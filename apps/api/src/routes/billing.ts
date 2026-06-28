@@ -14,18 +14,20 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AccountStore } from "../services/in-memory-account-store.js";
 import type { StripeClient } from "../services/stripe-client.js";
-import { subscriptionUnlocksQuota } from "../services/subscription-status.js";
-import { verifyUpgradeToken } from "../auth/upgrade-token.js";
 
 export interface BillingRouteDeps {
   accountStore: AccountStore;
   // null when Stripe isn't configured (STRIPE_SECRET_KEY unset) — the
   // routes register regardless and 503, matching the webhook's posture.
   stripe: StripeClient | null;
+  // Beta kill-switch. While Trusty Squire is free-during-beta, /checkout (the
+  // charge-creating route) refuses so no one can be billed by a stray Upgrade
+  // click — even with a live Stripe key set. Defaults OFF (fail-safe): billing
+  // only runs when explicitly enabled. /status and /portal stay up (read-only /
+  // lets an existing subscriber cancel). Flip on the day paid signups go live.
+  billingEnabled: boolean;
   // Base URL of the product site, for Stripe success/cancel/return redirects.
   webBaseUrl: string;
-  // Verifies the pre-authenticated upgrade token on /checkout-from-token.
-  sessionSecret: string;
 }
 
 export async function registerBillingRoute(
@@ -65,6 +67,10 @@ export async function registerBillingRoute(
     "/v1/billing/checkout",
     { preHandler: opts.requireWeb },
     async (req, reply) => {
+      if (!opts.deps.billingEnabled) {
+        reply.code(503).send({ error: "billing_disabled" });
+        return;
+      }
       const stripe = opts.deps.stripe;
       if (stripe === null) {
         reply.code(503).send({ error: "billing_not_configured" });
@@ -94,47 +100,6 @@ export async function registerBillingRoute(
       reply.code(200).send({ url: session.url });
     },
   );
-
-  // Pre-authenticated checkout. Exchanges a short-lived upgrade token (minted
-  // at the paywall, auth/upgrade-token.ts) for a Stripe Checkout URL with NO
-  // web session — so the user pays in one click from the agent's link instead
-  // of doing a separate browser OAuth login. The token is the auth.
-  fastify.post("/v1/billing/checkout-from-token", async (req, reply) => {
-    const stripe = opts.deps.stripe;
-    if (stripe === null) {
-      reply.code(503).send({ error: "billing_not_configured" });
-      return;
-    }
-    const body = req.body as { token?: unknown } | null;
-    const token = body !== null && typeof body.token === "string" ? body.token : null;
-    if (token === null) {
-      reply.code(400).send({ error: "missing_token" });
-      return;
-    }
-    const accountId = verifyUpgradeToken(token, opts.deps.sessionSecret, Date.now());
-    if (accountId === null) {
-      reply.code(401).send({ error: "invalid_or_expired_token" });
-      return;
-    }
-    const account = await opts.deps.accountStore.findAccountById(accountId);
-    if (account === null) {
-      reply.code(404).send({ error: "account_not_found" });
-      return;
-    }
-    if (subscriptionUnlocksQuota(account.subscription_status)) {
-      // Already on the paid tier — nothing to buy. /upgrade sends them to /billing.
-      reply.code(409).send({ error: "already_subscribed" });
-      return;
-    }
-    const session = await stripe.createCheckoutSession({
-      accountId: account.id,
-      customerEmail: account.email,
-      ...(account.stripe_customer_id !== null ? { customerId: account.stripe_customer_id } : {}),
-      successUrl: `${billingUrl}?status=success`,
-      cancelUrl: `${billingUrl}?status=cancelled`,
-    });
-    reply.code(200).send({ url: session.url });
-  });
 
   fastify.post(
     "/v1/billing/portal",

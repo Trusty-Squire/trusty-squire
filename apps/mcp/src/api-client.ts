@@ -137,6 +137,7 @@ export class ApiClient {
     env_var_suggestion?: string;
     type?: string;
     auth_shape?: string;
+    observed_hosts?: string[];
   }): Promise<{
     reference: string;
     service: string;
@@ -448,6 +449,11 @@ export interface InstallStatusResponse {
   status: "pending" | "claimed" | "expired";
   agent_session_token?: string;
   account_id?: string;
+  install_preferences?: {
+    registry_enabled?: boolean;
+    consent_operator_inbox_otp?: boolean;
+    proxy_url?: string;
+  };
 }
 
 export async function installPoll(
@@ -472,8 +478,6 @@ export async function installPoll(
 
 export interface MachineInstallResponse {
   machine_token: string;
-  quota_limit: number;
-  quota_used: number;
   message?: string;
 }
 
@@ -501,16 +505,6 @@ export async function issueMachineToken(
   const res = await fetchImpl(`${apiBaseUrl}/v1/install`, init);
   if (!res.ok) throw new ApiCallError(res.status, "install_failed", "machine install failed");
   return (await res.json()) as MachineInstallResponse;
-}
-
-export interface MachineStatusResponse {
-  quota_limit: number;
-  quota_used: number;
-  quota_remaining: number;
-  over_quota: boolean;
-  account_id: string | null;
-  created_at: string;
-  last_used_at: string | null;
 }
 
 // G15: shorten the headless install's cloudflared tunnel URL to a
@@ -542,14 +536,3 @@ export async function shortenVncUrl(
   }
 }
 
-export async function getMachineStatus(
-  apiBaseUrl: string,
-  machineToken: string,
-  fetchImpl: typeof fetch = fetch,
-): Promise<MachineStatusResponse> {
-  const res = await fetchImpl(`${apiBaseUrl}/v1/install/status`, {
-    headers: { "x-machine-token": machineToken },
-  });
-  if (!res.ok) throw new ApiCallError(res.status, "status_failed", "machine status failed");
-  return (await res.json()) as MachineStatusResponse;
-}

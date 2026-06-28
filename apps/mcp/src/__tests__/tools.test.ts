@@ -3,15 +3,13 @@
 // The native-provision cluster (provision/cancel/get_usage/list_services/
 // list_subscriptions/rotate_credential/wait_for_approval) was sunset in
 // 0.8 along with the runtime + mandate-validator packages. What's left:
-// the universal provision tool, its async status poll, the two vault
-// reads, and the extract-failure diagnostic pair.
+// the interactive provisioning driver, vault tools, and extract-failure
+// diagnostic pair.
 
 import { describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
 import {
-  checkProvisionStatusTool,
   listCredentialsTool,
-  provisionTool,
   TOOLS,
 } from "../tools/index.js";
 
@@ -57,36 +55,40 @@ describe("list_credentials", () => {
 
 describe("TOOLS registry", () => {
   it("exposes the post-0.8 public surface incl. the credential lifecycle tools", () => {
-    // 5 surviving post-0.8 tools + 2 credential write tools (store/use —
+    // 3 credential read/diagnostic tools + 2 credential write tools (store/use —
     // write-only sink; rotation = re-store, delete is web-only) + grant_app_access
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
     // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
-    expect(TOOLS).toHaveLength(8);
+    // 6 base tools + the 10 operator-surface tools
+    // (operate_start/observe/act/captcha_gate/await_verification/extract/
+    // remember/use/finish_task/finish — remember+use are the operator-recipe
+    // capture/replay pair, docs/DESIGN-operator-skills.md).
+    expect(TOOLS).toHaveLength(16);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
-      "check_provision_status",
       "get_extract_failure",
       "grant_app_access",
       "list_credentials",
       "list_extract_failures",
-      "provision",
+      "operate_act",
+      "operate_await_verification",
+      "operate_captcha_gate",
+      "operate_extract",
+      "operate_finish",
+      "operate_finish_task",
+      "operate_observe",
+      "operate_remember",
+      "operate_start",
+      "operate_use",
       "store_credential",
       "use_credential",
     ]);
   });
 
-  it("includes the async provision pair (start + status poll)", () => {
+  it("does not expose the legacy async provision pair", () => {
     const names = TOOLS.map((t) => t.name);
-    expect(names).toContain("provision");
-    expect(names).toContain("check_provision_status");
-  });
-
-  it("check_provision_status reports unknown_run for an unrecognized run_id", async () => {
-    const res = (await checkProvisionStatusTool.handler(
-      { run_id: "no-such-run" },
-      null,
-    )) as { status: string };
-    expect(res.status).toBe("unknown_run");
+    expect(names).not.toContain("provision");
+    expect(names).not.toContain("check_provision_status");
   });
 
   it("every tool has a non-trivial description (helps the coding agent decide when to call)", () => {
@@ -98,9 +100,6 @@ describe("TOOLS registry", () => {
     }
   });
 
-  it("provision's description tells the agent to poll check_provision_status (the long-running contract)", () => {
-    expect(provisionTool.description).toMatch(/poll check_provision_status/);
-  });
 });
 
 describe("ApiCallError surface", () => {

@@ -4,7 +4,7 @@
 // three real shells exercised below are the exact ones observed.
 
 import { describe, expect, it } from "vitest";
-import { looksLike404, titleFromHtml } from "../agent.js";
+import { looksLike404, shouldAbortOAuthFirstOnDeadPage, titleFromHtml } from "../agent.js";
 
 describe("looksLike404", () => {
   it("fathom: title 'Not Found' + 'could not be found' body", () => {
@@ -62,6 +62,35 @@ describe("looksLike404", () => {
 
   it("does NOT flag a dashboard with no not-found copy", () => {
     expect(looksLike404("Dashboard", "Welcome back Projects Usage Billing")).toBe(false);
+  });
+});
+
+describe("shouldAbortOAuthFirstOnDeadPage", () => {
+  it("flags a rendered 404 before OAuth-first waits for async provider buttons", () => {
+    expect(
+      shouldAbortOAuthFirstOnDeadPage(
+        "404: This page could not be found.",
+        "404: This page could not be found. OpenPipe: Fine-tuning for production apps",
+      ),
+    ).toBe(true);
+  });
+
+  it("flags browser network error pages before treating them as loading shells", () => {
+    expect(
+      shouldAbortOAuthFirstOnDeadPage(
+        "Luma AI - Transform Ideas into Videos Instantly with AI",
+        "This site can't be reached Check if there is a typo in luma.ai. DNS_PROBE_FINISHED_NXDOMAIN Reload",
+      ),
+    ).toBe(true);
+  });
+
+  it("flags Cartesia-style rendered dead signup pages before OAuth-first waits", () => {
+    expect(
+      shouldAbortOAuthFirstOnDeadPage(
+        "Playground | Cartesia",
+        "404 This page could not be found. Cartesia Playground Sign in Sign up",
+      ),
+    ).toBe(true);
   });
 });
 

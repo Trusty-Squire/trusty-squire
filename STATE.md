@@ -12,6 +12,19 @@ not belong here — it goes in "open questions."
 Convention: **H** = hypothesis, **✗ FALSIFIED** (with the experiment), **✓
 CONFIRMED**, **? OPEN** (current best guess + what would test it).
 
+> **This file is evergreen — do NOT prune entries for age.** A falsified
+> hypothesis stays useful forever precisely so we don't re-derive it. "Stale"
+> here means a CONCLUSION that a later experiment overturned (and those are kept
+> inline as the falsification chain), not an old date.
+>
+> Two caveats on the operational notes near the bottom, which predate the
+> 2026-06 housekeeper-repo split: (1) the **residential proxy is retired**
+> (direct-first since 2026-06-13 — the "Configured secrets" proxy URL below is
+> historical, not live); (2) the **housekeeper discover sweep + its queue/env**
+> (`harvester.env`, `housekeeper-services.yaml`, `--mode=discover`) moved to
+> `Trusty-Squire/trusty-squire-housekeeper` — discovery is now on-provision
+> auto-promote. The falsified-hypothesis log itself stays here.
+
 ---
 
 ## High-value spine sweep (2026-06-23) — 3/5 cracked + a generalizable survey filler

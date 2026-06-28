@@ -4,7 +4,14 @@
 // store.ts ships.
 
 import { randomUUID } from "node:crypto";
-import { canonicalizeServiceSlug, classifyFailure } from "@trusty-squire/skill-schema";
+import {
+  ACCOUNT_EXISTS_KIND,
+  NAV_TIMEOUT_KIND,
+  canonicalizeServiceSlug,
+  classifyFailure,
+  isNavNetworkFailure,
+  isReturningUserDivergence,
+} from "@trusty-squire/skill-schema";
 import type {
   InsertCaptureInput,
   InsertSkillInput,
@@ -28,6 +35,14 @@ import {
 
 const DEMOTION_THRESHOLD = 3;
 const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+
+function replayOutcomeFailureKind(input: RecordReplayInput): string | null {
+  const outcome = input.outcome.trim().toLowerCase();
+  if (outcome === "ok" || outcome === "dry_pass") return null;
+  if (outcome === "step_failed" && isNavNetworkFailure(input.reason)) return NAV_TIMEOUT_KIND;
+  if (outcome === "step_failed" && isReturningUserDivergence(input.reason)) return ACCOUNT_EXISTS_KIND;
+  return outcome;
+}
 
 // Statuses collapsed to `superseded` when another row becomes the service's
 // active recipe. Mirrors PrismaSkillStore.STALE_ON_ACTIVATE_STATUSES — keep
@@ -238,13 +253,17 @@ export class InMemorySkillStore implements SkillStore {
 
     // Atomic update — in-memory means we just mutate. The Prisma
     // implementation uses a SQL UPDATE to get real atomicity (E3).
-    const isSuccess = input.outcome === "ok" || input.outcome === "dry_pass";
+    const failureKind = replayOutcomeFailureKind(input);
+    const isSuccess = failureKind === null;
+    const countsTowardDemotion = classifyFailure(failureKind) === "rot";
     if (isSuccess) {
       skill.replays_succeeded += 1;
       skill.consecutive_failures = 0;
     } else {
       skill.replays_failed += 1;
-      skill.consecutive_failures += 1;
+      if (countsTowardDemotion) {
+        skill.consecutive_failures += 1;
+      }
     }
     skill.last_replayed_at = new Date();
 
@@ -346,11 +365,8 @@ export class InMemorySkillStore implements SkillStore {
     const now = input.now ?? new Date();
     let transition: RecordVerifierOutcomeResult["transition"] = "none";
 
-    // C11-gated pending-review → active promotion. Factored so BOTH the
-    // count-based path (verifier_succeeded ≥ threshold) and the producer-verdict
-    // path (input.verdict === "promote", D2.C) go through the SAME phishing/abuse
-    // gate — the verdict path must never bypass it. Returns "promoted" when it
-    // flipped status, "none" when the C11 gate held it in pending-review.
+    // C11-gated pending-review → active promotion. Returns "promoted" when it
+    // flipped status, "superseded"/"none" when the C11 gate held it.
     const promoteThroughC11Gate = (): "promoted" | "superseded" | "none" => {
       let existingActive: SkillStoreRecord | null = null;
       for (const other of this.skills.values()) {
@@ -400,35 +416,15 @@ export class InMemorySkillStore implements SkillStore {
       return "promoted";
     };
 
-    // D2.C — when the producer carries a CONVERGED verdict from the fresh-verify
-    // sequential-confidence sampler, trust it over the raw success count. A
-    // `hold` is an explicit no-op (no signal). `promote`/`reject` fall through
-    // to the shared promote-gate / demote-path below by treating them as a
-    // success / failure outcome respectively — so the C11 gate and the rot
-    // taxonomy still apply unchanged.
-    if (input.verdict === "hold") {
-      // No state change. Don't even bump the stat counters — a hold is "we
-      // learned nothing", not an outcome.
-      return { record: skill, transition: "none" };
-    }
-    const effectiveKind: "success" | "failure" =
-      input.verdict === "promote"
-        ? "success"
-        : input.verdict === "reject"
-          ? "failure"
-          : input.kind;
-
-    if (effectiveKind === "success") {
+    if (input.kind === "success") {
       skill.verifier_succeeded += 1;
       skill.consecutive_verifier_failures = 0;
       skill.last_verified_at = now;
-      // The producer verdict short-circuits the count threshold: a converged
-      // `promote` promotes on this single outcome (still through the C11 gate).
-      // Without a verdict, the historic count threshold applies.
+      // One success promotes (VERIFIER_PROMOTION_THRESHOLD = 1), through the
+      // C11 gate.
       const eligibleToPromote =
         skill.status === "pending-review" &&
-        (input.verdict === "promote" ||
-          skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD);
+        skill.verifier_succeeded >= VERIFIER_PROMOTION_THRESHOLD;
       if (eligibleToPromote) {
         transition = promoteThroughC11Gate();
       } else if (skill.status === "active") {
@@ -459,14 +455,10 @@ export class InMemorySkillStore implements SkillStore {
         transition = "quarantined";
       } else if (
         fclass === "rot" &&
-        (input.verdict === "reject" ||
-          skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD)
+        skill.consecutive_verifier_failures >= VERIFIER_FAILURE_THRESHOLD
       ) {
-        // A producer-level `reject` is already a converged fresh-identity
-        // verdict (for example 0/4 informative replays), so trust it
-        // immediately. Non-verdict replay failures keep the historic 3-strike
-        // path. In both cases the branch is rot-only: wall/infra/transient
-        // failures never retire or demote here.
+        // Rot-only 3-strike: wall/infra/transient failures never retire or
+        // demote here.
         if (skill.status === "pending-review") {
           // Never validated — soft-retire by deleting. The capture
           // is preserved in SkillCaptureRecord for forensics.

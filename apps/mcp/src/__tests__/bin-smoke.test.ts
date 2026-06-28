@@ -107,18 +107,14 @@ describe("launched through a bin symlink", () => {
     expect(out).toContain("Setting up this machine");
   }, 30_000);
 
-  it("`mcp install` still works as a deprecated alias for `connect`", async () => {
-    // 0.6.14 renamed `install` → `connect`. The old spelling stays as a
-    // hidden alias so docs/scripts published against ≤0.6.13 keep working.
-    // It should reach the same setup flow AND emit a deprecation warning.
-    const link = await linkTo("mcp-install-alias-link.js");
+  it("`mcp install` is removed", async () => {
+    const link = await linkTo("mcp-install-removed-link.js");
     const out = runSubcommand(link, [
       "install",
       "--target=claude-code",
       "--api-base=http://127.0.0.1:1",
     ]);
-    expect(out).toContain("Setting up this machine");
-    expect(out).toMatch(/install.*is now.*connect/);
+    expect(out).toMatch(/`install` has been removed/);
   }, 30_000);
 });
 

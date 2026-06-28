@@ -5,6 +5,7 @@ import {
   extractAllLabeledTokensFromReason,
   hasAnyExtractedCredential,
   hasUsableCredentialBundle,
+  terminalReasonInvalidatesCredentialSuccess,
   type PostSignupExtractionRoundPort,
   isMultiCredBundle,
 } from "../credential-extraction-flow.js";
@@ -25,7 +26,12 @@ describe("CredentialExtractionFlow credential policy", () => {
   });
 
   it("keeps legacy api_key as a usable single-field credential", () => {
-    expect(hasUsableCredentialBundle({ api_key: "sk-live" })).toBe(true);
+    expect(hasUsableCredentialBundle({ api_key: "sk-live-123456" })).toBe(true);
+  });
+
+  it("rejects short UI text as a single-field api_key", () => {
+    expect(hasUsableCredentialBundle({ api_key: "Cursor," })).toBe(false);
+    expect(hasAnyExtractedCredential({ api_key: "Cursor," })).toBe(true);
   });
 
   it("keeps access_token as a usable single-field credential", () => {
@@ -33,6 +39,26 @@ describe("CredentialExtractionFlow credential policy", () => {
       true,
     );
     expect(isMultiCredBundle({ access_token: "ddp_example_token" })).toBe(false);
+  });
+
+  it("keeps canonical single-secret labels as usable credentials", () => {
+    for (const [key, value] of [
+      ["auth_token", "tok_example_123456"],
+      ["api_secret", "sec_example_123456"],
+      ["secret_key", "sk_example_123456"],
+      ["secret", "secret_example_123456"],
+      ["token", "token_example_123456"],
+    ] as const) {
+      expect(hasUsableCredentialBundle({ [key]: value })).toBe(true);
+      expect(isMultiCredBundle({ [key]: value })).toBe(false);
+    }
+  });
+
+  it("treats a lone personal_api_key / project_api_key as single-sufficient", () => {
+    // posthog mints a `phx_…` personal_api_key — a complete credential on its
+    // own. It must end the post-signup loop, not bail oauth_onboarding_failed.
+    expect(hasUsableCredentialBundle({ personal_api_key: "phx_abc123" })).toBe(true);
+    expect(hasUsableCredentialBundle({ project_api_key: "phc_def456" })).toBe(true);
   });
 
   it("normalizes personal_api_key planner labels to a usable api_key", () => {
@@ -55,6 +81,22 @@ describe("CredentialExtractionFlow credential policy", () => {
 
   it("rejects a lone non-secret identifier as a usable credential bundle", () => {
     expect(hasUsableCredentialBundle({ application_id: "app-123" })).toBe(false);
+  });
+
+  it("invalidates success when the terminal reason says only a key id is visible", () => {
+    expect(
+      terminalReasonInvalidatesCredentialSuccess(
+        "The API key is masked and there is no option to reveal it, only to rotate it. The Key ID is visible but not the secret.",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not invalidate ordinary partial multi-credential prose", () => {
+    expect(
+      terminalReasonInvalidatesCredentialSuccess(
+        "The page shows cloud_name and api_key, but api_secret is hidden behind asterisks.",
+      ),
+    ).toBe(false);
   });
 
   it("classifies fields beyond api_key/username as multi-credential mode", () => {

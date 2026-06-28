@@ -10,6 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  detectCredentialExtractionBlock,
   extractApiKeyFromText,
   isTruncatedCapture,
   isCredentialNoiseCandidate,
@@ -56,6 +57,14 @@ describe("extractApiKeyFromText — prefixed keys", () => {
     expect(extractApiKeyFromText(`Your API Key: ${key}`)).toBe(key);
     // and the Stripe publishable key on the SAME page is still ignored
     expect(extractApiKeyFromText("checkout pk_live_examplePUBkey0000000000abcd")).toBeNull();
+  });
+
+  it("extracts a PostHog personal API key by its phx_ prefix (bare, no label)", () => {
+    // MEASURED 2026-06-24: the create-personal-api-key modal shows the secret
+    // once with no "API key:" label adjacent; the bare-prefix path must catch
+    // it or the whole posthog crack bails oauth_onboarding_failed.
+    const key = "phx_" + "synthETICposthogPERSONALkey00000000000000abcd";
+    expect(extractApiKeyFromText(`Personal API key ${key}`)).toBe(key);
   });
 
   it("ignores a PostHog project key — public analytics key, not a credential", () => {
@@ -266,6 +275,25 @@ describe("extractApiKeyFromText — captcha-token rejection", () => {
     // other page section and must not be picked up.
     const text = "API key:\n\nsomeUnrelatedToken1234567890";
     expect(extractApiKeyFromText(text)).toBeNull();
+  });
+});
+
+describe("detectCredentialExtractionBlock", () => {
+  it("flags GitLab's Cloudflare security verification page before candidate scans", () => {
+    const html =
+      '<title>Just a moment...</title><body><h1>gitlab.com</h1>' +
+      '<h2>Performing security verification</h2>' +
+      '<input type="hidden" name="cf-turnstile-response" />' +
+      '<div class="ray-id">Ray ID: <code>a1188f29ddf68758</code></div>' +
+      "</body>";
+    expect(detectCredentialExtractionBlock(html)).toBe("Cloudflare anti-bot interstitial");
+  });
+
+  it("does not block a normal API key dashboard", () => {
+    const html =
+      "<title>API keys</title><body><h1>API keys</h1>" +
+      "<div>API key: re_abcdefGHIJKLmnop1234567</div></body>";
+    expect(detectCredentialExtractionBlock(html)).toBeNull();
   });
 });
 

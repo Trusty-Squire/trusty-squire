@@ -135,17 +135,34 @@ export function findSignupLinkOnLoginPage(input: {
   if (/sign[-_/ ]?up|register|create[-_/ ]?account/.test(path)) return null;
   const looksLikeLogin =
     /\b(sign in|log in|login)\b/.test(text) &&
-    /\b(no account|no account yet|don't have an account|do not have an account|new to|sign up|register|create account)\b/.test(text);
+    /\b(no account|no account yet|don't have an account|do not have an account|new to|sign up|register|create an? account|create one)\b/.test(text);
   if (!looksLikeLogin) return null;
 
   const candidates = input.inventory
     .filter((el) => el.visible !== false)
     .filter((el) => el.tag === "a" || el.tag === "button" || el.role === "button")
+    .filter((el) => {
+      const label = elementLabel(el).toLowerCase();
+      const href = typeof el.href === "string" ? el.href.toLowerCase() : "";
+      if (/\b(?:privacy|policy|terms|tos|legal|cookies?|back|cancel|help|docs?|blog)\b/.test(label)) {
+        return false;
+      }
+      if (/\/(?:privacy|policy|terms|tos|legal|docs?|blog)(?:[/?#]|$)/.test(href)) {
+        return false;
+      }
+      return true;
+    })
     .map((el) => {
       const label = elementLabel(el).toLowerCase();
       let score = 0;
       if (/\bsign up\b/.test(label)) score += 30;
-      if (/\b(register|create account|get started|start free)\b/.test(label)) score += 20;
+      // "Create one" / "Create an account" is the canonical login→signup TOGGLE
+      // link (deepinfra: "Already have an account? Log in / … Create one" flips
+      // the submit from "Log in" to "Sign up"). MEASURED 2026-06-24 — without
+      // this it scored 0 and the bot bailed oauth_required on a service that DOES
+      // offer email signup.
+      if (/\bcreate\s+(?:an?\s+)?(?:account|one)\b/.test(label)) score += 28;
+      if (/\b(register|get started|start free)\b/.test(label)) score += 20;
       if (el.tag === "a" && typeof el.href === "string" && /sign[-_/]?up|register|signup/.test(el.href)) score += 15;
       if (/\b(sign in|log in|login|google|github|sso)\b/.test(label)) score -= 40;
       if (typeof el.href === "string" && /oauth|sso|google|github|microsoft/.test(el.href)) score -= 40;
@@ -214,12 +231,24 @@ export interface FormFillState {
   lastRoundPageSig: string | null;
   lastNoProgressClickSelectors: ReadonlySet<string>;
   // one-way control-state (review A3): once on the email path, suppress the
-  // OAuth-first scan so a two-stage chooser can't reroute back to Google.
+  // email-CODE gate / submit handling so the flow finishes the email signup.
+  // Set when an email affordance is touched OR a login→signup link is advanced.
   committedToEmailPath: boolean;
+  // STRICT PREFERENCE (Google → email → GitHub). committedToEmailPath alone used
+  // to suppress the OAuth-first scan — so clicking a "Sign up"/"Create one" link
+  // or an email field permanently abandoned a Google button sitting on the very
+  // form we advanced TO (MEASURED 2026-06-24: clerk/the general "hierarchy
+  // ignored" complaint). OAuth suppression now keys off THIS flag instead, which
+  // is set ONLY when Google has been PROVEN unavailable for signup — the
+  // re-route after a no-account Google bounce (detectGoogleNoAccount →
+  // forceFormFill). So a present, un-attempted Google is re-scanned and tried
+  // FIRST; email only wins when Google is absent or proven login-only.
+  oauthProvenUnavailable: boolean;
 }
 
-// The fresh FormFillState at loop entry. `forceFormFill` seeds committedToEmailPath
-// (the re-route after a no-account Google bounce — agent.ts:4645).
+// The fresh FormFillState at loop entry. `forceFormFill` (the re-route after a
+// no-account Google bounce, or UNIVERSAL_BOT_FORCE_FORM) seeds BOTH the email
+// commit and the proven-unavailable flag, so the OAuth scan stays suppressed.
 export function initialFormFillState(forceFormFill = false): FormFillState {
   return {
     errorReplans: 0,
@@ -233,6 +262,7 @@ export function initialFormFillState(forceFormFill = false): FormFillState {
     lastRoundPageSig: null,
     lastNoProgressClickSelectors: new Set(),
     committedToEmailPath: forceFormFill,
+    oauthProvenUnavailable: forceFormFill,
   };
 }
 
@@ -392,8 +422,11 @@ export function decideFormFillStep(
       if (state.committedToEmailPath && obs.codeGate) {
         return terminal({ kind: "submitted" });
       }
-      // OAuth-first scan — suppressed once committed to the email path. [4778]
-      if (obs.oauthCandidatesPresent && !state.committedToEmailPath) {
+      // OAuth-first scan (STRICT Google → email → GitHub). Suppressed ONLY when
+      // Google is proven unavailable for signup (oauthProvenUnavailable), NOT
+      // merely because an email field/link was touched — so a Google button
+      // present on the form we advanced to is still tried FIRST.
+      if (obs.oauthCandidatesPresent && !state.oauthProvenUnavailable) {
         if (obs.oauthButtonHit !== null) {
           return terminal({
             kind: "oauth",

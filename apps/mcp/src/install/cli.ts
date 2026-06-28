@@ -1,9 +1,9 @@
-// Setup CLI — install / logout / login subcommands.
+// Setup CLI — connect / settings / logout / login subcommands.
 //
-//   npx @trusty-squire/mcp install --target=claude-code
+//   npx @trusty-squire/mcp connect --target=claude-code
 //     Issues a machine token, then opens the trustysquire install-
 //     confirm page in the bot's own Chrome. The user signs in there
-//     once (Google or GitHub) — that single sign-in does TWO things:
+//     once with Google — that single sign-in does TWO things:
 //       (a) trustysquire claims the install and binds the machine to
 //           the user's account, and
 //       (b) the bot's Chrome profile gains a provider session it can
@@ -26,14 +26,7 @@
 //                        their own browser (CI / scripted installs)
 //   --proxy-url=<url>    bake a residential proxy into the MCP config's
 //                        env (UNIVERSAL_BOT_PROXY_URL)
-//   --registry-url=<url> override the default skill registry URL
-//                        (default: https://registry.trustysquire.ai).
-//                        Baked into the MCP config's env as
-//                        TRUSTY_SQUIRE_REGISTRY_URL so the Tier-2
-//                        router is on out of the box.
-//   --no-registry        omit TRUSTY_SQUIRE_REGISTRY_URL from the
-//                        config → mcp skips the router entirely and
-//                        every signup goes through the universal bot
+//   --no-registry        disable managed registry participation
 //
 // Pure module — `runCli()` is invoked by bin.ts. No shebang, no
 // entrypoint guard, no top-level execution.
@@ -42,7 +35,6 @@ import process from "node:process";
 import { cpSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
 import { loadHarvesterEnvFile } from "../operator-env.js";
 import { fileURLToPath } from "node:url";
 import { installInitiate, installPoll, issueMachineToken } from "../api-client.js";
@@ -52,6 +44,7 @@ import {
   detectInstalledAgents,
   writeClaudeCodePermissions,
   type AgentTarget,
+  type AgentDefinition,
 } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
@@ -62,25 +55,30 @@ import {
 import { type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
   clearAllProviderMarkers,
+  clearBrowserProfile,
   clearProviderCookies,
   clearProviderLoggedIn,
   loggedInProviders,
   markProviderLoggedIn,
 } from "../bot/login-state.js";
+import { waitForProfileFree } from "../bot/profile.js";
 import type { BrowserContext } from "playwright";
 import { VERSION } from "../version.js";
 import * as ui from "./ui.js";
-import { runInteractiveSetup, shouldRunInteractive, showOutro } from "./interactive.js";
+import {
+  runInteractiveSetup,
+  runSettingsSetup,
+  shouldRunInteractive,
+  showOutro,
+} from "./interactive.js";
 import chalk from "chalk";
+import { confirm, isCancel } from "@clack/prompts";
+import { normalizeProxyUrl } from "./proxy-url.js";
 
 const DEFAULT_API_BASE = process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev";
-// Default skill-registry URL. Wired into the MCP config's env block
-// so users don't have to set it manually — without it, mcp skips the
-// Tier-2 router and every signup goes through the universal bot
-// (fail-open by design, but a worse experience than just using the
-// closed loop).
-const DEFAULT_REGISTRY_URL =
-  process.env.TRUSTY_SQUIRE_REGISTRY_URL ?? "https://registry.trustysquire.ai";
+// Managed skill-registry URL. Advanced setup decides whether this is written
+// into the MCP config; the URL itself is product-owned and not user-editable.
+const DEFAULT_REGISTRY_URL = "https://registry.trustysquire.ai";
 
 type ProviderArg = "google" | "github";
 
@@ -92,19 +90,17 @@ type Argv = {
   // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
   // and the user never hand-edits the config env.
   proxyUrl?: string;
-  // Skill registry URL — baked into the MCP config's env as
-  // TRUSTY_SQUIRE_REGISTRY_URL. Defaults to the production registry;
-  // override with --registry-url=<url> (staging / self-hosted),
-  // disable with --no-registry (skip Tier-2 router entirely, every
-  // signup goes through the universal bot).
-  registryUrl?: string;
+  // Skill registry is product-owned infrastructure. Advanced setup controls
+  // whether this install participates; registry ON is also the user's consent
+  // to contribute successful non-personal signup recipes back to the registry.
   noRegistry: boolean;
+  registryConfigured?: boolean;
   // OAuth provider — for `login`, picks which provider to sign in to.
-  // For `install`, the provider is chosen by the user inside the
+  // For `connect`, the provider is chosen by the user inside the
   // trustysquire confirm page (Google or GitHub button), so this flag
   // is ignored there.
   providerArg?: ProviderArg;
-  // --skip-browser (also accepts the legacy --skip-login spelling):
+  // --skip-browser:
   // don't launch the bot's Chrome at the confirm URL. Print the URL
   // for the user to open in their own browser, then poll for claim.
   // The bot's Chrome profile won't gain a provider session — the user
@@ -115,6 +111,9 @@ type Argv = {
   // Use this to switch the bound Google account or recover a
   // suspect-stale session.
   forceRelogin: boolean;
+  // Optional scoped form: --force-relogin=google|github. Bare
+  // --force-relogin remains the full-profile account-switch escape hatch.
+  forceReloginProvider?: ProviderArg;
   // --no-interactive: skip the clack picker even in a TTY. Useful for
   // scripted runs that still want a normal Chrome confirm (i.e. don't
   // imply --skip-browser).
@@ -126,38 +125,39 @@ type Argv = {
   // robots cannot) in its own profile without clobbering the operator's
   // session. Pair with BOT_GOOGLE_PROFILE_DIR on the discover side.
   profileDir?: string;
-  // 0.8.1: choices the interactive picker collected (or that --llm /
-  // --byok-key flags pre-filled). Threaded into writeAgentConfig.
+  // Legacy config shape. Signup navigation is session-agent driven; install no
+  // longer asks users to configure an LLM.
   llmChoice?: import("./interactive.js").LlmChoice;
   byokKey?: string;
+  advancedConfigured?: boolean;
+  consentOperatorInboxOtp?: boolean;
 };
+
+interface InstallConsent {
+  skillifyTelemetry: boolean;
+  operatorInboxOtp: boolean;
+}
 
 function parseArgs(argv: string[]): Argv {
   const positional = argv.filter((a) => !a.startsWith("--"));
-  // `connect` is the canonical command as of 0.6.14. `install` is kept
-  // as a hidden alias so any docs/scripts/blog-posts published against
-  // ≤0.6.13 still work — it emits a one-line deprecation notice but
-  // otherwise behaves identically. Default (no positional) → `connect`
-  // because the most common invocation is `npx @trusty-squire/mcp` with
-  // no args, and that should still kick off the setup flow.
-  let command = positional[0] ?? "connect";
+  // Default (no positional) → `connect` because the most common invocation is
+  // `npx @trusty-squire/mcp` with no args, and that should kick off setup.
+  const command = positional[0] ?? "connect";
   if (command === "install") {
-    console.warn(
-      "[trusty-squire] `install` is now `connect`. " +
-        "This alias still works but will be removed in a future major. " +
-        "Update your docs/scripts to: `npx @trusty-squire/mcp connect`.",
+    rejectDeprecatedCli(
+      "`install` has been removed. Use `npx @trusty-squire/mcp connect`.",
     );
-    command = "connect";
   }
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
   let proxyUrl: string | undefined;
-  let registryUrl: string | undefined;
   let noRegistry = false;
+  let registryConfigured = false;
   let providerArg: ProviderArg | undefined;
   let profileDir: string | undefined;
   let skipBrowser = false;
   let forceRelogin = false;
+  let forceReloginProvider: ProviderArg | undefined;
   let noInteractive = false;
   for (const arg of argv) {
     if (arg.startsWith("--target=")) {
@@ -175,26 +175,43 @@ function parseArgs(argv: string[]): Argv {
     } else if (arg.startsWith("--api-base=")) {
       apiBase = arg.slice("--api-base=".length);
     } else if (arg.startsWith("--proxy-url=")) {
-      proxyUrl = arg.slice("--proxy-url=".length);
+      const rawProxyUrl = arg.slice("--proxy-url=".length);
+      const normalized = normalizeProxyUrl(rawProxyUrl);
+      if (rawProxyUrl.length > 0 && normalized === undefined) {
+        console.error(
+          "invalid --proxy-url. Use http://user:pass@host:port or socks5://host:port.",
+        );
+        process.exit(64);
+      }
+      proxyUrl = normalized;
     } else if (arg.startsWith("--registry-url=")) {
-      registryUrl = arg.slice("--registry-url=".length);
+      rejectDeprecatedCli(
+        "`--registry-url` has been removed. Trusty Squire uses the managed skill registry.",
+      );
     } else if (arg === "--no-registry") {
       noRegistry = true;
+      registryConfigured = true;
+    } else if (arg === "--registry") {
+      rejectDeprecatedCli(
+        "`--registry` has been removed because the managed registry is enabled by default.",
+      );
     } else if (arg.startsWith("--provider=")) {
       const p = arg.slice("--provider=".length);
       if (p === "google" || p === "github") providerArg = p;
     } else if (arg.startsWith("--profile-dir=")) {
       profileDir = arg.slice("--profile-dir=".length);
-    } else if (arg === "--skip-browser" || arg === "--skip-login") {
-      // --skip-login kept as an alias for the 0.5.0 spelling so any
-      // scripted callers still work.
+    } else if (arg === "--skip-browser") {
       skipBrowser = true;
+    } else if (arg === "--skip-login") {
+      rejectDeprecatedCli("`--skip-login` has been removed. Use `--skip-browser`.");
     } else if (arg === "--force-relogin") {
       forceRelogin = true;
+    } else if (arg.startsWith("--force-relogin=")) {
+      forceRelogin = true;
+      const p = arg.slice("--force-relogin=".length);
+      if (p === "google" || p === "github") forceReloginProvider = p;
     } else if (arg === "--skip-secondary") {
-      // No-op: kept as a flag for backwards-compat. The 0.8.2 wizard
-      // collapsed step 1 + step 2 into one browser session, so there
-      // is no "secondary" stage left to skip.
+      rejectDeprecatedCli("`--skip-secondary` has been removed; connect is single-stage.");
     } else if (arg === "--no-interactive") {
       noInteractive = true;
     }
@@ -204,15 +221,21 @@ function parseArgs(argv: string[]): Argv {
     apiBase,
     skipBrowser,
     forceRelogin,
+    ...(forceReloginProvider !== undefined ? { forceReloginProvider } : {}),
     noRegistry,
+    ...(registryConfigured ? { registryConfigured } : {}),
     noInteractive,
   };
   if (target !== undefined) args.target = target;
   if (proxyUrl !== undefined && proxyUrl.length > 0) args.proxyUrl = proxyUrl;
-  if (registryUrl !== undefined && registryUrl.length > 0) args.registryUrl = registryUrl;
   if (providerArg !== undefined) args.providerArg = providerArg;
   if (profileDir !== undefined && profileDir.length > 0) args.profileDir = profileDir;
   return args;
+}
+
+function rejectDeprecatedCli(message: string): never {
+  console.error(`[trusty-squire] ${message}`);
+  process.exit(64);
 }
 
 function isAgentTarget(s: string): s is AgentTarget {
@@ -228,23 +251,14 @@ function isAgentTarget(s: string): s is AgentTarget {
 //    that points at a permanent path. Use the absolute bin.js path
 //    directly. Deterministic, offline, fast.
 //
-// 2. Ephemeral + stable version — the CLI was invoked via
-//    `npx @trusty-squire/mcp@X.Y.Z`, which copies the package into
-//    npx's throwaway cache. The cache CAN get swept, so we don't
-//    pin the cache path; instead we write `npx @trusty-squire/mcp@<version>`
-//    so the launch re-resolves against npm every time. Works as
-//    long as the version is on the public npm registry.
-//
-// 3. Ephemeral + prerelease version — the CLI was invoked via
-//    `npx <tarball-url>` (the GitHub-Release test pattern). The
-//    version isn't on npm, so case 2 would fail with `ETARGET`.
-//    We instead copy the package out of the ephemeral cache into
-//    `~/.trusty-squire/lib/mcp` and write a `node <stable>/dist/bin.js`
-//    launch. The stable copy survives npx-cache cleanup; if the user
-//    re-installs they overwrite it.
-//
-// Prerelease detection: semver prerelease versions carry a `-` (e.g.
-// `0.6.0-rc.1`). Stable versions don't. Cheap, reliable.
+// 2. Ephemeral — the CLI was invoked via npx, which copies the package into
+//    npx's throwaway cache. The cache CAN get swept, so never pin the cache
+//    path into a host agent config. Instead write
+//    `npx -y @trusty-squire/mcp@<version> server`, which re-resolves the exact
+//    published version on each agent launch. This matters for RCs: prerelease
+//    versions are published to npm on the `next` tag, so treating every
+//    prerelease as a non-registry tarball leaves Goose pointing at dead npx
+//    cache paths and stale tool schemas.
 /**
  * Copy an npx-style node_modules tree to a stable location.
  *
@@ -282,11 +296,15 @@ function resolveServerLaunch(): { command: string; args: string[] } {
   if (!ephemeral) {
     return { command: process.execPath, args: [binPath, "server"] };
   }
-  const isPrerelease = VERSION.includes("-");
-  if (!isPrerelease) {
-    return { command: "npx", args: ["-y", `@trusty-squire/mcp@${VERSION}`, "server"] };
-  }
-  // Prerelease from GitHub Releases — copy the package PLUS the
+  return { command: "npx", args: ["-y", `@trusty-squire/mcp@${VERSION}`, "server"] };
+}
+
+// Historical fallback for GitHub-release tarball installs. The normal install
+// path no longer calls this because RCs are published to npm and host configs
+// must not pin npx cache paths. Kept exported for the regression tests around
+// copying broken npx symlink trees.
+function resolveCopiedNpxServerLaunch(binPath: string): { command: string; args: string[] } {
+  // Copy the package PLUS the
   // ephemeral cache's entire `node_modules` to a stable location.
   //
   // We need both because the package imports @modelcontextprotocol/sdk,
@@ -355,6 +373,9 @@ export async function runCli(argv: string[]): Promise<void> {
     case "login":
       await login(args);
       return;
+    case "settings":
+      await settings(args);
+      return;
     case "help":
       printHelp();
       return;
@@ -365,11 +386,59 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 }
 
+async function settings(args: Argv): Promise<void> {
+  const storage = await openSessionStorage();
+  const session = await storage.read();
+  if (session === null) {
+    ui.fail(`No local Trusty Squire session found. Run ${ui.code("npx @trusty-squire/mcp connect")} first.`);
+    process.exit(1);
+  }
+
+  if (!args.noInteractive && process.stdin.isTTY === true) {
+    const picker = await runSettingsSetup({
+      ...(args.target !== undefined ? { initialTarget: args.target } : {}),
+      ...(session.proxy_url !== undefined ? { initialProxyUrl: session.proxy_url } : {}),
+      initialRegistryEnabled: session.consent_skillify_telemetry === true,
+      initialConsentOperatorInboxOtp: session.consent_operator_inbox_otp === true,
+    });
+    args.target = picker.target;
+    if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
+    args.noRegistry = !picker.registryEnabled;
+    args.advancedConfigured = true;
+    args.consentOperatorInboxOtp = picker.consentOperatorInboxOtp === true;
+  } else {
+    if (args.target === undefined) {
+      ui.fail(`Pass ${ui.code("--target=<agent>")} when running settings outside an interactive terminal.`);
+      process.exit(64);
+    }
+    if (args.registryConfigured !== true) {
+      args.noRegistry = session.consent_skillify_telemetry !== true;
+    }
+    if (args.proxyUrl === undefined && session.proxy_url !== undefined) {
+      args.proxyUrl = session.proxy_url;
+    }
+  }
+
+  const target = await resolveTarget(args.target);
+  const agent = AGENTS[target];
+  const updated: SessionData = {
+    ...session,
+    saved_at: new Date().toISOString(),
+    consent_skillify_telemetry: !args.noRegistry,
+    consent_operator_inbox_otp: args.consentOperatorInboxOtp === true,
+    ...(args.proxyUrl !== undefined && args.proxyUrl.trim().length > 0
+      ? { proxy_url: args.proxyUrl.trim() }
+      : {}),
+  };
+  await storage.write(updated);
+  await writeAgentConfig(target, agent, args);
+  ui.success(`${agent.display_name} settings saved.`);
+}
+
 async function connect(args: Argv): Promise<void> {
-  // 0.8.1 — interactive picker (clack), Goose-flavored. Walks the
-  // user through agent / OAuth providers / LLM choice / advanced
-  // before the install ceremony fires. The picker fills in args so
-  // the rest of this function is unchanged.
+  // Interactive picker (clack). Walks the user through agent + advanced setup
+  // before the browser install ceremony fires. The picker fills in args so the
+  // rest of this function is unchanged.
   const wantInteractive =
     !args.noInteractive &&
     shouldRunInteractive({
@@ -382,21 +451,20 @@ async function connect(args: Argv): Promise<void> {
     // 0.8.2 — picker no longer asks about OAuth providers. The
     // install wizard rendered in the bot's Chrome handles the
     // Google + (optional) GitHub flow directly; the CLI just
-    // surfaces agent + LLM + advanced.
+    // surfaces agent + advanced.
     const picker = await runInteractiveSetup({
       ...(args.target !== undefined ? { initialTarget: args.target } : {}),
       ...(args.proxyUrl !== undefined ? { initialProxyUrl: args.proxyUrl } : {}),
-      ...(args.registryUrl !== undefined ? { initialRegistryUrl: args.registryUrl } : {}),
-      registryEnabled: !args.noRegistry,
+      initialRegistryEnabled: !args.noRegistry,
     });
     args.target = picker.target;
     args.llmChoice = picker.llmChoice;
     if (picker.byokKey !== undefined) args.byokKey = picker.byokKey;
     if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
-    if (!picker.registryEnabled) {
-      args.noRegistry = true;
-    } else if (picker.registryUrl !== undefined) {
-      args.registryUrl = picker.registryUrl;
+    args.noRegistry = !picker.registryEnabled;
+    args.advancedConfigured = picker.advancedConfigured;
+    if (picker.consentOperatorInboxOtp !== undefined) {
+      args.consentOperatorInboxOtp = picker.consentOperatorInboxOtp;
     }
   } else {
     ui.heading("Trusty Squire");
@@ -406,26 +474,33 @@ async function connect(args: Argv): Promise<void> {
   const target = await resolveTarget(args.target);
   const agent = AGENTS[target];
 
-  // Preflight: an existing install that's fully provisioned (machine
-  // token + agent session token + a bot Google session marker) doesn't
-  // need to redo the browser confirm. Just rewrite the MCP config in
-  // place so the host agent picks up the latest server entrypoint and
-  // env. Pass --force-relogin to bypass (e.g. to switch Google account).
+  // Preflight: an existing install is "connected" only when BOTH the
+  // account-bound plumbing still works and the bot profile has a confirmed
+  // Google session. A bare machine/agent token can talk to Trusty Squire, but
+  // it cannot act as the user at third-party sites, so it must not skip the
+  // browser confirm. Pass --force-relogin to bypass (e.g. to switch Google).
   if (!args.forceRelogin) {
     const preflight = await checkAlreadyProvisioned();
     if (preflight !== null) {
       ui.divider();
+      await hydrateArgsFromStoredPreferences(args);
+      await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true);
       await writeAgentConfig(target, agent, args);
-      const provNote =
-        preflight.providers.length > 0
-          ? `Already provisioned (${preflight.providers.join(" + ")}).`
-          : `Session valid — no bot OAuth login on this machine yet ` +
-            `(run ${ui.code("npx @trusty-squire/mcp login")} to enable ` +
-            `OAuth-preferring signups).`;
-      ui.success(`${provNote} ${agent.display_name} config refreshed.`);
+      ui.success(
+        `Already connected (${preflight.providers.join(" + ")}). ` +
+          `${agent.display_name} config refreshed.`,
+      );
+      printProviderState(preflight.providers);
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
       for (const p of preflight.providers) await recordConnectedProvider(p);
+      // DESIGN-connect-session-validation: we short-circuited because Google is
+      // valid + bound, but if the bot's GitHub session validated DEAD, proactively
+      // offer to reconnect it — a dead GitHub session is exactly why people re-run
+      // connect (GitHub-OAuth signups fail). Skippable; non-interactive notices.
+      if (!preflight.providers.includes("github")) {
+        await offerGithubReloginIfDead(args, target, agent);
+      }
       ui.hint(`Pass ${ui.code("--force-relogin")} to switch accounts.`);
       return;
     }
@@ -437,13 +512,51 @@ async function connect(args: Argv): Promise<void> {
       "The page walks you through signing in with Google and (optionally) GitHub.",
   );
 
-  // --force-relogin means "redo the OAuth dance from scratch" — wipe
-  // the bot's profile cookies + marker so the install wizard sees a
-  // clean slate. The user signs in fresh inside the bot Chrome.
+  // --force-relogin means "redo the OAuth dance from scratch". The scoped
+  // form clears only one provider; bare --force-relogin is the full-profile
+  // account-switch escape hatch.
   if (args.forceRelogin) {
-    clearAllProviderMarkers();
-    await clearProviderCookies();
+    if (args.forceReloginProvider !== undefined) {
+      clearProviderLoggedIn(args.forceReloginProvider);
+    } else {
+      clearAllProviderMarkers();
+    }
+    const free = await waitForProfileFree(undefined, {
+      deadlineMs: 120_000,
+      onWait: () =>
+        ui.hint("Waiting for the bot browser to finish before clearing the old session…"),
+    });
+    if (!free) {
+      ui.fail(
+        "The bot browser is still using the profile, so I can't safely switch accounts yet. " +
+          "Close the running signup/login browser and retry with --force-relogin.",
+      );
+      process.exit(1);
+    }
+    if (args.forceReloginProvider !== undefined) {
+      await clearProviderCookies(undefined, args.forceReloginProvider);
+    } else {
+      clearBrowserProfile();
+      await clearProviderCookies();
+    }
   }
+
+  // DESIGN-connect-session-validation: a SCOPED force-relogin=github on an
+  // already-bound account is a GitHub-only login — Google's gate is already
+  // satisfied (the account is bound + its session is what we'd re-bind), so we
+  // must NOT drag the Google-first account-binding confirm page into it. Route
+  // straight to the provider-scoped login (the `login --provider=github` path):
+  // it opens a GitHub-only login (account chooser, since cookies were cleared
+  // above), never touching Google. Falls through to the full confirm flow only
+  // when the account isn't bound yet (nothing to skip) or the scope is google
+  // (which can re-bind the account and so needs the claim).
+  if (args.forceReloginProvider === "github" && (await checkAlreadyBound())) {
+    const ok = await reloginGithubOnly(args, target, agent, { writeConfig: true });
+    if (ok) return;
+    process.exit(1);
+  }
+
+  const consent = consentFromArgs(args);
 
   // Detect egress class so the asn rides along in the install payload
   // (API uses it to correlate captcha failures with network class).
@@ -484,6 +597,8 @@ async function connect(args: Argv): Promise<void> {
     api_base_url: args.apiBase,
     saved_at: new Date().toISOString(),
     machine_token: machine.machine_token,
+    consent_skillify_telemetry: consent.skillifyTelemetry,
+    consent_operator_inbox_otp: consent.operatorInboxOtp,
   };
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser);
   if (session === null) {
@@ -497,6 +612,9 @@ async function connect(args: Argv): Promise<void> {
   const storage = await openSessionStorage();
   await storage.write(session);
   ui.success(`Session saved (${storage.backendName()})`);
+  args.noRegistry = session.consent_skillify_telemetry !== true;
+  args.consentOperatorInboxOtp = session.consent_operator_inbox_otp === true;
+  if (session.proxy_url !== undefined) args.proxyUrl = session.proxy_url;
 
   // 0.8.1 — the bot's persistent profile may have a stale provider
   // marker from a previous install (the marker is sticky on disk).
@@ -510,6 +628,8 @@ async function connect(args: Argv): Promise<void> {
       start: "Checking provider sessions",
       done: "Provider sessions checked",
       fail: () => "Provider session check failed (continuing)",
+      // validate=true: confirm each session is LIVE (not just cookie-present),
+      // so a dead-but-present GitHub session isn't shown as connected.
       task: () => detectActiveProviderSessions(),
     });
     if (actual !== null) {
@@ -526,7 +646,9 @@ async function connect(args: Argv): Promise<void> {
   }
 
   // Backfill connected_providers from the (now-fresh) bot-side marker.
-  for (const p of loggedInProviders()) await recordConnectedProvider(p);
+  const providers = loggedInProviders();
+  for (const p of providers) await recordConnectedProvider(p);
+  printProviderState(providers);
 
   await writeAgentConfig(target, agent, args);
   if (args.skipBrowser) {
@@ -553,6 +675,27 @@ async function connect(args: Argv): Promise<void> {
   }
 }
 
+async function hydrateArgsFromStoredPreferences(args: Argv): Promise<void> {
+  if (args.advancedConfigured === true) return;
+  try {
+    const session = await (await openSessionStorage()).read();
+    if (session === null) return;
+    args.noRegistry = session.consent_skillify_telemetry !== true;
+    args.consentOperatorInboxOtp = session.consent_operator_inbox_otp === true;
+    if (session.proxy_url !== undefined) args.proxyUrl = session.proxy_url;
+  } catch {
+    // Best-effort. Missing preferences fall back to the privacy-safe defaults.
+  }
+}
+
+function printProviderState(providers: OAuthProviderId[]): void {
+  const have = new Set(providers);
+  ui.hint(
+    `  Provider sessions: Google ${have.has("google") ? "connected" : "not connected"}; ` +
+      `GitHub ${have.has("github") ? "connected" : "not connected"}`,
+  );
+}
+
 // Runs the browser-based install confirm flow.
 //
 // Default path (`skipBrowser=false`): opens the trustysquire confirm
@@ -568,9 +711,9 @@ async function connect(args: Argv): Promise<void> {
 // provider session afterwards — the user must run `mcp login` before
 // their first OAuth signup. This path is for CI / scripted installs.
 // True when the local session + bot profile already carry everything
-// install would establish. Returns the list of provider sessions
-// detected, or null when anything's missing. Best-effort: any read
-// error returns null and the caller proceeds with the normal flow.
+// connect would establish. Returns the list of confirmed provider sessions, or
+// null when anything's missing. Best-effort: any read/probe error returns null
+// and the caller proceeds with the normal browser flow.
 // Probe whether the stored agent token still authenticates. Agent
 // sessions have a 24h absolute cap, so a token can be PRESENT in the
 // session file but already dead on the server. Treating present as
@@ -596,19 +739,15 @@ export async function agentTokenStillValid(
   }
 }
 
-// Pure gate for the `connect` fast path: given the read session, whether
-// its agent token still validated, and the bot's provider markers, decide
-// whether connect can (re)write the MCP config WITHOUT a browser re-claim.
+// Pure gate for the `connect` fast path: given the read session, whether its
+// agent token still validated, and the bot's confirmed provider sessions,
+// decide whether connect can (re)write the MCP config WITHOUT a browser
+// re-claim.
 //
-// The provider marker is INFORMATIONAL — it tells the signup bot which
-// providers to auto-prefer for OAuth, NOT whether the host agent can be
-// wired up. A valid session (machine + agent token that just validated)
-// is sufficient. Gating on a non-empty marker used to force a full
-// browser re-claim on any box whose bot profile had no login yet (a fresh
-// machine that restored session.json, or a headless box where the claim
-// browser can't run) — leaving the user with NO config written and no
-// clear reason. So an empty `providers` is fine; we still return
-// provisioned. Exported for unit tests.
+// Account-bound plumbing is not enough. The product-level connection is the
+// bot-profile Google session: without it the host agent may be able to call the
+// Trusty Squire API, but cannot act as the user at third-party services.
+// GitHub is optional headroom; Google is the required primary identity.
 export function decideProvisioned(
   session: SessionData | null,
   tokenValid: boolean,
@@ -623,6 +762,7 @@ export function decideProvisioned(
     return null;
   }
   if (!tokenValid) return null;
+  if (!providers.includes("google")) return null;
   return { providers };
 }
 
@@ -645,9 +785,114 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
       session.api_base_url,
       session.agent_session_token,
     );
-    return decideProvisioned(session, stillValid, loggedInProviders());
+    // Probe the profile cookies instead of trusting the marker. The marker is a
+    // cache that can lie after logout/expiry; connect is rare enough to pay this
+    // cost, and this keeps "Already connected" aligned with the bot's real
+    // ability to wear the user's Google identity. validate=true so a dead-but-
+    // present GitHub session isn't persisted into connected_providers.
+    const providers = await detectActiveProviderSessions();
+    await syncConnectedProviders(providers);
+    return decideProvisioned(session, stillValid, providers);
   } catch {
     return null;
+  }
+}
+
+// Is the account already BOUND? — a valid session (machine + agent token +
+// account id) whose agent token still validates. Unlike checkAlreadyProvisioned
+// this does NOT require a live Google session: it answers "is the install
+// claimed to an account", which is what a scoped GitHub force-relogin needs to
+// know it can skip the Google-binding confirm page.
+async function checkAlreadyBound(): Promise<boolean> {
+  try {
+    const storage = await openSessionStorage();
+    const session = await storage.read();
+    if (
+      session === null ||
+      session.machine_token === undefined ||
+      session.agent_session_token === undefined ||
+      session.account_id === undefined
+    ) {
+      return false;
+    }
+    return await agentTokenStillValid(session.api_base_url, session.agent_session_token);
+  } catch {
+    return false;
+  }
+}
+
+// A GitHub-only login in the bot's profile (the provider-scoped path) — clears
+// the GitHub session and opens a fresh GitHub login (account chooser). Used by
+// `--force-relogin=github` and by the proactive prompt when connect detects a
+// dead GitHub session. Returns true on success.
+async function reloginGithubOnly(
+  args: Argv,
+  target: AgentTarget,
+  agent: AgentDefinition,
+  opts: { writeConfig: boolean },
+): Promise<boolean> {
+  ui.heading("Sign in to GitHub");
+  clearProviderLoggedIn("github");
+  const result = await ensureOAuthSession({
+    provider: "github",
+    apiBaseUrl: args.apiBase,
+    forceOpen: true,
+  });
+  if (result.status === "logged_in" || result.status === "already_valid") {
+    await recordConnectedProvider("github");
+    if (opts.writeConfig) await writeAgentConfig(target, agent, args);
+    ui.success("Signed in to GitHub. The bot is ready.");
+    return true;
+  }
+  ui.fail(
+    result.status === "timeout"
+      ? "GitHub sign-in timed out."
+      : `GitHub sign-in failed: ${result.detail ?? "unknown error"}`,
+  );
+  return false;
+}
+
+// Connect short-circuited (Google valid + bound) but the bot's GitHub session
+// validated DEAD. GitHub is optional, but a dead session is exactly why a user
+// re-runs connect (GitHub-OAuth signups were failing), so PROACTIVELY offer to
+// fix it rather than just noticing. Skippable; non-interactive falls back to a
+// notice so scripted installs never block.
+async function offerGithubReloginIfDead(
+  args: Argv,
+  target: AgentTarget,
+  agent: AgentDefinition,
+): Promise<void> {
+  const reconnectHint = `run ${ui.code("npx @trusty-squire/mcp connect --force-relogin=github")} when a service needs GitHub`;
+  if (process.stdout.isTTY !== true || args.noInteractive) {
+    ui.hint(`GitHub session is not active — ${reconnectHint}.`);
+    return;
+  }
+  const answer = await confirm({
+    message: "Your GitHub session looks dead (GitHub-only signups will fail). Reconnect GitHub now?",
+    initialValue: true,
+  });
+  if (isCancel(answer) || answer !== true) {
+    ui.hint(`Skipped GitHub — ${reconnectHint}.`);
+    return;
+  }
+  await reloginGithubOnly(args, target, agent, { writeConfig: false });
+}
+
+async function syncConnectedProviders(providers: OAuthProviderId[]): Promise<void> {
+  clearAllProviderMarkers();
+  for (const p of providers) markProviderLoggedIn(p);
+  try {
+    const storage = await openSessionStorage();
+    const session = await storage.read();
+    if (session === null) return;
+    await storage.write({
+      ...session,
+      connected_providers: [...providers],
+      saved_at: new Date().toISOString(),
+    });
+  } catch {
+    // Best-effort — marker/session drift only affects fast-path UX. The next
+    // connect/login/provision probe can repair it.
   }
 }
 
@@ -677,23 +922,37 @@ async function recordConnectedProvider(provider: OAuthProviderId): Promise<void>
   }
 }
 
-// Y/n prompt with a default answer. Returns true on yes, false on no.
-// Default is taken when the user just hits enter or when stdin isn't
-// a TTY (CI / scripted contexts). Designed to match what the user
-// expects from common CLI tooling — `[Y/n]` means default-yes.
-async function promptYesNo(message: string, defaultYes: boolean): Promise<boolean> {
-  if (!process.stdin.isTTY) return defaultYes;
-  const suffix = defaultYes ? "[Y/n]" : "[y/N]";
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
+function consentFromArgs(args: Argv): InstallConsent {
+  return {
+    skillifyTelemetry: !args.noRegistry,
+    operatorInboxOtp: args.consentOperatorInboxOtp === true,
+  };
+}
+
+async function ensureConsentRecorded(
+  consent: InstallConsent,
+  overwrite: boolean,
+): Promise<void> {
   try {
-    const answer: string = await new Promise((resolve) => {
-      rl.question(`${message} ${suffix} `, resolve);
+    const storage = await openSessionStorage();
+    const session = await storage.read();
+    if (session === null) return;
+    if (
+      !overwrite &&
+      session.consent_skillify_telemetry !== undefined &&
+      session.consent_operator_inbox_otp !== undefined
+    ) {
+      return;
+    }
+    await storage.write({
+      ...session,
+      saved_at: new Date().toISOString(),
+      consent_skillify_telemetry: consent.skillifyTelemetry,
+      consent_operator_inbox_otp: consent.operatorInboxOtp,
     });
-    const trimmed = answer.trim().toLowerCase();
-    if (trimmed.length === 0) return defaultYes;
-    return trimmed === "y" || trimmed === "yes";
-  } finally {
-    rl.close();
+  } catch {
+    // Best-effort. If we can't persist consent, runtime treats missing
+    // fields as not approved.
   }
 }
 
@@ -716,17 +975,14 @@ async function writeAgentConfig(
   if (args.proxyUrl !== undefined) {
     env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
   }
-  // Skill registry URL — wired by default so the Tier-2 router is on
-  // out of the box. Override with --registry-url=<url>; opt out
-  // entirely with --no-registry (which omits the var → router skips).
+  // Skill registry URL. The endpoint is not user-configurable; Advanced setup
+  // controls whether it is written at all. Registry participation is also the
+  // user's consent to contribute successful non-personal signup recipes.
   if (!args.noRegistry) {
-    env.TRUSTY_SQUIRE_REGISTRY_URL = args.registryUrl ?? DEFAULT_REGISTRY_URL;
+    env.TRUSTY_SQUIRE_REGISTRY_URL = DEFAULT_REGISTRY_URL;
   }
-  // 0.8.1 — LLM choice from the interactive picker (or future
-  // --llm/--byok-key flags). BYOK paths write the provider key as
-  // env; the server's LLM client picks the matching path. The
-  // managed-free path omits keys entirely so the server routes
-  // through our proxy (the rate-limited /v1/llm/chat endpoint).
+  // Legacy LLM env support. Signup navigation is session-agent driven now, so
+  // normal installs never set these fields; keep the switch for older callers.
   switch (args.llmChoice) {
     case "byok_openrouter":
       if (args.byokKey !== undefined) env.OPENROUTER_API_KEY = args.byokKey;
@@ -761,9 +1017,7 @@ async function writeAgentConfig(
     ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
   }
   if (args.noRegistry) {
-    ui.hint("  Skill registry disabled (--no-registry) — every signup goes through the universal bot");
-  } else if (args.registryUrl !== undefined) {
-    ui.hint(`  Skill registry: ${args.registryUrl}`);
+    ui.hint("  Skill registry disabled — every signup goes through the universal bot");
   }
 }
 
@@ -807,7 +1061,7 @@ async function runInstallClaim(
   // flow's pollUntilClaimed can read it once the API reports claimed.
   // Wrapper object so TS can narrow `state.value` after a `=== null`
   // check at the call site — bare closure-captured `let` doesn't.
-  const state: { value: { token: string; account_id: string } | null } = { value: null };
+  const state: { value: ClaimResult | null } = { value: null };
   // 0.8.2 — the wizard's "Finish" button navigates to /install/done.
   // The bot waits for that URL before closing Chrome, so the user
   // gets a chance to complete optional step 2 (GitHub) AND any
@@ -824,6 +1078,9 @@ async function runInstallClaim(
         state.value = {
           token: status.agent_session_token,
           account_id: status.account_id ?? "",
+          ...(status.install_preferences !== undefined
+            ? { preferences: status.install_preferences }
+            : {}),
         };
       } else if (status.status === "expired") {
         // Bail loudly: state.value stays null and the caller
@@ -869,7 +1126,7 @@ async function runInstallClaim(
     const ok = await pollForClaim(apiBase, initiate.setup_code);
     if (ok === null) return null;
     return {
-      ...baseSession,
+      ...applyInstallPreferences(baseSession, ok.preferences),
       api_base_url: apiBase,
       saved_at: new Date().toISOString(),
       agent_session_token: ok.token,
@@ -904,11 +1161,25 @@ async function runInstallClaim(
   }
 
   return {
-    ...baseSession,
+    ...applyInstallPreferences(baseSession, state.value.preferences),
     api_base_url: apiBase,
     saved_at: new Date().toISOString(),
     agent_session_token: state.value.token,
     account_id: state.value.account_id,
+  };
+}
+
+function applyInstallPreferences(
+  baseSession: SessionData,
+  preferences: ClaimResult["preferences"] | undefined,
+): SessionData {
+  if (preferences === undefined) return baseSession;
+  const proxy = preferences.proxy_url?.trim();
+  return {
+    ...baseSession,
+    consent_skillify_telemetry: preferences.registry_enabled === true,
+    consent_operator_inbox_otp: preferences.consent_operator_inbox_otp === true,
+    ...(proxy !== undefined && proxy.length > 0 ? { proxy_url: proxy } : {}),
   };
 }
 
@@ -946,7 +1217,7 @@ async function logout(): Promise<void> {
 // timeout/error — it's the explicit retry path.
 async function login(args: Argv): Promise<void> {
   const provider: OAuthProviderId =
-    args.providerArg === "github" ? "github" : "google";
+    args.providerArg ?? args.forceReloginProvider ?? "google";
   const label = provider === "github" ? "GitHub" : "Google";
   ui.heading(`Sign in to ${label}`);
   // --force-relogin wipes this provider's cookies (via forceOpen below),
@@ -997,16 +1268,15 @@ function printHelp(): void {
   console.warn(`${chalk.bold("Commands")}`);
   console.warn(`  ${ui.code("connect")}                       set up this machine (default)`);
   console.warn(`  ${ui.code("login --provider=<p>")}          add a Google or GitHub session`);
+  console.warn(`  ${ui.code("settings")}                      edit registry, OTP, and proxy choices`);
   console.warn(`  ${ui.code("logout")}                        clear the local session`);
   console.warn("");
   console.warn(`${chalk.bold("Flags for connect")}`);
   console.warn(`  --target=<${Object.keys(AGENTS).join("|")}>`);
-  console.warn(`  --skip-secondary             don't prompt for the second provider`);
-  console.warn(`  --skip-login                 don't launch a browser (CI mode)`);
-  console.warn(`  --force-relogin              switch the bound account`);
+  console.warn(`  --skip-browser               don't launch a browser (CI mode)`);
+  console.warn(`  --force-relogin[=google|github] switch the bound account or one provider`);
   console.warn(`  --proxy-url=<url>            bake a residential proxy into the bot env`);
-  console.warn(`  --registry-url=<url>         use a non-default skill registry`);
-  console.warn(`  --no-registry                disable the Tier-2 router entirely`);
+  console.warn(`  --no-registry                disable managed registry participation`);
   console.warn(`  --no-interactive             skip the TUI picker (use flag defaults only)`);
   console.warn("");
   console.warn(`${chalk.bold("Example")}`);
@@ -1017,6 +1287,11 @@ function printHelp(): void {
 interface ClaimResult {
   token: string;
   account_id: string;
+  preferences?: {
+    registry_enabled?: boolean;
+    consent_operator_inbox_otp?: boolean;
+    proxy_url?: string;
+  };
 }
 
 async function pollForClaim(
@@ -1038,6 +1313,9 @@ async function pollForClaim(
       return {
         token: status.agent_session_token,
         account_id: status.account_id ?? "",
+        ...(status.install_preferences !== undefined
+          ? { preferences: status.install_preferences }
+          : {}),
       };
     }
     if (status.status === "expired") return null;
@@ -1079,15 +1357,13 @@ function printAsnWarning(asn: AsnInfo): void {
   }
 }
 
-// Back-compat alias: external imports of `install` keep working at the module
-// level. The CLI command got renamed; the function is the same.
 export {
   connect,
-  connect as install,
   logout,
   login,
   parseArgs,
   pollForClaim,
   printAsnWarning,
+  resolveCopiedNpxServerLaunch,
   resolveServerLaunch,
 };

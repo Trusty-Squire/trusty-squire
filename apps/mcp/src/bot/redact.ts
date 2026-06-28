@@ -31,6 +31,7 @@ const TOKEN_PATTERNS: ReadonlyArray<RegExp> = [
   /\bsbp_[A-Za-z0-9]{30,}/gi,
   /\bnapi_[a-zA-Z0-9]{30,80}/g,
   /\br8_[a-zA-Z0-9]{30,60}/g,
+  /\bphx_[A-Za-z0-9]{40,60}/g, // PostHog personal API key (lockstep w/ agent.ts)
   // rc.23 / rc.35 — Baseten (6-12 alnum . 30+ alnum)
   /\b[A-Za-z0-9]{6,12}\.[A-Za-z0-9]{30,50}\b/g,
   // rc.23 / rc.34 / rc.36 — Qdrant Cloud (UUID|opaque-55+, allowing _ and - in body)
@@ -43,6 +44,21 @@ const TOKEN_PATTERNS: ReadonlyArray<RegExp> = [
   /\bcfut_[A-Za-z0-9]{40,}/g,
   /\bcfat_[A-Za-z0-9]{40,}/g,
   /\bnpm_[A-Za-z0-9]{30,}/g,
+];
+
+const CONTEXTUAL_SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
+  [
+    /\b(api[_\s-]*key|secret|token|credential|password|key\s*id)\b(\s*(?:=|:)\s*['"])[^'"\n]{8,}(['"])/gi,
+    "$1$2REDACTED$3",
+  ],
+  [
+    /\b(api[_\s-]*key|secret|token|credential|password|key\s*id)\b(\s*(?:=|:)\s*)[A-Za-z0-9._|:/+=\-]{16,}/gi,
+    "$1$2REDACTED",
+  ],
+  [
+    /\b(api[_\s-]*key|secret|token|credential|password|key\s*id)\b(['"]?\s*,\s*['"]?value['"]?\s*:\s*['"])[^'"\n]{8,}(['"])/gi,
+    "$1$2REDACTED$3",
+  ],
 ];
 
 // Replace each known-shape token with a redaction marker that
@@ -58,6 +74,9 @@ export function redactCredentials(text: string): string {
       const tail = m.slice(-6);
       return `${prefix}REDACTED…${tail}`;
     });
+  }
+  for (const [re, repl] of CONTEXTUAL_SECRET_PATTERNS) {
+    out = out.replace(re, repl);
   }
   return out;
 }
@@ -103,9 +122,15 @@ const HTML_SECRET_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 export function redactHtml(html: string): string {
-  let out = redactCredentials(html);
+  // Run the SPECIFIC, structural DOM-secret patterns (captcha tokens, auth
+  // headers, password inputs) BEFORE the generic keyword-based credential
+  // redactor. The generic `token = "…"` contextual rule is greedy: on
+  // `window.token = "g-recaptcha-response":"<tok>"` it would otherwise redact
+  // the KEY NAME and consume its closing quote, destroying the structure the
+  // captcha pattern keys on — leaving the real token value un-redacted.
+  let out = html;
   for (const [re, repl] of HTML_SECRET_PATTERNS) {
     out = out.replace(re, repl);
   }
-  return out;
+  return redactCredentials(out);
 }

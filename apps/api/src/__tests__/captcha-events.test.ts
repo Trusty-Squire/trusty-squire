@@ -23,7 +23,6 @@ describe("POST /v1/captcha-events", () => {
     captchaStore = new InMemoryCaptchaEventStore();
     const deps = buildInMemoryDeps({
       sessionSecret: "test-secret-not-used",
-      customerId: "ts-test",
     });
     deps.captchaEventStore = captchaStore;
     app = await buildServer({ deps });

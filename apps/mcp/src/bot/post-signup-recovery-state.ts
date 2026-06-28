@@ -45,6 +45,9 @@ export class PostSignupRecoveryState {
   triedFallbackUrls = new Set<string>();
   clickedKeysLinks = new Set<string>();
   clickedScopeLinks = new Set<string>();
+  recentCredentialActionSignatures: string[] = [];
+  revealSweepUrls = new Set<string>();
+  triedRenderAccountMenu = false;
   prematureDoneFallbacks = 0;
 
   navigateCount = 0;
@@ -52,6 +55,17 @@ export class PostSignupRecoveryState {
   lastNavigatedTo: string | null = null;
   triedWizardForward = new Set<string>();
   triedWizardLeafChoices = new Set<string>();
+  // Once true, the STALLED-wizard escape-to-dashboard has been attempted — a
+  // re-presenting onboarding wizard whose clicks don't register overlays the
+  // real product dashboard, so we navigate to a settings/keys/home nav link to
+  // reach the credential surface behind it (cloudinary /app/welcome).
+  triedWizardEscape = false;
+  // Once true, the STALLED-wizard JS-click recovery has been attempted — the
+  // dominant wizard-stall cause is a custom radio-card selection whose React
+  // onClick a coordinate/CDP click doesn't fire (auth0 Account-Type, cloudinary
+  // survey, posthog role-picker). Re-dispatching the recent clicks via
+  // page.evaluate(el.click()) fires the handler the wizard was waiting on.
+  triedWizardJsClick = false;
 }
 
 export interface RecoveryClickableElement {

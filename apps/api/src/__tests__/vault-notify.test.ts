@@ -29,7 +29,7 @@ function stubForwarder(sent: SentMail[], fail = false): EmailForwarder {
 interface Harness { server: FastifyInstance; deps: ApiDeps; sent: SentMail[]; }
 
 async function setup(opts: { failMailer?: boolean } = {}): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
   const sent: SentMail[] = [];
   const server = await buildServer({ deps, emailForwarder: stubForwarder(sent, opts.failMailer) });
   return { server, deps, sent };

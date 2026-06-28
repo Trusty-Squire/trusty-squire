@@ -66,16 +66,22 @@ describe("agentTokenStillValid (fix #1: expired-token detection)", () => {
 });
 
 describe("decideProvisioned (fast-path gate: write config without a re-claim)", () => {
-  it("provisioned when the session is valid even with NO provider marker (the gap fix)", () => {
-    // The real bug: a valid session whose bot profile has no OAuth login
-    // yet (fresh box / headless) was forced through a full browser claim
-    // and ended up writing NO config. Empty providers must not block.
-    expect(decideProvisioned(fullSession, true, [])).toEqual({ providers: [] });
+  it("is NOT connected when the account token is valid but the bot has no Google session", () => {
+    // Connect identity: account-bound plumbing alone is hollow. The bot must
+    // hold the user's Google session before connect can skip the browser flow.
+    expect(decideProvisioned(fullSession, true, [])).toBeNull();
   });
 
-  it("provisioned and carries the marked providers when present", () => {
+  it("is NOT connected with only optional GitHub; Google is the primary identity", () => {
+    expect(decideProvisioned(fullSession, true, ["github"])).toBeNull();
+  });
+
+  it("connected and carries the confirmed providers when Google is present", () => {
     expect(decideProvisioned(fullSession, true, ["google"])).toEqual({
       providers: ["google"],
+    });
+    expect(decideProvisioned(fullSession, true, ["google", "github"])).toEqual({
+      providers: ["google", "github"],
     });
   });
 

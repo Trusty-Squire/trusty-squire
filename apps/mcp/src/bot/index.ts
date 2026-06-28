@@ -112,6 +112,9 @@ export interface UniversalSignupRequest {
   // tools/provision-any.ts (rc.13).
   machineToken?: string | undefined;
   apiBase?: string | undefined;
+  // Explicit install consent for polling the operator's inbox for matching
+  // OTP/device-confirmation messages. Missing/false means do not poll.
+  allowOperatorInboxOtp?: boolean | undefined;
   // Verify-fleet identity binding. When the housekeeper runs a fresh-signup
   // verification AS a specific robot identity, these route the run through that
   // identity's Chrome profile (its logged-in Google session) and its egress —
@@ -231,6 +234,7 @@ export class UniversalSignupBot {
         allowBlindOAuthConsent: request.allowBlindOAuthConsent,
         machineToken: request.machineToken,
         apiBase: request.apiBase,
+        allowOperatorInboxOtp: request.allowOperatorInboxOtp,
         forceForm: request.forceForm,
         oauthAccountEmail: request.oauthAccountEmail,
       });

@@ -70,6 +70,12 @@ export function isAtAccountReviewGate(text: string): boolean {
   return ACCOUNT_REVIEW_GATE_PATTERNS.some((p) => p.test(text));
 }
 
+export function isAtPermissionDeniedGate(text: string): boolean {
+  return /\b(?:not enough permissions|insufficient permissions|permission denied|access denied|not authorized|unauthorized to|you do not have permission|you don'?t have permission)\b/i.test(
+    text,
+  ) || /\byou do not have enough permissions\b/i.test(text);
+}
+
 export function isOnboardingReviewGate(
   verificationFailed: string | undefined,
   pageText: string,
@@ -148,6 +154,19 @@ export function isAtPhoneGate(text: string): boolean {
   return /phone verification|verify your phone|enter your phone|sms code|text message/i.test(text);
 }
 
+export function isAtOAuthAccountLinkVerificationGate(text: string): boolean {
+  const hay = text.toLowerCase().replace(/\s+/g, " ");
+  const linkIntent =
+    /\blink\s+(?:your\s+)?(?:google|github|oauth|social)\b/.test(hay) ||
+    /\blink\s+(?:google|github|oauth|social)\s+account\b/.test(hay) ||
+    /\baccount\s+already\s+exists\b/.test(hay);
+  const verifyEmail =
+    /\bverify\s+your\s+email\s+address\b/.test(hay) ||
+    /\bemail\s+with\s+instructions\b/.test(hay) ||
+    /\binstructions\s+to\s+link\b/.test(hay);
+  return linkIntent && verifyEmail;
+}
+
 const SIGNUPS_CLOSED_PATTERNS: readonly RegExp[] = [
   /\bsign[\s-]?ups?\s+(?:are|is)\s+(?:currently\s+)?(?:closed|disabled|paused|not\s+(?:open|available|being\s+accepted))\b/i,
   /\b(?:we\s+are|we're)\s+not\s+(?:currently\s+)?accepting\s+(?:new\s+)?(?:sign[\s-]?ups|registrations|users|accounts)\b/i,
@@ -166,7 +185,9 @@ export type TerminalGateKind =
   | "signups_closed"
   | "payment"
   | "phone"
-  | "account_review";
+  | "oauth_account_link_verification"
+  | "account_review"
+  | "permission_denied";
 
 export interface TerminalGateInput {
   frame: ObservationFrame | null;
@@ -196,8 +217,14 @@ export function classifyTerminalGate(input: TerminalGateInput): TerminalGateVerd
   if (stateVerdict?.state === "phone_gate" || isAtPhoneGate(text)) {
     return { kind: "phone", text, stateVerdict };
   }
+  if (isAtOAuthAccountLinkVerificationGate(text)) {
+    return { kind: "oauth_account_link_verification", text, stateVerdict };
+  }
   if (isAtPaywall(text) || (stateVerdict?.state === "payment_gate" && !hasPaywallNegation(text))) {
     return { kind: "payment", text, stateVerdict };
+  }
+  if (isAtPermissionDeniedGate(text)) {
+    return { kind: "permission_denied", text, stateVerdict };
   }
   if (
     (stateVerdict?.state === "account_review_gate" ||

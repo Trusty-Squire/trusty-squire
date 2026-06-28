@@ -21,6 +21,11 @@ export interface ResendInboundPayload {
   // Resend's own event id (Svix-style `evt_xxx` or `email_xxx`).
   // Different from the RFC-822 Message-ID below — kept distinct.
   id?: string;
+  // The Received Email id used to fetch body content. Resend inbound
+  // webhooks intentionally carry metadata only, so production must use
+  // this id with GET /emails/receiving/:email_id before storing mail
+  // that the bot can verify.
+  email_id?: string;
   // The original RFC-822 Message-ID from the email's headers. This
   // is what the dedupe lookup uses.
   message_id: string;
@@ -38,6 +43,11 @@ export interface ResendHandlerDeps {
   aliasStore: AliasStore;
   emailStore: EmailStore;
   now?: () => Date;
+  fetchEmailContent?: (emailId: string) => Promise<{
+    text?: string | null;
+    html?: string | null;
+    received_at?: string | null;
+  } | null>;
 }
 
 export type ResendIngestOutcome =
@@ -84,14 +94,35 @@ export class ResendHandler {
       return { kind: "duplicate", message_id: messageId };
     }
 
-    const bodyText = typeof payload.text === "string" && payload.text.length > 0 ? payload.text : null;
-    const bodyHtml = typeof payload.html === "string" && payload.html.length > 0 ? payload.html : null;
-    const links = bodyText !== null ? extractLinks(bodyText) : [];
-    const codes = bodyText !== null ? collectOtpCodes(bodyText) : [];
+    let bodyText = typeof payload.text === "string" && payload.text.length > 0 ? payload.text : null;
+    let bodyHtml = typeof payload.html === "string" && payload.html.length > 0 ? payload.html : null;
+    let receivedAtRaw = payload.received_at;
+    if (
+      bodyText === null &&
+      bodyHtml === null &&
+      typeof payload.email_id === "string" &&
+      payload.email_id.length > 0 &&
+      this.deps.fetchEmailContent !== undefined
+    ) {
+      const fetched = await this.deps.fetchEmailContent(payload.email_id);
+      if (fetched !== null) {
+        bodyText = typeof fetched.text === "string" && fetched.text.length > 0 ? fetched.text : null;
+        bodyHtml = typeof fetched.html === "string" && fetched.html.length > 0 ? fetched.html : null;
+        receivedAtRaw =
+          typeof fetched.received_at === "string" && fetched.received_at.length > 0
+            ? fetched.received_at
+            : receivedAtRaw;
+      }
+    }
+    const bodyForExtraction = [bodyText, bodyHtml]
+      .filter((body): body is string => body !== null)
+      .join(" ");
+    const links = bodyForExtraction.length > 0 ? extractLinks(bodyForExtraction) : [];
+    const codes = bodyForExtraction.length > 0 ? collectOtpCodes(bodyForExtraction) : [];
 
     const fromDomain = (payload.from.split("@")[1] ?? "").toLowerCase();
     const id = ulid();
-    const receivedAt = parseReceivedAt(payload.received_at, this.deps.now);
+    const receivedAt = parseReceivedAt(receivedAtRaw, this.deps.now);
 
     await this.deps.emailStore.insertIfAbsent({
       id,

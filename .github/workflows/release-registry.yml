@@ -36,8 +36,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # Free ~25GB by removing preinstalled toolchains we don't use.
-      # The monorepo's Next.js apps (apps/web, apps/pwa) blow past
-      # the runner's inode quota when their node_modules land; even
+      # The monorepo's Next.js app (apps/web) blows past
+      # the runner's inode quota when its node_modules land; even
       # though we filter the install below, the lockfile resolution
       # still touches them.
       - name: Free disk space on runner

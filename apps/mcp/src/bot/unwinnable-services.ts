@@ -32,12 +32,11 @@ export interface ManualRoute {
 
 // Keyed by the normalized service slug.
 const UNWINNABLE: Readonly<Record<string, ManualRoute>> = {
-  clerk: {
-    gate: "spa_broken",
-    reason:
-      "Clerk's dashboard SPA won't initialize/complete under automation " +
-      "(reproduced with AND without the residential proxy — not bot-detection).",
-  },
+  // clerk REMOVED 2026-06-24 — the spa_broken flag was STALE. A forced run
+  // (UNIVERSAL_BOT_FORCE_UNWINNABLE=1) drove the dashboard SPA fine: Google
+  // OAuth (login-only) → email path → OTP arrived (verifications@clerk.dev via
+  // the workspace catch-all) → extracted api_key → auto-promoted skill
+  // 8YACTGEPASNKRA7AS2W7KXHRFM. The SPA does initialize under automation.
   cloudflare: {
     gate: "max_antibot",
     reason:

@@ -58,6 +58,11 @@ export interface SessionData {
   // string[] here to avoid a circular import (bot → oauth-providers
   // → ... → session would cycle).
   connected_providers?: string[];
+  // Explicit install-time consent. Missing means "not approved" so older
+  // sessions do not silently opt into privacy-sensitive flows.
+  consent_skillify_telemetry?: boolean;
+  consent_operator_inbox_otp?: boolean;
+  proxy_url?: string;
 }
 
 export interface SessionStorage {

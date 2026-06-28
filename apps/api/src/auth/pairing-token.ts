@@ -39,16 +39,34 @@ export interface PairingTokenRecord {
   // server binds it to the authenticating account so the bot's
   // LLM-proxy + inbox calls credit the right account.
   machine_token: string | null;
+  // Browser-side install choices. These ride back to the CLI with the
+  // one-time agent token so the local MCP config matches what the user
+  // chose in the web wizard.
+  registry_enabled: boolean | null;
+  consent_operator_inbox_otp: boolean | null;
+  proxy_url: string | null;
 }
 
 export interface PairingTokenStore {
   insert(record: PairingTokenRecord): Promise<void>;
   find(token: string): Promise<PairingTokenRecord | null>;
-  claim(token: string, accountId: string, rawAgentToken: string, now: Date): Promise<boolean>;
+  claim(
+    token: string,
+    accountId: string,
+    rawAgentToken: string,
+    now: Date,
+    preferences?: InstallPreferences,
+  ): Promise<boolean>;
   // Marks the record as delivered after the CLI has fetched the raw
   // agent token exactly once. Returns the raw token; subsequent calls
   // return null.
   deliverAndMarkUsed(token: string, now: Date): Promise<string | null>;
+}
+
+export interface InstallPreferences {
+  registry_enabled?: boolean;
+  consent_operator_inbox_otp?: boolean;
+  proxy_url?: string | null;
 }
 
 export function issuePairingToken(
@@ -65,6 +83,9 @@ export function issuePairingToken(
     agent_session_raw_token: null,
     account_id: null,
     machine_token: machineToken,
+    registry_enabled: null,
+    consent_operator_inbox_otp: null,
+    proxy_url: null,
   };
 }
 
@@ -85,6 +106,7 @@ export class InMemoryPairingTokenStore implements PairingTokenStore {
     accountId: string,
     rawAgentToken: string,
     now: Date,
+    preferences: InstallPreferences = {},
   ): Promise<boolean> {
     const r = this.rows.get(token);
     if (r === undefined) return false;
@@ -96,6 +118,9 @@ export class InMemoryPairingTokenStore implements PairingTokenStore {
     r.status = "claimed";
     r.account_id = accountId;
     r.agent_session_raw_token = rawAgentToken;
+    r.registry_enabled = preferences.registry_enabled ?? null;
+    r.consent_operator_inbox_otp = preferences.consent_operator_inbox_otp ?? null;
+    r.proxy_url = preferences.proxy_url ?? null;
     return true;
   }
 

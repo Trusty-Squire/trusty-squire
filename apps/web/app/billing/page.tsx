@@ -137,20 +137,21 @@ export default function BillingPage() {
         <div className="app-card">
           {justPaid && (
             <div className="app-banner ok" style={{ marginTop: 0, marginBottom: 16 }}>
-              You&apos;re subscribed — thanks! Your signups are now unlimited.
+              You&apos;re on Pro — thanks! Egress grants and the extended audit
+              trail are unlocked.
             </div>
           )}
           <h2 className="app-title" style={{ fontSize: "18px" }}>
-            {status?.cancel_at != null ? "Paid plan — cancels soon" : "Paid plan — active"}
+            {status?.cancel_at != null ? "Pro plan — cancels soon" : "Pro plan — active"}
           </h2>
           {status?.cancel_at != null ? (
             <p className="app-sub">
-              Unlimited signups until {fmtDate(status.cancel_at)}. Your plan is set to cancel
+              Pro until {fmtDate(status.cancel_at)}. Your plan is set to cancel
               then — reopen Manage to resume it before the date.
             </p>
           ) : (
             <p className="app-sub">
-              Unlimited signups.
+              Egress grants and a 365-day audit trail.
               {status?.current_period_end != null
                 ? ` Renews ${fmtDate(status.current_period_end)}.`
                 : ""}
@@ -199,23 +200,18 @@ export default function BillingPage() {
         </div>
       )}
 
-      {/* Genuinely on the free plan. */}
+      {/* Genuinely on the free plan. Billing is off during beta — everything
+          is unlocked for everyone, so there's no checkout button to hit. */}
       {status !== null && !active && !awaitingActivation && (
         <div className="app-card">
           <h2 className="app-title" style={{ fontSize: "18px" }}>
-            Free plan
+            Free while in beta
           </h2>
           <p className="app-sub">
-            You&apos;ve used your free signups. Upgrade for unlimited provisioning.
+            Everything&apos;s unlocked — provisioning, the vault, egress grants,
+            and the audit trail — no card, no charge. Pro ($20/mo: egress,
+            365-day audit, automated rotation) starts billing once we leave beta.
           </p>
-          <button
-            type="button"
-            className="btn-primary"
-            disabled={busy}
-            onClick={() => go("/v1/billing/checkout")}
-          >
-            {busy ? "Opening…" : "Upgrade"}
-          </button>
         </div>
       )}
     </AppShell>

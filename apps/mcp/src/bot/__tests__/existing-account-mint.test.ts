@@ -20,6 +20,7 @@
 import { describe, expect, it } from "vitest";
 import {
   findApiKeysNavLink,
+  findWizardEscapeNavLink,
   findCreateKeyAffordance,
   findKeyModalSubmit,
   findKeyNameInput,
@@ -241,6 +242,30 @@ describe("findApiKeysNavLink", () => {
 
   it("returns null on an empty inventory", () => {
     expect(findApiKeysNavLink([])).toBeNull();
+  });
+});
+
+describe("findWizardEscapeNavLink (escape a stalled onboarding wizard)", () => {
+  it("picks an icon-only Settings link by href over a Home link (cloudinary)", () => {
+    // cloudinary /app/welcome: the Settings sidebar link has NO visible text,
+    // only an href — and settings (where API keys live) must beat home.
+    const inv = [
+      el({ tag: "a", visibleText: "Home", href: "/app/home", selector: "#home" }),
+      el({ tag: "a", visibleText: "", href: "/app/settings", selector: "#settings" }),
+    ];
+    expect(findWizardEscapeNavLink(inv)?.selector).toBe("#settings");
+  });
+  it("falls back to a home/dashboard link when no settings link exists", () => {
+    expect(
+      findWizardEscapeNavLink([el({ tag: "a", visibleText: "Dashboard", href: "/app/home", selector: "#h" })])?.selector,
+    ).toBe("#h");
+  });
+  it("returns null when only wizard survey buttons are present", () => {
+    const inv = [
+      el({ tag: "button", visibleText: "Back End Developer", selector: "#role" }),
+      el({ tag: "button", visibleText: "Next", selector: "#next" }),
+    ];
+    expect(findWizardEscapeNavLink(inv)).toBeNull();
   });
 });
 

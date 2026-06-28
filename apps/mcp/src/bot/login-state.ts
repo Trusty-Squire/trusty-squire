@@ -4,7 +4,7 @@
 // expensive provider round-trip — which providers it can auto-prefer
 // for OAuth-first signup.
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHROME_PROFILE_DIR } from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
@@ -87,6 +87,7 @@ export function clearAllProviderMarkers(
 // so the install can still proceed.
 export async function clearProviderCookies(
   profileDir: string = CHROME_PROFILE_DIR,
+  provider?: OAuthProviderId,
 ): Promise<void> {
   const dbPath = join(profileDir, "Default", "Cookies");
   try {
@@ -95,12 +96,16 @@ export async function clearProviderCookies(
     const sqlite = await import("node:sqlite").catch(() => null);
     if (sqlite === null) return;
     const db = new sqlite.DatabaseSync(dbPath);
+    const hosts =
+      provider === "google"
+        ? ["%google.com%"]
+        : provider === "github"
+          ? ["%github.com%"]
+          : ["%google.com%", "%github.com%"];
     try {
-      db.exec(
-        "DELETE FROM cookies WHERE " +
-          "host_key LIKE '%google.com%' OR " +
-          "host_key LIKE '%github.com%';",
-      );
+      const where = hosts.map((_, i) => `host_key LIKE ?${i + 1}`).join(" OR ");
+      const stmt = db.prepare(`DELETE FROM cookies WHERE ${where};`);
+      stmt.run(...hosts);
     } finally {
       db.close();
     }
@@ -108,5 +113,17 @@ export async function clearProviderCookies(
     /* best-effort — Chrome might be holding the lock, or the DB
        doesn't exist yet on first install. The OAuth flow will still
        work; it just won't be forced this run. */
+  }
+}
+
+// Wipe the whole bot Chrome profile. Used only for `connect --force-relogin`:
+// switching accounts must clear provider cookies AND Trusty Squire's own app
+// session, otherwise the confirm page can reuse the old account and skip the
+// Google credential prompt.
+export function clearBrowserProfile(profileDir: string = CHROME_PROFILE_DIR): void {
+  try {
+    rmSync(profileDir, { recursive: true, force: true });
+  } catch {
+    /* best-effort */
   }
 }

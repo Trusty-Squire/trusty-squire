@@ -61,6 +61,36 @@ describe("store_credential (upsert)", () => {
     expect(seen).toMatchObject({ service: "AWS", label: "prod", fields: { access_key_id: "AKIA" } });
   });
 
+  it("forwards observed_hosts so captured keys do not land with an empty allowlist", async () => {
+    let seen: unknown;
+    const api = mockApi({
+      storeCredential: async (input) => {
+        seen = input;
+        return {
+          reference: "vault://a/b/resend",
+          service: "Resend",
+          label: "default",
+          field_names: ["value"],
+          allowed_hosts: ["api.resend.com"],
+          created_at: "x",
+          updated: true,
+        };
+      },
+    });
+    await storeCredentialTool.handler(
+      {
+        service: "Resend",
+        value: "re_x",
+        observed_hosts: ["resend.com", "api.resend.com"],
+      },
+      api,
+    );
+    expect(seen).toMatchObject({
+      service: "Resend",
+      observed_hosts: ["resend.com", "api.resend.com"],
+    });
+  });
+
   it("schema requires value or fields", () => {
     expect(storeCredentialTool.inputSchema.safeParse({ service: "X" }).success).toBe(false);
   });

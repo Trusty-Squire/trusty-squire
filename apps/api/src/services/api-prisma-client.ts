@@ -19,7 +19,6 @@ import { createRequire } from "node:module";
 interface MachineTokenRow {
   token: string;
   created_at: Date;
-  signup_count: number;
   last_used_at: Date | null;
   paired_account_id: string | null;
   asn_class?: string | null;
@@ -55,23 +54,6 @@ interface OAuthIdentityRow {
   created_at: Date;
 }
 
-interface DeviceRow {
-  id: string;
-  account_id: string;
-  first_seen_at: Date;
-  last_seen_at: Date;
-  platform: string;
-  revoked_at: Date | null;
-}
-
-interface ActiveMandateRow {
-  account_id: string;
-  mandate: unknown;
-  signed_by_device: string;
-  vouchflow_device_token: string;
-  session_id: string;
-  installed_at: Date;
-}
 
 interface WebSessionRow {
   id: string;
@@ -208,8 +190,8 @@ export interface ApiPrismaClient {
     // Billing: the Stripe webhook flips subscription_status (+ the
     // customer/subscription ids) on the mapped account.
     update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<AccountRow>;
-    // Hard delete — cascades OAuthIdentity, Device, ActiveMandate,
-    // WebSession, AgentSession via FK onDelete: Cascade.
+    // Hard delete — cascades OAuthIdentity, WebSession, AgentSession via
+    // FK onDelete: Cascade.
     delete(args: { where: { id: string } }): Promise<AccountRow>;
     // Funnel (Panel 1): accounts created in a window + rows for the
     // daily new-accounts series. `where` carries created_at range and an
@@ -228,28 +210,6 @@ export interface ApiPrismaClient {
     findMany(args: {
       where: Record<string, unknown>;
     }): Promise<OAuthIdentityRow[]>;
-  };
-  device: {
-    upsert(args: {
-      where: { id: string };
-      create: Record<string, unknown>;
-      update: Record<string, unknown>;
-    }): Promise<DeviceRow>;
-    findMany(args: { where: Record<string, unknown> }): Promise<DeviceRow[]>;
-    updateMany(args: {
-      where: Record<string, unknown>;
-      data: Record<string, unknown>;
-    }): Promise<{ count: number }>;
-  };
-  activeMandate: {
-    upsert(args: {
-      where: { account_id: string };
-      create: Record<string, unknown>;
-      update: Record<string, unknown>;
-    }): Promise<ActiveMandateRow>;
-    findUnique(args: {
-      where: { account_id: string };
-    }): Promise<ActiveMandateRow | null>;
   };
   webSession: {
     create(args: { data: Record<string, unknown> }): Promise<WebSessionRow>;

@@ -47,6 +47,15 @@ const MARKETING_HTML = `
   </body></html>
 `;
 
+const PARKED_DOMAIN_HTML = `
+  <html><head><title>openpipe.com</title></head><body>
+    <h1>openpipe.com</h1>
+    <p>The domain openpipe.com is for sale! Click here to learn more.</p>
+    <form><input id="search-input" /><button>Search</button></form>
+    <p>Search for information</p>
+  </body></html>
+`;
+
 describe("classifySignupHtml", () => {
   it("classifies a login form as login", () => {
     expect(classifySignupHtml(PLUNK_LOGIN_HTML, "Plunk")).toBe("login");
@@ -64,6 +73,10 @@ describe("classifySignupHtml", () => {
 
   it("classifies a marketing page (no form) as other", () => {
     expect(classifySignupHtml(MARKETING_HTML, "Acme")).toBe("other");
+  });
+
+  it("classifies parked/domain-for-sale pages as other even with a search form", () => {
+    expect(classifySignupHtml(PARKED_DOMAIN_HTML, "openpipe.com")).toBe("other");
   });
 
   it("is robust to entities and casing in the CTA copy", () => {

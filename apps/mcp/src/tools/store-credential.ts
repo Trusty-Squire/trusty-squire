@@ -10,6 +10,7 @@ const inputSchema = z
     fields: z.record(z.string().min(1).max(8192)).optional(),
     env_var_suggestion: z.string().min(1).max(120).optional(),
     type: z.string().min(1).max(60).optional(),
+    observed_hosts: z.array(z.string().min(1).max(256)).max(10).optional(),
     auth_shape: z
       .string()
       .max(120)
@@ -32,6 +33,8 @@ the same service apart. Optional \`auth_shape\` records how the provider
 expects the key so an EGRESS GRANT (grant_app_access) auto-injects it
 correctly: "bearer" (default) | "header:<name>" (e.g. "header:x-api-key")
 | "query:<param>". Set it for non-bearer providers; bearer needs nothing.
+Optional \`observed_hosts\` carries hosts seen during signup/extraction and is
+unioned into the credential's allowed_hosts with the service defaults.
 Returns the reference, field names, and allowed_hosts. The value is never
 readable back to you afterwards.`;
 
@@ -49,6 +52,7 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       fields: { type: "object", additionalProperties: { type: "string" } },
       env_var_suggestion: { type: "string" },
       type: { type: "string" },
+      observed_hosts: { type: "array", items: { type: "string" } },
       auth_shape: { type: "string" },
     },
   },
@@ -63,6 +67,7 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       ...(args.fields !== undefined ? { fields: args.fields } : {}),
       ...(args.env_var_suggestion !== undefined ? { env_var_suggestion: args.env_var_suggestion } : {}),
       ...(args.type !== undefined ? { type: args.type } : {}),
+      ...(args.observed_hosts !== undefined ? { observed_hosts: args.observed_hosts } : {}),
       ...(args.auth_shape !== undefined ? { auth_shape: args.auth_shape } : {}),
     });
     return {

@@ -111,7 +111,6 @@ export interface ApiDeps {
 
   // Config
   sessionSecret: string;
-  customerId: string;
 
   // Test injection
   now?: () => Date;
@@ -119,7 +118,6 @@ export interface ApiDeps {
 
 export interface BuildInMemoryDepsOpts {
   sessionSecret: string;
-  customerId: string;
   now?: () => Date;
   // Inbox poll cadence in ms. Tests run with 1ms to keep wait loops fast;
   // omit in prod to use the default 2000ms.
@@ -224,9 +222,11 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
 
   // rc.19 — Resend inbound. Same alias-resolution + dedupe contract
   // as the (now retired) SES path.
+  const resendContentFetcher = buildResendReceivingFetcher();
   const resendHandler = new ResendHandler({
     aliasStore,
     emailStore,
+    ...(resendContentFetcher !== undefined ? { fetchEmailContent: resendContentFetcher } : {}),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
   });
 
@@ -272,7 +272,28 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     captchaEventStore,
     retentionCron,
     sessionSecret: opts.sessionSecret,
-    customerId: opts.customerId,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
+  };
+}
+
+function buildResendReceivingFetcher():
+  | ((emailId: string) => Promise<{ text?: string | null; html?: string | null; received_at?: string | null } | null>)
+  | undefined {
+  const apiKey = process.env.RESEND_API_KEY;
+  if (apiKey === undefined || apiKey.length === 0) return undefined;
+  return async (emailId) => {
+    const res = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(emailId)}`, {
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        accept: "application/json",
+      },
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as Record<string, unknown>;
+    return {
+      text: typeof data["text"] === "string" ? data["text"] : null,
+      html: typeof data["html"] === "string" ? data["html"] : null,
+      received_at: typeof data["created_at"] === "string" ? data["created_at"] : null,
+    };
   };
 }

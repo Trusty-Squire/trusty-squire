@@ -13,16 +13,18 @@ orchestration.
 
 **One provisioning path:**
 
-**`provision`** — universal browser-automation bot (Playwright + Claude
-vision) for any SaaS signup. Account-bound, vault-backed, free up to
-`ACCOUNT_FREE_QUOTA` signups before billing kicks in. Closed-loop with
-the skill registry: successful runs publish a Skill that subsequent
-provisions replay in ~30s instead of the bot's ~6min.
+**Interactive operator driver** — the host agent plans each step with
+`operate_start`, `operate_observe`, `operate_act`, `operate_extract`,
+and `operate_finish_task`/`operate_finish`; Trusty Squire supplies the scoped
+browser, DOM/screenshot observations, vault extraction, and registry hints.
+Account-bound, vault-backed. Provisioning is free during beta (no signup quota).
+Closed-loop with the skill registry: successful runs publish a Skill that
+subsequent provisions replay in ~30s instead of the bot's ~6min.
 
-A second tool path (hand-authored manifests + mandate engine + approval
-flow, formerly `provision_any_service` vs. `provision`) was sunset in
-0.8 — the bot covered every service the team would have written a
-native adapter for, faster than the manifest work paid for itself.
+The hand-authored manifest + mandate-engine path was sunset in 0.8, and
+the old async signup tool has now been removed from the public MCP surface.
+The browser driver covered every service the team would have written a native
+adapter for, faster than the manifest work paid for itself.
 
 **Tech stack:** TypeScript monorepo, pnpm workspaces, Fastify API,
 Playwright (headless Chromium), Prisma + Postgres, MCP SDK,
@@ -44,13 +46,18 @@ should move at least one of them up and neither down:
    generalizes to more of the long tail (and feeds OF#1). Measured as
    `discover_succeeded / discover_attempted` per heal pass.
 
-**How they're driven + monitored:** the daily heal pass (`mcp housekeeper
---mode=heal`, systemd timer in `tools/systemd/`) verifies skills, discovers
-across the curated ~100-service queue, and emits one digest carrying both
-metrics (Telegram + journal). The registry admin dashboard's **Objective
-functions** panel shows the live numbers + a run-over-run trend (stamped on
-each `HealRun`). See `docs/AUTONOMOUS-LOOP.md` for the loop + state machine
-and `AGENTS.md` for the skill-promotion pipeline.
+**How they're driven + monitored:** the daily **verify pass** (`ts-housekeeper`,
+now its own repo `Trusty-Squire/trusty-squire-housekeeper`) keeps the registry
+honest — promote skills that still work, demote ones that don't. New-skill growth
+(OF#1) now comes from **auto-promote on real provisions** (the bot/host-driven
+`provision_*` captures), NOT a housekeeper discover sweep.
+
+> ⚠️ **OF framing needs a strategic revisit (2026-06-26).** The codex-verify
+> refactor deleted the housekeeper's proactive **discover** sweep, so OF#2 as
+> defined ("`discover_succeeded / discover_attempted` per heal pass") no longer
+> has a housekeeper-driven source — discovery moved to on-provision auto-promote.
+> OF#1 (active-skill count) still stands. Re-derive OF#2 against the new model
+> before relying on it.
 
 **Honest tension:** OF#1 and OF#2 can pull against each other — as the bot
 covers the easy services, the residual discovery queue gets harder, so OF#2
@@ -112,7 +119,7 @@ can dip even while OF#1 rises. Read them together, not in isolation.
   - Long-poll inbox client, verification-link click, post-verify
     navigation loop
   - Hard cap of 15 LLM calls per signup (circuit breaker)
-- **Single-tier install flow.** `npx @trusty-squire/mcp install` does
+- **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
   1. Issues a machine token (bot-internal credential for LLM proxy +
      inbox alias service).
@@ -121,13 +128,14 @@ can dip even while OF#1 rises. Read them together, not in isolation.
      account-bound `agent_session_token` to the local session file.
   3. Runs the one-time OAuth login (the `mcp login` flow folded in —
      Google/GitHub session into the bot's Chrome profile; non-fatal,
-     `--skip-login` opts out for CI). Headed (laptop/desktop) is the
+     `--skip-browser` opts out for CI). Headed (laptop/desktop) is the
      recommended environment; a headless box does a one-time remote-
      browser login (noVNC).
-  Every install is account-bound — there is no anonymous tier. Free up
-  to `ACCOUNT_FREE_QUOTA` signups (default 10), then `payment_required`
-  + `cta_billing_url`. See the 2026-05-18 streamlined-oauth-onboarding
-  CEO plan (now combined with the 2026-05-19 single-tier collapse).
+  Every install is account-bound — there is no anonymous tier.
+  Provisioning is free during beta (the signup quota + `402 payment_required`
+  paywall were removed; see `docs/BUSINESS-MODEL.md`). See the 2026-05-18
+  streamlined-oauth-onboarding CEO plan (now combined with the 2026-05-19
+  single-tier collapse).
   - **0.6.0 — install preflight (rc.15).** Re-installs with a valid
     session file + bot Google session skip the browser dance entirely
     and just rewrite the MCP config. Pass `--force-relogin` to bypass.
@@ -182,8 +190,8 @@ can dip even while OF#1 rises. Read them together, not in isolation.
 ## Active Sprint/Task
 
 **Autonomous self-improving loop:** the provision bot's named-state machine,
-per-state retry policy, and single escalation condition live in
-`docs/AUTONOMOUS-LOOP.md`; the skill-promotion pipeline (virgin success →
+per-state retry policy, and single escalation condition live in the
+state-classifier + policy code; the skill-promotion pipeline (virgin success →
 registry skill) is the "Skill-Promotion Pipeline" section of `AGENTS.md`. State
 classifier + policy: `packages/skill-schema/src/provision-state.ts` +
 `provision-policy.ts`.
@@ -275,7 +283,7 @@ trusty-squire/
 │   │                housekeeper backplane (extract failures, bot-failure
 │   │                aggregation, compat-score). Sole publish surface
 │   │                since the native-provision sunset (0.8).
-│   └── tooling/     Internal scripts (Vouchflow stub, etc.)
+│   └── tooling/     Internal scripts
 ├── packages/
 │   ├── inbox/       Email alias + inbound parsing. Owns inbox Prisma schema.
 │   ├── vault/       Encrypted credential store.
@@ -315,15 +323,15 @@ flyctl deploy --config apps/api/fly.toml --dockerfile apps/api/Dockerfile.fly
 `prisma generate` for **both** schemas before `tsc` and deliberately
 keeps devDependencies — pruning with `pnpm install --prod` strips the
 generated Prisma clients out of `node_modules` and the server then
-crashes on boot. The root `Dockerfile` and `apps/api/Dockerfile` are
-stale (they reference a `prisma:generate` script that no longer exists)
-— don't use them.
+crashes on boot. The legacy root `Dockerfile` and `apps/api/Dockerfile`
+(which referenced a `prisma:generate` script that no longer exists) have
+been removed — only the `*.fly` Dockerfiles remain.
 
 ### npm distribution (the install path)
 
 **One package** ships to the public npm registry: `@trusty-squire/mcp`
 — the MCP server, install CLI, and the bundled universal signup bot
-(`src/bot/`). Current published version: `@trusty-squire/mcp@0.8.17`.
+(`src/bot/`). Current published version: `@trusty-squire/mcp@0.9.19-rc.24`.
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was
@@ -399,7 +407,7 @@ bin symlink and would catch any regression of the above.
 
 ### Ports / local dev
 - API: `API_PORT=3000` (default), `node apps/api/dist/server.js`
-- PWA: `pnpm -F @trusty-squire/pwa dev` (Next.js default 3000 — run
+- Web app: `pnpm -F @trusty-squire/web dev` (Next.js default 3000 — run
   one or the other, not both)
 - MCP: invoked by the host agent, not a long-running server
 
@@ -425,21 +433,22 @@ bin symlink and would catch any regression of the above.
 | `RESEND_INBOUND_SECRET` | Svix-style HMAC for `/v1/webhooks/resend-inbound` |
 | `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` + `/v1/llm/chat` |
 | `OPERATOR_IMAP_USER` / `OPERATOR_IMAP_PASSWORD` | IMAP creds for the operator's **single** mail identity — the bot's Google account (`lunchbox@trustysquire.ai`, the trustysquire.ai Workspace account, served by imap.gmail.com). Read-only — backs `operator-otp-poller.ts` for the `email_otp_required` gate (Porter, Koyeb, anthropic, other WorkOS-backed services whose OTP goes to the OAuth-bound inbox). The legacy `GMAIL_USER`/`GMAIL_APP_PASSWORD` names are still read as a fallback (un-migrated deploys). One identity, one inbox — do NOT reintroduce a separate personal-gmail credential. A Google account password change silently invalidates app passwords (no revocation notice); if the gate returns `imap_auth_failed`, regenerate the app password and reset the secret. Verify locally with `tools/test-operator-imap.mjs`. |
-| `VOUCHFLOW_CUSTOMER_ID` / `SESSION_JWT_SECRET` | Auth |
-| `VOUCHFLOW_READ_KEY` | Vouchflow server-side read key. Optional today (only needed once revocation/introspection paths land). **Never hardcode it** — `config/vouchflow.ts` sources it from env only. |
+| `SESSION_JWT_SECRET` | Auth — HS256 secret signing web-session JWTs. **Required in production**: the server throws on boot if unset (no insecure dev fallback). |
 | `STRIPE_SECRET_KEY` | Stripe secret key. Server creates Checkout + Billing-Portal sessions for `/v1/billing/*`. **Unset → billing routes register but 503** (`stripeClientFromEnv()` returns null). Use a `sk_test_` key until live billing is verified. |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` signing secret for `/v1/webhooks/stripe`. The SDK verifies the `Stripe-Signature` over the raw body; a bad/missing signature is rejected 400. |
 | `STRIPE_PRICE_ID` | `price_…` of the monthly subscription Checkout uses. Created once against the Stripe Product (via the vault proxy or dashboard). |
 
-**Billing (Stripe):** the free-signup quota (`ACCOUNT_FREE_QUOTA`) returns
-`402 payment_required` + `cta_billing_url` once hit. The PWA `/billing` page
-opens Stripe Checkout (`POST /v1/billing/checkout`, web-session-authed); on
-payment Stripe fires `/v1/webhooks/stripe` which flips the account's
-`subscription_status` to `active` — and `active`/`trialing` lift the quota
-(`subscription-status.ts`, consulted in `inbox.ts`). Manage/cancel via the
-Customer Portal (`POST /v1/billing/portal`). The bypass keys off the machine
-token's **bound** account, never the request body. New `Account` columns
-(`stripe_customer_id`, `subscription_status`, `subscription_id`,
+**Billing (Stripe):** **free during beta** — checkout is kill-switched OFF
+unless `BILLING_ENABLED=true`/`1` (`/v1/billing/checkout` returns `503
+billing_disabled`), so a stray Upgrade click can't charge anyone even with a
+live Stripe key. The signup-quota `402 payment_required` paywall was removed
+(provisioning is free); see `docs/BUSINESS-MODEL.md` for the planned Free/$20-Pro
+model (egress + audit + future rotation, gated on control-plane routes, NOT
+signup count). When billing is enabled, the web app's `/billing` page opens
+Stripe Checkout (`POST /v1/billing/checkout`, web-session-authed); on payment
+Stripe fires `/v1/webhooks/stripe` which flips `subscription_status` to `active`.
+Manage/cancel via the Customer Portal (`POST /v1/billing/portal`). `Account`
+columns (`stripe_customer_id`, `subscription_status`, `subscription_id`,
 `current_period_end`) apply via the deploy's `db push` (all nullable/defaulted
 — non-destructive).
 
@@ -479,9 +488,8 @@ package would defeat the whole 0.7.0 thesis).
 **Client env on user machines:**
 - `TRUSTY_SQUIRE_REGISTRY_URL` — base URL. **Auto-wired by `connect`
   as of rc.10**; defaults to `https://registry.trustysquire.ai`.
-  Override with `connect --registry-url=<url>`, disable with
-  `connect --no-registry` (skips the router entirely → universal bot
-  only).
+  The URL is not user-configurable; disable registry participation with
+  `connect --no-registry`.
 - `SKILL_SIGNING_PRIVATE_KEY` — required for `mcp skill promote`
   (operator-explicit signing). Auto-promote (rc.13+) falls back to
   an ephemeral Ed25519 keypair when this is unset, so the closed
@@ -503,7 +511,7 @@ package would defeat the whole 0.7.0 thesis).
 
 ### Goose / local-dev MCP install
 
-`npx @trusty-squire/mcp install --target=goose` writes the extension to
+`npx @trusty-squire/mcp connect --target=goose` writes the extension to
 `~/.config/goose/config.yaml` (modern goose's config file) — works for
 npx-installed users as of 0.4.2. (Before 0.4.2 it wrote `profiles.yaml`,
 the old pre-1.0 path, so goose never saw it.)
@@ -546,64 +554,36 @@ extension state on launch and won't reload mid-session.
 | `UNIVERSAL_BOT_LLM_TIER` | `cheap` | Primary LLM tier — `cheap`, `premium`, or `free`. `free` routes through OpenRouter's free models with a paid escape-hatch; the closed-loop verifier worker sets this. End-user installs leave it unset. |
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver. When set, runCaptchaGate falls through to 2Captcha after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). |
 | `UNIVERSAL_BOT_MAX_LLM_CALLS` | `15`   | Per-signup circuit breaker |
-| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. **Operator housekeeper egress is now `socks5://100.104.88.126:1081` — a native gost SOCKS5 on the Mac over Tailscale (NOT the old `ssh -D` tunnel, which collapsed under Chrome's concurrency: 1/40 vs gost 40/40). Set in `harvester.env`. Full setup + the `tools/proxy-eval.sh` screener: `docs/HOUSEKEEPER-OPERATIONS.md`.** |
+| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. (The old operator-housekeeper egress/proxy model was retired with the codex-verify refactor — the housekeeper no longer drives its own browser.) |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + inbox alias service |
-| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID. Required when running `mcp housekeeper --mode=discover` (inbox-alias scoping + auto-promote attribution). End-user installs read this from session.json. |
+| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (inbox-alias scoping + auto-promote attribution on provisions). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
 
-### Housekeeper env (`mcp housekeeper`)
+### Housekeeper — extracted to its own repo
 
-The merged verifier + discoverer + harvester. Runs from a SOURCE checkout on
-the operator box (`node apps/mcp/dist/bin.js housekeeper`), NOT on end-user
-laptops, and is excluded from the npm tarball (`apps/mcp/package.json` `files`
-omits `dist/housekeeper`).
+The registry verify pass (codex-driven promote/demote) was **moved out of this
+monorepo into its own closed-source operator repo:
+`Trusty-Squire/trusty-squire-housekeeper`** (the `@trusty-squire/housekeeper` /
+`ts-housekeeper` package). It depends on the published
+`@trusty-squire/skill-schema`, runs from a source checkout (never npm-published),
+and carries its own README + `docs/` + systemd units.
 
-**→ Full operational runbook: `docs/HOUSEKEEPER-OPERATIONS.md`** — the single
-source of truth for the egress model (datacenter direct vs the Mac SSH-SOCKS
-tunnel), the **autonomous OAuth session model + what NOT to do**, the failure
-taxonomy (`needs_login`/`nav_timeout`/rot/wall), running a verify sweep /
-draining the backlog, and a diagnostic checklist. **Read it before debugging a
-sweep or changing housekeeper behavior — most failures are session state, not
-code.** (Operational narrative lives only there; this file holds values + the
-link.)
-
-Three modes share one CLI: `--mode=verify` (skill replay; default),
-`--mode=discover` (universal bot; needs a machine token + account id),
-`--mode=heal` (scheduled verify→discover→digest, 12h systemd timer in
-`tools/systemd/`; design in `docs/DESIGN-closed-loop-remediation.md`).
-`--from=<path>` sources discover from a curated YAML; `--service=<slug>` is a
-single-service shortcut that implies discover. Each mode requires different
-auth (table below).
-
-**Verify-pool robots** (the OAuth fresh-identity fleet `verify-NN@trustysquire.ai`)
-are managed by `tools/provision-verify-robot.mjs` (list / create / **warm**
-[automated Google login via `tools/google-login-fleet.mjs`] / rotate / delete /
-licenses). It enforces a **cost cap** (`ROBOT_POOL_CAP`, default 10 billed seats)
-and **cost-flat rotation** (`rotate --make-room=N` is delete-before-create, so the
-active count never exceeds the cap). Full runbook: the "Verify-pool provisioning +
-cost-capped rotation" section of `docs/HOUSEKEEPER-OPERATIONS.md`.
-
-| Env var | Required by | Effect |
-|---|---|---|
-| `REGISTRY_ADMIN_BEARER` | verify, discover (telemetry) | `/admin/*` auth on the registry. Generate + rotate via fly secrets. |
-| `TRUSTY_SQUIRE_REGISTRY_URL` | all modes | Registry base URL. Default `https://registry.trustysquire.ai`. |
-| `TRUSTY_SQUIRE_MACHINE_TOKEN` | discover, --service | LLM proxy + inbox alias auth (operator's own machine token; `mcp connect` on the housekeeper host). |
-| `TRUSTY_SQUIRE_ACCOUNT_ID` | discover, --service | Inbox-alias scope + auto-promote attribution. |
-| `TRUSTY_SQUIRE_AUTO_PROMOTE` | discover, --service | Default-on. Set `0`/`off` to capture without publishing. |
-| `UNIVERSAL_BOT_LLM_TIER=free` | all modes (recommended) | Routes through the free OpenRouter chain. |
-| `TELEGRAM_BOT_TOKEN` | `--telegram` notifier | Bot token from @BotFather. Chat id auto-resolved from getUpdates on first run, cached to `~/.trusty-squire/telegram-chat-id.txt`. |
-| `GH_REPO` | `--github-issues` notifier | `<owner>/<repo>` for issue posting. Default `Trusty-Squire/trusty-squire`. Requires `gh auth status` to succeed on the host. |
-
-The curated services queue lives at `tools/housekeeper-services.yaml`,
-consumed via `mcp housekeeper --mode=discover --from=tools/housekeeper-services.yaml`.
+Monorepo-side relationship: it talks to the registry's `/admin/verifier/queue`,
+`/skills/by-id/:id`, and `/admin/skills/:id/verifier-outcome` endpoints
+(`apps/registry`), which own the **mechanical rule** — one success promotes
+pending-review → active, the 3rd consecutive *rot* failure demotes
+(`VERIFIER_PROMOTION_THRESHOLD = 1` / `VERIFIER_FAILURE_THRESHOLD = 3` in
+`apps/registry/src/skill-store.ts`). So changing the promote/demote behavior is a
+**registry** change here; changing how skills are verified is a change in the
+housekeeper repo.
 
 ### Server env knobs (`trusty-squire-api`)
 | Env var | Default | Effect |
 |---|---|---|
 | `LLM_HOURLY_LIMIT` | `150` | Per-machine-token rolling rate cap for `/v1/llm/chat` |
-| `ACCOUNT_FREE_QUOTA` | `10` | Free signups per account before `payment_required`. |
+| `BILLING_ENABLED` | `false` | Free-during-beta kill-switch. Unless `true`/`1`, `/v1/billing/checkout` returns `503 billing_disabled` so no one is charged even with a live Stripe key. |
 | `LLM_PROXY_CHEAP_MODEL` | `google/gemini-flash-1.5` | Cheap-tier model |
 | `LLM_PROXY_PREMIUM_MODEL` | `openai/gpt-4o` | Premium-tier fallback model |
 | `LLM_PROXY_FREE_MODEL` | `openrouter/free` | Free-tier primary — OpenRouter's curated free router (verifier worker). Survives the sunset-and-replace churn that took out the prior pinned-ID setup (0.8.2-rc.9). |

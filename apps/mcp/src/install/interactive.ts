@@ -1,6 +1,6 @@
 // Interactive install picker — the Goose / impeccable.style-flavored
-// TUI that walks the user through agent selection, OAuth providers,
-// and LLM provider config before the install ceremony fires.
+// TUI that walks the user through agent selection and advanced setup
+// before the install ceremony fires.
 //
 // Powered by @clack/prompts (select / text / confirm /
 // note / intro / outro primitives, with consistent box styling).
@@ -21,6 +21,7 @@ import {
 import chalk from "chalk";
 
 import { detectInstalledAgents, AGENTS, type AgentTarget } from "./agents.js";
+import { normalizeProxyUrl } from "./proxy-url.js";
 
 // What the picker resolves to. The caller spreads this into its Argv
 // + threads the LLM bits into writeAgentConfig. The picker no longer
@@ -28,17 +29,22 @@ import { detectInstalledAgents, AGENTS, type AgentTarget } from "./agents.js";
 // bot's Chrome owns that conversation as of 0.8.2.
 export interface InteractiveConfig {
   target: AgentTarget;
-  // Which LLM call path the universal bot should use. Maps to
-  // UNIVERSAL_BOT_LLM_TIER + optional BYOK key in the written MCP config.
+  // Legacy shape retained for config-writing compatibility. The signup
+  // session agent now drives planning through the Trusty Squire backend by
+  // default, so the picker no longer asks users to choose an LLM.
   llmChoice: LlmChoice;
   byokKey?: string;
   // Optional residential proxy URL (UNIVERSAL_BOT_PROXY_URL).
   proxyUrl?: string;
-  // Whether to wire TRUSTY_SQUIRE_REGISTRY_URL (default yes — the
-  // closed-loop router needs it; only off for "I want pure universal-bot
-  // mode" power users).
+  // Managed registry router. The endpoint is product-owned; advanced setup only
+  // controls whether this install uses it. User-facing registry ON also means
+  // successful non-personal signup recipes may be contributed back to it.
   registryEnabled: boolean;
-  registryUrl?: string;
+  // Privacy-sensitive advanced choices. Undefined means the user did not open
+  // advanced settings during this run, so existing session choices should not
+  // be overwritten on a config refresh.
+  consentOperatorInboxOtp?: boolean;
+  advancedConfigured: boolean;
 }
 
 export type LlmChoice =
@@ -124,154 +130,79 @@ async function pickAgent(detected: Awaited<ReturnType<typeof detectInstalledAgen
   return value as AgentTarget;
 }
 
-async function pickLlmConfig(): Promise<{ choice: LlmChoice; byokKey?: string }> {
-  const choice = bailIfCancelled(
-    await select<LlmChoice>({
-      message: "Which LLM should the bot use for form planning?",
-      initialValue: "managed_free",
-      options: [
-        {
-          value: "managed_free",
-          label: "Managed (default)",
-          hint: "Trusty Squire pays for LLM calls via our routed free + paid fallback chain",
-        },
-        {
-          value: "byok_openrouter",
-          label: "OpenRouter",
-          hint: "BYOK — your own OpenRouter key pays for LLM calls",
-        },
-        {
-          value: "byok_anthropic",
-          label: "Anthropic",
-          hint: "BYOK — your own Anthropic key (direct Claude API)",
-        },
-        {
-          value: "byok_openai",
-          label: "OpenAI",
-          hint: "BYOK — your own OpenAI key (GPT-4 vision)",
-        },
-        {
-          value: "skip",
-          label: "Skip — I'll configure LLM env vars manually",
-          hint: "Advanced",
-        },
-      ],
-    }),
-  );
-  if (choice === "managed_free" || choice === "skip") return { choice };
-
-  // BYOK chosen → ask for the key. clack's text() shows the input
-  // inline; we don't echo "***" because that flickers more than it
-  // protects, and the key is going to disk in the MCP config anyway.
-  const providerLabel =
-    choice === "byok_openrouter"
-      ? "OpenRouter"
-      : choice === "byok_anthropic"
-        ? "Anthropic"
-        : "OpenAI";
-  const key = bailIfCancelled(
-    await text({
-      message: `Paste your ${providerLabel} API key`,
-      placeholder: choice === "byok_anthropic" ? "sk-ant-…" : "sk-…",
-      validate: (v) => {
-        if (v === undefined || v.length < 8) return "That key looks too short.";
-        return undefined;
-      },
-    }),
-  );
-  return { choice, byokKey: (key ?? "").trim() };
-}
-
-async function pickAdvancedOptions(): Promise<{
+async function pickAdvancedOptionsWithDefaults(opts: {
+  initialProxyUrl?: string;
+  initialRegistryEnabled?: boolean;
+}): Promise<{
+  advancedConfigured: boolean;
   proxyUrl?: string;
   registryEnabled: boolean;
-  registryUrl?: string;
-  llmChoice?: LlmChoice;
-  byokKey?: string;
+  consentOperatorInboxOtp?: boolean;
 }> {
+  const initialRegistryEnabled = opts.initialRegistryEnabled ?? true;
   const wantAdvanced = bailIfCancelled(
     await confirm({
-      message: "Configure advanced options? (LLM provider, proxy, skill registry)",
-      initialValue: false,
+      message: "Configure advanced options? (proxy, registry, OTP)",
+      initialValue: opts.initialProxyUrl !== undefined,
     }),
   );
   if (!wantAdvanced) {
-    // Defaults: managed LLM, skill registry on, no proxy. Most users
-    // never touch these — the install just goes.
-    return { registryEnabled: true };
+    return {
+      advancedConfigured: false,
+      registryEnabled: initialRegistryEnabled,
+      ...(opts.initialProxyUrl !== undefined ? { proxyUrl: opts.initialProxyUrl } : {}),
+    };
   }
-
-  // LLM provider. Most users want the managed default — Trusty Squire
-  // pays via the routed free + paid fallback chain. BYOK is for users
-  // who want Anthropic / OpenAI / OpenRouter billing on their own
-  // account (still pays after ACCOUNT_FREE_QUOTA for the service
-  // either way — that's a separate axis from who pays for LLM calls).
-  const { choice: llmChoice, byokKey } = await pickLlmConfig();
 
   // Residential proxy. Most users skip this — datacenter egress is
   // re-routed through our proxy automatically when configured; only
   // power users running on a misclassified residential network ever
   // touch this.
-  const wantProxy = bailIfCancelled(
-    await confirm({
-      message: "Route the bot through a residential proxy?",
-      initialValue: false,
-    }),
-  );
-  let proxyUrl: string | undefined;
-  if (wantProxy) {
-    const url = bailIfCancelled(
-      await text({
-        message: "Proxy URL (http://user:pass@host:port or socks5://…)",
-        validate: (v) => {
-          if (v === undefined || !/^(http|https|socks5):\/\//.test(v)) {
-            return "URL must start with http://, https://, or socks5://";
-          }
-          return undefined;
-        },
-      }),
-    );
-    proxyUrl = (url ?? "").trim();
-  }
-
-  // Skill registry. Default on (Tier-2 router); off bypasses it
-  // entirely (every signup goes through the universal bot).
-  const registryEnabled = bailIfCancelled(
-    await confirm({
-      message: "Enable the skill registry router? (Recommended — reuses cached recipes for ~30s signups)",
-      initialValue: true,
-    }),
-  );
-  let registryUrl: string | undefined;
-  if (registryEnabled) {
-    const wantCustomRegistry = bailIfCancelled(
+  let proxyUrl = opts.initialProxyUrl;
+  if (proxyUrl === undefined) {
+    const wantProxy = bailIfCancelled(
       await confirm({
-        message: "Use a custom registry URL? (default: production)",
+        message: "Route the bot through a residential proxy?",
         initialValue: false,
       }),
     );
-    if (wantCustomRegistry) {
+    if (wantProxy) {
       const url = bailIfCancelled(
         await text({
-          message: "Registry base URL",
-          placeholder: "https://registry.trustysquire.ai",
+          message: "Proxy URL (http://user:pass@host:port or socks5://…)",
           validate: (v) => {
-            if (v === undefined || !/^https?:\/\//.test(v))
-              return "Must be an http:// or https:// URL.";
+            if (v === undefined || normalizeProxyUrl(v) === undefined) {
+              return "URL must start with http://, https://, or socks5://";
+            }
             return undefined;
           },
         }),
       );
-      registryUrl = (url ?? "").trim();
+      proxyUrl = normalizeProxyUrl(url ?? "");
     }
   }
 
+  const registryEnabled = bailIfCancelled(
+    await confirm({
+      message:
+        "Use the managed skill registry? This reuses shared signup recipes and lets successful non-personal recipes improve the registry.",
+      initialValue: initialRegistryEnabled,
+    }),
+  );
+
+  const consentOperatorInboxOtp = bailIfCancelled(
+    await confirm({
+      message:
+        "Let the squire poll only matching OTP/verification emails for requested services?",
+      initialValue: false,
+    }),
+  );
+
   return {
+    advancedConfigured: true,
     registryEnabled,
-    llmChoice,
-    ...(byokKey !== undefined ? { byokKey } : {}),
+    consentOperatorInboxOtp,
     ...(proxyUrl !== undefined ? { proxyUrl } : {}),
-    ...(registryUrl !== undefined ? { registryUrl } : {}),
   };
 }
 
@@ -279,32 +210,20 @@ function summarize(config: InteractiveConfig): void {
   const lines: string[] = [];
   const agentLabel = AGENTS[config.target].display_name;
   lines.push(`${chalk.dim("Agent:        ")}${chalk.bold(agentLabel)}`);
-  lines.push(`${chalk.dim("LLM:          ")}${llmChoiceLabel(config.llmChoice)}`);
+  lines.push(`${chalk.dim("Signup:       ")}${chalk.dim("session agent")}`);
   lines.push(`${chalk.dim("OAuth:        ")}${chalk.dim("set up in browser")}`);
   if (config.proxyUrl !== undefined) {
     lines.push(`${chalk.dim("Proxy:        ")}${config.proxyUrl}`);
   }
-  if (!config.registryEnabled) {
-    lines.push(`${chalk.dim("Registry:     ")}${chalk.yellow("disabled")}`);
-  } else if (config.registryUrl !== undefined) {
-    lines.push(`${chalk.dim("Registry:     ")}${config.registryUrl}`);
+  lines.push(
+    `${chalk.dim("Registry:     ")}${config.registryEnabled ? "managed" : chalk.yellow("disabled")}`,
+  );
+  if (config.advancedConfigured) {
+    lines.push(
+      `${chalk.dim("Email OTP:    ")}${config.consentOperatorInboxOtp === true ? "allowed" : "off"}`,
+    );
   }
   note(lines.join("\n"), "Setup summary");
-}
-
-function llmChoiceLabel(c: LlmChoice): string {
-  switch (c) {
-    case "managed_free":
-      return "Managed (Trusty Squire pays for LLM)";
-    case "byok_openrouter":
-      return "OpenRouter (BYOK)";
-    case "byok_anthropic":
-      return "Anthropic (BYOK)";
-    case "byok_openai":
-      return "OpenAI (BYOK)";
-    case "skip":
-      return chalk.dim("(none configured — you'll set env vars manually)");
-  }
 }
 
 // The main entry point. Walks the user through pickers and returns a
@@ -317,8 +236,7 @@ export async function runInteractiveSetup(opts: {
   // picker but with their choices baked in. Each is optional.
   initialTarget?: AgentTarget;
   initialProxyUrl?: string;
-  initialRegistryUrl?: string;
-  registryEnabled: boolean;
+  initialRegistryEnabled?: boolean;
 }): Promise<InteractiveConfig> {
   showIntro();
 
@@ -327,31 +245,27 @@ export async function runInteractiveSetup(opts: {
   const target = opts.initialTarget ?? (await pickAgent(detected));
 
   // Default-no advanced when --proxy-url isn't passed; if it IS passed,
-  // jump straight to confirming the value rather than asking yes/no.
-  // LLM picker is INSIDE advanced — most users don't touch it; the
-  // managed default works out of the box.
-  const advanced =
-    opts.initialProxyUrl !== undefined || opts.initialRegistryUrl !== undefined
-      ? {
-          registryEnabled: opts.registryEnabled,
-          ...(opts.initialProxyUrl !== undefined ? { proxyUrl: opts.initialProxyUrl } : {}),
-          ...(opts.initialRegistryUrl !== undefined
-            ? { registryUrl: opts.initialRegistryUrl }
-            : {}),
-        }
-      : await pickAdvancedOptions();
+  // carry the value straight through rather than asking yes/no. Signup
+  // planning is driven by the session agent, so there is no user-facing LLM
+  // picker here.
+  const advanced = await pickAdvancedOptionsWithDefaults({
+    ...(opts.initialProxyUrl !== undefined ? { initialProxyUrl: opts.initialProxyUrl } : {}),
+    ...(opts.initialRegistryEnabled !== undefined
+      ? { initialRegistryEnabled: opts.initialRegistryEnabled }
+      : {}),
+  });
 
-  // LLM defaults to managed_free when the user skipped Advanced.
-  const llmChoice: LlmChoice = advanced.llmChoice ?? "managed_free";
-  const byokKey = advanced.byokKey;
+  const llmChoice: LlmChoice = "managed_free";
 
   const config: InteractiveConfig = {
     target,
     llmChoice,
-    ...(byokKey !== undefined ? { byokKey } : {}),
     ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
     registryEnabled: advanced.registryEnabled,
-    ...(advanced.registryUrl !== undefined ? { registryUrl: advanced.registryUrl } : {}),
+    ...(advanced.consentOperatorInboxOtp !== undefined
+      ? { consentOperatorInboxOtp: advanced.consentOperatorInboxOtp }
+      : {}),
+    advancedConfigured: advanced.advancedConfigured,
   };
 
   summarize(config);
@@ -367,6 +281,45 @@ export async function runInteractiveSetup(opts: {
     process.exit(0);
   }
 
+  return config;
+}
+
+export async function runSettingsSetup(opts: {
+  initialTarget?: AgentTarget;
+  initialProxyUrl?: string;
+  initialRegistryEnabled?: boolean;
+  initialConsentOperatorInboxOtp?: boolean;
+} = {}): Promise<InteractiveConfig> {
+  intro("Trusty Squire settings");
+  const detected = await detectInstalledAgents();
+  const target = opts.initialTarget ?? (await pickAgent(detected));
+  const advanced = await pickAdvancedOptionsWithDefaults({
+    ...(opts.initialProxyUrl !== undefined ? { initialProxyUrl: opts.initialProxyUrl } : {}),
+    ...(opts.initialRegistryEnabled !== undefined
+      ? { initialRegistryEnabled: opts.initialRegistryEnabled }
+      : {}),
+  });
+  const consentOperatorInboxOtp =
+    advanced.consentOperatorInboxOtp ?? opts.initialConsentOperatorInboxOtp ?? false;
+  const config: InteractiveConfig = {
+    target,
+    llmChoice: "managed_free",
+    ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
+    registryEnabled: advanced.registryEnabled,
+    consentOperatorInboxOtp,
+    advancedConfigured: true,
+  };
+  summarize(config);
+  const proceed = bailIfCancelled(
+    await confirm({
+      message: "Save these settings?",
+      initialValue: true,
+    }),
+  );
+  if (!proceed) {
+    cancel("Settings unchanged.");
+    process.exit(0);
+  }
   return config;
 }
 

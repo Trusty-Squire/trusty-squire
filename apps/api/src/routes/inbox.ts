@@ -2,13 +2,11 @@
 //
 // Two auth modes, chosen by header:
 //   1. Machine token — `X-Machine-Token: tsm_...` (bound to an account
-//      at install-claim time; quota tracked per-account)
+//      at install-claim time)
 //   2. Admin/test — `Authorization: Bearer <UNIVERSAL_BOT_API_KEY>`
 //
-// Machine-token callers are checked against the free-signup quota on
-// alias creation. Once the limit is hit, the response is
-// payment_required + cta_billing_url so the MCP tool can tell the LLM
-// to point the user at billing.
+// Provisioning is free during beta: alias creation has no signup quota
+// and never returns payment_required.
 //
 // Alias ownership: an alias is stamped with the principal that created
 // it. The /wait and DELETE routes assert the caller owns the alias, so
@@ -22,17 +20,11 @@ import {
   authorizeMachineOrAdmin,
   type AuthPrincipal,
 } from "../auth/authorize-machine-or-admin.js";
-import { defaultQuota, type MachineTokenStore } from "../services/machine-tokens.js";
-import type { AccountStore } from "../services/in-memory-account-store.js";
-import { subscriptionUnlocksQuota } from "../services/subscription-status.js";
-import { mintUpgradeToken } from "../auth/upgrade-token.js";
+import type { MachineTokenStore } from "../services/machine-tokens.js";
 
 export interface InboxRouteDeps {
   inbox: InboxService;
   machineTokenStore: MachineTokenStore;
-  accountStore: AccountStore;
-  // Signs the pre-authenticated upgrade-link token on the 402 paywall.
-  sessionSecret: string;
   now?: () => Date;
 }
 
@@ -77,10 +69,8 @@ export async function registerInboxRoute(
   fastify: FastifyInstance,
   opts: { deps: InboxRouteDeps },
 ): Promise<void> {
-  const now = (): Date => opts.deps.now?.() ?? new Date();
-
-  // Create an alias. For machine-token callers, this consumes one quota
-  // slot. The creating principal is stamped onto the alias.
+  // Create an alias. The creating principal is stamped onto the alias.
+  // Provisioning is free during beta — no signup quota, no paywall.
   fastify.post("/v1/inbox/aliases", async (req, reply) => {
     const principal = await authorizeMachineOrAdmin(req, reply, opts.deps.machineTokenStore);
     if (principal === null) return;
@@ -89,40 +79,6 @@ export async function registerInboxRoute(
     if (!parsed.success) {
       reply.code(400).send({ error: "invalid_input", issues: parsed.error.issues });
       return;
-    }
-
-    // Free-tier signup quota. Counts against this machine_token for
-    // now; per-account aggregation (sum across all machine_tokens
-    // bound to an account) is a follow-up. An active subscription on the
-    // token's bound account lifts the quota entirely.
-    if (principal.kind === "machine") {
-      const quota = defaultQuota();
-      if (
-        principal.signup_count >= quota &&
-        !(await accountHasActiveSubscription(opts.deps.accountStore, principal))
-      ) {
-        // Pre-authenticated upgrade link: the token's bound account lets the
-        // /upgrade page start checkout with no separate browser login. Falls
-        // back to the plain /billing page when the token isn't account-bound.
-        const ctaBillingUrl =
-          principal.paired_account_id !== null
-            ? `${webAppBaseUrl()}/upgrade?t=${encodeURIComponent(
-                mintUpgradeToken(principal.paired_account_id, opts.deps.sessionSecret, now().getTime()),
-              )}`
-            : `${webAppBaseUrl()}/billing`;
-        reply.code(402).send({
-          error: "payment_required",
-          quota_limit: quota,
-          quota_used: principal.signup_count,
-          quota_remaining: 0,
-          cta_billing_url: ctaBillingUrl,
-          message:
-            `Free signup limit reached (${quota}). Upgrade to unlimited for ` +
-            `$19/mo — no extra login, about 30 seconds: open cta_billing_url. ` +
-            `Already upgraded? Re-run the command.`,
-        });
-        return;
-      }
     }
 
     // exactOptionalPropertyTypes: zod's `.optional()` produces
@@ -135,10 +91,6 @@ export async function registerInboxRoute(
       issued_to: ownerKey(principal),
       ...(ttl_seconds === undefined ? {} : { ttl_seconds }),
     });
-
-    if (principal.kind === "machine") {
-      await opts.deps.machineTokenStore.incrementUsage(principal.token, now());
-    }
 
     reply.code(201).send({ alias });
   });
@@ -245,23 +197,4 @@ export async function registerInboxRoute(
     await opts.deps.inbox.revokeAlias(req.params.alias);
     reply.code(204).send();
   });
-}
-
-function webAppBaseUrl(): string {
-  return process.env.PWA_BASE_URL ?? "https://trustysquire.ai";
-}
-
-// Whether the machine token's BOUND account carries an active (quota-
-// lifting) subscription. Keyed strictly off the token's paired_account_id
-// — never the request body's account_id — so a caller can't claim someone
-// else's paid status. An unbound token (null) or unknown account falls
-// through to the free quota.
-async function accountHasActiveSubscription(
-  accountStore: AccountStore,
-  principal: { paired_account_id: string | null },
-): Promise<boolean> {
-  if (principal.paired_account_id === null) return false;
-  const account = await accountStore.findAccountById(principal.paired_account_id);
-  if (account === null) return false;
-  return subscriptionUnlocksQuota(account.subscription_status);
 }

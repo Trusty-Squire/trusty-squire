@@ -152,6 +152,12 @@ export interface ReplayInput {
    */
   preferredOAuthProvider?: OAuthProviderId;
   /**
+   * Optional caller-visible diagnostics sink. The router wires this to
+   * check_provision_status recent_steps so returning-user skips and stale-route
+   * fallbacks are visible to the host agent instead of only stderr.
+   */
+  log?: (message: string) => void;
+  /**
    * 0.8.2-rc.19 — bypass the "skill must be active" guard. The verifier
    * loop NEEDS to replay pending-review skills (and sometimes demoted
    * ones) to gather the outcome data that drives promote/demote
@@ -216,6 +222,8 @@ export function revealPollMs(): number {
   return Number.isFinite(v) && v > 0 ? v : 8000;
 }
 
+const MAX_CONSECUTIVE_ABSENT_SETUP_SKIPS = 4;
+
 // ── Entry point ──────────────────────────────────────────────────────
 
 export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
@@ -224,6 +232,10 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   const candidatesDir = input.candidatesDir;
   const llmFallback = input.llmFallback;
   const templateValues = input.templateValues ?? {};
+  const log = (message: string): void => {
+    console.error(message);
+    input.log?.(message);
+  };
 
   // Router-level guard: a demoted, pending-review, or superseded
   // skill is not replay-eligible for end-user provisions. The router
@@ -307,6 +319,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
   // before treating it as skippable. Once a form control succeeds the form is
   // present, and from then on absent fields keep the account-state skip.
   let reachedForm = false;
+  let consecutiveAbsentSetupSkips = 0;
   // Post-click settle parity with the live bot. A click can kick off server
   // work BEFORE the SPA navigates (zilliz's onboarding Continue provisions a
   // default org/project/cluster, then routes to the dashboard — several
@@ -378,7 +391,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
       (await looksAuthenticatedReturningUser(browser))
     ) {
       const textMatch = step.kind === "click" ? step.text_match : "";
-      console.error(
+      log(
         `[replay] step ${i} (click text_match=${JSON.stringify(textMatch)}) ` +
           `is a first-run onboarding dismissal and the page is already an ` +
           `authenticated returning-user session — skipping.`,
@@ -474,11 +487,21 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         // fallback planner; otherwise returning-user verify can burn the
         // entire timeout inventing a replacement for a step that should
         // not run.
-        console.error(
+        log(
           `[replay] step ${i} (click text_match=${JSON.stringify(step.text_match)}) ` +
             `target absent from page; skipping as optional setup step. ` +
             `Reason: ${validation.reason}`,
         );
+        consecutiveAbsentSetupSkips += 1;
+        if (consecutiveAbsentSetupSkips > MAX_CONSECUTIVE_ABSENT_SETUP_SKIPS) {
+          return {
+            kind: "step_failed",
+            stepIndex: i,
+            reason:
+              `stale_skill_path: ${consecutiveAbsentSetupSkips} consecutive account-state-dependent setup steps were absent before credential extraction; falling back to universal bot`,
+            capturedStep: step,
+          };
+        }
         continue;
       }
       const fallbackResult = await tryFallback(
@@ -506,13 +529,23 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         // That's not rot — a later extract step still reaches the
         // credential, and the credential validator is the real backstop.
         // Skip the absent onboarding field rather than false-failing.
-        console.error(
+        log(
           `[replay] step ${i} (fill label_hint=${JSON.stringify(step.label_hint)}) ` +
             `input absent — skipping as account-state-dependent onboarding ` +
             `(account already registered; signup form gone). A later extract ` +
             `step still reaches the credential. Reason: ${validation.reason}`,
         );
         skippedOnboardingFill = true;
+        consecutiveAbsentSetupSkips += 1;
+        if (consecutiveAbsentSetupSkips > MAX_CONSECUTIVE_ABSENT_SETUP_SKIPS) {
+          return {
+            kind: "step_failed",
+            stepIndex: i,
+            reason:
+              `stale_skill_path: ${consecutiveAbsentSetupSkips} consecutive account-state-dependent setup steps were absent before credential extraction; falling back to universal bot`,
+            capturedStep: step,
+          };
+        }
         continue;
       } else if (
         step.kind === "select" &&
@@ -526,13 +559,23 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         // different control. A later extract step still reaches the
         // credential and the credential validator is the backstop, so skip
         // rather than false-failing the whole replay.
-        console.error(
+        log(
           `[replay] step ${i} (select label_hint=${JSON.stringify(step.label_hint)}) ` +
             `select absent — skipping as account-state-dependent onboarding ` +
             `(account already registered; signup form gone). A later extract ` +
             `step still reaches the credential. Reason: ${validation.reason}`,
         );
         skippedOnboardingFill = true;
+        consecutiveAbsentSetupSkips += 1;
+        if (consecutiveAbsentSetupSkips > MAX_CONSECUTIVE_ABSENT_SETUP_SKIPS) {
+          return {
+            kind: "step_failed",
+            stepIndex: i,
+            reason:
+              `stale_skill_path: ${consecutiveAbsentSetupSkips} consecutive account-state-dependent setup steps were absent before credential extraction; falling back to universal bot`,
+            capturedStep: step,
+          };
+        }
         continue;
       } else if (
         step.kind === "click_oauth_button" &&
@@ -549,7 +592,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         // rotted button still fails below; it returns true only on an actual
         // authenticated app shell. Skip the head and resume at the post-auth
         // credential-fetch tail, in returning-user mode.
-        console.error(
+        log(
           `[replay] step ${i} (click_oauth_button ${step.provider}) target absent, but the page ` +
             `is an authenticated returning-user session (account already exists) — skipping the ` +
             `login head and resuming at the post-auth credential tail.`,
@@ -566,6 +609,7 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayOutcome> {
         };
       }
     }
+    consecutiveAbsentSetupSkips = 0;
 
     // Execute. If execution itself throws (a transient browser fault),
     // surface it as a step failure with the underlying message —
@@ -1218,7 +1262,16 @@ export function labelMatchesHint(label: string | null, hint: string): boolean {
 
 function isLikelySubmitClick(step: Extract<SkillStep, { kind: "click" }>): boolean {
   const text = step.text_match.toLowerCase();
-  return /\b(create account|sign up|signup|register|submit)\b/.test(text);
+  // The text that gates the pre-submit prep (identity autofill + required
+  // combobox fill). Beyond the signup-button vocabulary, a "Create <noun>"
+  // button (Create organization / workspace / team / project / app) is the
+  // submit of a post-OAuth onboarding form whose required selects must be
+  // satisfied first. Some of these (posthog's "Create organization") are NOT
+  // html-disabled, so hasDisabledSubmit alone misses them — matching the text
+  // ensures the pre-submit combobox fill runs for the recognized control types.
+  return /\b(?:create\s+(?:account|organi[sz]ation|workspace|team|project|app|application|site|instance)|sign\s?up|signup|register|submit)\b/.test(
+    text,
+  );
 }
 
 async function autofillCommonIdentityFieldsBeforeSubmit(
@@ -1633,9 +1686,33 @@ async function executeStep(
       // account's host, so a captured deep-nav URL with a stale subdomain
       // gets rewritten to the current one. No-op for same-host / cross-product
       // / first-navigate (about:blank) cases.
-      const targetUrl = normalizeKindeReplayNavigateUrl(
-        rebaseSubdomain(step.url, browser.currentUrl()),
+      const targetUrl = stripVolatileIdentityParams(
+        normalizeKindeReplayNavigateUrl(
+          rebaseSubdomain(step.url, browser.currentUrl()),
+        ),
       );
+      // Skip a redundant navigate to a page we're already on. MEASURED
+      // 2026-06-24 (posthog): after the Google OAuth step, posthog's OWN
+      // callback already lands the user on the /organization/confirm-creation
+      // onboarding form (role-picker + org name). The captured step-2 navigate
+      // then RE-loads that same path, which drops the post-OAuth-initialized
+      // form ("signup form gone" at the next step) so org-create never enables.
+      // Re-navigating to the exact page you're already on is at best a no-op and
+      // at worst resets a freshly-initialized SPA form — skip it.
+      const hereUrl = browser.currentUrl();
+      const alreadyHere = ((): boolean => {
+        try {
+          const a = new URL(hereUrl);
+          const b = new URL(targetUrl);
+          return a.host === b.host && a.pathname.replace(/\/$/, "") === b.pathname.replace(/\/$/, "");
+        } catch {
+          return false;
+        }
+      })();
+      if (alreadyHere) {
+        await browser.waitForInteractiveDom().catch(() => undefined);
+        return { kind: "navigated" };
+      }
       try {
         await browser.goto(targetUrl);
       } catch (err) {
@@ -1772,6 +1849,17 @@ async function executeStep(
           console.error(
             `[replay] filled ${picked.length} required combobox(es) before submit: ${picked.join(", ")}`,
           );
+        }
+        // API-key creation forms gate submit behind access-scope presets
+        // (segmented "All access" + a LemonSelect preset) the combobox filler
+        // can't see — satisfy those too so the disabled "Create key" enables.
+        if (picked.length === 0) {
+          const scoped = await browser.satisfyScopePresets().catch(() => [] as string[]);
+          if (scoped.length > 0) {
+            console.error(
+              `[replay] satisfied ${scoped.length} access-scope preset(s) before submit: ${scoped.join(", ")}`,
+            );
+          }
         }
         inventory = await browser.extractInteractiveElements().catch(() => inventory);
       }
@@ -1993,6 +2081,25 @@ async function executeStep(
             "inbox alias) to poll for the verification email.",
         );
       }
+      // Post-submit captcha gate. A managed Turnstile can gate the just-submitted
+      // signup: the service won't accept it (and never dispatches the
+      // verification email) until the Turnstile clears. The universal bot's
+      // discover path runs runCaptchaGate here; the replay previously clicked
+      // submit and went straight to polling, so a Turnstile-gated email signup
+      // (MEASURED 2026-06-24, clerk: URL stuck on /sign-up at this step, no OTP
+      // ever sent) timed out forever. Engage the widget (humanized click + wait
+      // for the token, no-op when absent) and give the page up to ~24s to
+      // advance to a verify surface before polling — mirrors discover.
+      if (!/verif|confirm/i.test(browser.currentUrl())) {
+        if (typeof browser.solveVisibleCaptcha === "function") {
+          await browser.solveVisibleCaptcha().catch(() => undefined);
+        }
+        for (let i = 0; i < 12; i += 1) {
+          await browser.waitForInteractiveDom().catch(() => undefined);
+          if (/verif|confirm/i.test(browser.currentUrl())) break;
+          await browser.wait(2);
+        }
+      }
       const code = await fetchEmailCode({ alias });
       if (code === null || code.length === 0) {
         throw new Error(
@@ -2017,6 +2124,16 @@ async function executeStep(
       // Read the boxes back and re-type per-box — explicit targeting, no
       // auto-advance dependency — anything that didn't stick.
       await fixupOtpDistribution(browser, code, otpPageUrl);
+      // The OTP submit redirects to the post-signup surface (clerk: /apps/new
+      // with a "Create application" CTA the NEXT step clicks). Wait for that
+      // navigation + hydration so the following step doesn't race an unpainted
+      // page — MEASURED 2026-06-24: clerk's step-5 "Create application" click
+      // bailed "No element matches" because it ran before the redirect painted.
+      for (let i = 0; i < 8; i += 1) {
+        await browser.waitForInteractiveDom().catch(() => undefined);
+        if (browser.currentUrl() !== otpPageUrl) break;
+        await browser.wait(2);
+      }
       return { kind: "filled" };
     }
 
@@ -2111,10 +2228,28 @@ async function executeStep(
         const selectorOrdinal = copyButtons
           .slice(0, targetIndex + 1)
           .filter((candidate) => candidate.selector === target.selector).length - 1;
-        if (typeof browser.clickNth === "function") {
-          await browser.clickNth(target.selector, selectorOrdinal);
-        } else {
-          await browser.click(target.selector);
+        // The copy-click populates the clipboard, but it must NOT fail the whole
+        // extraction: the key is usually also in the (often modal) DOM, which the
+        // candidate/body tiers below read regardless. When the click is INTERCEPTED
+        // by a modal backdrop (MUI dialog — deepinfra's new-key dialog timed out
+        // "intercepts pointer events"), retry with a force click so the clipboard
+        // still gets the key; then proceed either way.
+        try {
+          if (typeof browser.clickNth === "function") {
+            await browser.clickNth(target.selector, selectorOrdinal);
+          } else {
+            await browser.click(target.selector);
+          }
+        } catch {
+          if (typeof browser.clickForce === "function") {
+            await browser.clickForce(target.selector, selectorOrdinal).catch(() => undefined);
+          }
+        }
+        // Also fire a JS-dispatched click: some React copy buttons populate the
+        // clipboard only on the synthetic onClick a positional click doesn't
+        // reproduce (deepinfra). The real click above supplied user-activation.
+        if (typeof browser.clickViaJs === "function") {
+          await browser.clickViaJs(target.selector, selectorOrdinal).catch(() => undefined);
         }
         await browser.wait(1);
       }
@@ -2269,6 +2404,13 @@ async function executeStep(
     }
 
     case "extract_via_regex": {
+      // Settle any navigation the previous step triggered before polling —
+      // MEASURED 2026-06-24: clerk's "Create application" click (step 5)
+      // redirects to the app dashboard where the sk_ key renders async, so the
+      // poll below could start (and exhaust) against the pre-redirect page.
+      // verify-244 raced this and missed the key; verify-245 didn't. A DOM-
+      // interactive settle makes the poll start on the right surface.
+      await browser.waitForInteractiveDom().catch(() => undefined);
       // rc.18 — poll the page text for the credential. The previous
       // step (click Create / Generate / etc.) returns after a fixed
       // 1s settle, but services like Railway render the new-token
@@ -4209,6 +4351,46 @@ export function normalizeKindeReplayNavigateUrl(url: string): string {
     return url;
   } catch {
     return url;
+  }
+}
+
+// Per-run identity query params a synthesizer may have baked into a captured
+// navigate URL. MEASURED 2026-06-24 (posthog): the org-create skill's step-2 URL
+// was captured as `…/organization/confirm-creation?organization_name=&first_name=
+// Verify+Robot+241&next=` — the DISCOVERING robot's literal name. Replaying that
+// on a different robot pre-seeds a stale identity into the form and diverges the
+// session ("returning-user divergence"), so the org-create submit never enables.
+// These params are always per-run and never load-bearing for reaching the page;
+// stripping them lets the form initialize from the live session instead. Belt-
+// and-suspenders for the synthesizer, which should template/strip them at
+// capture time.
+const VOLATILE_IDENTITY_PARAMS = new Set<string>([
+  "first_name",
+  "last_name",
+  "full_name",
+  "name",
+  "display_name",
+  "email",
+  "organization_name",
+  "org_name",
+  "company",
+  "username",
+  "user",
+]);
+
+export function stripVolatileIdentityParams(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    let changed = false;
+    for (const key of [...u.searchParams.keys()]) {
+      if (VOLATILE_IDENTITY_PARAMS.has(key.toLowerCase())) {
+        u.searchParams.delete(key);
+        changed = true;
+      }
+    }
+    return changed ? u.toString() : rawUrl;
+  } catch {
+    return rawUrl;
   }
 }
 

@@ -11,10 +11,17 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  credentialActionSignature,
   detectExistingAccountNoExtract,
+  findRenderAccountMenuTrigger,
+  findRenderAccountSettingsLink,
+  hasCuratedServiceKeyPath,
+  isRepeatingCredentialActionCycle,
   pickStuckLoopFallbackUrl,
   serviceSlug,
+  shouldRevealBeforeCredentialSweep,
 } from "../agent.js";
+import type { InteractiveElement } from "../browser.js";
 
 // Drains pickStuckLoopFallbackUrl by repeatedly asking for the next
 // candidate and recording it as tried, until it returns null. Returns
@@ -30,6 +37,26 @@ function drainFallbacks(startUrl: string, service?: string): readonly string[] {
     tried.add(next);
   }
   throw new Error("pickStuckLoopFallbackUrl never exhausted");
+}
+
+function el(partial: Partial<InteractiveElement>): InteractiveElement {
+  return {
+    index: 0,
+    tag: "button",
+    type: null,
+    id: null,
+    name: null,
+    placeholder: null,
+    ariaLabel: null,
+    role: null,
+    labelText: null,
+    visibleText: null,
+    selector: "#el",
+    visible: true,
+    inViewport: true,
+    inConsentWidget: false,
+    ...partial,
+  };
 }
 
 describe("pickStuckLoopFallbackUrl", () => {
@@ -356,6 +383,28 @@ describe("pickStuckLoopFallbackUrl", () => {
       ),
     ).toBe("https://app.example.test/t/acme-team/settings/api/tokens");
   });
+
+  it("tries Together AI's project-scoped API-key page first", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://api.together.ai/",
+      new Set(),
+      "together-ai",
+      "https://api.together.ai/",
+    );
+    expect(fallback).toBe(
+      "https://api.together.ai/settings/projects/~current/api-keys",
+    );
+  });
+
+  it("tries Cartesia's authenticated root before generic settings guesses", () => {
+    const fallback = pickStuckLoopFallbackUrl(
+      "https://play.cartesia.ai/settings/keys",
+      new Set(),
+      "cartesia",
+      "https://play.cartesia.ai/",
+    );
+    expect(fallback).toBe("https://play.cartesia.ai/");
+  });
 });
 
 describe("serviceSlug", () => {
@@ -364,6 +413,126 @@ describe("serviceSlug", () => {
     expect(serviceSlug("Groq Cloud")).toBe("groqcloud");
     expect(serviceSlug("xata.io")).toBe("xataio");
     expect(serviceSlug("north-flank")).toBe("northflank");
+  });
+});
+
+describe("hasCuratedServiceKeyPath", () => {
+  it("detects curated service routes through normalized slugs", () => {
+    expect(hasCuratedServiceKeyPath("together-ai")).toBe(true);
+    expect(hasCuratedServiceKeyPath("Render")).toBe(false);
+    expect(hasCuratedServiceKeyPath("somevendor")).toBe(false);
+  });
+});
+
+describe("Render account-settings navigation helpers", () => {
+  it("finds Render's account settings link in the opened account menu", () => {
+    const found = findRenderAccountSettingsLink([
+      el({
+        tag: "a",
+        selector: "#workspace-settings",
+        visibleText: "Settings",
+        href: "/w/tea-123/settings",
+      }),
+      el({
+        tag: "a",
+        selector: "#account-settings",
+        visibleText: "Account settings",
+        href: "/u/usr-123/settings",
+      }),
+    ]);
+    expect(found?.selector).toBe("#account-settings");
+  });
+
+  it("finds Render's compact header account menu trigger without choosing workspace controls", () => {
+    const found = findRenderAccountMenuTrigger([
+      el({
+        selector: "#workspace",
+        visibleText: "BBento's workspace",
+        landmark: "header",
+      }),
+      el({
+        selector: "#new",
+        visibleText: "New",
+        landmark: "header",
+      }),
+      el({
+        selector: "#avatar",
+        visibleText: "l",
+        landmark: "header",
+      }),
+    ]);
+    expect(found?.selector).toBe("#avatar");
+  });
+});
+
+describe("credential action loop helpers", () => {
+  it("normalizes create-key and skip-payment actions from inventory labels", () => {
+    expect(
+      credentialActionSignature(
+        { kind: "click", selector: "#create", reason: "mint a credential" },
+        [
+          el({
+            selector: "#create",
+            visibleText: "Create key",
+          }),
+        ],
+      ),
+    ).toBe("click:create-key");
+    expect(
+      credentialActionSignature(
+        { kind: "click", selector: "#skip", reason: "continue without billing" },
+        [
+          el({
+            selector: "#skip",
+            visibleText: "Skip adding payment method",
+          }),
+        ],
+      ),
+    ).toBe("click:skip-payment");
+  });
+
+  it("detects alternating credential/payment action cycles", () => {
+    expect(
+      isRepeatingCredentialActionCycle(
+        [
+          "click:create-key",
+          "click:skip-payment",
+          "click:create-key",
+          "click:skip-payment",
+          "click:create-key",
+        ],
+        "API keys",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat a short normal wizard sequence as a credential cycle", () => {
+    expect(
+      isRepeatingCredentialActionCycle(
+        ["click:create-key", "click:skip-payment"],
+        "API keys",
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("shouldRevealBeforeCredentialSweep", () => {
+  it("fires on key pages with reveal/masked-key hints", () => {
+    expect(
+      shouldRevealBeforeCredentialSweep({
+        url: "https://play.cartesia.ai/",
+        pageText: "API keys Name Default key sk-•••••• Reveal Copy",
+      }),
+    ).toBe(true);
+  });
+
+  it("ignores unrelated masked UI text", () => {
+    expect(
+      shouldRevealBeforeCredentialSweep({
+        url: "https://example.test/billing",
+        pageText: "Card •••• 4242",
+      }),
+    ).toBe(false);
   });
 });
 

@@ -16,7 +16,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 interface Harness { server: FastifyInstance; deps: ApiDeps; }
 
 async function setup(now?: () => Date): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID, ...(now ? { now } : {}) });
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, ...(now ? { now } : {}) });
   const server = await buildServer({ deps });
   return { server, deps };
 }

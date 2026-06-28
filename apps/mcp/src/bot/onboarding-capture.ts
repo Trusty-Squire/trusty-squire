@@ -99,6 +99,7 @@ export function resetCaptureChain(service?: string): void {
     runIds.clear();
     chainHead.clear();
     lastRounds.clear();
+    extractCaptured.clear();
     return;
   }
   const slug = slugOf(service);
@@ -106,6 +107,9 @@ export function resetCaptureChain(service?: string): void {
   lastRounds.delete(slug);
   for (const key of [...chainHead.keys()]) {
     if (key.startsWith(`${slug}|`)) chainHead.delete(key);
+  }
+  for (const key of [...extractCaptured]) {
+    if (key.startsWith(`${slug}|`)) extractCaptured.delete(key);
   }
 }
 
@@ -124,6 +128,37 @@ const chainHead = new Map<string, string>();
 // run reached (where a failure got stuck, or the last onboarding step on
 // success). Reset alongside runId/chainHead at the start of each signup.
 const lastRounds = new Map<string, number>();
+
+// True once a `kind:"extract"` round has been captured for the current
+// (slug, runId). The synthesizer REJECTS a capture with no extract step
+// (no_extract_step) even when the run obtained a credential — the bot's
+// credential-tracker/background extraction can populate `credentials` without
+// a planner `extract` action ever running, so the on-disk rounds end on a
+// `done`/`click` and the skill can't be synthesized. The discover loop reads
+// this at its success return to write a salvage extract round when one is
+// missing. Keyed by `${slug}|${runId}`, reset alongside the chain.
+const extractCaptured = new Set<string>();
+
+// True iff an extract round has already been captured for THIS run of the
+// service. Lets the discover loop avoid a redundant salvage round (and only
+// salvage when genuinely missing).
+export function hasCapturedExtractRound(service: string): boolean {
+  return extractCaptured.has(`${slugOf(service)}|${runIdFor(service)}`);
+}
+
+// True iff ANY round has been captured this run. A salvage extract round is only
+// worth writing when there are prior signup-flow rounds to chain it onto — a
+// LONE extract round has no navigate/OAuth steps and can't be replayed (the
+// no_rounds class). Callers gate the salvage on this.
+export function hasCapturedAnyRound(service: string): boolean {
+  return lastRounds.has(slugOf(service));
+}
+
+// The next round index to use for a synthesized/salvage capture round — one past
+// the highest captured round (0 when none captured yet).
+export function nextCaptureRound(service: string): number {
+  return (lastRounds.get(slugOf(service)) ?? -1) + 1;
+}
 
 export interface OnboardingRoundCapture {
   service: string;
@@ -273,6 +308,7 @@ export function captureOnboardingRound(entry: OnboardingRoundCapture): void {
 
     chainHead.set(chainKey, contentHash);
     lastRounds.set(slug, Math.max(lastRounds.get(slug) ?? -1, entry.round));
+    if (entry.observed.kind === "extract") extractCaptured.add(chainKey);
   } catch {
     // best-effort — capture is diagnostic, never load-bearing
   }

@@ -2037,6 +2037,28 @@ export class BrowserController {
           .catch(() => undefined);
         return;
       }
+      // ARIA toggle: a <button role="switch"> / role="checkbox" (Firebase's
+      // Google-provider "Enable" switch, MUI/Material toggles). A synthetic
+      // positional click frequently does NOT flip these — the handler binds to a
+      // keydown/pointer sequence the raw click misses, so click() returns but
+      // aria-checked never changes. The ARIA-correct activation is the keyboard:
+      // focus + Space. Click first (cheap); if aria-checked didn't move, focus
+      // and press Space. MEASURED 2026-06-27 (Firebase auth Enable switch).
+      if (probe.role === "switch" || probe.role === "checkbox") {
+        const node = this.page.locator(selector).first();
+        const readChecked = (): Promise<string | null> =>
+          node.getAttribute("aria-checked").catch(() => null);
+        const before = await readChecked();
+        await node.click({ timeout: 8000 }).catch(() => undefined);
+        if ((await readChecked()) === before) {
+          await node.focus().catch(() => undefined);
+          await this.page.keyboard.press("Space").catch(() => undefined);
+          if ((await readChecked()) === before) {
+            await this.page.keyboard.press("Enter").catch(() => undefined);
+          }
+        }
+        return;
+      }
     } catch {
       // element vanished / selector didn't resolve — fall through to a click
     }
@@ -2045,6 +2067,38 @@ export class BrowserController {
       return;
     }
     await this.humanClick(selector);
+  }
+
+  // Force-click bypasses Playwright's actionability + interception checks — for a
+  // button that is visible / enabled / stable but whose pointer events are eaten
+  // by a modal-dialog backdrop layered over it (MUI `<div class="MuiDialog-
+  // container">`, e.g. deepinfra's new-API-key dialog). A normal click() there
+  // times out with "intercepts pointer events"; force dispatches at the element.
+  async clickForce(selector: string, index = 0): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const safeIndex = Math.max(0, Math.floor(index));
+    await this.page.locator(selector).nth(safeIndex).click({ force: true, timeout: 8000 });
+  }
+
+  // Dispatch a DOM .click() in the page context. Some React copy buttons fire
+  // their onClick (and thus navigator.clipboard.writeText) on the synthetic
+  // event a real Playwright mouse click doesn't reliably reproduce (deepinfra's
+  // "copy key": a JS click populated the clipboard in a probe where the
+  // positional click did not). Used as a copy-extraction fallback; the preceding
+  // real click supplies the transient user-activation writeText needs.
+  async clickViaJs(selector: string, index = 0): Promise<void> {
+    if (!this.page) return;
+    const safeIndex = Math.max(0, Math.floor(index));
+    await this.page
+      .evaluate(
+        ({ sel, i }) => {
+          const els = Array.from(document.querySelectorAll<HTMLElement>(sel));
+          const el = els[i] ?? els[0];
+          if (el !== undefined) el.click();
+        },
+        { sel: selector, i: safeIndex },
+      )
+      .catch(() => undefined);
   }
 
   async clickNth(selector: string, index: number): Promise<void> {
@@ -2508,6 +2562,23 @@ export class BrowserController {
   //   3. Fallback: once wheel loop exits, set `scrollTop = scrollHeight`
   //      and dispatch a synthetic `scroll` event. Covers static lists
   //      whose handlers only debounce on the final scroll position.
+  // Operator surface — reveal below-the-fold controls so the planner can act on
+  // them (heavy SPAs like the GCP console render long forms whose lower fields
+  // sit outside the viewport and so never enter the element inventory). Scrolls
+  // the page by ~80% of a viewport (or to an extreme); the next observe picks
+  // up the newly-visible elements.
+  async scrollViewport(direction: "down" | "up" | "bottom" | "top" = "down"): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.page.evaluate((dir: string) => {
+      const step = Math.round(window.innerHeight * 0.8);
+      if (dir === "bottom") window.scrollTo(0, document.body.scrollHeight);
+      else if (dir === "top") window.scrollTo(0, 0);
+      else if (dir === "up") window.scrollBy(0, -step);
+      else window.scrollBy(0, step);
+    }, direction);
+    await this.page.waitForTimeout(350);
+  }
+
   async scrollToEndOfTOS(
     selector?: string,
   ): Promise<{
@@ -4748,6 +4819,88 @@ export class BrowserController {
     return filled;
   }
 
+  // Satisfy an API-key/token creation form's required ACCESS-SCOPE controls when
+  // its submit is disabled. Distinct from fillRequiredComboboxes (cmdk/Radix/
+  // LeafyGreen survey selects): the "create a scoped credential" pattern gates
+  // submit behind (a) a segmented "All access" / "Full access" button group that
+  // starts unselected, and (b) a LemonSelect-style preset trigger
+  // (`button[aria-haspopup="true"]` showing "Select…/Choose…") whose options
+  // render in a body-portal Popover as `[role="menuitem"]` — NOT an
+  // aria listbox, so the combobox filler's role/listbox query never sees it.
+  // MEASURED 2026-06-24 (posthog /settings/user-api-keys "Create personal API
+  // key": an "Organization & project access" segmented control + a "Select
+  // preset" scopes dropdown both gate the aria-disabled "Create key"; picking
+  // "All access" on each enables it and mints a phx_ key). Prefers the broadest
+  // option so the resulting credential isn't dead-on-arrival. Idempotent and
+  // tightly gated (callers only invoke it on a disabled submit).
+  async satisfyScopePresets(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const done: string[] = [];
+    const dialog = page.locator('[role="dialog"]').first();
+    const root =
+      (await dialog.count().catch(() => 0)) > 0 ? dialog : page.locator("body");
+
+    // (1) Segmented access-scope buttons that start unselected. Exclude select
+    // triggers (aria-haspopup) — those are handled in (2); a selected preset
+    // trigger can also read "All access" and we must not re-open it here.
+    try {
+      const allAccess = root.locator(
+        'button:not([aria-haspopup="true"])',
+        { hasText: /^(?:all access|full access|all scopes)$/i },
+      );
+      const n = Math.min(await allAccess.count().catch(() => 0), 3);
+      for (let i = 0; i < n; i += 1) {
+        const b = allAccess.nth(i);
+        if (!(await b.isVisible().catch(() => false))) continue;
+        await b.click({ timeout: 4000 }).catch(() => undefined);
+        done.push("access:all-access");
+        await page.waitForTimeout(300);
+      }
+    } catch {
+      // best-effort
+    }
+
+    // (2) LemonSelect-style preset triggers still showing a placeholder.
+    try {
+      const triggers = root.locator('button[aria-haspopup="true"]');
+      const n = Math.min(await triggers.count().catch(() => 0), 4);
+      for (let i = 0; i < n; i += 1) {
+        const t = triggers.nth(i);
+        if (!(await t.isVisible().catch(() => false))) continue;
+        const txt = ((await t.textContent().catch(() => "")) ?? "")
+          .replace(/\s+/g, " ")
+          .trim();
+        // Only act on an UNSELECTED select (a "Select…/Choose…/Pick…"
+        // placeholder) — never re-pick one that already holds a value.
+        if (!/^(?:please\s+)?(?:select|choose|pick)\b/i.test(txt)) continue;
+        await t.click({ timeout: 4000 }).catch(() => undefined);
+        await page.waitForTimeout(700);
+        const options = page.locator(
+          '.Popover [role="menuitem"], .Popover [role="option"], ' +
+            '[role="listbox"] [role="option"], .LemonDropdown [role="menuitem"]',
+        );
+        const broad = options.filter({ hasText: /all access|full access/i }).first();
+        const pick =
+          (await broad.count().catch(() => 0)) > 0 ? broad : options.first();
+        if ((await pick.count().catch(() => 0)) > 0) {
+          const name = ((await pick.textContent().catch(() => "")) ?? "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .slice(0, 30);
+          await pick.click({ timeout: 4000 }).catch(() => undefined);
+          done.push(`preset:${name}`);
+          await page.waitForTimeout(400);
+        } else {
+          await page.keyboard.press("Escape").catch(() => undefined);
+        }
+      }
+    } catch {
+      // best-effort
+    }
+    return done;
+  }
+
   // True when a visible advance/submit button (Next / Continue / Create /
   // Register / Submit / Get started / Finish) is currently DISABLED. The gate
   // for the deterministic combobox filler: only auto-satisfy a survey's
@@ -4756,7 +4909,7 @@ export class BrowserController {
     if (!this.page) return false;
     try {
       return await this.page.evaluate(() => {
-        const re = /\b(?:next|continue|register|submit|get started|finish|complete|done|create account|sign up)\b/i;
+        const re = /\b(?:next|continue|register|submit|get started|finish|complete|done|create account|sign up|create key|create token|create personal)\b/i;
         for (const el of Array.from(document.querySelectorAll("button,[role='button']"))) {
           const r = (el as HTMLElement).getBoundingClientRect();
           if (r.width <= 0 || r.height <= 0) continue;
@@ -4904,6 +5057,14 @@ export class BrowserController {
   // failure (caller catches and falls through to other paths).
   async readClipboard(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
+    // navigator.clipboard.readText() REJECTS ("Document is not focused") unless
+    // the page has focus — which a sequence of Playwright actions + page.evaluate
+    // reads between the copy-click and here can drop, silently yielding "". Bring
+    // the tab to front and focus the document first. MEASURED 2026-06-24
+    // (deepinfra: the copy-key clipboard held the 32-char key in a probe but the
+    // replay's read came back empty — focus was the difference).
+    await this.page.bringToFront().catch(() => undefined);
+    await this.page.evaluate(() => window.focus()).catch(() => undefined);
     return await this.page.evaluate(async () => {
       try {
         return await navigator.clipboard.readText();
@@ -4963,14 +5124,8 @@ export class BrowserController {
       // For each, walk up a few ancestors and dump the subtree's
       // innerText. The token is somewhere in there.
       const seen = new Set<string>();
-      for (const btn of copyButtons) {
-        let anc: HTMLElement | null = btn;
-        for (let i = 0; i < 6 && anc !== null; i++) {
-          anc = anc.parentElement;
-        }
-        if (anc === null) continue;
-        const text = (anc.innerText ?? "").trim();
-        if (text.length === 0 || text.length > 4096) continue;
+      const harvest = (text: string): void => {
+        if (text.length === 0 || text.length > 4096) return;
         // Tokenize by whitespace — each token is a separate candidate.
         text.split(/\s+/).forEach((tok) => {
           if (tok.length < 16 || tok.length > 256) return;
@@ -4978,6 +5133,20 @@ export class BrowserController {
           seen.add(tok);
           out.push(tok);
         });
+      };
+      for (const btn of copyButtons) {
+        // The value often lives in the copy button's OWN aria-label/title
+        // ("Copy to clipboard: GOCSPX-…", "Copy api key sk-…") rather than in
+        // any visible text node — GCP's new client-secret reveal does exactly
+        // this, so the innerText-only walk below would miss it entirely.
+        harvest(`${btn.getAttribute("aria-label") ?? ""} ${btn.getAttribute("title") ?? ""}`.trim());
+        // Then walk up a few ancestors and dump the subtree's innerText.
+        let anc: HTMLElement | null = btn;
+        for (let i = 0; i < 6 && anc !== null; i++) {
+          anc = anc.parentElement;
+        }
+        if (anc === null) continue;
+        harvest((anc.innerText ?? "").trim());
       }
       return out;
     });
@@ -5065,13 +5234,11 @@ export class BrowserController {
         if (!hasDigit && /^[a-z][a-z_-]*$/i.test(s) && s.length < 16) return false;
         return true;
       };
-      const isMaskedShape = (s: string): boolean => {
-        // Common mask glyphs: bullet, asterisk, em-dash spam
-        if (/[•●⬤]{3,}/.test(s)) return true;
-        if (/\*{4,}/.test(s)) return true;
-        if (/^[•*]+$/.test(s)) return true;
-        return false;
-      };
+      // Inline mirror of credential-shape.ts MASKED_DISPLAY_RE — page.evaluate
+      // code can't import, so keep this regex byte-identical to the canonical.
+      // Any mask glyph: bullet/circle, 3+ asterisks, ellipsis, or 3+ dots. (Was
+      // `[•●⬤]{3,}|\*{4,}`, which MISSED the ellipsis masks GCP/Zilliz/S3 use.)
+      const isMaskedShape = (s: string): boolean => /[•●⬤]|\*{3,}|…|\.{3,}/.test(s);
 
       // Compute element-center coords for proximity matching.
       const centerOf = (el: Element): { x: number; y: number } => {
@@ -5326,8 +5493,46 @@ export class BrowserController {
           if (!isVisible(el)) return;
           masked.push({ el, row: rowAncestor(el) });
         });
+      const selectorFor = (el: Element): string => {
+        const tag = el.tagName.toLowerCase();
+        const all = Array.from(document.querySelectorAll(tag));
+        const idx = all.indexOf(el);
+        return `${tag}:nth-of-type(${idx + 1})`;
+      };
+
+      // No masked placeholder anywhere — but some consoles hide the key
+      // ENTIRELY behind a "View/Show Key" button with no ••• shown at all
+      // (Zilliz's "View My Personal Key"). The row-anchored pass below has
+      // nothing to anchor on, so without this the reveal pass bails and the
+      // extractor reports no_legit_credential on a page that DOES have a key.
+      // Anchor-free fallback: click a button whose label pairs a SAFE reveal
+      // verb with a credential noun, excluding destructive verbs (reset/
+      // regenerate/delete/revoke/rotate would mint or destroy a key, not
+      // reveal the existing one).
       if (masked.length === 0) {
-        return { selectors: [] as string[], diagnostic: ["no_masked_displays"] };
+        const KEY_NOUN = /\b(?:api\s*key|secret|token|credential|personal\s+key|access\s+key|key)\b/i;
+        const SAFE_REVEAL = /\b(?:view|show|reveal|display|see)\b/i;
+        const DESTRUCTIVE = /\b(?:reset|regenerat\w*|delete|revoke|rotate|create|new|remove|add|download)\b/i;
+        const out: string[] = [];
+        const diag: string[] = [];
+        document
+          .querySelectorAll<HTMLElement>('button, [role="button"], a[role="button"]')
+          .forEach((el) => {
+            if (!isVisible(el)) return;
+            const hay =
+              `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`
+                .replace(/\s+/g, " ")
+                .trim();
+            if (hay.length === 0 || hay.length > 60) return;
+            if (!SAFE_REVEAL.test(hay) || !KEY_NOUN.test(hay)) return;
+            if (DESTRUCTIVE.test(hay)) return;
+            out.push(selectorFor(el));
+            diag.push(`anchorless_key_reveal:"${hay.slice(0, 40)}"`);
+          });
+        return {
+          selectors: out,
+          diagnostic: out.length > 0 ? diag : ["no_masked_displays"],
+        };
       }
 
       // 2. Classify candidate buttons. Prefer SHOW/REVEAL/EYE; fall
@@ -5355,13 +5560,6 @@ export class BrowserController {
             else if (COPY_PATTERN.test(hay)) copyBtns.push(el);
           });
         return { showBtns, copyBtns };
-      };
-
-      const selectorFor = (el: Element): string => {
-        const tag = el.tagName.toLowerCase();
-        const all = Array.from(document.querySelectorAll(tag));
-        const idx = all.indexOf(el);
-        return `${tag}:nth-of-type(${idx + 1})`;
       };
 
       const selectors: string[] = [];
@@ -5967,8 +6165,42 @@ export class BrowserController {
             /* malformed id — fall through */
           }
         }
+        const labelledBy = el.getAttribute("aria-labelledby");
+        if (labelledBy !== null && labelledBy.trim().length > 0) {
+          const parts: string[] = [];
+          for (const part of labelledBy.split(/\s+/)) {
+            const t = clean(document.getElementById(part)?.textContent);
+            if (t !== null) parts.push(t);
+          }
+          if (parts.length > 0) return clean(parts.join(" "));
+        }
         const anc = el.closest("label");
-        return anc !== null ? clean(anc.textContent) : null;
+        const ancestorLabel = anc !== null ? clean(anc.textContent) : null;
+        if (ancestorLabel !== null) return ancestorLabel;
+
+        let cur: Element | null = el;
+        for (let depth = 0; depth < 3 && cur !== null; depth += 1) {
+          let sib = cur.previousElementSibling;
+          for (let scanned = 0; scanned < 4 && sib !== null; scanned += 1) {
+            const nestedLabel = clean(sib.querySelector("label")?.textContent);
+            if (nestedLabel !== null) return nestedLabel;
+            const labelish =
+              sib.tagName.toLowerCase() === "label" ||
+              /\b(label|field|form|control)\b/i.test(sib.getAttribute("class") ?? "");
+            const t = clean(sib.textContent);
+            if (
+              t !== null &&
+              t.length <= 80 &&
+              !/[{};]/.test(t) &&
+              (labelish || t.split(/\s+/).length <= 8)
+            ) {
+              return t;
+            }
+            sib = sib.previousElementSibling;
+          }
+          cur = cur.parentElement;
+        }
+        return null;
       };
 
       const inConsent = (el: Element): boolean =>
@@ -6059,6 +6291,80 @@ export class BrowserController {
         }
       };
 
+      const slug = (s: string | null, fallback: string): string => {
+        const base = (s ?? fallback)
+          .replace(/\s+/g, " ")
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 48);
+        return base.length > 0 ? base : fallback;
+      };
+
+      const directLabel = (el: Element): string | null =>
+        clean(el.getAttribute("aria-label")) ??
+        clean(el.getAttribute("title")) ??
+        clean(el.getAttribute("name")) ??
+        clean(el.textContent);
+
+      const isFormControlElement = (el: Element): boolean =>
+        el instanceof HTMLInputElement ||
+        el instanceof HTMLTextAreaElement ||
+        el instanceof HTMLSelectElement;
+
+      const regionFor = (el: Element): Element | null =>
+        el.closest(
+          '[role="dialog"],dialog,[aria-modal="true"],nav,main,header,footer,aside,form,section,article',
+        );
+
+      const regionName = (region: Element | null): string | null => {
+        if (region === null) return null;
+        const role = region.getAttribute("role");
+        const tag = region.tagName.toLowerCase();
+        const kind =
+          role === "dialog" || tag === "dialog" || region.getAttribute("aria-modal") === "true"
+            ? "dialog"
+            : tag === "nav"
+              ? "navigation"
+              : tag;
+        const labelledBy = region.getAttribute("aria-labelledby");
+        let label: string | null = null;
+        if (labelledBy !== null && labelledBy.length > 0) {
+          try {
+            label = clean(document.getElementById(labelledBy)?.textContent);
+          } catch {
+            label = null;
+          }
+        }
+        label =
+          label ??
+          clean(region.getAttribute("aria-label")) ??
+          clean(region.querySelector("h1,h2,h3,[role='heading']")?.textContent) ??
+          clean(region.textContent)?.slice(0, 60) ??
+          kind;
+        return `${kind}:${slug(label, kind)}`;
+      };
+
+      const elementKind = (el: Element): string => {
+        const role = el.getAttribute("role");
+        const tag = el.tagName.toLowerCase();
+        if (role !== null && role.length > 0) return role;
+        if (tag === "a") return "link";
+        return tag;
+      };
+
+      const topmostStatus = (el: Element): { topmost: boolean; occludedBy: string | null } => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 1 || r.height < 1) return { topmost: false, occludedBy: null };
+        const x = Math.min(window.innerWidth - 1, Math.max(0, r.left + r.width / 2));
+        const y = Math.min(window.innerHeight - 1, Math.max(0, r.top + r.height / 2));
+        const top = document.elementFromPoint(x, y);
+        if (top === null) return { topmost: false, occludedBy: null };
+        if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
+        return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
+      };
+
       // N1 onboarding-wizard cards (2026-06-08). Chakra/React card pickers
       // (imagekit's step-1/3 objective cards, axiom/pusher role cards) render
       // each selectable card as a BARE clickable div — cursor:pointer, but no
@@ -6146,6 +6452,10 @@ export class BrowserController {
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
         interactedThisRun: boolean;
+        screenPath: string | null;
+        container: string | null;
+        topmost: boolean | null;
+        occludedBy: string | null;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -6192,6 +6502,14 @@ export class BrowserController {
         const isGoogleGSIIframe =
           el instanceof HTMLIFrameElement &&
           (el.getAttribute("src") ?? "").includes("accounts.google.com/gsi/button");
+        const container = regionName(regionFor(el));
+        const status = topmostStatus(el);
+        const pathLabel =
+          isGoogleGSIIframe
+            ? "Continue with Google"
+            : isFormControlElement(el)
+              ? labelFor(el) ?? directLabel(el) ?? iconLabelFor(el)
+              : directLabel(el) ?? labelFor(el) ?? iconLabelFor(el);
         out.push({
           tag: isGoogleGSIIframe ? "button" : el.tagName.toLowerCase(),
           type: el.getAttribute("type"),
@@ -6280,6 +6598,12 @@ export class BrowserController {
               ? clean(el.options[el.selectedIndex]?.textContent ?? null)
               : null,
           interactedThisRun: el.getAttribute("data-ts-touched") === "1",
+          screenPath:
+            `${container ?? "body:root"} > ${elementKind(el)}:` +
+            slug(pathLabel, `${elementKind(el)}-${out.length}`),
+          container,
+          topmost: status.topmost,
+          occludedBy: status.occludedBy,
         });
       }
       return { out, clusterMeta };
@@ -6329,7 +6653,9 @@ export class BrowserController {
   async startOAuth(selector: string): Promise<void> {
     if (!this.page || !this.context) throw new Error("Browser not started");
     this.maybeAttachOAuthNetListener();
-    this.oauthProductPage = this.page;
+    if (!/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(this.page.url())) {
+      this.oauthProductPage = this.page;
+    }
     // Race a popup `page` event against the click. context-level
     // "page" fires for both window.open popups and target=_blank.
     const popupPromise = this.context
@@ -6340,8 +6666,9 @@ export class BrowserController {
     if (popup !== null && popup !== this.page && !popup.isClosed()) {
       this.page = popup;
     }
+    this.adoptLivePage();
     try {
-      await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
+      await this.page?.waitForLoadState("domcontentloaded", { timeout: 30000 });
     } catch {
       // best-effort — the agent's consent loop re-reads state regardless
     }
@@ -6723,6 +7050,26 @@ export class BrowserController {
     return this.page !== null ? this.page.url() : "";
   }
 
+  recoverActivePage(): boolean {
+    return this.adoptLivePage();
+  }
+
+  private adoptLivePage(): boolean {
+    if (this.page !== null && !this.page.isClosed()) return true;
+    if (this.context === null) return false;
+    const pages = this.context.pages().filter((p) => !p.isClosed());
+    if (pages.length === 0) return false;
+    const product =
+      this.oauthProductPage !== null && !this.oauthProductPage.isClosed()
+        ? this.oauthProductPage
+        : null;
+    const nonAuth = [...pages]
+      .reverse()
+      .find((p) => !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(p.url()));
+    this.page = nonAuth ?? product ?? pages[pages.length - 1] ?? null;
+    return this.page !== null;
+  }
+
   // Press a keyboard key (e.g. "Escape" to dismiss a focus-trapped modal that
   // exposes no in-DOM close control). Best-effort. Used by the nav-search
   // overlay handler's dismiss fallback.
@@ -6803,8 +7150,8 @@ export class BrowserController {
   // `needs_login` where the full discover bot would just type the password —
   // a freshly-created robot account lands on the identifier page the first time
   // a given relying party requests OAuth even with a live session, and the
-  // robot's credentials are available to the verifier. Mirrors the proven
-  // tools/google-login-fleet.mjs in-page steps (email → Enter → password →
+  // robot's credentials are available to the verifier. Drives the standard
+  // Google in-page steps (email → Enter → password →
   // Enter → ToS/continue speedbumps) but operates on `this.page` instead of
   // navigating to myaccount — in the OAuth flow the success terminus is the
   // consent screen or the return to the relying party, NOT myaccount. Returns
@@ -7594,6 +7941,15 @@ export interface InteractiveElement {
   // the warning every round and the planner gets stuck in a select
   // loop. Default false (or absent).
   interactedThisRun?: boolean;
+  // Compact visual/structural context for non-vision host agents.
+  // screenPath is a stable-ish human target path like
+  // "dialog:finish-account > button:create-account"; container names the
+  // closest dialog/nav/main/form/etc.; topmost/occludedBy report whether the
+  // element is actually reachable at its center point.
+  screenPath?: string | null;
+  container?: string | null;
+  topmost?: boolean | null;
+  occludedBy?: string | null;
   // T38 — card-radio cluster membership. Set on elements that are
   // part of a "choose one of these N visually-similar siblings" group:
   // onboarding wizards like Cloudinary's "What are you using

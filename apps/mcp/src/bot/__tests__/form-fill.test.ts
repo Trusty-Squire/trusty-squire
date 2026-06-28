@@ -131,13 +131,21 @@ describe("decideFormFillStep — C1 pre_plan", () => {
     });
     expect(step.action).toEqual({ kind: "terminal", outcome: { kind: "oauth", selector: "#g", provider: "google" } });
   });
-  it("committedToEmailPath SUPPRESSES the OAuth-first scan (no reroute)", () => {
-    const step = decideFormFillStep(S({ committedToEmailPath: true }), {
+  it("oauthProvenUnavailable SUPPRESSES the OAuth-first scan (no reroute)", () => {
+    const step = decideFormFillStep(S({ oauthProvenUnavailable: true }), {
       ...PRE,
       oauthCandidatesPresent: true,
       oauthButtonHit: { selector: "#g", provider: "google" },
     });
     expect(step.action.kind).toBe("run_planner"); // scan skipped → falls through to planner
+  });
+  it("committedToEmailPath alone does NOT suppress OAuth — a present Google button is still preferred (strict Google→email→GitHub order)", () => {
+    const step = decideFormFillStep(S({ committedToEmailPath: true }), {
+      ...PRE,
+      oauthCandidatesPresent: true,
+      oauthButtonHit: { selector: "#g", provider: "google" },
+    });
+    expect(step.action).toEqual({ kind: "terminal", outcome: { kind: "oauth", selector: "#g", provider: "google" } });
   });
   it("no provider button yet → async-render wait, retry++ (2 for a form, 8 for a shell)", () => {
     const form = decideFormFillStep(S(), { ...PRE, oauthCandidatesPresent: true, oauthScanShell: false });
@@ -230,6 +238,35 @@ describe("form-fill selector helpers", () => {
       ],
     });
     expect(hit?.selector).toBe("#signup");
+  });
+
+  it("detects a 'Create one' login→signup toggle (deepinfra) over noise", () => {
+    const hit = findSignupLinkOnLoginPage({
+      url: "https://deepinfra.com/login",
+      title: "Log In - DeepInfra",
+      htmlOrText: "Log in to your account. Don't have an account? Create one",
+      inventory: [
+        { tag: "button", selector: "#login", visibleText: "Log in", visible: true },
+        { tag: "a", selector: "#announce", visibleText: "read the announcement", href: "/blog", visible: true },
+        { tag: "a", selector: "#createone", visibleText: "Create one", visible: true, inViewport: true },
+        { tag: "a", selector: "#gh", visibleText: "Continue with Github", href: "/oauth/github", visible: true },
+      ],
+    });
+    expect(hit?.selector).toBe("#createone");
+  });
+
+  it("does not treat policy, terms, or back links as signup affordances", () => {
+    const hit = findSignupLinkOnLoginPage({
+      url: "https://app.mor.org/signin",
+      title: "Sign in",
+      htmlOrText: "Sign in to your account. Don't have an account? Sign up",
+      inventory: [
+        { tag: "a", selector: "#privacy", visibleText: "Privacy Policy", href: "/signup/privacy", visible: true },
+        { tag: "a", selector: "#terms", visibleText: "Terms of Service", href: "/register/terms", visible: true },
+        { tag: "button", selector: "#back", visibleText: "Back", visible: true },
+      ],
+    });
+    expect(hit).toBeNull();
   });
 
   it("prefers Send Code over a marketing Sign up now anchor on email-code pages", () => {

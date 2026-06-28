@@ -25,6 +25,9 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
         agent_session_raw_token: record.agent_session_raw_token,
         account_id: record.account_id,
         machine_token: record.machine_token,
+        registry_enabled: record.registry_enabled,
+        consent_operator_inbox_otp: record.consent_operator_inbox_otp,
+        proxy_url: record.proxy_url,
       },
     });
   }
@@ -39,6 +42,11 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
     accountId: string,
     rawAgentToken: string,
     now: Date,
+    preferences: {
+      registry_enabled?: boolean;
+      consent_operator_inbox_otp?: boolean;
+      proxy_url?: string | null;
+    } = {},
   ): Promise<boolean> {
     // Race-safe claim: update only if status is still "pending" AND
     // not yet expired. updateMany returns count: 0 if either guard fires,
@@ -49,6 +57,9 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
         status: "claimed",
         account_id: accountId,
         agent_session_raw_token: rawAgentToken,
+        registry_enabled: preferences.registry_enabled ?? null,
+        consent_operator_inbox_otp: preferences.consent_operator_inbox_otp ?? null,
+        proxy_url: preferences.proxy_url ?? null,
       },
     });
     return result.count > 0;
@@ -96,6 +107,9 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
     agent_session_raw_token: string | null;
     account_id: string | null;
     machine_token: string | null;
+    registry_enabled?: boolean | null;
+    consent_operator_inbox_otp?: boolean | null;
+    proxy_url?: string | null;
   }): PairingTokenRecord {
     return {
       token: row.token,
@@ -106,6 +120,9 @@ export class PrismaPairingTokenStore implements PairingTokenStore {
       agent_session_raw_token: row.agent_session_raw_token,
       account_id: row.account_id,
       machine_token: row.machine_token,
+      registry_enabled: row.registry_enabled ?? null,
+      consent_operator_inbox_otp: row.consent_operator_inbox_otp ?? null,
+      proxy_url: row.proxy_url ?? null,
     };
   }
 }

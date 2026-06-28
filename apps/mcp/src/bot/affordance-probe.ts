@@ -3,11 +3,9 @@
 // actually offer": OAuth providers, an email-signup form, a card gate,
 // an anti-bot interstitial.
 //
-// Why this module exists: the same "BrowserController.start → goto →
-// extract → classify" routine was duplicated across two CLI probes
-// (tools/affordance-probe.mjs, tools/egress-doorcheck.mjs). Both now
-// call THIS. And the verify loop uses it to distinguish a brittle
-// replay failure (page still servable) from genuine skill rot.
+// Why this module exists: the canonical "BrowserController.start → goto →
+// extract → classify" routine. The verify loop uses it to distinguish a
+// brittle replay failure (page still servable) from genuine skill rot.
 //
 // The classification is split into a PURE function (classifyAffordances)
 // that takes an already-extracted inventory + text — unit-testable

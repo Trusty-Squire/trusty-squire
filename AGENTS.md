@@ -403,8 +403,8 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 
 How a successful provision becomes a replayable, registry-published **Skill** —
 fully automatically, no human in the path. This is the "maximize skills in the
-registry" half of the autonomous loop; the runtime/retry half is
-[`docs/AUTONOMOUS-LOOP.md`](docs/AUTONOMOUS-LOOP.md).
+registry" half of the autonomous loop; the runtime/retry half is the provision
+state machine + policy (`packages/skill-schema/src/provision-state.ts`).
 
 ### Pipeline: capture → synthesize → sign → publish → verify → active
 

@@ -24,7 +24,6 @@ async function buildApp(): Promise<FastifyInstance> {
   const { registerResendWebhookRoute } = await import("../routes/resend-webhook.js");
   const deps = buildInMemoryDeps({
     sessionSecret: "test",
-    customerId: "ts-test",
   });
   const app = Fastify({ logger: false });
   await app.register(registerResendWebhookRoute, {
@@ -145,6 +144,33 @@ describe("/v1/webhooks/resend-inbound", () => {
     });
     expect(res.statusCode).toBe(200);
     // No alias was registered → ResendHandler returns no_alias_match.
+    expect(res.json().kind).toBe("no_alias_match");
+  });
+
+  it("accepts Resend metadata-only inbound payloads with email_id", async () => {
+    const app = await buildApp();
+    const data = {
+      email_id: "rx_123",
+      message_id: "<test-msg-2@example.com>",
+      from: "noreply@service.com",
+      to: ["abc.testsvc.run-2@trustysquire.com"],
+      subject: "Verify your email",
+    };
+    const rawBody = JSON.stringify({ type: "email.received", data });
+    const ts = "1779800000";
+    const sig = signSvix(rawBody, "msg_inb_2", ts);
+    const res = await app.inject({
+      method: "POST",
+      url: "/v1/webhooks/resend-inbound",
+      headers: {
+        "content-type": "application/json",
+        "svix-id": "msg_inb_2",
+        "svix-timestamp": ts,
+        "svix-signature": sig,
+      },
+      payload: rawBody,
+    });
+    expect(res.statusCode).toBe(200);
     expect(res.json().kind).toBe("no_alias_match");
   });
 

@@ -1,9 +1,488 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.0 (2026-06-28)
+
+First stable release. Promotes the 1.0.0-rc line, plus:
+
+**Free during beta**
+- Billing is kill-switched off (`BILLING_ENABLED`, default off): no one can be
+  charged by a stray Upgrade click, even with a live Stripe key.
+- The free-signup quota / 402 paywall is removed — provisioning is unlimited.
+- Client drops the stale quota nudge + `getMachineStatus` plumbing.
+
+**Positioning**
+- Three pillars: provision / vault / operate. Pricing is Free / $20 Pro (no
+  Enterprise tier yet). Rotation and egress spend-caps are marked "coming
+  soon" / "planned" until enforced — claims no longer run ahead of the code.
+
+**Cleanup + hardening**
+- Removed the dead Vouchflow device-attestation integration and the orphaned
+  signup-quota upgrade-token path end to end.
+- `SESSION_JWT_SECRET` now fails closed in production.
+
+## 1.0.0-rc.0 (2026-06-27)
+
+First 1.0 release candidate. Headlines: the operator surface gains user-saved
+workflows, the credential-extraction shape logic is consolidated, and a
+production audit cleared out dead code + stale docs.
+
+**Operator surface — user-saved workflows (Phase A)**
+- `operate_remember` / `operate_use`: save a successful operator run as a named
+  local recipe (goal + text-targeted rail + sealed-slot references + a
+  machine-checkable postcondition) and replay it by name — planner-on-rails,
+  verified before close (the anti-false-green gate). Secrets are stored as slot
+  references, never values. See `docs/DESIGN-operator-skills.md`.
+- Persistent single-session operate-driver harness (`tools/op-driver.mjs`).
+
+**Extraction hardening**
+- Reveal keys hidden behind a "View" button (Zilliz) or a copy-button aria-label
+  (GCP's new client secret) — two real false-green/miss fixes.
+- Converged the credential-shape predicates into one canonical module + a single
+  masked-glyph definition (was four divergent spellings that disagreed — the
+  masked-key trap). 17 new tests.
+- Steer the host past real-identity signup walls: existing-account → log in and
+  read the existing key (OpenRouter); unlinked-OAuth → switch to email/OTP (Clerk).
+
+**Hygiene**
+- Removed dead code (dev spikes, an unregistered route) and orphaned artifacts
+  (retired SES records, a dangerous root `fly.toml`); freshened stale docs
+  (SES → Resend, version drift); pruned the stale `TODOS.md` snapshot.
+- fix(extract): reveal keys hidden behind a view-button or copy-button aria-label
+- release(mcp): 0.9.19-rc.24 — recognize multi-segment vendor keys (luma-api-)
+- release(mcp): 0.9.19-rc.23 — force-relogin no longer wipes the other provider
+- chore(tools): tidy the comments that referenced the deleted orphan probes
+- chore(tools): drop orphaned operator probes + tidy their comment refs
+- release(mcp): 0.9.19-rc.22 — proactively prompt GitHub reconnect on dead session
+- release(mcp): 0.9.19-rc.21 — force-relogin=github routes to GitHub-only login
+- docs+fix(connect): session-validation spec + 'GitHub dead' notice on skip
+- release(mcp): 0.9.19-rc.20 — guidance: drive through setup forms + one-time secrets
+- release(mcp): 0.9.19-rc.19 — recognize hyphen-prefixed keys (tally) + web GitHub reconnect
+- release(mcp): 0.9.19-rc.18 — validate GitHub session on every path
+- release(mcp): 0.9.19-rc.17 — kill false-green extraction + report-back
+- release(mcp): 0.9.19-rc.16 — validate GitHub session + secret_label
+- release(mcp): 0.9.19-rc.15 — ARIA switch activation + masked-secret guard
+- fix(operate): never seal a masked secret into a slot
+- release(mcp): 0.9.19-rc.14 — scroll action + sealed OTP (T3/T5 fixes)
+- refactor(operate): delete the inert TRUSTY_SQUIRE_OPERATE flag
+- release(mcp): 0.9.19-rc.13 — operator surface Phase 1
+- test(operate): functional session-flow suite (8 tests, mocked browser)
+- feat(operate): Change 2+3 — 2-kind terminal + operate_* rename (no aliases)
+- feat(operate): Change 5 — Google-session precondition gate + operate feature flag
+- test(operate): validateAllowHost hardening + maskSecretValue (16 new cases, 71 pass)
+- feat(operate): Change 1+4 tool layer — allowed_hosts, allow_host, type_secret, into_slot, egress_hosts
+- feat(operate): Change 1+4 substrate — source-tracked allow-set, allow_host, sealed secret slots, egress decouple
+- chore: scrub stale pwa/inbox-api refs + drop dead/demo scripts
+- chore: final sweep — drop orphaned tools + old autonomous-loop docs; track 2 design notes
+- refactor: extract housekeeper to its own repo + delete dead apps/tools
+- feat(provision): wall hand-off Flow B — captcha_blocked → sign-up-and-vault hand-back
+- feat(provision): wall hand-off Flow A — needs_user_code on await_verification
+- docs(wall-handoff): fold Codex review — two contracts, metadata, honesty fixes
+- docs(wall-handoff): pivot to conversational hand-back; bridge → deferred shelf option
+- docs(wall-handoff): spike results — Linux+Xvfb bridge viable; fold Codex findings
+- fix(redact): run structural DOM-secret patterns before the generic redactor
+- chore: stop ignoring /docs/ — design notes belong in the repo
+- docs: design note — wall hand-off (pause, surface live browser, resume)
+- refactor(bot): rip out the operator-only Telegram notifier
+- fix(systemd): daily verify timer uses OnCalendar, not monotonic
+- refactor(registry): remove dead verdict/sampler decision path
+- docs(housekeeper): Phase 6 — rewrite runbook + CLAUDE.md for verify-only model
+- feat(housekeeper): Phase 5 — systemd verify unit + --check preflight
+- fix(connect): require google identity for connected state
+- chore: snapshot dogfood fixes
+- refactor(mcp): delete the old in-mcp housekeeper (moved to apps/housekeeper)
+- docs(housekeeper): Phase 0 — registry mechanical rule already present
+- feat(housekeeper): verify scheduler + thin registry client
+- feat(housekeeper): codex-exec runner + failure classifier
+- feat(housekeeper): scaffold apps/housekeeper standalone package
+- docs(housekeeper): design note — codex-driven verify scheduler
+
+## 0.9.19-rc.24 (2026-06-27)
+
+Prerelease (`next`). Recognize multi-segment vendor keys.
+
+- **fix(extract):** `looksLikeCredentialToken` now accepts a multi-hyphen vendor
+  key (Luma's `luma-api-4Y7FDyM…`) when a segment is a high-entropy run (≥10
+  chars with both a letter and a digit). Single-run/underscore keys were already
+  recognized; this adds the multi-segment case while still rejecting
+  word-word-word-date slugs (`trusty-squire-dogfood-20260625`).
+
+## 0.9.19-rc.23 (2026-06-27)
+
+Prerelease (`next`). **Critical:** a force-relogin no longer wipes the *other*
+provider's session.
+
+- **fix(connect):** `ensureOAuthSession({forceOpen})` cleared **all** cookies
+  (bare `ctx.clearCookies()`), so `--force-relogin=github` (and
+  `login --provider=github --force-relogin`) nuked the live **Google** session —
+  after which every `require_live_identity` operate task failed the precondition
+  gate with "no live Google session." Now it clears only the *named provider's*
+  session cookies, leaving the other provider intact.
+
+## 0.9.19-rc.22 (2026-06-27)
+
+Prerelease (`next`). connect now proactively fixes a dead GitHub session.
+
+- **feat(connect):** when a plain `connect` would short-circuit (Google valid +
+  bound) but the bot's GitHub session validated **dead**, it now **prompts**
+  "Reconnect GitHub now?" (default yes) and does a GitHub-only login if accepted
+  — instead of just printing a notice. A dead GitHub session is exactly why
+  people re-run connect (GitHub-OAuth signups were failing), so it's fixed in
+  place. Skippable; non-interactive/scripted installs fall back to the notice.
+- **refactor:** the GitHub-only relogin is now a shared helper used by both
+  `--force-relogin=github` and the proactive prompt.
+
+## 0.9.19-rc.21 (2026-06-27)
+
+Prerelease (`next`). First slice of the connect/session-validation redesign
+(`docs/DESIGN-connect-session-validation.md`).
+
+- **fix(connect):** `--force-relogin=github` on an already-bound account now
+  routes straight to a **GitHub-only login** (with the account chooser, since the
+  session was cleared) — it no longer drags in the Google-first account-binding
+  page. Google's gate is already satisfied; GitHub is logged in on its own.
+- **fix(connect):** when connect short-circuits (Google valid + bound) but the
+  bot's GitHub session validated **dead**, it now prints a notice ("run
+  --force-relogin=github") instead of silently hiding it.
+
+Still pending (next slice): the plain-ceremony confirm page should drive the
+GitHub step from the bot's validated session, not the account link.
+
+## 0.9.19-rc.20 (2026-06-27)
+
+Prerelease (`next`). Perception guidance so the host agent drives THROUGH setup
+forms and one-time-secret modals instead of treating them as walls.
+
+- **feat(operate):** the observation `guidance` now flags an **onboarding /
+  org-creation form** ("Tell us about yourself", "create your organization",
+  "you aren't part of an org yet") as NOT a wall — telling the agent to fill the
+  required fields with sensible inferred values (name; org/workspace = your name
+  or "Personal"; smallest/free plan) and submit to reach the keys page.
+- **feat(operate):** the guidance now flags a **one-time secret reveal** ("won't
+  be shown again", "copy your key now") — telling the agent to extract it
+  IMMEDIATELY (with `secret_label` to pick the right field) before navigating
+  away, since the value vanishes. Addresses the Luma one-time-key miss.
+
+## 0.9.19-rc.19 (2026-06-27)
+
+Prerelease (`next`). Stop refusing real keys whose vendor prefix isn't hardcoded.
+
+- **fix(extract):** `looksLikeCredentialToken` accepted only underscore tokens or
+  a hardcoded prefix list, so a real hyphen-prefixed key (Tally `tly-…`) was
+  refused and returned `no_legit_credential`. Now any `prefix-<single random
+  run>` token is recognized, while word-word-word-date slugs (multiple hyphens)
+  stay rejected.
+
+## 0.9.19-rc.18 (2026-06-27)
+
+Prerelease (`next`). The GitHub session validation (rc.16) is now the DEFAULT on
+every path, not opt-in.
+
+- **fix(connect):** `detectActiveProviderSessions` now validates GitHub
+  everywhere — including the hot provision start, not just the install display —
+  so the agent's "you have GitHub" hint and the connected_providers sync reflect
+  a session that actually works, not a dead-but-present cookie. Stays cheap: it
+  only pays the github.com round-trip when a GitHub cookie is present; no cookie
+  → fast false, no navigation. Google remains presence-based (it doesn't lie).
+
+## 0.9.19-rc.17 (2026-06-27)
+
+Prerelease (`next`). Stops false-green credential extraction (page noise being
+stored as "keys"), and reports back so the agent retries instead of stopping.
+
+- **fix(extract):** harden the credential-noise filter — reject ISO dates
+  (`2026-06-23`), emails, anything containing whitespace (greetings/sentences),
+  and UI label fragments (`Owner:`). These were being stored in the vault as
+  junk "keys". Real keys have none of those shapes, so nothing legit is dropped.
+- **feat(extract):** when a page had candidate values but none survived as a
+  real credential, `operate_extract` now returns a `blocked_reason`
+  (`no_legit_credential: … navigate to the keys page or reveal the key, then
+  extract again`) instead of a silent empty — so the host agent keeps going
+  rather than treating junk/empty as success.
+
+## 0.9.19-rc.16 (2026-06-27)
+
+Prerelease (`next`). Two fixes from the third live run.
+
+- **fix(connect):** the "GitHub marker lies" bug — a GitHub session that expired
+  server-side leaves its `user_session` cookie in the profile, so the install
+  display showed GitHub "connected" when it wasn't (and tasks then failed to
+  authorize). The install/preflight checks now *validate* the session
+  (`detectActiveProviderSessions({validate:true})` navigates to github.com and
+  reads the refreshed `logged_in` flag) instead of trusting cookie presence. The
+  hot provision path stays on the fast cookie check.
+- **fix(operate):** `operate_extract{into_slot, secret_label?}` — when a page
+  shows several credentials (Google's OAuth dialog has both a client ID and a
+  client secret), the into_slot capture was sealing the first non-masked value
+  (the ID). Pass `secret_label:"client secret"` to seal the right one.
+
+## 0.9.19-rc.15 (2026-06-27)
+
+Prerelease (`next`). Two fixes from the second live operator-surface run (the
+"add Google OAuth" capstone, which reached one Firebase toggle from done).
+
+- **fix(operate):** `operate_act{click}` now activates ARIA toggles —
+  `<button role="switch">` / `role="checkbox"` (Firebase's Google-provider
+  "Enable" switch, Material toggles). A synthetic click often doesn't flip these;
+  we now click, and if `aria-checked` doesn't move, focus + press Space (then
+  Enter). This was the last blocker on the OAuth capstone.
+- **fix(operate):** `operate_extract{into_slot}` never seals a *masked* secret —
+  Google's OAuth client secret renders as `GOCSPX-••••` + a copy button, and the
+  slot was capturing the mask. Now it prefers a non-masked value and, if only a
+  masked one is present, returns `sealed:false` with a "reveal it first" reason.
+
+## 0.9.19-rc.14 (2026-06-26)
+
+Prerelease (`next`). Two fixes from the first live operator-surface test run
+(Codex against rc.13), plus removal of the inert `TRUSTY_SQUIRE_OPERATE` flag.
+
+- **feat(operate):** `operate_act{kind:"scroll", direction?}` reveals
+  below-the-fold controls on long SPA forms (the GCP-console capstone stalled
+  because lower fields never entered the element inventory). `operate_observe`
+  after a scroll picks up the newly-visible elements.
+- **feat(operate):** `operate_await_verification{into_slot}` seals a found email
+  OTP into a session slot — the host gets a masked handle, not the digits, and
+  enters it with `operate_act{type_secret, slot}`. The code never round-trips
+  through the host (safer, and dodges host-side payload truncation).
+- **removed:** the inert `TRUSTY_SQUIRE_OPERATE` flag (it gated nothing; the
+  real gate is per-call `require_live_identity`).
+
+## 0.9.19-rc.13 (2026-06-26)
+
+Prerelease (`next`). **Operator surface Phase 1** — the host-driven browser
+tools generalize from "drive a signup, extract a key" to driving arbitrary,
+credential-gated, often multi-app tasks. Every new capability is opt-in
+per-call (the precondition gate fires only on `require_live_identity`; the new
+params/actions activate only when the host uses them).
+
+- **renamed:** the 7 `provision_*` tools → `operate_*` (no aliases), plus a new
+  `operate_finish_task`. `operate_finish` stays for abort.
+- **feat(operate):** multi-app task scope — `operate_start{allowed_hosts[]}` and
+  a mid-session `allow_host` action let a task cross between apps (GCP Console →
+  Firebase → your app). Source-tracked allow-set; hardened host validation
+  (rejects punycode/IP/IPv6/public-suffix/port/wildcard).
+- **feat(operate):** sealed in-session credential transfer — `operate_extract`
+  `{into_slot}` stashes a secret server-side (host gets a masked handle only);
+  `operate_act{type_secret}` types the real value into another site's form. The
+  raw secret never crosses the MCP boundary (the write-only-vault moat extended
+  to transfers).
+- **feat(operate):** pluggable terminal — `operate_finish_task` reports
+  `kind:"credentials"` (extract + vault-store, byte-identical to the old store
+  path) or `kind:"result"` (a summary + structured data for any task).
+- **feat(operate):** Google-session precondition gate — operate tasks acting as
+  the user (`require_live_identity`) fail closed to a connect hand-back BEFORE
+  driving when no live session exists, instead of hitting a mid-task wall.
+- **security(vault):** credential egress decoupled from task scope — explicit
+  `egress_hosts` + service-default table (added gcp/firebase/fcm → googleapis);
+  a mid-session host never seeds a key's egress allow-list.
+
+## 0.9.19-rc.12 (2026-06-25)
+
+Prerelease (`next`). Fixes Goose installs that kept loading older Trusty Squire
+servers after reconnecting.
+
+- fixed(connect): Goose configs written from npx now launch
+  `npx -y @trusty-squire/mcp@<version> server` instead of pinning a temporary
+  npx cache path that can disappear or keep stale tool schemas alive.
+- fixed(connect): Goose reconnects now remove legacy `trustysquire` /
+  `trusty-squire` extension aliases, including old entries pinned to versions
+  like `@trusty-squire/mcp@0.4.1`, while preserving useful env settings such as
+  proxy configuration.
+
+## 0.9.19-rc.11 (2026-06-25)
+
+Prerelease (`next`). Removes the old async provisioning surface and deprecated
+installer compatibility flags for the host-driven signup flow.
+
+- removed(provision): the public MCP tool list no longer exposes `provision` or
+  `check_provision_status`; agents now drive signups directly with
+  `provision_start`, `provision_observe`, `provision_act`, `provision_extract`,
+  and `provision_finish`.
+- removed(connect): the old `install` command alias and deprecated flags
+  `--registry`, `--registry-url`, `--skip-login`, and `--skip-secondary` now
+  fail fast with explicit migration guidance.
+- changed(connect): managed skill registry participation defaults on, while
+  `--no-registry` remains the explicit opt-out.
+- changed(provision): the interactive signup driver is always available; the
+  previous environment opt-out was removed.
+- docs(connect): README, agent guidance, and helper scripts now describe
+  `connect` and the explicit signup-driver tools only.
+
+## 0.9.19-rc.10 (2026-06-25)
+
+Prerelease (`next`). Improves the interactive signup driver after the latest
+dogfood batch against hosted developer tools.
+
+- feat(provision): observations now include generated action refs plus compact
+  accessibility-style region context, so planners can target repeated labels
+  without guessing from flat page text.
+- fix(provision): OAuth sessions recover the active product page after popup or
+  account-switch flows, and tenant subdomains reached by organic redirects can
+  be reused for scoped navigation.
+- fix(provision): credential extraction drops UI noise such as versions, dates,
+  referral codes, key names, masked placeholders, and Together-style key IDs.
+  Langfuse and Neon extraction now normalize the real one-time key/token fields.
+- fix(provision): post-signup recovery can try curated key routes, reveal masked
+  credential surfaces before sweeping, detect create-key/payment loops, and use
+  Render account settings when API keys live behind the account menu.
+
+## 0.9.19-rc.9 (2026-06-25)
+
+Prerelease (`next`). Tightens the session-agent install flow after the first
+account-switching and consent tests.
+
+- fix(connect): `--force-relogin=google|github` can now clear a single provider
+  session while bare `--force-relogin` still resets the full browser profile for
+  a true account switch.
+- fix(connect): duplicate install claims recover from the paired state instead
+  of surfacing `not_pending` after the user completes browser sign-in.
+- changed(connect): managed skill registry and skillification consent are now
+  one user-facing choice. Registry participation controls whether successful,
+  redacted signup/navigation traces can become reusable skills.
+- changed(connect): registry participation, matching-service email OTP polling,
+  and proxy URL moved into Advanced settings. OTP polling defaults to off.
+- fix(connect): proxy URLs from the CLI or browser claim are parsed and
+  whitespace/control characters are rejected before they reach MCP config env.
+- changed(connect): stale LLM/provider setup copy was removed from the install
+  flow; signups are now described as session-agent driven.
+
+## 0.9.19-rc.8 (2026-06-25)
+
+Prerelease (`next`). Account-switching and privacy gates for the session-agent
+signup flow.
+
+- fix(connect): `connect --force-relogin` now waits for the bot Chrome profile
+  to be free, then clears the whole bot browser profile. This wipes the
+  Trusty Squire app session as well as provider cookies, so the Google sign-in
+  button prompts for a fresh account instead of silently reusing the old
+  install session.
+- feat(connect): install now asks two explicit permissions: whether successful
+  signup/navigation traces may become reusable skills without personal data or
+  secrets, and whether the squire may poll only matching OTP/verification
+  emails for the requested service.
+- fix(provision): the persisted consent flags are enforced at runtime. Missing
+  or declined consent disables auto-promotion/skillification and disables
+  operator-inbox OTP/device-link polling.
+- chore(connect): the interactive setup copy no longer asks users to configure
+  or provision their own LLM. Signups are described as session-agent driven.
+
+## 0.9.19-rc.7 (2026-06-25)
+
+Prerelease (`next`). Extraction fails CLOSED on a login wall — kills the
+last class of false-green (the Grok/X case from the field test).
+
+- fix(provision): `provision_extract` now detects an anti-bot / login-wall page
+  (X's "JavaScript is not available" tombstone, Cloudflare's "Just a moment",
+  "Verifying you are human", etc.) and refuses to scrape it. Such a page has no
+  credential — every token on it is a session/CSRF/asset value — so returning one
+  is a false-green. The tool returns `{credentials:{}, blocked_reason}` instead,
+  telling the host to drive an interactive login or hand back to the user.
+- Net: Grok is a genuine X-login wall (x.ai signup routes through X/Twitter
+  OAuth, which blocks headless Chromium). No hint can overcome X's anti-bot on
+  the login step; the bot now says so explicitly rather than handing back junk.
+
+## 0.9.19-rc.6 (2026-06-25)
+
+Prerelease (`next`). Login-agnostic hints — makes ALL registry skills usable for
+end users regardless of how the discoverer signed up, dissolving the thin-skill
+problem (81% of skills carry no usable login provider).
+
+- feat(provision): the route hint no longer prescribes a login method. A skill's
+  recorded login reflects how the *housekeeper* signed up (usually an email
+  alias), not how the user will. The hint now carries the durable, reusable part
+  — entry URL, the **post-auth navigation breadcrumb** to the keys page, and an
+  always-on "grab EVERY credential, not just the first" exhortation.
+- feat(provision): `provision_start` tells the agent which provider the user
+  **actually has a live session for** (read from profile cookies via
+  `detectSessionProviders`), Google-preferred, with "the account may exist — log
+  IN, don't re-sign-up." So the agent doesn't guess the login.
+- Net: even a skill with `oauth_provider:null` + single-cred now yields a useful
+  hint. (xai-grok's hint now points straight at `console.x.ai` — the keys page —
+  which would have prevented the Grok flail.)
+
+## 0.9.19-rc.5 (2026-06-25)
+
+Prerelease (`next`). Registry-hint reachability (Gap 1) — the hint now finds
+skills whose slug doesn't derive from the URL.
+
+- feat(provision): resolve the route hint by **signup_url host**, not just slug.
+  A skill promoted under a curated name (x.ai → "xai-grok") is unreachable by
+  the URL-canonicalized slug ("x-ai"); `provision_start` now falls back to a new
+  registry lookup (`GET /skills/by-host`) that returns the best skill (active or
+  pending-review) whose signup_url host matches. Requires the registry deploy
+  that adds the endpoint; degrades gracefully (no hint) against an older registry.
+- fix(provision): `renderSkillHint` reads the skill's top-level `oauth_provider`
+  field (the source of truth), not just a click_oauth_button step — so a skill
+  that records its login method surfaces it correctly.
+
+## 0.9.19-rc.4 (2026-06-25)
+
+Prerelease (`next`). Registry-route hints — the map the host agent was missing.
+
+- feat(provision): `provision_start` now consults the registry for a known skill
+  for the target service and, when one exists, attaches a `hint` to the first
+  observation: the route (login method, where the key lives + its shape, how
+  many credentials to expect). The agent reads the map and drives toward it
+  instead of making ad-hoc decisions (the Grok flail: try Google → "account
+  exists" → tombstone → scrape junk). Best-effort: no skill / no registry /
+  network error → no hint, agent drives as before. Pure `renderSkillHint` +
+  `serviceSlugFromUrl` are unit-tested.
+
+## 0.9.19-rc.3 (2026-06-25)
+
+Prerelease (`next`). Two extraction-correctness fixes from the first fresh-agent
+field test (Grok + VouchFlow):
+
+- fix(provision): reject code-identifier false-greens. X's anti-bot tombstone
+  ("JavaScript is not available…") leaked `loader.tweetUnavailableTombstoneHandler`
+  (a JS function name) into `provision_extract`, which wrote it to the vault as
+  an api_key and reported success — a false-green. Any dotted member-access
+  token is now rejected (JWTs excepted via their `eyJ` prefix).
+- fix(provision): multi-credential extraction. The single-key extraction policy
+  stopped at the first key, so VouchFlow's sandbox **read** key was dropped when
+  the **write** key was captured. `provision_extract` now also collects every
+  distinct credential-shaped token (prefix + body + digit) and surfaces the
+  extras as `api_key_2`, `api_key_3`, …
+- Both guarded by unit tests against the exact field-test strings.
+
+## 0.9.19-rc.2 (2026-06-25)
+
+Prerelease (`next`). Boot-crash fix — 0.9.19-rc.1 pinned the stale-by-content
+`@trusty-squire/skill-schema@0.1.2` (published before the `canonicalizeServiceSlug`
+export), so `npx @next` crashed on boot with "does not provide an export named
+'canonicalizeServiceSlug'". Republished skill-schema as `0.1.3-rc.1` with the
+matching content; this build pins it. No feature changes from rc.1.
+
+## 0.9.19-rc.1 (2026-06-25)
+
+Prerelease (`next`). Phase 1 of the host-as-planner architecture: an
+interactive, host-driven provisioning tool surface a frontier coding agent
+drives directly. The agent is the planner; Trusty Squire is the browser + the
+credential-broker moat.
+
+- feat(provision): interactive `provision_*` tool surface (DEFAULT-ON; opt out
+  with `PROVISION_DRIVE_TOOLS=0`). The host agent drives a real signup on the
+  user's machine via a session-held browser: `provision_start` →
+  `provision_observe` / `provision_act` → `provision_captcha_gate` /
+  `provision_await_verification` → `provision_extract` → `provision_finish`.
+  Backed by the existing `BrowserController` substrate (OAuth popup adoption,
+  captcha gate, extraction). Elements are targeted by text/role with
+  re-resolution every action (never a stale index); agent-initiated `goto` is
+  domain-scoped to the target + its identity providers; the vault stays
+  write-only; every action is audit-logged with no credential values.
+- feat(provision): `provision_await_verification` reads the user's OWN inbox
+  through their signed-in browser session (no IMAP, no mail token) — a scoped
+  Gmail search-and-extract for the OTP code / verification link.
+- Validated live end-to-end: a fresh-identity virgin LangWatch signup (Auth0 →
+  Google OAuth → onboarding wizard → API key) driven entirely through the
+  tools. `parseVerification` (OTP/link parsing) and the targeting/scoping logic
+  are unit-tested. Full mcp suite green (2148 passed).
+- Design + remaining hardening (consent-at-install) tracked in
+  `docs/DESIGN-host-planner-perception.md`.
+
 ## 0.9.18 (2026-06-24)
 
 Stable (`latest`). Verify-replay hardening that drove meilisearch pending-review
-→ active end-to-end, plus the egress 503 mitigation (#231/#227).
+-> active end-to-end, plus the egress 503 mitigation (#231/#227).
 
 - fix(verify): replay drives the OAuth login inline instead of bailing
   `needs_login`; restores the product page after a popup-OAuth handshake
@@ -15,7 +494,7 @@ Stable (`latest`). Verify-replay hardening that drove meilisearch pending-review
 - fix(replay): a visible auth gate dominates weak nav keywords in
   `detectAlreadySignedIn` (no more skipping the OAuth step on a /login shell).
 - fix(egress): `Retry-After` + `scope:"proxy"` on the 503, plus a short-TTL
-  credential-lookup cache — a proxy outage no longer burns escalation rungs and
+  credential-lookup cache -- a proxy outage no longer burns escalation rungs and
   the per-request DB pressure (P1017, #227) is relieved.
 
 ## 0.9.18-rc.1 (2026-06-23)
@@ -42,15 +521,6 @@ gcp) plus the generalizing bot fixes that did it.
   (`extractGoogleApiKeyFromCredentials`) pulls the auto-created "Browser key"
   from the GCP credentials page once a project exists — the same AIzaSy is the
   firebase web apiKey AND a GCP API key, so one extractor covers both.
-
-## 0.9.17 (2026-06-23)
-
-Stable (`latest`). Promotes the 0.9.17 line (rc.1–rc.5) from staging: anti-bot
-fingerprint hardening (in-iframe WebGL spoof + real-GPU remote-CDP), the
-refuse-walled provision gate for BYO anchors, semantic-nav + verifier hardening,
-the egress-grant resilient proxy path, per-service capture isolation, the
-shopping pre-bot signup-link resolver, and the queue/spine + test-debt cleanup
-that gets the suite fully green. See the rc entries below for the detail.
 
 ## 0.9.17-rc.5 (2026-06-23)
 

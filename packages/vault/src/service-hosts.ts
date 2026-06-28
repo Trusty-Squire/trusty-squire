@@ -42,6 +42,18 @@ export const KNOWN_SERVICE_HOSTS: Readonly<Record<string, readonly string[]>> = 
   koyeb: ["app.koyeb.com"],
   groq: ["api.groq.com"],
   huggingface: ["huggingface.co"],
+  // Google Cloud Platform / Firebase — keys are EXTRACTED on the console
+  // (console.cloud.google.com / console.firebase.google.com) but USED against
+  // the API surface, never the console. The operator surface relies on these
+  // defaults so a console-extracted key gets the right egress without the agent
+  // having to know it. normaliseService strips non-alphanumerics:
+  // "GCP"→"gcp", "google-cloud"→"googlecloud", "Firebase"→"firebase".
+  gcp: ["googleapis.com"],
+  googlecloud: ["googleapis.com"],
+  googlecloudplatform: ["googleapis.com"],
+  firebase: ["googleapis.com", "firebaseio.com", "identitytoolkit.googleapis.com"],
+  fcm: ["fcm.googleapis.com"],
+  firebasecloudmessaging: ["fcm.googleapis.com"],
   // Alpaca — brokerage/market-data API. Paper-trading, live trading, and
   // market data are SEPARATE hosts; seed all three so a paper key (the
   // common case) works without an edit. normaliseService("Alpaca") → "alpaca".

@@ -2,12 +2,10 @@
 //
 // In-memory deps in dev/test; production layer wires Prisma-backed
 // stores. We expose `buildServer(deps)` for tests so they can inject
-// a customised dep bundle (notably a VouchflowVerifier with a local
-// JWKS for offline testing).
+// a customised dep bundle.
 
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyCookie from "@fastify/cookie";
-import { loadVouchflowConfig, isStubMode } from "./config/vouchflow.js";
 import { makeAuthMiddleware } from "./auth/middleware.js";
 import { registerInstallRoute } from "./routes/install.js";
 import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
@@ -66,13 +64,25 @@ function defaultPwaBaseUrl(): string {
   return "http://localhost:3002";
 }
 
+// The HS256 secret behind every session + web JWT. In production it MUST be
+// set — fall back to the dev placeholder only outside production, otherwise a
+// missing env var would silently make all session tokens forgeable. Fail
+// closed instead.
+function resolveSessionSecret(): string {
+  const secret = process.env.SESSION_JWT_SECRET;
+  if (secret !== undefined && secret.length > 0) return secret;
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("SESSION_JWT_SECRET must be set in production (refusing to use a dev fallback)");
+  }
+  return "dev-secret-do-not-use";
+}
+
 export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyInstance> {
   const deps =
     opts.deps ??
     buildInMemoryDeps(
       opts.buildDeps ?? {
-        sessionSecret: process.env.SESSION_JWT_SECRET ?? "dev-secret-do-not-use",
-        customerId: loadVouchflowConfig().customerId,
+        sessionSecret: resolveSessionSecret(),
       },
     );
 
@@ -186,8 +196,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps: {
       inbox: deps.inbox,
       machineTokenStore: deps.machineTokenStore,
-      accountStore: deps.accountStore,
-      sessionSecret: deps.sessionSecret,
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     },
   });
@@ -199,8 +207,10 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps: {
       accountStore: deps.accountStore,
       stripe: stripeClient,
+      // Free-during-beta: checkout stays OFF unless explicitly enabled, so a
+      // stray Upgrade click can't charge anyone even with a live Stripe key.
+      billingEnabled: process.env.BILLING_ENABLED === "true" || process.env.BILLING_ENABLED === "1",
       webBaseUrl: defaultPwaBaseUrl(),
-      sessionSecret: deps.sessionSecret,
     },
     requireWeb: auth.requireWeb,
   });
@@ -266,8 +276,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // cron alongside the server. Matches the default buildServer() path
   // when opts.deps isn't passed.
   const deps = buildInMemoryDeps({
-    sessionSecret: process.env.SESSION_JWT_SECRET ?? "dev-secret-do-not-use",
-    customerId: loadVouchflowConfig().customerId,
+    sessionSecret: resolveSessionSecret(),
   });
   const server = await buildServer({ deps });
 

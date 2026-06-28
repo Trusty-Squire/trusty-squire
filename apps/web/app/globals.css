@@ -126,6 +126,52 @@ h1 .dim{color:var(--muted)}
 .cap h3{font-size:21px;font-weight:600;letter-spacing:-.022em;line-height:1.18}
 .cap p{margin-top:var(--s-2);font-size:15px;color:var(--muted);line-height:1.6;
   max-width:56ch}
+.cap p .m{font-family:var(--mono);font-size:.9em;color:var(--fg)}
+
+/* pricing — flat hairline-ruled tiers, mono prices, one accent-marked focal
+   column (see DESIGN.md: no glossy cards, no gradients). */
+.price-hero{padding:var(--s-20) 0 var(--s-4);text-align:center}
+.price-hero h1{font-size:clamp(2rem,4vw,2.6rem);font-weight:600;
+  letter-spacing:-.03em;line-height:1.08}
+.price-hero p{margin:var(--s-3) auto 0;color:var(--muted);font-size:16px;max-width:48ch}
+.price-beta{max-width:760px;margin:var(--s-8) auto 0;padding:10px 14px;
+  text-align:center;font-size:13px;color:var(--muted);
+  background:var(--surface);border:1px solid var(--line2);border-radius:var(--r-md)}
+.tier-feats em{font-style:normal;color:var(--faint);font-size:12px}
+.price-grid{display:grid;grid-template-columns:repeat(2,1fr);
+  border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;
+  max-width:760px;margin:var(--s-12) auto var(--s-24)}
+.tier{display:flex;flex-direction:column;padding:var(--s-8);
+  border-left:1px solid var(--line)}
+.tier:first-child{border-left:0}
+.tier.featured{background:var(--surface);box-shadow:inset 0 2px 0 var(--accent)}
+.tier-name{font-family:var(--mono);font-size:12.5px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--muted)}
+.tier.featured .tier-name{color:var(--accent)}
+.tier-price{margin-top:var(--s-4);display:flex;align-items:baseline;gap:5px}
+.tier-price .amt{font-family:var(--mono);font-size:34px;font-weight:600;
+  letter-spacing:-.02em;color:var(--fg)}
+.tier-price .per{font-family:var(--mono);font-size:14px;color:var(--faint)}
+.tier-tag{margin-top:var(--s-2);font-size:13.5px;color:var(--muted);min-height:38px}
+.tier-cta{margin-top:var(--s-6);display:inline-flex;align-items:center;
+  justify-content:center;padding:9px 16px;border-radius:var(--r-md);
+  font-size:14px;font-weight:600;border:1px solid var(--line2);color:var(--fg);
+  transition:border-color .12s,color .12s,background .12s}
+.tier-cta:hover{border-color:var(--accent)}
+.tier-cta.primary{background:var(--accent-fill);border-color:var(--accent-fill);color:#fff}
+.tier-cta.primary:hover{background:var(--accent-fill-h);border-color:var(--accent-fill-h)}
+.tier-feats{list-style:none;margin-top:var(--s-6);display:flex;
+  flex-direction:column;gap:var(--s-3)}
+.tier-feats li{position:relative;padding-left:20px;font-size:13.5px;
+  color:var(--muted);line-height:1.5}
+.tier-feats li::before{content:"";position:absolute;left:2px;top:7px;
+  width:5px;height:5px;border-radius:1px;background:var(--accent)}
+.tier-feats strong{color:var(--fg);font-weight:600}
+@media(max-width:780px){
+  .price-grid{grid-template-columns:1fr}
+  .tier{border-left:0;border-top:1px solid var(--line)}
+  .tier:first-child{border-top:0}
+}
 
 /* end cta — flat band, no glow */
 .endcta{text-align:center;padding:var(--s-24) 0;border-top:1px solid var(--line)}
@@ -224,11 +270,6 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
   background:var(--surface);border:1px solid var(--line2);color:var(--fg);max-width:520px}
 .app-banner.ok{border-color:rgba(84,216,139,.4);color:var(--ok)}
 .app-banner.err{border-color:rgba(255,107,107,.4);color:var(--err)}
-/* /upgrade — transient pre-auth checkout redirect, centered full-page */
-.upgrade-shell{min-height:100vh;display:flex;align-items:center;justify-content:center;
-  padding:24px;background:var(--bg);color:var(--fg)}
-.upgrade-shell .app-card{max-width:380px}
-.upgrade-shell .btn-primary{margin-top:16px;display:inline-flex;width:auto;padding:9px 18px}
 /* plan pill + account menu (app header) */
 /* free-tier upgrade CTA — accent outline, fills on hover (reads as a button) */
 .nav-r a.plan-cta{font-size:13px;font-weight:600;color:var(--accent);
@@ -480,6 +521,29 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .wizard-step-actions{margin-top:14px}
 .wizard-actions{display:flex;flex-direction:column;gap:8px}
 .wizard-finish{margin-top:24px}
+
+.provider-state{margin-top:16px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+.status-pill{display:inline-flex;align-items:center;gap:6px;
+  font-family:var(--mono);font-size:11px;color:var(--muted);
+  border:1px solid var(--line);border-radius:999px;padding:3px 9px}
+.status-pill.on{color:var(--ok);border-color:rgba(84,216,139,.32)}
+.status-dot{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.status-dot.on{background:var(--ok)}
+.install-advanced{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
+.advanced-toggle{font:inherit;font-size:13px;font-weight:600;color:var(--fg);
+  width:100%;display:flex;align-items:center;justify-content:space-between;
+  background:transparent;border:0;cursor:pointer;padding:0}
+.advanced-toggle span{font-family:var(--mono);font-size:11px;color:var(--muted);
+  font-weight:500}
+.advanced-toggle:disabled{opacity:.55;cursor:default}
+.advanced-panel{margin-top:12px;display:flex;flex-direction:column;gap:12px}
+.check-row{display:flex;align-items:flex-start;gap:10px;text-align:left;
+  font-size:12.5px;color:var(--muted);line-height:1.45}
+.check-row input{margin-top:3px;accent-color:var(--accent-fill)}
+.check-row b{display:block;color:var(--fg);font-size:13px;margin-bottom:1px}
+.field.compact{gap:5px;text-align:left}
+.field.compact span{font-size:12.5px;color:var(--fg);font-weight:600}
+.field.compact input{font-size:12px;font-family:var(--mono);padding:8px 10px}
 
 .spinner{width:15px;height:15px;border-radius:50%;flex:0 0 auto;
   border:2px solid var(--line2);border-top-color:var(--accent);

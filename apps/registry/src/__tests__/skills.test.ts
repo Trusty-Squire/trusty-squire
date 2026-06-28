@@ -302,6 +302,52 @@ describe("POST /skills", () => {
   });
 });
 
+// ── GET /skills/by-host ─────────────────────────────────────────────
+
+describe("GET /skills/by-host", () => {
+  it("resolves a skill by its signup_url host even when the slug differs", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    // Slug "xai-grok" doesn't derive from host "x.ai" — the whole point.
+    await server.inject({
+      method: "POST",
+      url: "/skills",
+      payload: {
+        skill: validSkill({
+          service: "xai-grok",
+          skill_id: testSkillId("H"),
+          signup_url: "https://x.ai/sign-up",
+        }),
+        signature: "x".repeat(64),
+      },
+    });
+
+    const res = await server.inject({ method: "GET", url: "/skills/by-host?host=x.ai" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().skill.service).toBe("xai-grok");
+    await server.close();
+  });
+
+  it("404s when no skill's signup_url matches the host", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    const res = await server.inject({
+      method: "GET",
+      url: "/skills/by-host?host=nonexistent.example",
+    });
+    expect(res.statusCode).toBe(404);
+    await server.close();
+  });
+
+  it("400s when host is missing", async () => {
+    const { skillStore, signer } = buildTestServer();
+    const server = await buildServer({ skillStore, signer });
+    const res = await server.inject({ method: "GET", url: "/skills/by-host" });
+    expect(res.statusCode).toBe(400);
+    await server.close();
+  });
+});
+
 // ── GET /skills/:service ────────────────────────────────────────────
 
 describe("GET /skills/:service", () => {
@@ -550,6 +596,62 @@ describe("POST /skills/:skill_id/replay-outcome", () => {
     // findActiveByService should now skip this skill.
     const active = await directStore.findActiveByService("railway");
     expect(active).toBeNull();
+  });
+
+  it("records transient replay failures without advancing the demotion counter", async () => {
+    const { InMemorySkillStore } = await import("../skill-store-memory.js");
+    const directStore = new InMemorySkillStore();
+    await directStore.insert({
+      skill: validSkill({ skill_id: "01HZTRANSIENTFAILURES000001" }),
+      signature: "sig",
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+
+    for (const [outcome, reason] of [
+      ["needs_login", "Google session needs refresh"],
+      ["step_failed", "page.goto: net::ERR_TIMED_OUT at https://example.test/signup"],
+      [
+        "step_failed",
+        'No element matches text_match="SMTP & API". [returning-user: authenticated session diverged from fresh-signup capture (onboarding/nav element absent - not rot)]',
+      ],
+    ] as const) {
+      const r = await directStore.recordReplayOutcome({
+        skill_id: "01HZTRANSIENTFAILURES000001",
+        outcome,
+        reason,
+        account_id: "acct-1",
+        step_index: 1,
+      });
+      expect(r.demoted).toBe(false);
+      expect(r.consecutive_failures).toBe(0);
+    }
+
+    const active = await directStore.findActiveByService("railway");
+    expect(active?.skill_id).toBe("01HZTRANSIENTFAILURES000001");
+  });
+
+  it("counts stale skill paths as replay rot", async () => {
+    const { InMemorySkillStore } = await import("../skill-store-memory.js");
+    const directStore = new InMemorySkillStore();
+    await directStore.insert({
+      skill: validSkill({ skill_id: "01HZSTALESKILLPATH00000001" }),
+      signature: "sig",
+      signed_at: new Date(),
+      signed_by: "test",
+    });
+
+    const r = await directStore.recordReplayOutcome({
+      skill_id: "01HZSTALESKILLPATH00000001",
+      outcome: "step_failed",
+      reason:
+        "stale_skill_path: 5 consecutive account-state-dependent setup steps were absent before credential extraction",
+      account_id: "acct-1",
+      step_index: 7,
+    });
+
+    expect(r.demoted).toBe(false);
+    expect(r.consecutive_failures).toBe(1);
   });
 
   it("resets consecutive_failures on a successful outcome", async () => {

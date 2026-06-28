@@ -160,6 +160,36 @@ async function hasProviderSession(
   return cookies.some((c) => target.cookies.includes(c.name));
 }
 
+// VALIDATE a session instead of just spotting a cookie. A provider session that
+// expired server-side often leaves its `user_session` cookie sitting in the
+// profile, so name-presence false-positives ("the GitHub marker lies"). Here we
+// navigate to the provider once — which forces it to refresh its ground-truth
+// auth state — and read that, so a dead-but-present session reports false.
+// GitHub: an anonymous/expired visit sets `logged_in=no`; a live one, `=yes`.
+async function validateProviderSession(
+  context: BrowserContext,
+  target: LoginTarget,
+): Promise<boolean> {
+  // Cheap negative: no session cookie at all → definitely not logged in.
+  if (!(await hasProviderSession(context, target))) return false;
+  if (target.provider !== "github") return true; // only GitHub's marker is known to lie
+  const page = await context.newPage();
+  try {
+    await page
+      .goto(target.cookieOrigin, { waitUntil: "domcontentloaded", timeout: 15_000 })
+      .catch(() => undefined);
+    const cookies = await context.cookies("https://github.com");
+    const loggedIn = cookies.find((c) => c.name === "logged_in");
+    // logged_in is GitHub's explicit auth flag; the visit above just refreshed
+    // it to the real state. Treat a missing flag as not-logged-in (fail closed).
+    return loggedIn?.value === "yes";
+  } catch {
+    return false;
+  } finally {
+    await page.close().catch(() => undefined);
+  }
+}
+
 // Inspect the bot Chrome profile on disk and return the set of OAuth
 // providers whose session cookies are currently present. The marker
 // file at logged-in-providers.json is a write-once memo from prior
@@ -185,7 +215,13 @@ export async function detectActiveProviderSessions(
   try {
     const present: OAuthProviderId[] = [];
     for (const id of Object.keys(LOGIN_TARGETS) as OAuthProviderId[]) {
-      if (await hasProviderSession(ctx, LOGIN_TARGETS[id])) present.push(id);
+      // ALWAYS validate (not just cookie-present) — this kills the "GitHub
+      // marker lies" class on EVERY path, including the hot provision start, not
+      // just the install display. validateProviderSession is cheap: it returns
+      // a fast false when no cookie is present (no navigation), and only pays
+      // the github.com round-trip when a github cookie EXISTS and must be proven
+      // live. Google stays presence-based (it doesn't lie this way).
+      if (await validateProviderSession(ctx, LOGIN_TARGETS[id])) present.push(id);
     }
     return present;
   } finally {
@@ -950,7 +986,15 @@ export async function ensureOAuthSession(opts?: {
       preflight: async (ctx) => {
         if (opts?.forceOpen === true) {
           try {
-            await ctx.clearCookies();
+            // Clear ONLY this provider's session cookies — never a bare
+            // ctx.clearCookies(), which wiped EVERY provider (a
+            // force-relogin=github would nuke the live Google session and the
+            // operate precondition gate would then fail "no Google session").
+            // The named session cookies are what define the login; dropping
+            // them forces the next load to the provider's login page.
+            for (const name of target.cookies) {
+              await ctx.clearCookies({ name });
+            }
           } catch {
             // best-effort — if clear fails we still proceed and let
             // the operator hit Sign Out manually in the noVNC.

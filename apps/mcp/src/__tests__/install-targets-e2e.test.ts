@@ -1,7 +1,7 @@
 // E2E #3 — the install CLI works against the four host agents users
 // commonly run: claude-code, codex, goose, cursor. For each target,
 // this test:
-//   1. Runs the same install() entrypoint runCli dispatches to.
+//   1. Runs the same connect() entrypoint runCli dispatches to.
 //   2. Mocks the external dependencies (API handshake + ASN detection
 //      + OAuth login + keytar) so the test is hermetic.
 //   3. Sandboxes HOME to a tmpdir so the writeConfig step lands in
@@ -21,15 +21,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Module-level mocks for the install pipeline's external collaborators.
 // Hoisted by vitest before the install/cli.js import below, so the
-// install() function sees the mocked versions.
+// connect() function sees the mocked versions.
 
 vi.mock("../api-client.js", () => ({
   // Canned install handshake — pretend the API issued a machine token
   // immediately and the user confirmed in the browser within ms.
   issueMachineToken: vi.fn(async () => ({
     machine_token: "tsm_test_machine_token",
-    quota_limit: 10,
-    quota_used: 0,
   })),
   installInitiate: vi.fn(async () => ({
     setup_code: "test_setup_code",
@@ -77,10 +75,10 @@ vi.mock("../bot/google-login.js", async (importOriginal) => {
   };
 });
 
-// Imported after the vi.mock calls so install() sees the mocks. The
+// Imported after the vi.mock calls so connect() sees the mocks. The
 // install/cli.ts module pulls in api-client + bot at top level, so
 // this ordering is load-bearing.
-import { install } from "../install/cli.js";
+import { connect } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
 
 const TARGETS = ["claude-code", "codex", "goose", "cursor"] as const;
@@ -107,11 +105,11 @@ afterEach(async () => {
   await fs.rm(tmpHome, { recursive: true, force: true });
 });
 
-describe("install --target=<agent> writes a valid config", () => {
+describe("connect --target=<agent> writes a valid config", () => {
   for (const target of TARGETS) {
     it(`works for --target=${target}`, async () => {
-      await install({
-        command: "install",
+      await connect({
+        command: "connect",
         target,
         apiBase: "https://test.invalid",
         // Skip the bot's Chrome — `open()` the URL in the default
@@ -136,19 +134,18 @@ describe("install --target=<agent> writes a valid config", () => {
       expect(raw, `${target}: config should reference the squire entry`).toMatch(
         /squire|trusty-squire/,
       );
-      // Skill-registry URL wired by default (rc.10). Without this, the
-      // bot's Tier-2 router has no endpoint and the closed loop can't
-      // close — so the install path must bake it in.
+      // Skill-registry URL is written when registry participation is enabled.
+      // That same choice is also the user's skillification consent.
       expect(
         raw,
-        `${target}: config should set TRUSTY_SQUIRE_REGISTRY_URL by default`,
+        `${target}: config should set TRUSTY_SQUIRE_REGISTRY_URL when enabled`,
       ).toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
     });
   }
 
   it("--no-registry omits TRUSTY_SQUIRE_REGISTRY_URL from the config", async () => {
-    await install({
-      command: "install",
+    await connect({
+      command: "connect",
       target: TARGETS[0]!,
       apiBase: "https://test.invalid",
       skipBrowser: true,
@@ -160,18 +157,61 @@ describe("install --target=<agent> writes a valid config", () => {
     expect(raw).not.toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
   });
 
-  it("--registry-url=<url> overrides the default", async () => {
-    await install({
-      command: "install",
+  it("keeps registry and skillification consent off when registry is disabled", async () => {
+    await connect({
+      command: "connect",
       target: TARGETS[0]!,
       apiBase: "https://test.invalid",
       skipBrowser: true,
       forceRelogin: false,
-      noRegistry: false,
+      noRegistry: true,
       noInteractive: false,
-      registryUrl: "https://staging.registry.test",
     });
     const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
-    expect(raw).toMatch(/staging\.registry\.test/);
+    expect(raw).not.toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
+    const sessionPath = path.join(
+      process.env.XDG_CONFIG_HOME!,
+      "trusty-squire",
+      "session.json",
+    );
+    const session = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
+      consent_skillify_telemetry?: boolean;
+      consent_operator_inbox_otp?: boolean;
+    };
+    expect(session.consent_skillify_telemetry).toBe(false);
+    expect(session.consent_operator_inbox_otp).toBe(false);
+  });
+
+  it("writes the managed registry URL and skillification consent when registry is enabled", async () => {
+    const prev = process.env.TRUSTY_SQUIRE_REGISTRY_URL;
+    process.env.TRUSTY_SQUIRE_REGISTRY_URL = "https://staging.registry.test";
+    try {
+      await connect({
+        command: "connect",
+        target: TARGETS[0]!,
+        apiBase: "https://test.invalid",
+        skipBrowser: true,
+        forceRelogin: false,
+        noRegistry: false,
+        noInteractive: false,
+      });
+      const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
+      expect(raw).toMatch(/registry\.trustysquire\.ai/);
+      expect(raw).not.toMatch(/staging\.registry\.test/);
+      const sessionPath = path.join(
+        process.env.XDG_CONFIG_HOME!,
+        "trusty-squire",
+        "session.json",
+      );
+      const session = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
+        consent_skillify_telemetry?: boolean;
+        consent_operator_inbox_otp?: boolean;
+      };
+      expect(session.consent_skillify_telemetry).toBe(true);
+      expect(session.consent_operator_inbox_otp).toBe(false);
+    } finally {
+      if (prev === undefined) delete process.env.TRUSTY_SQUIRE_REGISTRY_URL;
+      else process.env.TRUSTY_SQUIRE_REGISTRY_URL = prev;
+    }
   });
 });

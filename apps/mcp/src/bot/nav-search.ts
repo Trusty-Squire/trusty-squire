@@ -391,6 +391,9 @@ export function assessKeyGoal(input: {
   pageText: string;
   inventory: readonly InteractiveElement[];
 }): GoalAssessment {
+  if (KEYS_DESTINATION_URL.test(input.url) && looksLikeDeadKeySurface(input.pageText)) {
+    return { kind: "not_yet" };
+  }
   const credentialSurface =
     KEYS_DESTINATION_URL.test(input.url) || TOKEN_CONTEXT_TEXT.test(input.pageText);
   // A create-key affordance on a key surface → mint a fresh key. This is checked
@@ -425,6 +428,12 @@ export function assessKeyGoal(input: {
   // A create affordance off a non-key URL is still worth trying as a last move,
   // but it's not arrival — keep searching with it available to the caller.
   return { kind: "not_yet" };
+}
+
+function looksLikeDeadKeySurface(pageText: string): boolean {
+  const text = pageText.replace(/\s+/g, " ").trim().toLowerCase();
+  if (text.length === 0) return false;
+  return /\b(?:404|not found|page not found|doesn'?t exist|couldn'?t find|route not found)\b/i.test(text);
 }
 
 // ── overlay / wizard handling (T3) ───────────────────────────────────────────

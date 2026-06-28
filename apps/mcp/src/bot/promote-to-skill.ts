@@ -196,18 +196,36 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
       !isIdentityProviderUrl(r.state.url) &&
       !isUnstableSignupEntryUrl(r.state.url),
   );
-  if (entryRound === undefined) {
+  let capturedEntryUrl: string;
+  if (entryRound !== undefined) {
+    capturedEntryUrl = stableSignupEntryUrl(entryRound.state.url, verification.rounds);
+  } else if (
+    input.signupUrl !== undefined &&
+    !isUnstableSignupEntryUrl(input.signupUrl)
+  ) {
+    // No CAPTURED round qualifies as a clean entry — MEASURED 2026-06-24 (auth0:
+    // every round is either an accounts.google.com OAuth page or a per-tenant
+    // manage.auth0.com/dashboard/us/<tenant> URL, both unstable). Fall back to
+    // the KNOWN input signup_url — the entry the discover was HANDED, so it's
+    // authoritative by construction (we deliberately do NOT apply the IdP-host
+    // exclusion here: auth0.com/okta.com are in IDENTITY_PROVIDER_HOSTS because
+    // OTHER services OAuth through them, but when auth0 IS the target service its
+    // own auth0.com/signup is the legitimate entry). Only reject a genuinely
+    // unstable transaction/callback path. OAuth then routes to the (per-tenant)
+    // dashboard naturally, so signup_url == capturedEntryUrl ⇒ no post-OAuth
+    // navigate is synthesized and replay doesn't dead-end on a stale tenant URL.
+    capturedEntryUrl = input.signupUrl;
+  } else {
     return {
       kind: "rejected",
       stage: "synthesis",
       error_kind: "unstable_signup_url",
       message:
-        "Capture did not contain a stable service entry URL; all candidate URLs were identity-provider or post-signup/session transaction pages.",
+        "Capture did not contain a stable service entry URL; all candidate URLs were identity-provider or post-signup/session transaction pages, and no stable input signup_url was supplied.",
       offending_round: 0,
       synthesizer_version: SYNTHESIZER_VERSION,
     };
   }
-  const capturedEntryUrl = stableSignupEntryUrl(entryRound.state.url, verification.rounds);
   const signupUrl = stableSignupEntryUrl(input.signupUrl ?? capturedEntryUrl, verification.rounds);
   const oauthProvider = resolveOAuthProvider(stepsResult.steps, input.oauthProvider);
   const shouldNavigateToCapturedEntryAfterOAuth =
@@ -369,9 +387,6 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // skill_id is derived deterministically from the assembled content
   // so the same captures always produce the same skill_id (test
   // determinism + the registry idempotency on (service, skill_id)).
-  const createdAt = entryRound.state.url; // placeholder unused; created_at sourced from generator
-  void createdAt;
-
   const candidate: Omit<Skill, "skill_id"> = {
     schema_version: SKILL_SCHEMA_VERSION,
     service: input.service,
@@ -510,12 +525,25 @@ function synthesizeSteps(
     }
     // Soft-drop intermediate click/check rounds with text-resolution
     // failures — see the policy comment above.
-    const isSoftDroppable =
+    const isSoftDroppableClick =
       (round.observed.kind === "click" || round.observed.kind === "check") &&
       (translated.error_kind === "missing_text_hint" ||
         translated.error_kind === "ambiguous_text_match" ||
         translated.error_kind === "inventory_entry_not_found");
-    if (isSoftDroppable) {
+    // A CONFIRMATION-modal fill on an unlabeled input is also droppable. MEASURED
+    // 2026-06-24 (pubnub: `fill value="UPDATE"` into an attribute-less modal input
+    // — "Confirm the secret key update by typing UPDATE"). These "type X to
+    // confirm" gates guard a destructive regenerate/revoke the replay never needs
+    // (it reads the EXISTING credential shown on the page), and they're unlabeled
+    // by nature. Detect by a bare confirmation-token value so a real data fill
+    // (which is load-bearing — Sentry's permission grid) is never dropped.
+    const fillValue =
+      round.observed.kind === "fill" ? (round.observed.value ?? "").trim() : "";
+    const isConfirmationFill =
+      round.observed.kind === "fill" &&
+      translated.error_kind === "missing_text_hint" &&
+      /^(?:UPDATE|DELETE|CONFIRM|REVOKE|REGENERATE|DISABLE|ENABLE|REMOVE|YES)$/i.test(fillValue);
+    if (isSoftDroppableClick || isConfirmationFill) {
       if (firstSoftRejection === null) firstSoftRejection = translated;
       continue;
     }
