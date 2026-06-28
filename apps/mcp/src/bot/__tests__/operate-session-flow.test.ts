@@ -217,7 +217,10 @@ describe("operate session — Change 5 precondition gate", () => {
 
 describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {
   it("seals a found OTP into a slot (masked handle, no raw code) and type_secret enters it", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
     const sid = obs.session_id;
     h.visibleText = "Your verification code is 481920. It expires in 10 minutes.";
     const res = await awaitVerification(sid, { intoSlot: "otp" });
@@ -234,11 +237,25 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
   });
 
   it("returns the code normally when into_slot is NOT requested", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
     h.visibleText = "Your verification code is 481920.";
     const res = await awaitVerification(obs.session_id, {});
     expect(res.code).toBe("481920");
     expect(res.sealed).toBeUndefined();
+  });
+
+  it("PR2: refuses the inbox read without consent and hands the code request back", async () => {
+    // No consentInboxRead → default OFF → must NOT read the (mocked) inbox.
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    h.visibleText = "Your verification code is 481920.";
+    const res = await awaitVerification(obs.session_id, {});
+    expect(res.found).toBe(false);
+    expect(res.code).toBeNull();
+    expect(res.needs_user?.resume).toBe("code");
+    expect(res.needs_user?.message).toContain("not consented");
   });
 });
 

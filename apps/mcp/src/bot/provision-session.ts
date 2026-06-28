@@ -199,6 +199,9 @@ interface Session {
   // be `remember`ed as a replayable rail. Records visible text + non-secret
   // params only — sealed secret values stay in secretSlots, never the trace.
   actionTrace: TraceEntry[];
+  // PR2 — whether this session may read the inbox for email verification. From
+  // the install-time consent flag; gates awaitVerification (fail-closed).
+  consentInboxRead: boolean;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -862,6 +865,12 @@ export interface StartOptions {
   // in the bot profile before driving. When true and no live session exists,
   // start hands back (needs_user.connect) BEFORE touching the task.
   requireLiveIdentity?: boolean;
+  // PR2 — may the operator read the inbox for email verification? Sourced from
+  // the install-time `consent_operator_inbox_otp` flag. Default-OFF: when false,
+  // awaitVerification refuses the inbox read and hands the code request back to
+  // the user instead of silently reading mail. Operator/housekeeper deployments
+  // set the flag true (they consent to polling their own OAuth-bound inbox).
+  consentInboxRead?: boolean;
 }
 
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
@@ -950,6 +959,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     secretSlots: new Map(),
     lastElements: [],
     actionTrace: [],
+    consentInboxRead: opts.consentInboxRead === true,
   };
   sessions.set(id, session);
   audit(id, "start", {
@@ -1631,6 +1641,25 @@ export function buildVerificationResult(
   return { session_id: sessionId, found, code, link, needs_user };
 }
 
+// PR2 — consent refusal. The user has not consented to the operator reading
+// their inbox, so we do NOT read it. The session stays live (resumable): the
+// host asks the user for the code and types it, or the user grants inbox consent
+// and retries. Distinct message from buildVerificationResult so the host can tell
+// "consent withheld" apart from "code not found in an inbox we DID read".
+// Exported for unit tests.
+export function buildConsentRefusal(sessionId: string): VerificationResult {
+  const needs_user: NeedsUserCode = {
+    wall: "verification_code",
+    message:
+      "Inbox reading is not consented (consent_operator_inbox_otp is off), so the " +
+      "operator did not read any mail. Ask the user for the verification code and " +
+      "type it into the field with operate_act — the session is still live. To let " +
+      "the operator fetch codes automatically, re-run `connect` and grant inbox access.",
+    resume: "code",
+  };
+  return { session_id: sessionId, found: false, code: null, link: null, needs_user };
+}
+
 export async function awaitVerification(
   sessionId: string,
   opts: AwaitVerificationOptions = {},
@@ -1638,6 +1667,15 @@ export async function awaitVerification(
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
+
+  // PR2 fail-closed gate: without inbox-read consent, do NOT read the user's
+  // mail. Hand the code request back to the user instead (resumable). The old
+  // behavior read mail.google.com unconditionally, silently breaking the
+  // default-off consent promise.
+  if (!session.consentInboxRead) {
+    audit(sessionId, "await_verification", { refused: "no_inbox_consent" });
+    return buildConsentRefusal(sessionId);
+  }
 
   const filters = [
     opts.sender !== undefined && opts.sender.length > 0 ? `from:${opts.sender}` : "",

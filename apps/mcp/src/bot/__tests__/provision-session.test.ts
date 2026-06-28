@@ -12,6 +12,7 @@ import {
   buildAccessibilitySnapshot,
   parseVerification,
   buildVerificationResult,
+  buildConsentRefusal,
   classifyVouchflowCredentials,
   detectExtractionBlock,
   sanitizeExtractedCredentials,
@@ -271,6 +272,18 @@ describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
     expect(r.needs_user).toEqual({
       wall: "verification_code",
       message: expect.stringContaining("Ask the user for the code"),
+      resume: "code",
+    });
+  });
+});
+
+describe("buildConsentRefusal (PR2 — inbox-read consent withheld)", () => {
+  it("hands back resumably without a code and names the consent reason", () => {
+    const r = buildConsentRefusal("sk_2");
+    expect(r).toMatchObject({ session_id: "sk_2", found: false, code: null, link: null });
+    expect(r.needs_user).toEqual({
+      wall: "verification_code",
+      message: expect.stringContaining("not consented"),
       resume: "code",
     });
   });

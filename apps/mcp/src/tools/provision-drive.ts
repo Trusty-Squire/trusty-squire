@@ -32,6 +32,21 @@ import {
 import { isMaskedDisplay } from "../bot/credential-shape.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
+import { openSessionStorage } from "../session.js";
+
+// PR2 — read the install-time inbox-read consent. Default-OFF: a missing flag
+// (older sessions, no session file) means "not consented", so awaitVerification
+// fails closed and hands the code request back to the user. Operator/housekeeper
+// deployments set consent_operator_inbox_otp=true.
+async function readInboxConsent(): Promise<boolean> {
+  try {
+    const storage = await openSessionStorage();
+    const data = await storage.read();
+    return data?.consent_operator_inbox_otp === true;
+  } catch {
+    return false;
+  }
+}
 
 // Best-effort: ask the registry for a known route for this service so the agent
 // drives on rails instead of ad-hoc. Returns undefined on any miss (no skill,
@@ -98,8 +113,10 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   async handler(args) {
     const hint = await resolveRouteHint(args.service_url);
     const extra = [...(args.allowed_hosts ?? []), ...(args.extra_allowed_hosts ?? [])];
+    const consentInboxRead = await readInboxConsent();
     return await startProvisionSession({
       serviceUrl: args.service_url,
+      consentInboxRead,
       ...(extra.length > 0 ? { extraAllowedHosts: extra } : {}),
       ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
       ...(hint !== undefined ? { hint } : {}),
@@ -645,8 +662,10 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
           `pass them as operate_use{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
       );
     }
+    const consentInboxRead = await readInboxConsent();
     return await startProvisionSession({
       serviceUrl: url,
+      consentInboxRead,
       ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
       hint: renderOperatorRecipeHint(recipe),
       ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
