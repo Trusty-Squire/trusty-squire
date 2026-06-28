@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { Shield } from "../components/Shield";
 
-const DOCS_URL = "https://github.com/trusty-squire/trusty-squire#readme";
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
 const GITHUB_URL = "https://github.com/trusty-squire/trusty-squire";
 
@@ -19,7 +18,6 @@ export default function PricingPage() {
           </Link>
           <div className="nav-r">
             <Link href="/pricing">Pricing</Link>
-            <a href={DOCS_URL}>Docs</a>
             <a href={GITHUB_URL}>GitHub</a>
             <Link className="signin" href="/login">
               Sign in
@@ -103,7 +101,6 @@ export default function PricingPage() {
             </Link>
             <div className="foot-l">
               <Link href="/pricing">Pricing</Link>
-              <a href={DOCS_URL}>Docs</a>
               <a href={NPM_URL}>npm</a>
               <a href={GITHUB_URL}>GitHub</a>
             </div>

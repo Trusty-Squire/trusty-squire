@@ -59,7 +59,6 @@ export default function Page() {
           </Link>
           <div className="nav-r">
             <Link href="/pricing">Pricing</Link>
-            <a href={DOCS_URL}>Docs</a>
             <a href={GITHUB_URL}>GitHub</a>
             <Link className="signin" href="/login">
               Sign in
@@ -88,9 +87,9 @@ export default function Page() {
               <span className="dim">Your trusty squire handles the rest.</span>
             </h1>
             <p className="sub">
-              Move at the speed of your AI agent — without worrying about leaked
-              secrets. Your squire signs up for the services you need, drives the
-              setup behind any login, and vaults every key it touches.
+              Your squire signs up for the SaaS you need, does the click-work
+              behind every login, and seals each key in a vault that never leaks
+              it. You just keep shipping.
             </p>
             <div className="cta">
               <CopyChip />
@@ -179,7 +178,6 @@ export default function Page() {
             </Link>
             <div className="foot-l">
               <Link href="/pricing">Pricing</Link>
-              <a href={DOCS_URL}>Docs</a>
               <a href={NPM_URL}>npm</a>
               <a href={GITHUB_URL}>GitHub</a>
             </div>
