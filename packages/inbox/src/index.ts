@@ -23,12 +23,6 @@ export {
 } from "./inbox-service.js";
 
 export {
-  MailgunHandler,
-  type MailgunHandlerDeps,
-  type MailgunInboundPayload,
-} from "./mailgun-handler.js";
-
-export {
   ResendHandler,
   type ResendHandlerDeps,
   type ResendInboundPayload,

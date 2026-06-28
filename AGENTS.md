@@ -402,9 +402,9 @@ Read this file. Follow the rules. Run the verify script. Paste the output. Then 
 ## Skill-Promotion Pipeline (autonomous loop)
 
 How a successful provision becomes a replayable, registry-published **Skill** —
-fully automatically, no human in the path. This is the "maximize skills in the
-registry" half of the autonomous loop; the runtime/retry half is the provision
-state machine + policy (`packages/skill-schema/src/provision-state.ts`).
+fully automatically, no human in the path. This is the skill-growth half of
+the loop; the runtime/retry half is host-driven — the host agent plans each
+step and its retries via the `operate_*` tools (no in-package state machine).
 
 ### Pipeline: capture → synthesize → sign → publish → verify → active
 
@@ -446,12 +446,10 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
 - **No real credentials in fixtures** (captures redact to field NAMES). A leaked
   real key = rotate + delete the account.
 - **Write-only vault** — no path reads a secret back; promotion never needs to.
-- **failure-taxonomy / provision-state are shared** in `@trusty-squire/skill-schema`
-  so the registry and the mcp client agree. Change them there; never fork.
+- **failure-taxonomy is shared** in `@trusty-squire/skill-schema` so the
+  registry and the mcp client agree. Change it there; never fork.
 
 ### Reference
 
 - `packages/skill-schema/src/skill.ts` (`SkillSchema`, `entry_state`)
-- `packages/skill-schema/src/provision-state.ts`, `provision-policy.ts`
-- `apps/mcp/src/bot/promote-to-skill.ts`, `apps/mcp/src/bot/onboarding-capture.ts`
-- `apps/mcp/src/tools/provision-any.ts` (`runAutoPromote`)
+- `apps/mcp/src/bot/promote-to-skill.ts`, `apps/mcp/src/bot/onboarding-capture.ts` (auto-promote)

@@ -25,7 +25,7 @@ import {
   type OnboardingOutcomeFile,
 } from "../onboarding-capture.js";
 import { inferSemanticTransition } from "../semantic-transition.js";
-import type { PostVerifyStep, SignupResult } from "../agent.js";
+import type { PostVerifyStep, SignupResult } from "../provision-types.js";
 
 // Synthetic test fixtures — never any real captures.
 

@@ -94,20 +94,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
 
   await fastify.register(fastifyCookie);
 
-  // Add raw body parser for email webhooks
-  fastify.addContentTypeParser('message/rfc822', { parseAs: 'buffer' }, (req, body, done) => {
-    done(null, body);
-  });
-
-  // Add text/plain parser for SNS notifications
-  fastify.addContentTypeParser('text/plain', { parseAs: 'string' }, (req, body: string | Buffer, done) => {
-    try {
-      const text = typeof body === 'string' ? body : body.toString();
-      done(null, JSON.parse(text));
-    } catch (err) {
-      done(err as Error, undefined);
-    }
-  });
 
   // Replace the default JSON parser with one that also stashes the raw
   // body string on req.rawBody. Webhook signature verification (Svix /

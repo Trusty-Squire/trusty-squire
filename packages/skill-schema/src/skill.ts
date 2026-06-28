@@ -750,11 +750,10 @@ export const SkillSchema = z
 
     // Which provision STATE this recipe was discovered/replays in. Additive +
     // optional (omitted on pre-existing skills → canonical bytes unchanged).
-    // Lets the autonomous loop pick the right recipe for a detected entry state
-    // and lets verify assert it replays in that state. The transient states
-    // (email_pending / rate_limited) are NOT recipe entry points — they're
-    // runtime conditions handled by provision-policy — so only the two real
-    // entry states are allowed here. See provision-state.ts.
+    // Lets the host-driven loop pick the right recipe for a detected entry
+    // state and lets verify assert it replays in that state. Transient runtime
+    // conditions (email_pending / rate_limited) are NOT recipe entry points,
+    // so only the two real entry states are allowed here.
     entry_state: z
       .enum(["virgin", "authenticated"])
       .optional()

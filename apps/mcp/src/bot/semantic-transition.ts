@@ -1,5 +1,5 @@
 import type { InteractiveElement } from "./browser.js";
-import type { PostVerifyStep } from "./agent.js";
+import type { PostVerifyStep } from "./provision-types.js";
 import type { FailureStage } from "./failure-stage.js";
 
 export const SEMANTIC_TRANSITION_SCHEMA_VERSION = 1 as const;

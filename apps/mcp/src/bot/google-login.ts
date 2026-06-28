@@ -41,7 +41,7 @@ import boxen from "boxen";
 import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
 import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, waitForProfileFree } from "./profile.js";
-import { markProviderLoggedIn } from "./login-state.js";
+import { markProviderLoggedIn, recordProviderEmail } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -1026,6 +1026,46 @@ export async function ensureOAuthSession(opts?: {
   }
 }
 
+// PR3 signin-vault: pull the signed-in Google address out of an account page's
+// text. The OneGoogle account chip carries an aria-label like
+// "Google Account: Ada Lovelace (ada@example.com)" on every Google surface, so
+// prefer that anchored match; fall back to the first email-shaped token (the
+// myaccount.google.com page renders the address prominently). Pure + exported
+// for unit tests — the live navigation that feeds it is captureGoogleEmail.
+const EMAIL_TOKEN_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
+export function extractGoogleAccountEmail(pageText: string): string | null {
+  const chip = /Google Account:[^()]*\(([^)]+)\)/i.exec(pageText);
+  if (chip?.[1] !== undefined) {
+    const m = EMAIL_TOKEN_RE.exec(chip[1]);
+    if (m !== null) return m[0].trim();
+  }
+  const any = EMAIL_TOKEN_RE.exec(pageText);
+  return any !== null ? any[0].trim() : null;
+}
+
+// Capture-at-login: with the profile's live Google session, read the account's
+// email once and persist it to the profile marker so provision can fill it as
+// the signup email (user-owned accounts) without a per-run scrape. Best-effort:
+// any failure leaves the marker unset and provision proceeds without a pre-known
+// email. Only meaningful for google (the inbox identity); github has no inbox.
+async function captureGoogleEmail(
+  context: BrowserContext,
+  profileDir: string,
+): Promise<void> {
+  let page: Awaited<ReturnType<BrowserContext["newPage"]>> | null = null;
+  try {
+    page = await context.newPage();
+    await page.goto("https://myaccount.google.com/", { waitUntil: "domcontentloaded", timeout: 15_000 });
+    const text = await page.evaluate(() => document.body.innerText).catch(() => "");
+    const email = extractGoogleAccountEmail(text);
+    if (email !== null) recordProviderEmail("google", email, profileDir);
+  } catch {
+    /* best-effort — no pre-known email this run */
+  } finally {
+    if (page !== null) await page.close().catch(() => undefined);
+  }
+}
+
 // Public entry for the install flow: opens the trustysquire /install
 // confirm URL in the bot's persistent Chrome profile, runs the
 // user-supplied check until the install is claimed (or the deadline
@@ -1089,7 +1129,12 @@ export async function openInstallConfirmInBotChrome(opts: {
               break;
             }
           }
-          if (hit) markProviderLoggedIn(provider, profileDir);
+          if (hit) {
+            markProviderLoggedIn(provider, profileDir);
+            // Capture-at-login: store the Google email now (the one moment it's
+            // certain) so provision fills it as the user-owned signup email.
+            if (provider === "google") await captureGoogleEmail(context, profileDir);
+          }
         }
       },
     });

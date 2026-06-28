@@ -71,6 +71,9 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   startProvisionSession,
   act,
@@ -80,6 +83,11 @@ import {
   finishProvisionSession,
   closeAllProvisionSessions,
 } from "../provision-session.js";
+import {
+  provisionPrepareLoginTool,
+  provisionStoreLoginTool,
+} from "../../tools/provision-drive.js";
+import type { ApiClient } from "../../api-client.js";
 
 function elem(partial: Record<string, unknown>): unknown {
   return {
@@ -217,7 +225,10 @@ describe("operate session — Change 5 precondition gate", () => {
 
 describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {
   it("seals a found OTP into a slot (masked handle, no raw code) and type_secret enters it", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
     const sid = obs.session_id;
     h.visibleText = "Your verification code is 481920. It expires in 10 minutes.";
     const res = await awaitVerification(sid, { intoSlot: "otp" });
@@ -234,11 +245,39 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
   });
 
   it("returns the code normally when into_slot is NOT requested", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/",
+      consentInboxRead: true,
+    });
     h.visibleText = "Your verification code is 481920.";
     const res = await awaitVerification(obs.session_id, {});
     expect(res.code).toBe("481920");
     expect(res.sealed).toBeUndefined();
+  });
+
+  it("PR2: refuses the inbox read without consent and hands the code request back", async () => {
+    // No consentInboxRead → default OFF → must NOT read the (mocked) inbox.
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    h.visibleText = "Your verification code is 481920.";
+    const res = await awaitVerification(obs.session_id, {});
+    expect(res.found).toBe(false);
+    expect(res.code).toBeNull();
+    expect(res.needs_user?.resume).toBe("code");
+    expect(res.needs_user?.message).toContain("not consented");
+  });
+
+  it("PR3b: grant_inbox_consent reads the inbox after an in-context yes, and is remembered", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const sid = obs.session_id;
+    h.visibleText = "Your verification code is 481920.";
+    // First call refuses (consent OFF).
+    expect((await awaitVerification(sid, {})).found).toBe(false);
+    // Host relays the user's yes → grant + read.
+    const granted = await awaitVerification(sid, { grantConsent: true });
+    expect(granted.found).toBe(true);
+    expect(granted.code).toBe("481920");
+    // Remembered for the session: a later await needs no re-grant.
+    expect((await awaitVerification(sid, {})).found).toBe(true);
   });
 });
 
@@ -252,5 +291,76 @@ describe("operate session — scroll (T5 fix: reveal below-the-fold controls)", 
     const obs = await startProvisionSession({ serviceUrl: "https://console.cloud.google.com/" });
     await act(obs.session_id, { kind: "scroll", direction: "bottom" });
     expect(h.scrolls).toEqual(["bottom"]);
+  });
+});
+
+describe("operate session — PR3c username/password login (capture-at-login sourced)", () => {
+  let profileDir: string;
+  beforeEach(() => {
+    profileDir = mkdtempSync(join(tmpdir(), "ts-pr3c-"));
+  });
+  afterEach(() => {
+    rmSync(profileDir, { recursive: true, force: true });
+  });
+
+  function withEmail(email: string): void {
+    writeFileSync(join(profileDir, "provider-emails.json"), JSON.stringify({ google: email }));
+  }
+
+  it("prepare_login seals the captured user email + a generated password (masked handles only)", async () => {
+    withEmail("ada@example.com");
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
+    const res = (await provisionPrepareLoginTool.handler(
+      { session_id: obs.session_id },
+      null as unknown as ApiClient,
+    )) as { slots: { login: { preview: string }; password: { length: number } }; email_preview: string };
+    // Neither the handle preview nor the email_preview leaks the raw address.
+    expect(res.email_preview).not.toContain("ada@example.com");
+    expect(res.slots.login.preview).not.toContain("ada@example.com");
+    expect(res.slots.password.length).toBeGreaterThanOrEqual(16);
+  });
+
+  it("prepare_login hands back when no user email was captured", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
+    const res = (await provisionPrepareLoginTool.handler(
+      { session_id: obs.session_id },
+      null as unknown as ApiClient,
+    )) as { needs_user?: { wall: string; resume: string } };
+    expect(res.needs_user?.wall).toBe("user_email");
+    expect(res.needs_user?.resume).toBe("connect");
+  });
+
+  it("store_login vaults the sealed email+password as username_password, no raw values returned", async () => {
+    withEmail("ada@example.com");
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
+    await provisionPrepareLoginTool.handler({ session_id: obs.session_id }, null as unknown as ApiClient);
+
+    let captured: { service: string; type?: string; fields?: Record<string, string> } | undefined;
+    const api = {
+      storeCredential: async (input: { service: string; type?: string; fields?: Record<string, string> }) => {
+        captured = input;
+        return {
+          reference: "vault://acct/login1",
+          service: input.service,
+          label: "default",
+          field_names: ["username", "password"],
+          allowed_hosts: [],
+          created_at: "now",
+          updated: false,
+        };
+      },
+    } as unknown as ApiClient;
+
+    const res = (await provisionStoreLoginTool.handler(
+      { session_id: obs.session_id, service: "example" },
+      api,
+    )) as { reference: string; type: string };
+
+    expect(captured?.type).toBe("username_password");
+    expect(captured?.fields?.username).toBe("ada@example.com");
+    expect((captured?.fields?.password ?? "").length).toBeGreaterThanOrEqual(16);
+    expect(res.reference).toBe("vault://acct/login1");
+    // The raw password must not appear in the tool's response.
+    expect(JSON.stringify(res)).not.toContain(captured?.fields?.password ?? "UNSET");
   });
 });

@@ -11,11 +11,7 @@
   },
   "files": [
     "dist",
-    "assets",
-    "!dist/bot/eval-*",
-    "!dist/bot/build-corpus.*",
-    "!dist/bot/label-target.*",
-    "!dist/bot/failure-stats.*"
+    "assets"
   ],
   "publishConfig": {
     "access": "public"

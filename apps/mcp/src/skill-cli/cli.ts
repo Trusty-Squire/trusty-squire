@@ -23,11 +23,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import { spawnSync } from "node:child_process";
 import { CliExit, ExitCode } from "./errors.js";
-import { clientFromEnvOrThrow, RegistryHttpClient } from "./registry-http.js";
+import { clientFromEnvOrThrow } from "./registry-http.js";
+import type { RegistryHttpClient } from "./registry-http.js";
 import { signSkillForPublish } from "./signing.js";
 import { promoteToSkill, deriveSkillId } from "../bot/promote-to-skill.js";
-import { replaySkill } from "../bot/replay-skill.js";
-import { BrowserController } from "../bot/browser.js";
 import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
 
 // ── Public entry point ──────────────────────────────────────────────
@@ -51,11 +50,6 @@ export interface SkillCliOpts {
    * KeyObject so they don't have to round-trip a real env var.
    */
   signingPrivateKey?: import("node:crypto").KeyObject;
-  /**
-   * Browser factory for `replay-test`. Default: `new BrowserController()`.
-   * Tests inject a stub.
-   */
-  browserFactory?: () => BrowserController;
   /**
    * Editor invocation for `edit`. Default: spawnSync($EDITOR, [filePath]).
    * Tests inject a function that mutates the tempfile in place — that's
@@ -113,8 +107,6 @@ export async function runSkillCli(
         return await cmdReactivate(argv.slice(1), client, stdout);
       case "delete":
         return await cmdDelete(argv.slice(1), client, stdout);
-      case "replay-test":
-        return await cmdReplayTest(argv.slice(1), client, stdout, opts);
       case "diff":
         return await cmdDiff(argv.slice(1), client, stdout);
       case "edit":
@@ -824,72 +816,6 @@ async function cmdDelete(
   return ExitCode.OK;
 }
 
-// ── replay-test ─────────────────────────────────────────────────────
-
-async function cmdReplayTest(
-  argv: string[],
-  client: RegistryHttpClient,
-  out: (line: string) => void,
-  opts: SkillCliOpts,
-): Promise<number> {
-  const parsed = parseFlags(argv);
-  rejectUnknownFlags(parsed, new Set(["full", "json"]));
-  requirePositional(parsed, 1, "service");
-  const service = parsed.positional[0]!;
-  const full = parsed.booleans.has("full");
-  const json = parsed.booleans.has("json");
-
-  // Fetch the active skill — same endpoint the router uses. 404 here
-  // becomes CliExit(NOT_FOUND, …) via the http client.
-  const envelope = await client.get<{ ok: boolean; skill: unknown; signed_by: string }>(
-    `/skills/${encodeURIComponent(service)}`,
-  );
-  let skill: Skill;
-  try {
-    skill = parseSkill(envelope.skill);
-  } catch (err) {
-    throw new CliExit(
-      ExitCode.GENERIC,
-      `registry returned a skill that fails schema validation: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-
-  // Boot the browser. Tests inject a stub so they don't need
-  // Playwright/Chromium.
-  const browser = (opts.browserFactory ?? (() => new BrowserController({ humanize: true })))();
-  let outcome: Awaited<ReturnType<typeof replaySkill>>;
-  try {
-    await browser.start();
-    outcome = await replaySkill({
-      skill,
-      browser,
-      mode: full ? "full" : "dry",
-      templateValues: {
-        EMAIL_ALIAS: `replay-test-${Date.now()}@example.invalid`,
-        TOKEN_NAME: `replay-test-${Date.now()}`,
-      },
-    });
-  } finally {
-    try { await browser.close(); } catch { /* noop */ }
-  }
-
-  const payload = { ok: outcome.kind === "ok" || outcome.kind === "dry_pass", outcome };
-  if (json) {
-    out(JSON.stringify(payload, null, 2));
-  } else if (outcome.kind === "dry_pass") {
-    out(`dry-pass: walked ${outcome.stepsWalked} steps without executing the credential-creating click.`);
-  } else if (outcome.kind === "ok") {
-    out(`ok: full-mode replay extracted a credential via ${outcome.via}.`);
-  } else {
-    out(`failed: ${outcome.kind}`);
-    if ("reason" in outcome) out(`  reason: ${outcome.reason}`);
-    if ("stepIndex" in outcome) out(`  at step ${outcome.stepIndex}`);
-  }
-  return outcome.kind === "ok" || outcome.kind === "dry_pass"
-    ? ExitCode.OK
-    : 6; // T30 exit code for replay-test rejection (design doc §CLI)
-}
-
 // ── diff ────────────────────────────────────────────────────────────
 
 type StepDiffEntry =
@@ -1351,9 +1277,6 @@ Subcommands:
 
   delete      <skill_id> --confirm [--json]
               Hard-delete a skill and its captures. Irreversible.
-
-  replay-test <service> [--full] [--json]
-              Re-run the active skill's replay against the live page. Default: dry mode.
 
   diff        <service> <v1> <v2> [--json]
               Semantic step-graph diff between two skill versions for a service.
