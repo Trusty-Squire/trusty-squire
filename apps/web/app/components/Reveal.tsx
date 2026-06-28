@@ -41,6 +41,19 @@ export function Reveal({
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    // No IntersectionObserver support → never leave content invisible.
+    if (typeof IntersectionObserver === "undefined") {
+      setShown(true);
+      return;
+    }
+    // Already on-screen at mount (e.g. a short mobile hero leaves the next
+    // section visible before any scroll) → reveal it right away so the page
+    // never paints a blank void below the fold.
+    const rect = el.getBoundingClientRect();
+    if (rect.top < window.innerHeight && rect.bottom > 0) {
+      setShown(true);
+      return;
+    }
     const io = new IntersectionObserver(
       ([entry]) => {
         if (entry.isIntersecting) {

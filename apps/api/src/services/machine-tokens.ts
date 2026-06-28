@@ -3,19 +3,12 @@
 // service; it's bound to the user's account during the install-claim
 // handshake (see routes/mcp-install.ts).
 //
-// Quota: each machine_token gets ACCOUNT_FREE_QUOTA free signups before
-// the alias-create path returns payment_required. Per-account
-// aggregation (sum across all machine_tokens for an account) is a
-// follow-up; today the count tracks per machine_token, which lines up
-// with the typical one-account-one-machine case.
+// There is no signup quota: provisioning is free during beta. The 402
+// paywall + per-token counter were removed (see routes/inbox.ts).
 
 import { randomBytes } from "node:crypto";
 
 const TOKEN_PREFIX = "tsm_";
-const DEFAULT_QUOTA = Number.parseInt(
-  process.env.ACCOUNT_FREE_QUOTA ?? "10",
-  10,
-);
 
 // Network classification recorded at install time. Used downstream to
 // correlate captcha failures with egress reputation — see CaptchaEvent
@@ -31,7 +24,6 @@ export interface AsnFingerprint {
 export interface MachineTokenRecord {
   token: string;
   created_at: Date;
-  signup_count: number;
   last_used_at: Date | null;
   // The account this machine token is bound to (set by the install-
   // claim handshake). Internal field name retains the `paired_` prefix
@@ -48,7 +40,6 @@ export interface MachineTokenStore {
   // cron, analytics) can read it without a second lookup.
   issue(now: Date, asn?: AsnFingerprint): Promise<MachineTokenRecord>;
   find(token: string): Promise<MachineTokenRecord | null>;
-  incrementUsage(token: string, now: Date): Promise<MachineTokenRecord | null>;
   markPaired(token: string, accountId: string): Promise<void>;
   // Hard-delete every machine token paired to an account. Used by account
   // erasure — the account is gone, so its machine credentials must go too.
@@ -66,7 +57,6 @@ export class InMemoryMachineTokenStore implements MachineTokenStore {
     const record: MachineTokenRecord = {
       token,
       created_at: now,
-      signup_count: 0,
       last_used_at: null,
       paired_account_id: null,
       asn: asn ?? null,
@@ -77,14 +67,6 @@ export class InMemoryMachineTokenStore implements MachineTokenStore {
 
   async find(token: string): Promise<MachineTokenRecord | null> {
     return this.byToken.get(token) ?? null;
-  }
-
-  async incrementUsage(token: string, now: Date): Promise<MachineTokenRecord | null> {
-    const record = this.byToken.get(token);
-    if (record === undefined) return null;
-    record.signup_count += 1;
-    record.last_used_at = now;
-    return record;
   }
 
   async markPaired(token: string, accountId: string): Promise<void> {
@@ -105,18 +87,6 @@ export class InMemoryMachineTokenStore implements MachineTokenStore {
   }
 }
 
-export function defaultQuota(): number {
-  return DEFAULT_QUOTA;
-}
-
 export function isMachineToken(value: string): boolean {
   return value.startsWith(TOKEN_PREFIX);
-}
-
-// Quota check helper. Single-tier: every machine_token is account-bound
-// (or about to be), so the free-signup limit applies uniformly. The
-// account upgrades to paid by signing for billing — quota_enforcement
-// stops at that point, not at the pairing step.
-export function isOverQuota(record: MachineTokenRecord, quota: number): boolean {
-  return record.signup_count >= quota;
 }

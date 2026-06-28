@@ -28,8 +28,6 @@ vi.mock("../api-client.js", () => ({
   // immediately and the user confirmed in the browser within ms.
   issueMachineToken: vi.fn(async () => ({
     machine_token: "tsm_test_machine_token",
-    quota_limit: 10,
-    quota_used: 0,
   })),
   installInitiate: vi.fn(async () => ({
     setup_code: "test_setup_code",

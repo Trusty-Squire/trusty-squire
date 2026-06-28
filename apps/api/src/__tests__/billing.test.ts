@@ -1,11 +1,10 @@
 // Stripe billing — the paid tier end to end, with a fake StripeClient
-// (no live Stripe, no real signatures). Covers the three things that
-// actually touch money state:
-//   1. the quota gate: an active subscription on the token's BOUND
-//      account lifts the free-signup 402;
+// (no live Stripe, no real signatures). Covers:
+//   1. provisioning is free — no signup quota / 402 (beta);
 //   2. the webhook: checkout.session.completed activates, subscription
-//      .deleted cancels — and the lift/loss follows;
-//   3. the checkout/portal routes: guards + URL hand-off.
+//      .deleted cancels — and the status follows;
+//   3. the checkout/portal routes: guards + URL hand-off, including the
+//      free-during-beta kill-switch.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
@@ -14,7 +13,6 @@ import { buildServer } from "../server.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
 import { mintUpgradeToken } from "../auth/upgrade-token.js";
-import { defaultQuota } from "../services/machine-tokens.js";
 import type {
   StripeClient,
   CheckoutSessionInput,
@@ -50,6 +48,9 @@ interface Harness {
 }
 
 async function setup(stripe: FakeStripe | null = new FakeStripe()): Promise<Harness> {
+  // These tests exercise the real checkout flow, so the free-during-beta
+  // kill-switch must be ON. (A dedicated test below covers the OFF default.)
+  process.env.BILLING_ENABLED = "true";
   const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
   const app = await buildServer({
     deps,
@@ -64,15 +65,12 @@ async function webCookie(deps: ApiDeps, accountId: string): Promise<string> {
   return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
 }
 
-// Issue a machine token, bind it to `accountId`, and push its signup
-// count to the free quota so the next alias-create would be gated.
-async function overQuotaToken(deps: ApiDeps, app: FastifyInstance, accountId: string): Promise<string> {
+// Issue a machine token and bind it to `accountId`. There's no signup
+// quota anymore — provisioning is free during beta.
+async function pairedToken(deps: ApiDeps, app: FastifyInstance, accountId: string): Promise<string> {
   const res = await app.inject({ method: "POST", url: "/v1/install" });
   const token = (res.json() as { machine_token: string }).machine_token;
   await deps.machineTokenStore.markPaired(token, accountId);
-  for (let i = 0; i < defaultQuota(); i++) {
-    await deps.machineTokenStore.incrementUsage(token, new Date());
-  }
   return token;
 }
 
@@ -87,7 +85,7 @@ function createAlias(app: FastifyInstance, token: string): Promise<{ statusCode:
     .then((r) => ({ statusCode: r.statusCode, body: r.json() }));
 }
 
-describe("billing — quota gate", () => {
+describe("provisioning is free — no signup quota (beta)", () => {
   let h: Harness;
   beforeEach(async () => {
     h = await setup();
@@ -96,44 +94,28 @@ describe("billing — quota gate", () => {
     await h.app.close();
   });
 
-  it("an over-quota token on a FREE account is 402'd", async () => {
+  it("a paired token creates aliases freely — many signups, no 402", async () => {
     const acct = await h.deps.accountStore.createAccount("free@test.dev", "Free");
-    const token = await overQuotaToken(h.deps, h.app, acct.id);
-    const res = await createAlias(h.app, token);
-    expect(res.statusCode).toBe(402);
-    expect((res.body as { error: string }).error).toBe("payment_required");
+    const token = await pairedToken(h.deps, h.app, acct.id);
+    // Well past the old free limit (10): every signup still succeeds. Unique
+    // run_id per call so each is a distinct alias, not a duplicate.
+    for (let i = 0; i < 13; i++) {
+      const res = await h.app.inject({
+        method: "POST",
+        url: "/v1/inbox/aliases",
+        headers: { "content-type": "application/json", "x-machine-token": token },
+        payload: { account_id: "acct-body-ignored", service: "resend", run_id: `run-${i}` },
+      });
+      expect(res.statusCode, `iteration ${i}`).toBe(201);
+    }
   });
 
-  it("an active subscription on the bound account lifts the 402", async () => {
-    const acct = await h.deps.accountStore.createAccount("paid@test.dev", "Paid");
-    const token = await overQuotaToken(h.deps, h.app, acct.id);
-    await h.deps.accountStore.setSubscription(acct.id, { subscription_status: "active" });
-    const res = await createAlias(h.app, token);
-    expect(res.statusCode).toBe(201);
-  });
-
-  it("a canceled subscription does NOT lift the 402", async () => {
+  it("a canceled/free account is not paywalled either", async () => {
     const acct = await h.deps.accountStore.createAccount("ex@test.dev", "Ex");
-    const token = await overQuotaToken(h.deps, h.app, acct.id);
+    const token = await pairedToken(h.deps, h.app, acct.id);
     await h.deps.accountStore.setSubscription(acct.id, { subscription_status: "canceled" });
     const res = await createAlias(h.app, token);
-    expect(res.statusCode).toBe(402);
-  });
-
-  it("the paid bypass keys off the bound account, NOT the request body", async () => {
-    // Paid account exists, but the token is bound to a DIFFERENT free
-    // account; passing the paid id in the body must not grant the bypass.
-    const paid = await h.deps.accountStore.createAccount("real-paid@test.dev", "Paid");
-    await h.deps.accountStore.setSubscription(paid.id, { subscription_status: "active" });
-    const free = await h.deps.accountStore.createAccount("attacker@test.dev", "Free");
-    const token = await overQuotaToken(h.deps, h.app, free.id);
-    const res = await h.app.inject({
-      method: "POST",
-      url: "/v1/inbox/aliases",
-      headers: { "content-type": "application/json", "x-machine-token": token },
-      payload: { account_id: paid.id, service: "resend", run_id: "run-1" },
-    });
-    expect(res.statusCode).toBe(402);
+    expect(res.statusCode).toBe(201);
   });
 });
 
@@ -285,6 +267,25 @@ describe("billing — checkout + portal routes", () => {
       expect(res.statusCode).toBe(503);
     } finally {
       await unconfigured.app.close();
+    }
+  });
+
+  it("checkout is 503 billing_disabled when the beta kill-switch is off — even with Stripe live", async () => {
+    // The free-during-beta default: no one can be billed by a stray Upgrade
+    // click, regardless of a configured Stripe key.
+    const prev = process.env.BILLING_ENABLED;
+    delete process.env.BILLING_ENABLED;
+    const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
+    const app = await buildServer({ deps, stripeClient: new FakeStripe() });
+    try {
+      const acct = await deps.accountStore.createAccount("beta@test.dev", "Beta");
+      const cookie = await webCookie(deps, acct.id);
+      const res = await app.inject({ method: "POST", url: "/v1/billing/checkout", headers: { cookie } });
+      expect(res.statusCode).toBe(503);
+      expect((res.json() as { error: string }).error).toBe("billing_disabled");
+    } finally {
+      await app.close();
+      if (prev !== undefined) process.env.BILLING_ENABLED = prev;
     }
   });
 });

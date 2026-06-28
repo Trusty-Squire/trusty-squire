@@ -15,9 +15,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import {
-  defaultQuota,
   isMachineToken,
-  isOverQuota,
   type AsnFingerprint,
   type MachineTokenStore,
   type MachineTokenRecord,
@@ -47,17 +45,14 @@ export async function registerInstallRoute(
     const record = await opts.deps.machineTokenStore.issue(now(), asn ?? undefined);
     reply.code(201).send({
       machine_token: record.token,
-      quota_limit: defaultQuota(),
-      quota_used: 0,
       message:
         "Machine token issued. The MCP install CLI will now open a " +
         "browser to bind this machine to your account.",
     });
   });
 
-  // GET /v1/install/status — caller passes their machine token, gets quota info.
-  // Lets the MCP show "you've used X of N signups" to the user without burning
-  // a request through the inbox.
+  // GET /v1/install/status — caller passes their machine token, gets its
+  // bound account + timestamps. No quota: provisioning is free during beta.
   fastify.get("/v1/install/status", async (req, reply) => {
     const token = extractMachineToken(req);
     if (token === null) {
@@ -69,12 +64,7 @@ export async function registerInstallRoute(
       reply.code(404).send({ error: "unknown_machine_token" });
       return;
     }
-    const quota = defaultQuota();
     reply.send({
-      quota_limit: quota,
-      quota_used: record.signup_count,
-      quota_remaining: Math.max(0, quota - record.signup_count),
-      over_quota: isOverQuota(record, quota),
       account_id: record.paired_account_id,
       created_at: record.created_at.toISOString(),
       last_used_at: record.last_used_at?.toISOString() ?? null,

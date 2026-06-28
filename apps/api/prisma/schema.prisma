@@ -33,9 +33,14 @@ datasource db {
 model MachineToken {
   token              String    @id
   created_at         DateTime  @default(now())
+  // Vestigial: the free-signup quota was removed (provisioning is free
+  // during beta), so nothing reads or increments this anymore. Kept in the
+  // schema so `prisma db push` (the flag-less release_command) doesn't try
+  // to DROP it — a destructive change that aborts the deploy. Remove via a
+  // deliberate, flagged migration if/when quota stays gone for good.
   signup_count       Int       @default(0)
   last_used_at       DateTime?
-  // Once paired (Tier 1 upgrade), quota stops applying. The PWA's
+  // The account this token is bound to. The PWA's
   // /v1/mcp/pair/:token/claim sets this.
   paired_account_id  String?   @db.VarChar(26)
 
