@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.0 (2026-06-28)
+
+- _summarize the changes_
+
 ## 0.9.18 (2026-06-24)
 
 Stable (`latest`). Verify-replay hardening that drove meilisearch pending-review
