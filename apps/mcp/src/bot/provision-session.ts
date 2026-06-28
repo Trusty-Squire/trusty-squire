@@ -197,6 +197,12 @@ interface Session {
   // here so a later type_secret can enter them into another site's form. Never
   // returned to the host (the write-only-vault moat extended to transfers).
   secretSlots: Map<string, string>;
+  // PR3 privacy — element target keys (screenPath/testId/ref) of fields a sealed
+  // secret slot was typed into via type_secret. A subsequent observation masks
+  // their DOM value so the cleartext can't surface to the host. Password-type
+  // inputs are masked unconditionally; this covers the rest (OTP/token fields,
+  // the email filled from the sealed login slot).
+  sealedFieldKeys: Set<string>;
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
@@ -706,6 +712,7 @@ export function shouldBlockUnsafeProvisionAction(
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
   pageText: string,
+  sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
 ): ScreenOutline | undefined {
   if (elements.length === 0) return undefined;
   const byRegion = new Map<string, ScreenRegion>();
@@ -732,9 +739,9 @@ export function buildScreenOutline(
     }
     if (region.children.length < 10) {
       region.children.push({
-        ref: el.screenPath ?? elementRef(el),
+        ref: el.screenPath ?? presentLabel(el, sealedFieldKeys),
         role: el.role,
-        text: elementRef(el),
+        text: presentLabel(el, sealedFieldKeys),
         href: el.href ?? null,
         topmost: el.topmost ?? null,
         occluded_by: el.occludedBy ?? null,
@@ -761,10 +768,45 @@ function roleForAccessibility(el: InteractiveElement): string {
   return el.tag;
 }
 
+// PR3 privacy — a host-facing observation reads field VALUES straight off the
+// live DOM, so after a type_secret the cleartext password (or any sealed slot)
+// would surface in the observation/accessibility tree the planner sees and logs.
+// The whole point of prepare_login/extract is that the host only ever holds a
+// MASKED handle. Mask the presented copy here; internal callers (form-fill,
+// replay, postcondition length checks) read the raw InteractiveElement and are
+// unaffected. A field is sealed if it's a password input or a target a secret
+// slot was typed into (tracked per-session in sealedFieldKeys).
+const SEALED_FIELD_PLACEHOLDER = "[sealed]";
+function isSealedFieldValue(
+  el: InteractiveElement,
+  sealed: ReadonlySet<string>,
+): boolean {
+  if ((el.type ?? "").toLowerCase() === "password") return true;
+  return elementTargetKeys(el).some((k) => sealed.has(k));
+}
+function presentFieldValue(
+  el: InteractiveElement,
+  sealed: ReadonlySet<string>,
+): string | null {
+  const v = el.value ?? null;
+  if (v === null || v.length === 0) return v;
+  return isSealedFieldValue(el, sealed) ? SEALED_FIELD_PLACEHOLDER : v;
+}
+// The host-facing LABEL. elementRef falls back to a field's VALUE when it has no
+// other label text — which would leak a sealed secret as the element's name. For
+// a sealed field, re-derive the label with the value stripped so it lands on the
+// next signal (placeholder/name) or `tag#index`, never the secret. Ref-keying
+// and targeting still use the raw elementRef, so resolution is unaffected.
+function presentLabel(el: InteractiveElement, sealed: ReadonlySet<string>): string {
+  if (!isSealedFieldValue(el, sealed)) return elementRef(el);
+  return elementRef({ ...el, value: null });
+}
+
 export function buildAccessibilitySnapshot(
   elements: readonly InteractiveElement[],
   generation: number,
   limit = 12000,
+  sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
 ): AccessibilitySnapshot | undefined {
   if (elements.length === 0) return undefined;
   const refs = provisionElementRefs(elements, generation);
@@ -783,10 +825,11 @@ export function buildAccessibilitySnapshot(
   for (const [region, group] of entries.slice(0, 24)) {
     lines.push(`  region "${region}"`);
     for (const el of group.slice(0, 16)) {
-      const label = elementRef(el).replace(/"/g, '\\"');
+      const label = presentLabel(el, sealedFieldKeys).replace(/"/g, '\\"');
       const role = roleForAccessibility(el);
+      const shownValue = presentFieldValue(el, sealedFieldKeys);
       const flags = [
-        el.value !== undefined && el.value !== null ? `value="${el.value.slice(0, 60)}"` : null,
+        el.value !== undefined && el.value !== null ? `value="${(shownValue ?? "").slice(0, 60)}"` : null,
         el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
         el.href !== undefined && el.href !== null ? `href="${el.href.slice(0, 120)}"` : null,
         el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
@@ -834,6 +877,27 @@ function baseDomain(host: string): string {
   const parts = host.toLowerCase().split(".").filter(Boolean);
   if (parts.length <= 2) return parts.join(".");
   return parts.slice(-2).join(".");
+}
+
+// Webmail hosts awaitVerification drives the browser INTO to read a code/link.
+// They are never declared in a session's allowed_hosts (the goto gate blocks
+// them); the browser only reaches them via awaitVerification's sanctioned
+// internal navigation. Actions taken while parked here must NOT enter the
+// replayable recipe: (a) replay re-fetches the code via awaitVerification, so a
+// recorded inbox click is dead weight, and (b) the clicked row's visible text
+// carries the email's subject/snippet — baking a user's inbox content into a
+// shareable recipe. Identity-provider hosts (accounts.google.com, github.com)
+// are NOT here — OAuth steps stay in the trace.
+const INBOX_READ_HOSTS = new Set([
+  "mail.google.com",
+  "outlook.live.com",
+  "outlook.office365.com",
+  "mail.yahoo.com",
+  "mail.proton.me",
+]);
+export function isInboxReadHost(url: string): boolean {
+  const host = registrableHost(url);
+  return host !== null && INBOX_READ_HOSTS.has(host);
 }
 
 function widenAllowedHostsFromCurrentUrl(session: Session): void {
@@ -966,6 +1030,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     allowedHosts,
     generation: 0,
     secretSlots: new Map(),
+    sealedFieldKeys: new Set(),
     lastElements: [],
     actionTrace: [],
     consentInboxRead: opts.consentInboxRead === true,
@@ -1098,8 +1163,13 @@ async function observeSession(session: Session): Promise<Observation> {
   const text = await session.browser.extractVisibleText();
   const normalizedText = text.replace(/\s+/g, " ").trim().slice(0, 4000);
   const guidance = provisionPerceptionGuidance(normalizedText);
-  const screen = buildScreenOutline(elements, normalizedText);
-  const accessibility = buildAccessibilitySnapshot(elements, generation);
+  const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
+  const accessibility = buildAccessibilitySnapshot(
+    elements,
+    generation,
+    undefined,
+    session.sealedFieldKeys,
+  );
   const refs = provisionElementRefs(elements, generation);
   return {
     session_id: session.id,
@@ -1110,11 +1180,11 @@ async function observeSession(session: Session): Promise<Observation> {
     ...(accessibility !== undefined ? { accessibility } : {}),
     elements: elements.map((el) => ({
       ref: refs.get(el) ?? provisionElementRef(el, generation),
-      label: elementRef(el),
+      label: presentLabel(el, session.sealedFieldKeys),
       tag: el.tag,
       role: el.role,
       type: el.type,
-      value: el.value ?? null,
+      value: presentFieldValue(el, session.sealedFieldKeys),
       checked: el.checked ?? null,
       href: el.href ?? null,
       testId: el.testId ?? null,
@@ -1191,6 +1261,9 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
         throw new Error(`type_secret: no element matched target "${action.target}".`);
       }
       resolvedEl = el;
+      // Remember this field so the next observation masks its DOM value — the
+      // host sealed this secret into a slot and must never read it back.
+      for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
       await browser.type(el.selector, value);
@@ -1228,7 +1301,12 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
       break;
     }
   }
-  recordTrace(session, action, resolvedEl);
+  // Don't fold inbox-provider steps into the replayable recipe (see
+  // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
+  // recorded inbox click would bake the email's subject into a shared recipe.
+  if (!isInboxReadHost(browser.currentUrl())) {
+    recordTrace(session, action, resolvedEl);
+  }
   return await observeSession(session);
 }
 
@@ -1339,9 +1417,13 @@ export async function rememberRecipe(
 // reduced to lengths here so a token/secret success-signal can't leak.
 async function snapshotForPostcondition(session: Session): Promise<PostconditionSnapshot> {
   const obs = await observeSession(session);
-  const fields = obs.elements
+  // Read lengths off the RAW elements (session.lastElements, set by
+  // observeSession) — obs.elements masks sealed/password values to a fixed
+  // placeholder, which would corrupt a min_value_len success-signal. Lengths
+  // never expose the value, so this stays leak-free.
+  const fields = session.lastElements
     .filter((e) => typeof e.value === "string" && e.value.length > 0)
-    .map((e) => ({ label: e.label, value_len: (e.value ?? "").length }));
+    .map((e) => ({ label: elementRef(e), value_len: (e.value ?? "").length }));
   return { url: obs.url, text: obs.text, fields };
 }
 

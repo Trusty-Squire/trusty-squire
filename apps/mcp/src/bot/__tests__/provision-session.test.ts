@@ -10,6 +10,7 @@ import {
   hostAllowed,
   elementRef,
   buildAccessibilitySnapshot,
+  isInboxReadHost,
   parseVerification,
   buildVerificationResult,
   buildConsentRefusal,
@@ -204,6 +205,75 @@ describe("buildAccessibilitySnapshot", () => {
     expect(snap?.tree).toContain('region "dialog:finish-account"');
     expect(snap?.tree).toContain('button "Create account" ref=@g5:');
     expect(snap?.tree).toContain('textbox "Email" ref=@g5:');
+  });
+
+  it("masks a password-type field value, never leaking the cleartext", () => {
+    const elements = [
+      el({
+        tag: "input",
+        type: "password",
+        value: "nG^6+HsnfVCcXp8%*4rMgXjw",
+        screenPath: "form:signup > input:password",
+        selector: "#pw",
+      }),
+    ];
+    const snap = buildAccessibilitySnapshot(elements, 1);
+    expect(snap?.tree).not.toContain("nG^6+HsnfVCcXp8");
+    expect(snap?.tree).toContain('value="[sealed]"');
+  });
+
+  it("masks a non-password field whose key was sealed (type_secret target)", () => {
+    const sealed = new Set(["form:signup > input:email"]);
+    const elements = [
+      el({
+        tag: "input",
+        type: "email",
+        value: "methoxine@gmail.com",
+        screenPath: "form:signup > input:email",
+        selector: "#email",
+      }),
+      el({
+        tag: "input",
+        type: "text",
+        value: "Acme Inc",
+        screenPath: "form:signup > input:org",
+        selector: "#org",
+      }),
+    ];
+    const snap = buildAccessibilitySnapshot(elements, 1, undefined, sealed);
+    expect(snap?.tree).not.toContain("methoxine@gmail.com");
+    expect(snap?.tree).toContain('value="[sealed]"');
+    // a non-sealed, non-password field keeps its real value
+    expect(snap?.tree).toContain('value="Acme Inc"');
+  });
+
+  it("leaves ordinary field values untouched when nothing is sealed", () => {
+    const elements = [
+      el({
+        tag: "input",
+        type: "text",
+        value: "Acme Inc",
+        screenPath: "form:signup > input:org",
+        selector: "#org",
+      }),
+    ];
+    const snap = buildAccessibilitySnapshot(elements, 1);
+    expect(snap?.tree).toContain('value="Acme Inc"');
+  });
+});
+
+describe("isInboxReadHost", () => {
+  it("flags the webmail hosts awaitVerification drives into", () => {
+    expect(isInboxReadHost("https://mail.google.com/mail/u/0/#search/x")).toBe(true);
+    expect(isInboxReadHost("https://outlook.live.com/mail/0/")).toBe(true);
+    expect(isInboxReadHost("https://mail.proton.me/u/0/inbox")).toBe(true);
+  });
+
+  it("does NOT flag the service or identity-provider hosts (those stay in the recipe)", () => {
+    expect(isInboxReadHost("https://next-app.useplunk.com/auth/verify-email?token=abc")).toBe(false);
+    expect(isInboxReadHost("https://accounts.google.com/o/oauth2/v2/auth")).toBe(false);
+    expect(isInboxReadHost("https://github.com/login/oauth/authorize")).toBe(false);
+    expect(isInboxReadHost("not a url")).toBe(false);
   });
 
   it("truncates large trees at a line boundary", () => {
