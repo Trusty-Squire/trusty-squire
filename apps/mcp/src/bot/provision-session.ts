@@ -16,7 +16,7 @@
 //  - no credential is ever read back to the agent except via the explicit
 //    `finish`/extract path; the vault stays write-only.
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import { BrowserController, type InteractiveElement } from "./browser.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
@@ -24,6 +24,7 @@ import {
   detectActiveProviderSessions,
   ensureOAuthSession,
 } from "./google-login.js";
+import { loggedInEmail } from "./login-state.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import {
   type OperatorRecipe,
@@ -133,6 +134,11 @@ export interface Observation {
   // required a live Google session that was absent. The task did NOT start; the
   // host asks the user to connect, then retries. No browser was driven.
   needs_user?: NeedsUserConnect;
+  // PR3 signin-vault: the user's own email (the Google identity captured at
+  // login), present on the start observation when known. The host fills THIS as
+  // the signup email so the account is user-owned, and it is the same identity
+  // whose inbox awaitVerification reads. Absent when no email was captured.
+  user_email?: string;
 }
 
 export interface AccessibilitySnapshot {
@@ -202,6 +208,9 @@ interface Session {
   // PR2 — whether this session may read the inbox for email verification. From
   // the install-time consent flag; gates awaitVerification (fail-closed).
   consentInboxRead: boolean;
+  // PR3 — the user's own email (Google identity captured at login), or null when
+  // unknown. The authoritative signup email + the identity whose inbox is read.
+  userEmail: string | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -960,6 +969,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     lastElements: [],
     actionTrace: [],
     consentInboxRead: opts.consentInboxRead === true,
+    userEmail: loggedInEmail("google", opts.profileDir),
   };
   sessions.set(id, session);
   audit(id, "start", {
@@ -976,7 +986,11 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     loginSessionGuidance(liveProviders),
     ...(opts.hint !== undefined ? [opts.hint] : []),
   ];
-  return { ...observation, hint: hintParts.join("\n") };
+  return {
+    ...observation,
+    hint: hintParts.join("\n"),
+    ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
+  };
 }
 
 export async function observe(sessionId: string): Promise<Observation> {
@@ -1024,6 +1038,54 @@ export function stashSecretSlot(sessionId: string, slot: string, value: string):
   session.actionTrace.push({ action: { kind: "extract", slot } });
   audit(sessionId, "secret_slot_set", { slot, length: value.length });
   return { slot, preview: maskSecretValue(value), length: value.length };
+}
+
+// Internal MCP tool bridge: read a sealed slot so the tool layer can persist a
+// signup password to the vault after the service account is created. Never
+// expose this value in a tool response or recipe trace.
+export function readSecretSlotValue(sessionId: string, slot: string): string {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const value = session.secretSlots.get(slot);
+  if (value === undefined) throw new Error(`no sealed slot named "${slot}"`);
+  return value;
+}
+
+export function currentProvisionUrl(sessionId: string): string {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  return session.browser.currentUrl();
+}
+
+// PR3c — the user's own email captured at login (the authoritative signup
+// address), or null when none was captured. The tool layer reads this to fill
+// username/password signups so the account is user-owned.
+export function getSessionUserEmail(sessionId: string): string | null {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  return session.userEmail;
+}
+
+// PR3c — generate a strong signup password. Policy-compliant by construction
+// (>=1 lower/upper/digit/symbol) so it satisfies common signup validators, then
+// the remaining length is filled from the full set and the whole thing shuffled.
+// Uses crypto.randomInt for unbiased selection. Length clamped to [16, 64].
+const PW_LOWER = "abcdefghijkmnpqrstuvwxyz"; // no l/o
+const PW_UPPER = "ABCDEFGHJKLMNPQRSTUVWXYZ"; // no I/O
+const PW_DIGIT = "23456789"; // no 0/1
+const PW_SYMBOL = "!@#$%^&*-_=+";
+const PW_ALL = PW_LOWER + PW_UPPER + PW_DIGIT + PW_SYMBOL;
+export function generatePassword(length = 24): string {
+  const n = Math.max(16, Math.min(64, Math.floor(length)));
+  const pick = (set: string): string => set[randomInt(set.length)]!;
+  const chars = [pick(PW_LOWER), pick(PW_UPPER), pick(PW_DIGIT), pick(PW_SYMBOL)];
+  while (chars.length < n) chars.push(pick(PW_ALL));
+  // Fisher-Yates shuffle so the guaranteed-class chars aren't always first.
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+  return chars.join("");
 }
 
 async function observeSession(session: Session): Promise<Observation> {
@@ -1187,6 +1249,19 @@ export function redactEmailForTrace(value: string): string {
   return looksLikeEmailValue(value) ? EMAIL_SLOT_TEMPLATE : value;
 }
 
+// PR3d — exact-scrub the KNOWN user email wherever it appears in a trace string
+// (not just a whole-value email field). In the operator path the host fills the
+// user's real address, which can also surface in a targeted element's visible
+// text (e.g. a "signed in as ada@x.com" chip the action hit). We know the exact
+// address (session.userEmail), so replace every occurrence with the slot token
+// before it's persisted to a recipe. (onboarding-capture observation frames are
+// NOT a vector here — that path belonged to the retired autonomous bot and is
+// not wired into operate_*.) Exported for unit tests.
+export function scrubKnownEmail(s: string, userEmail: string | null): string {
+  if (userEmail === null || userEmail.length === 0 || !s.includes(userEmail)) return s;
+  return s.split(userEmail).join(EMAIL_SLOT_TEMPLATE);
+}
+
 // Append a TEXT-targeted entry to the session's operator-recipe trace. Stores
 // the visible text the action hit (never a ref/coordinate) + non-secret params.
 // `extract` (the seal) is recorded separately in stashSecretSlot.
@@ -1202,7 +1277,8 @@ function recordTrace(
   action: ProvisionAction,
   el: InteractiveElement | null,
 ): void {
-  const text = traceTextFor(el);
+  const rawText = traceTextFor(el);
+  const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
   let a: TraceAction;
   switch (action.kind) {
@@ -1211,7 +1287,7 @@ function recordTrace(
     case "press": a = { kind: "press", key: action.key }; break;
     case "oauth_settle": a = { kind: "oauth_settle" }; break;
     case "scroll": a = { kind: "scroll", ...(action.direction !== undefined ? { direction: action.direction } : {}) }; break;
-    case "type": a = { kind: "type", ...withText, value: redactEmailForTrace(action.text) }; break;
+    case "type": a = { kind: "type", ...withText, value: scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail) }; break;
     case "type_secret": a = { kind: "type_secret", slot: action.slot, ...withText }; break;
     case "click": a = { kind: "click", ...withText }; break;
     case "js_click": a = { kind: "js_click", ...withText }; break;
@@ -1608,6 +1684,12 @@ export interface AwaitVerificationOptions {
   // code is typed via type_secret and never crosses the MCP boundary to the
   // host (also dodges host-side payload truncation — see T3).
   intoSlot?: string;
+  // PR3b — JIT consent at the verification wall. The host sets this true ONLY
+  // after the user agrees, in-context, to let the operator read their inbox.
+  // Grants inbox-read for the rest of THIS session (the remembered cache, so we
+  // don't re-prompt on every await); it does NOT change the standing install
+  // flag. Headless/no-user → the host never sets it, so the gate still refuses.
+  grantConsent?: boolean;
 }
 
 // Pure verification parser (exported for unit tests). Extracts a {code, link}
@@ -1668,10 +1750,12 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
   const needs_user: NeedsUserCode = {
     wall: "verification_code",
     message:
-      "Inbox reading is not consented (consent_operator_inbox_otp is off), so the " +
-      "operator did not read any mail. Ask the user for the verification code and " +
-      "type it into the field with operate_act — the session is still live. To let " +
-      "the operator fetch codes automatically, re-run `connect` and grant inbox access.",
+      "Inbox reading is not consented, so the operator did not read any mail. Ask " +
+      "the user, in context: may the operator read your inbox to fetch the code for " +
+      "this signup? If YES, retry operate_await_verification with " +
+      "grant_inbox_consent:true (grants it for the rest of this session). If NO, " +
+      "ask them for the code and type it with operate_act — the session is still " +
+      "live either way. (To grant it permanently, re-run `connect` and allow inbox access.)",
     resume: "code",
   };
   return { session_id: sessionId, found: false, code: null, link: null, needs_user };
@@ -1685,6 +1769,13 @@ export async function awaitVerification(
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
 
+  // PR3b — JIT consent grant: the host passes grantConsent ONLY after the user
+  // agreed in-context. Grant inbox-read for the rest of this session (remembered
+  // so we don't re-prompt each await); does not touch the standing install flag.
+  if (opts.grantConsent === true && !session.consentInboxRead) {
+    session.consentInboxRead = true;
+    audit(sessionId, "inbox_consent_granted", { scope: "session" });
+  }
   // PR2 fail-closed gate: without inbox-read consent, do NOT read the user's
   // mail. Hand the code request back to the user instead (resumable). The old
   // behavior read mail.google.com unconditionally, silently breaking the

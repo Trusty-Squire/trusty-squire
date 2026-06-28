@@ -115,18 +115,19 @@ in-memory `Session` (`:185`) has no consent field and `operate_await_verificatio
 untouched. Ships independent of PR3.
 
 ### PR3 — User-owned accounts in the operator path (Decision B)
-- **Identity resolution (codex #6 / R2) — RESOLVED: server is authoritative.**
-  The user's email is the server `Account.email` — the verified Google identity
-  the user *deliberately signed in with* (bound at OAuth, `oauth.ts:9,152`;
-  guaranteed present, `notify.ts:11`). NOT the browser's incidental `u/0` account.
-  The bot reads it via a new agent-authed endpoint (its `agent_session_token` →
-  `auth.kind:"agent"` carries `account_id`). Consequence: `awaitVerification`'s
-  hardcoded `mail/u/0` (`:1649`) is the bug — the inbox read must FOLLOW the
-  authoritative identity (resolve the bound account's `/u/N`, or assert `u/0` is
-  that account else hand back) so fill-email and read-inbox are the same identity.
-  Linchpin; everything in §5 keys off it. Pieces: (1) server endpoint returning
-  `Account.email` for agent auth; (2) api-client reader; (3) operator surface
-  (start observation carries `user_email`); (4) align `awaitVerification`.
+- **Identity resolution (codex #6 / R2) — RESOLVED: capture-at-login (browser).**
+  The user's email is captured from the live Google session **at login** (the one
+  moment it's certain) and persisted to the profile marker, then read at provision
+  time. Sourcing from the browser session makes fill-email and read-inbox the SAME
+  account by construction, so the `mail/u/0` mismatch dissolves — no `/u/N`
+  reconciliation needed. (Considered + dropped: a server `Account.email` endpoint —
+  it still left the inbox read on the browser, so it required reconciling the two
+  sources; capture-at-login avoids that.) Implemented:
+  (1) `login-state.recordProviderEmail`/`loggedInEmail` (a `provider-emails.json`
+  marker); (2) `google-login.extractGoogleAccountEmail` (parses the OneGoogle
+  account-chip aria-label) + `captureGoogleEmail` (reads `myaccount.google.com`
+  once at login, wired into the install `onSuccess`); (3) `Session.userEmail` +
+  `user_email` on the start observation so the host fills it.
 - **JIT consent at the wall** — end-user + no standing consent + human present →
   surface grant-or-paste; cache the grant. Headless → `needs_consent` pause.
   Reuses the `needs_user` hand-back machinery.

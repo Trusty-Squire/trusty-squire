@@ -60,11 +60,12 @@ describe("TOOLS registry", () => {
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
     // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
-    // 6 base tools + the 10 operator-surface tools
-    // (operate_start/observe/act/captcha_gate/await_verification/extract/
-    // remember/use/finish_task/finish — remember+use are the operator-recipe
-    // capture/replay pair, docs/DESIGN-operator-skills.md).
-    expect(TOOLS).toHaveLength(16);
+    // 6 base tools + the 12 operator-surface tools (operate_start/observe/act/
+    // captcha_gate/await_verification/extract/remember/use/finish_task/finish —
+    // remember+use are the operator-recipe capture/replay pair — plus the PR3c
+    // login-credential pair: operate_prepare_login (seal the user's email +
+    // generated password) and operate_store_login (vault them as username_password).
+    expect(TOOLS).toHaveLength(18);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "get_extract_failure",
       "grant_app_access",
@@ -77,8 +78,10 @@ describe("TOOLS registry", () => {
       "operate_finish",
       "operate_finish_task",
       "operate_observe",
+      "operate_prepare_login",
       "operate_remember",
       "operate_start",
+      "operate_store_login",
       "operate_use",
       "store_credential",
       "use_credential",
