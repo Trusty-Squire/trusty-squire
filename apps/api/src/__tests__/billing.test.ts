@@ -1,11 +1,10 @@
 // Stripe billing — the paid tier end to end, with a fake StripeClient
-// (no live Stripe, no real signatures). Covers the three things that
-// actually touch money state:
-//   1. the quota gate: an active subscription on the token's BOUND
-//      account lifts the free-signup 402;
+// (no live Stripe, no real signatures). Covers:
+//   1. provisioning is free — no signup quota / 402 (beta);
 //   2. the webhook: checkout.session.completed activates, subscription
-//      .deleted cancels — and the lift/loss follows;
-//   3. the checkout/portal routes: guards + URL hand-off.
+//      .deleted cancels — and the status follows;
+//   3. the checkout/portal routes: guards + URL hand-off, including the
+//      free-during-beta kill-switch.
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
@@ -14,7 +13,6 @@ import { buildServer } from "../server.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
 import { mintUpgradeToken } from "../auth/upgrade-token.js";
-import { defaultQuota } from "../services/machine-tokens.js";
 import type {
   StripeClient,
   CheckoutSessionInput,
@@ -67,15 +65,12 @@ async function webCookie(deps: ApiDeps, accountId: string): Promise<string> {
   return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
 }
 
-// Issue a machine token, bind it to `accountId`, and push its signup
-// count to the free quota so the next alias-create would be gated.
-async function overQuotaToken(deps: ApiDeps, app: FastifyInstance, accountId: string): Promise<string> {
+// Issue a machine token and bind it to `accountId`. There's no signup
+// quota anymore — provisioning is free during beta.
+async function pairedToken(deps: ApiDeps, app: FastifyInstance, accountId: string): Promise<string> {
   const res = await app.inject({ method: "POST", url: "/v1/install" });
   const token = (res.json() as { machine_token: string }).machine_token;
   await deps.machineTokenStore.markPaired(token, accountId);
-  for (let i = 0; i < defaultQuota(); i++) {
-    await deps.machineTokenStore.incrementUsage(token, new Date());
-  }
   return token;
 }
 
@@ -99,16 +94,25 @@ describe("provisioning is free — no signup quota (beta)", () => {
     await h.app.close();
   });
 
-  it("a token past the old free limit still creates aliases (no 402)", async () => {
+  it("a paired token creates aliases freely — many signups, no 402", async () => {
     const acct = await h.deps.accountStore.createAccount("free@test.dev", "Free");
-    const token = await overQuotaToken(h.deps, h.app, acct.id);
-    const res = await createAlias(h.app, token);
-    expect(res.statusCode).toBe(201);
+    const token = await pairedToken(h.deps, h.app, acct.id);
+    // Well past the old free limit (10): every signup still succeeds. Unique
+    // run_id per call so each is a distinct alias, not a duplicate.
+    for (let i = 0; i < 13; i++) {
+      const res = await h.app.inject({
+        method: "POST",
+        url: "/v1/inbox/aliases",
+        headers: { "content-type": "application/json", "x-machine-token": token },
+        payload: { account_id: "acct-body-ignored", service: "resend", run_id: `run-${i}` },
+      });
+      expect(res.statusCode, `iteration ${i}`).toBe(201);
+    }
   });
 
   it("a canceled/free account is not paywalled either", async () => {
     const acct = await h.deps.accountStore.createAccount("ex@test.dev", "Ex");
-    const token = await overQuotaToken(h.deps, h.app, acct.id);
+    const token = await pairedToken(h.deps, h.app, acct.id);
     await h.deps.accountStore.setSubscription(acct.id, { subscription_status: "canceled" });
     const res = await createAlias(h.app, token);
     expect(res.statusCode).toBe(201);

@@ -161,7 +161,6 @@ describe("single-tier install handshake", () => {
     });
     expect(beforeBind.json()).toMatchObject({
       account_id: null,
-      over_quota: false,
     });
 
     await deps.machineTokenStore.markPaired(machine_token, "acct-bound");
@@ -173,7 +172,6 @@ describe("single-tier install handshake", () => {
     });
     expect(afterBind.json()).toMatchObject({
       account_id: "acct-bound",
-      over_quota: false,
     });
   });
 });

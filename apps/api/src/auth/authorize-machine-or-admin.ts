@@ -16,14 +16,13 @@ import {
 } from "../routes/install.js";
 import { isMachineToken, type MachineTokenStore } from "../services/machine-tokens.js";
 
-// The resolved auth principal. `machine` carries the full record fields
-// the inbox quota check needs; `admin` is the operator/test bypass.
+// The resolved auth principal. `machine` carries the token + its bound
+// account; `admin` is the operator/test bypass.
 export type AuthPrincipal =
   | { kind: "admin" }
   | {
       kind: "machine";
       token: string;
-      signup_count: number;
       paired_account_id: string | null;
     };
 
@@ -84,7 +83,6 @@ export async function authorizeMachineOrAdmin(
     return {
       kind: "machine",
       token: record.token,
-      signup_count: record.signup_count,
       paired_account_id: record.paired_account_id,
     };
   }

@@ -24,7 +24,6 @@ export class PrismaMachineTokenStore implements MachineTokenStore {
       data: {
         token,
         created_at: now,
-        signup_count: 0,
         last_used_at: null,
         paired_account_id: null,
         asn_class: asn?.class ?? null,
@@ -39,23 +38,6 @@ export class PrismaMachineTokenStore implements MachineTokenStore {
   async find(token: string): Promise<MachineTokenRecord | null> {
     const row = await this.prisma.machineToken.findUnique({ where: { token } });
     return row === null ? null : this.toRecord(row);
-  }
-
-  async incrementUsage(token: string, now: Date): Promise<MachineTokenRecord | null> {
-    try {
-      const row = await this.prisma.machineToken.update({
-        where: { token },
-        data: { signup_count: { increment: 1 }, last_used_at: now },
-      });
-      return this.toRecord(row);
-    } catch (err) {
-      // P2025 = record not found. Same shape as the in-memory store's
-      // "return null" for an unknown token.
-      if (typeof err === "object" && err !== null && (err as { code?: unknown }).code === "P2025") {
-        return null;
-      }
-      throw err;
-    }
   }
 
   async markPaired(token: string, accountId: string): Promise<void> {
@@ -75,7 +57,6 @@ export class PrismaMachineTokenStore implements MachineTokenStore {
   private toRecord(row: {
     token: string;
     created_at: Date;
-    signup_count: number;
     last_used_at: Date | null;
     paired_account_id: string | null;
     asn_class?: string | null;
@@ -96,7 +77,6 @@ export class PrismaMachineTokenStore implements MachineTokenStore {
     return {
       token: row.token,
       created_at: row.created_at,
-      signup_count: row.signup_count,
       last_used_at: row.last_used_at,
       paired_account_id: row.paired_account_id,
       asn,

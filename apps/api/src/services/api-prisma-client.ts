@@ -19,7 +19,6 @@ import { createRequire } from "node:module";
 interface MachineTokenRow {
   token: string;
   created_at: Date;
-  signup_count: number;
   last_used_at: Date | null;
   paired_account_id: string | null;
   asn_class?: string | null;
