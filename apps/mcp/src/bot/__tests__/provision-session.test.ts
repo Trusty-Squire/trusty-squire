@@ -13,6 +13,7 @@ import {
   parseVerification,
   buildVerificationResult,
   buildConsentRefusal,
+  redactEmailForTrace,
   classifyVouchflowCredentials,
   detectExtractionBlock,
   sanitizeExtractedCredentials,
@@ -286,6 +287,19 @@ describe("buildConsentRefusal (PR2 — inbox-read consent withheld)", () => {
       message: expect.stringContaining("not consented"),
       resume: "code",
     });
+  });
+});
+
+describe("redactEmailForTrace (PR3 — user email never lands in a recipe)", () => {
+  it("templatizes an email-shaped value to the email slot token", () => {
+    expect(redactEmailForTrace("ada@example.com")).toBe("${EMAIL_ALIAS}");
+    expect(redactEmailForTrace("  user.name+tag@sub.domain.io  ")).toBe("${EMAIL_ALIAS}");
+  });
+
+  it("leaves non-email values untouched (token names, free text)", () => {
+    expect(redactEmailForTrace("my-project")).toBe("my-project");
+    expect(redactEmailForTrace("Acme Inc")).toBe("Acme Inc");
+    expect(redactEmailForTrace("not@anemail")).toBe("not@anemail"); // no TLD
   });
 });
 

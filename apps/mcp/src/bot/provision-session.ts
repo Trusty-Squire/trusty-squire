@@ -1170,6 +1170,23 @@ export async function act(sessionId: string, action: ProvisionAction): Promise<O
   return await observeSession(session);
 }
 
+// PR3 privacy: in the operator model the host fills the USER's real email into
+// signup forms (no Squire alias anymore). The recipe trace must NOT persist that
+// literal address — it would land in operator recipes and any skill synthesized
+// from them. Templatize an email-shaped `type` value to the established email
+// slot token so the trace stays a recipe, not a record of someone's address.
+// Mirrors the synthesizer's looksLikeEmail check (promote-to-skill.ts). The token
+// name keeps its legacy form for corpus compatibility (validateReplayGraph and
+// published skills key off it); it now means "the email to fill", not a Squire alias.
+const EMAIL_SLOT_TEMPLATE = "${EMAIL_ALIAS}";
+function looksLikeEmailValue(v: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
+}
+// Exported for unit tests.
+export function redactEmailForTrace(value: string): string {
+  return looksLikeEmailValue(value) ? EMAIL_SLOT_TEMPLATE : value;
+}
+
 // Append a TEXT-targeted entry to the session's operator-recipe trace. Stores
 // the visible text the action hit (never a ref/coordinate) + non-secret params.
 // `extract` (the seal) is recorded separately in stashSecretSlot.
@@ -1194,7 +1211,7 @@ function recordTrace(
     case "press": a = { kind: "press", key: action.key }; break;
     case "oauth_settle": a = { kind: "oauth_settle" }; break;
     case "scroll": a = { kind: "scroll", ...(action.direction !== undefined ? { direction: action.direction } : {}) }; break;
-    case "type": a = { kind: "type", ...withText, value: action.text }; break;
+    case "type": a = { kind: "type", ...withText, value: redactEmailForTrace(action.text) }; break;
     case "type_secret": a = { kind: "type_secret", slot: action.slot, ...withText }; break;
     case "click": a = { kind: "click", ...withText }; break;
     case "js_click": a = { kind: "js_click", ...withText }; break;
