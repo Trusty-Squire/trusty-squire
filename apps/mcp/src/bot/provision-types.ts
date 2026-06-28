@@ -55,12 +55,10 @@ export interface SignupResult {
   // docs/DESIGN-antibot-hardening.md.
   stealth_profile?: "baseline" | "cdp_hardened";
 
-  // Skill promoter (0.7.0): when a SignupResult was produced by
-  // replaying a Tier-2 learned skill (vs the universal bot), these
-  // fields identify the skill so the caller can include them in the
-  // tool response. `via: "bot"` is the default (universal bot path);
-  // `via: "skill"` means the registry served a skill and replaySkill
-  // executed it successfully end-to-end.
+  // Skill provenance: which path produced this result. Legacy field from the
+  // universal-bot era. The autonomous replay ENGINE was excised (signin-vault
+  // PR1), so the "skill" path is no longer produced in source; the field is
+  // retained for wire/registry compatibility and assessed for removal in PR4.
   via?: "bot" | "skill";
   skill_id?: string;
   skill_version?: string;

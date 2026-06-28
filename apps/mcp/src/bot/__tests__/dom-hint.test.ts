@@ -6,7 +6,6 @@
 
 import { describe, expect, it } from "vitest";
 import { isStableDomAttr, pickStableDomHint } from "../promote-to-skill.js";
-import { matchesDomHint } from "../replay-skill.js";
 import type { InteractiveElement } from "../browser.js";
 
 function el(over: Partial<InteractiveElement>): InteractiveElement {
@@ -41,17 +40,6 @@ describe("testid anchor (strongest stable hint)", () => {
 
   it("pickStableDomHint ignores a hash-shaped testid", () => {
     expect(pickStableDomHint(el({ testId: "css-1a2b3c4d" }))).toBeUndefined();
-  });
-
-  it("matchesDomHint resolves on testid", () => {
-    expect(matchesDomHint(el({ testId: "create-api-key" }), { testid: "create-api-key" })).toBe(true);
-    expect(matchesDomHint(el({ testId: "other" }), { testid: "create-api-key" })).toBe(false);
-    expect(matchesDomHint(el({ id: "x" }), { testid: "create-api-key" })).toBe(false);
-  });
-
-  it("matchesDomHint requires ALL provided anchors to agree", () => {
-    expect(matchesDomHint(el({ testId: "k", name: "submit" }), { testid: "k", name: "submit" })).toBe(true);
-    expect(matchesDomHint(el({ testId: "k", name: "other" }), { testid: "k", name: "submit" })).toBe(false);
   });
 });
 
@@ -99,28 +87,5 @@ describe("pickStableDomHint", () => {
   it("returns undefined when neither attribute is stable (keeps canonical bytes)", () => {
     expect(pickStableDomHint(el({ name: null, id: "css-1x2y3z" }))).toBeUndefined();
     expect(pickStableDomHint(el({}))).toBeUndefined();
-  });
-});
-
-describe("matchesDomHint", () => {
-  it("matches when every specified attribute equals the element's", () => {
-    expect(matchesDomHint(el({ name: "next" }), { name: "next" })).toBe(true);
-    expect(matchesDomHint(el({ id: "create" }), { id: "create" })).toBe(true);
-    expect(matchesDomHint(el({ name: "next", id: "create" }), { name: "next", id: "create" })).toBe(
-      true,
-    );
-  });
-
-  it("does NOT match when a specified attribute differs or is absent", () => {
-    expect(matchesDomHint(el({ name: "previous" }), { name: "next" })).toBe(false);
-    expect(matchesDomHint(el({ name: null }), { name: "next" })).toBe(false);
-    // id specified in the hint but the element only matches on name → no match
-    expect(matchesDomHint(el({ name: "next", id: "other" }), { name: "next", id: "create" })).toBe(
-      false,
-    );
-  });
-
-  it("never matches an empty hint", () => {
-    expect(matchesDomHint(el({ name: "next" }), {})).toBe(false);
   });
 });
