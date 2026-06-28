@@ -24,6 +24,7 @@ import {
   detectActiveProviderSessions,
   ensureOAuthSession,
 } from "./google-login.js";
+import { loggedInEmail } from "./login-state.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import {
   type OperatorRecipe,
@@ -133,6 +134,11 @@ export interface Observation {
   // required a live Google session that was absent. The task did NOT start; the
   // host asks the user to connect, then retries. No browser was driven.
   needs_user?: NeedsUserConnect;
+  // PR3 signin-vault: the user's own email (the Google identity captured at
+  // login), present on the start observation when known. The host fills THIS as
+  // the signup email so the account is user-owned, and it is the same identity
+  // whose inbox awaitVerification reads. Absent when no email was captured.
+  user_email?: string;
 }
 
 export interface AccessibilitySnapshot {
@@ -202,6 +208,9 @@ interface Session {
   // PR2 — whether this session may read the inbox for email verification. From
   // the install-time consent flag; gates awaitVerification (fail-closed).
   consentInboxRead: boolean;
+  // PR3 — the user's own email (Google identity captured at login), or null when
+  // unknown. The authoritative signup email + the identity whose inbox is read.
+  userEmail: string | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -960,6 +969,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     lastElements: [],
     actionTrace: [],
     consentInboxRead: opts.consentInboxRead === true,
+    userEmail: loggedInEmail("google", opts.profileDir),
   };
   sessions.set(id, session);
   audit(id, "start", {
@@ -976,7 +986,11 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     loginSessionGuidance(liveProviders),
     ...(opts.hint !== undefined ? [opts.hint] : []),
   ];
-  return { ...observation, hint: hintParts.join("\n") };
+  return {
+    ...observation,
+    hint: hintParts.join("\n"),
+    ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
+  };
 }
 
 export async function observe(sessionId: string): Promise<Observation> {
@@ -1024,6 +1038,23 @@ export function stashSecretSlot(sessionId: string, slot: string, value: string):
   session.actionTrace.push({ action: { kind: "extract", slot } });
   audit(sessionId, "secret_slot_set", { slot, length: value.length });
   return { slot, preview: maskSecretValue(value), length: value.length };
+}
+
+// Internal MCP tool bridge: read a sealed slot so the tool layer can persist a
+// signup password to the vault after the service account is created. Never
+// expose this value in a tool response or recipe trace.
+export function readSecretSlotValue(sessionId: string, slot: string): string {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const value = session.secretSlots.get(slot);
+  if (value === undefined) throw new Error(`no sealed slot named "${slot}"`);
+  return value;
+}
+
+export function currentProvisionUrl(sessionId: string): string {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  return session.browser.currentUrl();
 }
 
 async function observeSession(session: Session): Promise<Observation> {
