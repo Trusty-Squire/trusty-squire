@@ -1,5 +1,25 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.0 (2026-06-28)
+
+First stable release. Promotes the 1.0.0-rc line, plus:
+
+**Free during beta**
+- Billing is kill-switched off (`BILLING_ENABLED`, default off): no one can be
+  charged by a stray Upgrade click, even with a live Stripe key.
+- The free-signup quota / 402 paywall is removed — provisioning is unlimited.
+- Client drops the stale quota nudge + `getMachineStatus` plumbing.
+
+**Positioning**
+- Three pillars: provision / vault / operate. Pricing is Free / $20 Pro (no
+  Enterprise tier yet). Rotation and egress spend-caps are marked "coming
+  soon" / "planned" until enforced — claims no longer run ahead of the code.
+
+**Cleanup + hardening**
+- Removed the dead Vouchflow device-attestation integration and the orphaned
+  signup-quota upgrade-token path end to end.
+- `SESSION_JWT_SECRET` now fails closed in production.
+
 ## 1.0.0-rc.0 (2026-06-27)
 
 First 1.0 release candidate. Headlines: the operator surface gains user-saved
