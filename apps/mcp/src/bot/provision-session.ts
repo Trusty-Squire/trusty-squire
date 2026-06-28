@@ -1249,6 +1249,19 @@ export function redactEmailForTrace(value: string): string {
   return looksLikeEmailValue(value) ? EMAIL_SLOT_TEMPLATE : value;
 }
 
+// PR3d — exact-scrub the KNOWN user email wherever it appears in a trace string
+// (not just a whole-value email field). In the operator path the host fills the
+// user's real address, which can also surface in a targeted element's visible
+// text (e.g. a "signed in as ada@x.com" chip the action hit). We know the exact
+// address (session.userEmail), so replace every occurrence with the slot token
+// before it's persisted to a recipe. (onboarding-capture observation frames are
+// NOT a vector here — that path belonged to the retired autonomous bot and is
+// not wired into operate_*.) Exported for unit tests.
+export function scrubKnownEmail(s: string, userEmail: string | null): string {
+  if (userEmail === null || userEmail.length === 0 || !s.includes(userEmail)) return s;
+  return s.split(userEmail).join(EMAIL_SLOT_TEMPLATE);
+}
+
 // Append a TEXT-targeted entry to the session's operator-recipe trace. Stores
 // the visible text the action hit (never a ref/coordinate) + non-secret params.
 // `extract` (the seal) is recorded separately in stashSecretSlot.
@@ -1264,7 +1277,8 @@ function recordTrace(
   action: ProvisionAction,
   el: InteractiveElement | null,
 ): void {
-  const text = traceTextFor(el);
+  const rawText = traceTextFor(el);
+  const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
   let a: TraceAction;
   switch (action.kind) {
@@ -1273,7 +1287,7 @@ function recordTrace(
     case "press": a = { kind: "press", key: action.key }; break;
     case "oauth_settle": a = { kind: "oauth_settle" }; break;
     case "scroll": a = { kind: "scroll", ...(action.direction !== undefined ? { direction: action.direction } : {}) }; break;
-    case "type": a = { kind: "type", ...withText, value: redactEmailForTrace(action.text) }; break;
+    case "type": a = { kind: "type", ...withText, value: scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail) }; break;
     case "type_secret": a = { kind: "type_secret", slot: action.slot, ...withText }; break;
     case "click": a = { kind: "click", ...withText }; break;
     case "js_click": a = { kind: "js_click", ...withText }; break;

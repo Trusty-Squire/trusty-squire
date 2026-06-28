@@ -14,6 +14,7 @@ import {
   buildVerificationResult,
   buildConsentRefusal,
   redactEmailForTrace,
+  scrubKnownEmail,
   generatePassword,
   classifyVouchflowCredentials,
   detectExtractionBlock,
@@ -301,6 +302,19 @@ describe("redactEmailForTrace (PR3 — user email never lands in a recipe)", () 
     expect(redactEmailForTrace("my-project")).toBe("my-project");
     expect(redactEmailForTrace("Acme Inc")).toBe("Acme Inc");
     expect(redactEmailForTrace("not@anemail")).toBe("not@anemail"); // no TLD
+  });
+});
+
+describe("scrubKnownEmail (PR3d — exact known-email scrub in trace text)", () => {
+  it("replaces every occurrence of the known email with the slot token", () => {
+    expect(scrubKnownEmail("signed in as ada@x.com", "ada@x.com")).toBe("signed in as ${EMAIL_ALIAS}");
+    expect(scrubKnownEmail("ada@x.com / ada@x.com", "ada@x.com")).toBe("${EMAIL_ALIAS} / ${EMAIL_ALIAS}");
+  });
+
+  it("is a no-op when the email is null, empty, or absent", () => {
+    expect(scrubKnownEmail("Continue", "ada@x.com")).toBe("Continue");
+    expect(scrubKnownEmail("ada@x.com", null)).toBe("ada@x.com");
+    expect(scrubKnownEmail("ada@x.com", "")).toBe("ada@x.com");
   });
 });
 
