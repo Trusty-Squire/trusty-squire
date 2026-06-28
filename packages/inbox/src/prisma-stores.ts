@@ -9,7 +9,7 @@
 //
 // The interfaces these classes implement (find / revoke / bumpInbound on
 // AliasStore; insertIfAbsent / findByAlias on EmailStore) are the
-// canonical names used by InboxService, SesHandler, and MailgunHandler.
+// canonical names used by InboxService and ResendHandler.
 // An earlier draft used findActive/incrementInbound/findMatching here;
 // the rename happened in the in-memory store + call sites first, and
 // this file lagged behind.
@@ -42,7 +42,7 @@ export class PrismaAliasStore implements AliasStore {
   }
 
   // Returns the alias regardless of active/expired state. Callers
-  // (InboxService, SesHandler, MailgunHandler) decide what to do based
+  // (InboxService, ResendHandler) decide what to do based
   // on `active` / `expires_at`. Mirrors InMemoryAliasStore.find.
   async find(alias: string): Promise<EmailAliasRecord | null> {
     const row = await this.prisma.emailAlias.findUnique({ where: { alias } });

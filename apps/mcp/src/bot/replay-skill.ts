@@ -114,7 +114,7 @@ export interface ReplayInput {
    * Fetches the email verification code for an `await_email_code` step.
    * The replay engine has no inbox transport of its own (same separation
    * as `llmFallback` / `templateValues`): the caller — verify mode or the
-   * live-provision router — wires this to an InboxClient poll + code
+   * live-provision router — wires this to an inbox poll + code
    * extraction against the run's alias (`templateValues.EMAIL_ALIAS`).
    * Resolves to the code, or null when no verification email arrived in
    * time. A skill containing an `await_email_code` step that is replayed

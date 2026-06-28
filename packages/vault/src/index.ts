@@ -56,8 +56,6 @@ export {
   generateKey,
 } from "./encryption.js";
 
-export { KekDerivationError, deriveSessionKEK } from "./kek-derivation.js";
-
 export {
   InMemoryCredentialStore,
   InMemoryVaultAuditStore,

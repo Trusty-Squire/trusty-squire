@@ -19,7 +19,6 @@ import {
   PrismaAliasStore,
   PrismaEmailStore,
   ResendHandler,
-  MailgunHandler,
   type AliasStore,
   type EmailStore,
 } from "@trusty-squire/inbox";
@@ -102,7 +101,6 @@ export interface ApiDeps {
   vault: CredentialVault;
   egressGrantStore: EgressGrantStore;
   inbox: InboxService;
-  mailgunHandler: MailgunHandler;
   resendHandler: ResendHandler;
   machineTokenStore: MachineTokenStore;
   llmUsageTracker: LLMUsageTracker;
@@ -218,8 +216,6 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     ...(opts.pollIntervalMs !== undefined ? { pollIntervalMs: opts.pollIntervalMs } : {}),
   });
 
-  const mailgunHandler = new MailgunHandler({ aliasStore, emailStore });
-
   // rc.19 — Resend inbound. Same alias-resolution + dedupe contract
   // as the (now retired) SES path.
   const resendContentFetcher = buildResendReceivingFetcher();
@@ -265,7 +261,6 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     vault,
     egressGrantStore,
     inbox,
-    mailgunHandler,
     resendHandler,
     machineTokenStore,
     llmUsageTracker,
