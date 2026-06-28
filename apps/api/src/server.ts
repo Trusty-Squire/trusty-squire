@@ -11,7 +11,6 @@ import { registerInstallRoute } from "./routes/install.js";
 import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
 import { registerAdminFunnelRoute } from "./routes/admin-funnel.js";
 import { registerLLMRoute } from "./routes/llm.js";
-import { registerResendWebhookRoute } from "./routes/resend-webhook.js";
 import { registerBillingRoute } from "./routes/billing.js";
 import { registerStripeWebhookRoute } from "./routes/stripe-webhook.js";
 import { stripeClientFromEnv } from "./services/stripe-client.js";
@@ -144,12 +143,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
 
   await fastify.register(registerAuthRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerOAuthRoute, { deps });
-  await fastify.register(registerResendWebhookRoute, {
-    deps: {
-      resendHandler: deps.resendHandler,
-      ...(opts.emailForwarder !== undefined ? { emailForwarder: opts.emailForwarder } : {}),
-    },
-  });
   await fastify.register(registerInstallRoute, {
     deps: {
       machineTokenStore: deps.machineTokenStore,

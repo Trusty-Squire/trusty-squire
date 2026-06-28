@@ -11,17 +11,6 @@
 // captcha-event / inbox / vault.
 
 import { Buffer } from "node:buffer";
-import { createRequire } from "node:module";
-import {
-  InboxService,
-  InMemoryAliasStore,
-  InMemoryEmailStore,
-  PrismaAliasStore,
-  PrismaEmailStore,
-  ResendHandler,
-  type AliasStore,
-  type EmailStore,
-} from "@trusty-squire/inbox";
 import {
   CredentialVault,
   InMemoryCredentialStore,
@@ -67,7 +56,7 @@ import {
   PrismaCaptchaEventStore,
   type CaptchaEventStore,
 } from "./captcha-events.js";
-import { RetentionCron, type InboxPrismaClientLike } from "./retention-cron.js";
+import { RetentionCron } from "./retention-cron.js";
 import {
   InMemorySessionStore,
   type SessionStore,
@@ -100,8 +89,6 @@ export interface ApiDeps {
   credentialStore: CredentialStore;
   vault: CredentialVault;
   egressGrantStore: EgressGrantStore;
-  inbox: InboxService;
-  resendHandler: ResendHandler;
   machineTokenStore: MachineTokenStore;
   llmUsageTracker: LLMUsageTracker;
   captchaEventStore: CaptchaEventStore;
@@ -187,45 +174,6 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     proxyAuditFailureMode: "best_effort",
   });
 
-  // Inbox stores: Postgres-backed when INBOX_DATABASE_URL is set,
-  // in-memory otherwise. The PrismaClient is loaded lazily via
-  // createRequire so test runs without @prisma/client installed don't
-  // fail at import.
-  let aliasStore: AliasStore;
-  let emailStore: EmailStore;
-  let inboxPrismaForCron: InboxPrismaClientLike | null = null;
-  if (process.env.INBOX_DATABASE_URL !== undefined && process.env.INBOX_DATABASE_URL.length > 0) {
-    const req = createRequire(import.meta.url);
-    const { PrismaClient } = req("@prisma/client") as typeof import("@prisma/client");
-    const prisma = new PrismaClient({ datasourceUrl: process.env.INBOX_DATABASE_URL });
-    aliasStore = new PrismaAliasStore(prisma);
-    emailStore = new PrismaEmailStore(prisma);
-    inboxPrismaForCron = prisma as unknown as InboxPrismaClientLike;
-  } else {
-    aliasStore = new InMemoryAliasStore();
-    emailStore = new InMemoryEmailStore();
-  }
-
-  const aliasDomain =
-    process.env.INBOX_ALIAS_DOMAIN ??
-    (process.env.NODE_ENV === "production" ? "trustysquire.ai" : "test.local");
-  const inbox = new InboxService({
-    aliasStore,
-    emailStore,
-    domain: aliasDomain,
-    ...(opts.pollIntervalMs !== undefined ? { pollIntervalMs: opts.pollIntervalMs } : {}),
-  });
-
-  // rc.19 — Resend inbound. Same alias-resolution + dedupe contract
-  // as the (now retired) SES path.
-  const resendContentFetcher = buildResendReceivingFetcher();
-  const resendHandler = new ResendHandler({
-    aliasStore,
-    emailStore,
-    ...(resendContentFetcher !== undefined ? { fetchEmailContent: resendContentFetcher } : {}),
-    ...(opts.now !== undefined ? { now: opts.now } : {}),
-  });
-
   const machineTokenStore: MachineTokenStore =
     authPrisma !== null
       ? new PrismaMachineTokenStore(authPrisma)
@@ -242,9 +190,8 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
       : new InMemoryCaptchaEventStore();
 
   const retentionCron: RetentionCron | null =
-    inboxPrismaForCron !== null || authPrisma !== null
+    authPrisma !== null
       ? new RetentionCron({
-          inboxPrisma: inboxPrismaForCron ?? undefined,
           authPrisma: authPrisma ?? undefined,
           ...(opts.now !== undefined ? { now: opts.now } : {}),
         })
@@ -260,35 +207,11 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     credentialStore,
     vault,
     egressGrantStore,
-    inbox,
-    resendHandler,
     machineTokenStore,
     llmUsageTracker,
     captchaEventStore,
     retentionCron,
     sessionSecret: opts.sessionSecret,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
-  };
-}
-
-function buildResendReceivingFetcher():
-  | ((emailId: string) => Promise<{ text?: string | null; html?: string | null; received_at?: string | null } | null>)
-  | undefined {
-  const apiKey = process.env.RESEND_API_KEY;
-  if (apiKey === undefined || apiKey.length === 0) return undefined;
-  return async (emailId) => {
-    const res = await fetch(`https://api.resend.com/emails/receiving/${encodeURIComponent(emailId)}`, {
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        accept: "application/json",
-      },
-    });
-    if (!res.ok) return null;
-    const data = (await res.json()) as Record<string, unknown>;
-    return {
-      text: typeof data["text"] === "string" ? data["text"] : null,
-      html: typeof data["html"] === "string" ? data["html"] : null,
-      received_at: typeof data["created_at"] === "string" ? data["created_at"] : null,
-    };
   };
 }
