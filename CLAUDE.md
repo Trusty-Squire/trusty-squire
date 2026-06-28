@@ -193,12 +193,12 @@ silent failures.
 
 ## Active Sprint/Task
 
-**Self-improving loop:** the provision named-state machine, per-state
-retry policy, and single escalation condition live in the state-classifier
-+ policy code; the skill-promotion pipeline (virgin success → registry
-skill) is the "Skill-Promotion Pipeline" section of `AGENTS.md`. State
-classifier + policy: `packages/skill-schema/src/provision-state.ts` +
-`provision-policy.ts`.
+**Self-improving loop:** the host agent drives each provision step and its
+retries/escalation via `operate_*` (there is no in-package state machine
+anymore — the old `provision-state.ts`/`provision-policy.ts` classifier died
+with the autonomous bot). The skill-promotion pipeline (virgin success →
+registry skill) is the "Skill-Promotion Pipeline" section of `AGENTS.md`; the
+mechanical promote/demote rule lives in `apps/registry/src/skill-store.ts`.
 
 **0.7.0 closed loop shipped (rc.9).** Skill Promoter end-to-end:
 host-driven provision success → captured signup → synthesizer-produced

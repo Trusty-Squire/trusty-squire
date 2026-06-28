@@ -41,23 +41,6 @@ export {
 } from "./failure-taxonomy.js";
 export type { FailureClass } from "./failure-taxonomy.js";
 export {
-  classifyProvisionState,
-  unknownStateSignature,
-  WALL_STATE_KINDS,
-  EMAIL_PENDING_KINDS,
-  RATE_LIMITED_KINDS,
-  KNOWN_TRANSIENT_KINDS,
-} from "./provision-state.js";
-export type { ProvisionState, ProvisionSignals } from "./provision-state.js";
-export {
-  PROVISION_POLICY,
-  UNKNOWN_ESCALATION_THRESHOLD,
-  policyFor,
-  shouldEscalate,
-  backoffForAttempt,
-} from "./provision-policy.js";
-export type { ProvisionAction, StatePolicy } from "./provision-policy.js";
-export {
   canonicalizeServiceSlug,
   equivalentServiceSlugs,
   serviceSlugLookupOrder,
