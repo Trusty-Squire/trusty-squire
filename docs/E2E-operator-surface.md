@@ -13,6 +13,24 @@ host (an LLM planner whose context is logged) must never receive.
 - Status after the 2026-06-28 run is noted per scenario (server = local
   `@trusty-squire/mcp@1.0.1-rc.2` candidate).
 
+## Results (2026-06-28)
+Run twice: first against published `1.0.1-rc.1` (the leak baseline), then against
+the local fixed build after reconnect.
+
+| # | rc.1 (published) | fixed build | Evidence |
+|---|---|---|---|
+| A | ✅ pass | ✅ pass | refusal msg + URL unchanged + 7ms (no inbox I/O) |
+| B | ✅ pass | ✅ pass | flag → reads; no-flag → still reads (session-remembered) |
+| C | ❌ **LEAK** | ✅ pass | rc.1: `value="BwLfcB…RSt7="`; fixed: `value="[sealed]"` on password AND the email filled from the sealed login slot, in a11y tree + `elements[].value` + label |
+| D | ❌ inbox step recorded | ✅ pass | rc.1: recipe had `…link:inbox-verify-your-email-address…`; fixed: `steps:0`, no `mail.google.com`, no subject text |
+| E | ✅ pass | ✅ pass | `user_email` surfaces; absent identity → `needs_user(connect)` |
+| G | ✅ pass | ✅ pass | distinct 24-char passwords per session, masked previews only |
+| H | ✅ pass | ✅ pass | `evil.example.com` and `mail.google.com` both blocked by `goto` |
+| K | ✅ pass | ✅ pass | no credential → `{credentials:{}, candidate_count:0}` |
+
+C and D were the two fixes (commit `ac92dcc`); both flipped red→green on the
+fixed build. I, J not run (need a code service / a deliberate mutating replay).
+
 ---
 
 ## A — Consent fail-closed is "user-owned-or-nothing" 🔒
