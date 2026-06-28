@@ -60,14 +60,12 @@ The agent drives the browser step by step; the key lands in your vault, never in
 
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| `operate_start` / `observe` / `act` | Open a scoped browser session, read the page, take one action at a time. |
-| `operate_extract` | Reveal and capture credentials from the current page. |
-| `operate_remember` / `operate_use` | Save a successful run as a skill; replay it by name in ~30s. |
-| `operate_finish_task` / `operate_finish` | Close with an outcome (store credentials) or just release the browser. |
-| `grant_app_access` | Mint a scoped, revocable key for a deployed app (egress grant). |
-| `list_credentials` / `use_credential` | Browse the vault; call an API through it without exposing the raw secret. |
+- `operate_start` / `operate_observe` / `operate_act` — open a scoped browser session, read the page, act one step at a time.
+- `operate_extract` — reveal and capture credentials from the current page.
+- `operate_remember` / `operate_use` — save a successful run as a skill; replay it by name in ~30s.
+- `operate_finish_task` / `operate_finish` — finish with an outcome (store credentials) or just release the browser.
+- `grant_app_access` — mint a scoped, revocable key for a deployed app (egress grant).
+- `list_credentials` / `use_credential` — browse the vault; call an API through it without exposing the raw secret.
 
 ## How it works
 
@@ -86,13 +84,9 @@ A thin local MCP server that drives a real browser on your machine:
 
 ## Configuration
 
-| Env var | Default | Purpose |
-|---|---|---|
-| `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API gateway URL |
-| `UNIVERSAL_BOT_PREFER_CHEAP` | `true` | Cheap-tier vision planning; premium fallback only on parse failure |
-| `UNIVERSAL_BOT_MAX_LLM_CALLS` | `15` | Per-run circuit breaker |
-| `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`socks5://…`); datacenter egress only unless `UNIVERSAL_BOT_PROXY_ALWAYS=true` |
-| `UNIVERSAL_BOT_HEADLESS` | `false` | Force Chromium-headless (only when you want no display surface) |
+No setup needed for normal use — `connect` wires everything up. Advanced bot
+knobs (residential proxy, LLM tier, per-run call cap, API gateway override) are
+documented in [the repo](https://github.com/Trusty-Squire/trusty-squire).
 
 ## Security & privacy
 
