@@ -18,6 +18,9 @@ import {
   finishProvisionSession,
   observedHostsForSession,
   stashSecretSlot,
+  readSecretSlotValue,
+  getSessionUserEmail,
+  generatePassword,
   rememberRecipe,
   verifyPostcondition,
   type ProvisionAction,
@@ -681,6 +684,113 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
   },
 };
 
+// PR3c — username/password signup credential lifecycle (no Trusty Squire alias).
+const prepareLoginSchema = z.object({
+  session_id: z.string().min(1),
+  login_slot: z.string().min(1).max(60).optional(),
+  password_slot: z.string().min(1).max(60).optional(),
+  password_length: z.number().int().min(16).max(64).optional(),
+});
+
+export const provisionPrepareLoginTool: Tool<z.infer<typeof prepareLoginSchema>> = {
+  name: "operate_prepare_login",
+  description:
+    "Prepare username/password signup fields from the user's OWN email (captured " +
+    "at login) and a freshly generated strong password. Both are sealed into " +
+    "session slots — you get only masked handles, never the raw values. Fill the " +
+    "signup form with operate_act{kind:'type_secret'} using the returned login/" +
+    "password slots, then after the account is created call operate_store_login to " +
+    "vault them. This never uses a Trusty Squire alias — the account is the user's. " +
+    "If no user email was captured, a needs_user hand-back asks the user to run " +
+    "`connect` so the operator has their Google identity.",
+  inputSchema: prepareLoginSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      session_id: { type: "string" },
+      login_slot: { type: "string" },
+      password_slot: { type: "string" },
+      password_length: { type: "number" },
+    },
+  },
+  async handler(args) {
+    const email = getSessionUserEmail(args.session_id);
+    if (email === null) {
+      return {
+        session_id: args.session_id,
+        needs_user: {
+          wall: "user_email",
+          message:
+            "No user email is on file for this session, so the operator cannot " +
+            "fill a user-owned signup. Ask the user to run `npx @trusty-squire/mcp " +
+            "connect` (Google login) so their identity is captured, then retry.",
+          resume: "connect",
+        },
+      };
+    }
+    const login = stashSecretSlot(args.session_id, args.login_slot ?? "login", email);
+    const password = stashSecretSlot(
+      args.session_id,
+      args.password_slot ?? "password",
+      generatePassword(args.password_length ?? 24),
+    );
+    return { session_id: args.session_id, slots: { login, password }, email_preview: login.preview };
+  },
+};
+
+const storeLoginSchema = z.object({
+  session_id: z.string().min(1),
+  service: z.string().min(1).max(120),
+  login_slot: z.string().min(1).max(60).optional(),
+  password_slot: z.string().min(1).max(60).optional(),
+  label: z.string().min(1).max(120).optional(),
+});
+
+export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
+  name: "operate_store_login",
+  description:
+    "After the service account is created, vault the sealed signup login (the " +
+    "user's email + the generated password from operate_prepare_login) as a " +
+    "username_password credential so the user can sign back in. Reads the sealed " +
+    "slots server-side; raw values are never returned to you.",
+  inputSchema: storeLoginSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "service"],
+    properties: {
+      session_id: { type: "string" },
+      service: { type: "string" },
+      login_slot: { type: "string" },
+      password_slot: { type: "string" },
+      label: { type: "string" },
+    },
+  },
+  async handler(args, api) {
+    if (api === null) {
+      throw new Error("operate_store_login requires an active Trusty Squire session");
+    }
+    const username = readSecretSlotValue(args.session_id, args.login_slot ?? "login");
+    const password = readSecretSlotValue(args.session_id, args.password_slot ?? "password");
+    const observedHosts = observedHostsForSession(args.session_id);
+    const stored = await api.storeCredential({
+      service: args.service,
+      ...(args.label !== undefined ? { label: args.label } : {}),
+      fields: { username, password },
+      type: "username_password",
+      ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
+    });
+    return {
+      session_id: args.session_id,
+      reference: stored.reference,
+      service: stored.service,
+      type: "username_password",
+      field_names: stored.field_names,
+      updated: stored.updated,
+    };
+  },
+};
+
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
@@ -688,6 +798,8 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionCaptchaGateTool,
   provisionAwaitVerificationTool,
   provisionExtractTool,
+  provisionPrepareLoginTool,
+  provisionStoreLoginTool,
   provisionRememberTool,
   provisionUseTool,
   provisionFinishTaskTool,

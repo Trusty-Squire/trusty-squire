@@ -14,6 +14,7 @@ import {
   buildVerificationResult,
   buildConsentRefusal,
   redactEmailForTrace,
+  generatePassword,
   classifyVouchflowCredentials,
   detectExtractionBlock,
   sanitizeExtractedCredentials,
@@ -300,6 +301,26 @@ describe("redactEmailForTrace (PR3 — user email never lands in a recipe)", () 
     expect(redactEmailForTrace("my-project")).toBe("my-project");
     expect(redactEmailForTrace("Acme Inc")).toBe("Acme Inc");
     expect(redactEmailForTrace("not@anemail")).toBe("not@anemail"); // no TLD
+  });
+});
+
+describe("generatePassword (PR3c signup password)", () => {
+  it("clamps length to [16,64] and is policy-compliant (lower/upper/digit/symbol)", () => {
+    for (const req of [1, 16, 24, 64, 200]) {
+      const pw = generatePassword(req);
+      const expected = Math.max(16, Math.min(64, req));
+      expect(pw.length).toBe(expected);
+      expect(pw).toMatch(/[a-z]/);
+      expect(pw).toMatch(/[A-Z]/);
+      expect(pw).toMatch(/[0-9]/);
+      expect(pw).toMatch(/[^a-zA-Z0-9]/);
+    }
+  });
+
+  it("produces distinct values across calls", () => {
+    const a = generatePassword();
+    const b = generatePassword();
+    expect(a).not.toBe(b);
   });
 });
 

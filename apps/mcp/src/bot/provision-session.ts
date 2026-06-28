@@ -16,7 +16,7 @@
 //  - no credential is ever read back to the agent except via the explicit
 //    `finish`/extract path; the vault stays write-only.
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import { BrowserController, type InteractiveElement } from "./browser.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
@@ -1055,6 +1055,37 @@ export function currentProvisionUrl(sessionId: string): string {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return session.browser.currentUrl();
+}
+
+// PR3c — the user's own email captured at login (the authoritative signup
+// address), or null when none was captured. The tool layer reads this to fill
+// username/password signups so the account is user-owned.
+export function getSessionUserEmail(sessionId: string): string | null {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  return session.userEmail;
+}
+
+// PR3c — generate a strong signup password. Policy-compliant by construction
+// (>=1 lower/upper/digit/symbol) so it satisfies common signup validators, then
+// the remaining length is filled from the full set and the whole thing shuffled.
+// Uses crypto.randomInt for unbiased selection. Length clamped to [16, 64].
+const PW_LOWER = "abcdefghijkmnpqrstuvwxyz"; // no l/o
+const PW_UPPER = "ABCDEFGHJKLMNPQRSTUVWXYZ"; // no I/O
+const PW_DIGIT = "23456789"; // no 0/1
+const PW_SYMBOL = "!@#$%^&*-_=+";
+const PW_ALL = PW_LOWER + PW_UPPER + PW_DIGIT + PW_SYMBOL;
+export function generatePassword(length = 24): string {
+  const n = Math.max(16, Math.min(64, Math.floor(length)));
+  const pick = (set: string): string => set[randomInt(set.length)]!;
+  const chars = [pick(PW_LOWER), pick(PW_UPPER), pick(PW_DIGIT), pick(PW_SYMBOL)];
+  while (chars.length < n) chars.push(pick(PW_ALL));
+  // Fisher-Yates shuffle so the guaranteed-class chars aren't always first.
+  for (let i = chars.length - 1; i > 0; i--) {
+    const j = randomInt(i + 1);
+    [chars[i], chars[j]] = [chars[j]!, chars[i]!];
+  }
+  return chars.join("");
 }
 
 async function observeSession(session: Session): Promise<Observation> {
