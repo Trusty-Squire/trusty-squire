@@ -90,7 +90,7 @@ function createAlias(app: FastifyInstance, token: string): Promise<{ statusCode:
     .then((r) => ({ statusCode: r.statusCode, body: r.json() }));
 }
 
-describe("billing — quota gate", () => {
+describe("provisioning is free — no signup quota (beta)", () => {
   let h: Harness;
   beforeEach(async () => {
     h = await setup();
@@ -99,44 +99,19 @@ describe("billing — quota gate", () => {
     await h.app.close();
   });
 
-  it("an over-quota token on a FREE account is 402'd", async () => {
+  it("a token past the old free limit still creates aliases (no 402)", async () => {
     const acct = await h.deps.accountStore.createAccount("free@test.dev", "Free");
     const token = await overQuotaToken(h.deps, h.app, acct.id);
-    const res = await createAlias(h.app, token);
-    expect(res.statusCode).toBe(402);
-    expect((res.body as { error: string }).error).toBe("payment_required");
-  });
-
-  it("an active subscription on the bound account lifts the 402", async () => {
-    const acct = await h.deps.accountStore.createAccount("paid@test.dev", "Paid");
-    const token = await overQuotaToken(h.deps, h.app, acct.id);
-    await h.deps.accountStore.setSubscription(acct.id, { subscription_status: "active" });
     const res = await createAlias(h.app, token);
     expect(res.statusCode).toBe(201);
   });
 
-  it("a canceled subscription does NOT lift the 402", async () => {
+  it("a canceled/free account is not paywalled either", async () => {
     const acct = await h.deps.accountStore.createAccount("ex@test.dev", "Ex");
     const token = await overQuotaToken(h.deps, h.app, acct.id);
     await h.deps.accountStore.setSubscription(acct.id, { subscription_status: "canceled" });
     const res = await createAlias(h.app, token);
-    expect(res.statusCode).toBe(402);
-  });
-
-  it("the paid bypass keys off the bound account, NOT the request body", async () => {
-    // Paid account exists, but the token is bound to a DIFFERENT free
-    // account; passing the paid id in the body must not grant the bypass.
-    const paid = await h.deps.accountStore.createAccount("real-paid@test.dev", "Paid");
-    await h.deps.accountStore.setSubscription(paid.id, { subscription_status: "active" });
-    const free = await h.deps.accountStore.createAccount("attacker@test.dev", "Free");
-    const token = await overQuotaToken(h.deps, h.app, free.id);
-    const res = await h.app.inject({
-      method: "POST",
-      url: "/v1/inbox/aliases",
-      headers: { "content-type": "application/json", "x-machine-token": token },
-      payload: { account_id: paid.id, service: "resend", run_id: "run-1" },
-    });
-    expect(res.statusCode).toBe(402);
+    expect(res.statusCode).toBe(201);
   });
 });
 

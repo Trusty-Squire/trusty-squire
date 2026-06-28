@@ -186,8 +186,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps: {
       inbox: deps.inbox,
       machineTokenStore: deps.machineTokenStore,
-      accountStore: deps.accountStore,
-      sessionSecret: deps.sessionSecret,
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     },
   });

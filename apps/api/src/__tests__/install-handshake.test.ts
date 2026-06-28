@@ -129,7 +129,7 @@ describe("single-tier install handshake", () => {
     expect(claim.json()).toMatchObject({ error: "invalid_request" });
   });
 
-  it("emits payment_required + cta_billing_url at the free-quota limit", async () => {
+  it("provisioning is free during beta — no paywall past the old free limit", async () => {
     const issue = await app.inject({ method: "POST", url: "/v1/install" });
     const { machine_token } = issue.json() as { machine_token: string };
 
@@ -137,8 +137,9 @@ describe("single-tier install handshake", () => {
     // the install-claim does this seconds after token issuance).
     await deps.machineTokenStore.markPaired(machine_token, "acct-test");
 
-    // Burn through the free quota.
-    for (let i = 0; i < 10; i++) {
+    // Well past the old free limit (10) — every signup still succeeds; the
+    // quota gate has been removed for the free-during-beta window.
+    for (let i = 0; i < 13; i++) {
       const r = await app.inject({
         method: "POST",
         url: "/v1/inbox/aliases",
@@ -147,18 +148,6 @@ describe("single-tier install handshake", () => {
       });
       expect(r.statusCode, `iteration ${i}`).toBe(201);
     }
-
-    // 11th request — the free limit hits and the response points the
-    // user at billing instead of a separate pairing flow.
-    const blocked = await app.inject({
-      method: "POST",
-      url: "/v1/inbox/aliases",
-      headers: { "x-machine-token": machine_token, ...JSON_HEADERS },
-      payload: { account_id: "acct-test", service: "test", run_id: "r-blocked" },
-    });
-    expect(blocked.statusCode).toBe(402);
-    expect(blocked.json()).toMatchObject({ error: "payment_required" });
-    expect((blocked.json() as Record<string, unknown>).cta_billing_url).toBeDefined();
   });
 
   it("install/status returns the bound account_id", async () => {
