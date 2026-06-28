@@ -134,6 +134,10 @@ h1 .dim{color:var(--muted)}
 .price-hero h1{font-size:clamp(2rem,4vw,2.6rem);font-weight:600;
   letter-spacing:-.03em;line-height:1.08}
 .price-hero p{margin:var(--s-3) auto 0;color:var(--muted);font-size:16px;max-width:48ch}
+.price-beta{max-width:760px;margin:var(--s-8) auto 0;padding:10px 14px;
+  text-align:center;font-size:13px;color:var(--muted);
+  background:var(--surface);border:1px solid var(--line2);border-radius:var(--r-md)}
+.tier-feats em{font-style:normal;color:var(--faint);font-size:12px}
 .price-grid{display:grid;grid-template-columns:repeat(2,1fr);
   border:1px solid var(--line);border-radius:var(--r-lg);overflow:hidden;
   max-width:760px;margin:var(--s-12) auto var(--s-24)}

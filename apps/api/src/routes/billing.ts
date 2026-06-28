@@ -22,6 +22,13 @@ export interface BillingRouteDeps {
   // null when Stripe isn't configured (STRIPE_SECRET_KEY unset) — the
   // routes register regardless and 503, matching the webhook's posture.
   stripe: StripeClient | null;
+  // Beta kill-switch. While Trusty Squire is free-during-beta, the two
+  // charge-creating routes (/checkout, /checkout-from-token) refuse so no
+  // one can be billed by a stray Upgrade click — even with a live Stripe
+  // key set. Defaults OFF (fail-safe): billing only runs when explicitly
+  // enabled. /status and /portal stay up (read-only / lets an existing
+  // subscriber cancel). Flip on the day paid signups go live.
+  billingEnabled: boolean;
   // Base URL of the product site, for Stripe success/cancel/return redirects.
   webBaseUrl: string;
   // Verifies the pre-authenticated upgrade token on /checkout-from-token.
@@ -65,6 +72,10 @@ export async function registerBillingRoute(
     "/v1/billing/checkout",
     { preHandler: opts.requireWeb },
     async (req, reply) => {
+      if (!opts.deps.billingEnabled) {
+        reply.code(503).send({ error: "billing_disabled" });
+        return;
+      }
       const stripe = opts.deps.stripe;
       if (stripe === null) {
         reply.code(503).send({ error: "billing_not_configured" });
@@ -100,6 +111,10 @@ export async function registerBillingRoute(
   // web session — so the user pays in one click from the agent's link instead
   // of doing a separate browser OAuth login. The token is the auth.
   fastify.post("/v1/billing/checkout-from-token", async (req, reply) => {
+    if (!opts.deps.billingEnabled) {
+      reply.code(503).send({ error: "billing_disabled" });
+      return;
+    }
     const stripe = opts.deps.stripe;
     if (stripe === null) {
       reply.code(503).send({ error: "billing_not_configured" });

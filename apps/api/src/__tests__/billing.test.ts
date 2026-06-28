@@ -50,6 +50,9 @@ interface Harness {
 }
 
 async function setup(stripe: FakeStripe | null = new FakeStripe()): Promise<Harness> {
+  // These tests exercise the real checkout flow, so the free-during-beta
+  // kill-switch must be ON. (A dedicated test below covers the OFF default.)
+  process.env.BILLING_ENABLED = "true";
   const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
   const app = await buildServer({
     deps,
@@ -285,6 +288,25 @@ describe("billing — checkout + portal routes", () => {
       expect(res.statusCode).toBe(503);
     } finally {
       await unconfigured.app.close();
+    }
+  });
+
+  it("checkout is 503 billing_disabled when the beta kill-switch is off — even with Stripe live", async () => {
+    // The free-during-beta default: no one can be billed by a stray Upgrade
+    // click, regardless of a configured Stripe key.
+    const prev = process.env.BILLING_ENABLED;
+    delete process.env.BILLING_ENABLED;
+    const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
+    const app = await buildServer({ deps, stripeClient: new FakeStripe() });
+    try {
+      const acct = await deps.accountStore.createAccount("beta@test.dev", "Beta");
+      const cookie = await webCookie(deps, acct.id);
+      const res = await app.inject({ method: "POST", url: "/v1/billing/checkout", headers: { cookie } });
+      expect(res.statusCode).toBe(503);
+      expect((res.json() as { error: string }).error).toBe("billing_disabled");
+    } finally {
+      await app.close();
+      if (prev !== undefined) process.env.BILLING_ENABLED = prev;
     }
   });
 });

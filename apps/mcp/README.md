@@ -82,7 +82,7 @@ A thin local MCP server that drives a real browser on your machine:
 ## Pricing
 
 - **Free** — provision, operate, store keys, personal use, 7-day audit, manual rotation.
-- **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, automated rotation.
+- **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, automated rotation _(coming soon)_. Free while in beta.
 
 ## Configuration
 

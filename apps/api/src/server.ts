@@ -199,6 +199,9 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps: {
       accountStore: deps.accountStore,
       stripe: stripeClient,
+      // Free-during-beta: checkout stays OFF unless explicitly enabled, so a
+      // stray Upgrade click can't charge anyone even with a live Stripe key.
+      billingEnabled: process.env.BILLING_ENABLED === "true" || process.env.BILLING_ENABLED === "1",
       webBaseUrl: defaultPwaBaseUrl(),
       sessionSecret: deps.sessionSecret,
     },

@@ -42,6 +42,10 @@ export default function PricingPage() {
 
       {/* ---------------- TIERS ---------------- */}
       <section className="wrap">
+        <p className="price-beta">
+          Free while in beta — Pro features are unlocked for everyone, no card
+          required. Pricing below is where it&apos;s headed.
+        </p>
         <div className="price-grid">
           {/* Free */}
           <div className="tier">
@@ -71,8 +75,8 @@ export default function PricingPage() {
               <span className="per">/mo</span>
             </div>
             <div className="tier-tag">For shipping real apps to production.</div>
-            <Link className="tier-cta primary" href="/billing">
-              Upgrade
+            <Link className="tier-cta primary" href="/start">
+              Install
             </Link>
             <ul className="tier-feats">
               <li>Everything in Free</li>
@@ -80,12 +84,11 @@ export default function PricingPage() {
                 <strong>Egress grants</strong> — scoped, revocable, spend-capped
                 keys for deployed apps
               </li>
-              <li>
-                <strong>Automated rotation</strong> on covered services, growing
-                weekly
-              </li>
               <li>365-day audit trail + export</li>
               <li>Generous fair-use egress</li>
+              <li>
+                <strong>Automated rotation</strong> <em>(coming soon)</em>
+              </li>
             </ul>
           </div>
         </div>
