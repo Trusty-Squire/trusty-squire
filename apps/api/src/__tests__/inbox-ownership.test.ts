@@ -20,7 +20,6 @@ describe("/v1/inbox alias ownership", () => {
     process.env["UNIVERSAL_BOT_API_KEY"] = "inbox-admin-key";
     const deps = buildInMemoryDeps({
       sessionSecret: "test-secret-not-used",
-      customerId: CUSTOMER_ID,
       // Fast poll so /wait timeouts return quickly.
       pollIntervalMs: 1,
     });

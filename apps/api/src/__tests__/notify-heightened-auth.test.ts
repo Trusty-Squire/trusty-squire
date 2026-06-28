@@ -50,7 +50,6 @@ describe("POST /v1/notify/heightened-auth", () => {
     forwarder = new StubEmailForwarder([]);
     deps = buildInMemoryDeps({
       sessionSecret: "test-secret-not-used",
-      customerId: "ts-test",
     });
     app = await buildServer({ deps, emailForwarder: forwarder });
   });

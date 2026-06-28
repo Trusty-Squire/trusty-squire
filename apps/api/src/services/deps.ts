@@ -111,7 +111,6 @@ export interface ApiDeps {
 
   // Config
   sessionSecret: string;
-  customerId: string;
 
   // Test injection
   now?: () => Date;
@@ -119,7 +118,6 @@ export interface ApiDeps {
 
 export interface BuildInMemoryDepsOpts {
   sessionSecret: string;
-  customerId: string;
   now?: () => Date;
   // Inbox poll cadence in ms. Tests run with 1ms to keep wait loops fast;
   // omit in prod to use the default 2000ms.
@@ -274,7 +272,6 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     captchaEventStore,
     retentionCron,
     sessionSecret: opts.sessionSecret,
-    customerId: opts.customerId,
     ...(opts.now !== undefined ? { now: opts.now } : {}),
   };
 }

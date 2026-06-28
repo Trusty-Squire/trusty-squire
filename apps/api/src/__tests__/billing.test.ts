@@ -50,7 +50,7 @@ async function setup(stripe: FakeStripe | null = new FakeStripe()): Promise<Harn
   // These tests exercise the real checkout flow, so the free-during-beta
   // kill-switch must be ON. (A dedicated test below covers the OFF default.)
   process.env.BILLING_ENABLED = "true";
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
   const app = await buildServer({
     deps,
     ...(stripe !== null ? { stripeClient: stripe } : {}),
@@ -274,7 +274,7 @@ describe("billing — checkout + portal routes", () => {
     // click, regardless of a configured Stripe key.
     const prev = process.env.BILLING_ENABLED;
     delete process.env.BILLING_ENABLED;
-    const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
+    const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
     const app = await buildServer({ deps, stripeClient: new FakeStripe() });
     try {
       const acct = await deps.accountStore.createAccount("beta@test.dev", "Beta");

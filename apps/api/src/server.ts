@@ -2,12 +2,10 @@
 //
 // In-memory deps in dev/test; production layer wires Prisma-backed
 // stores. We expose `buildServer(deps)` for tests so they can inject
-// a customised dep bundle (notably a VouchflowVerifier with a local
-// JWKS for offline testing).
+// a customised dep bundle.
 
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyCookie from "@fastify/cookie";
-import { loadVouchflowConfig, isStubMode } from "./config/vouchflow.js";
 import { makeAuthMiddleware } from "./auth/middleware.js";
 import { registerInstallRoute } from "./routes/install.js";
 import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
@@ -85,7 +83,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     buildInMemoryDeps(
       opts.buildDeps ?? {
         sessionSecret: resolveSessionSecret(),
-        customerId: loadVouchflowConfig().customerId,
       },
     );
 
@@ -280,7 +277,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // when opts.deps isn't passed.
   const deps = buildInMemoryDeps({
     sessionSecret: resolveSessionSecret(),
-    customerId: loadVouchflowConfig().customerId,
   });
   const server = await buildServer({ deps });
 

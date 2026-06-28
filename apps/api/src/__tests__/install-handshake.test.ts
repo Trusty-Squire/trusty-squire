@@ -14,7 +14,6 @@
 import { describe, expect, it, beforeEach } from "vitest";
 import { buildServer } from "../server.js";
 import { buildInMemoryDeps } from "../services/deps.js";
-import { loadVouchflowConfig } from "../config/vouchflow.js";
 import type { FastifyInstance } from "fastify";
 import type { ApiDeps } from "../services/deps.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
@@ -43,7 +42,6 @@ describe("single-tier install handshake", () => {
   beforeEach(async () => {
     deps = buildInMemoryDeps({
       sessionSecret: SESSION_SECRET,
-      customerId: loadVouchflowConfig().customerId,
     });
     app = await buildServer({ deps });
   });

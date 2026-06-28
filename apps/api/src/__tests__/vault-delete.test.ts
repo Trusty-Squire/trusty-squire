@@ -19,7 +19,7 @@ interface Harness {
 }
 
 async function setup(): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
   const server = await buildServer({ deps });
   return { server, deps };
 }

@@ -21,7 +21,6 @@ describe("/v1/auth/whoami", () => {
   beforeEach(async () => {
     deps = buildInMemoryDeps({
       sessionSecret: "test-secret-not-used",
-      customerId: "ts-test",
       pollIntervalMs: 1,
     });
     app = await buildServer({ deps });

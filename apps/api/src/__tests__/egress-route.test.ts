@@ -38,7 +38,7 @@ function fakeExecutor(): HttpProxyExecutor {
 
 interface Harness { server: FastifyInstance; deps: ApiDeps }
 async function setup(opts: { egressGrantStore?: EgressGrantStore } = {}): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID });
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
   const server = await buildServer({
     deps,
     proxyExecutor: fakeExecutor(),
@@ -193,7 +193,7 @@ describe("Egress Grants — /v1/egress", () => {
 
   it("maps grant-store connection collapse to retryable 503 instead of raw 500", async () => {
     await h.server.close();
-    const backing = buildInMemoryDeps({ sessionSecret: SESSION_SECRET, customerId: CUSTOMER_ID }).egressGrantStore;
+    const backing = buildInMemoryDeps({ sessionSecret: SESSION_SECRET}).egressGrantStore;
     let failReads = false;
     const flakyStore: EgressGrantStore = {
       create: (grant: EgressGrant) => backing.create(grant),

@@ -188,10 +188,8 @@ model Account {
   cancel_at           DateTime?
 
   oauth_identities OAuthIdentity[]
-  devices          Device[]
   web_sessions     WebSession[]
   agent_sessions   AgentSession[]
-  active_mandate   ActiveMandate?
 
   @@index([stripe_customer_id])
 }
@@ -210,35 +208,6 @@ model OAuthIdentity {
 
   @@unique([provider, provider_user_id])
   @@index([account_id])
-}
-
-// Vouchflow signing devices observed on bundles. OAuth logins do not
-// produce devices; this stays for the passkey login path + ledger UI.
-model Device {
-  id            String    @id // signing_device_id from Vouchflow
-  account_id    String    @db.VarChar(26)
-  first_seen_at DateTime  @default(now())
-  last_seen_at  DateTime
-  platform      String    // "ios" | "android" | "web"
-  revoked_at    DateTime?
-
-  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
-
-  @@index([account_id])
-}
-
-// The account's current active mandate (latest signed replaces prior).
-// `mandate` is the full Mandate object as JSON. OAuth signup writes a
-// stub mandate here so mandate-aware code keeps working.
-model ActiveMandate {
-  account_id             String   @id @db.VarChar(26)
-  mandate                Json
-  signed_by_device       String
-  vouchflow_device_token String
-  session_id             String
-  installed_at           DateTime @default(now())
-
-  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
 }
 
 // Web sessions — JWT in an HTTP-only cookie. `jwt_id` is looked up on

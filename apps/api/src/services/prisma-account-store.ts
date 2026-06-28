@@ -10,11 +10,8 @@ import type { ApiPrismaClient } from "./api-prisma-client.js";
 import type {
   AccountRecord,
   AccountStore,
-  DeviceRecord,
   SubscriptionPatch,
 } from "./in-memory-account-store.js";
-
-type Platform = "ios" | "android" | "web";
 
 export class PrismaAccountStore implements AccountStore {
   constructor(private readonly prisma: ApiPrismaClient) {}
@@ -77,52 +74,11 @@ export class PrismaAccountStore implements AccountStore {
     });
   }
 
-  async touchDevice(input: {
-    account_id: string;
-    signing_device_id: string;
-    platform: Platform;
-    now: Date;
-  }): Promise<void> {
-    await this.prisma.device.upsert({
-      where: { id: input.signing_device_id },
-      create: {
-        id: input.signing_device_id,
-        account_id: input.account_id,
-        first_seen_at: input.now,
-        last_seen_at: input.now,
-        platform: input.platform,
-        revoked_at: null,
-      },
-      update: { last_seen_at: input.now },
-    });
-  }
-
-  async listDevices(accountId: string): Promise<DeviceRecord[]> {
-    const rows = await this.prisma.device.findMany({
-      where: { account_id: accountId },
-    });
-    return rows.map((d) => ({
-      id: d.id,
-      account_id: d.account_id,
-      first_seen_at: d.first_seen_at,
-      last_seen_at: d.last_seen_at,
-      platform: this.toPlatform(d.platform),
-      revoked_at: d.revoked_at,
-    }));
-  }
-
-  async markDeviceRevoked(signingDeviceId: string, now: Date): Promise<void> {
-    await this.prisma.device.updateMany({
-      where: { id: signingDeviceId },
-      data: { revoked_at: now },
-    });
-  }
-
   async deleteAccount(accountId: string): Promise<void> {
     // The schema declares onDelete: Cascade from Account on OAuthIdentity,
-    // Device, ActiveMandate, WebSession, and AgentSession — deleting the
-    // row tears those down with it. Credentials + vault audit are not FK-
-    // linked and are purged separately by the caller.
+    // WebSession, and AgentSession — deleting the row tears those down with
+    // it. Credentials + vault audit are not FK-linked and are purged
+    // separately by the caller.
     try {
       await this.prisma.account.delete({ where: { id: accountId } });
     } catch (err) {
@@ -158,11 +114,5 @@ export class PrismaAccountStore implements AccountStore {
       current_period_end: row.current_period_end,
       cancel_at: row.cancel_at,
     };
-  }
-
-  // Platform is a free-text column; narrow it back to the union the
-  // DeviceRecord type expects. Anything unexpected falls back to "web".
-  private toPlatform(value: string): Platform {
-    return value === "ios" || value === "android" ? value : "web";
   }
 }

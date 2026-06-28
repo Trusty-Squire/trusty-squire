@@ -22,7 +22,6 @@ beforeEach(async () => {
   process.env.PWA_BASE_URL = "https://trustysquire.ai";
   const deps = buildInMemoryDeps({
     sessionSecret: "test-secret-not-used",
-    customerId: "ts-test",
     now: () => new Date(nowMs),
   });
   app = await buildServer({ deps });

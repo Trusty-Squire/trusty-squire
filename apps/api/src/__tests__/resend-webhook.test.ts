@@ -24,7 +24,6 @@ async function buildApp(): Promise<FastifyInstance> {
   const { registerResendWebhookRoute } = await import("../routes/resend-webhook.js");
   const deps = buildInMemoryDeps({
     sessionSecret: "test",
-    customerId: "ts-test",
   });
   const app = Fastify({ logger: false });
   await app.register(registerResendWebhookRoute, {

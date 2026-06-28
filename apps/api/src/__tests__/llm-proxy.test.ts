@@ -10,7 +10,6 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { buildServer } from "../server.js";
 import { buildInMemoryDeps } from "../services/deps.js";
-import { loadVouchflowConfig } from "../config/vouchflow.js";
 import type { FastifyInstance } from "fastify";
 
 const JSON_HEADERS = { "content-type": "application/json" };
@@ -32,7 +31,6 @@ describe("/v1/llm/chat", () => {
     process.env["OPENROUTER_API_KEY"] = "test-or-key";
     const deps = buildInMemoryDeps({
       sessionSecret: "test-secret-not-used",
-      customerId: loadVouchflowConfig().customerId,
     });
     app = await buildServer({ deps });
     const issue = await app.inject({ method: "POST", url: "/v1/install" });
@@ -105,7 +103,6 @@ describe("/v1/llm/chat", () => {
     // tracker directly via the deps it was built with.
     const deps = buildInMemoryDeps({
       sessionSecret: "test-secret-not-used",
-      customerId: loadVouchflowConfig().customerId,
     });
     const tightApp = await buildServer({ deps });
     const issue = await tightApp.inject({ method: "POST", url: "/v1/install" });
@@ -277,7 +274,7 @@ describe("/v1/llm/chat", () => {
     const { buildServer: buildServer2 } = await import("../server.js");
     const { buildInMemoryDeps: depsBuilder } = await import("../services/deps.js");
     const app2 = await buildServer2({
-      deps: depsBuilder({ sessionSecret: "s", customerId: "ts-test", pollIntervalMs: 1 }),
+      deps: depsBuilder({ sessionSecret: "s", pollIntervalMs: 1 }),
     });
 
     const tok = (await app2.inject({ method: "POST", url: "/v1/install" }).then((r) =>
@@ -355,7 +352,6 @@ describe("/v1/llm/chat", () => {
     delete process.env["OPENROUTER_API_KEY"];
     const deps = buildInMemoryDeps({
       sessionSecret: "test-secret-not-used",
-      customerId: loadVouchflowConfig().customerId,
     });
     const blindApp = await buildServer({ deps });
     const issue = await blindApp.inject({ method: "POST", url: "/v1/install" });

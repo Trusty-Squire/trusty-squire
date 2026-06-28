@@ -283,7 +283,7 @@ trusty-squire/
 │   │                housekeeper backplane (extract failures, bot-failure
 │   │                aggregation, compat-score). Sole publish surface
 │   │                since the native-provision sunset (0.8).
-│   └── tooling/     Internal scripts (Vouchflow stub, etc.)
+│   └── tooling/     Internal scripts
 ├── packages/
 │   ├── inbox/       Email alias + inbound parsing. Owns inbox Prisma schema.
 │   ├── vault/       Encrypted credential store.
@@ -433,8 +433,7 @@ bin symlink and would catch any regression of the above.
 | `RESEND_INBOUND_SECRET` | Svix-style HMAC for `/v1/webhooks/resend-inbound` |
 | `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` + `/v1/llm/chat` |
 | `OPERATOR_IMAP_USER` / `OPERATOR_IMAP_PASSWORD` | IMAP creds for the operator's **single** mail identity — the bot's Google account (`lunchbox@trustysquire.ai`, the trustysquire.ai Workspace account, served by imap.gmail.com). Read-only — backs `operator-otp-poller.ts` for the `email_otp_required` gate (Porter, Koyeb, anthropic, other WorkOS-backed services whose OTP goes to the OAuth-bound inbox). The legacy `GMAIL_USER`/`GMAIL_APP_PASSWORD` names are still read as a fallback (un-migrated deploys). One identity, one inbox — do NOT reintroduce a separate personal-gmail credential. A Google account password change silently invalidates app passwords (no revocation notice); if the gate returns `imap_auth_failed`, regenerate the app password and reset the secret. Verify locally with `tools/test-operator-imap.mjs`. |
-| `VOUCHFLOW_CUSTOMER_ID` / `SESSION_JWT_SECRET` | Auth |
-| `VOUCHFLOW_READ_KEY` | Vouchflow server-side read key. Optional today (only needed once revocation/introspection paths land). **Never hardcode it** — `config/vouchflow.ts` sources it from env only. |
+| `SESSION_JWT_SECRET` | Auth — HS256 secret signing web-session JWTs. **Required in production**: the server throws on boot if unset (no insecure dev fallback). |
 | `STRIPE_SECRET_KEY` | Stripe secret key. Server creates Checkout + Billing-Portal sessions for `/v1/billing/*`. **Unset → billing routes register but 503** (`stripeClientFromEnv()` returns null). Use a `sk_test_` key until live billing is verified. |
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` signing secret for `/v1/webhooks/stripe`. The SDK verifies the `Stripe-Signature` over the raw body; a bad/missing signature is rejected 400. |
 | `STRIPE_PRICE_ID` | `price_…` of the monthly subscription Checkout uses. Created once against the Stripe Product (via the vault proxy or dashboard). |
