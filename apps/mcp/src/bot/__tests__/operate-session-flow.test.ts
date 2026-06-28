@@ -257,6 +257,20 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     expect(res.needs_user?.resume).toBe("code");
     expect(res.needs_user?.message).toContain("not consented");
   });
+
+  it("PR3b: grant_inbox_consent reads the inbox after an in-context yes, and is remembered", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const sid = obs.session_id;
+    h.visibleText = "Your verification code is 481920.";
+    // First call refuses (consent OFF).
+    expect((await awaitVerification(sid, {})).found).toBe(false);
+    // Host relays the user's yes → grant + read.
+    const granted = await awaitVerification(sid, { grantConsent: true });
+    expect(granted.found).toBe(true);
+    expect(granted.code).toBe("481920");
+    // Remembered for the session: a later await needs no re-grant.
+    expect((await awaitVerification(sid, {})).found).toBe(true);
+  });
 });
 
 describe("operate session — scroll (T5 fix: reveal below-the-fold controls)", () => {

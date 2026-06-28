@@ -440,6 +440,10 @@ const verifySchema = z.object({
   // with operate_act{type_secret, slot}. The code never reaches you (safer, and
   // it dodges client-side payload truncation).
   into_slot: z.string().min(1).max(60).optional(),
+  // PR3b — set true ONLY after the user agrees, in context, to let the operator
+  // read their inbox for this signup. Grants inbox-read for the rest of this
+  // session and proceeds to read. Never set this without an explicit user yes.
+  grant_inbox_consent: z.boolean().optional(),
 });
 
 export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> = {
@@ -456,7 +460,9 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
     "authenticator or hasn't arrived: ASK THE USER for it, then type it with " +
     "operate_act and continue. The session stays live; this is a resumable " +
     "hand-back, not a failure. Scoped search-and-extract — reads only the matching " +
-    "recent mail, never the whole inbox.",
+    "recent mail, never the whole inbox. If a needs_user(verification_code) says " +
+    "inbox reading isn't consented, ask the user; on an explicit yes retry with " +
+    "grant_inbox_consent:true.",
   inputSchema: verifySchema,
   jsonInputSchema: {
     type: "object",
@@ -465,12 +471,14 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
       session_id: { type: "string" },
       sender: { type: "string" },
       into_slot: { type: "string" },
+      grant_inbox_consent: { type: "boolean" },
     },
   },
   async handler(args) {
     return await awaitVerification(args.session_id, {
       ...(args.sender !== undefined ? { sender: args.sender } : {}),
       ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
+      ...(args.grant_inbox_consent === true ? { grantConsent: true } : {}),
     });
   },
 };

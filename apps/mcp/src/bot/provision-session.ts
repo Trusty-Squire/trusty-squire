@@ -1639,6 +1639,12 @@ export interface AwaitVerificationOptions {
   // code is typed via type_secret and never crosses the MCP boundary to the
   // host (also dodges host-side payload truncation — see T3).
   intoSlot?: string;
+  // PR3b — JIT consent at the verification wall. The host sets this true ONLY
+  // after the user agrees, in-context, to let the operator read their inbox.
+  // Grants inbox-read for the rest of THIS session (the remembered cache, so we
+  // don't re-prompt on every await); it does NOT change the standing install
+  // flag. Headless/no-user → the host never sets it, so the gate still refuses.
+  grantConsent?: boolean;
 }
 
 // Pure verification parser (exported for unit tests). Extracts a {code, link}
@@ -1699,10 +1705,12 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
   const needs_user: NeedsUserCode = {
     wall: "verification_code",
     message:
-      "Inbox reading is not consented (consent_operator_inbox_otp is off), so the " +
-      "operator did not read any mail. Ask the user for the verification code and " +
-      "type it into the field with operate_act — the session is still live. To let " +
-      "the operator fetch codes automatically, re-run `connect` and grant inbox access.",
+      "Inbox reading is not consented, so the operator did not read any mail. Ask " +
+      "the user, in context: may the operator read your inbox to fetch the code for " +
+      "this signup? If YES, retry operate_await_verification with " +
+      "grant_inbox_consent:true (grants it for the rest of this session). If NO, " +
+      "ask them for the code and type it with operate_act — the session is still " +
+      "live either way. (To grant it permanently, re-run `connect` and allow inbox access.)",
     resume: "code",
   };
   return { session_id: sessionId, found: false, code: null, link: null, needs_user };
@@ -1716,6 +1724,13 @@ export async function awaitVerification(
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
 
+  // PR3b — JIT consent grant: the host passes grantConsent ONLY after the user
+  // agreed in-context. Grant inbox-read for the rest of this session (remembered
+  // so we don't re-prompt each await); does not touch the standing install flag.
+  if (opts.grantConsent === true && !session.consentInboxRead) {
+    session.consentInboxRead = true;
+    audit(sessionId, "inbox_consent_granted", { scope: "session" });
+  }
   // PR2 fail-closed gate: without inbox-read consent, do NOT read the user's
   // mail. Hand the code request back to the user instead (resumable). The old
   // behavior read mail.google.com unconditionally, silently breaking the
