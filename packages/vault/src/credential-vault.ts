@@ -181,6 +181,11 @@ export interface VaultClient {
     reference: string,
     purpose: string,
   ): Promise<Record<string, string>>;
+  retrieveForAgentBrowserFill(
+    reference: string,
+    accountId: string,
+    purpose?: string,
+  ): Promise<Record<string, string>>;
   delete(reference: string): Promise<void>;
 }
 
@@ -467,6 +472,24 @@ export class CredentialVault implements VaultClient {
       reference,
       purpose,
       requester: "system",
+      signingDeviceId: null,
+      assertion: null,
+    });
+  }
+
+  async retrieveForAgentBrowserFill(
+    reference: string,
+    accountId: string,
+    purpose = "agent:browser_login_fill",
+  ): Promise<Record<string, string>> {
+    const record = await this.deps.store.findActive(reference);
+    if (record === null || record.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
+    return this.retrieveInternal({
+      reference,
+      purpose,
+      requester: "agent",
       signingDeviceId: null,
       assertion: null,
     });

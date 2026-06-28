@@ -66,6 +66,9 @@ const storeBody = z
     fields: z.record(z.string().min(1).max(8192)).optional(),
     env_var_suggestion: z.string().min(1).max(120).optional(),
     type: z.string().min(1).max(60).optional(),
+    auth_strategy: z.enum(["api_key", "username_password"]).optional(),
+    signin_url: z.string().url().max(2048).optional(),
+    login_hosts: z.array(z.string().min(1).max(253)).max(20).optional(),
     // Hosts the capture observed (signup URL host, etc.) — unioned with the
     // service-name table so a new credential never lands with an empty
     // allowlist. Bare hosts or URLs; normalised server-side. Max 10.
@@ -151,6 +154,27 @@ function normaliseHost(raw: string): string | null {
   return host;
 }
 
+function normaliseLoginHost(raw: string): string | null {
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed.startsWith("*.")) {
+    const suffix = normaliseHost(trimmed.slice(2));
+    if (suffix === null || suffix.split(".").length < 2) return null;
+    return `*.${suffix}`;
+  }
+  return normaliseHost(trimmed);
+}
+
+function normaliseLoginHosts(rawHosts: string[] | undefined): string[] | undefined | null {
+  if (rawHosts === undefined) return undefined;
+  const hosts: string[] = [];
+  for (const raw of rawHosts) {
+    const host = normaliseLoginHost(raw);
+    if (host === null) return null;
+    if (!hosts.includes(host)) hosts.push(host);
+  }
+  return hosts;
+}
+
 export const registerVaultRoute: FastifyPluginAsync<{
   deps: ApiDeps;
   requireWeb: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
@@ -181,6 +205,11 @@ export const registerVaultRoute: FastifyPluginAsync<{
             key_name: c.env_var_suggestion,
             type: c.type,
             allowed_hosts: c.allowed_hosts,
+            auth_strategy: typeof c.metadata.auth_strategy === "string" ? c.metadata.auth_strategy : null,
+            signin_url: typeof c.metadata.signin_url === "string" ? c.metadata.signin_url : null,
+            login_hosts: Array.isArray(c.metadata.login_hosts)
+              ? c.metadata.login_hosts.filter((h): h is string => typeof h === "string")
+              : [],
             favicon_domain: faviconDomain(service, c.allowed_hosts),
             created_at: c.created_at.toISOString(),
             rotated_at: c.rotated_at?.toISOString() ?? null,
@@ -586,6 +615,16 @@ async function storeUpsert(
     return;
   }
   const data = parsed.data;
+  const loginHosts = normaliseLoginHosts(data.login_hosts);
+  if (loginHosts === null) {
+    reply.code(400).send({ error: "invalid_login_hosts" });
+    return;
+  }
+  const authStrategy = data.auth_strategy ?? (data.type === "username_password" ? "username_password" : undefined);
+  if ((data.type === "username_password" || authStrategy === "username_password") && (loginHosts === undefined || loginHosts.length === 0)) {
+    reply.code(400).send({ error: "login_hosts_required" });
+    return;
+  }
   const entry = await opts.deps.vault.store({
     account_id: accountId,
     subscription_id: ulid(),
@@ -595,7 +634,13 @@ async function storeUpsert(
     ...(data.type !== undefined ? { type: data.type } : {}),
     ...(data.env_var_suggestion !== undefined ? { env_var_suggestion: data.env_var_suggestion } : {}),
     ...(data.observed_hosts !== undefined ? { observed_hosts: data.observed_hosts } : {}),
-    metadata: { source, ...(data.auth_shape !== undefined ? { auth_shape: data.auth_shape } : {}) },
+    metadata: {
+      source,
+      ...(data.auth_shape !== undefined ? { auth_shape: data.auth_shape } : {}),
+      ...(authStrategy !== undefined ? { auth_strategy: authStrategy } : {}),
+      ...(data.signin_url !== undefined ? { signin_url: data.signin_url } : {}),
+      ...(loginHosts !== undefined ? { login_hosts: loginHosts } : {}),
+    },
   });
   // Notify the user that a key landed in their vault unattended. Only on
   // a fresh create (not a rotation), and never fatal to the store —
@@ -609,6 +654,9 @@ async function storeUpsert(
     label: entry.label,
     field_names: entry.field_names,
     type: data.type ?? "api_key",
+    auth_strategy: authStrategy ?? null,
+    signin_url: data.signin_url ?? null,
+    login_hosts: loginHosts ?? [],
     allowed_hosts: entry.allowed_hosts,
     created_at: entry.created_at,
     updated: entry.updated,

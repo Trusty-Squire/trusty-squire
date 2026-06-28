@@ -42,6 +42,41 @@ const useBody = z
     message: "one of reference or service is required",
   });
 
+const browserFillBody = z
+  .object({
+    reference: z.string().min(1).max(400).optional(),
+    service: z.string().min(1).max(120).optional(),
+    current_host: z.string().min(1).max(2048),
+    fields: z.array(z.string().min(1).max(120)).min(1).max(20),
+  })
+  .refine((b) => b.reference !== undefined || b.service !== undefined, {
+    message: "one of reference or service is required",
+  });
+
+function normaliseHost(raw: string): string | null {
+  let host = raw.trim().toLowerCase();
+  if (host.length === 0) return null;
+  host = host.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
+  host = host.replace(/[/?#].*$/, "");
+  host = host.replace(/:\d+$/, "");
+  if (host.length === 0 || /\s/.test(host)) return null;
+  if (!/^[a-z0-9.-]+$/.test(host)) return null;
+  return host;
+}
+
+function metadataStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+}
+
+function loginHostMatches(pattern: string, host: string): boolean {
+  if (pattern.startsWith("*.")) {
+    const suffix = pattern.slice(2);
+    if (suffix.split(".").length < 2) return false;
+    return host !== suffix && host.endsWith(`.${suffix}`);
+  }
+  return host === pattern;
+}
+
 function proxyErrorStatus(code: ProxyError["code"]): number {
   switch (code) {
     case "secret_in_url":
@@ -71,6 +106,36 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
 }> = async (fastify, opts) => {
   const executor = opts.proxyExecutor ?? new HttpProxyExecutor();
 
+  async function resolveCredential(authAccountId: string, selector: { reference?: string; service?: string }, reply: FastifyReply) {
+    const owned = await opts.deps.credentialStore.listByAccount(authAccountId);
+    if (selector.reference !== undefined) {
+      const selected = owned.find((c) => c.reference === selector.reference);
+      if (selected === undefined) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return null;
+      }
+      return selected;
+    }
+    const matches = owned.filter(
+      (c) =>
+        typeof c.metadata.service === "string" &&
+        c.metadata.service.toLowerCase() === selector.service!.toLowerCase(),
+    );
+    if (matches.length > 1) {
+      reply.code(409).send({
+        error: "ambiguous_service",
+        candidates: matches.map((c) => c.reference),
+      });
+      return null;
+    }
+    const selected = matches[0];
+    if (selected === undefined) {
+      reply.code(404).send({ error: "credential_not_found" });
+      return null;
+    }
+    return selected;
+  }
+
   fastify.post(
     "/v1/vault/use",
     { preHandler: opts.requireAgent },
@@ -84,28 +149,16 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
       }
       const data = parsed.data;
 
-      // Resolve the credential — account-scoped.
-      const owned = await opts.deps.credentialStore.listByAccount(auth.account_id);
-      let reference: string | undefined;
-      if (data.reference !== undefined) {
-        reference = owned.find((c) => c.reference === data.reference)?.reference;
-      } else {
-        const matches = owned.filter(
-          (c) =>
-            typeof c.metadata.service === "string" &&
-            c.metadata.service.toLowerCase() === data.service!.toLowerCase(),
-        );
-        if (matches.length > 1) {
-          reply.code(409).send({
-            error: "ambiguous_service",
-            candidates: matches.map((c) => c.reference),
-          });
-          return;
-        }
-        reference = matches[0]?.reference;
-      }
-      if (reference === undefined) {
-        reply.code(404).send({ error: "credential_not_found" });
+      const selected = await resolveCredential(auth.account_id, {
+        ...(data.reference !== undefined ? { reference: data.reference } : {}),
+        ...(data.service !== undefined ? { service: data.service } : {}),
+      }, reply);
+      if (selected === null) return;
+      if (selected.type === "username_password") {
+        reply.code(400).send({
+          error: "unsupported_credential_type",
+          hint: "username_password credentials can only be used through browser fill.",
+        });
         return;
       }
 
@@ -120,7 +173,7 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
 
       try {
         const response = await opts.deps.vault.proxy(
-          reference,
+          selected.reference,
           auth.account_id,
           http,
           (input) => executor.execute(input),
@@ -141,6 +194,57 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
         }
         if (err instanceof ProxyError) {
           reply.code(proxyErrorStatus(err.code)).send({ error: err.code });
+          return;
+        }
+        throw err;
+      }
+    },
+  );
+
+  fastify.post(
+    "/v1/vault/browser-fill",
+    { preHandler: opts.requireAgent },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "agent") return;
+      const parsed = browserFillBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const data = parsed.data;
+      const selected = await resolveCredential(auth.account_id, {
+        ...(data.reference !== undefined ? { reference: data.reference } : {}),
+        ...(data.service !== undefined ? { service: data.service } : {}),
+      }, reply);
+      if (selected === null) return;
+      if (selected.type !== "username_password") {
+        reply.code(400).send({ error: "unsupported_credential_type" });
+        return;
+      }
+      const currentHost = normaliseHost(data.current_host);
+      if (currentHost === null) {
+        reply.code(400).send({ error: "invalid_current_host" });
+        return;
+      }
+      const loginHosts = metadataStringArray(selected.metadata.login_hosts);
+      if (!loginHosts.some((pattern) => loginHostMatches(pattern, currentHost))) {
+        reply.code(403).send({ error: "login_host_not_allowed", host: currentHost });
+        return;
+      }
+      try {
+        const fields = await opts.deps.vault.retrieveForAgentBrowserFill(
+          selected.reference,
+          auth.account_id,
+        );
+        const selectedFields: Record<string, string> = {};
+        for (const field of data.fields) {
+          if (fields[field] !== undefined) selectedFields[field] = fields[field];
+        }
+        return reply.code(200).send({ reference: selected.reference, fields: selectedFields });
+      } catch (err) {
+        if (err instanceof CredentialNotFoundError) {
+          reply.code(404).send({ error: "credential_not_found" });
           return;
         }
         throw err;

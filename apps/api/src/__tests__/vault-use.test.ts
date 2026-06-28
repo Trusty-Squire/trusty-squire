@@ -72,6 +72,28 @@ async function storeCred(h: Harness, cookie: string, service: string): Promise<s
   return (res.json() as { reference: string }).reference;
 }
 
+async function storeLoginCred(
+  h: Harness,
+  cookie: string,
+  service: string,
+  loginHosts: string[],
+): Promise<string> {
+  const res = await h.server.inject({
+    method: "POST",
+    url: "/v1/vault/credentials/manual",
+    headers: { cookie, "content-type": "application/json" },
+    payload: {
+      service,
+      fields: { login: "ada@example.test", password: "correct-horse" },
+      type: "username_password",
+      auth_strategy: "username_password",
+      login_hosts: loginHosts,
+    },
+  });
+  expect(res.statusCode).toBe(201);
+  return (res.json() as { reference: string }).reference;
+}
+
 describe("POST /v1/vault/use", () => {
   let h: Harness;
   beforeEach(async () => {
@@ -167,5 +189,103 @@ describe("POST /v1/vault/use", () => {
       payload: { reference: refA, http: { method: "GET", url: "https://api.openai.com/v1/models", headers: {} } },
     });
     expect(res.statusCode).toBe(404);
+  });
+
+  it("rejects username_password credentials on the generic proxy", async () => {
+    const account = await h.deps.accountStore.createAccount("u@example.test", "U");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const reference = await storeLoginCred(h, cookie, "Example", ["app.example.com"]);
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/use",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        http: { method: "GET", url: "https://app.example.com/login", headers: {} },
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: string }).error).toBe("unsupported_credential_type");
+    expect(seen).toHaveLength(0);
+  });
+});
+
+describe("POST /v1/vault/browser-fill", () => {
+  let h: Harness;
+  beforeEach(async () => {
+    seen.length = 0;
+    h = await setup();
+  });
+  afterEach(async () => {
+    await h.server.close();
+  });
+
+  it("returns requested login fields for an exact login host", async () => {
+    const account = await h.deps.accountStore.createAccount("u@example.test", "U");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const reference = await storeLoginCred(h, cookie, "Example", ["app.example.com"]);
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/browser-fill",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        current_host: "https://app.example.com/login",
+        fields: ["login", "password"],
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      reference,
+      fields: { login: "ada@example.test", password: "correct-horse" },
+    });
+  });
+
+  it("does not let an exact login host match a subdomain", async () => {
+    const account = await h.deps.accountStore.createAccount("u@example.test", "U");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const reference = await storeLoginCred(h, cookie, "Example", ["example.com"]);
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/browser-fill",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: { reference, current_host: "api.example.com", fields: ["login"] },
+    });
+
+    expect(res.statusCode).toBe(403);
+    expect((res.json() as { error: string }).error).toBe("login_host_not_allowed");
+  });
+
+  it("lets an explicit wildcard match subdomains but not the apex host", async () => {
+    const account = await h.deps.accountStore.createAccount("u@example.test", "U");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const reference = await storeLoginCred(h, cookie, "Example", ["*.example.com"]);
+
+    const subdomain = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/browser-fill",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: { reference, current_host: "login.example.com", fields: ["login"] },
+    });
+    expect(subdomain.statusCode).toBe(200);
+    expect(subdomain.json()).toMatchObject({ fields: { login: "ada@example.test" } });
+
+    const apex = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/browser-fill",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: { reference, current_host: "example.com", fields: ["login"] },
+    });
+    expect(apex.statusCode).toBe(403);
+    expect((apex.json() as { error: string }).error).toBe("login_host_not_allowed");
   });
 });
