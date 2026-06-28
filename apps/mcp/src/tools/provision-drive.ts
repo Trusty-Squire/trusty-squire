@@ -17,6 +17,7 @@ import {
   awaitVerification,
   finishProvisionSession,
   observedHostsForSession,
+  currentProvisionUrl,
   stashSecretSlot,
   readSecretSlotValue,
   getSessionUserEmail,
@@ -745,6 +746,8 @@ const storeLoginSchema = z.object({
   login_slot: z.string().min(1).max(60).optional(),
   password_slot: z.string().min(1).max(60).optional(),
   label: z.string().min(1).max(120).optional(),
+  signin_url: z.string().url().optional(),
+  login_hosts: z.array(z.string().min(1).max(253)).min(1).max(20),
 });
 
 export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
@@ -753,31 +756,38 @@ export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
     "After the service account is created, vault the sealed signup login (the " +
     "user's email + the generated password from operate_prepare_login) as a " +
     "username_password credential so the user can sign back in. Reads the sealed " +
-    "slots server-side; raw values are never returned to you.",
+    "slots server-side; raw values are never returned to you. Pass the exact " +
+    "login hosts where this credential may be filled; use *.example.com only " +
+    "when subdomains are intentionally allowed.",
   inputSchema: storeLoginSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["session_id", "service"],
+    required: ["session_id", "service", "login_hosts"],
     properties: {
       session_id: { type: "string" },
       service: { type: "string" },
       login_slot: { type: "string" },
       password_slot: { type: "string" },
       label: { type: "string" },
+      signin_url: { type: "string" },
+      login_hosts: { type: "array", items: { type: "string" } },
     },
   },
   async handler(args, api) {
     if (api === null) {
       throw new Error("operate_store_login requires an active Trusty Squire session");
     }
-    const username = readSecretSlotValue(args.session_id, args.login_slot ?? "login");
+    const login = readSecretSlotValue(args.session_id, args.login_slot ?? "login");
     const password = readSecretSlotValue(args.session_id, args.password_slot ?? "password");
     const observedHosts = observedHostsForSession(args.session_id);
     const stored = await api.storeCredential({
       service: args.service,
       ...(args.label !== undefined ? { label: args.label } : {}),
-      fields: { username, password },
+      fields: { login, password },
       type: "username_password",
+      auth_strategy: "username_password",
+      login_hosts: args.login_hosts,
+      ...(args.signin_url !== undefined ? { signin_url: args.signin_url } : {}),
       ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
     });
     return {
@@ -786,7 +796,63 @@ export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
       service: stored.service,
       type: "username_password",
       field_names: stored.field_names,
+      login_hosts: stored.login_hosts,
+      signin_url: stored.signin_url,
       updated: stored.updated,
+    };
+  },
+};
+
+const sealVaultCredentialSchema = z
+  .object({
+    session_id: z.string().min(1),
+    reference: z.string().min(1).max(400).optional(),
+    service: z.string().min(1).max(120).optional(),
+    fields: z.array(z.string().min(1).max(120)).min(1).max(20).default(["login", "password"]),
+    slot_prefix: z.string().min(1).max(60).default("vault"),
+  })
+  .refine((b) => b.reference !== undefined || b.service !== undefined, {
+    message: "one of reference or service is required",
+  });
+
+export const provisionSealVaultCredentialTool: Tool<z.infer<typeof sealVaultCredentialSchema>> = {
+  name: "operate_seal_vault_credential",
+  description:
+    "For a sign-in page, retrieve a username/password credential only if the " +
+    "current browser host is allowed for login, then seal requested fields into " +
+    "session slots. Raw values are never returned; use operate_act type_secret " +
+    "with the returned slot names to fill the page.",
+  inputSchema: sealVaultCredentialSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      session_id: { type: "string" },
+      reference: { type: "string" },
+      service: { type: "string" },
+      fields: { type: "array", items: { type: "string" } },
+      slot_prefix: { type: "string" },
+    },
+  },
+  async handler(args, api) {
+    if (api === null) {
+      throw new Error("operate_seal_vault_credential requires an active Trusty Squire session");
+    }
+    const current = currentProvisionUrl(args.session_id);
+    const response = await api.browserFillCredential({
+      ...(args.reference !== undefined ? { reference: args.reference } : {}),
+      ...(args.service !== undefined ? { service: args.service } : {}),
+      current_host: current,
+      fields: args.fields,
+    });
+    const slots: Record<string, ReturnType<typeof stashSecretSlot>> = {};
+    for (const [field, value] of Object.entries(response.fields)) {
+      slots[field] = stashSecretSlot(args.session_id, `${args.slot_prefix}_${field}`, value);
+    }
+    return {
+      session_id: args.session_id,
+      reference: response.reference,
+      slots,
     };
   },
 };
@@ -800,6 +866,7 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionExtractTool,
   provisionPrepareLoginTool,
   provisionStoreLoginTool,
+  provisionSealVaultCredentialTool,
   provisionRememberTool,
   provisionUseTool,
   provisionFinishTaskTool,

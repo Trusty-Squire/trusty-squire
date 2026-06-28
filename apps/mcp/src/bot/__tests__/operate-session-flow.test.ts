@@ -85,6 +85,7 @@ import {
 } from "../provision-session.js";
 import {
   provisionPrepareLoginTool,
+  provisionSealVaultCredentialTool,
   provisionStoreLoginTool,
 } from "../../tools/provision-drive.js";
 import type { ApiClient } from "../../api-client.js";
@@ -335,15 +336,32 @@ describe("operate session — PR3c username/password login (capture-at-login sou
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
     await provisionPrepareLoginTool.handler({ session_id: obs.session_id }, null as unknown as ApiClient);
 
-    let captured: { service: string; type?: string; fields?: Record<string, string> } | undefined;
+    let captured: {
+      service: string;
+      type?: string;
+      auth_strategy?: string;
+      fields?: Record<string, string>;
+      login_hosts?: string[];
+      signin_url?: string;
+    } | undefined;
     const api = {
-      storeCredential: async (input: { service: string; type?: string; fields?: Record<string, string> }) => {
+      storeCredential: async (input: {
+        service: string;
+        type?: string;
+        auth_strategy?: string;
+        fields?: Record<string, string>;
+        login_hosts?: string[];
+        signin_url?: string;
+      }) => {
         captured = input;
         return {
           reference: "vault://acct/login1",
           service: input.service,
           label: "default",
-          field_names: ["username", "password"],
+          field_names: ["login", "password"],
+          auth_strategy: "username_password",
+          login_hosts: input.login_hosts ?? [],
+          signin_url: input.signin_url ?? null,
           allowed_hosts: [],
           created_at: "now",
           updated: false,
@@ -352,15 +370,62 @@ describe("operate session — PR3c username/password login (capture-at-login sou
     } as unknown as ApiClient;
 
     const res = (await provisionStoreLoginTool.handler(
-      { session_id: obs.session_id, service: "example" },
+      {
+        session_id: obs.session_id,
+        service: "example",
+        login_hosts: ["app.example.com"],
+        signin_url: "https://app.example.com/login",
+      },
       api,
-    )) as { reference: string; type: string };
+    )) as { reference: string; type: string; login_hosts: string[] };
 
     expect(captured?.type).toBe("username_password");
-    expect(captured?.fields?.username).toBe("ada@example.com");
+    expect(captured?.auth_strategy).toBe("username_password");
+    expect(captured?.fields?.login).toBe("ada@example.com");
     expect((captured?.fields?.password ?? "").length).toBeGreaterThanOrEqual(16);
+    expect(captured?.login_hosts).toEqual(["app.example.com"]);
+    expect(res.login_hosts).toEqual(["app.example.com"]);
     expect(res.reference).toBe("vault://acct/login1");
     // The raw password must not appear in the tool's response.
     expect(JSON.stringify(res)).not.toContain(captured?.fields?.password ?? "UNSET");
+  });
+
+  it("seal_vault_credential stashes browser-fill fields as slots without returning raw values", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/login", profileDir });
+    let captured: { current_host: string; reference?: string; fields: string[] } | undefined;
+    const api = {
+      browserFillCredential: async (input: { current_host: string; reference?: string; fields: string[] }) => {
+        captured = input;
+        return {
+          reference: input.reference ?? "vault://acct/login1",
+          fields: { login: "ada@example.com", password: "correct-horse" },
+        };
+      },
+    } as unknown as ApiClient;
+
+    const res = (await provisionSealVaultCredentialTool.handler(
+      {
+        session_id: obs.session_id,
+        reference: "vault://acct/login1",
+        fields: ["login", "password"],
+        slot_prefix: "signin",
+      },
+      api,
+    )) as { reference: string; slots: Record<string, { slot: string }> };
+
+    expect(captured).toMatchObject({
+      current_host: "https://app.example.com/login",
+      reference: "vault://acct/login1",
+      fields: ["login", "password"],
+    });
+    expect(res.reference).toBe("vault://acct/login1");
+    expect(res.slots.login?.slot).toBe("signin_login");
+    expect(res.slots.password?.slot).toBe("signin_password");
+    expect(JSON.stringify(res)).not.toContain("ada@example.com");
+    expect(JSON.stringify(res)).not.toContain("correct-horse");
+
+    h.elements = [elem({ visibleText: "Email", selector: "#email" })];
+    await act(obs.session_id, { kind: "type_secret", slot: "signin_login", target: "Email" });
+    expect(h.typed.some((t) => t.selector === "#email" && t.text === "ada@example.com")).toBe(true);
   });
 });
