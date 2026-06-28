@@ -6,6 +6,7 @@
 // in place; the consent-at-install prompt is the remaining hardening.
 
 import { z } from "zod";
+import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
 import type { Tool } from "./index.js";
 import type { ApiClient } from "../api-client.js";
 import {
@@ -826,6 +827,7 @@ export const provisionSealVaultCredentialTool: Tool<z.infer<typeof sealVaultCred
   jsonInputSchema: {
     type: "object",
     required: ["session_id"],
+    anyOf: [{ required: ["reference"] }, { required: ["service"] }],
     properties: {
       session_id: { type: "string" },
       reference: { type: "string" },
@@ -839,14 +841,28 @@ export const provisionSealVaultCredentialTool: Tool<z.infer<typeof sealVaultCred
       throw new Error("operate_seal_vault_credential requires an active Trusty Squire session");
     }
     const current = currentProvisionUrl(args.session_id);
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
     const response = await api.browserFillCredential({
       ...(args.reference !== undefined ? { reference: args.reference } : {}),
       ...(args.service !== undefined ? { service: args.service } : {}),
       current_host: current,
       fields: args.fields,
+      encrypted_response_public_key: publicKey,
     });
     const slots: Record<string, ReturnType<typeof stashSecretSlot>> = {};
-    for (const [field, value] of Object.entries(response.fields)) {
+    for (const [field, encrypted] of Object.entries(response.encrypted_fields)) {
+      const value = privateDecrypt(
+        {
+          key: privateKey,
+          padding: constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: "sha256",
+        },
+        Buffer.from(encrypted, "base64"),
+      ).toString("utf8");
       slots[field] = stashSecretSlot(args.session_id, `${args.slot_prefix}_${field}`, value);
     }
     return {

@@ -186,7 +186,7 @@ export interface VaultClient {
     accountId: string,
     purpose?: string,
   ): Promise<Record<string, string>>;
-  delete(reference: string): Promise<void>;
+  delete(reference: string, accountId: string): Promise<void>;
 }
 
 const ASSERTION_MAX_AGE_MS = 60 * 60 * 1000;
@@ -279,10 +279,14 @@ export class CredentialVault implements VaultClient {
 
     if (existing !== null) {
       const env = await this.encryptFields(existing.reference, input.account_id, input.fields);
+      const metadata = { ...existing.metadata, ...(input.metadata ?? {}), service: input.service };
       await this.deps.store.replaceSecret(existing.reference, {
         ...env,
         field_names: fieldNames,
         rotatedAt: now,
+        ...(input.type !== undefined ? { type: input.type ?? null } : {}),
+        ...(input.env_var_suggestion !== undefined ? { env_var_suggestion: input.env_var_suggestion ?? null } : {}),
+        metadata,
       });
       // Backfill an EMPTY allowlist on re-store, but never clobber a
       // non-empty one (the user may have curated it). This heals
@@ -399,6 +403,13 @@ export class CredentialVault implements VaultClient {
     const existing = await this.deps.store.findActive(reference);
     if (existing === null || existing.account_id !== accountId) {
       throw new CredentialNotFoundError(reference);
+    }
+    const service = typeof existing.metadata.service === "string" ? existing.metadata.service : "";
+    if (service.length > 0 && trimmed !== existing.label) {
+      const live = await this.deps.store.findActiveByServiceLabel(accountId, service, trimmed);
+      if (live !== null && live.reference !== reference) {
+        throw new RestoreConflictError(reference, service, trimmed);
+      }
     }
     await this.deps.store.setLabel(reference, trimmed);
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.renamed, {
@@ -520,10 +531,13 @@ export class CredentialVault implements VaultClient {
     return fields;
   }
 
-  async delete(reference: string): Promise<void> {
+  async delete(reference: string, accountId: string): Promise<void> {
     const existing = await this.deps.store.findActive(reference);
+    if (existing === null || existing.account_id !== accountId) {
+      throw new CredentialNotFoundError(reference);
+    }
     await this.deps.store.softDelete(reference, this.now());
-    await this.recordAudit(existing?.account_id ?? "", VAULT_AUDIT_TYPES.deleted, {
+    await this.recordAudit(accountId, VAULT_AUDIT_TYPES.deleted, {
       reference,
       requester: "user",
     });

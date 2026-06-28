@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.1-rc.2 (2026-06-28)
+
+**Sign-in vault hardening**
+- Browser-fill responses are encrypted to an ephemeral MCP key instead of
+  returning plaintext fields over the API boundary.
+- Credential rotation now persists non-secret metadata/type updates used by
+  browser-fill and egress policy.
+- Login-host wildcard storage rejects broad public-suffix scopes.
+- CI/release hygiene: remove stale package filters and run canonical install
+  verification after publish.
+
 ## 1.0.1-rc.1 (2026-06-28)
 
 **Universal-bot retirement (completed)**

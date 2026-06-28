@@ -12,6 +12,7 @@
 // safe.
 
 import { z } from "zod";
+import { constants, publicEncrypt } from "node:crypto";
 import type {
   FastifyPluginAsync,
   FastifyReply,
@@ -48,6 +49,7 @@ const browserFillBody = z
     service: z.string().min(1).max(120).optional(),
     current_host: z.string().min(1).max(2048),
     fields: z.array(z.string().min(1).max(120)).min(1).max(20),
+    encrypted_response_public_key: z.string().min(1).max(4096),
   })
   .refine((b) => b.reference !== undefined || b.service !== undefined, {
     message: "one of reference or service is required",
@@ -68,13 +70,32 @@ function metadataStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
+const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
+  "co.uk", "org.uk", "gov.uk", "ac.uk", "com.au", "net.au", "org.au",
+  "co.jp", "co.nz", "co.in", "com.br", "co.za", "com.cn",
+  "github.io", "web.app", "firebaseapp.com", "pages.dev", "workers.dev",
+  "vercel.app", "netlify.app", "herokuapp.com",
+]);
+
 function loginHostMatches(pattern: string, host: string): boolean {
   if (pattern.startsWith("*.")) {
     const suffix = pattern.slice(2);
-    if (suffix.split(".").length < 2) return false;
+    if (suffix.split(".").length < 2 || TWO_LABEL_PUBLIC_SUFFIXES.has(suffix)) return false;
     return host !== suffix && host.endsWith(`.${suffix}`);
   }
+  if (TWO_LABEL_PUBLIC_SUFFIXES.has(pattern)) return false;
   return host === pattern;
+}
+
+function encryptBrowserFillField(value: string, publicKeyPem: string): string {
+  return publicEncrypt(
+    {
+      key: publicKeyPem,
+      padding: constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash: "sha256",
+    },
+    Buffer.from(value, "utf8"),
+  ).toString("base64");
 }
 
 function proxyErrorStatus(code: ProxyError["code"]): number {
@@ -237,11 +258,21 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
           selected.reference,
           auth.account_id,
         );
-        const selectedFields: Record<string, string> = {};
-        for (const field of data.fields) {
-          if (fields[field] !== undefined) selectedFields[field] = fields[field];
+        const missing = data.fields.filter((field) => fields[field] === undefined);
+        if (missing.length > 0) {
+          reply.code(400).send({ error: "missing_fields", fields: missing });
+          return;
         }
-        return reply.code(200).send({ reference: selected.reference, fields: selectedFields });
+        const encryptedFields: Record<string, string> = {};
+        try {
+          for (const field of data.fields) {
+            encryptedFields[field] = encryptBrowserFillField(fields[field]!, data.encrypted_response_public_key);
+          }
+        } catch {
+          reply.code(400).send({ error: "invalid_public_key" });
+          return;
+        }
+        return reply.code(200).send({ reference: selected.reference, encrypted_fields: encryptedFields });
       } catch (err) {
         if (err instanceof CredentialNotFoundError) {
           reply.code(404).send({ error: "credential_not_found" });

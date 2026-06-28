@@ -63,10 +63,7 @@ jobs:
             "@trusty-squire/mcp"
             "@trusty-squire/web"
             "@trusty-squire/skill-schema"
-            "@trusty-squire/adapter-resend"
-            "@trusty-squire/runtime"
             "@trusty-squire/inbox"
-            "@trusty-squire/mandate-validator"
           )
           for p in "${PKGS[@]}"; do
             echo "::group::$p"
@@ -115,8 +112,6 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # apps/api tests import @trusty-squire/runtime and
-      # @trusty-squire/adapter-resend, whose package.json points at dist/.
       # Prisma-backed packages need their client generated before tests.
       # NOT vault: its prisma client is consumed by apps/api (which has its
       # own isolated client), the vault package's own src/tests don't import
@@ -138,10 +133,7 @@ jobs:
             "@trusty-squire/mcp"
             "@trusty-squire/api"
             "@trusty-squire/skill-schema"
-            "@trusty-squire/adapter-resend"
-            "@trusty-squire/runtime"
             "@trusty-squire/inbox"
-            "@trusty-squire/mandate-validator"
             "@trusty-squire/registry"
             "@trusty-squire/vault"
           )

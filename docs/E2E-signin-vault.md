@@ -49,9 +49,9 @@ verification code** (not OAuth-only).
 3. Enter the code; finish the signup.
 
 ## Phase 5 — PR3c: vault the login credentials
-1. `operate_store_login { session_id, service: "<service>" }`.
+1. `operate_store_login { session_id, service: "<service>", login_hosts: ["login.example.com"] }`.
    - **Pass:** returns a vault `reference`, `type: "username_password"`,
-     `field_names: ["username","password"]`; **no raw password** in the response.
+     `field_names: ["login","password"]`; **no raw password** in the response.
 2. `list_credentials` → the service appears as a `username_password` credential.
 3. **Pass:** you can later sign into the service yourself with your email + the
    vaulted password (the account is genuinely yours).

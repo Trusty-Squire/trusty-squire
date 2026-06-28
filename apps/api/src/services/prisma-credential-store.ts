@@ -109,6 +109,9 @@ export class PrismaCredentialStore implements CredentialStore {
       account_kek_blob: Buffer;
       field_names: string[];
       rotatedAt: Date;
+      type?: string | null;
+      env_var_suggestion?: string | null;
+      metadata?: Record<string, unknown>;
     },
   ): Promise<void> {
     await this.prisma.credential.updateMany({
@@ -119,6 +122,9 @@ export class PrismaCredentialStore implements CredentialStore {
         account_kek_blob: payload.account_kek_blob,
         field_names: payload.field_names,
         rotated_at: payload.rotatedAt,
+        ...("type" in payload ? { type: payload.type ?? null } : {}),
+        ...("env_var_suggestion" in payload ? { env_var_suggestion: payload.env_var_suggestion ?? null } : {}),
+        ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
       },
     });
   }

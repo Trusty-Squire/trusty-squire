@@ -174,7 +174,8 @@ export class ApiClient {
     service?: string;
     current_host: string;
     fields: string[];
-  }): Promise<{ reference: string; fields: Record<string, string> }> {
+    encrypted_response_public_key: string;
+  }): Promise<{ reference: string; encrypted_fields: Record<string, string> }> {
     return this.post("/v1/vault/browser-fill", input);
   }
 

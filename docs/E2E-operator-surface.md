@@ -10,8 +10,8 @@ host (an LLM planner whose context is logged) must never receive.
 
 ## Legend
 - 🔒 privacy/security invariant · 🧪 functional · ⚙️ robustness
-- Status after the 2026-06-28 run is noted per scenario (server = published
-  `@trusty-squire/mcp@1.0.1-rc.1`).
+- Status after the 2026-06-28 run is noted per scenario (server = local
+  `@trusty-squire/mcp@1.0.1-rc.2` candidate).
 
 ---
 

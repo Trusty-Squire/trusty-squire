@@ -154,14 +154,33 @@ function normaliseHost(raw: string): string | null {
   return host;
 }
 
+const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
+  "co.uk", "org.uk", "gov.uk", "ac.uk", "com.au", "net.au", "org.au",
+  "co.jp", "co.nz", "co.in", "com.br", "co.za", "com.cn",
+  "github.io", "web.app", "firebaseapp.com", "pages.dev", "workers.dev",
+  "vercel.app", "netlify.app", "herokuapp.com",
+]);
+
+function validLoginHost(host: string): boolean {
+  if (host.includes("..") || host.startsWith(".") || host.endsWith(".")) return false;
+  if (host.includes("xn--")) return false;
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false;
+  const labels = host.split(".");
+  if (labels.length < 2) return false;
+  if (labels.some((label) => label.length === 0 || label.length > 63)) return false;
+  if (TWO_LABEL_PUBLIC_SUFFIXES.has(host)) return false;
+  return true;
+}
+
 function normaliseLoginHost(raw: string): string | null {
   const trimmed = raw.trim().toLowerCase();
   if (trimmed.startsWith("*.")) {
     const suffix = normaliseHost(trimmed.slice(2));
-    if (suffix === null || suffix.split(".").length < 2) return null;
+    if (suffix === null || !validLoginHost(suffix)) return null;
     return `*.${suffix}`;
   }
-  return normaliseHost(trimmed);
+  const host = normaliseHost(trimmed);
+  return host !== null && validLoginHost(host) ? host : null;
 }
 
 function normaliseLoginHosts(rawHosts: string[] | undefined): string[] | undefined | null {
@@ -369,7 +388,7 @@ export const registerVaultRoute: FastifyPluginAsync<{
         reply.code(404).send({ error: "credential_not_found" });
         return;
       }
-      await opts.deps.vault.delete(target.reference);
+      await opts.deps.vault.delete(target.reference, auth.account_id);
       return reply.code(204).send();
     },
   );
@@ -547,6 +566,10 @@ export const registerVaultRoute: FastifyPluginAsync<{
       } catch (err) {
         if (err instanceof CredentialNotFoundError) {
           reply.code(404).send({ error: "credential_not_found" });
+          return;
+        }
+        if (err instanceof RestoreConflictError) {
+          reply.code(409).send({ error: "rename_conflict", message: err.message });
           return;
         }
         throw err;

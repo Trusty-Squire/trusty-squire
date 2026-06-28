@@ -8,6 +8,7 @@
 //   - the precondition gate fails closed without starting the browser
 //   - credential egress seed excludes mid_session task scope
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { constants, publicEncrypt } from "node:crypto";
 
 const h = vi.hoisted(() => ({
   providers: ["google"] as string[],
@@ -392,13 +393,27 @@ describe("operate session — PR3c username/password login (capture-at-login sou
 
   it("seal_vault_credential stashes browser-fill fields as slots without returning raw values", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/login", profileDir });
-    let captured: { current_host: string; reference?: string; fields: string[] } | undefined;
+    let captured: { current_host: string; reference?: string; fields: string[]; encrypted_response_public_key: string } | undefined;
     const api = {
-      browserFillCredential: async (input: { current_host: string; reference?: string; fields: string[] }) => {
+      browserFillCredential: async (input: {
+        current_host: string;
+        reference?: string;
+        fields: string[];
+        encrypted_response_public_key: string;
+      }) => {
         captured = input;
+        const encrypt = (value: string) =>
+          publicEncrypt(
+            {
+              key: input.encrypted_response_public_key,
+              padding: constants.RSA_PKCS1_OAEP_PADDING,
+              oaepHash: "sha256",
+            },
+            Buffer.from(value, "utf8"),
+          ).toString("base64");
         return {
           reference: input.reference ?? "vault://acct/login1",
-          fields: { login: "ada@example.com", password: "correct-horse" },
+          encrypted_fields: { login: encrypt("ada@example.com"), password: encrypt("correct-horse") },
         };
       },
     } as unknown as ApiClient;

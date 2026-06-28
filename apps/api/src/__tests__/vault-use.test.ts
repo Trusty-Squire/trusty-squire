@@ -7,6 +7,7 @@
 //  - service selector resolves; cross-account 404
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { issueAgentSession } from "../auth/agent.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
@@ -92,6 +93,26 @@ async function storeLoginCred(
   });
   expect(res.statusCode).toBe(201);
   return (res.json() as { reference: string }).reference;
+}
+
+function fillKeyPair(): { publicKey: string; decrypt: (value: string) => string } {
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
+  });
+  return {
+    publicKey,
+    decrypt: (value: string) =>
+      privateDecrypt(
+        {
+          key: privateKey,
+          padding: constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: "sha256",
+        },
+        Buffer.from(value, "base64"),
+      ).toString("utf8"),
+  };
 }
 
 describe("POST /v1/vault/use", () => {
@@ -196,6 +217,7 @@ describe("POST /v1/vault/use", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     const reference = await storeLoginCred(h, cookie, "Example", ["app.example.com"]);
+    const keys = fillKeyPair();
 
     const res = await h.server.inject({
       method: "POST",
@@ -228,6 +250,7 @@ describe("POST /v1/vault/browser-fill", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     const reference = await storeLoginCred(h, cookie, "Example", ["app.example.com"]);
+    const keys = fillKeyPair();
 
     const res = await h.server.inject({
       method: "POST",
@@ -237,14 +260,16 @@ describe("POST /v1/vault/browser-fill", () => {
         reference,
         current_host: "https://app.example.com/login",
         fields: ["login", "password"],
+        encrypted_response_public_key: keys.publicKey,
       },
     });
 
     expect(res.statusCode).toBe(200);
-    expect(res.json()).toMatchObject({
-      reference,
-      fields: { login: "ada@example.test", password: "correct-horse" },
-    });
+    const body = res.json() as { reference: string; encrypted_fields: Record<string, string> };
+    expect(body.reference).toBe(reference);
+    expect(body.encrypted_fields.login).not.toBe("ada@example.test");
+    expect(keys.decrypt(body.encrypted_fields.login!)).toBe("ada@example.test");
+    expect(keys.decrypt(body.encrypted_fields.password!)).toBe("correct-horse");
   });
 
   it("does not let an exact login host match a subdomain", async () => {
@@ -252,12 +277,13 @@ describe("POST /v1/vault/browser-fill", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     const reference = await storeLoginCred(h, cookie, "Example", ["example.com"]);
+    const keys = fillKeyPair();
 
     const res = await h.server.inject({
       method: "POST",
       url: "/v1/vault/browser-fill",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      payload: { reference, current_host: "api.example.com", fields: ["login"] },
+      payload: { reference, current_host: "api.example.com", fields: ["login"], encrypted_response_public_key: keys.publicKey },
     });
 
     expect(res.statusCode).toBe(403);
@@ -269,23 +295,65 @@ describe("POST /v1/vault/browser-fill", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     const reference = await storeLoginCred(h, cookie, "Example", ["*.example.com"]);
+    const keys = fillKeyPair();
 
     const subdomain = await h.server.inject({
       method: "POST",
       url: "/v1/vault/browser-fill",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      payload: { reference, current_host: "login.example.com", fields: ["login"] },
+      payload: { reference, current_host: "login.example.com", fields: ["login"], encrypted_response_public_key: keys.publicKey },
     });
     expect(subdomain.statusCode).toBe(200);
-    expect(subdomain.json()).toMatchObject({ fields: { login: "ada@example.test" } });
+    expect(keys.decrypt((subdomain.json() as { encrypted_fields: Record<string, string> }).encrypted_fields.login!)).toBe("ada@example.test");
 
     const apex = await h.server.inject({
       method: "POST",
       url: "/v1/vault/browser-fill",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      payload: { reference, current_host: "example.com", fields: ["login"] },
+      payload: { reference, current_host: "example.com", fields: ["login"], encrypted_response_public_key: keys.publicKey },
     });
     expect(apex.statusCode).toBe(403);
     expect((apex.json() as { error: string }).error).toBe("login_host_not_allowed");
+  });
+
+  it("rejects broad public-suffix login host wildcards at store time", async () => {
+    const account = await h.deps.accountStore.createAccount("u@example.test", "U");
+    const cookie = await webCookie(h.deps, account.id);
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: {
+        service: "Example",
+        fields: { login: "ada@example.test", password: "correct-horse" },
+        type: "username_password",
+        login_hosts: ["*.github.io"],
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect((res.json() as { error: string }).error).toBe("invalid_login_hosts");
+  });
+
+  it("rejects requested browser-fill fields that are not in the credential", async () => {
+    const account = await h.deps.accountStore.createAccount("u@example.test", "U");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const reference = await storeLoginCred(h, cookie, "Example", ["app.example.com"]);
+    const keys = fillKeyPair();
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/browser-fill",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        current_host: "app.example.com",
+        fields: ["username"],
+        encrypted_response_public_key: keys.publicKey,
+      },
+    });
+
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ error: "missing_fields", fields: ["username"] });
   });
 });

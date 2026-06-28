@@ -387,10 +387,8 @@ jobs:
               break
             fi
             if [[ "$i" == "30" ]]; then
-              echo "::warning::Tarball CDN still 404 after 5min — skipping content check."
-              echo "  (npm metadata says version is live, so end users will install OK"
-              echo "   once the CDN catches up. Content check is non-blocking.)"
-              exit 0
+              echo "::error::Tarball CDN still 404 after 5min — cannot verify published contents."
+              exit 1
             fi
             sleep 10
           done
@@ -471,6 +469,13 @@ jobs:
           done
           echo "::error::dist-tag $TAG still wrong after fix attempt. Manual intervention required."
           exit 1
+
+      - name: Canonical install verification
+        env:
+          EXPECTED_TAG: ${{ needs.verify.outputs.npm_dist_tag }}
+        run: |
+          set -euo pipefail
+          scripts/verify-install.sh "@trusty-squire/mcp" "${{ needs.verify.outputs.version }}" 'case "connect"'
 
       # ---- GitHub release --------------------------------------------------
       - name: Build release tarball for GitHub
