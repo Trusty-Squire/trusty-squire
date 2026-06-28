@@ -1,5 +1,28 @@
 # Changelog — @trusty-squire/mcp
 
+## Unreleased (staging)
+
+**Universal-bot retirement (completed)**
+- Excised the autonomous skill-replay engine (`replay-skill.ts` + the
+  `mcp skill replay-test` command) — skills are operator hints now, not
+  autonomously executed recipes.
+- Swept the dead code the retirement stranded: `llm-client`, `inbox-client`,
+  inbox `mailgun-handler`, vault `kek-derivation`, and skill-schema
+  `provision-state`/`provision-policy` (all verified zero-caller).
+
+**Sign-in + vault credentials (user-owned non-OAuth signups)**
+- Consent gate: `operate_await_verification` no longer reads the user's inbox
+  without consent (fail-closed); `grant_inbox_consent` grants it in-context at
+  the verification wall (session-remembered).
+- Capture-at-login: the user's Google email is captured at `connect` and
+  surfaced as `user_email` on the start observation, so signups use the user's
+  own address (no Trusty Squire alias) and the read inbox matches it.
+- `operate_prepare_login` / `operate_store_login`: seal the user's email + a
+  generated password into session slots (masked handles only) and vault them as
+  a `username_password` credential — the account is the user's, re-loginable.
+- Privacy: the user's real email is redacted from operator recipes (heuristic
+  email-shape + exact known-email scrub).
+
 ## 1.0.0 (2026-06-28)
 
 First stable release. Promotes the 1.0.0-rc line, plus:
