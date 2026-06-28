@@ -115,11 +115,18 @@ in-memory `Session` (`:185`) has no consent field and `operate_await_verificatio
 untouched. Ships independent of PR3.
 
 ### PR3 — User-owned accounts in the operator path (Decision B)
-- **Context/identity resolution (codex #6 / R2).** Resolve whether the active
-  profile is end-user or operator, and ensure the email filled matches the inbox
-  read — `awaitVerification` hardcodes `mail/u/0` (`:1649`). API-account email ≠
-  Chrome-profile email ≠ Gmail `u/0` → wrong inbox / unrecoverable account. This
-  is the linchpin: everything in §5 keys off it.
+- **Identity resolution (codex #6 / R2) — RESOLVED: server is authoritative.**
+  The user's email is the server `Account.email` — the verified Google identity
+  the user *deliberately signed in with* (bound at OAuth, `oauth.ts:9,152`;
+  guaranteed present, `notify.ts:11`). NOT the browser's incidental `u/0` account.
+  The bot reads it via a new agent-authed endpoint (its `agent_session_token` →
+  `auth.kind:"agent"` carries `account_id`). Consequence: `awaitVerification`'s
+  hardcoded `mail/u/0` (`:1649`) is the bug — the inbox read must FOLLOW the
+  authoritative identity (resolve the bound account's `/u/N`, or assert `u/0` is
+  that account else hand back) so fill-email and read-inbox are the same identity.
+  Linchpin; everything in §5 keys off it. Pieces: (1) server endpoint returning
+  `Account.email` for agent auth; (2) api-client reader; (3) operator surface
+  (start observation carries `user_email`); (4) align `awaitVerification`.
 - **JIT consent at the wall** — end-user + no standing consent + human present →
   surface grant-or-paste; cache the grant. Headless → `needs_consent` pause.
   Reuses the `needs_user` hand-back machinery.
