@@ -6,12 +6,9 @@
 // that gets bound to the user's account during the install-claim
 // handshake (see routes/mcp-install.ts) seconds later.
 //
-// Abuse surface is bounded by:
-//   1. Quota — each token is good for QUOTA_LIMIT free signups before
-//      payment_required kicks in.
-//   2. SES inbound costs us ~$0.0001 per email — negligible.
-//   3. The install-claim binds the token to an account; unbound tokens
-//      stop accruing usage when their TTL expires.
+// Provisioning is free during beta — there is no signup quota. The
+// install-claim binds the token to an account; unbound tokens expire
+// at their TTL.
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 import {

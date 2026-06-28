@@ -2,13 +2,11 @@
 //
 // Two auth modes, chosen by header:
 //   1. Machine token — `X-Machine-Token: tsm_...` (bound to an account
-//      at install-claim time; quota tracked per-account)
+//      at install-claim time)
 //   2. Admin/test — `Authorization: Bearer <UNIVERSAL_BOT_API_KEY>`
 //
-// Machine-token callers are checked against the free-signup quota on
-// alias creation. Once the limit is hit, the response is
-// payment_required + cta_billing_url so the MCP tool can tell the LLM
-// to point the user at billing.
+// Provisioning is free during beta: alias creation has no signup quota
+// and never returns payment_required.
 //
 // Alias ownership: an alias is stamped with the principal that created
 // it. The /wait and DELETE routes assert the caller owns the alias, so

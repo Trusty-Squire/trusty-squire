@@ -13,13 +13,13 @@ orchestration.
 
 **One provisioning path:**
 
-**Interactive signup driver** — the host agent plans each step with
-`provision_start`, `provision_observe`, `provision_act`, `provision_extract`,
-and `provision_finish`; Trusty Squire supplies the scoped browser, DOM/screenshot
-observations, vault extraction, and registry hints. Account-bound, vault-backed,
-free up to `ACCOUNT_FREE_QUOTA` signups before billing kicks in. Closed-loop
-with the skill registry: successful runs publish a Skill that subsequent
-provisions replay in ~30s instead of the bot's ~6min.
+**Interactive operator driver** — the host agent plans each step with
+`operate_start`, `operate_observe`, `operate_act`, `operate_extract`,
+and `operate_finish_task`/`operate_finish`; Trusty Squire supplies the scoped
+browser, DOM/screenshot observations, vault extraction, and registry hints.
+Account-bound, vault-backed. Provisioning is free during beta (no signup quota).
+Closed-loop with the skill registry: successful runs publish a Skill that
+subsequent provisions replay in ~30s instead of the bot's ~6min.
 
 The hand-authored manifest + mandate-engine path was sunset in 0.8, and
 the old async signup tool has now been removed from the public MCP surface.
@@ -131,10 +131,11 @@ can dip even while OF#1 rises. Read them together, not in isolation.
      `--skip-browser` opts out for CI). Headed (laptop/desktop) is the
      recommended environment; a headless box does a one-time remote-
      browser login (noVNC).
-  Every install is account-bound — there is no anonymous tier. Free up
-  to `ACCOUNT_FREE_QUOTA` signups (default 10), then `payment_required`
-  + `cta_billing_url`. See the 2026-05-18 streamlined-oauth-onboarding
-  CEO plan (now combined with the 2026-05-19 single-tier collapse).
+  Every install is account-bound — there is no anonymous tier.
+  Provisioning is free during beta (the signup quota + `402 payment_required`
+  paywall were removed; see `docs/BUSINESS-MODEL.md`). See the 2026-05-18
+  streamlined-oauth-onboarding CEO plan (now combined with the 2026-05-19
+  single-tier collapse).
   - **0.6.0 — install preflight (rc.15).** Re-installs with a valid
     session file + bot Google session skip the browser dance entirely
     and just rewrite the MCP config. Pass `--force-relogin` to bypass.
@@ -438,15 +439,17 @@ bin symlink and would catch any regression of the above.
 | `STRIPE_WEBHOOK_SECRET` | `whsec_…` signing secret for `/v1/webhooks/stripe`. The SDK verifies the `Stripe-Signature` over the raw body; a bad/missing signature is rejected 400. |
 | `STRIPE_PRICE_ID` | `price_…` of the monthly subscription Checkout uses. Created once against the Stripe Product (via the vault proxy or dashboard). |
 
-**Billing (Stripe):** the free-signup quota (`ACCOUNT_FREE_QUOTA`) returns
-`402 payment_required` + `cta_billing_url` once hit. The web app's `/billing` page
-opens Stripe Checkout (`POST /v1/billing/checkout`, web-session-authed); on
-payment Stripe fires `/v1/webhooks/stripe` which flips the account's
-`subscription_status` to `active` — and `active`/`trialing` lift the quota
-(`subscription-status.ts`, consulted in `inbox.ts`). Manage/cancel via the
-Customer Portal (`POST /v1/billing/portal`). The bypass keys off the machine
-token's **bound** account, never the request body. New `Account` columns
-(`stripe_customer_id`, `subscription_status`, `subscription_id`,
+**Billing (Stripe):** **free during beta** — checkout is kill-switched OFF
+unless `BILLING_ENABLED=true`/`1` (`/v1/billing/checkout` returns `503
+billing_disabled`), so a stray Upgrade click can't charge anyone even with a
+live Stripe key. The signup-quota `402 payment_required` paywall was removed
+(provisioning is free); see `docs/BUSINESS-MODEL.md` for the planned Free/$20-Pro
+model (egress + audit + future rotation, gated on control-plane routes, NOT
+signup count). When billing is enabled, the web app's `/billing` page opens
+Stripe Checkout (`POST /v1/billing/checkout`, web-session-authed); on payment
+Stripe fires `/v1/webhooks/stripe` which flips `subscription_status` to `active`.
+Manage/cancel via the Customer Portal (`POST /v1/billing/portal`). `Account`
+columns (`stripe_customer_id`, `subscription_status`, `subscription_id`,
 `current_period_end`) apply via the deploy's `db push` (all nullable/defaulted
 — non-destructive).
 
@@ -581,7 +584,7 @@ housekeeper repo.
 | Env var | Default | Effect |
 |---|---|---|
 | `LLM_HOURLY_LIMIT` | `150` | Per-machine-token rolling rate cap for `/v1/llm/chat` |
-| `ACCOUNT_FREE_QUOTA` | `10` | Free signups per account before `payment_required`. |
+| `BILLING_ENABLED` | `false` | Free-during-beta kill-switch. Unless `true`/`1`, `/v1/billing/checkout` returns `503 billing_disabled` so no one is charged even with a live Stripe key. |
 | `LLM_PROXY_CHEAP_MODEL` | `google/gemini-flash-1.5` | Cheap-tier model |
 | `LLM_PROXY_PREMIUM_MODEL` | `openai/gpt-4o` | Premium-tier fallback model |
 | `LLM_PROXY_FREE_MODEL` | `openrouter/free` | Free-tier primary — OpenRouter's curated free router (verifier worker). Survives the sunset-and-replace churn that took out the prior pinned-ID setup (0.8.2-rc.9). |

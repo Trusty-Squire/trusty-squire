@@ -39,7 +39,7 @@ secrets stay put.
 
 1. **"Sign me up for Resend and put the API key in my vault."** — account created, key extracted and stored.
 2. **"Add Google OAuth login to my app."** — a multi-step setup driven across consoles (GCP → OAuth Playground); the secret is never exposed.
-3. **"Give my deployed app a scoped OpenAI key, capped at $50/mo."** — an *egress grant*: your code calls through a proxy that injects the key; the raw secret stays vaulted.
+3. **"Give my deployed app a scoped, revocable OpenAI key."** — an *egress grant*: your code calls through a proxy that injects the key; the raw secret stays vaulted.
 4. **"Rotate my Stripe key and update everywhere it's used."** — rotated where we can, honest about what we can't.
 5. **"Show me everything that touched my keys in the last 90 days."** — the audit ledger.
 6. **"Something leaked — kill that key now."** — revoke the grant on the spot.

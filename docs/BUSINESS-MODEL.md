@@ -46,7 +46,7 @@ configures, and rotates by driving the actual service.
 
 1. *"Sign me up for Resend and drop the API key in my vault."* — provisioning.
 2. *"Add Google OAuth login to my app."* — multi-console operator task.
-3. *"Give my deployed app a scoped, revocable OpenAI key — cap it at $20/mo."* — egress grant.
+3. *"Give my deployed app a scoped, revocable OpenAI key."* — egress grant. (Spend caps are planned, not yet enforced.)
 4. *"Rotate my Stripe key and update everywhere it's used."* — rotation.
 5. *"Show me everything that touched my keys in the last 90 days."* — the ledger.
 6. *"Something leaked — kill that key now."* — revoke a grant.
@@ -63,8 +63,8 @@ configures, and rotates by driving the actual service.
 | Store keys (write-only vault) | ✅ | ✅ |
 | Personal use via injecting proxy | ✅ | ✅ |
 | Audit trail / ledger | 7-day | **365-day + export** |
-| **Egress grants** (scoped, revocable, spend-capped key for a deployed app) | — | ✅ **generous fair-use** |
-| **Rotation** (auto on covered services, growing; honest on the rest) | manual | ✅ **automated** |
+| **Egress grants** (scoped, revocable key for a deployed app; spend caps planned) | — | ✅ **generous fair-use** |
+| **Rotation** (auto on covered services, growing; honest on the rest) | manual | _(coming soon)_ |
 
 **Price: $20/mo** (Cursor-band; the AI-coding-velocity buyer's reference price).
 
@@ -75,8 +75,8 @@ published tier today.
 ## Pro anchor (how to pitch $20)
 
 *Move fast without leaking secrets — for the price of your AI editor.*
-- **Shipped a real app → egress.** Scoped, revocable, spend-capped key your deployed
-  code uses; the raw secret never leaves the vault.
+- **Shipped a real app → egress.** Scoped, revocable key your deployed code uses;
+  the raw secret never leaves the vault. (Spend caps planned, not yet enforced.)
 - **Rotation is the emotional differentiator** — 1Password/Google don't even attempt
   it; we auto-rotate covered services (growing weekly) and are honest about the rest.
 - **Audit** is the trust/compliance layer.

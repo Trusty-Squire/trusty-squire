@@ -187,8 +187,6 @@ up again.
 
 IMMEDIATE RESPONSES (no run started):
 - status="started" + run_id → poll check_provision_status next.
-- status="payment_required" + cta_billing_url → the account hit the free
-  signup limit; the user can upgrade at cta_billing_url.
 - status="not_installed" → Trusty Squire isn't connected; tell the user to run \`npx @trusty-squire/mcp connect\`.
 - status="error" → could not reach the API to set up the signup.`;
 
@@ -313,30 +311,6 @@ export const provisionTool = {
       console.error(`[provision-any] alias=${alias} apiBase=${apiBase}`);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // The createAlias error body carries the structured payload; parse it back.
-      // The API may still emit the old `quota_exceeded` error code during a
-      // rollout window — accept both shapes and surface a single
-      // payment_required status to the LLM.
-      if (/quota_exceeded|payment_required/.test(message)) {
-        const match = message.match(/\{.*\}/s);
-        if (match !== null) {
-          try {
-            const parsed = JSON.parse(match[0]) as Record<string, unknown>;
-            return {
-              status: "payment_required",
-              service: input.service,
-              quota_limit: parsed["quota_limit"],
-              quota_used: parsed["quota_used"],
-              cta_billing_url: parsed["cta_billing_url"] ?? parsed["cta_pair_url"],
-              message:
-                "Your account has hit the free signup limit. " +
-                "Open cta_billing_url to upgrade — until then signups are paused.",
-            };
-          } catch {
-            // fall through
-          }
-        }
-      }
       return {
         status: "error",
         service: input.service,

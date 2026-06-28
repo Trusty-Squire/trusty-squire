@@ -66,7 +66,7 @@ The agent drives the browser step by step; the key lands in your vault, never in
 | `operate_extract` | Reveal and capture credentials from the current page. |
 | `operate_remember` / `operate_use` | Save a successful run as a skill; replay it by name in ~30s. |
 | `operate_finish_task` / `operate_finish` | Close with an outcome (store credentials) or just release the browser. |
-| `grant_app_access` | Mint a scoped, revocable, spend-capped key for a deployed app (egress grant). |
+| `grant_app_access` | Mint a scoped, revocable key for a deployed app (egress grant). |
 | `list_credentials` / `use_credential` | Browse the vault; call an API through it without exposing the raw secret. |
 
 ## How it works

@@ -270,11 +270,6 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
   background:var(--surface);border:1px solid var(--line2);color:var(--fg);max-width:520px}
 .app-banner.ok{border-color:rgba(84,216,139,.4);color:var(--ok)}
 .app-banner.err{border-color:rgba(255,107,107,.4);color:var(--err)}
-/* /upgrade — transient pre-auth checkout redirect, centered full-page */
-.upgrade-shell{min-height:100vh;display:flex;align-items:center;justify-content:center;
-  padding:24px;background:var(--bg);color:var(--fg)}
-.upgrade-shell .app-card{max-width:380px}
-.upgrade-shell .btn-primary{margin-top:16px;display:inline-flex;width:auto;padding:9px 18px}
 /* plan pill + account menu (app header) */
 /* free-tier upgrade CTA — accent outline, fills on hover (reads as a button) */
 .nav-r a.plan-cta{font-size:13px;font-weight:600;color:var(--accent);

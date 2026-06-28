@@ -73,7 +73,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             (isPro(plan) ? (
               <span className="plan-chip">Pro</span>
             ) : (
-              <Link className="plan-cta" href="/billing" title="Upgrade to unlimited">
+              <Link className="plan-cta" href="/billing" title="Upgrade to Pro">
                 Upgrade
               </Link>
             ))}
