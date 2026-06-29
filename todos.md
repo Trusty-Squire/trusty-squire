@@ -16,10 +16,30 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
     / `{ body }` CANNOT leak — proven by `log-redaction.test.ts` (no `SECRET`
     survives; non-secret context stays). 259 API tests green.
 
-- [ ] **2. Master key set + backed up out-of-band.** Confirm `LOCAL_KMS_KEY` is
-  set on `trusty-squire-api` AND backed up somewhere other than the DB — a DB
-  restore is useless without it, and we're about to accumulate real user keys.
-  (See `docs/VAULT-OPERATIONS.md`.)
+- [~] **2. Master key — was a P0, code fixed; ops remediation PENDING (you).**
+  FINDING: prod was encrypting EVERY credential with `LocalKMS.withFixedKey(0x7f)`
+  — a constant in this open-source repo (`deps.ts:169`, unconditional). The server
+  never read `LOCAL_KMS_KEY`. So at-rest encryption was theater: anyone with the
+  repo + the vault DB could decrypt everything.
+  - [x] CODE FIX: prod now uses `LocalKMS.fromEnv()` and fails closed on boot if
+    `LOCAL_KMS_KEY` is unset (commit on `production-hardening`). +3 tests.
+  - [ ] OPS RUNBOOK (no-downtime; `OLD = 7f`×32 = 64-hex; `NEW = openssl rand -hex 32`):
+    1. Generate `NEW`; **back it up out-of-band** (password manager, NOT the DB/repo).
+    2. `flyctl secrets set LOCAL_KMS_KEY=$NEW LOCAL_KMS_LEGACY_KEYS=$OLD -a trusty-squire-api`
+       (old code ignores these — still runs on 0x7f, no breakage). **Do this BEFORE
+       the new code deploys, or prod fails closed.**
+    3. Deploy the new code (merge `production-hardening` → main → CI). New server
+       boots `[NEW, 0x7f-legacy]` → decrypts existing creds via legacy, writes new
+       ones under NEW. No downtime.
+    4. Rewrap (re-wrap every KEK 0x7f→NEW). Easiest on the box — env is already set:
+       `flyctl ssh console -a trusty-squire-api` then
+       `node /app/apps/api/dist/scripts/rewrap-kek.bin.js`  (dry-run)
+       `node /app/apps/api/dist/scripts/rewrap-kek.bin.js --apply`  (mutate)
+       Confirm `failed=0`.
+    5. `flyctl secrets unset LOCAL_KMS_LEGACY_KEYS -a trusty-squire-api` (now `[NEW]` only).
+    6. **Rotate the sensitive creds** — they lived under a public key, treat as
+       compromised: ipinfo / plunk / sentry / VouchFlow keys / etc. Re-store them.
+  - [ ] After: verify with `vault-decrypt-check` that all creds decrypt under NEW.
 
 - [ ] **3. DB capacity + alerting.** `trusty-squire-db` OOMs at 256MB (known —
   see DB-OOM-wedge note). A launch spike WILL hit it. Bump VM memory + add an
