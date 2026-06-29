@@ -93,6 +93,40 @@ export function looksLikeCredentialToken(token: string): boolean {
     .some((s) => s.length >= 10 && /[A-Za-z]/.test(s) && /[0-9]/.test(s));
 }
 
+// Last-resort acceptance for a PREFIXLESS, SEPARATORLESS key — the shape the
+// strict scanners (extractApiKeyFromText, findCredentialTokens) deliberately
+// refuse from raw page text, because a bare 32-char base62 string is
+// indistinguishable from a content hash / nonce / trace id. The ONE thing that
+// disambiguates it is CONTEXT: this token was harvested from directly beside a
+// copy/reveal affordance (browser.extractCredentialsNearCopyButtons), and
+// dashboards put the copy button next to the SECRET, not next to a trace id.
+// deepinfra's keys table (`Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz` in a row with a
+// copy + a reveal control) is the canonical case the prefix-based extractor
+// can't see. Apply ONLY to copy-proximate tokens, NEVER to raw page text.
+export function pickRelaxedNearCopyCredential(nearCopyTokens: readonly string[]): string | null {
+  for (const raw of nearCopyTokens) {
+    const t = raw.trim();
+    // Real keys are long; bound out short UI tokens and runaway page blobs.
+    if (t.length < 20 || t.length > 128) continue;
+    // Key charset only — rejects dates (06/29/2026), times (12:30:38), emails,
+    // URLs, and any token that picked up punctuation/prose.
+    if (!/^[A-Za-z0-9_\-.]+$/.test(t)) continue;
+    // Entropy: a real key carries BOTH letters and digits.
+    if (!/[A-Za-z]/.test(t) || !/[0-9]/.test(t)) continue;
+    if (isCredentialNoise(t)) continue; // dates/emails/versions/env-var-names/masked
+    if (looksLikeCodeIdentifier(t)) continue; // dotted member access
+    // A bare UUID is ambiguous (project/request/trace ids litter dashboards) —
+    // refuse it even near a copy button.
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(t)) continue;
+    // A long hex-only run is more likely a sha/etag/commit than a key, and any
+    // real hex key worth storing carries a prefix the strict path already
+    // matches — so require entropy BEYOND hex (a g-z / G-Z letter).
+    if (/^[0-9a-f]+$/i.test(t)) continue;
+    return t;
+  }
+  return null;
+}
+
 // The TIGHT host-side gate: is this string a credential VALUE we'd surface/store?
 // (Distinct from browser.ts's loose in-page collector — see the TIERS note above.)
 export function looksLikeCredentialValue(value: string): boolean {

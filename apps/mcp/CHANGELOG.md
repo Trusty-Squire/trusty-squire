@@ -1,5 +1,26 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.5 (2026-06-29)
+
+**Extraction — prefixless keys beside a copy/reveal control.** `operate_extract`
+returned `no_legit_credential` on pages whose API key is a bare, separatorless
+token (deepinfra's `Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz`) — the strict scanners
+refuse such a token from raw page text because it's indistinguishable from a
+hash/trace-id. Fixed by using *copy/reveal-affordance proximity* as the
+disambiguator: `extractCredentialsNearCopyButtons` now also recognises icon
+controls by id/class/data-testid (not just visible "copy" text) and reveal /
+toggle-visibility affordances, and a new `pickRelaxedNearCopyCredential` accepts
+a copy-proximate token under a relaxed shape rule (rejects dates, times, emails,
+URLs, bare UUIDs, and hex-only shas). Applies only when no labeled/prefixed key
+was found, so it can't clobber a real match.
+
+**Captcha gate — token-true success signal.** `operate_captcha_gate` now drives
+the substrate's provider-specific gate (invisible reCAPTCHA v3 trigger → visible
+checkbox solve → 2Captcha token-solver fallback for reCAPTCHA v2 / hCaptcha /
+Turnstile) and requires a real response token before reporting `settled`, rather
+than treating challenge-disappearance alone as cleared (a v2 checkbox can sit
+idle with an empty token).
+
 ## 1.0.4 (2026-06-29)
 
 Closes two gaps where the README marketed a capability the agent surface

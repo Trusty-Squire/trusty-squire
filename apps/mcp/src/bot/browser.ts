@@ -4013,13 +4013,7 @@ export class BrowserController {
   // it on its own submit handler).
   async triggerInvisibleRecaptcha(timeoutMs = 9000): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
-    const tokenPresent = (): Promise<boolean> =>
-      this.page!.evaluate(() => {
-        const ta = document.querySelector(
-          'textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]',
-        ) as HTMLTextAreaElement | null;
-        return ta !== null && ta.value.length > 0;
-      }).catch(() => false);
+    const tokenPresent = (): Promise<boolean> => this.hasCaptchaResponseToken();
 
     if (await tokenPresent()) return true;
 
@@ -4088,6 +4082,34 @@ export class BrowserController {
       await this.sleep(500);
       if (await tokenPresent()) return true;
     }
+    return false;
+  }
+
+  async hasCaptchaResponseToken(): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    return this.page
+      .evaluate(() => {
+        const hasValue = (selector: string): boolean => {
+          const el = document.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+          return el !== null && el.value.trim().length > 0;
+        };
+        return (
+          hasValue('textarea[name="g-recaptcha-response"], textarea[id^="g-recaptcha-response"]') ||
+          hasValue('textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"]') ||
+          hasValue('input[name="cf-turnstile-response"], input[id^="cf-chl-widget"]') ||
+          document.querySelector(".cf-turnstile[data-state='success']") !== null
+        );
+      })
+      .catch(() => false);
+  }
+
+  async waitForCaptchaResponseToken(timeoutMs = 5000): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const start = Date.now();
+    do {
+      if (await this.hasCaptchaResponseToken()) return true;
+      await this.sleep(250);
+    } while (Date.now() - start < timeoutMs);
     return false;
   }
 
@@ -5110,16 +5132,29 @@ export class BrowserController {
         const r = el.getBoundingClientRect();
         return r.width > 2 && r.height > 2;
       };
-      // Find every Copy-class affordance.
+      // Find every Copy- OR reveal-class affordance. A secret table-cell value
+      // (deepinfra's keys table) lives in a row next to BOTH a copy and a
+      // toggle-visibility/reveal control — but those are often icon buttons
+      // whose accessible NAME is the row's date, not "copy". So match the
+      // element's id / class / data-testid too, which carry the semantic name
+      // ("copy-key", "toggle-token-visibility"). Reveal patterns are scoped to
+      // key/token/secret/visibility context so a generic "Show more" doesn't
+      // anchor a harvest.
       const copyButtons = Array.from(
         document.querySelectorAll<HTMLElement>(
           'button, [role="button"], a, [aria-label]',
         ),
       ).filter((el) => {
         if (!isVisible(el)) return false;
-        const hay =
+        const name =
           `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`.toLowerCase();
-        return /\bcopy\b/.test(hay);
+        // el.className is an SVGAnimatedString on SVG elements — read via attr.
+        const attrs =
+          `${el.id} ${el.getAttribute("class") ?? ""} ${el.getAttribute("data-testid") ?? ""} ${el.getAttribute("data-test") ?? ""}`.toLowerCase();
+        const hay = `${name} ${attrs}`;
+        return /\bcopy\b|clipboard|reveal|toggle[-_ ]?(?:token|visibility)|show[-_ ]?(?:key|token|secret|api)/.test(
+          hay,
+        );
       });
       // For each, walk up a few ancestors and dump the subtree's
       // innerText. The token is somewhere in there.
