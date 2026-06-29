@@ -9,6 +9,52 @@
   re-pair. It now falls back to the session's cached provider state, so a valid
   install short-circuits ("Already connected") regardless of profile contention.
 
+## 1.0.2 (2026-06-29)
+
+**`connect` reliability.**
+- `connect` no longer re-opens the install/noVNC page every run on headless
+  boxes where the OS keychain is present-but-ephemeral: set
+  `TRUSTY_SQUIRE_SESSION_FILE=1` (globally) to use the durable
+  `~/.config/trusty-squire/session.json` instead of the keychain. `connect`
+  now prints a hint pointing at this when the keychain backend is in use.
+- Install page: the GitHub step reflects the **bot's** live GitHub session, not
+  a stale account link — it shows "linked — sign in to enable" until the OAuth
+  runs in the bot's Chrome (which is what actually lets the bot act on GitHub),
+  and the contradictory "connected but might not work" copy is gone.
+
+**Housekeeping.**
+- Dropped stale alias/pricing copy from this README (the Squire-alias inbound
+  mail and the Pro tier are gone — verification reads your own inbox; beta is
+  free).
+- Retired the inbound-mail subsystem end to end (package + DB + secrets) and
+  swept the leftovers; the API owns its own Prisma tooling now.
+
+## 1.0.1 (2026-06-29)
+
+Promotes the 1.0.1-rc line to stable. Highlights since 1.0.0 (full detail in the
+rc.1 / rc.2 entries below):
+
+**User-owned signups (sign-in vault).** The operator signs services up with the
+user's own Google identity (captured at `connect`), seals the login + a
+generated password into a `username_password` vault credential, and reads the
+verification code from the user's own inbox behind a just-in-time consent gate —
+no Squire email aliases.
+
+**Privacy hardening.**
+- Observations no longer echo a sealed value: after `type_secret`, the password
+  (and the email filled from the sealed login slot) is masked to `[sealed]` in
+  `elements[].value`, the accessibility tree, the screen outline, and the
+  element label — the cleartext never returns to the host.
+- Operator recipes no longer record inbox-provider steps, so a shared recipe
+  can't leak the user's mail (subject text or webmail navigation).
+- Browser-fill responses are encrypted to an ephemeral key; login-host wildcard
+  storage rejects broad public-suffix scopes; rotation persists non-secret
+  metadata.
+
+**Inbound-mail subsystem retired.** With aliases gone, the Squire-alias inbound
+pipeline (`packages/inbox`, the resend-inbound webhook) is removed and the API
+owns its own Prisma tooling.
+
 ## 1.0.1-rc.2 (2026-06-28)
 
 **Sign-in vault hardening**
