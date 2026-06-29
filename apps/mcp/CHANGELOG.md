@@ -1,5 +1,22 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.4 (2026-06-29)
+
+Closes two gaps where the README marketed a capability the agent surface
+couldn't actually perform. Found during an end-to-end pass over the seven
+"what you can ask your squire" use cases.
+
+- **`audit_log`** — "show me everything that touched my keys." The vault audit
+  ledger was web-only; the account's own agent now reads it
+  (`GET /v1/vault/audit`, account-scoped, no secret values — strictly less than
+  `list_credentials`, which is already agent-readable). Filter by `type` /
+  `reference`, page with `before`.
+- **`revoke_app_access`** — "something leaked, kill that key now." Instantly
+  revokes an egress grant (`DELETE /v1/egress/grants/:id`); the next call
+  through it is rejected. The DELETE route existed but no tool wrapped it.
+- **`list_app_access`** — lists this account's egress grants so you can find
+  the `grant_id` to revoke.
+
 ## 1.0.3 (2026-06-29)
 
 - **`connect` no longer re-opens the install/noVNC page when the bot profile is
