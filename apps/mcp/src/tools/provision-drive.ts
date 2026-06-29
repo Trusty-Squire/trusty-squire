@@ -115,7 +115,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       require_live_identity: { type: "boolean" },
     },
   },
-  async handler(args) {
+  async handler(args, api) {
     const hint = await resolveRouteHint(args.service_url);
     const extra = [...(args.allowed_hosts ?? []), ...(args.extra_allowed_hosts ?? [])];
     const consentInboxRead = await readInboxConsent();
@@ -125,6 +125,8 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       ...(extra.length > 0 ? { extraAllowedHosts: extra } : {}),
       ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
       ...(hint !== undefined ? { hint } : {}),
+      // Thread the api-client so the captcha gate can spend a vaulted 2Captcha key.
+      ...(api !== null ? { api } : {}),
     });
   },
 };

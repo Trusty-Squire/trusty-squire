@@ -90,6 +90,10 @@ type Argv = {
   // UNIVERSAL_BOT_PROXY_URL — so the proxy is set once at install time
   // and the user never hand-edits the config env.
   proxyUrl?: string;
+  // Optional 2Captcha API key from advanced setup. Stored ENCRYPTED in the
+  // vault (never written to the MCP config) by maybeStoreTwoCaptchaKey once the
+  // session is paired; the bot spends it through the injecting proxy.
+  twoCaptchaKey?: string;
   // Skill registry is product-owned infrastructure. Advanced setup controls
   // whether this install participates; registry ON is also the user's consent
   // to contribute successful non-personal signup recipes back to the registry.
@@ -386,6 +390,53 @@ export async function runCli(argv: string[]): Promise<void> {
   }
 }
 
+// Store the user-supplied 2Captcha key in the vault (encrypted, never written
+// to the MCP config). Idempotent + best-effort: a failure here must never fail
+// the install — the bot just won't have the Tier-3 solver. Runs after pairing,
+// so the session carries a usable agent_session_token. Clears args.twoCaptchaKey
+// on success so the secret doesn't linger in memory longer than needed.
+async function maybeStoreTwoCaptchaKey(args: Argv): Promise<void> {
+  const key = args.twoCaptchaKey?.trim();
+  if (key === undefined || key.length === 0) return;
+  const storage = await openSessionStorage();
+  const session = await storage.read();
+  if (session?.agent_session_token === undefined) {
+    ui.warn("Couldn't vault the 2Captcha key — no active session yet. Re-run connect to retry.");
+    return;
+  }
+  try {
+    const res = await fetch(`${session.api_base_url}/v1/vault/credentials`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${session.agent_session_token}`,
+      },
+      body: JSON.stringify({
+        service: "2captcha",
+        label: "default",
+        value: key,
+        type: "api_key",
+        // 2Captcha authenticates with the key as the `key` query param
+        // (in.php/res.php). The bot's runtime use_credential calls place the
+        // ${SECRET} explicitly; this records the canonical shape for the vault.
+        auth_shape: "query:key",
+        observed_hosts: ["2captcha.com", "api.2captcha.com"],
+        env_var_suggestion: "TWOCAPTCHA_API_KEY",
+      }),
+    });
+    if (res.ok) {
+      delete args.twoCaptchaKey;
+      ui.success("2Captcha key vaulted — the bot spends it through the injecting proxy.");
+    } else {
+      ui.warn(`Couldn't vault the 2Captcha key (HTTP ${res.status}). Re-run connect to retry.`);
+    }
+  } catch (err) {
+    ui.warn(
+      `Couldn't vault the 2Captcha key: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 async function settings(args: Argv): Promise<void> {
   const storage = await openSessionStorage();
   const session = await storage.read();
@@ -406,6 +457,7 @@ async function settings(args: Argv): Promise<void> {
     args.noRegistry = !picker.registryEnabled;
     args.advancedConfigured = true;
     args.consentOperatorInboxOtp = picker.consentOperatorInboxOtp === true;
+    if (picker.twoCaptchaKey !== undefined) args.twoCaptchaKey = picker.twoCaptchaKey;
   } else {
     if (args.target === undefined) {
       ui.fail(`Pass ${ui.code("--target=<agent>")} when running settings outside an interactive terminal.`);
@@ -432,6 +484,7 @@ async function settings(args: Argv): Promise<void> {
   };
   await storage.write(updated);
   await writeAgentConfig(target, agent, args);
+  await maybeStoreTwoCaptchaKey(args);
   ui.success(`${agent.display_name} settings saved.`);
 }
 
@@ -466,6 +519,7 @@ async function connect(args: Argv): Promise<void> {
     if (picker.consentOperatorInboxOtp !== undefined) {
       args.consentOperatorInboxOtp = picker.consentOperatorInboxOtp;
     }
+    if (picker.twoCaptchaKey !== undefined) args.twoCaptchaKey = picker.twoCaptchaKey;
   } else {
     ui.heading("Trusty Squire");
     ui.hint("Setting up this machine.");
@@ -486,6 +540,7 @@ async function connect(args: Argv): Promise<void> {
       await hydrateArgsFromStoredPreferences(args);
       await ensureConsentRecorded(consentFromArgs(args), args.advancedConfigured === true);
       await writeAgentConfig(target, agent, args);
+      await maybeStoreTwoCaptchaKey(args);
       ui.success(
         `Already connected (${preflight.providers.join(" + ")}). ` +
           `${agent.display_name} config refreshed.`,
@@ -661,6 +716,7 @@ async function connect(args: Argv): Promise<void> {
   printProviderState(providers);
 
   await writeAgentConfig(target, agent, args);
+  await maybeStoreTwoCaptchaKey(args);
   if (args.skipBrowser) {
     ui.panel(
       `--skip-browser was set, so the bot's Chrome didn't observe your sign-in.\n` +
