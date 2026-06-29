@@ -37,13 +37,13 @@ secrets stay put.
 
 ## What you can ask your squire
 
-1. **"Sign me up for Resend and put the API key in my vault."** — account created, key extracted and stored.
-2. **"Add Google OAuth login to my app."** — a multi-step setup driven across consoles (GCP → OAuth Playground); the secret is never exposed.
+1. **"Sign me up for Resend and put the API key in my vault."** — an account is created (or you're signed in with your own Google/GitHub identity), the key is extracted and stored.
+2. **"Add login/OAuth to my app — set it up across the provider's consoles."** — a multi-step setup driven across consoles (GCP → OAuth Playground is the canonical, hardest case): a secret captured in one console is *sealed in-session* and typed into the next, so the raw value is never exposed to the agent.
 3. **"Give my deployed app a scoped, revocable OpenAI key."** — an *egress grant*: your code calls through a proxy that injects the key; the raw secret stays vaulted.
-4. **"Rotate my Stripe key and update everywhere it's used."** — rotated where we can, honest about what we can't.
-5. **"Show me everything that touched my keys in the last 90 days."** — the audit ledger.
-6. **"Something leaked — kill that key now."** — revoke the grant on the spot.
-7. **"Stand up the same stack for a new project."** — replayed from a saved skill in ~30s.
+4. **"Rotate my Stripe key and update everywhere it's used."** — rotated in the vault and picked up transparently by every egress grant and proxied call that uses it; honest that copies you've pasted into external systems are yours to update.
+5. **"Show me everything that touched my keys."** — the audit ledger: stored / retrieved / rotated / proxied, newest-first, never a secret value.
+6. **"Something leaked — kill that key now."** — revoke the grant on the spot; the next call through it is rejected.
+7. **"Stand up the same stack for a new project."** — replayed from a saved skill instead of driven from scratch.
 
 ## Install
 
