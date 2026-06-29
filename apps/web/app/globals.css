@@ -776,3 +776,15 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 /* System-styled not-found in the centered auth-card vocabulary. */
 .nf-code{font-family:var(--mono);font-size:13px;color:var(--accent);
   letter-spacing:.08em;text-align:center;margin-bottom:var(--s-2)}
+
+/* Legal pages (privacy / terms) — readable prose in the design system. */
+.legal{max-width:680px;margin:0 auto;padding:var(--s-16) var(--s-8) var(--s-24)}
+.legal h1{font-size:34px;letter-spacing:-.02em;line-height:1.05;margin:0 0 6px}
+.legal-meta{color:var(--faint);font-size:13.5px;margin:0 0 var(--s-10)}
+.legal h2{font-size:18px;font-weight:600;color:var(--fg);margin:var(--s-10) 0 var(--s-3)}
+.legal p,.legal li{color:var(--muted);line-height:1.66;font-size:15.5px}
+.legal p{margin:var(--s-3) 0}
+.legal ul{padding-left:1.15em;margin:var(--s-3) 0}
+.legal li{margin:6px 0}
+.legal strong{color:var(--fg);font-weight:600}
+.legal a{color:var(--accent);text-decoration:underline;text-underline-offset:2px}

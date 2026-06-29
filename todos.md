@@ -68,16 +68,24 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
   profile, no keychain, headless + Xvfb). That's the actual first impression and
   the most likely place strangers bounce.
 
-- [ ] **7. Fail-fast gate UX.** [user item #1] When the operator hits a gate it
-  can't pass without config — 2Captcha, SMS/phone, email/inbox verification —
-  return a STRUCTURED `needs_user` with the specific gate
-  (`captcha_key` / `sms_phone` / `inbox_consent`) and the exact remedy
-  (`npx @trusty-squire/mcp settings → …`). Detect early so it bails in seconds,
-  not after a 6-minute drive. Doubles as expectation-setting.
+- [~] **7. Fail-fast gate UX.** [user item #1] 2 of 3 gates done.
+  - [x] **Captcha:** `operate_captcha_gate` returns a structured
+    `needs_user {gate, message, remedy}` on settled=false — `captcha_solver`
+    (set up 2Captcha in settings) / `captcha_wall` (proxy or manual) — so the
+    host fails fast with an actionable message. +2 tests. Shipped to `next`
+    (1.0.7-rc.2); rides 1.0.7 → latest via #5.
+  - [x] **Inbox:** already a structured handback (`buildConsentRefusal`).
+  - [ ] **SMS/phone:** NO bot-side handling or phone setting exists — that's a
+    FEATURE (like 2Captcha vaulting was), not a UX tweak. Tracked separately.
 
-- [ ] **8. Privacy policy + ToS live and linked.** Storing people's credentials
-  is a legal necessity AND a trust feature. Surface the encrypted / write-only-
-  sink / deletion-path story (GDPR export + erasure already exist).
+- [x] **8. Privacy policy + ToS live and linked.** DONE.
+  - `/privacy` + `/terms` pages added (apps/web), in the design system; linked
+    from the home, pricing, and legal-page footers. Cover encrypted /
+    write-only-sink / never-read-back, your-own-inbox verification,
+    export+erasure, the automated-signup-is-your-responsibility disclaimer, and
+    beta "as is" terms. Web build compiles (static routes).
+  - NOTE: engineer-drafted first version, NOT legal-reviewed — have counsel
+    review before a real launch.
 
 ## Tier 3 — survive launch day (observability / ops)
 
