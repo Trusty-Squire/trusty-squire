@@ -555,6 +555,7 @@ extension state on launch and won't reload mid-session.
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + the operator inbox-OTP service |
 | `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (auto-promote attribution on provisions). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
+| `TRUSTY_SQUIRE_SESSION_FILE` | — | `1`/`true`/`yes` forces the durable file session backend (`~/.config/trusty-squire/session.json`) over the OS keychain. Set it **globally** (so `connect` and the spawned server agree) on headless boxes where the keychain is present-but-ephemeral (gnome-keyring "session" collection) — otherwise the session isn't persisted and `connect` re-opens the install/noVNC page every run. |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
 
 ### Housekeeper — extracted to its own repo

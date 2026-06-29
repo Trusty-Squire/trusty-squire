@@ -61,4 +61,31 @@ describe("openSessionStorage", () => {
     const store = await openSessionStorage({ preferFile: true });
     expect(store.backendName()).toBe("file");
   });
+
+  it("TRUSTY_SQUIRE_SESSION_FILE=1 forces the file backend", async () => {
+    const prev = process.env.TRUSTY_SQUIRE_SESSION_FILE;
+    process.env.TRUSTY_SQUIRE_SESSION_FILE = "1";
+    try {
+      const store = await openSessionStorage();
+      expect(store.backendName()).toBe("file");
+    } finally {
+      if (prev === undefined) delete process.env.TRUSTY_SQUIRE_SESSION_FILE;
+      else process.env.TRUSTY_SQUIRE_SESSION_FILE = prev;
+    }
+  });
+
+  it("ignores a falsey TRUSTY_SQUIRE_SESSION_FILE", async () => {
+    const prev = process.env.TRUSTY_SQUIRE_SESSION_FILE;
+    process.env.TRUSTY_SQUIRE_SESSION_FILE = "0";
+    try {
+      // Falls through to keytar-or-file; in CI/containers keytar is absent so
+      // this still resolves to file — assert it doesn't THROW and returns a
+      // valid backend rather than asserting a specific one.
+      const store = await openSessionStorage();
+      expect(["file", "keytar"]).toContain(store.backendName());
+    } finally {
+      if (prev === undefined) delete process.env.TRUSTY_SQUIRE_SESSION_FILE;
+      else process.env.TRUSTY_SQUIRE_SESSION_FILE = prev;
+    }
+  });
 });
