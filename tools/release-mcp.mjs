@@ -76,6 +76,27 @@ const prev = pkg.version;
 pkg.version = version;
 writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 
+// 1b. On a STABLE cut, also strip the -rc suffix off bundled workspace
+//     packages that have their own main=stable / staging=prerelease release
+//     guard. A stable cut promotes the whole staging delta to main, which
+//     carries staging's PRERELEASE versions onto main — and their release
+//     workflow then fails ("main requires a stable version"). De-prerelease
+//     them here so e.g. skill-schema 0.1.3-rc.1 → 0.1.3 lands stable on main.
+//     (Idempotent at publish time: if that stable version is already on npm,
+//     the workflow skips with a notice instead of republishing.)
+const promotedWorkspacePkgs = [];
+if (!isPrerelease) {
+  for (const wsPath of ["packages/skill-schema/package.json"]) {
+    const wsPkg = JSON.parse(readFileSync(wsPath, "utf8"));
+    if (wsPkg.version.includes("-")) {
+      wsPkg.version = wsPkg.version.replace(/-.*$/, "");
+      writeFileSync(wsPath, `${JSON.stringify(wsPkg, null, 2)}\n`);
+      promotedWorkspacePkgs.push(wsPath);
+      console.log(`  also promoting ${wsPkg.name} → ${wsPkg.version} (stable cut)`);
+    }
+  }
+}
+
 // 2. Seed a CHANGELOG entry from commits since the last tag (release.yml tags
 //    v<version>). The author tightens the bullets before merge.
 let bullets = "- _summarize the changes_\n";
@@ -94,8 +115,9 @@ const entry = `## ${version} (${date})\n\n${bullets}\n`;
 const rest = cl.startsWith(clHeader) ? cl.slice(clHeader.length).replace(/^\n+/, "") : cl;
 writeFileSync(clPath, `${clHeader}\n${entry}${rest}`);
 
-// 3. Commit only the two release files, push, open the PR.
-git("add", pkgPath, clPath);
+// 3. Commit the release files (+ any workspace pkgs promoted to stable), push,
+//    open the PR.
+git("add", pkgPath, clPath, ...promotedWorkspacePkgs);
 git("commit", "-m", `release(mcp): ${version}`);
 git("push", "-u", "origin", branch);
 
