@@ -580,6 +580,8 @@ housekeeper repo.
 | Env var | Default | Effect |
 |---|---|---|
 | `LLM_HOURLY_LIMIT` | `150` | Per-machine-token rolling rate cap for `/v1/llm/chat` |
+| `API_ACCOUNT_HOURLY_LIMIT` | `1000` | Per-account rolling-hour cap on the authed control plane (every `requireWeb`/`requireAgent`/`requireAny` route — vault store/list/use, grant mint, etc.). DoS backstop; returns `429 {error:rate_limited, scope:account}`. The deployed-app egress PROXY runs on a separate grant-token path with its own per-grant cap, so this doesn't throttle workloads. `<= 0` disables. In-memory / single-instance. |
+| `EGRESS_DEFAULT_RATE_PER_HOUR` | `1000` | Default per-grant rate cap applied when `grant_app_access` is called WITHOUT `rate_limit_per_hour` (was unlimited-by-default — abuse protection). An explicit `rate_limit_per_hour` (1..100000) still overrides. |
 | `BILLING_ENABLED` | `false` | Free-during-beta kill-switch. Unless `true`/`1`, `/v1/billing/checkout` returns `503 billing_disabled` so no one is charged even with a live Stripe key. |
 | `LLM_PROXY_CHEAP_MODEL` | `google/gemini-flash-1.5` | Cheap-tier model |
 | `LLM_PROXY_PREMIUM_MODEL` | `openai/gpt-4o` | Premium-tier fallback model |

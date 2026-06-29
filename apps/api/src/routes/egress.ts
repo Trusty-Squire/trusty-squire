@@ -146,9 +146,14 @@ export const registerEgressRoutes: FastifyPluginAsync<{
     return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 15_000;
   })();
   const now = opts.now ?? (() => new Date());
-  // Limits are OPT-IN: 0 = unlimited. A grant only gets a rate cap when the
-  // caller passes rate_limit_per_hour; spend_cap is likewise null unless asked.
-  const UNLIMITED_RATE = 0;
+  // A grant minted WITHOUT an explicit rate now gets a sane DEFAULT cap rather
+  // than unlimited — abuse protection so a leaked/abused token can't run the
+  // egress proxy at unbounded volume. Generous (not a monetization lever); an
+  // explicit rate_limit_per_hour (1..100000) still overrides. Env-tunable.
+  const DEFAULT_RATE_PER_HOUR = Number.parseInt(
+    process.env.EGRESS_DEFAULT_RATE_PER_HOUR ?? "1000",
+    10,
+  );
 
   // ── Mint (agent) ──────────────────────────────────────────────
   fastify.post("/v1/egress/grants", { preHandler: opts.requireAgent }, async (req, reply) => {
@@ -191,7 +196,7 @@ export const registerEgressRoutes: FastifyPluginAsync<{
     const { grant, token } = mintGrant({
       account_id: auth.account_id,
       credential_ref: selected.reference,
-      rate_limit_per_hour: parsed.data.rate_limit_per_hour ?? UNLIMITED_RATE,
+      rate_limit_per_hour: parsed.data.rate_limit_per_hour ?? DEFAULT_RATE_PER_HOUR,
       spend_cap_usd: parsed.data.spend_cap_usd ?? null,
       now: now().toISOString(),
     });
