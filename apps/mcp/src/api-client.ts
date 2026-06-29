@@ -221,6 +221,26 @@ export class ApiClient {
     }>;
   }
 
+  // ── Audit ledger: who-touched-my-keys (no secret values) ──────────
+
+  async listAudit(input: {
+    limit?: number;
+    before?: string;
+    type?: string;
+    reference?: string;
+  }): Promise<{
+    events: Array<{ id: string; type: string; emitted_at: string } & Record<string, unknown>>;
+    next_before: string | null;
+  }> {
+    const q = new URLSearchParams();
+    if (input.limit !== undefined) q.set("limit", String(input.limit));
+    if (input.before !== undefined) q.set("before", input.before);
+    if (input.type !== undefined) q.set("type", input.type);
+    if (input.reference !== undefined) q.set("reference", input.reference);
+    const qs = q.toString();
+    return this.get(`/v1/vault/audit${qs.length > 0 ? `?${qs}` : ""}`);
+  }
+
   // ── Subscriptions ─────────────────────────────────────────
 
   async listSubscriptions(): Promise<{ subscriptions: unknown[] }> {

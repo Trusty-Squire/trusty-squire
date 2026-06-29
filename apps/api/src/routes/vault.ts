@@ -246,12 +246,16 @@ export const registerVaultRoute: FastifyPluginAsync<{
   // The full event trail for the account — stored/retrieved/rotated/
   // deleted/proxy_executed/proxy_rejected — newest first, paginated by
   // the `before` keyset cursor. Payloads carry NO secret values.
+  // Account-scoped, no secret values (references / requesters / outcomes /
+  // proxy forensics only). Readable by the human in the web UI AND by the
+  // account's own agent ("show me everything that touched my keys"), since
+  // both are bound to the same account and the agent already lists creds +
+  // mints grants on it — the audit trail exposes strictly less.
   fastify.get(
     "/v1/vault/audit",
-    { preHandler: opts.requireWeb },
+    { preHandler: opts.requireAny },
     async (req, reply) => {
       const auth = req.auth!;
-      if (auth.kind !== "web") return;
       const parsed = auditQuery.safeParse(req.query);
       if (!parsed.success) {
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
