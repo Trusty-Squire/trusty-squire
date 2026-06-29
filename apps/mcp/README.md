@@ -73,14 +73,9 @@ A thin local MCP server that drives a real browser on your machine:
 
 - **Browser:** real Chrome via Playwright + a stealth plugin, headed against an on-demand Xvfb on headless boxes (modern SaaS gate Chromium-headless).
 - **OAuth-first:** takes the Google/GitHub OAuth path when offered; auto-approves only basic identity scopes (`openid`/`email`/`profile`), surfacing anything broader to you.
-- **Email fallback:** a one-shot alias under `@trustysquire.com`, read via a Resend inbound webhook.
+- **Email verification:** reads the code or link from *your own* inbox via your signed-in browser, behind a just-in-time consent prompt — no shared aliases.
 - **Captcha:** behavior simulation for invisible Turnstile / reCAPTCHA v3; click-and-wait for visible v2.
 - **Write-only vault:** the raw secret is stored write-only and only ever *injected* server-side by the proxy — the agent never sees it.
-
-## Pricing
-
-- **Free** — provision, operate, store keys, personal use, 7-day audit, manual rotation.
-- **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, automated rotation _(coming soon)_. Free while in beta.
 
 ## Configuration
 
@@ -92,7 +87,7 @@ documented in [the repo](https://github.com/Trusty-Squire/trusty-squire).
 
 - The bot **never** types into a Google/GitHub login form (it stops and returns `needs_login`), and never auto-approves OAuth scopes beyond basic identity.
 - The MCP server runs on your machine; it does not phone home with traffic data.
-- Per-run email aliases auto-expire (bodies cleared at 7 days, rows deleted at 90); LLM proxy events deleted at 30 days.
+- LLM proxy events auto-delete at 30 days; the vault audit trail at 365.
 
 > **Developers note:** if you've cloned this repo, run `connect` from outside it (`cd ~` first). From inside `~/trusty-squire/apps/mcp/`, npm 10's npx mistakes the local workspace for the target and fails `sh: 1: mcp: not found`. End users don't hit this.
 
