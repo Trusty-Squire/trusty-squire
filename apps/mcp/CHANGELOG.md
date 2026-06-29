@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.6-rc.1 (2026-06-29)
+
+Sync the staging RC line up to `1.0.5` (staging had drifted to `1.0.1-rc.2`,
+12 commits behind main — so the next RC would have been cut from a base missing
+the audit/revoke tools, the honest README, and the extraction + captcha fixes).
+No functional change over `1.0.5`; this just realigns the prerelease channel.
+
 ## 1.0.5 (2026-06-29)
 
 **Extraction — prefixless keys beside a copy/reveal control.** `operate_extract`
