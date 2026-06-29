@@ -2,14 +2,23 @@
 
 ## 1.0.2 (2026-06-29)
 
-- fix(connect): durable file session backend for ephemeral-keychain boxes
-- fix(install): GitHub step reflects the bot's session, not a stale account link
-- docs(readme): drop stale alias/pricing info from the npm README
-- chore(cleanup): clear inbound-mail retirement leftovers
-- fix(release): de-prerelease bundled workspace pkgs on a stable mcp cut
-- fix(api): repoint fly release_command prisma to apps/api's own CLI (#249)
-- chore(infra): retire the inbound-mail subsystem — delete packages/inbox (#247)
-- chore(cleanup): PR4/T9 — remove dormant retention-cron inbox-half
+**`connect` reliability.**
+- `connect` no longer re-opens the install/noVNC page every run on headless
+  boxes where the OS keychain is present-but-ephemeral: set
+  `TRUSTY_SQUIRE_SESSION_FILE=1` (globally) to use the durable
+  `~/.config/trusty-squire/session.json` instead of the keychain. `connect`
+  now prints a hint pointing at this when the keychain backend is in use.
+- Install page: the GitHub step reflects the **bot's** live GitHub session, not
+  a stale account link — it shows "linked — sign in to enable" until the OAuth
+  runs in the bot's Chrome (which is what actually lets the bot act on GitHub),
+  and the contradictory "connected but might not work" copy is gone.
+
+**Housekeeping.**
+- Dropped stale alias/pricing copy from this README (the Squire-alias inbound
+  mail and the Pro tier are gone — verification reads your own inbox; beta is
+  free).
+- Retired the inbound-mail subsystem end to end (package + DB + secrets) and
+  swept the leftovers; the API owns its own Prisma tooling now.
 - chore(cleanup): PR4/T9 (code) — turn off the inbound-mail subsystem
 - chore(cleanup): PR4/T8 dead-code sweep — remove orphaned alias route + doc drift
 - docs(e2e): record fixed-build validation results for operator surface
