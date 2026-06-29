@@ -19,12 +19,32 @@
   free).
 - Retired the inbound-mail subsystem end to end (package + DB + secrets) and
   swept the leftovers; the API owns its own Prisma tooling now.
-- chore(cleanup): PR4/T9 (code) — turn off the inbound-mail subsystem
-- chore(cleanup): PR4/T8 dead-code sweep — remove orphaned alias route + doc drift
-- docs(e2e): record fixed-build validation results for operator surface
-- fix: harden signin vault audit gaps
-- fix(mcp): stop sealed/password values leaking into observations + recipes
-- feat: add signin vault browser fill
+
+## 1.0.1 (2026-06-29)
+
+Promotes the 1.0.1-rc line to stable. Highlights since 1.0.0 (full detail in the
+rc.1 / rc.2 entries below):
+
+**User-owned signups (sign-in vault).** The operator signs services up with the
+user's own Google identity (captured at `connect`), seals the login + a
+generated password into a `username_password` vault credential, and reads the
+verification code from the user's own inbox behind a just-in-time consent gate —
+no Squire email aliases.
+
+**Privacy hardening.**
+- Observations no longer echo a sealed value: after `type_secret`, the password
+  (and the email filled from the sealed login slot) is masked to `[sealed]` in
+  `elements[].value`, the accessibility tree, the screen outline, and the
+  element label — the cleartext never returns to the host.
+- Operator recipes no longer record inbox-provider steps, so a shared recipe
+  can't leak the user's mail (subject text or webmail navigation).
+- Browser-fill responses are encrypted to an ephemeral key; login-host wildcard
+  storage rejects broad public-suffix scopes; rotation persists non-secret
+  metadata.
+
+**Inbound-mail subsystem retired.** With aliases gone, the Squire-alias inbound
+pipeline (`packages/inbox`, the resend-inbound webhook) is removed and the API
+owns its own Prisma tooling.
 
 ## 1.0.1-rc.2 (2026-06-28)
 
