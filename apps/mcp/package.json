@@ -61,7 +61,6 @@
     "keytar": "^7.9.0"
   },
   "devDependencies": {
-    "@trusty-squire/inbox": "workspace:*",
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^2.1.8",
     "tsx": "^4.7.0",
