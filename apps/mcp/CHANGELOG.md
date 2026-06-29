@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.6 (2026-06-29)
+
+Promotes the 1.0.6-rc line to stable: the expanded 10-example "what you can ask
+your squire" marketing section (full detail in the rc.2 entry below). Docs only
+— no code change over 1.0.5.
+
 ## 1.0.6-rc.2 (2026-06-29)
 
 - docs(readme): expand "What you can ask your squire" into a 10-example
