@@ -20,6 +20,22 @@ const h = vi.hoisted(() => ({
   elements: [] as unknown[],
   visibleText: "",
   scrolls: [] as string[],
+  captchaVariant: "unknown" as string,
+  captchaChallengeRendered: false,
+  captchaToken: false,
+  captchaSettled: true,
+  captchaSolved: true,
+  invisibleTriggered: true,
+  visibleSolveCalls: 0,
+  invisibleTriggerCalls: 0,
+  twoCaptchaAvailable: false,
+  twoCaptchaResult: { kind: "ok", token: "captcha-token", durationMs: 1 } as
+    | { kind: "ok"; token: string; durationMs: number }
+    | { kind: "no_key" }
+    | { kind: "submission_failed"; reason: string }
+    | { kind: "solve_timeout"; durationMs: number }
+    | { kind: "solver_error"; reason: string },
+  twoCaptchaCalls: [] as string[],
 }));
 
 vi.mock("../browser.js", () => ({
@@ -44,6 +60,54 @@ vi.mock("../browser.js", () => ({
     }
     async waitForInteractiveDom(): Promise<void> {}
     async waitForCaptchaChallengeToSettle(): Promise<boolean> {
+      return h.captchaSettled;
+    }
+    async waitForCaptchaResponseToken(): Promise<boolean> {
+      return h.captchaToken;
+    }
+    async hasCaptchaResponseToken(): Promise<boolean> {
+      return h.captchaToken;
+    }
+    async detectCaptchaVariant(): Promise<{ variant: string; challengeRendered: boolean }> {
+      return { variant: h.captchaVariant, challengeRendered: h.captchaChallengeRendered };
+    }
+    async solveVisibleCaptcha(): Promise<{ found: boolean; solved?: boolean; kind?: string }> {
+      h.visibleSolveCalls += 1;
+      if (h.captchaVariant === "unknown") return { found: false };
+      if (h.captchaSolved) h.captchaToken = true;
+      return { found: true, solved: h.captchaSolved, kind: "recaptcha" };
+    }
+    async triggerInvisibleRecaptcha(): Promise<boolean> {
+      h.invisibleTriggerCalls += 1;
+      if (h.invisibleTriggered) h.captchaToken = true;
+      return h.invisibleTriggered;
+    }
+    async extractRecaptchaSitekey(): Promise<string | null> {
+      return "6Lcaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    }
+    async injectRecaptchaToken(): Promise<boolean> {
+      h.captchaToken = true;
+      return true;
+    }
+    async extractHcaptchaSitekey(): Promise<string | null> {
+      return "00000000-0000-0000-0000-000000000000";
+    }
+    async getHcaptchaSolveContext(): Promise<{
+      invisible: boolean;
+      userAgent: string | null;
+      rqdata: string | null;
+    }> {
+      return { invisible: false, userAgent: "test-agent", rqdata: null };
+    }
+    async injectHcaptchaToken(): Promise<boolean> {
+      h.captchaToken = true;
+      return true;
+    }
+    async extractTurnstileSitekey(): Promise<string | null> {
+      return "0x4AAAAAAA";
+    }
+    async injectTurnstileToken(): Promise<boolean> {
+      h.captchaToken = true;
       return true;
     }
     async scrollViewport(direction: string): Promise<void> {
@@ -59,6 +123,26 @@ vi.mock("../browser.js", () => ({
     async pressKey(): Promise<void> {}
     async close(): Promise<void> {
       h.started -= 1;
+    }
+  },
+}));
+
+vi.mock("../captcha-solver-2captcha.js", () => ({
+  TwoCaptchaSolver: class {
+    isAvailable(): boolean {
+      return h.twoCaptchaAvailable;
+    }
+    async solveRecaptchaV2(): Promise<typeof h.twoCaptchaResult> {
+      h.twoCaptchaCalls.push("recaptcha_v2");
+      return h.twoCaptchaResult;
+    }
+    async solveHcaptcha(): Promise<typeof h.twoCaptchaResult> {
+      h.twoCaptchaCalls.push("hcaptcha");
+      return h.twoCaptchaResult;
+    }
+    async solveTurnstile(): Promise<typeof h.twoCaptchaResult> {
+      h.twoCaptchaCalls.push("turnstile");
+      return h.twoCaptchaResult;
     }
   },
 }));
@@ -81,6 +165,7 @@ import {
   observedHostsForSession,
   stashSecretSlot,
   awaitVerification,
+  captchaGate,
   finishProvisionSession,
   closeAllProvisionSessions,
 } from "../provision-session.js";
@@ -93,9 +178,21 @@ import type { ApiClient } from "../../api-client.js";
 
 function elem(partial: Record<string, unknown>): unknown {
   return {
-    index: 0, tag: "input", type: "text", id: null, name: null, placeholder: null,
-    ariaLabel: null, role: null, labelText: null, visibleText: null, selector: "input",
-    visible: true, inViewport: true, inConsentWidget: false, ...partial,
+    index: 0,
+    tag: "input",
+    type: "text",
+    id: null,
+    name: null,
+    placeholder: null,
+    ariaLabel: null,
+    role: null,
+    labelText: null,
+    visibleText: null,
+    selector: "input",
+    visible: true,
+    inViewport: true,
+    inConsentWidget: false,
+    ...partial,
   };
 }
 
@@ -109,6 +206,17 @@ beforeEach(() => {
   h.elements = [];
   h.visibleText = "";
   h.scrolls = [];
+  h.captchaVariant = "unknown";
+  h.captchaChallengeRendered = false;
+  h.captchaToken = false;
+  h.captchaSettled = true;
+  h.captchaSolved = true;
+  h.invisibleTriggered = true;
+  h.visibleSolveCalls = 0;
+  h.invisibleTriggerCalls = 0;
+  h.twoCaptchaAvailable = false;
+  h.twoCaptchaResult = { kind: "ok", token: "captcha-token", durationMs: 1 };
+  h.twoCaptchaCalls = [];
 });
 afterEach(async () => {
   await closeAllProvisionSessions();
@@ -172,7 +280,9 @@ describe("operate session — sealed credential transfer", () => {
       return true;
     });
     try {
-      const obs = await startProvisionSession({ serviceUrl: "https://console.firebase.google.com/" });
+      const obs = await startProvisionSession({
+        serviceUrl: "https://console.firebase.google.com/",
+      });
       const sid = obs.session_id;
       // Seal a secret (as operate_extract{into_slot} would) and target a field.
       stashSecretSlot(sid, "oauth_secret", secret);
@@ -296,6 +406,64 @@ describe("operate session — scroll (T5 fix: reveal below-the-fold controls)", 
   });
 });
 
+describe("operate session — captcha gate", () => {
+  it("solves a visible reCAPTCHA before returning settled=true", async () => {
+    h.captchaVariant = "recaptcha_v2";
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await captchaGate(obs.session_id);
+
+    expect(res).toMatchObject({ found: true, variant: "recaptcha_v2", settled: true });
+    expect(h.visibleSolveCalls).toBe(1);
+  });
+
+  it("does not treat a cleared visible challenge as solved without a token", async () => {
+    h.captchaVariant = "recaptcha_v2";
+    h.captchaSolved = false;
+    h.captchaSettled = true;
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await captchaGate(obs.session_id);
+
+    expect(res).toMatchObject({ found: true, variant: "recaptcha_v2", settled: false });
+    expect(h.visibleSolveCalls).toBe(1);
+  });
+
+  it("escalates visible reCAPTCHA to the token solver when configured", async () => {
+    h.captchaVariant = "recaptcha_v2";
+    h.captchaSolved = false;
+    h.twoCaptchaAvailable = true;
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await captchaGate(obs.session_id);
+
+    expect(res).toMatchObject({ found: true, variant: "recaptcha_v2", settled: true });
+    expect(h.visibleSolveCalls).toBe(1);
+    expect(h.twoCaptchaCalls).toEqual(["recaptcha_v2"]);
+  });
+
+  it("executes invisible reCAPTCHA and waits for a response token", async () => {
+    h.captchaVariant = "recaptcha_v3";
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await captchaGate(obs.session_id);
+
+    expect(res).toMatchObject({ found: true, variant: "recaptcha_v3", settled: true });
+    expect(h.invisibleTriggerCalls).toBe(1);
+  });
+
+  it("blocks invisible reCAPTCHA when no response token is minted", async () => {
+    h.captchaVariant = "recaptcha_v3";
+    h.invisibleTriggered = false;
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await captchaGate(obs.session_id);
+
+    expect(res).toMatchObject({ found: true, variant: "recaptcha_v3", settled: false });
+    expect(h.invisibleTriggerCalls).toBe(1);
+  });
+});
+
 describe("operate session — PR3c username/password login (capture-at-login sourced)", () => {
   let profileDir: string;
   beforeEach(() => {
@@ -315,7 +483,10 @@ describe("operate session — PR3c username/password login (capture-at-login sou
     const res = (await provisionPrepareLoginTool.handler(
       { session_id: obs.session_id },
       null as unknown as ApiClient,
-    )) as { slots: { login: { preview: string }; password: { length: number } }; email_preview: string };
+    )) as {
+      slots: { login: { preview: string }; password: { length: number } };
+      email_preview: string;
+    };
     // Neither the handle preview nor the email_preview leaks the raw address.
     expect(res.email_preview).not.toContain("ada@example.com");
     expect(res.slots.login.preview).not.toContain("ada@example.com");
@@ -335,16 +506,21 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   it("store_login vaults the sealed email+password as username_password, no raw values returned", async () => {
     withEmail("ada@example.com");
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
-    await provisionPrepareLoginTool.handler({ session_id: obs.session_id }, null as unknown as ApiClient);
+    await provisionPrepareLoginTool.handler(
+      { session_id: obs.session_id },
+      null as unknown as ApiClient,
+    );
 
-    let captured: {
-      service: string;
-      type?: string;
-      auth_strategy?: string;
-      fields?: Record<string, string>;
-      login_hosts?: string[];
-      signin_url?: string;
-    } | undefined;
+    let captured:
+      | {
+          service: string;
+          type?: string;
+          auth_strategy?: string;
+          fields?: Record<string, string>;
+          login_hosts?: string[];
+          signin_url?: string;
+        }
+      | undefined;
     const api = {
       storeCredential: async (input: {
         service: string;
@@ -392,8 +568,18 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   });
 
   it("seal_vault_credential stashes browser-fill fields as slots without returning raw values", async () => {
-    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/login", profileDir });
-    let captured: { current_host: string; reference?: string; fields: string[]; encrypted_response_public_key: string } | undefined;
+    const obs = await startProvisionSession({
+      serviceUrl: "https://app.example.com/login",
+      profileDir,
+    });
+    let captured:
+      | {
+          current_host: string;
+          reference?: string;
+          fields: string[];
+          encrypted_response_public_key: string;
+        }
+      | undefined;
     const api = {
       browserFillCredential: async (input: {
         current_host: string;
@@ -413,7 +599,10 @@ describe("operate session — PR3c username/password login (capture-at-login sou
           ).toString("base64");
         return {
           reference: input.reference ?? "vault://acct/login1",
-          encrypted_fields: { login: encrypt("ada@example.com"), password: encrypt("correct-horse") },
+          encrypted_fields: {
+            login: encrypt("ada@example.com"),
+            password: encrypt("correct-horse"),
+          },
         };
       },
     } as unknown as ApiClient;

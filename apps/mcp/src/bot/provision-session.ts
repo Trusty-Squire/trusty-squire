@@ -18,6 +18,7 @@
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import { BrowserController, type InteractiveElement } from "./browser.js";
+import { TwoCaptchaSolver } from "./captcha-solver-2captcha.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
 import {
@@ -41,6 +42,7 @@ import {
   looksLikeCredentialValue,
   isCredentialNoise,
   findCredentialTokens,
+  pickRelaxedNearCopyCredential,
 } from "./credential-shape.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
@@ -1656,6 +1658,18 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     ...resolveExtraction(state),
   };
 
+  // Relaxed near-copy fallback: a PREFIXLESS, SEPARATORLESS key (deepinfra's
+  // `Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz`) that the strict scanners refuse from raw
+  // text but which was harvested from beside a copy/reveal affordance — that
+  // proximity is the disambiguator. Only when nothing better surfaced an api_key
+  // (a labeled or prefixed key always wins), so this can't clobber a real match.
+  if (!("api_key" in credentials)) {
+    const relaxed = pickRelaxedNearCopyCredential(nearCopy);
+    if (relaxed !== null && !Object.values(credentials).includes(relaxed)) {
+      credentials.api_key = relaxed;
+    }
+  }
+
   // Multi-credential: a service may present several keys of the same shape
   // (VouchFlow shows sandbox write AND read). The single-key extraction.ts
   // policy stops at the first; collect every distinct credential-shaped token
@@ -1703,16 +1717,70 @@ export interface CaptchaGateResult {
   session_id: string;
   found: boolean;
   variant: string;
-  // True when no challenge is rendered after the wait — either there was none,
-  // or the behavior-sim/IP score cleared an invisible widget. False means a
-  // visible challenge is still up (the host should surface captcha_blocked).
+  // True when the page has a captcha response token and no challenge remains
+  // rendered. False means the host should surface captcha_blocked or hand back.
   settled: boolean;
 }
 
-// Detect a captcha and wait for it to clear. Behavior-sim (humanized clicks +
-// typing) during the drive already scores invisible Turnstile/reCAPTCHA-v3; for
-// a visible checkbox the host clicks it via operate_act, then calls this to
-// wait for the token. Reuses the substrate's detector + settle poll.
+async function solveCaptchaWithTokenSolver(
+  browser: BrowserController,
+  variant: string,
+): Promise<{ solved: boolean; outcome: string }> {
+  const solver = new TwoCaptchaSolver();
+  if (!solver.isAvailable()) return { solved: false, outcome: "no_key" };
+
+  if (variant === "recaptcha_v2") {
+    const sitekey = await browser.extractRecaptchaSitekey();
+    if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
+    const res = await solver.solveRecaptchaV2({ sitekey, pageUrl: browser.currentUrl() });
+    if (res.kind !== "ok") return { solved: false, outcome: res.kind };
+    const injected = await browser.injectRecaptchaToken(res.token);
+    if (!injected) return { solved: false, outcome: "inject_failed" };
+    return {
+      solved: await browser.waitForCaptchaResponseToken(2_000),
+      outcome: "ok",
+    };
+  }
+
+  if (variant === "hcaptcha") {
+    const sitekey = await browser.extractHcaptchaSitekey();
+    if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
+    const ctx = await browser.getHcaptchaSolveContext();
+    const res = await solver.solveHcaptcha({
+      sitekey,
+      pageUrl: browser.currentUrl(),
+      invisible: ctx.invisible,
+      ...(ctx.userAgent !== null ? { userAgent: ctx.userAgent } : {}),
+      ...(ctx.rqdata !== null ? { data: ctx.rqdata } : {}),
+    });
+    if (res.kind !== "ok") return { solved: false, outcome: res.kind };
+    const injected = await browser.injectHcaptchaToken(res.token);
+    if (!injected) return { solved: false, outcome: "inject_failed" };
+    return {
+      solved: await browser.waitForCaptchaResponseToken(2_000),
+      outcome: "ok",
+    };
+  }
+
+  if (variant === "turnstile") {
+    const sitekey = await browser.extractTurnstileSitekey();
+    if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
+    const res = await solver.solveTurnstile({ sitekey, pageUrl: browser.currentUrl() });
+    if (res.kind !== "ok") return { solved: false, outcome: res.kind };
+    const injected = await browser.injectTurnstileToken(res.token);
+    if (!injected) return { solved: false, outcome: "inject_failed" };
+    return {
+      solved: await browser.waitForCaptchaResponseToken(2_000),
+      outcome: "ok",
+    };
+  }
+
+  return { solved: false, outcome: "unsupported_variant" };
+}
+
+// Detect a captcha and drive the substrate's provider-specific gate. A hidden
+// response token is the success signal; challenge disappearance alone is not
+// enough because a reCAPTCHA v2 checkbox can be idle with an empty token.
 export async function captchaGate(sessionId: string): Promise<CaptchaGateResult> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -1722,8 +1790,38 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     audit(sessionId, "captcha_gate", { found: false });
     return { session_id: sessionId, found: false, variant: "none", settled: true };
   }
-  const settled = await session.browser.waitForCaptchaChallengeToSettle(15_000);
-  audit(sessionId, "captcha_gate", { found: true, variant: det.variant, settled });
+
+  let token = await session.browser.waitForCaptchaResponseToken(750);
+  let solvedBySubstrate = false;
+  let tokenSolverOutcome: string | null = null;
+
+  if (!token && det.variant === "recaptcha_v3") {
+    solvedBySubstrate = await session.browser.triggerInvisibleRecaptcha(9_000);
+    token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
+  } else if (!token && (det.variant === "recaptcha_v2" || det.variant === "hcaptcha" || det.variant === "turnstile")) {
+    const solved = await session.browser.solveVisibleCaptcha(30_000);
+    solvedBySubstrate = solved.found && solved.solved;
+    token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
+    if (!token) {
+      const tokenSolved = await solveCaptchaWithTokenSolver(session.browser, det.variant);
+      tokenSolverOutcome = tokenSolved.outcome;
+      token = tokenSolved.solved;
+    }
+  }
+
+  const clear = await session.browser.waitForCaptchaChallengeToSettle(token ? 5_000 : 15_000);
+  const settled =
+    det.variant === "unknown"
+      ? clear
+      : token && clear;
+  audit(sessionId, "captcha_gate", {
+    found: true,
+    variant: det.variant,
+    settled,
+    token,
+    substrate: solvedBySubstrate,
+    ...(tokenSolverOutcome !== null ? { token_solver: tokenSolverOutcome } : {}),
+  });
   return { session_id: sessionId, found: true, variant: det.variant, settled };
 }
 

@@ -7,6 +7,7 @@ import {
   findCredentialTokens,
   looksLikeCredentialToken,
   looksLikeCredentialValue,
+  pickRelaxedNearCopyCredential,
 } from "../credential-shape.js";
 
 describe("isMaskedDisplay (canonical masked-glyph — unifies the 4 drifted spellings)", () => {
@@ -91,5 +92,39 @@ describe("looksLikeCredentialValue (the tight host-side gate, distinct from the 
     expect(looksLikeCredentialValue("2026-06-23")).toBe(false);
     expect(looksLikeCredentialValue("loader.tweetTombstone")).toBe(false);
     expect(looksLikeCredentialValue("GOCSPX-••••3f")).toBe(false);
+  });
+});
+
+describe("pickRelaxedNearCopyCredential (prefixless key beside a copy/reveal affordance)", () => {
+  it("accepts deepinfra's bare 32-char base62 key (the canonical case)", () => {
+    expect(pickRelaxedNearCopyCredential(["Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz"])).toBe(
+      "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz",
+    );
+  });
+  it("picks the key out of a row's harvested tokens, skipping the date/label noise", () => {
+    // What extractCredentialsNearCopyButtons harvests from the deepinfra key row.
+    const harvested = ["auto", "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz", "06/29/2026,", "12:30:38"];
+    expect(pickRelaxedNearCopyCredential(harvested)).toBe("Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz");
+  });
+  it("rejects a date, a time, an email, and a url", () => {
+    expect(pickRelaxedNearCopyCredential(["06/29/2026"])).toBeNull();
+    expect(pickRelaxedNearCopyCredential(["2026-06-29T04:30:38.000Z"])).toBeNull();
+    expect(pickRelaxedNearCopyCredential(["someone@example.com"])).toBeNull();
+    expect(pickRelaxedNearCopyCredential(["https://deepinfra.com/dash/api_keys"])).toBeNull();
+  });
+  it("rejects a bare UUID and a long hex sha (ambiguous: trace id / content hash)", () => {
+    expect(pickRelaxedNearCopyCredential(["123e4567-e89b-12d3-a456-426614174000"])).toBeNull();
+    expect(pickRelaxedNearCopyCredential(["9f86d081884c7d659a2feaa0c55ad015a3bf4f1b"])).toBeNull();
+  });
+  it("rejects too-short tokens, all-letter words, and dotted code identifiers", () => {
+    expect(pickRelaxedNearCopyCredential(["Ctrl+K", "abc123"])).toBeNull();
+    expect(pickRelaxedNearCopyCredential(["TableOfContentsRenderer"])).toBeNull(); // no digit
+    expect(pickRelaxedNearCopyCredential(["loader.tweetUnavailableHandler1"])).toBeNull();
+  });
+  it("returns the first qualifying token and is a no-op on an empty list", () => {
+    expect(pickRelaxedNearCopyCredential([])).toBeNull();
+    expect(pickRelaxedNearCopyCredential(["noise", "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz", "AbC9dEf2GhI5jKl8MnO1pQr4"])).toBe(
+      "Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz",
+    );
   });
 });
