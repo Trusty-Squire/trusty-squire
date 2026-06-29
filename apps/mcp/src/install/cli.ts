@@ -568,8 +568,8 @@ async function connect(args: Argv): Promise<void> {
     task: () => detectAsn(),
   });
 
-  // The machine token is the bot-internal credential the universal
-  // signup bot uses for the LLM proxy and the inbox alias service. It
+  // The machine token is the bot-internal credential the operator driver
+  // uses for the LLM proxy and the operator inbox-OTP service. It
   // is NOT the user's auth — the agent_session_token (issued via the
   // browser confirm flow below) is. The MCP server reads both from the
   // session file.

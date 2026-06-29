@@ -1,6 +1,6 @@
 // skill-registry-client.ts — HTTP client for the Tier-2 skill
-// registry. Sits between the MCP-side router (provision-any.ts) and
-// the registry endpoints added in Phase 4. Three responsibilities:
+// registry. Sits between the operator-driver tools and the registry
+// endpoints. Three responsibilities:
 //
 //   1. Fetch the active skill for a service (`GET /skills/:service`),
 //      validate the signed payload via the SkillSchema, and return a

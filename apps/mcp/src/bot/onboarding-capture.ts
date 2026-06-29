@@ -228,8 +228,8 @@ function computeContentHash(
 //      stray captures from agent-loop tests. Tests that exercise the
 //      capture explicitly set the env var via the withCaptureDir
 //      helper.
-// Exported so the round-uploader (provision-any.ts) can read the same
-// resolved path without re-implementing the policy.
+// Exported so the auto-promote path can read the same resolved path
+// without re-implementing the policy.
 export function resolveCaptureDir(): string | null {
   const envValue = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
   if (envValue !== undefined) {

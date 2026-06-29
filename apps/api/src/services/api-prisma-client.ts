@@ -1,8 +1,8 @@
 // Lazy loader for the API's Prisma client.
 //
 // The schema lives at apps/api/prisma/schema.prisma and generates to
-// apps/api/node_modules/.prisma/api-client (custom output so it
-// doesn't clash with @prisma/client used by the inbox package).
+// apps/api/node_modules/.prisma/api-client (custom output, kept from when
+// a second schema shared the workspace's default @prisma/client).
 //
 // We createRequire so test runs without an applied migration don't
 // fail at import; the in-memory fallback handles them.

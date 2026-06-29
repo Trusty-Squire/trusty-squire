@@ -67,26 +67,20 @@ silent failures.
 ### Production, deployed, verified end-to-end
 - **API on Fly** (`trusty-squire-api.fly.dev`) — Fastify + Prisma,
   v16+ shipped.
-- **Inbound mail pipeline — Resend-backed on `trustysquire.com`.**
-  Resend webhook → `/v1/webhooks/resend-inbound` → Prisma. Verified via
-  Svix-style HMAC-SHA256 signature with `RESEND_INBOUND_SECRET`. Alias
-  domain is `INBOX_ALIAS_DOMAIN=trustysquire.com` (set on
-  `trusty-squire-api`). The historic SES + S3 + SNS pipeline was
-  retired (no more AWS dependency) — Resend handles both outbound and
-  inbound now.
-  - **Young-domain caveat:** `trustysquire.com` is a fresh-MX domain;
-    some services (Resend, Postmark, historically) still silently
-    withhold verification mails to fresh-MX. Render-class services
-    don't gate on this. Diagnose via the bot's
-    `verification_not_sent` status.
-- **Postgres persistence (Fly Postgres `trusty-squire-db`).** The two
-  Prisma schemas live in **two separate databases** on one cluster —
-  they cannot share a database (`prisma db push` drops any table
-  outside its own schema):
-  - `trustysquire_inbox` ← `packages/inbox/prisma` (`INBOX_DATABASE_URL`)
-    → `EmailAlias`, `ReceivedEmail`
-  - `trustysquire` ← `apps/api/prisma` (`AUTH_DATABASE_URL`)
-    → `MachineToken`, `PairingToken`, `LLMUsageEvent`, `CaptchaEvent`
+- **Email verification — the user's own inbox.** Signups are user-owned:
+  the operator reads the verification code/link from the user's own Gmail
+  through their signed-in browser session (`operate_await_verification`),
+  behind a JIT consent gate. The Squire-alias inbound-mail subsystem
+  (`packages/inbox`, the resend-inbound webhook) was retired in 1.0.1 —
+  no aliases are minted and nothing receives inbound mail server-side.
+  Operator-side OTP still arrives via the bot's own Gmail over IMAP
+  (`operator-otp-poller.ts`, see `OPERATOR_IMAP_*` below). Resend is
+  still used for **outbound** notification mail.
+- **Postgres persistence (Fly Postgres `trusty-squire-db`).** One database,
+  `trustysquire` ← `apps/api/prisma` (`AUTH_DATABASE_URL`) →
+  `MachineToken`, `PairingToken`, `LLMUsageEvent`, `CaptchaEvent`,
+  `VaultAuditEvent`. (The second `trustysquire_inbox` database was dropped
+  with the inbound-mail retirement.)
 - **Retention cron** (hourly, in-process). Bodies → null at 7d,
   metadata → delete at 90d, pairing tokens → delete at 1h, LLM events
   → delete at 30d. Structured JSON log per run.
@@ -119,14 +113,16 @@ silent failures.
     (`cf-turnstile-response` or `g-recaptcha-response`) populated, up
     to 30s timeout. Returns `captcha_blocked` on timeout so the MCP
     tool can surface a clear status to the user.
-  - Long-poll inbox client, verification-link click, and post-verify
-    navigation primitives the host agent drives via `operate_*`.
+  - User-inbox verification read (`operate_await_verification` reads the
+    code/link from the user's own signed-in Gmail behind a JIT consent
+    gate), verification-link click, and post-verify navigation primitives
+    the host agent drives via `operate_*`.
   - DOM/screenshot observation + vault-backed credential extraction +
     operator-recipe replay (`operate_use`) the host agent composes per step.
 - **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
   1. Issues a machine token (bot-internal credential for LLM proxy +
-     inbox alias service).
+     operator inbox-OTP service).
   2. Opens a browser so the user signs in (Google/GitHub) and confirms
      the machine — binds the install to the account, writes the
      account-bound `agent_session_token` to the local session file.
@@ -291,7 +287,6 @@ trusty-squire/
 │   │                since the native-provision sunset (0.8).
 │   └── tooling/     Internal scripts
 ├── packages/
-│   ├── inbox/       Email alias + inbound parsing. Owns inbox Prisma schema.
 │   ├── vault/       Encrypted credential store.
 │   └── ...          Other shared libs (auth, http-clients, etc.)
 └── CLAUDE.md        This file.
@@ -310,7 +305,7 @@ pnpm -F @trusty-squire/api prisma:generate
 ### Deploy (API only)
 
 **CI-AUTOMATED — the API deploys on push to `main` when `apps/api/**` (or the
-workspace packages it bundles: inbox/vault/skill-schema, or the lockfile)
+workspace packages it bundles: vault/skill-schema, or the lockfile)
 changes.** `.github/workflows/release-api.yml` runs typecheck+test as a gate,
 then `flyctl deploy --remote-only` to `trusty-squire-api` (the `release_command`
 runs `prisma db push` for the api schema). Pushes to `staging` run tests only,
@@ -422,21 +417,19 @@ bin symlink and would catch any regression of the above.
   trustysquire.ai. Fly auto-stop/auto-start (idle → machine stops, wakes
   on first request), so it shows "suspended" when idle but still serves.
 - `trusty-squire-registry`   — adapter registry
-- `trusty-squire-db`         — Postgres-flex cluster. Two databases:
-  `trustysquire` (api schema) + `trustysquire_inbox` (inbox schema).
-- The old `trusty-squire-mail` postfix server was deleted 2026-06-02
-  (inbound mail is Resend-backed; see the inbound pipeline above). Its
+- `trusty-squire-db`         — Postgres-flex cluster. One database:
+  `trustysquire` (api schema). (The `trustysquire_inbox` db was dropped
+  with the inbound-mail retirement in 1.0.1.)
+- The old `trusty-squire-mail` postfix server was deleted 2026-06-02. Its
   `mailserver/` config + the Gmail-forwarding doc were removed with it.
 
 ### Fly secrets (set on `trusty-squire-api`)
 | Secret | Purpose |
 |---|---|
-| `INBOX_DATABASE_URL` | Postgres URL — `trustysquire_inbox` db (inbox schema) |
 | `AUTH_DATABASE_URL`  | Postgres URL — `trustysquire` db (api schema) |
 | `OPENROUTER_API_KEY` | Operator's OpenRouter key for `/v1/llm/chat` proxy |
-| `RESEND_API_KEY` | Resend outbound (SES-replacement) |
-| `RESEND_INBOUND_SECRET` | Svix-style HMAC for `/v1/webhooks/resend-inbound` |
-| `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` + `/v1/llm/chat` |
+| `RESEND_API_KEY` | Resend outbound notification mail |
+| `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` (operator-OTP / workspace-inbox polling) + `/v1/llm/chat` |
 | `OPERATOR_IMAP_USER` / `OPERATOR_IMAP_PASSWORD` | IMAP creds for the operator's **single** mail identity — the bot's Google account (`lunchbox@trustysquire.ai`, the trustysquire.ai Workspace account, served by imap.gmail.com). Read-only — backs `operator-otp-poller.ts` for the `email_otp_required` gate (Porter, Koyeb, anthropic, other WorkOS-backed services whose OTP goes to the OAuth-bound inbox). The legacy `GMAIL_USER`/`GMAIL_APP_PASSWORD` names are still read as a fallback (un-migrated deploys). One identity, one inbox — do NOT reintroduce a separate personal-gmail credential. A Google account password change silently invalidates app passwords (no revocation notice); if the gate returns `imap_auth_failed`, regenerate the app password and reset the secret. Verify locally with `tools/test-operator-imap.mjs`. |
 | `SESSION_JWT_SECRET` | Auth — HS256 secret signing web-session JWTs. **Required in production**: the server throws on boot if unset (no insecure dev fallback). |
 | `STRIPE_SECRET_KEY` | Stripe secret key. Server creates Checkout + Billing-Portal sessions for `/v1/billing/*`. **Unset → billing routes register but 503** (`stripeClientFromEnv()` returns null). Use a `sk_test_` key until live billing is verified. |
@@ -457,13 +450,12 @@ columns (`stripe_customer_id`, `subscription_status`, `subscription_id`,
 `current_period_end`) apply via the deploy's `db push` (all nullable/defaulted
 — non-destructive).
 
-**Webhook auth:** inbound mail arrives via Resend's webhook
-(`/v1/webhooks/resend-inbound`), verified by a Svix-style HMAC-SHA256
-signature against `RESEND_INBOUND_SECRET`. The SES + S3 + SNS pipeline
-was retired; Mailgun + postfix + fly-email routes never shipped. The
-inbox schema has an `issued_to` column for alias ownership; run
-`pnpm -F @trusty-squire/inbox prisma migrate deploy` against the
-inbox database on the next deploy.
+**Webhook auth:** the live inbound webhook is Stripe's
+(`/v1/webhooks/stripe`, raw-body HMAC). The Squire-alias inbound-mail
+webhook (`/v1/webhooks/resend-inbound`) and the whole inbound-mail
+subsystem were retired in 1.0.1 — no aliases are minted, so nothing
+arrives server-side. The historic SES + S3 + SNS pipeline was retired
+earlier; Mailgun + postfix + fly-email routes never shipped.
 
 ### Skill registry (0.7.0)
 
@@ -560,8 +552,8 @@ extension state on launch and won't reload mid-session.
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver. When set, runCaptchaGate falls through to 2Captcha after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). |
 | `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. (The old operator-housekeeper egress/proxy model was retired with the codex-verify refactor — the housekeeper no longer drives its own browser.) |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
-| `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + inbox alias service |
-| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (inbox-alias scoping + auto-promote attribution on provisions). End-user installs read this from session.json. |
+| `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + the operator inbox-OTP service |
+| `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (auto-promote attribution on provisions). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
 

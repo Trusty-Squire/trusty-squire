@@ -677,7 +677,7 @@ export class BrowserController {
   private mouseX = 100;
   private mouseY = 100;
   // Records the browser channel that .start() actually launched. Set
-  // post-launch so telemetry (provision-any.ts) can surface "this run
+  // post-launch so telemetry can surface "this run
   // used real Chrome" vs "this run used bundled Chromium." Useful for
   // separating fingerprint regressions from network regressions when
   // a service starts failing.

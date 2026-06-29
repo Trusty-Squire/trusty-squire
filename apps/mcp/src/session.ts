@@ -28,8 +28,8 @@ function resolveFallbackFile(): string {
 
 // Session storage holds the account-bound credentials the squire needs
 // to act on a user's behalf:
-//   - machine_token: bot-internal credential for the LLM proxy + inbox
-//     alias service, bound to the account at claim time.
+//   - machine_token: bot-internal credential for the LLM proxy + the
+//     operator inbox-OTP service, bound to the account at claim time.
 //   - agent_session_token: bearer token the MCP server presents on
 //     vault writes, mandate-aware tool calls, and any other authed API
 //     surface.

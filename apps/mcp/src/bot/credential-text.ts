@@ -235,7 +235,7 @@ export function extractApiKeyFromText(text: string): string | null {
 // `rnd_…` key; LastPass, Bitwarden, and Dashlane do the same. These
 // strings are alphanumeric, often carry a digit ("1Password"), and sit
 // EARLIER in DOM order than the credential — so the validator-blind
-// candidate-scan tiers (replay-skill.ts) used to return them as the
+// candidate-scan tiers used to return them as the
 // "credential" and the downstream length validator then rejected them
 // (the 0DTW2V66 render skill: `got="1Password" length 9 below min 32`).
 // They are never credentials; reject them at the candidate layer so the

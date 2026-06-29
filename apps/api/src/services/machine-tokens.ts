@@ -1,5 +1,5 @@
 // Machine token store. A machine_token is the bot-internal credential
-// the universal signup bot uses for the LLM proxy + the inbox alias
+// the operator driver uses for the LLM proxy + the operator inbox-OTP
 // service; it's bound to the user's account during the install-claim
 // handshake (see routes/mcp-install.ts).
 //
