@@ -1725,13 +1725,24 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
 
 // ── captcha gate (thick tool) ──
 
+// Fail-fast hand-back when a captcha can't be cleared in-session. Carries the
+// SPECIFIC gate + the EXACT remedy so the host surfaces an actionable message
+// and stops driving immediately, instead of churning toward a dead end.
+export interface NeedsUserCaptcha {
+  gate: "captcha_solver" | "captcha_wall";
+  message: string;
+  remedy: string;
+}
+
 export interface CaptchaGateResult {
   session_id: string;
   found: boolean;
   variant: string;
   // True when the page has a captcha response token and no challenge remains
-  // rendered. False means the host should surface captcha_blocked or hand back.
+  // rendered. False means the host should surface needs_user and hand back.
   settled: boolean;
+  // Present only when settled=false: tells the host WHY and what to do.
+  needs_user?: NeedsUserCaptcha;
 }
 
 // A TwoCaptchaVaultProxy backed by the MCP api-client: every 2Captcha call is
@@ -1881,6 +1892,38 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     det.variant === "unknown"
       ? clear
       : token && clear;
+
+  // Fail-fast: if we couldn't clear it, hand the host a specific, actionable
+  // reason so it stops driving immediately. `no_key` means a 2Captcha solver
+  // would have been tried but isn't configured → tell the user to set one up.
+  // Anything else (incl. v3/Turnstile IP/behavior scoring 2Captcha can't help)
+  // is a wall → suggest a residential proxy or a manual signup.
+  let needs_user: NeedsUserCaptcha | undefined;
+  if (!settled) {
+    needs_user =
+      tokenSolverOutcome === "no_key"
+        ? {
+            gate: "captcha_solver",
+            message:
+              "This signup hit an image captcha the bot couldn't clear on its own, " +
+              "and no 2Captcha solver is configured.",
+            remedy:
+              "Set up 2Captcha, then retry: `npx @trusty-squire/mcp settings` → " +
+              "advanced options → enable 2Captcha (paste your 2Captcha API key, " +
+              "stored encrypted in your vault).",
+          }
+        : {
+            gate: "captcha_wall",
+            message:
+              `A ${det.variant} captcha could not be solved automatically ` +
+              "(usually IP/behavior scoring, which a solver can't bypass).",
+            remedy:
+              "Route the bot through a residential proxy " +
+              "(`npx @trusty-squire/mcp settings` → advanced → proxy URL), or " +
+              "complete this one signup manually.",
+          };
+  }
+
   audit(sessionId, "captcha_gate", {
     found: true,
     variant: det.variant,
@@ -1888,8 +1931,15 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     token,
     substrate: solvedBySubstrate,
     ...(tokenSolverOutcome !== null ? { token_solver: tokenSolverOutcome } : {}),
+    ...(needs_user !== undefined ? { needs_gate: needs_user.gate } : {}),
   });
-  return { session_id: sessionId, found: true, variant: det.variant, settled };
+  return {
+    session_id: sessionId,
+    found: true,
+    variant: det.variant,
+    settled,
+    ...(needs_user !== undefined ? { needs_user } : {}),
+  };
 }
 
 // ── email verification (thick tool — user-inbox-via-browser) ──

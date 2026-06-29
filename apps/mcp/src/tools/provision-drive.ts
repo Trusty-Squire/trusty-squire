@@ -425,10 +425,12 @@ export const provisionCaptchaGateTool: Tool<z.infer<typeof captchaSchema>> = {
   name: "operate_captcha_gate",
   description:
     "Detect a captcha and drive the in-session captcha gate: returns {found, variant, " +
-    "settled}. The gate attempts visible checkbox widgets and invisible reCAPTCHA " +
-    "execution itself, then requires a real response token before settled=true. " +
-    "settled=false means the challenge could not be solved in-session (surface " +
-    "captcha_blocked to the user).",
+    "settled, needs_user?}. The gate attempts visible checkbox widgets and invisible " +
+    "reCAPTCHA execution itself, then requires a real response token before " +
+    "settled=true. settled=false means it couldn't be cleared and carries a " +
+    "`needs_user` {gate, message, remedy} — FAIL FAST: relay that exact remedy to " +
+    "the user and stop driving, don't keep churning. gate='captcha_solver' means " +
+    "set up 2Captcha in settings; gate='captcha_wall' means a proxy or manual signup.",
   inputSchema: captchaSchema,
   jsonInputSchema: {
     type: "object",

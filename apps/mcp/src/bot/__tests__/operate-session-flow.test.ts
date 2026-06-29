@@ -442,6 +442,34 @@ describe("operate session — captcha gate", () => {
     expect(h.twoCaptchaCalls).toEqual(["recaptcha_v2"]);
   });
 
+  it("fail-fast: blocked v2 + no 2Captcha → needs_user(captcha_solver) with a settings remedy", async () => {
+    h.captchaVariant = "recaptcha_v2";
+    h.captchaSolved = false; // checkbox doesn't yield a token
+    h.captchaSettled = false; // challenge stays up
+    h.twoCaptchaAvailable = false; // no solver configured → no_key
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await captchaGate(obs.session_id);
+
+    expect(res.settled).toBe(false);
+    expect(res.needs_user?.gate).toBe("captcha_solver");
+    expect(res.needs_user?.remedy).toMatch(/2Captcha/i);
+    expect(res.needs_user?.remedy).toMatch(/settings/i);
+  });
+
+  it("fail-fast: a scoring wall (blocked invisible v3) → needs_user(captcha_wall) suggesting a proxy", async () => {
+    h.captchaVariant = "recaptcha_v3";
+    h.invisibleTriggered = false; // scoring never mints a token
+    h.captchaSettled = false;
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await captchaGate(obs.session_id);
+
+    expect(res.settled).toBe(false);
+    expect(res.needs_user?.gate).toBe("captcha_wall");
+    expect(res.needs_user?.remedy).toMatch(/proxy|manual/i);
+  });
+
   it("executes invisible reCAPTCHA and waits for a response token", async () => {
     h.captchaVariant = "recaptcha_v3";
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
