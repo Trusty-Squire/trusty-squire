@@ -75,6 +75,48 @@ function resolveSessionSecret(): string {
   return "dev-secret-do-not-use";
 }
 
+// Defense-in-depth for a CREDENTIAL BROKER: the guarantee must be "the logger
+// CANNOT emit a secret," not "current code happens to be careful." pino `redact`
+// censors these object paths on every log line, so a future careless
+// `req.log.info({ headers })` / `{ token }` / `{ body }` can't leak a value. The
+// injecting proxy (http-proxy.ts) already never logs; this is the backstop.
+// Exported + tested so a critical path can't be silently dropped.
+export const SECRET_REDACT_PATHS: readonly string[] = [
+  // Auth-bearing request/response headers (Fastify's default req serializer
+  // omits headers, but cover the case where someone logs them explicitly).
+  "req.headers.authorization",
+  "req.headers.cookie",
+  "res.headers['set-cookie']",
+  "headers.authorization",
+  "headers.cookie",
+  "authorization",
+  "cookie",
+  // Credential-shaped fields anywhere in a logged object.
+  "token",
+  "secret",
+  "password",
+  "value",
+  "fields",
+  "machine_token",
+  "agent_session_token",
+  "api_key",
+  "apiKey",
+  "*.token",
+  "*.secret",
+  "*.password",
+  "*.value",
+  "*.fields",
+  "*.machine_token",
+  "*.agent_session_token",
+  "*.api_key",
+  "*.apiKey",
+  // Request/response bodies can carry secrets (use_credential payloads,
+  // browser-fill responses) — never log them.
+  "body",
+  "req.body",
+  "res.body",
+];
+
 export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyInstance> {
   const deps =
     opts.deps ??
@@ -87,7 +129,10 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   const logger =
     process.env.VITEST === "true" || process.env.NODE_ENV === "test"
       ? false
-      : { level: process.env.LOG_LEVEL ?? "info" };
+      : {
+          level: process.env.LOG_LEVEL ?? "info",
+          redact: { paths: [...SECRET_REDACT_PATHS], censor: "[redacted]" },
+        };
   const fastify = Fastify({ logger });
 
   await fastify.register(fastifyCookie);

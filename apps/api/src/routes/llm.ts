@@ -315,11 +315,9 @@ export async function registerLLMRoute(
         body: JSON.stringify(requestBody),
       });
       if (!orRes.ok) {
-        const text = await orRes.text();
-        fastify.log.warn(
-          { status: orRes.status, body: text.slice(0, 500) },
-          "openrouter upstream error",
-        );
+        // Status only — never log the upstream body (a leak vector if an
+        // upstream ever echoes auth back). pino redact also censors `body`.
+        fastify.log.warn({ status: orRes.status }, "openrouter upstream error");
         if (!swallowError) {
           reply.code(502).send({ error: "upstream_error", upstream_status: orRes.status });
         }
