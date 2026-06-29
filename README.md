@@ -37,13 +37,37 @@ secrets stay put.
 
 ## What you can ask your squire
 
-1. **"Sign me up for Resend and put the API key in my vault."** — an account is created (or you're signed in with your own Google/GitHub identity), the key is extracted and stored.
-2. **"Add login/OAuth to my app — set it up across the provider's consoles."** — a multi-step setup driven across consoles (GCP → OAuth Playground is the canonical, hardest case): a secret captured in one console is *sealed in-session* and typed into the next, so the raw value is never exposed to the agent.
-3. **"Give my deployed app a scoped, revocable OpenAI key."** — an *egress grant*: your code calls through a proxy that injects the key; the raw secret stays vaulted.
-4. **"Rotate my Stripe key and update everywhere it's used."** — rotated in the vault and picked up transparently by every egress grant and proxied call that uses it; honest that copies you've pasted into external systems are yours to update.
-5. **"Show me everything that touched my keys."** — the audit ledger: stored / retrieved / rotated / proxied, newest-first, never a secret value.
-6. **"Something leaked — kill that key now."** — revoke the grant on the spot; the next call through it is rejected.
-7. **"Stand up the same stack for a new project."** — replayed from a saved skill instead of driven from scratch.
+> Plain-English asks. Your squire drives the browser, signs in with **your** identity, and never hands a raw secret back to the agent.
+
+1. **"Sign me up for Resend and vault the API key."**
+   An account is created — or signed in with your own Google/GitHub — and the key is extracted, encrypted, and stored. You never see it, and neither does the model.
+
+2. **"Stand up my whole stack."**
+   Resend, Sentry, PostHog, a Postgres host — provisioned in one ask, every key vaulted, your app handed one scoped, revocable grant per service. Day-one setup, zero keys on the box.
+
+3. **"Add Google OAuth to my app."**
+   A multi-step setup driven across consoles — GCP → OAuth Playground — where a secret captured in one console is *sealed in-session* and typed into the next. The client secret never touches the agent.
+
+4. **"Give my deployed app a scoped, revocable OpenAI key."**
+   An **egress grant**: your code calls the provider through a proxy that injects the real key server-side. The raw secret never leaves the vault — your app holds a downgraded, rate-limited, instantly-revocable token instead.
+
+5. **"My local agent should hold no keys."**
+   Point a CLI loop's base URL at the grant; it makes real provider calls holding nothing. The key stays vaulted, every call metered, the leash cut whenever you want.
+
+6. **"Give the contractor a key for a week."**
+   A rate-limited, spend-capped, revocable grant instead of your real key. They get a leash; you keep the secret and revoke on the spot when they're done.
+
+7. **"Rotate my Stripe key everywhere it's used."**
+   Rotated in the vault and picked up transparently by every grant and proxied call — no redeploy, no hunting through configs. Honest about the copies you've pasted into systems we can't reach.
+
+8. **"Something leaked — kill that key now."**
+   Revoke the grant instantly; the next call through it is rejected and the app fails closed. Re-mint a fresh grant to recover — no key rotation required.
+
+9. **"Show me everything that touched my keys."**
+   The audit ledger — every store, retrieval, rotation, and proxied call, newest first, never a secret value — plus a nudge on anything overdue for rotation.
+
+10. **"Move me off SendGrid with zero downtime."**
+    Sign up for the new vendor, vault the key, dual-send through both during cutover, then revoke the old grant when you've switched. No redeploy, no outage.
 
 ## Install
 
