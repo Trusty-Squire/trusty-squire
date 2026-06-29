@@ -1,5 +1,23 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.3 (2026-06-29)
+
+- fix(connect): don't re-pair (noVNC) when the bot profile is merely busy
+- fix(connect): durable file session backend for ephemeral-keychain boxes
+- fix(install): GitHub step reflects the bot's session, not a stale account link
+- docs(readme): drop stale alias/pricing info from the npm README
+- chore(cleanup): clear inbound-mail retirement leftovers
+- fix(release): de-prerelease bundled workspace pkgs on a stable mcp cut
+- fix(api): repoint fly release_command prisma to apps/api's own CLI (#249)
+- chore(infra): retire the inbound-mail subsystem — delete packages/inbox (#247)
+- chore(cleanup): PR4/T9 — remove dormant retention-cron inbox-half
+- chore(cleanup): PR4/T9 (code) — turn off the inbound-mail subsystem
+- chore(cleanup): PR4/T8 dead-code sweep — remove orphaned alias route + doc drift
+- docs(e2e): record fixed-build validation results for operator surface
+- fix: harden signin vault audit gaps
+- fix(mcp): stop sealed/password values leaking into observations + recipes
+- feat: add signin vault browser fill
+
 ## 1.0.1-rc.2 (2026-06-28)
 
 **Sign-in vault hardening**
