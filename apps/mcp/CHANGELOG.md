@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.6-rc.2 (2026-06-29)
+
+- docs(readme): expand "What you can ask your squire" into a 10-example
+  marketing section spanning the full operator + vault range — provision,
+  stack bootstrap, sealed multi-console OAuth, egress grants (deployed app /
+  local agent / third-party leash), transparent rotation, instant kill-switch,
+  the audit ledger, and zero-downtime vendor migration. Eight verified live;
+  the two composite asks chain verified primitives.
+
 ## 1.0.6-rc.1 (2026-06-29)
 
 Sync the staging RC line up to `1.0.5` (staging had drifted to `1.0.1-rc.2`,
