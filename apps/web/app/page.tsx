@@ -178,6 +178,8 @@ export default function Page() {
             </Link>
             <div className="foot-l">
               <Link href="/pricing">Pricing</Link>
+              <Link href="/privacy">Privacy</Link>
+              <Link href="/terms">Terms</Link>
               <a href={NPM_URL}>npm</a>
               <a href={GITHUB_URL}>GitHub</a>
             </div>
