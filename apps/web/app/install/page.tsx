@@ -96,6 +96,14 @@ export default function InstallPage() {
   // Returning from the OAuth round-trip — fire the claim if we
   // weren't already claimed. The wizard then continues to step 2.
   const returnedFromAuth = useQueryParam("claim") === "1";
+  // Returning specifically from a GitHub sign-in done in THIS browser
+  // (the bot's Chrome). Account-binding alone (whoami.identities) does NOT
+  // mean the bot has a live github.com session — that link persists across
+  // sessions while the bot's cookie expires. So GitHub step 2 only counts
+  // as done when the OAuth ran here this session, which is what actually
+  // (re)establishes the bot's github.com login.
+  const returnedFromGithub = useQueryParam("gh") === "1";
+  const [githubSessionFresh, setGithubSessionFresh] = useState(false);
 
   // Initial load: fetch state + whoami in parallel. A missing token is
   // handled at render (see below), so just bail here without touching state.
@@ -260,8 +268,19 @@ export default function InstallPage() {
     if (token === null) return;
     window.location.href =
       `/v1/auth/oauth/github/start?next=` +
-      encodeURIComponent(`/install?token=${encodeURIComponent(token)}`);
+      // `gh=1` marks the return so we know the bot's github.com session was
+      // just (re)established here, vs. a stale account-only link.
+      encodeURIComponent(`/install?token=${encodeURIComponent(token)}&gh=1`);
   }, [token]);
+
+  // Once the GitHub OAuth returns here (gh=1) and the account confirms the
+  // link, the bot's github.com cookie is live in this profile — mark the
+  // step done. Sticky: survives the URL-marker cleanup below.
+  useEffect(() => {
+    if (returnedFromGithub && identities.includes("github")) {
+      setGithubSessionFresh(true);
+    }
+  }, [returnedFromGithub, identities]);
 
   const skipGithub = useCallback(() => {
     setSkippedGithub(true);
@@ -327,7 +346,10 @@ export default function InstallPage() {
 
   // page === "wizard"
   const step1Done = installClaimed && identities.includes("google");
-  const step2Done = identities.includes("github");
+  // GitHub: linked = bound to the account (may be a stale link); done = the
+  // bot's github.com session was (re)established here this session.
+  const githubLinked = identities.includes("github");
+  const step2Done = githubSessionFresh;
   const step2Skipped = skippedGithub && !step2Done;
   const canFinish = step1Done; // step 2 is optional
 
@@ -342,7 +364,11 @@ export default function InstallPage() {
 
       <div className="provider-state" aria-label="Provider connection status">
         <StatusPill label="Google" connected={identities.includes("google")} />
-        <StatusPill label="GitHub" connected={identities.includes("github")} />
+        <StatusPill
+          label="GitHub"
+          connected={step2Done}
+          offLabel={githubLinked ? "linked — sign in to enable" : "not connected"}
+        />
       </div>
 
       <AdvancedInstallSettings
@@ -400,12 +426,22 @@ export default function InstallPage() {
         >
           {step1Done && !step2Done && !step2Skipped && (
             <div className="wizard-actions">
+              {/* Account-linked but no live bot session: the link persists
+                  across sessions while the bot's github.com cookie expires,
+                  so a re-sign-in here is what actually lets the bot act. */}
+              {githubLinked && (
+                <span className="wizard-step-hint">
+                  GitHub is linked to your account, but the bot needs its own
+                  GitHub sign-in to act on it. Sign in here to establish (or
+                  refresh) that session.
+                </span>
+              )}
               <button
                 className="btn-primary"
                 type="button"
                 onClick={startGithub}
               >
-                Connect GitHub
+                {githubLinked ? "Sign in to GitHub" : "Connect GitHub"}
               </button>
               <button
                 className="btn-secondary"
@@ -416,23 +452,17 @@ export default function InstallPage() {
               </button>
             </div>
           )}
-          {/* GitHub is linked to the ACCOUNT, but that's not the same as the
-              bot's Chrome having a live GitHub session — the account link
-              persists even after the bot's session expires. Always offer a
-              reconnect so a dead bot session can be refreshed (re-running the
-              OAuth in the bot's Chrome re-establishes its github.com login). */}
           {step1Done && step2Done && (
             <div className="wizard-actions">
               <span className="wizard-step-hint">
-                Linked to your account. If the bot can&apos;t act on GitHub
-                (logins fail), reconnect to refresh its session.
+                The bot has a working GitHub session.
               </span>
               <button
                 className="btn-secondary"
                 type="button"
                 onClick={startGithub}
               >
-                Reconnect GitHub
+                Re-sign in to GitHub
               </button>
             </div>
           )}
@@ -472,11 +502,19 @@ function Shell({ children }: { children: React.ReactNode }) {
 
 type StepStatus = "pending" | "done" | "skipped";
 
-function StatusPill({ label, connected }: { label: string; connected: boolean }) {
+function StatusPill({
+  label,
+  connected,
+  offLabel = "not connected",
+}: {
+  label: string;
+  connected: boolean;
+  offLabel?: string;
+}) {
   return (
     <span className={`status-pill ${connected ? "on" : ""}`}>
       <span className={`status-dot ${connected ? "on" : ""}`} />
-      {label}: {connected ? "connected" : "not connected"}
+      {label}: {connected ? "connected" : offLabel}
     </span>
   );
 }
