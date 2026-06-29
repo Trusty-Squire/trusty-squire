@@ -239,11 +239,10 @@ export const registerMcpInstallRoute: FastifyPluginAsync<{
             auth.account_id,
           );
         } catch (err) {
-          // Non-fatal: claim already succeeded. Log and continue.
-          fastify.log.warn(
-            { err, machine_token_prefix: record.machine_token.slice(0, 8) },
-            "machine_token bind failed",
-          );
+          // Non-fatal: claim already succeeded. Log and continue. Never log any
+          // slice of the token — a prefix is still a partial credential; the err
+          // + message are enough to correlate.
+          fastify.log.warn({ err }, "machine_token bind failed");
         }
       }
 

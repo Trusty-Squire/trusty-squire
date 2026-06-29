@@ -166,7 +166,30 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
       ? new PrismaEgressGrantStore(authPrisma)
       : new InMemoryEgressGrantStore();
 
-  const kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x7f));
+  // KMS master key — wraps every credential's KEK. In PRODUCTION it MUST come
+  // from LOCAL_KMS_KEY and MUST NOT be the hardcoded dev key: that key is a
+  // constant in this open-source repo, so encrypting the prod vault under it
+  // makes every stored secret decryptable by anyone with the repo + the DB.
+  // Fail closed in prod (mirrors the SESSION_JWT_SECRET guard); the hardcoded
+  // 0x7f key survives ONLY for the no-key dev/test path (disposable data).
+  let kms: LocalKMS;
+  if (process.env.NODE_ENV === "production") {
+    if ((process.env.LOCAL_KMS_KEY ?? "").length === 0) {
+      throw new Error(
+        "LOCAL_KMS_KEY must be set in production — refusing to encrypt the vault " +
+          "with a non-durable/dev key. Generate one: " +
+          `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`,
+      );
+    }
+    kms = LocalKMS.fromEnv();
+  } else if ((process.env.LOCAL_KMS_KEY ?? "").length > 0) {
+    // Non-prod but an explicit key is set (a dev pointing at a real DB) — honor it.
+    kms = LocalKMS.fromEnv();
+  } else {
+    // No key + non-prod: deterministic dev/test key, no env required. The data
+    // is in-memory/disposable here; never reached in production.
+    kms = LocalKMS.withFixedKey(Buffer.alloc(32, 0x7f));
+  }
   const vault = new CredentialVault({
     store: credentialStore,
     audit: vaultAuditStore,
