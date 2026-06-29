@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import type { InteractiveElement } from "../browser.js";
+import type { ApiClient } from "../../api-client.js";
 import {
   resolveTarget,
   provisionElementRef,
@@ -30,6 +31,7 @@ import {
   hasOneTimeSecretModal,
   hasExistingAccountSignal,
   hasUnlinkedOAuthAccountSignal,
+  makeTwoCaptchaVaultProxy,
 } from "../provision-session.js";
 import { looksLikeCodeIdentifier, findCredentialTokens } from "../credential-shape.js";
 
@@ -884,5 +886,67 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
   });
   it("fails closed when only a non-Google provider is live (no autonomous login)", () => {
     expect(googleSessionGate(["github"]).ok).toBe(false);
+  });
+});
+
+describe("makeTwoCaptchaVaultProxy (2Captcha through the injecting vault proxy)", () => {
+  it("injects the key as a ${SECRET} query param (in.php/res.php) — never raw", async () => {
+    const useCredential = vi.fn().mockResolvedValue({
+      response: { status: 200, headers: {}, body: JSON.stringify({ status: 1, request: "id" }), truncated: false },
+    });
+    const proxy = makeTwoCaptchaVaultProxy({ useCredential } as unknown as ApiClient);
+    const r = await proxy.request({
+      url: "https://2captcha.com/in.php",
+      method: "POST",
+      query: { method: "userrecaptcha", json: "1" },
+      keyInjection: { in: "query", name: "key" },
+    });
+    expect(r.ok).toBe(true);
+    expect(useCredential).toHaveBeenCalledWith({
+      service: "2captcha",
+      http: {
+        method: "POST",
+        url: "https://2captcha.com/in.php",
+        query: { method: "userrecaptcha", json: "1", key: "${SECRET}" },
+      },
+    });
+  });
+
+  it("injects the key as a ${SECRET} clientKey in the JSON body (createTask)", async () => {
+    const useCredential = vi.fn().mockResolvedValue({
+      response: { status: 200, headers: {}, body: "{}", truncated: false },
+    });
+    const proxy = makeTwoCaptchaVaultProxy({ useCredential } as unknown as ApiClient);
+    await proxy.request({
+      url: "https://api.2captcha.com/createTask",
+      method: "POST",
+      jsonBody: { task: { type: "CoordinatesTask" } },
+      keyInjection: { in: "body", name: "clientKey" },
+    });
+    const call = useCredential.mock.calls[0]![0] as {
+      service: string;
+      http: { headers: Record<string, string>; body: string };
+    };
+    expect(call.service).toBe("2captcha");
+    expect(call.http.headers["content-type"]).toBe("application/json");
+    expect(JSON.parse(call.http.body)).toEqual({
+      clientKey: "${SECRET}",
+      task: { type: "CoordinatesTask" },
+    });
+  });
+
+  it("maps a non-2xx upstream status to ok=false", async () => {
+    const useCredential = vi.fn().mockResolvedValue({
+      response: { status: 401, headers: {}, body: "{}", truncated: false },
+    });
+    const proxy = makeTwoCaptchaVaultProxy({ useCredential } as unknown as ApiClient);
+    const r = await proxy.request({
+      url: "https://2captcha.com/res.php",
+      method: "GET",
+      query: { action: "get" },
+      keyInjection: { in: "query", name: "key" },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.status).toBe(401);
   });
 });

@@ -1,5 +1,30 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.7 (2026-06-29)
+
+Promotes the 1.0.7-rc line to stable: **2Captcha key vaulting** (your own key,
+encrypted in the vault, spent through the injecting proxy — never on disk) and a
+**fail-fast captcha gate** (a structured `needs_user` with the exact remedy).
+Full detail in the rc.2 / rc.1 entries below.
+
+## 1.0.7-rc.2 (2026-06-29)
+
+- feat(mcp): fail-fast captcha gate — `operate_captcha_gate` returns a structured
+  `needs_user {gate, message, remedy}` when it can't clear a challenge, so the
+  host surfaces an actionable message and stops driving (`captcha_solver` → set
+  up 2Captcha in settings; `captcha_wall` → proxy or manual signup).
+
+## 1.0.7-rc.1 (2026-06-29)
+
+- **feat(captcha): vault the 2Captcha key at install; spend it through the
+  proxy.** `connect`/`settings` advanced setup optionally prompts for a 2Captcha
+  API key and stores it ENCRYPTED as the `2captcha` vault credential (never
+  written to the MCP config). The captcha gate then spends it through the
+  injecting proxy (`use_credential`, `${SECRET}` injected server-side) so the
+  raw key never lives in the bot process. Falls back to `TWOCAPTCHA_API_KEY` for
+  back-compat. Fingerprint-neutral (the v2 token is a back-channel fetch,
+  injected into the user's real session).
+
 ## 1.0.6 (2026-06-29)
 
 Promotes the 1.0.6-rc line to stable: the expanded 10-example "what you can ask
