@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.1 (2026-06-29)
+
+- chore(infra): retire the inbound-mail subsystem — delete packages/inbox (#247)
+- chore(cleanup): PR4/T9 — remove dormant retention-cron inbox-half
+- chore(cleanup): PR4/T9 (code) — turn off the inbound-mail subsystem
+- chore(cleanup): PR4/T8 dead-code sweep — remove orphaned alias route + doc drift
+- docs(e2e): record fixed-build validation results for operator surface
+- fix: harden signin vault audit gaps
+- fix(mcp): stop sealed/password values leaking into observations + recipes
+- feat: add signin vault browser fill
+
 ## 1.0.1-rc.2 (2026-06-28)
 
 **Sign-in vault hardening**
