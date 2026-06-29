@@ -149,7 +149,7 @@ describe("Egress Grants — /v1/egress", () => {
     expect((await call()).statusCode).toBe(429);
   });
 
-  it("limits are OPT-IN: no rate_limit → unlimited (never 429), response shows null", async () => {
+  it("a grant minted WITHOUT a rate gets the DEFAULT cap (not unlimited) — abuse protection", async () => {
     const account = await h.deps.accountStore.createAccount("ul@example.test", "U");
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
@@ -160,16 +160,9 @@ describe("Egress Grants — /v1/egress", () => {
       payload: { service: "OpenAI" }, // no rate_limit_per_hour, no spend_cap_usd
     });
     const j = res.json() as { grant_id: string; token: string; rate_limit_per_hour: number | null; spend_cap_usd: number | null };
-    // Unlimited surfaces as null, not a default cap.
-    expect(j.rate_limit_per_hour).toBeNull();
-    expect(j.spend_cap_usd).toBeNull();
-
-    const call = () => h.server.inject({
-      method: "POST", url: `/v1/egress/${j.grant_id}/v1/chat/completions`,
-      headers: { authorization: `Bearer ${j.token}`, "content-type": "application/json" }, payload: {},
-    });
-    // Many calls, never rate-limited.
-    for (let i = 0; i < 5; i++) expect((await call()).statusCode).toBe(200);
+    // No explicit rate → the server applies the default cap (1000/hr), NOT unlimited.
+    expect(j.rate_limit_per_hour).toBe(1000);
+    expect(j.spend_cap_usd).toBeNull(); // spend cap stays opt-in
   });
 
   it("refuses to mint a grant for a credential with an empty host allowlist", async () => {

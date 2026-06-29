@@ -46,12 +46,18 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
   - [ ] Consider (not launch-blocking): the DB is a SINGLE node (no HA failover).
     A replica would survive a node death mid-launch — bigger lift; flag for after.
 
-- [ ] **4. Per-account rate limits on all authed routes + egress default cap.**
-  - Rate limit vault store/list/use, grant mint, account creation per account/
-    token (not just the old LLM-proxy 150/hr). One token must not hammer the
-    control plane.
-  - Egress: apply a server-side DEFAULT cap (per-grant AND per-account aggregate)
-    — today caps are opt-in / unlimited-by-default (`perHour <= 0`). [user item #2]
+- [~] **4. Per-account rate limits + egress default cap.** Core DONE.
+  - [x] Per-account rolling-hour limiter on the authed control plane (the
+    `requireWeb/Agent/Any` guards) — `API_ACCOUNT_HOURLY_LIMIT` default 1000,
+    returns 429. DoS backstop; doesn't touch the deployed-app egress proxy path
+    (separate grant-token auth + its own per-grant cap). +2 tests.
+  - [x] Egress DEFAULT cap: a grant minted without a rate now gets
+    `EGRESS_DEFAULT_RATE_PER_HOUR` (default 1000) instead of unlimited; explicit
+    rate still overrides. +test. [was user item #2]
+  - [ ] Follow-up (not launch-blocking): **account-creation rate limiting is
+    IP-based** (unauthed, no account_id yet) — not covered by the per-account
+    limiter. Add a per-IP cap on the signup/create route before/at launch if
+    signup-spam shows up.
 
 ## Tier 2 — launch readiness (HN-bounce / correctness)
 
@@ -95,6 +101,16 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
   when-you-have-traffic move. Launch-appropriate version is the rate limits in #4
   + maybe a separate Fly process/machine pool sharing the DB. Full split when
   egress volume justifies it; not a launch blocker.
+
+---
+
+## Owner action items (YOU — surfaced from the items above)
+- [ ] **Rotate the previously-public-keyed creds** (#2) — ipinfo / plunk / sentry /
+  VouchFlow / growthbook / the rest. Low realistic blast radius; best practice.
+- [ ] **Point an uptime monitor at** `https://trusty-squire-api.fly.dev/readyz`
+  (#3) to get paged on a DB wedge.
+- [ ] **Later: DB HA replica** (#3) — single node today; a replica survives a node
+  death mid-launch. Bigger lift, not launch-blocking.
 
 ---
 
