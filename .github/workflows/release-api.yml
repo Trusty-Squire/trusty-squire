@@ -24,7 +24,6 @@ on:
     branches: [main, staging]
     paths:
       - "apps/api/**"
-      - "packages/inbox/**"
       - "packages/vault/**"
       - "packages/skill-schema/**"
       - "pnpm-lock.yaml"
@@ -68,20 +67,14 @@ jobs:
       - name: Install (api dep tree only)
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/api...'
 
-      # The API has no prisma CLI of its own; it uses the inbox package's,
-      # generating BOTH the inbox client (default output) and the api client
-      # (custom .prisma/api-client output) — exactly as Dockerfile.fly does.
-      # Absolute --schema paths because `pnpm -F inbox exec` runs in the
-      # inbox package dir, so a relative path wouldn't resolve.
-      - name: Prisma generate (inbox + api schemas)
-        run: |
-          set -euo pipefail
-          pnpm -F @trusty-squire/inbox exec prisma generate --schema="$GITHUB_WORKSPACE/packages/inbox/prisma/schema.prisma"
-          pnpm -F @trusty-squire/inbox exec prisma generate --schema="$GITHUB_WORKSPACE/apps/api/prisma/schema.prisma"
+      # Generate the API's Prisma client (custom .prisma/api-client output),
+      # the same artifact Dockerfile.fly produces. apps/api owns its prisma CLI.
+      - name: Prisma generate (api schema)
+        run: pnpm -F @trusty-squire/api exec prisma generate --schema="$GITHUB_WORKSPACE/apps/api/prisma/schema.prisma"
 
-      # tsc resolves the workspace deps (inbox/vault/skill-schema) via their
+      # tsc resolves the workspace deps (vault/skill-schema) via their
       # `types` → dist/index.d.ts, so build them before the API's typecheck.
-      - name: Build workspace deps (inbox/vault/skill-schema dist)
+      - name: Build workspace deps (vault/skill-schema dist)
         run: pnpm --filter '@trusty-squire/api^...' build
 
       - name: Typecheck

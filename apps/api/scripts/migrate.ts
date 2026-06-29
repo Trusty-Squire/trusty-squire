@@ -2,13 +2,9 @@
 //
 // Fly runs `node apps/api/dist/scripts/migrate.js` once per deploy, before
 // rolling new machines into traffic. The job: apply pending Prisma
-// migrations against both schemas (apps/api/prisma + packages/inbox/prisma)
-// so the new app code never starts before the DB matches it.
-//
-// Both schemas live in the same Postgres DB but are tracked by separate
-// Prisma migration tables (`_prisma_migrations` in each schema's own
-// search_path). We invoke each via the prisma CLI so the standard
-// migration log + advisory-lock semantics apply.
+// migrations against the api schema (apps/api/prisma) so the new app code
+// never starts before the DB matches it. We invoke prisma via the CLI so
+// the standard migration log + advisory-lock semantics apply.
 //
 // Failure here makes Fly fail the release and roll back. That's the
 // desired behavior — we'd rather block a bad deploy than let app code
@@ -25,12 +21,6 @@ const STEPS: { name: string; cwd: string; databaseUrlEnv: string }[] = [
     name: "api",
     cwd: "apps/api",
     databaseUrlEnv: process.env.AUTH_DATABASE_URL ?? process.env.DATABASE_URL ?? "",
-  },
-  // Inbox schema (email_alias, received_email).
-  {
-    name: "inbox",
-    cwd: "packages/inbox",
-    databaseUrlEnv: process.env.INBOX_DATABASE_URL ?? process.env.DATABASE_URL ?? "",
   },
 ];
 

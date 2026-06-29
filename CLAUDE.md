@@ -304,7 +304,6 @@ pnpm -F @trusty-squire/api typecheck
 pnpm -F @trusty-squire/api test
 pnpm -F @trusty-squire/mcp build       # builds the bundled bot too
 pnpm -F @trusty-squire/mcp test        # mcp + bot tests, one suite
-pnpm -F @trusty-squire/inbox prisma:generate
 pnpm -F @trusty-squire/api prisma:generate
 ```
 

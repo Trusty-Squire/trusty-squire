@@ -11,7 +11,7 @@ name: Release mcp
 # This means re-pushing main without bumping the version does NOT republish.
 #
 # Path filter: only fires on changes that could affect the mcp tarball
-# (apps/mcp, packages/inbox, packages/skill-schema, root lockfile, this file).
+# (apps/mcp, packages/skill-schema, root lockfile, this file).
 # Unrelated commits to other parts of the monorepo skip CI entirely.
 
 on:
@@ -19,7 +19,6 @@ on:
     branches: [main, staging]
     paths:
       - "apps/mcp/**"
-      - "packages/inbox/**"
       - "packages/skill-schema/**"
       - "pnpm-lock.yaml"
       - ".github/workflows/release.yml"
@@ -88,14 +87,10 @@ jobs:
       # We exclude the MCP package itself — its own dist gets built fresh
       # in the publish job right before npm publish.
       - name: Build mcp's workspace deps (for test resolution)
-        # Vitest follows the `main` of @trusty-squire/{skill-schema,inbox} to
-        # their dist/ — those must exist before mcp tests can import them.
-        # `inbox` requires `prisma generate` first; without the generated client
-        # tsc fails with "Property 'emailAlias' does not exist on type 'PrismaClient'".
+        # Vitest follows the `main` of @trusty-squire/skill-schema to its dist/ —
+        # that must exist before mcp tests can import it.
         # Explicitly list mcp's workspace deps (keep in sync with apps/mcp/package.json).
-        run: |
-          pnpm --filter '@trusty-squire/inbox' prisma:generate
-          pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/inbox' build
+        run: pnpm --filter '@trusty-squire/skill-schema' build
 
       # NOTE: lint + typecheck are intentionally NOT gating this pipeline yet.
       # The repo has pre-existing lint/typecheck debt (see ci.yml signal).
@@ -256,18 +251,11 @@ jobs:
       - name: Install (mcp dep tree only)
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
 
-      - name: Generate Prisma client for inbox
-        # `packages/inbox` (an mcp workspace dep) ships a Prisma schema; tsc
-        # fails ("Property 'emailAlias' does not exist on PrismaClient")
-        # without a generated client.
-        run: pnpm --filter '@trusty-squire/inbox' prisma:generate
-
       - name: Build mcp's workspace deps
         # Build ONLY what mcp depends on. A full `pnpm -r build` pulls in
-        # apps/web (Next.js) which rebuilds @prisma/client in
-        # parallel and race with inbox's tsc, breaking the inbox build.
+        # apps/web (Next.js) which rebuilds @prisma/client in parallel.
         # Keep in sync with apps/mcp/package.json workspace deps.
-        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/inbox' build
+        run: pnpm --filter '@trusty-squire/skill-schema' build
 
       # Force a clean rebuild of the MCP package right before publish.
       # Without this, TypeScript's incremental build can reuse stale dist

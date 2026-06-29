@@ -14,14 +14,11 @@ COPY . .
 # Install dependencies
 RUN pnpm install --frozen-lockfile
 
-# Generate the Prisma clients before tsc. There are two schemas —
-# packages/inbox (default @prisma/client output) and apps/api/prisma
-# (custom .prisma/api-client output). deps.ts imports both generated
-# clients at runtime; without generate the server crashes on boot with
-# "@prisma/client did not initialize yet". Both run via the inbox
-# package's prisma CLI (apps/api has no prisma CLI of its own).
-RUN pnpm -F @trusty-squire/inbox exec prisma generate --schema=/app/packages/inbox/prisma/schema.prisma
-RUN pnpm -F @trusty-squire/inbox exec prisma generate --schema=/app/apps/api/prisma/schema.prisma
+# Generate the API's Prisma client before tsc (custom
+# .prisma/api-client output). api-prisma-client.ts requires it at
+# runtime; without generate the server crashes on boot with
+# "@prisma/client did not initialize yet". apps/api owns its prisma CLI.
+RUN pnpm -F @trusty-squire/api exec prisma generate --schema=/app/apps/api/prisma/schema.prisma
 
 # Build
 RUN pnpm --filter @trusty-squire/api... build
