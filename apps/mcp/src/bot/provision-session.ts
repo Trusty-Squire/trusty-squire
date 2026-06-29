@@ -18,7 +18,11 @@
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import { BrowserController, type InteractiveElement } from "./browser.js";
-import { TwoCaptchaSolver } from "./captcha-solver-2captcha.js";
+import {
+  TwoCaptchaSolver,
+  type TwoCaptchaVaultProxy,
+} from "./captcha-solver-2captcha.js";
+import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
 import {
@@ -219,6 +223,10 @@ interface Session {
   // PR3 — the user's own email (Google identity captured at login), or null when
   // unknown. The authoritative signup email + the identity whose inbox is read.
   userEmail: string | null;
+  // The MCP api-client (when the tool layer passed one through). Lets the captcha
+  // gate spend a VAULTED 2Captcha key through the injecting proxy instead of a
+  // raw env key. Undefined → the gate falls back to TWOCAPTCHA_API_KEY.
+  api?: ApiClient;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -946,6 +954,9 @@ export interface StartOptions {
   // the user instead of silently reading mail. Operator/housekeeper deployments
   // set the flag true (they consent to polling their own OAuth-bound inbox).
   consentInboxRead?: boolean;
+  // The MCP api-client, threaded from the operate_* tool layer. Enables the
+  // captcha gate to spend a VAULTED 2Captcha key via the injecting proxy.
+  api?: ApiClient;
 }
 
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
@@ -1037,6 +1048,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     actionTrace: [],
     consentInboxRead: opts.consentInboxRead === true,
     userEmail: loggedInEmail("google", opts.profileDir),
+    ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
   audit(id, "start", {
@@ -1713,20 +1725,85 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
 
 // ── captcha gate (thick tool) ──
 
+// Fail-fast hand-back when a captcha can't be cleared in-session. Carries the
+// SPECIFIC gate + the EXACT remedy so the host surfaces an actionable message
+// and stops driving immediately, instead of churning toward a dead end.
+export interface NeedsUserCaptcha {
+  gate: "captcha_solver" | "captcha_wall";
+  message: string;
+  remedy: string;
+}
+
 export interface CaptchaGateResult {
   session_id: string;
   found: boolean;
   variant: string;
   // True when the page has a captcha response token and no challenge remains
-  // rendered. False means the host should surface captcha_blocked or hand back.
+  // rendered. False means the host should surface needs_user and hand back.
   settled: boolean;
+  // Present only when settled=false: tells the host WHY and what to do.
+  needs_user?: NeedsUserCaptcha;
+}
+
+// A TwoCaptchaVaultProxy backed by the MCP api-client: every 2Captcha call is
+// routed through use_credential against the vaulted "2captcha" credential, so
+// the raw key is injected server-side and never lives in this process. The
+// ${SECRET} placeholder goes in the query (`key`) or JSON body (`clientKey`)
+// per the request's keyInjection; the proxy substitutes it at the boundary.
+export function makeTwoCaptchaVaultProxy(api: ApiClient): TwoCaptchaVaultProxy {
+  return {
+    async request(req) {
+      const http: {
+        method: string;
+        url: string;
+        headers?: Record<string, string>;
+        body?: string;
+        query?: Record<string, string>;
+      } = { method: req.method, url: req.url };
+      if (req.keyInjection.in === "query") {
+        http.query = { ...(req.query ?? {}), [req.keyInjection.name]: "${SECRET}" };
+      } else {
+        http.headers = { "content-type": "application/json" };
+        http.body = JSON.stringify({
+          [req.keyInjection.name]: "${SECRET}",
+          ...(req.jsonBody ?? {}),
+        });
+      }
+      const { response } = await api.useCredential({ service: "2captcha", http });
+      return {
+        ok: response.status >= 200 && response.status < 300,
+        status: response.status,
+        json: async () => JSON.parse(response.body) as unknown,
+      };
+    },
+  };
+}
+
+// Build the right-transport solver for a session: vault-proxy when the install
+// vaulted a "2captcha" credential (key never in this process), else the env key
+// (TWOCAPTCHA_API_KEY, back-compat). Listing creds is metadata-only — no secret.
+async function buildTwoCaptchaSolver(session: Session): Promise<TwoCaptchaSolver> {
+  if (session.api !== undefined) {
+    try {
+      const { credentials } = await session.api.listCredentials();
+      const hasVaulted = credentials.some(
+        (c) => (c.service ?? "").toLowerCase() === "2captcha",
+      );
+      if (hasVaulted) {
+        return new TwoCaptchaSolver({ vaultProxy: makeTwoCaptchaVaultProxy(session.api) });
+      }
+    } catch {
+      // Listing failed (offline / transient) — fall back to the env key.
+    }
+  }
+  return new TwoCaptchaSolver();
 }
 
 async function solveCaptchaWithTokenSolver(
+  solver: TwoCaptchaSolver,
   browser: BrowserController,
   variant: string,
 ): Promise<{ solved: boolean; outcome: string }> {
-  const solver = new TwoCaptchaSolver();
   if (!solver.isAvailable()) return { solved: false, outcome: "no_key" };
 
   if (variant === "recaptcha_v2") {
@@ -1803,7 +1880,8 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     solvedBySubstrate = solved.found && solved.solved;
     token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
     if (!token) {
-      const tokenSolved = await solveCaptchaWithTokenSolver(session.browser, det.variant);
+      const solver = await buildTwoCaptchaSolver(session);
+      const tokenSolved = await solveCaptchaWithTokenSolver(solver, session.browser, det.variant);
       tokenSolverOutcome = tokenSolved.outcome;
       token = tokenSolved.solved;
     }
@@ -1814,6 +1892,38 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     det.variant === "unknown"
       ? clear
       : token && clear;
+
+  // Fail-fast: if we couldn't clear it, hand the host a specific, actionable
+  // reason so it stops driving immediately. `no_key` means a 2Captcha solver
+  // would have been tried but isn't configured → tell the user to set one up.
+  // Anything else (incl. v3/Turnstile IP/behavior scoring 2Captcha can't help)
+  // is a wall → suggest a residential proxy or a manual signup.
+  let needs_user: NeedsUserCaptcha | undefined;
+  if (!settled) {
+    needs_user =
+      tokenSolverOutcome === "no_key"
+        ? {
+            gate: "captcha_solver",
+            message:
+              "This signup hit an image captcha the bot couldn't clear on its own, " +
+              "and no 2Captcha solver is configured.",
+            remedy:
+              "Set up 2Captcha, then retry: `npx @trusty-squire/mcp settings` → " +
+              "advanced options → enable 2Captcha (paste your 2Captcha API key, " +
+              "stored encrypted in your vault).",
+          }
+        : {
+            gate: "captcha_wall",
+            message:
+              `A ${det.variant} captcha could not be solved automatically ` +
+              "(usually IP/behavior scoring, which a solver can't bypass).",
+            remedy:
+              "Route the bot through a residential proxy " +
+              "(`npx @trusty-squire/mcp settings` → advanced → proxy URL), or " +
+              "complete this one signup manually.",
+          };
+  }
+
   audit(sessionId, "captcha_gate", {
     found: true,
     variant: det.variant,
@@ -1821,8 +1931,15 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
     token,
     substrate: solvedBySubstrate,
     ...(tokenSolverOutcome !== null ? { token_solver: tokenSolverOutcome } : {}),
+    ...(needs_user !== undefined ? { needs_gate: needs_user.gate } : {}),
   });
-  return { session_id: sessionId, found: true, variant: det.variant, settled };
+  return {
+    session_id: sessionId,
+    found: true,
+    variant: det.variant,
+    settled,
+    ...(needs_user !== undefined ? { needs_user } : {}),
+  };
 }
 
 // ── email verification (thick tool — user-inbox-via-browser) ──

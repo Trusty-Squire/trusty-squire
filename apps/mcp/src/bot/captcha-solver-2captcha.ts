@@ -34,8 +34,34 @@ const IN_TIMEOUT_MS = 10_000;
 const RES_POLL_INTERVAL_MS = 5_000;
 const RES_TIMEOUT_MS = 180_000;
 
+// A single authenticated 2Captcha request, with the API key NOT yet attached —
+// the transport (direct or vault-proxy) injects it. `keyInjection` says where:
+// the `key` query param (in.php/res.php) or the `clientKey` JSON field
+// (createTask/getTaskResult).
+export interface TwoCaptchaVaultRequest {
+  url: string;
+  method: "GET" | "POST";
+  query?: Record<string, string>;
+  jsonBody?: Record<string, unknown>;
+  keyInjection: { in: "query"; name: string } | { in: "body"; name: string };
+}
+
+// The vault-proxy transport. When set, the solver never holds the raw key —
+// every 2Captcha call goes through Squire's injecting proxy (use_credential),
+// which substitutes the vaulted key server-side. The captcha TOKEN that comes
+// back is still injected into the user's real browser session, so this changes
+// nothing the target site can fingerprint (reCAPTCHA-v2 tokens aren't IP-bound).
+export interface TwoCaptchaVaultProxy {
+  request(
+    req: TwoCaptchaVaultRequest,
+  ): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>;
+}
+
 export interface TwoCaptchaSolverOpts {
   apiKey?: string;
+  // When set, the solver routes every 2Captcha call through this proxy and the
+  // raw key never lives in the bot process. Takes precedence over apiKey/env.
+  vaultProxy?: TwoCaptchaVaultProxy;
   // Override globalThis.fetch (tests).
   fetchFn?: typeof globalThis.fetch;
   // Override polling sleep (tests).
@@ -57,19 +83,62 @@ export type TwoCaptchaCoordinatesResult =
 
 export class TwoCaptchaSolver {
   private readonly apiKey: string | undefined;
+  private readonly vaultProxy: TwoCaptchaVaultProxy | undefined;
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly resTimeoutMs: number;
 
   constructor(opts: TwoCaptchaSolverOpts = {}) {
     this.apiKey = opts.apiKey ?? process.env.TWOCAPTCHA_API_KEY;
+    this.vaultProxy = opts.vaultProxy;
     this.fetchFn = opts.fetchFn ?? globalThis.fetch;
     this.sleepFn = opts.sleepFn ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.resTimeoutMs = opts.resTimeoutMs ?? RES_TIMEOUT_MS;
   }
 
   isAvailable(): boolean {
+    if (this.vaultProxy !== undefined) return true;
     return this.apiKey !== undefined && this.apiKey.length > 0;
+  }
+
+  // One authenticated 2Captcha request. Vault-proxy mode hands it to the proxy
+  // (key injected server-side); direct mode inlines the raw key into the query
+  // (`key`) or JSON body (`clientKey`) per `keyInjection`. Both return the same
+  // {ok,status,json} shape so the callers don't branch on transport.
+  private async dispatch(
+    req: TwoCaptchaVaultRequest & { timeoutMs?: number },
+  ): Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }> {
+    const exec = async (): Promise<{
+      ok: boolean;
+      status: number;
+      json: () => Promise<unknown>;
+    }> => {
+      if (this.vaultProxy !== undefined) {
+        return this.vaultProxy.request({
+          url: req.url,
+          method: req.method,
+          ...(req.query !== undefined ? { query: req.query } : {}),
+          ...(req.jsonBody !== undefined ? { jsonBody: req.jsonBody } : {}),
+          keyInjection: req.keyInjection,
+        });
+      }
+      const apiKey = this.apiKey!;
+      if (req.keyInjection.in === "query") {
+        const u = new URL(req.url);
+        for (const [k, v] of Object.entries(req.query ?? {})) u.searchParams.set(k, v);
+        u.searchParams.set(req.keyInjection.name, apiKey);
+        const r = await this.fetchFn(u.toString(), { method: req.method });
+        return { ok: r.ok, status: r.status, json: () => r.json() };
+      }
+      const body = JSON.stringify({ [req.keyInjection.name]: apiKey, ...(req.jsonBody ?? {}) });
+      const r = await this.fetchFn(req.url, {
+        method: req.method,
+        headers: { "content-type": "application/json" },
+        body,
+      });
+      return { ok: r.ok, status: r.status, json: () => r.json() };
+    };
+    return req.timeoutMs !== undefined ? withTimeout(exec(), req.timeoutMs) : exec();
   }
 
   /**
@@ -153,28 +222,25 @@ export class TwoCaptchaSolver {
     maxClicks?: number;
   }): Promise<TwoCaptchaCoordinatesResult> {
     if (!this.isAvailable()) return { kind: "no_key" };
-    const apiKey = this.apiKey!;
     const startMs = Date.now();
 
     let taskId: number;
     try {
-      const res = await withTimeout(
-        this.fetchFn(`${TWOCAPTCHA_API_BASE}/createTask`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            clientKey: apiKey,
-            task: {
-              type: "CoordinatesTask",
-              body: input.imageBase64,
-              ...(input.comment !== undefined ? { comment: input.comment } : {}),
-              ...(input.minClicks !== undefined ? { minClicks: input.minClicks } : {}),
-              ...(input.maxClicks !== undefined ? { maxClicks: input.maxClicks } : {}),
-            },
-          }),
-        }),
-        IN_TIMEOUT_MS,
-      );
+      const res = await this.dispatch({
+        url: `${TWOCAPTCHA_API_BASE}/createTask`,
+        method: "POST",
+        jsonBody: {
+          task: {
+            type: "CoordinatesTask",
+            body: input.imageBase64,
+            ...(input.comment !== undefined ? { comment: input.comment } : {}),
+            ...(input.minClicks !== undefined ? { minClicks: input.minClicks } : {}),
+            ...(input.maxClicks !== undefined ? { maxClicks: input.maxClicks } : {}),
+          },
+        },
+        keyInjection: { in: "body", name: "clientKey" },
+        timeoutMs: IN_TIMEOUT_MS,
+      });
       if (!res.ok) return { kind: "submission_failed", reason: `createTask HTTP ${res.status}` };
       const body = (await res.json()) as {
         errorId?: number;
@@ -199,10 +265,11 @@ export class TwoCaptchaSolver {
     while (Date.now() - startMs < this.resTimeoutMs) {
       await this.sleepFn(RES_POLL_INTERVAL_MS);
       try {
-        const res = await this.fetchFn(`${TWOCAPTCHA_API_BASE}/getTaskResult`, {
+        const res = await this.dispatch({
+          url: `${TWOCAPTCHA_API_BASE}/getTaskResult`,
           method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ clientKey: apiKey, taskId }),
+          jsonBody: { taskId },
+          keyInjection: { in: "body", name: "clientKey" },
         });
         if (!res.ok) continue;
         const body = (await res.json()) as {
@@ -241,21 +308,18 @@ export class TwoCaptchaSolver {
     params: Record<string, string>,
   ): Promise<TwoCaptchaResult> {
     if (!this.isAvailable()) return { kind: "no_key" };
-    const apiKey = this.apiKey!;
     const startMs = Date.now();
 
     // ── 1. Submit ────────────────────────────────────────────────
-    const inUrl = new URL(`${TWOCAPTCHA_BASE}/in.php`);
-    inUrl.searchParams.set("key", apiKey);
-    for (const [k, v] of Object.entries(params)) inUrl.searchParams.set(k, v);
-    inUrl.searchParams.set("json", "1");
-
     let captchaId: string;
     try {
-      const inRes = await withTimeout(
-        this.fetchFn(inUrl.toString(), { method: "POST" }),
-        IN_TIMEOUT_MS,
-      );
+      const inRes = await this.dispatch({
+        url: `${TWOCAPTCHA_BASE}/in.php`,
+        method: "POST",
+        query: { ...params, json: "1" },
+        keyInjection: { in: "query", name: "key" },
+        timeoutMs: IN_TIMEOUT_MS,
+      });
       if (!inRes.ok) {
         return {
           kind: "submission_failed",
@@ -280,16 +344,15 @@ export class TwoCaptchaSolver {
     }
 
     // ── 2. Poll for the token ────────────────────────────────────
-    const resUrl = new URL(`${TWOCAPTCHA_BASE}/res.php`);
-    resUrl.searchParams.set("key", apiKey);
-    resUrl.searchParams.set("action", "get");
-    resUrl.searchParams.set("id", captchaId);
-    resUrl.searchParams.set("json", "1");
-
     while (Date.now() - startMs < this.resTimeoutMs) {
       await this.sleepFn(RES_POLL_INTERVAL_MS);
       try {
-        const resRes = await this.fetchFn(resUrl.toString());
+        const resRes = await this.dispatch({
+          url: `${TWOCAPTCHA_BASE}/res.php`,
+          method: "GET",
+          query: { action: "get", id: captchaId, json: "1" },
+          keyInjection: { in: "query", name: "key" },
+        });
         if (!resRes.ok) continue; // transient — retry on next tick
         const body = (await resRes.json()) as { status: number; request: string };
         if (body.status === 1) {

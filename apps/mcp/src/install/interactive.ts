@@ -14,6 +14,7 @@ import {
   select,
   confirm,
   text,
+  password,
   note,
   isCancel,
   cancel,
@@ -44,6 +45,11 @@ export interface InteractiveConfig {
   // advanced settings during this run, so existing session choices should not
   // be overwritten on a config refresh.
   consentOperatorInboxOtp?: boolean;
+  // Optional 2Captcha API key the user supplied in advanced setup. Captured
+  // here, then stored ENCRYPTED in the vault by cli.ts (never written to the
+  // MCP config or disk) — the bot solves hard image captchas through the vault
+  // proxy. Undefined means the user didn't configure it this run.
+  twoCaptchaKey?: string;
   advancedConfigured: boolean;
 }
 
@@ -138,6 +144,7 @@ async function pickAdvancedOptionsWithDefaults(opts: {
   proxyUrl?: string;
   registryEnabled: boolean;
   consentOperatorInboxOtp?: boolean;
+  twoCaptchaKey?: string;
 }> {
   const initialRegistryEnabled = opts.initialRegistryEnabled ?? true;
   const wantAdvanced = bailIfCancelled(
@@ -198,11 +205,37 @@ async function pickAdvancedOptionsWithDefaults(opts: {
     }),
   );
 
+  // 2Captcha (optional, paid). The last-resort solver for hard reCAPTCHA-v2
+  // IMAGE challenges that behavior simulation + click-and-wait can't clear.
+  // Most signups never hit this. We take the user's own 2Captcha key and store
+  // it ENCRYPTED in the vault — it's never written to the MCP config — so the
+  // bot can spend it through the injecting proxy.
+  let twoCaptchaKey: string | undefined;
+  const wantCaptcha = bailIfCancelled(
+    await confirm({
+      message:
+        "Set up 2Captcha for hard image captchas? (optional, paid — you supply your own key)",
+      initialValue: false,
+    }),
+  );
+  if (wantCaptcha) {
+    const key = bailIfCancelled(
+      await password({
+        message: "2Captcha API key (stored encrypted in your vault, never on disk)",
+        validate: (v) =>
+          v === undefined || v.trim().length < 8 ? "Enter a valid 2Captcha API key" : undefined,
+      }),
+    );
+    const trimmed = (key ?? "").trim();
+    if (trimmed.length > 0) twoCaptchaKey = trimmed;
+  }
+
   return {
     advancedConfigured: true,
     registryEnabled,
     consentOperatorInboxOtp,
     ...(proxyUrl !== undefined ? { proxyUrl } : {}),
+    ...(twoCaptchaKey !== undefined ? { twoCaptchaKey } : {}),
   };
 }
 
@@ -222,6 +255,9 @@ function summarize(config: InteractiveConfig): void {
     lines.push(
       `${chalk.dim("Email OTP:    ")}${config.consentOperatorInboxOtp === true ? "allowed" : "off"}`,
     );
+  }
+  if (config.twoCaptchaKey !== undefined) {
+    lines.push(`${chalk.dim("2Captcha:     ")}${chalk.green("configured")} ${chalk.dim("(vaulted)")}`);
   }
   note(lines.join("\n"), "Setup summary");
 }
@@ -265,6 +301,7 @@ export async function runInteractiveSetup(opts: {
     ...(advanced.consentOperatorInboxOtp !== undefined
       ? { consentOperatorInboxOtp: advanced.consentOperatorInboxOtp }
       : {}),
+    ...(advanced.twoCaptchaKey !== undefined ? { twoCaptchaKey: advanced.twoCaptchaKey } : {}),
     advancedConfigured: advanced.advancedConfigured,
   };
 
@@ -307,6 +344,7 @@ export async function runSettingsSetup(opts: {
     ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
     registryEnabled: advanced.registryEnabled,
     consentOperatorInboxOtp,
+    ...(advanced.twoCaptchaKey !== undefined ? { twoCaptchaKey: advanced.twoCaptchaKey } : {}),
     advancedConfigured: true,
   };
   summarize(config);

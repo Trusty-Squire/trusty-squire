@@ -3,7 +3,11 @@
 // sleep + fetch so the test runs in milliseconds.
 
 import { describe, expect, it, vi } from "vitest";
-import { TwoCaptchaSolver } from "../captcha-solver-2captcha.js";
+import {
+  TwoCaptchaSolver,
+  type TwoCaptchaVaultProxy,
+  type TwoCaptchaVaultRequest,
+} from "../captcha-solver-2captcha.js";
 
 function mockFetch(scenario: {
   inResponse?: { status?: number; body?: unknown };
@@ -296,5 +300,91 @@ describe("TwoCaptchaSolver — failure modes", () => {
       pageUrl: "https://x.example/",
     });
     expect(res.kind).toBe("solve_timeout");
+  });
+});
+
+// A TwoCaptchaVaultProxy that answers like the 2Captcha API, records every
+// request, and (critically) never receives a raw key — the key would be
+// injected server-side by use_credential, so the solver must hand the proxy the
+// key's LOCATION (keyInjection), not its value.
+function mockVaultProxy(scenario: {
+  resResponses?: Array<{ status?: number; body?: unknown }>;
+  taskResultResponses?: Array<{ status?: number; body?: unknown }>;
+  createTaskBody?: unknown;
+}): { proxy: TwoCaptchaVaultProxy; calls: TwoCaptchaVaultRequest[] } {
+  const calls: TwoCaptchaVaultRequest[] = [];
+  let resIdx = 0;
+  let taskIdx = 0;
+  const wrap = (body: unknown, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  });
+  const proxy: TwoCaptchaVaultProxy = {
+    async request(req) {
+      calls.push(req);
+      if (req.url.includes("/in.php")) return wrap({ status: 1, request: "vault-id" });
+      if (req.url.includes("/res.php")) {
+        const r = scenario.resResponses?.[resIdx];
+        resIdx += 1;
+        return wrap(r?.body ?? { status: 0, request: "CAPCHA_NOT_READY" }, r?.status ?? 200);
+      }
+      if (req.url.includes("/createTask"))
+        return wrap(scenario.createTaskBody ?? { errorId: 0, taskId: 999 });
+      if (req.url.includes("/getTaskResult")) {
+        const r = scenario.taskResultResponses?.[taskIdx];
+        taskIdx += 1;
+        return wrap(r?.body ?? { errorId: 0, status: "processing" }, r?.status ?? 200);
+      }
+      throw new Error(`unexpected proxy request ${req.url}`);
+    },
+  };
+  return { proxy, calls };
+}
+
+describe("TwoCaptchaSolver — vault proxy transport", () => {
+  it("isAvailable() is true with a vault proxy and no raw key", () => {
+    const { proxy } = mockVaultProxy({});
+    const solver = new TwoCaptchaSolver({ apiKey: "", vaultProxy: proxy });
+    expect(solver.isAvailable()).toBe(true);
+  });
+
+  it("solves reCAPTCHA v2 through the proxy, never touching fetch or holding the key", async () => {
+    const fetchFn = vi.fn() as unknown as typeof globalThis.fetch;
+    const { proxy, calls } = mockVaultProxy({
+      resResponses: [{ body: { status: 1, request: "vault-token" } }],
+    });
+    const solver = new TwoCaptchaSolver({ vaultProxy: proxy, fetchFn, sleepFn: noSleep });
+    const res = await solver.solveRecaptchaV2({ sitekey: "6Le-x", pageUrl: "https://t.example/" });
+    expect(res).toMatchObject({ kind: "ok", token: "vault-token" });
+    // The raw fetch path is bypassed entirely.
+    expect(fetchFn).not.toHaveBeenCalled();
+    // in.php submit: key goes in the query as `key`, never inlined as a value.
+    const submit = calls.find((c) => c.url.includes("/in.php"));
+    expect(submit?.keyInjection).toEqual({ in: "query", name: "key" });
+    expect(submit?.query).toMatchObject({ method: "userrecaptcha", googlekey: "6Le-x", json: "1" });
+    // The key is NOT in the query — the proxy injects it server-side under `key`.
+    expect(submit?.query).not.toHaveProperty("key");
+    // res.php poll carries the same query-key injection.
+    const poll = calls.find((c) => c.url.includes("/res.php"));
+    expect(poll?.keyInjection).toEqual({ in: "query", name: "key" });
+    expect(poll?.query).toMatchObject({ action: "get", id: "vault-id", json: "1" });
+  });
+
+  it("routes the coordinates (createTask) flow through the proxy with body-key injection", async () => {
+    const { proxy, calls } = mockVaultProxy({
+      createTaskBody: { errorId: 0, taskId: 42 },
+      taskResultResponses: [
+        { body: { errorId: 0, status: "ready", solution: { coordinates: [{ x: 10, y: 20 }] } } },
+      ],
+    });
+    const solver = new TwoCaptchaSolver({ vaultProxy: proxy, sleepFn: noSleep });
+    const res = await solver.solveCoordinates({ imageBase64: "aGVsbG8=" });
+    expect(res).toMatchObject({ kind: "ok", coordinates: [{ x: 10, y: 20 }] });
+    const create = calls.find((c) => c.url.includes("/createTask"));
+    expect(create?.keyInjection).toEqual({ in: "body", name: "clientKey" });
+    // The task payload is present; the clientKey is the proxy's job, not in jsonBody.
+    expect(JSON.stringify(create?.jsonBody)).toContain("CoordinatesTask");
+    expect(create?.jsonBody).not.toHaveProperty("clientKey");
   });
 });
