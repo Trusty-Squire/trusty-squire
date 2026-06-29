@@ -52,7 +52,7 @@ import {
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
 } from "../bot/google-login.js";
-import { type OAuthProviderId } from "../bot/oauth-providers.js";
+import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
   clearAllProviderMarkers,
   clearBrowserProfile,
@@ -800,8 +800,20 @@ async function checkAlreadyProvisioned(): Promise<{ providers: OAuthProviderId[]
     // cost, and this keeps "Already connected" aligned with the bot's real
     // ability to wear the user's Google identity. validate=true so a dead-but-
     // present GitHub session isn't persisted into connected_providers.
-    const providers = await detectActiveProviderSessions();
-    await syncConnectedProviders(providers);
+    //
+    // BUT a BUSY profile (another Chromium already using it — a live operate
+    // session, a background heal run, an orphaned Chrome) makes the probe throw.
+    // That must NOT read as "not provisioned": forcing a re-pair (the noVNC
+    // dance) on a transient lock is the connect-loops-forever bug. Fall back to
+    // the session's cached connected_providers instead — a busy profile, if
+    // anything, means the bot IS wearing its browser session.
+    let providers: OAuthProviderId[];
+    try {
+      providers = await detectActiveProviderSessions();
+      await syncConnectedProviders(providers);
+    } catch {
+      providers = (session.connected_providers ?? []).filter(isOAuthProviderId);
+    }
     return decideProvisioned(session, stillValid, providers);
   } catch {
     return null;
