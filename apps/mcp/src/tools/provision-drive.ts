@@ -422,11 +422,11 @@ const captchaSchema = z.object({ session_id: z.string().min(1) });
 export const provisionCaptchaGateTool: Tool<z.infer<typeof captchaSchema>> = {
   name: "operate_captcha_gate",
   description:
-    "Detect a captcha and wait for it to clear: returns {found, variant, " +
-    "settled}. Invisible Turnstile/reCAPTCHA-v3 usually clears from the humanized " +
-    "driving alone; for a visible checkbox, click it with operate_act first, " +
-    "then call this to wait for the token. settled=false means a challenge is " +
-    "still up (surface captcha_blocked to the user).",
+    "Detect a captcha and drive the in-session captcha gate: returns {found, variant, " +
+    "settled}. The gate attempts visible checkbox widgets and invisible reCAPTCHA " +
+    "execution itself, then requires a real response token before settled=true. " +
+    "settled=false means the challenge could not be solved in-session (surface " +
+    "captcha_blocked to the user).",
   inputSchema: captchaSchema,
   jsonInputSchema: {
     type: "object",

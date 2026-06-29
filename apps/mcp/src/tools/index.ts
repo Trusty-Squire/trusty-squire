@@ -15,6 +15,8 @@ import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failur
 import { storeCredentialTool } from "./store-credential.js";
 import { useCredentialTool } from "./use-credential.js";
 import { grantAppAccessTool } from "./grant-app-access.js";
+import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
+import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
@@ -58,6 +60,10 @@ export const TOOLS: Tool[] = [
   useCredentialTool,
   // Egress grants: a deployed app uses a vaulted credential via the proxy.
   grantAppAccessTool,
+  listAppAccessTool,
+  revokeAppAccessTool,
+  // Audit ledger: who-touched-my-keys (account-scoped, no secret values).
+  auditLogTool,
   // Diagnostic tools: agent reads them after a failed extract so it
   // can write a targeted fix without the user fetching by curl.
   listExtractFailuresTool,
@@ -81,6 +87,9 @@ export {
   storeCredentialTool,
   useCredentialTool,
   grantAppAccessTool,
+  listAppAccessTool,
+  revokeAppAccessTool,
+  auditLogTool,
   listExtractFailuresTool,
   getExtractFailureTool,
 };

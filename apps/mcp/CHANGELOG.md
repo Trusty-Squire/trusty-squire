@@ -1,5 +1,98 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.5 (2026-06-29)
+
+**Extraction — prefixless keys beside a copy/reveal control.** `operate_extract`
+returned `no_legit_credential` on pages whose API key is a bare, separatorless
+token (deepinfra's `Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz`) — the strict scanners
+refuse such a token from raw page text because it's indistinguishable from a
+hash/trace-id. Fixed by using *copy/reveal-affordance proximity* as the
+disambiguator: `extractCredentialsNearCopyButtons` now also recognises icon
+controls by id/class/data-testid (not just visible "copy" text) and reveal /
+toggle-visibility affordances, and a new `pickRelaxedNearCopyCredential` accepts
+a copy-proximate token under a relaxed shape rule (rejects dates, times, emails,
+URLs, bare UUIDs, and hex-only shas). Applies only when no labeled/prefixed key
+was found, so it can't clobber a real match.
+
+**Captcha gate — token-true success signal.** `operate_captcha_gate` now drives
+the substrate's provider-specific gate (invisible reCAPTCHA v3 trigger → visible
+checkbox solve → 2Captcha token-solver fallback for reCAPTCHA v2 / hCaptcha /
+Turnstile) and requires a real response token before reporting `settled`, rather
+than treating challenge-disappearance alone as cleared (a v2 checkbox can sit
+idle with an empty token).
+
+## 1.0.4 (2026-06-29)
+
+Closes two gaps where the README marketed a capability the agent surface
+couldn't actually perform. Found during an end-to-end pass over the seven
+"what you can ask your squire" use cases.
+
+- **`audit_log`** — "show me everything that touched my keys." The vault audit
+  ledger was web-only; the account's own agent now reads it
+  (`GET /v1/vault/audit`, account-scoped, no secret values — strictly less than
+  `list_credentials`, which is already agent-readable). Filter by `type` /
+  `reference`, page with `before`.
+- **`revoke_app_access`** — "something leaked, kill that key now." Instantly
+  revokes an egress grant (`DELETE /v1/egress/grants/:id`); the next call
+  through it is rejected. The DELETE route existed but no tool wrapped it.
+- **`list_app_access`** — lists this account's egress grants so you can find
+  the `grant_id` to revoke.
+
+## 1.0.3 (2026-06-29)
+
+- **`connect` no longer re-opens the install/noVNC page when the bot profile is
+  busy.** The preflight probes live profile cookies to confirm the session; if
+  another Chromium already holds the profile (a live operate run, a background
+  job, or an orphaned Chrome) the probe threw and connect fell through to a full
+  re-pair. It now falls back to the session's cached provider state, so a valid
+  install short-circuits ("Already connected") regardless of profile contention.
+
+## 1.0.2 (2026-06-29)
+
+**`connect` reliability.**
+- `connect` no longer re-opens the install/noVNC page every run on headless
+  boxes where the OS keychain is present-but-ephemeral: set
+  `TRUSTY_SQUIRE_SESSION_FILE=1` (globally) to use the durable
+  `~/.config/trusty-squire/session.json` instead of the keychain. `connect`
+  now prints a hint pointing at this when the keychain backend is in use.
+- Install page: the GitHub step reflects the **bot's** live GitHub session, not
+  a stale account link — it shows "linked — sign in to enable" until the OAuth
+  runs in the bot's Chrome (which is what actually lets the bot act on GitHub),
+  and the contradictory "connected but might not work" copy is gone.
+
+**Housekeeping.**
+- Dropped stale alias/pricing copy from this README (the Squire-alias inbound
+  mail and the Pro tier are gone — verification reads your own inbox; beta is
+  free).
+- Retired the inbound-mail subsystem end to end (package + DB + secrets) and
+  swept the leftovers; the API owns its own Prisma tooling now.
+
+## 1.0.1 (2026-06-29)
+
+Promotes the 1.0.1-rc line to stable. Highlights since 1.0.0 (full detail in the
+rc.1 / rc.2 entries below):
+
+**User-owned signups (sign-in vault).** The operator signs services up with the
+user's own Google identity (captured at `connect`), seals the login + a
+generated password into a `username_password` vault credential, and reads the
+verification code from the user's own inbox behind a just-in-time consent gate —
+no Squire email aliases.
+
+**Privacy hardening.**
+- Observations no longer echo a sealed value: after `type_secret`, the password
+  (and the email filled from the sealed login slot) is masked to `[sealed]` in
+  `elements[].value`, the accessibility tree, the screen outline, and the
+  element label — the cleartext never returns to the host.
+- Operator recipes no longer record inbox-provider steps, so a shared recipe
+  can't leak the user's mail (subject text or webmail navigation).
+- Browser-fill responses are encrypted to an ephemeral key; login-host wildcard
+  storage rejects broad public-suffix scopes; rotation persists non-secret
+  metadata.
+
+**Inbound-mail subsystem retired.** With aliases gone, the Squire-alias inbound
+pipeline (`packages/inbox`, the resend-inbound webhook) is removed and the API
+owns its own Prisma tooling.
+
 ## 1.0.1-rc.2 (2026-06-28)
 
 **Sign-in vault hardening**

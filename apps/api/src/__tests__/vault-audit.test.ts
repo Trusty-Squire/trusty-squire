@@ -6,6 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
+import { issueAgentSession } from "../auth/agent.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
 
@@ -27,6 +28,17 @@ async function makeWebSession(deps: ApiDeps, accountId: string): Promise<string>
   const { record, jwt } = issueSession({ account_id: accountId, ip: null, user_agent: null, now: new Date() });
   await deps.sessionStore.insert(record);
   return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
+}
+
+async function makeAgentToken(deps: ApiDeps, accountId: string): Promise<string> {
+  const { raw_token, record } = issueAgentSession({
+    account_id: accountId,
+    agent_identity: "claude-code",
+    agent_version: "test",
+    now: new Date(),
+  });
+  await deps.agentSessionStore.insert(record);
+  return raw_token;
 }
 
 interface AuditEvent {
@@ -113,7 +125,7 @@ describe("GET /v1/vault/audit", () => {
     expect(body2.events.every((e) => !ids1.has(e.id))).toBe(true);
   });
 
-  it("is web-only (agent token / no session rejected) and account-scoped", async () => {
+  it("is account-scoped and rejects an anonymous request", async () => {
     const a = await h.deps.accountStore.createAccount("a@example.test", "A");
     const b = await h.deps.accountStore.createAccount("b@example.test", "B");
     const cookieA = await makeWebSession(h.deps, a.id);
@@ -127,5 +139,27 @@ describe("GET /v1/vault/audit", () => {
     // no session → not 200
     const anon = await h.server.inject({ method: "GET", url: "/v1/vault/audit" });
     expect(anon.statusCode).not.toBe(200);
+  });
+
+  it("is readable by the account's own agent token (not web-only)", async () => {
+    // The README markets the ledger as something you ASK YOUR SQUIRE — so the
+    // account's agent must be able to read it, not just the human web UI. It's
+    // account-scoped and carries no secret values, strictly less than what
+    // list_credentials (also agent-readable) already exposes.
+    const account = await h.deps.accountStore.createAccount("agent@example.test", "AG");
+    const cookie = await makeWebSession(h.deps, account.id);
+    await createCred(h.server, cookie, "sk-agent-secret");
+    const token = await makeAgentToken(h.deps, account.id);
+
+    const res = await h.server.inject({
+      method: "GET",
+      url: "/v1/vault/audit",
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(res.statusCode).toBe(200);
+    const events = (res.json() as { events: AuditEvent[] }).events;
+    expect(events.map((e) => e.type)).toContain("vault.credential_stored");
+    // still no secret leakage on the agent surface
+    expect(JSON.stringify(events)).not.toContain("sk-agent-secret");
   });
 });
