@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.7-rc.2 (2026-06-29)
+
+- feat(mcp): fail-fast captcha gate — `operate_captcha_gate` returns a structured
+  `needs_user {gate, message, remedy}` when it can't clear a challenge, so the
+  host surfaces an actionable message and stops driving (`captcha_solver` → set
+  up 2Captcha in settings; `captcha_wall` → proxy or manual signup).
+
 ## 1.0.7-rc.1 (2026-06-29)
 
 - **feat(captcha): vault the 2Captcha key at install; spend it through the
