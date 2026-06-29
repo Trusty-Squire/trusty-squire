@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.7-rc.1 (2026-06-29)
+
+- **feat(captcha): vault the 2Captcha key at install; spend it through the
+  proxy.** `connect`/`settings` advanced setup optionally prompts for a 2Captcha
+  API key and stores it ENCRYPTED as the `2captcha` vault credential (never
+  written to the MCP config). The captcha gate then spends it through the
+  injecting proxy (`use_credential`, `${SECRET}` injected server-side) so the
+  raw key never lives in the bot process. Falls back to `TWOCAPTCHA_API_KEY` for
+  back-compat. Fingerprint-neutral (the v2 token is a back-channel fetch,
+  injected into the user's real session).
+
 ## 1.0.6-rc.2 (2026-06-29)
 
 - docs(readme): expand "What you can ask your squire" into a 10-example
