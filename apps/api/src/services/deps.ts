@@ -97,6 +97,12 @@ export interface ApiDeps {
   // Config
   sessionSecret: string;
 
+  // Bounded DB liveness probe for the /readyz readiness endpoint — a cheap,
+  // timeout-capped query so an external monitor catches a wedged DB (the 256MB
+  // OOM failure mode). Resolves true when the DB answers, false on error/timeout.
+  // Always true for the no-DB in-memory dev path.
+  pingDb: () => Promise<boolean>;
+
   // Test injection
   now?: () => Date;
 }
@@ -235,6 +241,23 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     captchaEventStore,
     retentionCron,
     sessionSecret: opts.sessionSecret,
+    pingDb: async (): Promise<boolean> => {
+      // No DB wired (in-memory dev/test) → always ready.
+      if (authPrisma === null) return true;
+      try {
+        // Cheap DB touch (the narrowed client has no $queryRaw); time-capped so a
+        // wedged/unreachable DB fails fast instead of hanging the probe.
+        await Promise.race([
+          authPrisma.machineToken.count({ where: { token: "__readyz_probe__" } }),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("db ping timeout")), 2000),
+          ),
+        ]);
+        return true;
+      } catch {
+        return false;
+      }
+    },
     ...(opts.now !== undefined ? { now: opts.now } : {}),
   };
 }

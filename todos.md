@@ -16,34 +16,35 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
     / `{ body }` CANNOT leak — proven by `log-redaction.test.ts` (no `SECRET`
     survives; non-secret context stays). 259 API tests green.
 
-- [~] **2. Master key — was a P0, code fixed; ops remediation PENDING (you).**
+- [~] **2. Master key — was a P0; code + ops migration DONE; only cred rotation left (you).**
   FINDING: prod was encrypting EVERY credential with `LocalKMS.withFixedKey(0x7f)`
   — a constant in this open-source repo (`deps.ts:169`, unconditional). The server
   never read `LOCAL_KMS_KEY`. So at-rest encryption was theater: anyone with the
   repo + the vault DB could decrypt everything.
-  - [x] CODE FIX: prod now uses `LocalKMS.fromEnv()` and fails closed on boot if
-    `LOCAL_KMS_KEY` is unset (commit on `production-hardening`). +3 tests.
-  - [ ] OPS RUNBOOK (no-downtime; `OLD = 7f`×32 = 64-hex; `NEW = openssl rand -hex 32`):
-    1. Generate `NEW`; **back it up out-of-band** (password manager, NOT the DB/repo).
-    2. `flyctl secrets set LOCAL_KMS_KEY=$NEW LOCAL_KMS_LEGACY_KEYS=$OLD -a trusty-squire-api`
-       (old code ignores these — still runs on 0x7f, no breakage). **Do this BEFORE
-       the new code deploys, or prod fails closed.**
-    3. Deploy the new code (merge `production-hardening` → main → CI). New server
-       boots `[NEW, 0x7f-legacy]` → decrypts existing creds via legacy, writes new
-       ones under NEW. No downtime.
-    4. Rewrap (re-wrap every KEK 0x7f→NEW). Easiest on the box — env is already set:
-       `flyctl ssh console -a trusty-squire-api` then
-       `node /app/apps/api/dist/scripts/rewrap-kek.bin.js`  (dry-run)
-       `node /app/apps/api/dist/scripts/rewrap-kek.bin.js --apply`  (mutate)
-       Confirm `failed=0`.
-    5. `flyctl secrets unset LOCAL_KMS_LEGACY_KEYS -a trusty-squire-api` (now `[NEW]` only).
-    6. **Rotate the sensitive creds** — they lived under a public key, treat as
-       compromised: ipinfo / plunk / sentry / VouchFlow keys / etc. Re-store them.
-  - [ ] After: verify with `vault-decrypt-check` that all creds decrypt under NEW.
+  - [x] CODE FIX (PR #257): prod uses `LocalKMS.fromEnv()` and fails closed on
+    boot if `LOCAL_KMS_KEY` is unset. +3 tests.
+  - [x] OPS MIGRATION DONE (2026-06-29, no downtime, verified live):
+    `NEW` set + backed up out-of-band → deployed fail-closed code (boot log
+    `keyed from LOCAL_KMS_KEY (+1 legacy)`) → `rewrap-kek --apply` `rewrapped=72
+    failed=0` → unset `LOCAL_KMS_LEGACY_KEYS` → server `[NEW]`-only, an originally-
+    0x7f cred decrypts under the new key alone. The 0x7f public key is out of prod.
+  - [ ] **#6 STILL YOURS — rotate the previously-public-keyed creds.** They were
+    under 0x7f for their whole life (exploit needed repo + *private* DB access, so
+    realistic blast radius is low — but best practice for a cred broker is to
+    rotate). Re-store: ipinfo / plunk / sentry / VouchFlow / growthbook / the rest.
 
-- [ ] **3. DB capacity + alerting.** `trusty-squire-db` OOMs at 256MB (known —
-  see DB-OOM-wedge note). A launch spike WILL hit it. Bump VM memory + add an
-  alert on DB mem / CPU / connection count. The DB is the SPOF.
+- [~] **3. DB capacity + alerting.** Capacity DONE; alert-wiring is a quick you-step.
+  - [x] Bumped `trusty-squire-db` primary 512MB → **1024MB** (2x headroom for the
+    launch spike; was the 256MB OOM-wedge failure mode). Verified healthy + API
+    reconnected.
+  - [x] Added **`/readyz`** (DB-readiness probe, time-capped) — 200 when the DB
+    answers, 503 on wedge. `/health` stays shallow for Fly liveness so a wedge
+    can't trigger an API restart loop. +3 tests. (Deploys with this branch.)
+  - [ ] YOU: point an external uptime monitor (UptimeRobot / Betterstack / the
+    housekeeper Telegram cron) at `https://trusty-squire-api.fly.dev/readyz` to
+    get paged on a wedge. (Broader metrics dashboard lives in #9.)
+  - [ ] Consider (not launch-blocking): the DB is a SINGLE node (no HA failover).
+    A replica would survive a node death mid-launch — bigger lift; flag for after.
 
 - [ ] **4. Per-account rate limits on all authed routes + egress default cap.**
   - Rate limit vault store/list/use, grant mint, account creation per account/
