@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.3 (2026-06-29)
+
+- **`connect` no longer re-opens the install/noVNC page when the bot profile is
+  busy.** The preflight probes live profile cookies to confirm the session; if
+  another Chromium already holds the profile (a live operate run, a background
+  job, or an orphaned Chrome) the probe threw and connect fell through to a full
+  re-pair. It now falls back to the session's cached provider state, so a valid
+  install short-circuits ("Already connected") regardless of profile contention.
+
 ## 1.0.2 (2026-06-29)
 
 **`connect` reliability.**
