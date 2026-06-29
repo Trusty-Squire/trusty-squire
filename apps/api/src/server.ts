@@ -281,7 +281,22 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     },
   });
 
+  // Liveness — shallow + DB-independent. Fly's http_service check hits this; it
+  // must NOT depend on the DB, or a DB wedge would trigger an API restart loop
+  // that can't fix the DB.
   fastify.get("/health", async () => ({ ok: true }));
+
+  // Readiness — verifies the DB actually answers. Point an external uptime
+  // monitor here to get paged when the DB wedges (the 256MB OOM failure mode):
+  // 200 {ready:true} when healthy, 503 {ready:false} when the DB is unreachable.
+  fastify.get("/readyz", async (_req, reply) => {
+    const ready = await deps.pingDb();
+    if (!ready) {
+      reply.code(503);
+      return { ready: false, db: "unreachable" };
+    }
+    return { ready: true };
+  });
 
   return fastify;
 }

@@ -33,9 +33,18 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
     realistic blast radius is low — but best practice for a cred broker is to
     rotate). Re-store: ipinfo / plunk / sentry / VouchFlow / growthbook / the rest.
 
-- [ ] **3. DB capacity + alerting.** `trusty-squire-db` OOMs at 256MB (known —
-  see DB-OOM-wedge note). A launch spike WILL hit it. Bump VM memory + add an
-  alert on DB mem / CPU / connection count. The DB is the SPOF.
+- [~] **3. DB capacity + alerting.** Capacity DONE; alert-wiring is a quick you-step.
+  - [x] Bumped `trusty-squire-db` primary 512MB → **1024MB** (2x headroom for the
+    launch spike; was the 256MB OOM-wedge failure mode). Verified healthy + API
+    reconnected.
+  - [x] Added **`/readyz`** (DB-readiness probe, time-capped) — 200 when the DB
+    answers, 503 on wedge. `/health` stays shallow for Fly liveness so a wedge
+    can't trigger an API restart loop. +3 tests. (Deploys with this branch.)
+  - [ ] YOU: point an external uptime monitor (UptimeRobot / Betterstack / the
+    housekeeper Telegram cron) at `https://trusty-squire-api.fly.dev/readyz` to
+    get paged on a wedge. (Broader metrics dashboard lives in #9.)
+  - [ ] Consider (not launch-blocking): the DB is a SINGLE node (no HA failover).
+    A replica would survive a node death mid-launch — bigger lift; flag for after.
 
 - [ ] **4. Per-account rate limits on all authed routes + egress default cap.**
   - Rate limit vault store/list/use, grant mint, account creation per account/
