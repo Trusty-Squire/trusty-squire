@@ -127,27 +127,6 @@ describe("single-tier install handshake", () => {
     expect(claim.json()).toMatchObject({ error: "invalid_request" });
   });
 
-  it("provisioning is free during beta — no paywall past the old free limit", async () => {
-    const issue = await app.inject({ method: "POST", url: "/v1/install" });
-    const { machine_token } = issue.json() as { machine_token: string };
-
-    // Bind the machine to an account up front (single-tier reality:
-    // the install-claim does this seconds after token issuance).
-    await deps.machineTokenStore.markPaired(machine_token, "acct-test");
-
-    // Well past the old free limit (10) — every signup still succeeds; the
-    // quota gate has been removed for the free-during-beta window.
-    for (let i = 0; i < 13; i++) {
-      const r = await app.inject({
-        method: "POST",
-        url: "/v1/inbox/aliases",
-        headers: { "x-machine-token": machine_token, ...JSON_HEADERS },
-        payload: { account_id: "acct-test", service: "test", run_id: `r-${i}` },
-      });
-      expect(r.statusCode, `iteration ${i}`).toBe(201);
-    }
-  });
-
   it("install/status returns the bound account_id", async () => {
     const issue = await app.inject({ method: "POST", url: "/v1/install" });
     const { machine_token } = issue.json() as { machine_token: string };

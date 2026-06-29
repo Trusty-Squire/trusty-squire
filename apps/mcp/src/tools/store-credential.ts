@@ -10,6 +10,9 @@ const inputSchema = z
     fields: z.record(z.string().min(1).max(8192)).optional(),
     env_var_suggestion: z.string().min(1).max(120).optional(),
     type: z.string().min(1).max(60).optional(),
+    auth_strategy: z.enum(["api_key", "username_password"]).optional(),
+    signin_url: z.string().url().optional(),
+    login_hosts: z.array(z.string().min(1).max(253)).max(20).optional(),
     observed_hosts: z.array(z.string().min(1).max(256)).max(10).optional(),
     auth_shape: z
       .string()
@@ -35,8 +38,11 @@ correctly: "bearer" (default) | "header:<name>" (e.g. "header:x-api-key")
 | "query:<param>". Set it for non-bearer providers; bearer needs nothing.
 Optional \`observed_hosts\` carries hosts seen during signup/extraction and is
 unioned into the credential's allowed_hosts with the service defaults.
-Returns the reference, field names, and allowed_hosts. The value is never
-readable back to you afterwards.`;
+For username/password credentials, pass \`auth_strategy: "username_password"\`
+and explicit \`login_hosts\`; those credentials cannot be spent through
+\`use_credential\` and can only be sealed into browser-fill slots on allowed
+signin hosts. Returns the reference, field names, and allowed_hosts. The value
+is never readable back to you afterwards.`;
 
 export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
   name: "store_credential",
@@ -52,6 +58,9 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       fields: { type: "object", additionalProperties: { type: "string" } },
       env_var_suggestion: { type: "string" },
       type: { type: "string" },
+      auth_strategy: { type: "string" },
+      signin_url: { type: "string" },
+      login_hosts: { type: "array", items: { type: "string" } },
       observed_hosts: { type: "array", items: { type: "string" } },
       auth_shape: { type: "string" },
     },
@@ -67,6 +76,9 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       ...(args.fields !== undefined ? { fields: args.fields } : {}),
       ...(args.env_var_suggestion !== undefined ? { env_var_suggestion: args.env_var_suggestion } : {}),
       ...(args.type !== undefined ? { type: args.type } : {}),
+      ...(args.auth_strategy !== undefined ? { auth_strategy: args.auth_strategy } : {}),
+      ...(args.signin_url !== undefined ? { signin_url: args.signin_url } : {}),
+      ...(args.login_hosts !== undefined ? { login_hosts: args.login_hosts } : {}),
       ...(args.observed_hosts !== undefined ? { observed_hosts: args.observed_hosts } : {}),
       ...(args.auth_shape !== undefined ? { auth_shape: args.auth_shape } : {}),
     });
@@ -75,6 +87,9 @@ export const storeCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       service: res.service,
       label: res.label,
       field_names: res.field_names,
+      auth_strategy: res.auth_strategy,
+      signin_url: res.signin_url,
+      login_hosts: res.login_hosts,
       allowed_hosts: res.allowed_hosts,
       updated: res.updated,
     };

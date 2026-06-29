@@ -1,38 +1,24 @@
 // Unit-tests the retention cron's decision math without hitting a real
-// database. We feed in fake Prisma clients that record the where
-// clauses they're asked to operate on; the test asserts the cutoffs
-// are correct relative to the configured retention windows.
+// database. We feed in a fake auth Prisma client that records the where
+// clauses it's asked to operate on; the test asserts the cutoffs are
+// correct relative to the configured retention windows.
 
 import { describe, expect, it } from "vitest";
 import { RetentionCron } from "../services/retention-cron.js";
 
 interface RecordedCall {
   table: string;
-  op: "updateMany" | "deleteMany";
+  op: "deleteMany";
   where: Record<string, unknown>;
-  data?: Record<string, unknown>;
 }
 
 function makeFakes(): {
-  inboxPrisma: NonNullable<ConstructorParameters<typeof RetentionCron>[0]["inboxPrisma"]>;
   authPrisma: NonNullable<ConstructorParameters<typeof RetentionCron>[0]["authPrisma"]>;
   calls: RecordedCall[];
 } {
   const calls: RecordedCall[] = [];
   return {
     calls,
-    inboxPrisma: {
-      receivedEmail: {
-        updateMany: async (args) => {
-          calls.push({ table: "ReceivedEmail", op: "updateMany", where: args.where, data: args.data });
-          return { count: 3 };
-        },
-        deleteMany: async (args) => {
-          calls.push({ table: "ReceivedEmail", op: "deleteMany", where: args.where });
-          return { count: 1 };
-        },
-      },
-    },
     authPrisma: {
       machineToken: {} as never,
       lLMUsageEvent: {
@@ -60,13 +46,10 @@ function makeFakes(): {
 describe("RetentionCron", () => {
   it("computes correct cutoffs for each retention window", async () => {
     const now = new Date("2026-01-15T12:00:00Z");
-    const { inboxPrisma, authPrisma, calls } = makeFakes();
+    const { authPrisma, calls } = makeFakes();
     const cron = new RetentionCron({
-      inboxPrisma,
       authPrisma,
       now: () => now,
-      bodyRetentionDays: 7,
-      metadataRetentionDays: 90,
       pairingTokenRetentionHours: 1,
       llmEventRetentionDays: 30,
       vaultAuditRetentionDays: 365,
@@ -74,8 +57,6 @@ describe("RetentionCron", () => {
 
     const stats = await cron.runOnce();
 
-    expect(stats.bodies_purged).toBe(3);
-    expect(stats.emails_deleted).toBe(1);
     expect(stats.pairing_tokens_deleted).toBe(2);
     expect(stats.llm_events_deleted).toBe(4);
     expect(stats.vault_audit_deleted).toBe(5);
@@ -86,26 +67,6 @@ describe("RetentionCron", () => {
     expect(vaultAuditDelete).toBeDefined();
     const vaultWhere = vaultAuditDelete!.where["emitted_at"] as { lt: Date };
     expect(vaultWhere.lt).toEqual(new Date("2025-01-15T12:00:00Z"));
-
-    // Body purge cutoff: now - 7 days
-    const bodyPurge = calls.find((c) => c.table === "ReceivedEmail" && c.op === "updateMany");
-    expect(bodyPurge).toBeDefined();
-    const bodyWhere = bodyPurge!.where["received_at"] as { lt: Date };
-    expect(bodyWhere.lt).toEqual(new Date("2026-01-08T12:00:00Z"));
-    expect(bodyPurge!.where["body_purged_at"]).toBeNull();
-
-    // Body fields should be nulled, body_purged_at stamped.
-    expect(bodyPurge!.data).toMatchObject({
-      body_text: null,
-      body_html: null,
-      body_purged_at: now,
-    });
-
-    // Metadata delete cutoff: now - 90 days
-    const metaDelete = calls.find((c) => c.table === "ReceivedEmail" && c.op === "deleteMany");
-    expect(metaDelete).toBeDefined();
-    const metaWhere = metaDelete!.where["received_at"] as { lt: Date };
-    expect(metaWhere.lt).toEqual(new Date("2025-10-17T12:00:00Z"));
 
     // Pairing token cutoff: now - 1 hour
     const pairingDelete = calls.find((c) => c.table === "PairingToken");
@@ -123,48 +84,54 @@ describe("RetentionCron", () => {
   it("aggregates errors per section without crashing", async () => {
     const now = new Date("2026-01-15T12:00:00Z");
     const cron = new RetentionCron({
-      inboxPrisma: {
-        receivedEmail: {
-          updateMany: async () => {
-            throw new Error("body purge boom");
-          },
+      authPrisma: {
+        machineToken: {} as never,
+        pairingToken: {
           deleteMany: async () => {
-            throw new Error("delete boom");
+            throw new Error("pairing boom");
           },
-        },
-      },
-      authPrisma: undefined,
+        } as never,
+        lLMUsageEvent: {
+          deleteMany: async () => {
+            throw new Error("llm boom");
+          },
+        } as unknown as never,
+        vaultAuditEvent: {
+          deleteMany: async () => {
+            throw new Error("vault boom");
+          },
+        } as unknown as never,
+      } as never,
       now: () => now,
     });
 
     const stats = await cron.runOnce();
-    expect(stats.errors).toHaveLength(2);
-    expect(stats.errors[0]).toMatch(/body purge/);
-    expect(stats.errors[1]).toMatch(/email delete/);
+    expect(stats.errors).toHaveLength(3);
+    expect(stats.errors[0]).toMatch(/pairing/);
+    expect(stats.errors[1]).toMatch(/llm event/);
+    expect(stats.errors[2]).toMatch(/vault audit/);
   });
 
   it("status() exposes last-run state", async () => {
     const now = new Date("2026-01-15T12:00:00Z");
-    const { inboxPrisma, authPrisma } = makeFakes();
-    const cron = new RetentionCron({ inboxPrisma, authPrisma, now: () => now });
+    const { authPrisma } = makeFakes();
+    const cron = new RetentionCron({ authPrisma, now: () => now });
 
     expect(cron.status().last_run_at).toBeNull();
     await cron.runOnce();
     expect(cron.status().last_run_at).toEqual(now);
-    expect(cron.status().last_stats?.bodies_purged).toBe(3);
+    expect(cron.status().last_stats?.pairing_tokens_deleted).toBe(2);
   });
 
-  it("does nothing harmful when both Prisma clients are absent (in-memory mode)", async () => {
+  it("does nothing harmful when the Prisma client is absent (in-memory mode)", async () => {
     const cron = new RetentionCron({
-      inboxPrisma: undefined,
       authPrisma: undefined,
       now: () => new Date("2026-01-15T12:00:00Z"),
     });
     const stats = await cron.runOnce();
-    expect(stats.bodies_purged).toBe(0);
-    expect(stats.emails_deleted).toBe(0);
     expect(stats.pairing_tokens_deleted).toBe(0);
     expect(stats.llm_events_deleted).toBe(0);
+    expect(stats.vault_audit_deleted).toBe(0);
     expect(stats.errors).toEqual([]);
   });
 });

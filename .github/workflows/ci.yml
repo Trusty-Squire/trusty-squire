@@ -46,11 +46,8 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # Workspace deps (skill-schema, inbox, runtime, etc.) ship as TS sources
+      # Workspace deps (skill-schema, runtime, etc.) ship as TS sources
       # whose package.json points at dist/. tsc can't resolve them otherwise.
-      # Inbox needs prisma generate first or its build fails.
-      - name: Prisma generate (inbox)
-        run: pnpm --filter '@trusty-squire/inbox' prisma:generate
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
       # Per-package typecheck on the green set. Workspace-wide pnpm -r
@@ -63,10 +60,6 @@ jobs:
             "@trusty-squire/mcp"
             "@trusty-squire/web"
             "@trusty-squire/skill-schema"
-            "@trusty-squire/adapter-resend"
-            "@trusty-squire/runtime"
-            "@trusty-squire/inbox"
-            "@trusty-squire/mandate-validator"
           )
           for p in "${PKGS[@]}"; do
             echo "::group::$p"
@@ -93,8 +86,6 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: Prisma generate (inbox)
-        run: pnpm --filter '@trusty-squire/inbox' prisma:generate
       # Builds skill-schema (+ other workspace packages) dist FIRST.
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
@@ -115,17 +106,11 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # apps/api tests import @trusty-squire/runtime and
-      # @trusty-squire/adapter-resend, whose package.json points at dist/.
-      # Prisma-backed packages need their client generated before tests.
-      # NOT vault: its prisma client is consumed by apps/api (which has its
-      # own isolated client), the vault package's own src/tests don't import
-      # it, and vault's schema has no custom `output` — so generating it here
-      # would clobber inbox's default-location client and break inbox's build.
-      - name: Prisma generate (inbox, registry)
-        run: |
-          pnpm --filter '@trusty-squire/inbox' prisma:generate
-          pnpm --filter '@trusty-squire/registry' prisma:generate
+      # Registry's Prisma client must be generated before its tests. NOT vault
+      # (apps/api owns an isolated client; vault's src/tests don't import one)
+      # and NOT api (its tests use the in-memory store fallback).
+      - name: Prisma generate (registry)
+        run: pnpm --filter '@trusty-squire/registry' prisma:generate
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
       # Per-package test over every package whose suite passes locally.
@@ -138,10 +123,6 @@ jobs:
             "@trusty-squire/mcp"
             "@trusty-squire/api"
             "@trusty-squire/skill-schema"
-            "@trusty-squire/adapter-resend"
-            "@trusty-squire/runtime"
-            "@trusty-squire/inbox"
-            "@trusty-squire/mandate-validator"
             "@trusty-squire/registry"
             "@trusty-squire/vault"
           )

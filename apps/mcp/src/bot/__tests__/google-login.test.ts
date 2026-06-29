@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   binaryOnPath,
   classifyGoogleAuthState,
+  extractGoogleAccountEmail,
   extractGoogleNumberMatch,
   extractOAuthScopes,
   findFreePort,
@@ -14,6 +15,21 @@ import {
   scopesAreBasic,
   scrapeGoogleScopePhrases,
 } from "../google-login.js";
+
+describe("extractGoogleAccountEmail (PR3 capture-at-login)", () => {
+  it("prefers the OneGoogle account-chip aria-label", () => {
+    const text = "Google Account: Ada Lovelace (ada.lovelace@example.com)\nInbox\nads@notme.com";
+    expect(extractGoogleAccountEmail(text)).toBe("ada.lovelace@example.com");
+  });
+
+  it("falls back to the first email token when no chip is present", () => {
+    expect(extractGoogleAccountEmail("Signed in as user@gmail.com — Manage")).toBe("user@gmail.com");
+  });
+
+  it("returns null when there is no email in the text", () => {
+    expect(extractGoogleAccountEmail("My Account · Security · Privacy")).toBeNull();
+  });
+});
 
 describe("google-login env helpers", () => {
   it("binaryOnPath finds a real binary and rejects a fake one", () => {

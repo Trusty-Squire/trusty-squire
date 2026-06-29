@@ -1,5 +1,65 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.1 (2026-06-29)
+
+Promotes the 1.0.1-rc line to stable. Highlights since 1.0.0 (full detail in the
+rc.1 / rc.2 entries below):
+
+**User-owned signups (sign-in vault).** The operator signs services up with the
+user's own Google identity (captured at `connect`), seals the login + a
+generated password into a `username_password` vault credential, and reads the
+verification code from the user's own inbox behind a just-in-time consent gate —
+no Squire email aliases.
+
+**Privacy hardening.**
+- Observations no longer echo a sealed value: after `type_secret`, the password
+  (and the email filled from the sealed login slot) is masked to `[sealed]` in
+  `elements[].value`, the accessibility tree, the screen outline, and the
+  element label — the cleartext never returns to the host.
+- Operator recipes no longer record inbox-provider steps, so a shared recipe
+  can't leak the user's mail (subject text or webmail navigation).
+- Browser-fill responses are encrypted to an ephemeral key; login-host wildcard
+  storage rejects broad public-suffix scopes; rotation persists non-secret
+  metadata.
+
+**Inbound-mail subsystem retired.** With aliases gone, the Squire-alias inbound
+pipeline (`packages/inbox`, the resend-inbound webhook) is removed and the API
+owns its own Prisma tooling.
+
+## 1.0.1-rc.2 (2026-06-28)
+
+**Sign-in vault hardening**
+- Browser-fill responses are encrypted to an ephemeral MCP key instead of
+  returning plaintext fields over the API boundary.
+- Credential rotation now persists non-secret metadata/type updates used by
+  browser-fill and egress policy.
+- Login-host wildcard storage rejects broad public-suffix scopes.
+- CI/release hygiene: remove stale package filters and run canonical install
+  verification after publish.
+
+## 1.0.1-rc.1 (2026-06-28)
+
+**Universal-bot retirement (completed)**
+- Excised the autonomous skill-replay engine (`replay-skill.ts` + the
+  `mcp skill replay-test` command) — skills are operator hints now, not
+  autonomously executed recipes.
+- Swept the dead code the retirement stranded: `llm-client`, `inbox-client`,
+  inbox `mailgun-handler`, vault `kek-derivation`, and skill-schema
+  `provision-state`/`provision-policy` (all verified zero-caller).
+
+**Sign-in + vault credentials (user-owned non-OAuth signups)**
+- Consent gate: `operate_await_verification` no longer reads the user's inbox
+  without consent (fail-closed); `grant_inbox_consent` grants it in-context at
+  the verification wall (session-remembered).
+- Capture-at-login: the user's Google email is captured at `connect` and
+  surfaced as `user_email` on the start observation, so signups use the user's
+  own address (no Trusty Squire alias) and the read inbox matches it.
+- `operate_prepare_login` / `operate_store_login`: seal the user's email + a
+  generated password into session slots (masked handles only) and vault them as
+  a `username_password` credential — the account is the user's, re-loginable.
+- Privacy: the user's real email is redacted from operator recipes (heuristic
+  email-shape + exact known-email scrub).
+
 ## 1.0.0 (2026-06-28)
 
 First stable release. Promotes the 1.0.0-rc line, plus:

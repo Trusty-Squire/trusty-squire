@@ -4,14 +4,18 @@
 //   node tools/release-mcp.mjs <version>      e.g. 0.9.13   or   0.9.13-rc.2
 //
 // Bumps apps/mcp/package.json (the npm source of truth), seeds a CHANGELOG
-// entry from the commits since the last tag, branches off the target, and
-// opens a PR to the channel that matches the version shape:
+// entry from the commits since the last tag, branches off `staging` (the
+// integration branch where RC work accumulates), and opens a PR to the
+// channel branch that matches the version shape:
 //
-//   stable     (0.9.13)      → PR to main    → release.yml publishes npm `latest`
-//   prerelease (0.9.13-rc.2) → PR to staging → release.yml publishes npm `next`
+//   stable     (0.9.13)      → branch off staging → PR to main    → npm `latest`
+//   prerelease (0.9.13-rc.2) → branch off staging → PR to staging → npm `next`
 //
-// main is branch-protected (PR + green CI required, no direct push), so this
-// always goes through a PR. There is deliberately no publish-from-laptop path.
+// Both cut from staging because that's where work lands. A stable cut therefore
+// promotes the whole staging delta to main (not just the bump) — that IS the
+// release. (Branching a stable off main would ship a version bump on stale
+// code, missing everything staged but not yet promoted.) main is branch-
+// protected (PR + green CI required, no direct push); no publish-from-laptop.
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -31,13 +35,17 @@ if (!SEMVER.test(version)) {
 }
 
 const isPrerelease = version.includes("-");
+// Always branch off staging (where RC work accumulates); `target` is only the
+// PR base / channel branch. A stable cut promotes the whole staging delta to main.
+const source = "staging";
 const target = isPrerelease ? "staging" : "main";
 const channel = isPrerelease ? "next" : "latest";
 
 const git = (...args) => execFileSync("git", args, { encoding: "utf8" }).trim();
 
-// A release branch must start from a clean tree — we branch off the target and
-// the only diff in the PR should be the bump itself.
+// A release branch must start from a clean tree. We branch off staging; for a
+// prerelease the PR diff is just the bump, for a stable cut it's the staging
+// delta being promoted to main.
 if (git("status", "--porcelain").length > 0) {
   console.error("✗ working tree is not clean. Commit or stash first — a release PR should contain only the bump.");
   process.exit(1);
@@ -57,9 +65,9 @@ if (branchExists) {
   process.exit(1);
 }
 
-console.log(`→ ${version}  (${channel} via ${target})`);
-git("fetch", "origin", target, "--quiet");
-git("checkout", "-b", branch, `origin/${target}`);
+console.log(`→ ${version}  (${channel}: ${source} → ${target})`);
+git("fetch", "origin", source, "--quiet");
+git("checkout", "-b", branch, `origin/${source}`);
 
 // 1. Bump the source of truth.
 const pkgPath = "apps/mcp/package.json";

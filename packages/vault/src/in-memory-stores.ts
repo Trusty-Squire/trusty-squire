@@ -70,6 +70,9 @@ export class InMemoryCredentialStore implements CredentialStore {
       account_kek_blob: Buffer;
       field_names: string[];
       rotatedAt: Date;
+      type?: string | null;
+      env_var_suggestion?: string | null;
+      metadata?: Record<string, unknown>;
     },
   ): Promise<void> {
     const r = this.byReference.get(reference);
@@ -79,6 +82,9 @@ export class InMemoryCredentialStore implements CredentialStore {
     r.account_kek_blob = Buffer.from(payload.account_kek_blob);
     r.field_names = [...payload.field_names];
     r.rotated_at = payload.rotatedAt;
+    if ("type" in payload) r.type = payload.type ?? null;
+    if ("env_var_suggestion" in payload) r.env_var_suggestion = payload.env_var_suggestion ?? null;
+    if (payload.metadata !== undefined) r.metadata = { ...payload.metadata };
   }
 
   async listByAccount(accountId: string): Promise<CredentialRecord[]> {

@@ -7,6 +7,7 @@ import {
   AllowlistViolationError,
   CredentialNotFoundError,
   CredentialVault,
+  RestoreConflictError,
   StaleAssertionError,
   VaultRateLimitError,
   mergeAllowedHosts,
@@ -194,6 +195,39 @@ describe("upsert (store overwrites by service+label)", () => {
     expect(b.allowed_hosts).toEqual(["custom.example.com"]);
   });
 
+  it("overwrite persists non-secret metadata and row fields", async () => {
+    const { vault, store } = makeVault();
+    const a = await vault.store(
+      storeInput({
+        type: "api_key",
+        metadata: { auth_shape: "bearer" },
+      }),
+    );
+    await vault.store(
+      storeInput({
+        fields: { login: "ada@example.com", password: "correct-horse" },
+        type: "username_password",
+        env_var_suggestion: "EXAMPLE_LOGIN",
+        metadata: {
+          auth_strategy: "username_password",
+          signin_url: "https://app.example.com/login",
+          login_hosts: ["app.example.com"],
+        },
+      }),
+    );
+    const [row] = await store.listByAccount(ACCOUNT);
+    expect(row?.reference).toBe(a.reference);
+    expect(row?.type).toBe("username_password");
+    expect(row?.env_var_suggestion).toBe("EXAMPLE_LOGIN");
+    expect(row?.metadata).toMatchObject({
+      service: "OpenAI",
+      auth_shape: "bearer",
+      auth_strategy: "username_password",
+      signin_url: "https://app.example.com/login",
+      login_hosts: ["app.example.com"],
+    });
+  });
+
   it("a different label is a separate entry", async () => {
     const { vault } = makeVault();
     const def = await vault.store(storeInput({ fields: { value: "sk_default" } }));
@@ -202,6 +236,13 @@ describe("upsert (store overwrites by service+label)", () => {
     expect(prod.label).toBe("prod");
     expect(await vault.retrieve(def.reference, "user:read", assertion())).toEqual({ value: "sk_default" });
     expect(await vault.retrieve(prod.reference, "user:read", assertion())).toEqual({ value: "sk_prod" });
+  });
+
+  it("rename refuses to collide with another active service label", async () => {
+    const { vault } = makeVault();
+    const def = await vault.store(storeInput({ fields: { value: "sk_default" } }));
+    const prod = await vault.store(storeInput({ label: "prod", fields: { value: "sk_prod" } }));
+    await expect(vault.rename(prod.reference, ACCOUNT, def.label)).rejects.toThrow(RestoreConflictError);
   });
 
   it("rejects an empty field map", async () => {
@@ -214,7 +255,7 @@ describe("delete + reveal", () => {
   it("delete soft-deletes; retrieve then 404s", async () => {
     const { vault } = makeVault();
     const entry = await vault.store(storeInput());
-    await vault.delete(entry.reference);
+    await vault.delete(entry.reference, ACCOUNT);
     await expect(vault.retrieve(entry.reference, "user:read", assertion())).rejects.toThrow(
       CredentialNotFoundError,
     );

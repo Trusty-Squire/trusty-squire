@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/mcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "license": "MIT",
   "mcpName": "io.github.Trusty-Squire/mcp",
   "type": "module",
@@ -11,11 +11,7 @@
   },
   "files": [
     "dist",
-    "assets",
-    "!dist/bot/eval-*",
-    "!dist/bot/build-corpus.*",
-    "!dist/bot/label-target.*",
-    "!dist/bot/failure-stats.*"
+    "assets"
   ],
   "publishConfig": {
     "access": "public"
@@ -65,7 +61,6 @@
     "keytar": "^7.9.0"
   },
   "devDependencies": {
-    "@trusty-squire/inbox": "workspace:*",
     "@types/node": "^22.10.2",
     "@vitest/coverage-v8": "^2.1.8",
     "tsx": "^4.7.0",

@@ -16,10 +16,7 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
-    "test:cov": "vitest run --coverage",
-    "prisma:validate": "prisma validate --schema=prisma/schema.prisma",
-    "prisma:generate": "prisma generate --schema=prisma/schema.prisma",
-    "prisma:migrate:dev": "prisma migrate dev --schema=prisma/schema.prisma"
+    "test:cov": "vitest run --coverage"
   },
   "dependencies": {
     "@prisma/client": "^5.22.0",

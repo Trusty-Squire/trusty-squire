@@ -6,6 +6,7 @@
 // in place; the consent-at-install prompt is the remaining hardening.
 
 import { z } from "zod";
+import { constants, generateKeyPairSync, privateDecrypt } from "node:crypto";
 import type { Tool } from "./index.js";
 import type { ApiClient } from "../api-client.js";
 import {
@@ -17,7 +18,11 @@ import {
   awaitVerification,
   finishProvisionSession,
   observedHostsForSession,
+  currentProvisionUrl,
   stashSecretSlot,
+  readSecretSlotValue,
+  getSessionUserEmail,
+  generatePassword,
   rememberRecipe,
   verifyPostcondition,
   type ProvisionAction,
@@ -32,6 +37,21 @@ import {
 import { isMaskedDisplay } from "../bot/credential-shape.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
 import { clientFromEnv, generateProvisionId } from "../skill-registry-client.js";
+import { openSessionStorage } from "../session.js";
+
+// PR2 — read the install-time inbox-read consent. Default-OFF: a missing flag
+// (older sessions, no session file) means "not consented", so awaitVerification
+// fails closed and hands the code request back to the user. Operator/housekeeper
+// deployments set consent_operator_inbox_otp=true.
+async function readInboxConsent(): Promise<boolean> {
+  try {
+    const storage = await openSessionStorage();
+    const data = await storage.read();
+    return data?.consent_operator_inbox_otp === true;
+  } catch {
+    return false;
+  }
+}
 
 // Best-effort: ask the registry for a known route for this service so the agent
 // drives on rails instead of ad-hoc. Returns undefined on any miss (no skill,
@@ -98,8 +118,10 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   async handler(args) {
     const hint = await resolveRouteHint(args.service_url);
     const extra = [...(args.allowed_hosts ?? []), ...(args.extra_allowed_hosts ?? [])];
+    const consentInboxRead = await readInboxConsent();
     return await startProvisionSession({
       serviceUrl: args.service_url,
+      consentInboxRead,
       ...(extra.length > 0 ? { extraAllowedHosts: extra } : {}),
       ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
       ...(hint !== undefined ? { hint } : {}),
@@ -423,6 +445,10 @@ const verifySchema = z.object({
   // with operate_act{type_secret, slot}. The code never reaches you (safer, and
   // it dodges client-side payload truncation).
   into_slot: z.string().min(1).max(60).optional(),
+  // PR3b — set true ONLY after the user agrees, in context, to let the operator
+  // read their inbox for this signup. Grants inbox-read for the rest of this
+  // session and proceeds to read. Never set this without an explicit user yes.
+  grant_inbox_consent: z.boolean().optional(),
 });
 
 export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> = {
@@ -439,7 +465,9 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
     "authenticator or hasn't arrived: ASK THE USER for it, then type it with " +
     "operate_act and continue. The session stays live; this is a resumable " +
     "hand-back, not a failure. Scoped search-and-extract — reads only the matching " +
-    "recent mail, never the whole inbox.",
+    "recent mail, never the whole inbox. If a needs_user(verification_code) says " +
+    "inbox reading isn't consented, ask the user; on an explicit yes retry with " +
+    "grant_inbox_consent:true.",
   inputSchema: verifySchema,
   jsonInputSchema: {
     type: "object",
@@ -448,12 +476,14 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
       session_id: { type: "string" },
       sender: { type: "string" },
       into_slot: { type: "string" },
+      grant_inbox_consent: { type: "boolean" },
     },
   },
   async handler(args) {
     return await awaitVerification(args.session_id, {
       ...(args.sender !== undefined ? { sender: args.sender } : {}),
       ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
+      ...(args.grant_inbox_consent === true ? { grantConsent: true } : {}),
     });
   },
 };
@@ -645,12 +675,201 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
           `pass them as operate_use{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
       );
     }
+    const consentInboxRead = await readInboxConsent();
     return await startProvisionSession({
       serviceUrl: url,
+      consentInboxRead,
       ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
       hint: renderOperatorRecipeHint(recipe),
       ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
     });
+  },
+};
+
+// PR3c — username/password signup credential lifecycle (no Trusty Squire alias).
+const prepareLoginSchema = z.object({
+  session_id: z.string().min(1),
+  login_slot: z.string().min(1).max(60).optional(),
+  password_slot: z.string().min(1).max(60).optional(),
+  password_length: z.number().int().min(16).max(64).optional(),
+});
+
+export const provisionPrepareLoginTool: Tool<z.infer<typeof prepareLoginSchema>> = {
+  name: "operate_prepare_login",
+  description:
+    "Prepare username/password signup fields from the user's OWN email (captured " +
+    "at login) and a freshly generated strong password. Both are sealed into " +
+    "session slots — you get only masked handles, never the raw values. Fill the " +
+    "signup form with operate_act{kind:'type_secret'} using the returned login/" +
+    "password slots, then after the account is created call operate_store_login to " +
+    "vault them. This never uses a Trusty Squire alias — the account is the user's. " +
+    "If no user email was captured, a needs_user hand-back asks the user to run " +
+    "`connect` so the operator has their Google identity.",
+  inputSchema: prepareLoginSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    properties: {
+      session_id: { type: "string" },
+      login_slot: { type: "string" },
+      password_slot: { type: "string" },
+      password_length: { type: "number" },
+    },
+  },
+  async handler(args) {
+    const email = getSessionUserEmail(args.session_id);
+    if (email === null) {
+      return {
+        session_id: args.session_id,
+        needs_user: {
+          wall: "user_email",
+          message:
+            "No user email is on file for this session, so the operator cannot " +
+            "fill a user-owned signup. Ask the user to run `npx @trusty-squire/mcp " +
+            "connect` (Google login) so their identity is captured, then retry.",
+          resume: "connect",
+        },
+      };
+    }
+    const login = stashSecretSlot(args.session_id, args.login_slot ?? "login", email);
+    const password = stashSecretSlot(
+      args.session_id,
+      args.password_slot ?? "password",
+      generatePassword(args.password_length ?? 24),
+    );
+    return { session_id: args.session_id, slots: { login, password }, email_preview: login.preview };
+  },
+};
+
+const storeLoginSchema = z.object({
+  session_id: z.string().min(1),
+  service: z.string().min(1).max(120),
+  login_slot: z.string().min(1).max(60).optional(),
+  password_slot: z.string().min(1).max(60).optional(),
+  label: z.string().min(1).max(120).optional(),
+  signin_url: z.string().url().optional(),
+  login_hosts: z.array(z.string().min(1).max(253)).min(1).max(20),
+});
+
+export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
+  name: "operate_store_login",
+  description:
+    "After the service account is created, vault the sealed signup login (the " +
+    "user's email + the generated password from operate_prepare_login) as a " +
+    "username_password credential so the user can sign back in. Reads the sealed " +
+    "slots server-side; raw values are never returned to you. Pass the exact " +
+    "login hosts where this credential may be filled; use *.example.com only " +
+    "when subdomains are intentionally allowed.",
+  inputSchema: storeLoginSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "service", "login_hosts"],
+    properties: {
+      session_id: { type: "string" },
+      service: { type: "string" },
+      login_slot: { type: "string" },
+      password_slot: { type: "string" },
+      label: { type: "string" },
+      signin_url: { type: "string" },
+      login_hosts: { type: "array", items: { type: "string" } },
+    },
+  },
+  async handler(args, api) {
+    if (api === null) {
+      throw new Error("operate_store_login requires an active Trusty Squire session");
+    }
+    const login = readSecretSlotValue(args.session_id, args.login_slot ?? "login");
+    const password = readSecretSlotValue(args.session_id, args.password_slot ?? "password");
+    const observedHosts = observedHostsForSession(args.session_id);
+    const stored = await api.storeCredential({
+      service: args.service,
+      ...(args.label !== undefined ? { label: args.label } : {}),
+      fields: { login, password },
+      type: "username_password",
+      auth_strategy: "username_password",
+      login_hosts: args.login_hosts,
+      ...(args.signin_url !== undefined ? { signin_url: args.signin_url } : {}),
+      ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
+    });
+    return {
+      session_id: args.session_id,
+      reference: stored.reference,
+      service: stored.service,
+      type: "username_password",
+      field_names: stored.field_names,
+      login_hosts: stored.login_hosts,
+      signin_url: stored.signin_url,
+      updated: stored.updated,
+    };
+  },
+};
+
+const sealVaultCredentialSchema = z
+  .object({
+    session_id: z.string().min(1),
+    reference: z.string().min(1).max(400).optional(),
+    service: z.string().min(1).max(120).optional(),
+    fields: z.array(z.string().min(1).max(120)).min(1).max(20).default(["login", "password"]),
+    slot_prefix: z.string().min(1).max(60).default("vault"),
+  })
+  .refine((b) => b.reference !== undefined || b.service !== undefined, {
+    message: "one of reference or service is required",
+  });
+
+export const provisionSealVaultCredentialTool: Tool<z.infer<typeof sealVaultCredentialSchema>> = {
+  name: "operate_seal_vault_credential",
+  description:
+    "For a sign-in page, retrieve a username/password credential only if the " +
+    "current browser host is allowed for login, then seal requested fields into " +
+    "session slots. Raw values are never returned; use operate_act type_secret " +
+    "with the returned slot names to fill the page.",
+  inputSchema: sealVaultCredentialSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id"],
+    anyOf: [{ required: ["reference"] }, { required: ["service"] }],
+    properties: {
+      session_id: { type: "string" },
+      reference: { type: "string" },
+      service: { type: "string" },
+      fields: { type: "array", items: { type: "string" } },
+      slot_prefix: { type: "string" },
+    },
+  },
+  async handler(args, api) {
+    if (api === null) {
+      throw new Error("operate_seal_vault_credential requires an active Trusty Squire session");
+    }
+    const current = currentProvisionUrl(args.session_id);
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+      publicKeyEncoding: { type: "spki", format: "pem" },
+      privateKeyEncoding: { type: "pkcs8", format: "pem" },
+    });
+    const response = await api.browserFillCredential({
+      ...(args.reference !== undefined ? { reference: args.reference } : {}),
+      ...(args.service !== undefined ? { service: args.service } : {}),
+      current_host: current,
+      fields: args.fields,
+      encrypted_response_public_key: publicKey,
+    });
+    const slots: Record<string, ReturnType<typeof stashSecretSlot>> = {};
+    for (const [field, encrypted] of Object.entries(response.encrypted_fields)) {
+      const value = privateDecrypt(
+        {
+          key: privateKey,
+          padding: constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: "sha256",
+        },
+        Buffer.from(encrypted, "base64"),
+      ).toString("utf8");
+      slots[field] = stashSecretSlot(args.session_id, `${args.slot_prefix}_${field}`, value);
+    }
+    return {
+      session_id: args.session_id,
+      reference: response.reference,
+      slots,
+    };
   },
 };
 
@@ -661,6 +880,9 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionCaptchaGateTool,
   provisionAwaitVerificationTool,
   provisionExtractTool,
+  provisionPrepareLoginTool,
+  provisionStoreLoginTool,
+  provisionSealVaultCredentialTool,
   provisionRememberTool,
   provisionUseTool,
   provisionFinishTaskTool,

@@ -45,7 +45,7 @@ import {
   type SkillStepProvenance,
 } from "@trusty-squire/skill-schema";
 import type { InteractiveElement } from "./browser.js";
-import type { PostVerifyStep } from "./agent.js";
+import type { PostVerifyStep } from "./provision-types.js";
 import { extractAllLabeledTokensFromReason } from "./credential-extraction-flow.js";
 import {
   verifyCaptureChain,
@@ -931,11 +931,13 @@ function translateStep(
       // ("API key name", "production-api-key") closes that gap.
       const literal = observed.value;
       const looksGenerated = /^[a-z]{3,15}-[a-z0-9]{4,12}$/.test(literal);
-      // An email value is the run's signup alias — templatize it to
-      // ${EMAIL_ALIAS} so replay fills a FRESH alias (and so the await_-
-      // email_code dispatch + poll target the same inbox). Baking the
-      // literal would replay the original run's email and, for OTP flows,
-      // dispatch the code to an inbox the replay doesn't own.
+      // An email value is the run's signup email — templatize it to the email
+      // slot token so the literal never bakes into a shared skill (privacy: in
+      // the operator model this is the USER's real address) and so each run
+      // fills a fresh value. The token keeps its legacy ${EMAIL_ALIAS} name for
+      // corpus compatibility (validateReplayGraph + published skills key off it);
+      // post-scope-#1 it denotes "the email to fill" (operator-resolved), not a
+      // Squire alias, and there is no autonomous await_email_code poll anymore.
       const looksLikeEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(literal.trim());
       const matchedInput = inventory.find((e) => e.selector === observed.selector);
       const inputLooksLikeTokenName =

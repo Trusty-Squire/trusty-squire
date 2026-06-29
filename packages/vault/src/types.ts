@@ -58,6 +58,9 @@ export interface CredentialStore {
       account_kek_blob: Buffer;
       field_names: string[];
       rotatedAt: Date;
+      type?: CredentialType | null;
+      env_var_suggestion?: string | null;
+      metadata?: Record<string, unknown>;
     },
   ): Promise<void>;
   listByAccount(accountId: string): Promise<CredentialRecord[]>;

@@ -2,8 +2,6 @@
 //
 // Schedule:
 //   Hourly:
-//     - Null body_text/body_html for ReceivedEmail older than 7d
-//     - Delete ReceivedEmail older than 90d (metadata + S3 pointer)
 //     - Delete PairingToken older than 1h
 //     - Delete LLMUsageEvent older than 30d
 //     - Delete VaultAuditEvent older than 365d
@@ -17,33 +15,17 @@ import type { ApiPrismaClient } from "./api-prisma-client.js";
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
-export interface InboxPrismaClientLike {
-  receivedEmail: {
-    updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
-    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
-  };
-}
-
 export interface RetentionCronDeps {
-  // Inbox client (from packages/inbox via @prisma/client). Separate
-  // from the auth client because they target different generated
-  // outputs. We accept whichever is present — if a deployment lacks
-  // either DB, that section is skipped silently.
-  inboxPrisma?: InboxPrismaClientLike | undefined;
   authPrisma?: ApiPrismaClient | undefined;
   // Test seam.
   now?: () => Date;
   // Tunables (env-overridable in production).
-  bodyRetentionDays?: number;
-  metadataRetentionDays?: number;
   pairingTokenRetentionHours?: number;
   llmEventRetentionDays?: number;
   vaultAuditRetentionDays?: number;
 }
 
 export interface RetentionCronStats {
-  bodies_purged: number;
-  emails_deleted: number;
   pairing_tokens_deleted: number;
   llm_events_deleted: number;
   vault_audit_deleted: number;
@@ -53,8 +35,6 @@ export interface RetentionCronStats {
 
 export class RetentionCron {
   private readonly now: () => Date;
-  private readonly bodyRetentionDays: number;
-  private readonly metadataRetentionDays: number;
   private readonly pairingTokenRetentionHours: number;
   private readonly llmEventRetentionDays: number;
   private readonly vaultAuditRetentionDays: number;
@@ -64,10 +44,6 @@ export class RetentionCron {
 
   constructor(private readonly deps: RetentionCronDeps) {
     this.now = deps.now ?? (() => new Date());
-    this.bodyRetentionDays = deps.bodyRetentionDays
-      ?? Number.parseInt(process.env.INBOX_BODY_RETENTION_DAYS ?? "7", 10);
-    this.metadataRetentionDays = deps.metadataRetentionDays
-      ?? Number.parseInt(process.env.INBOX_METADATA_RETENTION_DAYS ?? "90", 10);
     this.pairingTokenRetentionHours = deps.pairingTokenRetentionHours
       ?? Number.parseInt(process.env.PAIRING_TOKEN_RETENTION_HOURS ?? "1", 10);
     this.llmEventRetentionDays = deps.llmEventRetentionDays
@@ -125,8 +101,6 @@ export class RetentionCron {
   async runOnce(): Promise<RetentionCronStats> {
     const startedAt = this.now();
     const stats: RetentionCronStats = {
-      bodies_purged: 0,
-      emails_deleted: 0,
       pairing_tokens_deleted: 0,
       llm_events_deleted: 0,
       vault_audit_deleted: 0,
@@ -134,36 +108,9 @@ export class RetentionCron {
       errors: [],
     };
 
-    const bodyCutoff = new Date(startedAt.getTime() - this.bodyRetentionDays * DAY_MS);
-    const metaCutoff = new Date(startedAt.getTime() - this.metadataRetentionDays * DAY_MS);
     const pairingCutoff = new Date(startedAt.getTime() - this.pairingTokenRetentionHours * HOUR_MS);
     const llmCutoff = new Date(startedAt.getTime() - this.llmEventRetentionDays * DAY_MS);
     const vaultAuditCutoff = new Date(startedAt.getTime() - this.vaultAuditRetentionDays * DAY_MS);
-
-    if (this.deps.inboxPrisma !== undefined) {
-      // Body purge: null out body_text/body_html, set body_purged_at.
-      // We only update rows that aren't already purged to keep the
-      // count meaningful.
-      try {
-        const r = await this.deps.inboxPrisma.receivedEmail.updateMany({
-          where: { received_at: { lt: bodyCutoff }, body_purged_at: null },
-          data: { body_text: null, body_html: null, body_purged_at: startedAt },
-        });
-        stats.bodies_purged = r.count;
-      } catch (err) {
-        stats.errors.push(`body purge: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      // Hard-delete old metadata.
-      try {
-        const r = await this.deps.inboxPrisma.receivedEmail.deleteMany({
-          where: { received_at: { lt: metaCutoff } },
-        });
-        stats.emails_deleted = r.count;
-      } catch (err) {
-        stats.errors.push(`email delete: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
 
     if (this.deps.authPrisma !== undefined) {
       try {

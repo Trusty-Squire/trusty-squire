@@ -64,60 +64,6 @@ async function webCookie(deps: ApiDeps, accountId: string): Promise<string> {
   return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
 }
 
-// Issue a machine token and bind it to `accountId`. There's no signup
-// quota anymore — provisioning is free during beta.
-async function pairedToken(deps: ApiDeps, app: FastifyInstance, accountId: string): Promise<string> {
-  const res = await app.inject({ method: "POST", url: "/v1/install" });
-  const token = (res.json() as { machine_token: string }).machine_token;
-  await deps.machineTokenStore.markPaired(token, accountId);
-  return token;
-}
-
-function createAlias(app: FastifyInstance, token: string): Promise<{ statusCode: number; body: unknown }> {
-  return app
-    .inject({
-      method: "POST",
-      url: "/v1/inbox/aliases",
-      headers: { "content-type": "application/json", "x-machine-token": token },
-      payload: { account_id: "acct-body-ignored", service: "resend", run_id: "run-1" },
-    })
-    .then((r) => ({ statusCode: r.statusCode, body: r.json() }));
-}
-
-describe("provisioning is free — no signup quota (beta)", () => {
-  let h: Harness;
-  beforeEach(async () => {
-    h = await setup();
-  });
-  afterEach(async () => {
-    await h.app.close();
-  });
-
-  it("a paired token creates aliases freely — many signups, no 402", async () => {
-    const acct = await h.deps.accountStore.createAccount("free@test.dev", "Free");
-    const token = await pairedToken(h.deps, h.app, acct.id);
-    // Well past the old free limit (10): every signup still succeeds. Unique
-    // run_id per call so each is a distinct alias, not a duplicate.
-    for (let i = 0; i < 13; i++) {
-      const res = await h.app.inject({
-        method: "POST",
-        url: "/v1/inbox/aliases",
-        headers: { "content-type": "application/json", "x-machine-token": token },
-        payload: { account_id: "acct-body-ignored", service: "resend", run_id: `run-${i}` },
-      });
-      expect(res.statusCode, `iteration ${i}`).toBe(201);
-    }
-  });
-
-  it("a canceled/free account is not paywalled either", async () => {
-    const acct = await h.deps.accountStore.createAccount("ex@test.dev", "Ex");
-    const token = await pairedToken(h.deps, h.app, acct.id);
-    await h.deps.accountStore.setSubscription(acct.id, { subscription_status: "canceled" });
-    const res = await createAlias(h.app, token);
-    expect(res.statusCode).toBe(201);
-  });
-});
-
 describe("billing — Stripe webhook", () => {
   let h: Harness;
   beforeEach(async () => {

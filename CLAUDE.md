@@ -19,49 +19,48 @@ and `operate_finish_task`/`operate_finish`; Trusty Squire supplies the scoped
 browser, DOM/screenshot observations, vault extraction, and registry hints.
 Account-bound, vault-backed. Provisioning is free during beta (no signup quota).
 Closed-loop with the skill registry: successful runs publish a Skill that
-subsequent provisions replay in ~30s instead of the bot's ~6min.
+subsequent provisions replay in ~30s instead of the ~6min a from-scratch
+host-driven run takes.
 
-The hand-authored manifest + mandate-engine path was sunset in 0.8, and
-the old async signup tool has now been removed from the public MCP surface.
-The browser driver covered every service the team would have written a native
-adapter for, faster than the manifest work paid for itself.
+The hand-authored manifest + mandate-engine path was sunset in 0.8, the
+old async signup tool was removed from the public MCP surface, and the
+**autonomous self-driving "universal bot" (`agent.ts`) was retired** — the
+host agent now does the planning over the operator-driver toolkit, so there
+is no in-process LLM planner or circuit breaker to maintain. The operator
+driver covers every service the team would have written a native adapter
+for, faster than the manifest work paid for itself.
 
 **Tech stack:** TypeScript monorepo, pnpm workspaces, Fastify API,
 Playwright (headless Chromium), Prisma + Postgres, MCP SDK,
 OpenRouter for LLM, Resend for inbound + outbound mail.
 
-## Objective Functions (what this project optimizes for)
+## Objective Function (what this project optimizes for)
 
-Trusty Squire runs an autonomous self-improving loop. **Two objective
-functions** define "better" — every autonomous run, and most feature work,
-should move at least one of them up and neither down:
+**There is one objective function: maximize the probability that the
+project successfully executes the signup/provision the user actually
+asked for.** Every run, and most feature work, should move this up and
+nothing else down.
 
-1. **OF#1 — maximize the number of skills in the skill registry.** More
-   active skills = more services a user provisions via fast (~30s) replay
-   instead of the ~6min universal bot. Grown by the discover→auto-promote
-   path: a virgin signup success on an uncovered service synthesizes +
-   publishes a skill. Measured as the registry's active-skill count.
-2. **OF#2 — lift the provision success rate the housekeeper sees on
-   discovery runs.** A higher virgin-signup success rate means the bot
-   generalizes to more of the long tail (and feeds OF#1). Measured as
-   `discover_succeeded / discover_attempted` per heal pass.
+- "The signup the user needs" is the unit — not an abstract registry
+  count. For a simple service that's one account+key. For a **composite
+  navigation case (e.g. provisioning GCP) it is a nested chain of
+  multiple provisions** that all have to land for the task to count as
+  done; the objective is the probability the *whole* chain completes,
+  not any single hop.
+- The skill registry and the auto-promote loop are **means, not the
+  end** — a published skill matters only because replaying it raises the
+  success probability (and cuts a ~6min from-scratch run to a ~30s
+  replay) on the next request for that service. Grow the registry when
+  it lifts that probability; don't optimize skill count for its own sake.
 
-**How they're driven + monitored:** the daily **verify pass** (`ts-housekeeper`,
-now its own repo `Trusty-Squire/trusty-squire-housekeeper`) keeps the registry
-honest — promote skills that still work, demote ones that don't. New-skill growth
-(OF#1) now comes from **auto-promote on real provisions** (the bot/host-driven
-`provision_*` captures), NOT a housekeeper discover sweep.
-
-> ⚠️ **OF framing needs a strategic revisit (2026-06-26).** The codex-verify
-> refactor deleted the housekeeper's proactive **discover** sweep, so OF#2 as
-> defined ("`discover_succeeded / discover_attempted` per heal pass") no longer
-> has a housekeeper-driven source — discovery moved to on-provision auto-promote.
-> OF#1 (active-skill count) still stands. Re-derive OF#2 against the new model
-> before relying on it.
-
-**Honest tension:** OF#1 and OF#2 can pull against each other — as the bot
-covers the easy services, the residual discovery queue gets harder, so OF#2
-can dip even while OF#1 rises. Read them together, not in isolation.
+**How it's driven + monitored:** every host-driven provision capture
+feeds **auto-promote on real provisions** (`provision_*` captures), which
+publishes a skill on a virgin success. The daily **verify pass**
+(`ts-housekeeper`, now its own repo
+`Trusty-Squire/trusty-squire-housekeeper`) keeps the registry honest —
+promote skills that still work, demote ones that don't — so replay stays
+a reliable contributor to the success probability rather than a source of
+silent failures.
 
 ## Current State
 
@@ -91,8 +90,14 @@ can dip even while OF#1 rises. Read them together, not in isolation.
 - **Retention cron** (hourly, in-process). Bodies → null at 7d,
   metadata → delete at 90d, pairing tokens → delete at 1h, LLM events
   → delete at 30d. Structured JSON log per run.
-- **Universal signup bot** (`apps/mcp/src/bot/` — bundled into the mcp
-  package, no longer a separate npm package):
+- **Operator-driver toolkit** (`apps/mcp/src/bot/` — bundled into the mcp
+  package, no longer a separate npm package). NOT an autonomous bot: the
+  **host agent** (Claude Code / Codex / etc.) plans each step via the
+  `operate_*` MCP tools; this toolkit supplies the scoped browser, the
+  observation/extraction/replay primitives, and the anti-detection layer.
+  The self-driving `agent.ts` planner + its 15-call circuit breaker were
+  retired with the `retire-universal-bot` work — planning now lives in the
+  host agent, not in-process. What the toolkit provides:
   - Stealth (`playwright-extra` + stealth plugin) patches ~17
     client-side tells (navigator.webdriver, etc.).
   - **Browser-automation fingerprinting is mitigated by `patchright`**
@@ -114,11 +119,10 @@ can dip even while OF#1 rises. Read them together, not in isolation.
     (`cf-turnstile-response` or `g-recaptcha-response`) populated, up
     to 30s timeout. Returns `captcha_blocked` on timeout so the MCP
     tool can surface a clear status to the user.
-  - Claude vision form planner with parse-failure premium fallback
-    (Gemini Flash → GPT-4o)
-  - Long-poll inbox client, verification-link click, post-verify
-    navigation loop
-  - Hard cap of 15 LLM calls per signup (circuit breaker)
+  - Long-poll inbox client, verification-link click, and post-verify
+    navigation primitives the host agent drives via `operate_*`.
+  - DOM/screenshot observation + vault-backed credential extraction +
+    operator-recipe replay (`operate_use`) the host agent composes per step.
 - **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
   1. Issues a machine token (bot-internal credential for LLM proxy +
@@ -189,19 +193,19 @@ can dip even while OF#1 rises. Read them together, not in isolation.
 
 ## Active Sprint/Task
 
-**Autonomous self-improving loop:** the provision bot's named-state machine,
-per-state retry policy, and single escalation condition live in the
-state-classifier + policy code; the skill-promotion pipeline (virgin success →
-registry skill) is the "Skill-Promotion Pipeline" section of `AGENTS.md`. State
-classifier + policy: `packages/skill-schema/src/provision-state.ts` +
-`provision-policy.ts`.
+**Self-improving loop:** the host agent drives each provision step and its
+retries/escalation via `operate_*` (there is no in-package state machine
+anymore — the old `provision-state.ts`/`provision-policy.ts` classifier died
+with the autonomous bot). The skill-promotion pipeline (virgin success →
+registry skill) is the "Skill-Promotion Pipeline" section of `AGENTS.md`; the
+mechanical promote/demote rule lives in `apps/registry/src/skill-store.ts`.
 
 **0.7.0 closed loop shipped (rc.9).** Skill Promoter end-to-end:
-universal-bot success → captured signup → synthesizer-produced
+host-driven provision success → captured signup → synthesizer-produced
 skill → registry → replay on subsequent provisions. Phases 1-8 +
-the polish audit complete. The Tier 2 closed loop is now in
-production; Tier 1 (universal bot) stays the fallback when no
-skill exists or replay fails.
+the polish audit complete. The closed loop is in production; a
+from-scratch host-driven operator run is the fallback when no skill
+exists or replay fails.
 
 **Multi-credential scaffolding landed (Phases B/C/D/G of
 `docs/DESIGN-multi-credential.md`).** Schema + synthesizer +
@@ -276,9 +280,11 @@ can be tuned against real data.
 trusty-squire/
 ├── apps/
 │   ├── api/         Fastify API. Prisma schema in prisma/.
-│   ├── mcp/         The MCP server users install. Bundles the universal
-│   │                signup bot at src/bot/ (Playwright + Claude vision,
-│   │                tiered captcha). The bot is NOT a separate package.
+│   ├── mcp/         The MCP server users install. Bundles the
+│   │                operator-driver toolkit at src/bot/ (scoped Playwright
+│   │                browser, observation/extraction/replay primitives,
+│   │                tiered captcha). Host-agent-driven; NOT a separate
+│   │                package, NOT an autonomous bot.
 │   ├── registry/    Skill registry — published Skill recipes + the
 │   │                housekeeper backplane (extract failures, bot-failure
 │   │                aggregation, compat-score). Sole publish surface
@@ -298,7 +304,6 @@ pnpm -F @trusty-squire/api typecheck
 pnpm -F @trusty-squire/api test
 pnpm -F @trusty-squire/mcp build       # builds the bundled bot too
 pnpm -F @trusty-squire/mcp test        # mcp + bot tests, one suite
-pnpm -F @trusty-squire/inbox prisma:generate
 pnpm -F @trusty-squire/api prisma:generate
 ```
 
@@ -330,8 +335,8 @@ been removed — only the `*.fly` Dockerfiles remain.
 ### npm distribution (the install path)
 
 **One package** ships to the public npm registry: `@trusty-squire/mcp`
-— the MCP server, install CLI, and the bundled universal signup bot
-(`src/bot/`). Current published version: `@trusty-squire/mcp@0.9.19-rc.24`.
+— the MCP server, install CLI, and the bundled operator-driver toolkit
+(`src/bot/`). Latest stable is `1.0.0` (next dev line `1.0.1-rc.x`).
 
 The bot used to be a separate `@trusty-squire/universal-bot` package.
 That split caused a recurring bug: a bot fix shipped to git, `mcp` was
@@ -465,7 +470,7 @@ inbox database on the next deploy.
 Lives at `apps/registry/`. Separate Fly app:
 `trusty-squire-registry`. Holds skills, capture sidecars, replay
 outcomes, extract failures. The mcp package is its only public
-client (universal bot reports outcomes; skill CLI publishes +
+client (host-driven provisions report outcomes; skill CLI publishes +
 manages skills).
 
 **Why separate from the rest of the API:** different deployment
@@ -533,7 +538,7 @@ extensions:
     enabled: true
     bundled: false
     name: trusty-squire
-    description: Trusty Squire universal signup bot
+    description: Trusty Squire operator-driver MCP server
     envs: {}
     timeout: 300
 ```
@@ -553,7 +558,6 @@ extension state on launch and won't reload mid-session.
 | `UNIVERSAL_BOT_PREFER_CHEAP` | `true` | Gemini Flash primary, premium fallback only on parse-failure |
 | `UNIVERSAL_BOT_LLM_TIER` | `cheap` | Primary LLM tier — `cheap`, `premium`, or `free`. `free` routes through OpenRouter's free models with a paid escape-hatch; the closed-loop verifier worker sets this. End-user installs leave it unset. |
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver. When set, runCaptchaGate falls through to 2Captcha after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). |
-| `UNIVERSAL_BOT_MAX_LLM_CALLS` | `15`   | Per-signup circuit breaker |
 | `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. (The old operator-housekeeper egress/proxy model was retired with the codex-verify refactor — the housekeeper no longer drives its own browser.) |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
 | `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + inbox alias service |
@@ -589,8 +593,6 @@ housekeeper repo.
 | `LLM_PROXY_FREE_MODEL` | `openrouter/free` | Free-tier primary — OpenRouter's curated free router (verifier worker). Survives the sunset-and-replace churn that took out the prior pinned-ID setup (0.8.2-rc.9). |
 | `LLM_PROXY_FREE_FALLBACK_1` | `google/gemini-flash-1.5-8b` | Cheap paid backstop. Reasoning-model variability can give the router an empty-content reply; this catches that case instead of falling to the full paid escape. |
 | `LLM_PROXY_FREE_ESCAPE` | `google/gemini-2.0-flash-001` | Paid escape-hatch when the router + cheap backstop both fail. Costs less than cheap-tier defaults. |
-| `INBOX_BODY_RETENTION_DAYS` | `7` | Body_text/html nulled after this many days |
-| `INBOX_METADATA_RETENTION_DAYS` | `90` | ReceivedEmail rows deleted after this |
 | `PAIRING_TOKEN_RETENTION_HOURS` | `1` | PairingToken row sweep |
 | `LLM_EVENT_RETENTION_DAYS` | `30` | LLMUsageEvent row sweep |
 | `VAULT_AUDIT_RETENTION_DAYS` | `365` | VaultAuditEvent row sweep (the who-touched-my-keys trail). Kept a year — long enough for a compromise investigation, bounded so it doesn't grow forever. |

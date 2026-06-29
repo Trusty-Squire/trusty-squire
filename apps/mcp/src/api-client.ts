@@ -82,6 +82,9 @@ export interface VaultCredentialSummary {
   key_name: string | null;
   type: string | null;
   allowed_hosts: string[];
+  auth_strategy: string | null;
+  signin_url: string | null;
+  login_hosts: string[];
   created_at: string;
   last_retrieved_at: string | null;
   retrieval_count: number;
@@ -137,12 +140,18 @@ export class ApiClient {
     env_var_suggestion?: string;
     type?: string;
     auth_shape?: string;
+    auth_strategy?: "api_key" | "username_password";
+    signin_url?: string;
+    login_hosts?: string[];
     observed_hosts?: string[];
   }): Promise<{
     reference: string;
     service: string;
     label: string;
     field_names: string[];
+    auth_strategy: string | null;
+    signin_url: string | null;
+    login_hosts: string[];
     allowed_hosts: string[];
     created_at: string;
     updated: boolean;
@@ -158,6 +167,16 @@ export class ApiClient {
     http: { method: string; url: string; headers?: Record<string, string>; body?: string; query?: Record<string, string> };
   }): Promise<{ response: { status: number; headers: Record<string, string>; body: string; truncated: boolean } }> {
     return this.post("/v1/vault/use", input);
+  }
+
+  async browserFillCredential(input: {
+    reference?: string;
+    service?: string;
+    current_host: string;
+    fields: string[];
+    encrypted_response_public_key: string;
+  }): Promise<{ reference: string; encrypted_fields: Record<string, string> }> {
+    return this.post("/v1/vault/browser-fill", input);
   }
 
   // ── Egress grants: a deployed app uses a vaulted credential via the proxy ──
@@ -535,4 +554,3 @@ export async function shortenVncUrl(
     return longUrl;
   }
 }
-

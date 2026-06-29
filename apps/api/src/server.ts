@@ -10,9 +10,7 @@ import { makeAuthMiddleware } from "./auth/middleware.js";
 import { registerInstallRoute } from "./routes/install.js";
 import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
 import { registerAdminFunnelRoute } from "./routes/admin-funnel.js";
-import { registerInboxRoute } from "./routes/inbox.js";
 import { registerLLMRoute } from "./routes/llm.js";
-import { registerResendWebhookRoute } from "./routes/resend-webhook.js";
 import { registerBillingRoute } from "./routes/billing.js";
 import { registerStripeWebhookRoute } from "./routes/stripe-webhook.js";
 import { stripeClientFromEnv } from "./services/stripe-client.js";
@@ -94,20 +92,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
 
   await fastify.register(fastifyCookie);
 
-  // Add raw body parser for email webhooks
-  fastify.addContentTypeParser('message/rfc822', { parseAs: 'buffer' }, (req, body, done) => {
-    done(null, body);
-  });
-
-  // Add text/plain parser for SNS notifications
-  fastify.addContentTypeParser('text/plain', { parseAs: 'string' }, (req, body: string | Buffer, done) => {
-    try {
-      const text = typeof body === 'string' ? body : body.toString();
-      done(null, JSON.parse(text));
-    } catch (err) {
-      done(err as Error, undefined);
-    }
-  });
 
   // Replace the default JSON parser with one that also stashes the raw
   // body string on req.rawBody. Webhook signature verification (Svix /
@@ -159,12 +143,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
 
   await fastify.register(registerAuthRoute, { deps, requireWeb: auth.requireWeb });
   await fastify.register(registerOAuthRoute, { deps });
-  await fastify.register(registerResendWebhookRoute, {
-    deps: {
-      resendHandler: deps.resendHandler,
-      ...(opts.emailForwarder !== undefined ? { emailForwarder: opts.emailForwarder } : {}),
-    },
-  });
   await fastify.register(registerInstallRoute, {
     deps: {
       machineTokenStore: deps.machineTokenStore,
@@ -191,13 +169,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   });
   await fastify.register(registerWorkspaceInboxRoute, {
     deps: { machineTokenStore: deps.machineTokenStore },
-  });
-  await fastify.register(registerInboxRoute, {
-    deps: {
-      inbox: deps.inbox,
-      machineTokenStore: deps.machineTokenStore,
-      ...(deps.now !== undefined ? { now: deps.now } : {}),
-    },
   });
   // Billing — Stripe Checkout/Portal (web-authed) + the webhook that flips
   // subscription_status. stripeClient is null when STRIPE_SECRET_KEY is
