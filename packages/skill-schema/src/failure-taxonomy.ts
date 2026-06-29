@@ -41,9 +41,9 @@ export const INFRA_FAILURE_KINDS: ReadonlySet<string> = new Set([
 // Genuine skill staleness — a recorded step's selector/action/validator/
 // extraction no longer matches the live page. This is the ONLY class that
 // advances the demote counter. Kept a TIGHT explicit allowlist: the
-// replay path's terminal failures (replay-skill.ts: step_failed,
-// validator_failed, extraction_failed) plus the discover form-submit
-// failure. Everything not listed here defaults to transient.
+// replay path's terminal failures (step_failed, validator_failed,
+// extraction_failed) plus the discover form-submit failure. Everything
+// not listed here defaults to transient.
 export const ROT_FAILURE_KINDS: ReadonlySet<string> = new Set([
   "step_failed",
   "validator_failed",

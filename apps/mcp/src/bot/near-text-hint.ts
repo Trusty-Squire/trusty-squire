@@ -1,13 +1,13 @@
 // near-text-hint.ts — shared disambiguator for ambiguous inventory
-// matches. Used by both the synthesizer (promote-to-skill.ts) when it
-// picks a near_text_hint to emit, and the replay engine
-// (replay-skill.ts) when it applies one at replay time.
+// matches. Used by the synthesizer (promote-to-skill.ts) when it picks a
+// near_text_hint to emit, and by recipe replay (operate_use) when it
+// applies one.
 //
-// 0.8.3-rc.1 — extracted from replay-skill.ts so the synthesizer can
-// validate its chosen near_text_hint via the same scoring logic that
-// will run at replay time. Without this, a chosen hint that looked
-// plausible in the local inventory window could fail to disambiguate
-// at replay (or pick the wrong duplicate).
+// Kept as its own module so the synthesizer can validate its chosen
+// near_text_hint via the same scoring logic that runs at replay time.
+// Without this, a chosen hint that looked plausible in the local
+// inventory window could fail to disambiguate at replay (or pick the
+// wrong duplicate).
 
 import type { InteractiveElement } from "./browser.js";
 

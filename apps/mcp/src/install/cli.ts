@@ -511,6 +511,16 @@ async function connect(args: Argv): Promise<void> {
     "Opening the Trusty Squire install page in a browser. " +
       "The page walks you through signing in with Google and (optionally) GitHub.",
   );
+  // If the preflight keeps missing a valid session, connect re-opens this page
+  // every run. The usual cause on a headless box is an ephemeral OS keychain
+  // that doesn't persist the session between logins — point people at the
+  // durable file backend so they don't loop.
+  if ((await openSessionStorage()).backendName() === "keytar") {
+    ui.hint(
+      `If ${ui.code("connect")} re-opens this page on every run, your OS keychain may not be ` +
+        `persisting the session. Set ${ui.code("TRUSTY_SQUIRE_SESSION_FILE=1")} (globally) to use a durable session file.`,
+    );
+  }
 
   // --force-relogin means "redo the OAuth dance from scratch". The scoped
   // form clears only one provider; bare --force-relogin is the full-profile
@@ -568,8 +578,8 @@ async function connect(args: Argv): Promise<void> {
     task: () => detectAsn(),
   });
 
-  // The machine token is the bot-internal credential the universal
-  // signup bot uses for the LLM proxy and the inbox alias service. It
+  // The machine token is the bot-internal credential the operator driver
+  // uses for the LLM proxy and the operator inbox-OTP service. It
   // is NOT the user's auth — the agent_session_token (issued via the
   // browser confirm flow below) is. The MCP server reads both from the
   // session file.

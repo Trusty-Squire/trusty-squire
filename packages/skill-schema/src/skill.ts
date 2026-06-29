@@ -436,8 +436,8 @@ const ExtractLabeledStepSchema = z
 // must be entered before the account is created (zilliz, deepseek, axiom).
 // The code is DYNAMIC — a recorded value is useless on replay — and the OTP
 // input frequently has no stable label/name (single-digit boxes, headless
-// inputs), so a `fill` step can't represent it. This step tells the replay
-// engine: poll the run's inbox alias for the verification email, extract the
+// inputs), so a `fill` step can't represent it. This step tells replay:
+// read the verification email from the user's own inbox, extract the
 // code, and type it into the page's code input (found heuristically, or via
 // the optional label_hint when the field is labeled). The subsequent
 // Verify/Continue click is a separate `click` step.
@@ -563,8 +563,8 @@ export const SkillCredentialSpecSchema = z
     //     captured steps. Works for ~80% of dev SaaS.
     //
     //   - "show_once_at_creation" → bypass replay entirely; treat
-    //     every provision as a fresh signup (new email alias →
-    //     new account → capture the secret while it's visible).
+    //     every provision as a fresh signup (new account →
+    //     capture the secret while it's visible).
     //     Avoids accumulating-N-failed-rotation-attempts and email-
     //     OTP gates that gate rotation.
     //

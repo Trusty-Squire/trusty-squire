@@ -1,5 +1,25 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.2 (2026-06-29)
+
+**`connect` reliability.**
+- `connect` no longer re-opens the install/noVNC page every run on headless
+  boxes where the OS keychain is present-but-ephemeral: set
+  `TRUSTY_SQUIRE_SESSION_FILE=1` (globally) to use the durable
+  `~/.config/trusty-squire/session.json` instead of the keychain. `connect`
+  now prints a hint pointing at this when the keychain backend is in use.
+- Install page: the GitHub step reflects the **bot's** live GitHub session, not
+  a stale account link — it shows "linked — sign in to enable" until the OAuth
+  runs in the bot's Chrome (which is what actually lets the bot act on GitHub),
+  and the contradictory "connected but might not work" copy is gone.
+
+**Housekeeping.**
+- Dropped stale alias/pricing copy from this README (the Squire-alias inbound
+  mail and the Pro tier are gone — verification reads your own inbox; beta is
+  free).
+- Retired the inbound-mail subsystem end to end (package + DB + secrets) and
+  swept the leftovers; the API owns its own Prisma tooling now.
+
 ## 1.0.1 (2026-06-29)
 
 Promotes the 1.0.1-rc line to stable. Highlights since 1.0.0 (full detail in the

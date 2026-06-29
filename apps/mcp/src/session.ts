@@ -28,8 +28,8 @@ function resolveFallbackFile(): string {
 
 // Session storage holds the account-bound credentials the squire needs
 // to act on a user's behalf:
-//   - machine_token: bot-internal credential for the LLM proxy + inbox
-//     alias service, bound to the account at claim time.
+//   - machine_token: bot-internal credential for the LLM proxy + the
+//     operator inbox-OTP service, bound to the account at claim time.
 //   - agent_session_token: bearer token the MCP server presents on
 //     vault writes, mandate-aware tool calls, and any other authed API
 //     surface.
@@ -78,11 +78,24 @@ export interface SessionStorage {
 export async function openSessionStorage(
   options: { preferFile?: boolean } = {},
 ): Promise<SessionStorage> {
-  if (options.preferFile !== true) {
-    const keytar = await tryLoadKeytar();
-    if (keytar !== null) return new KeytarStorage(keytar);
+  if (options.preferFile === true || preferFileFromEnv()) {
+    return new FileStorage();
   }
+  const keytar = await tryLoadKeytar();
+  if (keytar !== null) return new KeytarStorage(keytar);
   return new FileStorage();
+}
+
+// Escape hatch for boxes where the OS keychain is present-but-ephemeral —
+// a headless Linux server's per-login gnome-keyring "session" collection is
+// the common case: keytar's write/delete probe passes (so it gets picked),
+// but the saved session is wiped between SSH logins, leaving `connect`
+// re-pairing on every run. Set TRUSTY_SQUIRE_SESSION_FILE=1 to force the
+// durable 0600 session.json instead. Set it GLOBALLY (shell profile / the
+// service env) so `connect` AND the spawned MCP server agree on the backend.
+function preferFileFromEnv(): boolean {
+  const v = (process.env.TRUSTY_SQUIRE_SESSION_FILE ?? "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
 }
 
 async function tryLoadKeytar(): Promise<KeytarShape | null> {
