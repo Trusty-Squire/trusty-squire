@@ -11,10 +11,10 @@ primary_region = "iad"
 # investigation). release_command runs in the release image with secrets
 # available, so AUTH_DATABASE_URL resolves. Additive changes auto-apply;
 # a destructive change makes `db push` exit non-zero and aborts the
-# deploy rather than drifting silently. The inbox schema lives in a
-# separate DB and is managed with `prisma migrate deploy` out of band.
+# deploy rather than drifting silently. Uses the API's own prisma CLI
+# (apps/api owns it since the inbox package was retired).
 [deploy]
-  release_command = "/app/packages/inbox/node_modules/.bin/prisma db push --schema=/app/apps/api/prisma/schema.prisma --skip-generate"
+  release_command = "/app/apps/api/node_modules/.bin/prisma db push --schema=/app/apps/api/prisma/schema.prisma --skip-generate"
 
 [env]
   API_PORT = "8080"
