@@ -58,7 +58,6 @@ export default function Page() {
             Trusty Squire
           </Link>
           <div className="nav-r">
-            <Link href="/pricing">Pricing</Link>
             <a href={GITHUB_URL}>GitHub</a>
             <Link className="signin" href="/login">
               Sign in
@@ -177,7 +176,6 @@ export default function Page() {
               Trusty Squire
             </Link>
             <div className="foot-l">
-              <Link href="/pricing">Pricing</Link>
               <Link href="/privacy">Privacy</Link>
               <Link href="/terms">Terms</Link>
               <a href={NPM_URL}>npm</a>
