@@ -1,7 +1,6 @@
 // email-verification.ts — choose which link in a verification email to click.
-// Carved out of agent.ts (the retired universal-bot monolith); the provision
-// session uses this to follow the confirm/activate link without navigating to
-// an unsubscribe or asset URL.
+// The provision session uses this to follow the confirm/activate link without
+// navigating to an unsubscribe or asset URL.
 
 // Choose which link in a verification email to click. Scores each URL
 // by keyword and picks the best — but only if it scored positive.

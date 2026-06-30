@@ -1,7 +1,7 @@
 // provision-types.ts — the two shared result/step types the provision
 // pipeline passes between the capture, synthesis, replay, and telemetry
-// modules. Carved out of agent.ts (the retired universal-bot monolith) so
-// the live modules depend on these shapes without pulling in the bot.
+// modules. Kept standalone so the live modules depend on these shapes
+// without pulling in the heavier bot internals.
 //
 // `SignupResult` is the terminal outcome of a provision run; `PostVerifyStep`
 // is one planner-emitted action in the post-verification navigation loop.

@@ -1,8 +1,7 @@
 // oauth-detect.ts — browser-free inventory predicates for the OAuth-first
 // signup path: find a "Sign in with <provider>" affordance, and decide whether
-// a page is already an authenticated (post-login) surface. Carved out of
-// agent.ts (the retired universal-bot monolith); skill replay uses these to
-// route between OAuth, form-fill, and key-extraction.
+// a page is already an authenticated (post-login) surface. Skill replay uses
+// these to route between OAuth, form-fill, and key-extraction.
 
 import type { InteractiveElement } from "./browser.js";
 import { OAUTH_PROVIDERS, type OAuthProviderId } from "./oauth-providers.js";
