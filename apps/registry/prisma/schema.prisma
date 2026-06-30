@@ -302,7 +302,7 @@ model ExtractFailureSnapshot {
 // ProvisionEvent — one row per provision request across ALL dispatch
 // paths (replay-served, replay-fell-back, no-skill-bot). Renamed from
 // ProvisionAttempt (bot-only) when the model widened; see
-// docs/DESIGN-provision-event-dashboard.md. `status` is preserved so
+// docs/ARCHITECTURE.md. `status` is preserved so
 // the compat-score derivation stays untouched.
 model ProvisionEvent {
   id           String   @id @default(cuid())

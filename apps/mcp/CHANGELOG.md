@@ -1,5 +1,39 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.9 (2026-06-30)
+
+Promotes the 1.0.9-rc line to stable. Full detail in the rc.1 / rc.2 entries below.
+
+- fix(mcp): `connect` provider-session probe launches the system Chrome
+  (`channel:"chrome"`) — fixes the spurious "Provider session check failed
+  (continuing)" ✗ on every connect. (#278)
+- fix(mcp): operator-recipes record a stable `entry_url` and drop single-use
+  links, so `operate_use` replays no longer open on a dead token page. (#280)
+- fix(captcha): configured 2Captcha token solve counts the gate as settled;
+  invisible reCAPTCHA passes the `invisible` flag; v3 escalates to the solver
+  only when a key is configured (else it stays a `captcha_wall`). (#279)
+- docs: canonical `docs/ARCHITECTURE.md` + docs index; stale public design/E2E
+  docs removed. (#279)
+
+## 1.0.9-rc.2 (2026-06-30)
+
+- fix(captcha): a successful 2Captcha token solve now counts the gate as
+  settled, and invisible reCAPTCHA passes the `invisible` flag to the solver
+  so the right widget mode is solved. (#279)
+- docs: add canonical `docs/ARCHITECTURE.md` + docs index; remove stale public
+  design/E2E planning docs and repoint internal references at the canonical
+  doc. (#279)
+
+## 1.0.9-rc.1 (2026-06-30)
+
+- fix(mcp): the `connect` provider-session probe now launches the system Chrome
+  (`channel:"chrome"`) like the login flow, instead of reaching for an absent
+  bundled Chromium — fixes the spurious "Provider session check failed
+  (continuing)" ✗ on every connect (the catch also surfaces the real error). (#278)
+- fix(mcp): operator-recipes record a stable `entry_url` and drop single-use
+  links (email-verify / magic / reset tokens) from the trace, so `operate_use`
+  replays no longer open on a dead "invalid or expired token" page. (#280)
+
 ## 1.0.8 (2026-06-30)
 
 Promotes 1.0.8-rc.1 to stable.
@@ -42,7 +76,6 @@ Full detail in the rc.2 / rc.1 entries below.
 Promotes the 1.0.6-rc line to stable: the expanded 10-example "what you can ask
 your squire" marketing section (full detail in the rc.2 entry below). Docs only
 — no code change over 1.0.5.
-
 ## 1.0.6-rc.2 (2026-06-29)
 
 - docs(readme): expand "What you can ask your squire" into a 10-example
@@ -217,7 +250,7 @@ production audit cleared out dead code + stale docs.
   local recipe (goal + text-targeted rail + sealed-slot references + a
   machine-checkable postcondition) and replay it by name — planner-on-rails,
   verified before close (the anti-false-green gate). Secrets are stored as slot
-  references, never values. See `docs/DESIGN-operator-skills.md`.
+  references, never values. See `docs/ARCHITECTURE.md`.
 - Persistent single-session operate-driver harness (`tools/op-driver.mjs`).
 
 **Extraction hardening**
@@ -320,7 +353,7 @@ Prerelease (`next`). connect now proactively fixes a dead GitHub session.
 ## 0.9.19-rc.21 (2026-06-27)
 
 Prerelease (`next`). First slice of the connect/session-validation redesign
-(`docs/DESIGN-connect-session-validation.md`).
+(`docs/ARCHITECTURE.md`).
 
 - **fix(connect):** `--force-relogin=github` on an already-bound account now
   routes straight to a **GitHub-only login** (with the account chooser, since the
@@ -663,7 +696,7 @@ credential-broker moat.
   tools. `parseVerification` (OTP/link parsing) and the targeting/scoping logic
   are unit-tested. Full mcp suite green (2148 passed).
 - Design + remaining hardening (consent-at-install) tracked in
-  `docs/DESIGN-host-planner-perception.md`.
+  `docs/ARCHITECTURE.md`.
 
 ## 0.9.18 (2026-06-24)
 
@@ -1228,7 +1261,7 @@ Operational hardening after the 0.9.0 live run burned a residential exit.
 
 Post-OAuth navigation: deterministic planner, N1 planner wins (eval- AND
 live-validated), an offline eval harness, and a flakiness taxonomy
-(docs/DESIGN-planner-navigation-eval.md).
+(docs/ARCHITECTURE.md).
 
 ### Bot behavior (shipped)
 - **Deterministic planner (temperature 0).** The post-verify navigation planner,

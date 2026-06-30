@@ -1,5 +1,5 @@
 // operator-recipe.ts — Phase A of "user-saved operator workflows as skills"
-// (docs/DESIGN-operator-skills.md). A LOCAL artifact (deliberately NOT the
+// (docs/ARCHITECTURE.md). A LOCAL artifact (deliberately NOT the
 // registry Skill schema yet — that bump is Phase B) that captures a successful
 // operate run so it can be replayed by name.
 //
@@ -92,6 +92,13 @@ export const OperatorRecipeSchema = z
     name: z.string().min(1).max(80),
     schema_version: z.literal(1),
     goal: z.string().min(1).max(300),
+    // The canonical replay entry — the session's START url (the service_url
+    // passed to operate_start). Optional for back-compat with recipes saved
+    // before this field; recipeEntryUrl falls back to the first STABLE trace
+    // goto. This exists because inferring the entry from trace gotos picked up
+    // mid-flow single-use links (a verify-email URL became the entry, so the
+    // replay opened on an expired-token dead page — the plunk-recipe bug).
+    entry_url: z.string().max(2000).optional(),
     allowed_hosts: z.array(z.string().max(253)).max(20).default([]),
     trace: z.array(TraceEntrySchema).max(200),
     secrets: z.array(SecretRefSchema).max(20).default([]),
@@ -251,7 +258,59 @@ export function fillTemplate(
   return { url, missing };
 }
 
+// A URL that carries a ONE-TIME credential in its path/query — email
+// verification links, magic links, password-reset links, signup-confirm
+// tokens. These are single-use: freezing one into a recipe makes the replay
+// open on a dead "invalid or expired token" page (the plunk-recipe bug, where
+// `/auth/verify-email?token=<64-hex>` was captured as a goto AND became the
+// entry). The detector pairs a verification-intent hint with a long opaque
+// token, so stable app URLs (which carry no such token) are never matched.
+const SINGLE_USE_HINT =
+  /(verif|confirm|activate|activation|magic|passwordless|password[-_]?reset|reset[-_]?password|invitation|\binvite\b|one[-_]?time|\boob\b)/i;
+const SINGLE_USE_TOKEN_PARAM =
+  /[?&](?:token|code|key|oobcode|confirmation_token|reset_token|auth|secret|signature|sig|otp|t)=([A-Za-z0-9._-]{16,})/i;
+
+// A long, token-shaped string: not a human word — long, token charset, and
+// mixes letters+digits (so "verify-email" or "confirmation" don't qualify).
+function looksOpaqueToken(s: string): boolean {
+  return (
+    s.length >= 16 &&
+    /^[A-Za-z0-9._-]+$/.test(s) &&
+    /[0-9]/.test(s) &&
+    /[A-Za-z]/.test(s)
+  );
+}
+
+export function isSingleUseUrl(rawUrl: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  const hay = `${u.pathname}${u.search}`;
+  if (!SINGLE_USE_HINT.test(hay)) return false;
+  const tok = hay.match(SINGLE_USE_TOKEN_PARAM)?.[1];
+  if (tok !== undefined && looksOpaqueToken(tok)) return true; // token in the query
+  return u.pathname.split("/").some(looksOpaqueToken); // or in a path segment
+}
+
 export function recipeEntryUrl(recipe: OperatorRecipe): string | null {
-  const firstGoto = recipe.trace.find((t) => t.action.kind === "goto");
-  return firstGoto?.action.url_template ?? null;
+  // Prefer the recipe's canonical entry (the session's start URL). Recipes
+  // synthesized before entry_url existed fall back to the first STABLE trace
+  // goto — skipping single-use verification/magic links, which must never be a
+  // replay entry (opening one lands on an expired-token dead page).
+  if (recipe.entry_url !== undefined && recipe.entry_url.length > 0) {
+    return recipe.entry_url;
+  }
+  const firstStableGoto = recipe.trace.find((t) => {
+    const url = t.action.url_template;
+    return (
+      t.action.kind === "goto" &&
+      url !== undefined &&
+      url.length > 0 &&
+      !isSingleUseUrl(url)
+    );
+  });
+  return firstStableGoto?.action.url_template ?? null;
 }

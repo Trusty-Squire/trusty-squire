@@ -1,5 +1,5 @@
 // failure-stage.ts — the canonical terminal-failure taxonomy
-// (docs/DESIGN-planner-navigation-eval.md, B1). One classifier, one enum,
+// (docs/ARCHITECTURE.md, B1). One classifier, one enum,
 // used by the A2 run-outcome sidecar AND any telemetry sink, so the stage
 // labels can't drift across call sites.
 //

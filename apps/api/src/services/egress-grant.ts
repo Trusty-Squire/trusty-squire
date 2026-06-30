@@ -7,7 +7,7 @@
 // injection, and an in-memory store. The Fastify egress route + the
 // grant_app_access MCP tool build on top. Provider-agnostic by construction: the
 // auth_shape table covers bearer / header / query, so any vaulted credential
-// works (the "OpenRouter-only" framing was wrong — see DESIGN-egress-grants.md).
+// works (the "OpenRouter-only" framing was wrong — see docs/ARCHITECTURE.md).
 
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 

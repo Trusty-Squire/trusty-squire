@@ -96,7 +96,7 @@ model CaptchaEvent {
   // Which stealth launcher ran: "baseline" (vanilla playwright) or
   // "cdp_hardened" (rebrowser-playwright-core, Runtime.enable leak
   // closed). null = pre-CDP-hardening client. The A/B tag for measuring
-  // whether the patch lowers block rate — DESIGN-antibot-hardening.md.
+  // whether the patch lowers block rate — docs/ARCHITECTURE.md.
   stealth_profile    String?
 
   @@index([occurred_at])
@@ -287,7 +287,7 @@ model VaultAuditEvent {
 
 // Egress grant — a standing, revocable token a deployed workload holds to
 // call a provider through the injecting proxy, so the raw vault credential
-// never leaves the server (v1a of Egress Grants; see DESIGN-egress-grants.md).
+// never leaves the server (v1a of Egress Grants; see docs/ARCHITECTURE.md).
 // id is `g_<hex>` (not a ULID), so no VarChar(26). Only the token HASH is
 // stored — the token itself is shown to the caller exactly once at mint.
 model EgressGrant {

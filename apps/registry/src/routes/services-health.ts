@@ -127,7 +127,7 @@ export const registerServicesHealthRoute: FastifyPluginAsync<
         // Decision 12: a post with no strategy fields is a legacy
         // (pre-event) client, which only ever ran the bot — default
         // both legs to "bot". Version-gated provenance is a deferred
-        // TODO (see docs/DESIGN-provision-event-dashboard.md).
+        // TODO (see docs/ARCHITECTURE.md).
         initial_strategy: d.initial_strategy ?? "bot",
         final_strategy: d.final_strategy ?? "bot",
         ...(d.replay_outcome !== undefined ? { replay_outcome: d.replay_outcome } : {}),

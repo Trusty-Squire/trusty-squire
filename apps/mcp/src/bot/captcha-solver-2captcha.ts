@@ -153,12 +153,16 @@ export class TwoCaptchaSolver {
     // Optional: data-action for reCAPTCHA v2 invisible / v3-styled
     // challenges. 2Captcha returns an action-bound token when set.
     action?: string;
+    // Invisible reCAPTCHA uses the same 2Captcha method as v2 checkbox, but
+    // the provider needs the invisible flag to solve the right widget mode.
+    invisible?: boolean;
   }): Promise<TwoCaptchaResult> {
     return this.submitAndPoll({
       method: "userrecaptcha",
       googlekey: input.sitekey,
       pageurl: input.pageUrl,
       ...(input.action !== undefined ? { action: input.action } : {}),
+      ...(input.invisible === true ? { invisible: "1" } : {}),
     });
   }
 

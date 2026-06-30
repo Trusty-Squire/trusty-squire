@@ -2,8 +2,8 @@
 
 Operational reference for the credential vault: the security + lifecycle
 surface, master-key custody, retention, and backup/DR. Companion to
-`DESIGN-vault-operations-v2.md` (which captures the write-only-sink design
-decisions) — this doc is the *runbook*, not the design.
+`docs/ARCHITECTURE.md`, which is the canonical system overview. This doc is
+the runbook, not the design history.
 
 Landed in the 2026-05-30 vault-hardening sweep. Everything below is
 account-scoped and, for the human paths, web-session only.

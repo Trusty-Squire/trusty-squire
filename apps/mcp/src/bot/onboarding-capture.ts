@@ -14,7 +14,7 @@
 // harness loads only cases that have it.
 //
 // **0.7.0 — integrity chain.** The Skill Promoter (docs/
-// DESIGN-skill-promoter.md, finding E1) signs its output skills but
+// docs/ARCHITECTURE.md, finding E1) signs its output skills but
 // trusted unsigned local JSON as input. Anyone running
 // `pnpm skill:promote` could hand-edit `r*.json` before publishing,
 // and the signature would attest to the tampered output. Fix: each

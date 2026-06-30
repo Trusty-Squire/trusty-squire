@@ -148,7 +148,7 @@ describe("POST /v1/captcha-events", () => {
     expect(captchaStore.events[0]?.captcha_variant).toBe("unknown");
   });
 
-  // CDP-hardening A/B tag (DESIGN-antibot-hardening.md). The route
+  // CDP-hardening A/B tag (docs/ARCHITECTURE.md). The route
   // allowlists the two profiles; anything else (or absence) records
   // null so the A/B dimension stays clean.
   it("records stealth_profile=cdp_hardened when the bot reports it", async () => {

@@ -1,6 +1,6 @@
 // skill.ts — Zod schema for Tier-2 Learned Skills.
 //
-// See docs/DESIGN-skill-promoter.md for the rationale. In short: a Skill
+// See docs/ARCHITECTURE.md for the rationale. In short: a Skill
 // is a structured replay graph promoted from one or more successful
 // universal-bot runs. The registry stores Skills in the same `Adapter`
 // table that hosts hand-authored Tier-3 manifests (Challenge 2 →
@@ -333,7 +333,7 @@ const ExtractViaRegexStepSchema = z
   })
   .strict();
 
-// Multi-credential step kinds (Phase B per docs/DESIGN-multi-credential.md).
+// Multi-credential step kinds (Phase B per docs/ARCHITECTURE.md).
 // These are NEW kinds, not new fields on the existing extract steps — the
 // side-by-side dispatch principle keeps single-credential skills byte-
 // identical (canonical bytes unchanged → signatures still verify).
@@ -512,7 +512,7 @@ const CredentialShapeSchema = z
 
 export const SkillCredentialSpecSchema = z
   .object({
-    // Multi-credential identifier (Phase B per docs/DESIGN-multi-credential.md).
+    // Multi-credential identifier (Phase B per docs/ARCHITECTURE.md).
     // Optional for backward-compat: existing single-credential skills
     // omit it (their canonical bytes don't change → signatures remain
     // valid). Multi-credential skills MUST set it; the synthesizer
@@ -784,7 +784,7 @@ export const SkillSchema = z
           "extract_* steps.",
       ),
 
-    // Multi-credential bundle validator (Phase B per docs/DESIGN-multi-credential.md).
+    // Multi-credential bundle validator (Phase B per docs/ARCHITECTURE.md).
     // Optional. Single-credential skills omit it. When set, the replay
     // engine signs ONE HTTP request with the named credentials and
     // calls the configured URL — catches "right shape, wrong values"

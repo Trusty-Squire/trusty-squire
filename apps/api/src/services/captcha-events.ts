@@ -36,7 +36,7 @@ export interface CaptchaEventRecord {
   signup_succeeded: boolean | null;
   // Which stealth launcher ran: "baseline" | "cdp_hardened". null =
   // pre-CDP-hardening client. The A/B tag for the Runtime.enable patch
-  // — see docs/DESIGN-antibot-hardening.md.
+  // — see docs/ARCHITECTURE.md.
   stealth_profile: string | null;
   // The asn class of the machine when this event happened. Captured
   // at event time rather than read from MachineToken row at query
