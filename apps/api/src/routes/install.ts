@@ -1,7 +1,7 @@
 // Machine-token issuance for the MCP install flow.
 //
 // The MCP CLI calls POST /v1/install at install time to mint a
-// machine_token for the bot's LLM-proxy + inbox-alias use. This token
+// machine_token for the bot's inbox-OTP use. This token
 // is unauthenticated at issuance — it's just a bot-internal credential
 // that gets bound to the user's account during the install-claim
 // handshake (see routes/mcp-install.ts) seconds later.

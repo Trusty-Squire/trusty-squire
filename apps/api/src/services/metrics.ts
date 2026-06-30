@@ -17,7 +17,6 @@ export interface MetricsSnapshot {
   credentials_total: number;
   egress_grants_total: number;
   egress_grants_active: number;
-  llm_events_total: number;
   captcha_events_total: number;
   vault_audit_events_total: number;
   db_up: number; // 0 or 1
@@ -30,7 +29,6 @@ const ZERO_SNAPSHOT: MetricsSnapshot = {
   credentials_total: 0,
   egress_grants_total: 0,
   egress_grants_active: 0,
-  llm_events_total: 0,
   captcha_events_total: 0,
   vault_audit_events_total: 0,
   db_up: 0,
@@ -54,7 +52,6 @@ export async function collectMetrics(
     credentials_total,
     egress_grants_total,
     egress_grants_active,
-    llm_events_total,
     captcha_events_total,
     vault_audit_events_total,
   ] = await Promise.all([
@@ -64,7 +61,6 @@ export async function collectMetrics(
     prisma.credential.count(),
     prisma.egressGrant.count(),
     prisma.egressGrant.count({ where: { revoked_at: null } }),
-    prisma.lLMUsageEvent.count(),
     prisma.captchaEvent.count(),
     prisma.vaultAuditEvent.count(),
   ]);
@@ -76,7 +72,6 @@ export async function collectMetrics(
     credentials_total,
     egress_grants_total,
     egress_grants_active,
-    llm_events_total,
     captcha_events_total,
     vault_audit_events_total,
     db_up: 1,
@@ -92,7 +87,6 @@ const GAUGES: ReadonlyArray<{ key: keyof MetricsSnapshot; help: string }> = [
   { key: "credentials_total", help: "Total credentials stored in the vault." },
   { key: "egress_grants_total", help: "Total egress grants ever minted." },
   { key: "egress_grants_active", help: "Egress grants not yet revoked." },
-  { key: "llm_events_total", help: "Total LLM proxy usage events recorded." },
   { key: "captcha_events_total", help: "Total captcha encounters recorded." },
   { key: "vault_audit_events_total", help: "Total vault audit-trail events recorded." },
   { key: "db_up", help: "1 if the database answered the liveness probe, else 0." },

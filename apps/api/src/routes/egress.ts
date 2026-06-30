@@ -45,7 +45,7 @@ const mintBody = z.object({
 // a grant minted without a rate carries perHour <= 0, which means UNLIMITED and
 // the limiter never blocks it. A leaked token is still bounded by revocation +
 // the (optional) spend cap; the rate cap only exists when the caller asked for
-// one. One writer per process; the LLM tracker is the model, kept local here.
+// one. One writer per process, kept local here.
 class GrantRateLimiter {
   private readonly hits = new Map<string, number[]>();
   allow(grantId: string, perHour: number, now: number): boolean {

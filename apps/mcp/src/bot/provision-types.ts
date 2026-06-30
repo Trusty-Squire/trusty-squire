@@ -23,16 +23,6 @@ export interface SignupResult {
   // finished result so telemetry + the outcome sidecar share one value.
   // "none" on success; see classifyFailureStage in failure-stage.ts.
   failure_stage?: FailureStage;
-  // How many LLM calls this run made. Useful for cost accounting and
-  // for catching regressions where a refactor accidentally doubles the
-  // round-trips.
-  llm_calls?: number;
-  // One entry per LLM call, identifying which backend handled it.
-  // E.g. ["openrouter:google/gemini-flash-1.5", "openrouter:anthropic/claude-3.5-sonnet"]
-  // means the cheap path was used twice and the premium fallback engaged
-  // once. Useful for verifying dual-mode is actually saving money in
-  // production rather than always landing on the premium fallback.
-  llm_backends?: readonly string[];
 
   // Browser channel actually launched ("chrome", "msedge", or null for
   // bundled Chromium). Surfaced for telemetry: a captcha failure on

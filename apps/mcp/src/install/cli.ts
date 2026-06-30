@@ -129,10 +129,6 @@ type Argv = {
   // robots cannot) in its own profile without clobbering the operator's
   // session. Pair with BOT_GOOGLE_PROFILE_DIR on the discover side.
   profileDir?: string;
-  // Legacy config shape. Signup navigation is session-agent driven; install no
-  // longer asks users to configure an LLM.
-  llmChoice?: import("./interactive.js").LlmChoice;
-  byokKey?: string;
   advancedConfigured?: boolean;
   consentOperatorInboxOtp?: boolean;
 };
@@ -511,8 +507,6 @@ async function connect(args: Argv): Promise<void> {
       initialRegistryEnabled: !args.noRegistry,
     });
     args.target = picker.target;
-    args.llmChoice = picker.llmChoice;
-    if (picker.byokKey !== undefined) args.byokKey = picker.byokKey;
     if (picker.proxyUrl !== undefined) args.proxyUrl = picker.proxyUrl;
     args.noRegistry = !picker.registryEnabled;
     args.advancedConfigured = picker.advancedConfigured;
@@ -1048,7 +1042,6 @@ async function writeAgentConfig(
   const launch = resolveServerLaunch();
   const env: Record<string, string> = {
     TRUSTY_SQUIRE_AGENT_IDENTITY: target,
-    UNIVERSAL_BOT_PREFER_CHEAP: "true",
   };
   if (args.proxyUrl !== undefined) {
     env.UNIVERSAL_BOT_PROXY_URL = args.proxyUrl;
@@ -1058,22 +1051,6 @@ async function writeAgentConfig(
   // user's consent to contribute successful non-personal signup recipes.
   if (!args.noRegistry) {
     env.TRUSTY_SQUIRE_REGISTRY_URL = DEFAULT_REGISTRY_URL;
-  }
-  // Legacy LLM env support. Signup navigation is session-agent driven now, so
-  // normal installs never set these fields; keep the switch for older callers.
-  switch (args.llmChoice) {
-    case "byok_openrouter":
-      if (args.byokKey !== undefined) env.OPENROUTER_API_KEY = args.byokKey;
-      break;
-    case "byok_anthropic":
-      if (args.byokKey !== undefined) env.ANTHROPIC_API_KEY = args.byokKey;
-      break;
-    case "byok_openai":
-      if (args.byokKey !== undefined) env.OPENAI_API_KEY = args.byokKey;
-      break;
-    // "managed_free" / "skip" / undefined → no LLM env. The server's
-    // proxy path is the default; "skip" means the user will set keys
-    // themselves outside this CLI.
   }
   await agent.writeConfig({
     command: launch.command,

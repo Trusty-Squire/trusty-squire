@@ -7,7 +7,7 @@
 // The native-provision cluster (mandate evaluator, adapter registry,
 // run store, approval-token store, native adapters) was sunset in
 // 0.8 — the universal browser-driven bot replaced it. What survives:
-// account / session / OAuth identity / machine-token / LLM-usage /
+// account / session / OAuth identity / machine-token /
 // captcha-event / inbox / vault.
 
 import { Buffer } from "node:buffer";
@@ -55,7 +55,6 @@ import {
   type FunnelStatsStore,
 } from "./funnel-stats.js";
 import { PrismaMachineTokenStore } from "./prisma-machine-tokens.js";
-import { PrismaLLMUsageTracker } from "./prisma-llm-usage-tracker.js";
 import {
   InMemoryCaptchaEventStore,
   PrismaCaptchaEventStore,
@@ -74,10 +73,6 @@ import {
   InMemoryMachineTokenStore,
   type MachineTokenStore,
 } from "./machine-tokens.js";
-import {
-  InMemoryLLMUsageTracker,
-  type LLMUsageTracker,
-} from "./llm-usage-tracker.js";
 
 export interface ApiDeps {
   // Identity / auth
@@ -95,7 +90,6 @@ export interface ApiDeps {
   vault: CredentialVault;
   egressGrantStore: EgressGrantStore;
   machineTokenStore: MachineTokenStore;
-  llmUsageTracker: LLMUsageTracker;
   captchaEventStore: CaptchaEventStore;
   retentionCron: RetentionCron | null;
 
@@ -129,9 +123,9 @@ export interface BuildInMemoryDepsOpts {
 
 export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   // Auth Prisma client — loaded once and shared across the account,
-  // session, agent-session, pairing-token, machine-token, and LLM
-  // stores. Conditional on AUTH_DATABASE_URL so tests/local dev use
-  // the in-memory stores.
+  // session, agent-session, pairing-token, and machine-token stores.
+  // Conditional on AUTH_DATABASE_URL so tests/local dev use the
+  // in-memory stores.
   const authDatabaseUrl = process.env.AUTH_DATABASE_URL;
   const authPrisma =
     authDatabaseUrl !== undefined && authDatabaseUrl.length > 0
@@ -220,11 +214,6 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
       ? new PrismaMachineTokenStore(authPrisma)
       : new InMemoryMachineTokenStore();
 
-  const llmUsageTracker: LLMUsageTracker =
-    authPrisma !== null
-      ? new PrismaLLMUsageTracker(authPrisma)
-      : new InMemoryLLMUsageTracker();
-
   const captchaEventStore: CaptchaEventStore =
     authPrisma !== null
       ? new PrismaCaptchaEventStore(authPrisma)
@@ -279,7 +268,6 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     vault,
     egressGrantStore,
     machineTokenStore,
-    llmUsageTracker,
     captchaEventStore,
     retentionCron,
     sessionSecret: opts.sessionSecret,
