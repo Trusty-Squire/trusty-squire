@@ -55,8 +55,8 @@ export const ALL_FAILURE_STAGES: readonly FailureStage[] = [
 ];
 
 // The minimal slice of a finished run the classifier reads. Kept local (not
-// Pick<SignupResult>) so this module has no dependency on agent.ts — both the
-// outcome sidecar and agent.ts can import the stage type without a cycle.
+// Pick<SignupResult>) so this module stays dependency-free — the outcome
+// sidecar and the provision path can import the stage type without a cycle.
 export interface FailureSignal {
   success: boolean;
   error?: string;

@@ -1,7 +1,6 @@
 // Operator-driver toolkit — public surface for the bot package.
 //
-// The autonomous SignupAgent / UniversalSignupBot driver (the agent.ts
-// monolith) was retired on the retire-universal-bot branch; the live
+// The autonomous self-driving driver (the old monolith) was retired; the live
 // provisioning path is the host-driven provision_*/operate_* tools (see
 // provision-session.ts). Everything else in this directory is imported by
 // direct path; this barrel exists only for the ASN re-export that install/cli.ts

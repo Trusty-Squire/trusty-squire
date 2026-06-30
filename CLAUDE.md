@@ -199,8 +199,7 @@ the polish audit complete. The closed loop is in production; a
 from-scratch host-driven operator run is the fallback when no skill
 exists or replay fails.
 
-**Multi-credential scaffolding landed (Phases B/C/D/G of
-`docs/DESIGN-multi-credential.md`).** Schema + synthesizer +
+**Multi-credential scaffolding landed (Phases B/C/D/G).** Schema + synthesizer +
 replay engine + shadow-test harness all in place. Single-cred
 byte-equivalence preserved (no existing skill's canonical bytes
 change). Phase E (planner prompt expansion) and Phase F (bundle
@@ -249,7 +248,7 @@ can be tuned against real data.
    PostHog SPA wait, billing surface, per-account quota
    aggregation — all still queued but not blocking the
    closed-loop work.
-8. **Egress Grants (roadmap, `docs/DESIGN-egress-grants.md`).**
+8. **Egress Grants (roadmap, `docs/ARCHITECTURE.md` § Egress Grants).**
    `use_credential` generalized to a standing workload identity: the agent
    mints a scoped, revocable token so a *deployed app* can call providers
    through the injecting proxy — raw key still never leaves Squire. Reuses

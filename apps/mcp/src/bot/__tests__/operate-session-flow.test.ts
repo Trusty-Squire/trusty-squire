@@ -162,6 +162,7 @@ import { join } from "node:path";
 import {
   startProvisionSession,
   act,
+  observe,
   observedHostsForSession,
   stashSecretSlot,
   awaitVerification,
@@ -672,5 +673,49 @@ describe("operate session — PR3c username/password login (capture-at-login sou
     h.elements = [elem({ visibleText: "Email", selector: "#email" })];
     await act(obs.session_id, { kind: "type_secret", slot: "signin_login", target: "Email" });
     expect(h.typed.some((t) => t.selector === "#email" && t.text === "ada@example.com")).toBe(true);
+  });
+});
+
+describe("observation detail ladder (none < compact < full)", () => {
+  it("default is compact: no screen/accessibility, value_len, elements_total, no container", async () => {
+    h.elements = [
+      elem({ tag: "input", type: "text", value: "acme", screenPath: "form:x > input:org", container: "form:x" }),
+    ];
+    h.visibleText = "Org";
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(obs.screen).toBeUndefined();
+    expect(obs.accessibility).toBeUndefined();
+    expect(obs.elements_total).toBe(1);
+    const e = obs.elements[0]!;
+    const bag = e as unknown as Record<string, unknown>;
+    expect(bag.value).toBeUndefined();
+    expect(e.value_len).toBe(4);
+    expect(bag.container).toBeUndefined();
+    expect(e.path).toBe("form:x > input:org");
+  });
+
+  it("operate_observe detail:'full' restores the screen + accessibility views", async () => {
+    h.elements = [elem({ tag: "button", visibleText: "Go", screenPath: "main:x > button:go", container: "main:x" })];
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const full = await observe(obs.session_id, "full");
+    expect(full.screen).toBeDefined();
+    expect(full.accessibility).toBeDefined();
+  });
+
+  it("operate_act detail:'none' returns a minimal ack (no perception)", async () => {
+    h.elements = [elem({ tag: "button", visibleText: "Go", screenPath: "main:x > button:go" })];
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const ack = await act(obs.session_id, { kind: "scroll", direction: "down" }, "none");
+    expect(ack.observed).toBe("none");
+    expect(ack.elements).toEqual([]);
+    expect(ack.screen).toBeUndefined();
+  });
+
+  it("operate_act detail:'full' returns the legacy payload", async () => {
+    h.elements = [elem({ tag: "button", visibleText: "Go", screenPath: "main:x > button:go", container: "main:x" })];
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    const full = await act(obs.session_id, { kind: "scroll", direction: "down" }, "full");
+    expect(full.screen).toBeDefined();
+    expect(full.accessibility).toBeDefined();
   });
 });

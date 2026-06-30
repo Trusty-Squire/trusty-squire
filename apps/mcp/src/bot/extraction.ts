@@ -1,5 +1,5 @@
 // extraction.ts — pure decision primitives of the credential-EXTRACTION phase,
-// carved out of extractCredentials (agent.ts:12623) as strangler slice 4 (the A4
+// carved out of the credential-extraction phase as strangler slice 4 (the A4
 // order: nav-search → OAuth/consent → form-fill → EXTRACTION → capture-chain).
 // Browser-free + unit-tested.
 //
@@ -16,8 +16,7 @@
 //     demonstrably reached the modal); else {} (keep navigating).
 //
 // This is the highest-value, most self-contained pure piece (the truncated-vs-full
-// priority is a recurring brittleness source — the S3 masked-key trap). NOT yet
-// wired into agent.ts — changing this file cannot regress the live path.
+// priority is a recurring brittleness source — the S3 masked-key trap).
 
 // One candidate's classification, as the executor's regex pass produces it.
 export type CandidateClass =

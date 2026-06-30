@@ -19,8 +19,8 @@
 // Together with the user's residential IP (the bot runs on user
 // machines, not on Fly), these are sufficient for invisible-mode
 // Turnstile/reCAPTCHA-v3 scoring on most SaaS signups. Visible-mode
-// captchas still need the click-and-wait pattern documented in
-// agent.ts.
+// captchas still need the click-and-wait pattern (the Tier 2 captcha
+// gate).
 
 import { chromium as baseChromium } from "playwright";
 import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
@@ -121,7 +121,7 @@ function getChromium(): typeof baseChromium {
     // isn't installed. The bot still works, it's just easier to
     // fingerprint as a bot — and the A/B tag stays truthfully "baseline".
     console.warn(
-      `[universal-bot] hardened launcher unavailable, falling back to vanilla chromium: ${
+      `[operator] hardened launcher unavailable, falling back to vanilla chromium: ${
         err instanceof Error ? err.message : String(err)
       }`,
     );
@@ -595,7 +595,7 @@ function reapOrphanedVerifyBrowsersOnce(): void {
     }
   }
   if (pids.length === 0) return;
-  console.error(`[universal-bot] reaping ${pids.length} orphaned verify Chrome process(es)`);
+  console.error(`[operator] reaping ${pids.length} orphaned verify Chrome process(es)`);
   for (const pid of pids) killPid(pid, "SIGTERM");
   setTimeout(() => {
     for (const pid of pids) killPid(pid, "SIGKILL");
@@ -928,7 +928,7 @@ export class BrowserController {
       }
     });
     console.error(
-      "[universal-bot] resource blocking ON (image/media/font + analytics aborted; captcha/CSS/JS allowed)",
+      "[operator] resource blocking ON (image/media/font + analytics aborted; captcha/CSS/JS allowed)",
     );
   }
 
@@ -941,7 +941,7 @@ export class BrowserController {
     // Stderr so the MCP stdio transport's framing stays clean (the
     // module's existing logging convention).
     console.error(
-      `[universal-bot] launching browser channel=${channel ?? "bundled-chromium"} ` +
+      `[operator] launching browser channel=${channel ?? "bundled-chromium"} ` +
         `proxy=${proxy?.server ?? "direct"}`,
     );
     // Remote-CDP mode (BOT_CDP_ENDPOINT): the browser runs on a REMOTE host
@@ -956,7 +956,7 @@ export class BrowserController {
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
     if (remoteMode) {
       console.error(
-        `[universal-bot] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
+        `[operator] REMOTE-CDP mode — attaching to ${(process.env.BOT_CDP_ENDPOINT ?? "").trim()} ` +
           `(real-host GPU + egress; local fingerprint spoof + Xvfb DISABLED)`,
       );
     }
@@ -969,7 +969,7 @@ export class BrowserController {
     const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy);
     if (geo !== null) {
       console.error(
-        `[universal-bot] egress geo: timezone=${geo.timezoneId}` +
+        `[operator] egress geo: timezone=${geo.timezoneId}` +
           (geo.geolocation !== undefined
             ? ` loc=${geo.geolocation.latitude},${geo.geolocation.longitude}`
             : ""),
@@ -1022,11 +1022,11 @@ export class BrowserController {
         chromeHeadless = false;
         this.launchedMode = "xvfb";
         console.error(
-          `[universal-bot] no DISPLAY — spawned Xvfb at ${this.xvfb.display} for headed Chrome`,
+          `[operator] no DISPLAY — spawned Xvfb at ${this.xvfb.display} for headed Chrome`,
         );
       } catch (err) {
         console.error(
-          `[universal-bot] Xvfb failed (${err instanceof Error ? err.message : String(err)}) — ` +
+          `[operator] Xvfb failed (${err instanceof Error ? err.message : String(err)}) — ` +
             `falling back to true headless; Cloudflare/Stytch-class signups may fail`,
         );
         chromeHeadless = true;
@@ -1034,7 +1034,7 @@ export class BrowserController {
       }
     } else {
       console.error(
-        `[universal-bot] no DISPLAY and Xvfb not installed — running true headless. ` +
+        `[operator] no DISPLAY and Xvfb not installed — running true headless. ` +
           `For Cloudflare/Stytch-class signups install xvfb: apt-get install -y xvfb`,
       );
       chromeHeadless = true;
@@ -1048,7 +1048,7 @@ export class BrowserController {
     let free = await waitForProfileFree(this.profileDir, {
       deadlineMs: 120_000,
       onWait: () =>
-        console.error("[universal-bot] bot Chrome profile is busy with another run — waiting…"),
+        console.error("[operator] bot Chrome profile is busy with another run — waiting…"),
     });
     if (!free) {
       // A live-pid holder that never released within the deadline. The
@@ -1074,12 +1074,12 @@ export class BrowserController {
       const reaped = allowLiveReap ? reapLeakedProfileHolder(this.profileDir) : false;
       if (reaped) {
         console.error(
-          "[universal-bot] reaped a leaked Chrome holding the profile (orphan from an externally-killed run) — retrying",
+          "[operator] reaped a leaked Chrome holding the profile (orphan from an externally-killed run) — retrying",
         );
         free = await waitForProfileFree(this.profileDir, { deadlineMs: 10_000 });
       } else if (!allowLiveReap) {
         console.error(
-          "[universal-bot] profile still held after wait; not reaping because HOUSEKEEPER_CONCURRENCY>1",
+          "[operator] profile still held after wait; not reaping because HOUSEKEEPER_CONCURRENCY>1",
         );
       }
       if (!free) {
@@ -1138,7 +1138,7 @@ export class BrowserController {
     let context: BrowserContext;
     if (useSelfLaunch && selfLaunchBinary !== null) {
       console.error(
-        `[universal-bot] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
+        `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
       );
       // Window size matches the display surface so viewport reads as a real
       // window (no emulated-viewport tell). TZ on the child makes Chrome
@@ -1171,7 +1171,7 @@ export class BrowserController {
         }
       } catch (err) {
         console.error(
-          `[universal-bot] post-connect context setup partial: ${
+          `[operator] post-connect context setup partial: ${
             err instanceof Error ? err.message : String(err)
           }`,
         );
@@ -1179,7 +1179,7 @@ export class BrowserController {
     } else {
       if (selfLaunchEnabled() && selfLaunchBinary !== null && proxyHasAuth) {
         console.error(
-          "[universal-bot] credentialed proxy → launchPersistentContext (self-launch can't carry proxy auth)",
+          "[operator] credentialed proxy → launchPersistentContext (self-launch can't carry proxy auth)",
         );
       }
       // T3: a PERSISTENT context (the legacy path). The profile dir carries the
@@ -1463,7 +1463,7 @@ export class BrowserController {
         return parseEgressGeo(await resp.text());
       } catch (err) {
         console.error(
-          `[universal-bot] egress geo probe failed — using default ` +
+          `[operator] egress geo probe failed — using default ` +
             `timezone: ${err instanceof Error ? err.message : String(err)}`,
         );
         return null;
@@ -1487,7 +1487,7 @@ export class BrowserController {
       return parseEgressGeo(body);
     } catch (err) {
       console.error(
-        `[universal-bot] egress geo probe failed — using default ` +
+        `[operator] egress geo probe failed — using default ` +
           `timezone: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
@@ -1520,7 +1520,7 @@ export class BrowserController {
       proxy = parseProxyUrl(raw);
     } catch (err) {
       console.error(
-        `[universal-bot] UNIVERSAL_BOT_PROXY_URL is malformed — running ` +
+        `[operator] UNIVERSAL_BOT_PROXY_URL is malformed — running ` +
           `direct: ${err instanceof Error ? err.message : String(err)}`,
       );
       return null;
@@ -1541,20 +1541,20 @@ export class BrowserController {
       const reachable = await isProxyReachable(proxy.server);
       if (!reachable) {
         console.error(
-          `[universal-bot] proxy ${proxy.server} is UNREACHABLE — falling back to ` +
+          `[operator] proxy ${proxy.server} is UNREACHABLE — falling back to ` +
             `DIRECT egress (datacenter IP; anti-bot services may block it, but far ` +
             `better than every navigation timing out)`,
         );
         return null;
       }
       console.error(
-        `[universal-bot] routing through residential proxy ` +
+        `[operator] routing through residential proxy ` +
           `(asn=${asnClass}${forceAlways ? ", forced" : ""})`,
       );
       return proxy;
     }
     console.error(
-      `[universal-bot] direct connection (asn=${asnClass}) — proxy ` +
+      `[operator] direct connection (asn=${asnClass}) — proxy ` +
         `configured but not needed for this network`,
     );
     return null;
@@ -1770,7 +1770,7 @@ export class BrowserController {
       // search results, the marketing site, an error page) — that's
       // still better than a cold landing on /sign_up. Log and proceed.
       console.error(
-        `[universal-bot] referrer-chain prewarm partial failure (non-fatal): ${
+        `[operator] referrer-chain prewarm partial failure (non-fatal): ${
           err instanceof Error ? err.message : String(err)
         }`,
       );
@@ -5204,7 +5204,7 @@ export class BrowserController {
   //     isMasked: true if the value looks like a redacted display
   //               (••••, ****, contains "•" or runs of "*") }
   //
-  // The caller (agent.ts extractAllLabeledCandidates path) maps label
+  // The caller maps label
   // text to canonical credential keys using the same vocabulary the
   // Phase E parser uses.
   async extractLabeledCredentialCandidates(): Promise<
@@ -6935,11 +6935,11 @@ export class BrowserController {
     try {
       cdp = await this.context.newCDPSession(this.page);
       await cdp.send("FedCm.enable", { disableRejectionDelay: true });
-      console.error("[universal-bot] FedCm.enable ok — listening for dialogShown");
+      console.error("[operator] FedCm.enable ok — listening for dialogShown");
       cdp.on("FedCm.dialogShown", (ev: unknown) => {
         const e = ev as { dialogId?: string; dialogType?: string; accounts?: unknown[] };
         console.error(
-          `[universal-bot] FedCm.dialogShown type=${e.dialogType ?? "?"} accounts=${
+          `[operator] FedCm.dialogShown type=${e.dialogType ?? "?"} accounts=${
             Array.isArray(e.accounts) ? e.accounts.length : "?"
           }`,
         );
@@ -6989,7 +6989,7 @@ export class BrowserController {
     } catch (err) {
       cdp = null; // FedCm domain unavailable — the popup path still works
       console.error(
-        `[universal-bot] FedCm.enable failed (${
+        `[operator] FedCm.enable failed (${
           err instanceof Error ? err.message : String(err)
         }) — FedCM path disabled, relying on popup`,
       );
@@ -7073,7 +7073,7 @@ export class BrowserController {
       return { ok: true, via: "fedcm" };
     }
     console.error(
-      `[universal-bot] GSI resolved via none — fedcmEnabled=${cdp !== null} ` +
+      `[operator] GSI resolved via none — fedcmEnabled=${cdp !== null} ` +
         `fedcmResolved=${fedcmResolved} pages=${this.context.pages().length}`,
     );
     return { ok: false, via: "none" };
@@ -7424,7 +7424,7 @@ export class BrowserController {
         })
         .catch(() => [] as string[]);
       console.error(
-        `[universal-bot] GitHub advanceOAuthConsent failed — visible buttons: ` +
+        `[operator] GitHub advanceOAuthConsent failed — visible buttons: ` +
           `${seen.length === 0 ? "<none>" : seen.map((s) => JSON.stringify(s)).join(", ")}`,
       );
       return false;
@@ -7508,7 +7508,7 @@ export class BrowserController {
       })
       .catch(() => [] as string[]);
     console.error(
-      `[universal-bot] Google advanceOAuthConsent failed — visible buttons: ` +
+      `[operator] Google advanceOAuthConsent failed — visible buttons: ` +
         `${seen.length === 0 ? "<none>" : seen.map((s) => JSON.stringify(s)).join(", ")}`,
     );
     return false;
@@ -7646,7 +7646,7 @@ function rand(min: number, max: number): number {
 // button[type=submit] next to the real account-creation button, so a
 // generic selector resolves to several — this picks the right one.
 //
-// Same shape and rationale as agent.ts's pickVerificationLink: a positive
+// Same shape and rationale as the verification-link picker: a positive
 // score gate so an OAuth-only page (every candidate negative) returns
 // null rather than mis-clicking "Continue with Google".
 // Click disambiguation (regression: #61 weaviate). A bare id selector can

@@ -1,8 +1,7 @@
 // credential-text.ts — pull a credential VALUE out of a blob of visible page
 // text, and reject candidates that are truncated displays or password-manager
-// UI noise. Carved out of agent.ts (the retired universal-bot monolith); these
-// are the browser-free, regex-driven extraction predicates the provision
-// session + skill replay paths share.
+// UI noise. These are the browser-free, regex-driven extraction predicates the
+// provision session + skill replay paths share.
 //
 // Distinct from credential-shape.ts: that module answers "is this string
 // shaped like a credential" (a tight host-side gate); this one answers "given a

@@ -1,5 +1,54 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.10 (2026-06-30)
+
+Promotes the 1.0.10 line (rc.1 → rc.3) to stable. Highlights:
+
+- **Compact operate observations, default-on.** `observeSession` now emits a
+  compact perception payload — drops the `screen`/`accessibility` re-encodings,
+  omits null/empty/false element fields, drops `container` (redundant with
+  `path`), and returns `value_len` instead of raw values. ~50% smaller per turn
+  with no perception loss (proven by an information-equivalence eval).
+- **One ordered verbosity knob.** A single per-call `detail: none|compact|full`
+  on `operate_observe` (compact|full) and `operate_act` (none|compact|full) —
+  `full` restores the legacy payload for an ambiguous step, `none` is a bare ack
+  so chained fills don't each echo the page. Replaces the short-lived
+  `BOT_OBSERVE_COMPACT` env + `include` option from the rc line.
+- **Cleanup:** retired the orphaned eval corpus (`apps/mcp/corpus/eval`, dead
+  since the autonomous planner was removed), rebranded the `[universal-bot]` log
+  prefixes to `[operator]`, and pruned stale `agent.ts`/doc references in
+  comments. No behavior change.
+
+## 1.0.10-rc.3 (2026-06-30)
+
+- refactor(mcp): collapse the observation-verbosity controls into **one ordered
+  per-call knob** `detail: none|compact|full` on both `operate_observe`
+  (compact|full) and `operate_act` (none|compact|full). Removed the
+  `BOT_OBSERVE_COMPACT` env default (payload shape has no server-side blast
+  radius — nothing for an operator to revert; compact is simply the hardcoded
+  default) and the `operate_observe` `include` option (broke the linear ladder;
+  `full` is the escalation). Same behavior, one coherent vocabulary the planner
+  sets per call.
+
+## 1.0.10-rc.2 (2026-06-30)
+
+- feat(mcp): compact observation is now **default-on** (`BOT_OBSERVE_COMPACT`
+  opt out with `=0`), after the information-equivalence eval + live format-smoke.
+- feat(mcp): `operate_observe({ detail:"compact"|"full", include:["screen"|"accessibility"] })`
+  — `full` restores the legacy payload; `include` re-adds one heavy view on demand.
+- feat(mcp): `operate_act({ observe:"none"|"compact"|"full" })` — `none` returns a
+  minimal ack so chained fills don't each echo the page (the per-act multiplier).
+
+## 1.0.10-rc.1 (2026-06-30)
+
+- feat(mcp): compact operate observation payload behind `BOT_OBSERVE_COMPACT`
+  (default **off**). Drops the redundant `screen`/`accessibility` re-encodings,
+  omits empty element fields, reports `value_len` not the raw value, drops
+  `container` (redundant with `path`), adds `elements_total`/`text_truncated`
+  metadata. ~50% smaller per turn with zero perception loss; full mode unchanged.
+  Information-equivalence eval + design doc included. Flip the default only after
+  a live format-smoke. (#282)
+
 ## 1.0.9 (2026-06-30)
 
 Promotes the 1.0.9-rc line to stable. Full detail in the rc.1 / rc.2 entries below.

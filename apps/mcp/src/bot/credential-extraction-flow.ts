@@ -1,7 +1,7 @@
 // CredentialExtractionFlow owns the policy boundary between "values the
 // extractor happened to carry around" and "usable service credentials".
 //
-// The heavy extraction mechanics still live in agent.ts/extraction.ts for now;
+// The heavy extraction mechanics live in extraction.ts + browser.ts;
 // this module is intentionally the small, shared contract the orchestration
 // loop uses to decide whether to continue navigating, wait for sibling fields,
 // or return a successful bundle.

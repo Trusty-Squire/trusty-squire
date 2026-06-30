@@ -1852,7 +1852,7 @@ function synthesizeExtractStep(
 //
 // Order matters — sk-or-v1- before sk- because both could match the
 // same string and we want the more-specific one to win, matching
-// agent.ts's extractApiKeyFromText order.
+// the extractApiKeyFromText ordering.
 function detectKnownCredentialPattern(
   html: string,
 ): "stripe_secret" | "stripe_publishable" | "resend" | "sendgrid" | "mailgun" | "render" | "sentry_token" | "openrouter" | "anthropic" | "openai_legacy" | "openai_project" | "uuid_token" {
@@ -1912,7 +1912,7 @@ function findCopyButton(
     // class flows, then the replay's regex library can't match a
     // bare UUID and the skill replay-fails forever.
     const text = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.title ?? ""} ${el.iconLabel ?? ""}`.trim();
-    // Same vocabulary as agent.ts:tryCopyButtonExtraction.
+    // Same vocabulary as the copy-button extraction path.
     if (/^\s*copy(?:\b|\s|$)|copy\s+(?:api\s*key|secret|token|code|key|to\s+clipboard)\b/i.test(text)) {
       return el;
     }

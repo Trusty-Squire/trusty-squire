@@ -3,7 +3,7 @@
 //
 // Phase 1 was Google-only (D7). Phase 2 adds GitHub: for a developer
 // audience "Sign in with GitHub" is as common as Google. The signup
-// flow (agent.ts runOAuthFlow) is identical in shape per provider —
+// flow is identical in shape per provider —
 // click the affordance, walk the consent screens, scope-gate them —
 // so the per-provider differences are captured in one descriptor:
 // how to classify the provider's auth pages and which scopes are
