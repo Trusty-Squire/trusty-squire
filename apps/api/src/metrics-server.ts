@@ -36,6 +36,10 @@ export function startMetricsServer(opts: StartMetricsServerOpts): http.Server {
         res.end("metrics collection failed\n");
       });
   });
-  server.listen(opts.port, "0.0.0.0");
+  // Bind "::" (all IPv6, dual-stack) — NOT "0.0.0.0". Fly's 6PN private
+  // network is IPv6, so the Prometheus scraper reaches the machine at its
+  // fdaa:… address; an IPv4-only bind would refuse that connection and the
+  // scrape would silently never land. Dual-stack still accepts 127.0.0.1.
+  server.listen(opts.port, "::");
   return server;
 }
