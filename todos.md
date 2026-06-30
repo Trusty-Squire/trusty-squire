@@ -40,9 +40,11 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
   - [x] Added **`/readyz`** (DB-readiness probe, time-capped) — 200 when the DB
     answers, 503 on wedge. `/health` stays shallow for Fly liveness so a wedge
     can't trigger an API restart loop. +3 tests. (Deploys with this branch.)
-  - [ ] YOU: point an external uptime monitor (UptimeRobot / Betterstack / the
-    housekeeper Telegram cron) at `https://trusty-squire-api.fly.dev/readyz` to
-    get paged on a wedge. (Broader metrics dashboard lives in #9.)
+  - [x] Telegram uptime alert wired: `tools/readyz-check.sh` (revived from the
+    openrouter-credit-check Telegram pattern) polls `/readyz` every 5 min via
+    cron on the housekeeper box; pushes a 🔴 alert to Telegram (token from
+    harvester.env, chat-id from `~/.trusty-squire/telegram-chat-id.txt`) on a
+    DB wedge. Install confirmation message verified end-to-end.
   - [ ] Consider (not launch-blocking): the DB is a SINGLE node (no HA failover).
     A replica would survive a node death mid-launch — bigger lift; flag for after.
 
