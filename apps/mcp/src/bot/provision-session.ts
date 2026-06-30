@@ -78,7 +78,7 @@ export interface ObservedElement {
   label: string;
   tag: string;
   // Below ref/label/tag, fields are nullable in FULL mode (emitted as null) and
-  // OMITTED entirely in compact mode (BOT_OBSERVE_COMPACT) when empty — hence
+  // OMITTED entirely in compact mode when empty — hence
   // optional. `value_len` replaces `value` in compact (never the raw value).
   role?: string | null;
   type?: string | null;
@@ -143,7 +143,7 @@ export interface Observation {
   // remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
   elements: ObservedElement[];
-  // Compact-mode (BOT_OBSERVE_COMPACT) bookkeeping so omission is never silent:
+  // Compact-mode bookkeeping so omission is never silent:
   // the full element count (compact keeps all elements, just lighter), and
   // whether the page text was capped at the 4000-char limit. Absent in full mode.
   elements_total?: number;
@@ -151,7 +151,7 @@ export interface Observation {
   // Phase 2 — set to "none" on the minimal ack returned by
   // operate_act{observe:"none"} (action ran; no perception emitted — call
   // operate_observe before the next ref-targeted act).
-  observed?: ObserveMode;
+  observed?: ObserveDetail;
   // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
   // required a live Google session that was absent. The task did NOT start; the
   // host asks the user to connect, then retries. No browser was driven.
@@ -1094,10 +1094,13 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   };
 }
 
-export async function observe(sessionId: string, opts: ObserveOpts = {}): Promise<Observation> {
+export async function observe(
+  sessionId: string,
+  detail: "compact" | "full" = "compact",
+): Promise<Observation> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  return await observeSession(session, opts);
+  return await observeSession(session, detail);
 }
 
 // Hosts to seed credential EGRESS from when storing a key extracted in this
@@ -1189,26 +1192,16 @@ export function generatePassword(length = 24): string {
   return chars.join("");
 }
 
-// Compact observation payload (docs/DESIGN-observe-compact.md). Drops the two
-// redundant re-encodings (screen + accessibility), omits empty element fields,
-// drops `container` (redundant with `path`), and reports value LENGTH not value.
-// DEFAULT-ON since the information-equivalence eval + live format-smoke passed
-// (~50% smaller per turn, zero perception loss). Opt out with BOT_OBSERVE_COMPACT
-// =0/false/off to get the full screen+accessibility payload, or per-call via
-// operate_observe{detail:"full"} / operate_act{observe:"full"|"none"}.
-function observeCompactEnabled(): boolean {
-  const v = process.env.BOT_OBSERVE_COMPACT;
-  return v !== "0" && v !== "false" && v !== "off";
-}
-
-// Per-call observation controls (Phase 2). `compact` overrides the env default;
-// `include` re-adds the heavy views on demand even in compact mode.
-export type ObserveMode = "none" | "compact" | "full";
-export type ObserveView = "screen" | "accessibility";
-export interface ObserveOpts {
-  compact?: boolean;
-  include?: ObserveView[];
-}
+// Observation verbosity — ONE ordered knob (docs/DESIGN-observe-compact.md), set
+// per call via operate_observe{detail} / operate_act{detail}:
+//   "none"    — bare ack, no perception (operate_act only; for chained fills).
+//   "compact" — text + actionable elements; empty fields omitted, value→value_len,
+//               `container` dropped, no screen/accessibility. The DEFAULT.
+//   "full"    — the legacy payload: screen + accessibility + full element fields.
+// Compact is information-equivalent to full (eval + live smoke), ~50% smaller, so
+// it's the default with no global override — the planner escalates to "full" per
+// call on a genuinely ambiguous step.
+export type ObserveDetail = "none" | "compact" | "full";
 
 // One element, compacted: ref/label/tag always; every other field omitted when
 // empty. `value`→`value_len` (never the raw value — keeps the sealed-field moat);
@@ -1233,7 +1226,10 @@ export function toCompactElement(
   return out;
 }
 
-async function observeSession(session: Session, opts: ObserveOpts = {}): Promise<Observation> {
+async function observeSession(
+  session: Session,
+  detail: "compact" | "full" = "compact",
+): Promise<Observation> {
   session.browser.recoverActivePage();
   widenAllowedHostsFromCurrentUrl(session);
   session.generation += 1;
@@ -1248,25 +1244,14 @@ async function observeSession(session: Session, opts: ObserveOpts = {}): Promise
   const refOf = (el: InteractiveElement): string =>
     refs.get(el) ?? provisionElementRef(el, generation);
 
-  // Compact path: text + actionable elements only. No screen/accessibility (the
-  // two re-encodings of the same nodes) unless `include` asks for them; empty
-  // fields omitted. ~50% smaller.
-  const compact = opts.compact ?? observeCompactEnabled();
-  if (compact) {
-    const include = new Set(opts.include ?? []);
-    const inclScreen = include.has("screen")
-      ? buildScreenOutline(elements, normalizedText, session.sealedFieldKeys)
-      : undefined;
-    const inclAccessibility = include.has("accessibility")
-      ? buildAccessibilitySnapshot(elements, generation, undefined, session.sealedFieldKeys)
-      : undefined;
+  // Compact (default): text + actionable elements only. No screen/accessibility
+  // (the two re-encodings of the same nodes); empty fields omitted. ~50% smaller.
+  if (detail !== "full") {
     return {
       session_id: session.id,
       url: session.browser.currentUrl(),
       text: normalizedText,
       ...(guidance !== undefined ? { guidance } : {}),
-      ...(inclScreen !== undefined ? { screen: inclScreen } : {}),
-      ...(inclAccessibility !== undefined ? { accessibility: inclAccessibility } : {}),
       elements: elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys)),
       elements_total: elements.length,
       ...(normalizedFull.length > 4000 ? { text_truncated: true } : {}),
@@ -1309,7 +1294,7 @@ async function observeSession(session: Session, opts: ObserveOpts = {}): Promise
 export async function act(
   sessionId: string,
   action: ProvisionAction,
-  opts: { observe?: ObserveMode } = {},
+  detail: ObserveDetail = "compact",
 ): Promise<Observation> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -1421,16 +1406,13 @@ export async function act(
   if (!isInboxReadHost(browser.currentUrl())) {
     recordTrace(session, action, resolvedEl);
   }
-  // Phase 2 — `observe:"none"` returns a minimal ack (the action ran; no
-  // perception emitted) so multi-field fills don't each echo the page. The host
-  // must call operate_observe before its next ref-targeted act (refs aren't
-  // refreshed here). "compact"/"full" force the payload shape; default = env.
-  if (opts.observe === "none") {
+  // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
+  // so multi-field fills don't each echo the page. The host must call
+  // operate_observe before its next ref-targeted act (refs aren't refreshed here).
+  if (detail === "none") {
     return { session_id: session.id, url: browser.currentUrl(), text: "", elements: [], observed: "none" };
   }
-  const observeOpts: ObserveOpts =
-    opts.observe === "compact" ? { compact: true } : opts.observe === "full" ? { compact: false } : {};
-  return await observeSession(session, observeOpts);
+  return await observeSession(session, detail);
 }
 
 // PR3 privacy: in the operator model the host fills the USER's real email into

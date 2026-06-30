@@ -37,11 +37,26 @@ Inside `elements`:
    `screen` region-tree and `accessibility` flat-tree are not needed to choose an
    action. `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
 
-## Phase 1 — compact encoder ✅ shipped, DEFAULT-ON
+## The one knob — `detail`
 
-Gate: `BOT_OBSERVE_COMPACT` (default **on** since 1.0.10-rc.2, after the
-information-equivalence eval + live format-smoke passed; opt out with `=0`).
-When on, `observeSession`:
+There is a single ordered control, set **per call**, no env/global flag:
+
+```
+detail:  none  <  compact  <  full
+         ack       default     legacy (compact + screen + accessibility + raw fields)
+```
+
+`operate_observe({ detail })` accepts `compact|full`; `operate_act({ detail })`
+also accepts `none` (a bare ack). Default everywhere is **compact**. There is no
+deploy-time override: unlike the server kill-switches (signups/egress/billing),
+`detail` only shapes the payload returned to the host on the user's own machine —
+it has no server-side blast radius, so there's nothing for an operator to revert.
+If a step is genuinely ambiguous the planner escalates to `detail:"full"` for
+that one call.
+
+## Phase 1 — compact encoder ✅ shipped, DEFAULT
+
+When `detail` is `compact` (the default), `observeSession`:
 
 - **Omit `screen` + `accessibility`** (the two re-encodings). Also skip computing
   them (CPU win).
@@ -64,21 +79,19 @@ Projected: ~50 KB → ~17–20 KB per turn (≈60% cut) with **zero perception l
 ~74% but is deferred to the eval — `ref` is the machine target, `path` is the
 human/planner disambiguator for repeated labels / modal overlays.
 
-## Phase 2 — escalation API
+## Phase 2 — the `detail` ladder ✅ shipped
 
-✅ shipped (1.0.10-rc.2):
-- `operate_observe({ detail: "compact" | "full", include?: ["screen" | "accessibility"] })`
-  — `full` restores the legacy payload; `include` re-adds just one heavy view for
-  an ambiguous step without going all the way to full.
-- `operate_act({ observe?: "none" | "compact" | "full" })` — the multiplier:
-  `none` returns a minimal ack (action ran; no page dump) so chained fills don't
-  each echo the page (call `operate_observe` before the next ref-targeted act);
-  `compact`/`full` force the shape. Default = the env shape (compact).
+- `operate_observe({ detail: "compact" | "full" })` — `full` restores the legacy
+  screen+accessibility+raw-field payload for an ambiguous step.
+- `operate_act({ detail: "none" | "compact" | "full" })` — `none` returns a
+  minimal ack (action ran; no page dump) so chained fills don't each echo the
+  page (call `operate_observe` before the next ref-targeted act). Same vocabulary
+  as `operate_observe`, plus the bottom rung.
 
-deferred (Phase 2.5, only if evidence demands):
-- `scope: { ref }` + `depth` for sub-tree reads on heavy consoles.
-- `since_observation_id` diffs (guard for stale refs — diffs are additive, refs
-  still re-issued each generation).
+deferred (Phase 2.5, only if evidence demands): an `include` partial-escalation
+(re-add just one heavy view) was considered and dropped — it breaks the linear
+ladder and `full` already covers the rare escalation. `scope:{ref}`/`depth`
+sub-tree reads and `since_observation_id` diffs likewise remain unbuilt.
 
 ## Eval gate (before flipping default)
 
