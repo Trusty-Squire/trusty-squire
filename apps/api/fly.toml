@@ -47,3 +47,11 @@ primary_region = "iad"
   method = "GET"
   timeout = "5s"
   path = "/health"
+
+# Private app-level funnel + health gauges. This port (9091) is deliberately
+# NOT declared in [http_service], so it is NOT publicly routed — Fly's managed
+# Prometheus ("Prometheus on Fly") scrapes it over the 6PN private network and
+# feeds the org Grafana. Counts only, no PII / no secret material.
+[[metrics]]
+  port = 9091
+  path = "/metrics"

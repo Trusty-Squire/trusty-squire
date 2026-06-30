@@ -4,8 +4,10 @@
 // stores. We expose `buildServer(deps)` for tests so they can inject
 // a customised dep bundle.
 
+import { createRequire } from "node:module";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyCookie from "@fastify/cookie";
+import { startMetricsServer } from "./metrics-server.js";
 import { makeAuthMiddleware } from "./auth/middleware.js";
 import { registerInstallRoute } from "./routes/install.js";
 import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
@@ -317,6 +319,22 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   deps.retentionCron?.start();
 
   await server.listen({ port, host: "0.0.0.0" });
+
+  // Private Prometheus exporter — only when a DB is wired (collectMetrics is
+  // undefined on the no-DB path). Binds a port that fly.toml does NOT declare
+  // in [http_service], so Fly's managed Prometheus scrapes it over the 6PN
+  // private network while it stays off the public internet.
+  if (deps.collectMetrics !== undefined) {
+    const require = createRequire(import.meta.url);
+    // Resolve relative to the built dist/server.js → apps/api/package.json.
+    const pkg = require("../package.json") as { version?: string };
+    const version = pkg.version ?? process.env.npm_package_version ?? "dev";
+    startMetricsServer({
+      port: Number(process.env.METRICS_PORT ?? 9091),
+      collect: deps.collectMetrics,
+      version,
+    });
+  }
 }
 
 export type { ApiDeps };

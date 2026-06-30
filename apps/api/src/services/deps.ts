@@ -45,6 +45,11 @@ import {
 } from "./oauth-identity-store.js";
 import { getApiPrismaClient } from "./api-prisma-client.js";
 import {
+  collectMetrics,
+  makeCachedCollector,
+  type MetricsSnapshot,
+} from "./metrics.js";
+import {
   PrismaFunnelStatsStore,
   ZeroFunnelStatsStore,
   type FunnelStatsStore,
@@ -102,6 +107,13 @@ export interface ApiDeps {
   // OOM failure mode). Resolves true when the DB answers, false on error/timeout.
   // Always true for the no-DB in-memory dev path.
   pingDb: () => Promise<boolean>;
+
+  // Funnel + health gauges for the private Prometheus exporter
+  // (metrics-server.ts). Defined only on the Prisma path — the no-DB
+  // in-memory dev path has nothing real to count, so it stays undefined
+  // and the exporter isn't started. Wrapped in a TTL cache so frequent
+  // scrapes don't hammer the DB.
+  collectMetrics?: () => Promise<MetricsSnapshot>;
 
   // Test injection
   now?: () => Date;
@@ -226,6 +238,36 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
         })
       : null;
 
+  const pingDb = async (): Promise<boolean> => {
+    // No DB wired (in-memory dev/test) → always ready.
+    if (authPrisma === null) return true;
+    try {
+      // Cheap DB touch (the narrowed client has no $queryRaw); time-capped so a
+      // wedged/unreachable DB fails fast instead of hanging the probe.
+      await Promise.race([
+        authPrisma.machineToken.count({ where: { token: "__readyz_probe__" } }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("db ping timeout")), 2000),
+        ),
+      ]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // Metrics exporter only makes sense against a real DB. 15s TTL matches a
+  // typical Prometheus scrape interval, so back-to-back scrapes share one
+  // count pass.
+  const collectMetricsFn: (() => Promise<MetricsSnapshot>) | undefined =
+    authPrisma !== null
+      ? makeCachedCollector(
+          () => collectMetrics(authPrisma, pingDb),
+          15000,
+          () => Date.now(),
+        )
+      : undefined;
+
   return {
     accountStore,
     sessionStore,
@@ -241,23 +283,8 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     captchaEventStore,
     retentionCron,
     sessionSecret: opts.sessionSecret,
-    pingDb: async (): Promise<boolean> => {
-      // No DB wired (in-memory dev/test) → always ready.
-      if (authPrisma === null) return true;
-      try {
-        // Cheap DB touch (the narrowed client has no $queryRaw); time-capped so a
-        // wedged/unreachable DB fails fast instead of hanging the probe.
-        await Promise.race([
-          authPrisma.machineToken.count({ where: { token: "__readyz_probe__" } }),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("db ping timeout")), 2000),
-          ),
-        ]);
-        return true;
-      } catch {
-        return false;
-      }
-    },
+    pingDb,
+    ...(collectMetricsFn !== undefined ? { collectMetrics: collectMetricsFn } : {}),
     ...(opts.now !== undefined ? { now: opts.now } : {}),
   };
 }

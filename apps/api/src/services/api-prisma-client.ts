@@ -135,7 +135,9 @@ export interface ApiPrismaClient {
   };
   lLMUsageEvent: {
     create(args: { data: Record<string, unknown> }): Promise<unknown>;
-    count(args: { where: { machine_token: string; occurred_at: { gte: Date } } }): Promise<number>;
+    // Optional `where` so the metrics exporter can take a grand total
+    // (count()) while the rate-limiter passes a per-token window.
+    count(args?: { where?: Record<string, unknown> }): Promise<number>;
   };
   // Captcha encounter ledger. Tightly typed for create() because that's
   // all PrismaCaptchaEventStore uses; readers (analytics queries) will
@@ -144,6 +146,8 @@ export interface ApiPrismaClient {
   // us from accidentally depending on Prisma internals here.
   captchaEvent: {
     create(args: { data: Record<string, unknown> }): Promise<unknown>;
+    // Metrics exporter: total captcha encounters.
+    count(args?: { where?: Record<string, unknown> }): Promise<number>;
   };
   pairingToken: {
     create(args: { data: Record<string, unknown> }): Promise<unknown>;
@@ -235,6 +239,8 @@ export interface ApiPrismaClient {
   };
   credential: {
     create(args: { data: Record<string, unknown> }): Promise<CredentialRow>;
+    // Metrics exporter: total stored credentials.
+    count(args?: { where?: Record<string, unknown> }): Promise<number>;
     findFirst(args: {
       where: Record<string, unknown>;
     }): Promise<CredentialRow | null>;
@@ -257,9 +263,9 @@ export interface ApiPrismaClient {
   };
   vaultAuditEvent: {
     create(args: { data: Record<string, unknown> }): Promise<VaultAuditEventRow>;
-    count(args: {
-      where: { account_id: string; type: string; emitted_at: { gte: Date } };
-    }): Promise<number>;
+    // Optional/broad `where` so the metrics exporter can take a grand total
+    // while audit readers pass a scoped (account_id + type + window) filter.
+    count(args?: { where?: Record<string, unknown> }): Promise<number>;
     findMany(args: {
       where: Record<string, unknown>;
       orderBy?: Record<string, unknown>;
@@ -269,6 +275,8 @@ export interface ApiPrismaClient {
   };
   egressGrant: {
     create(args: { data: Record<string, unknown> }): Promise<EgressGrantRow>;
+    // Metrics exporter: total grants + active (revoked_at: null) grants.
+    count(args?: { where?: Record<string, unknown> }): Promise<number>;
     findUnique(args: { where: { id: string } }): Promise<EgressGrantRow | null>;
     findMany(args: {
       where: Record<string, unknown>;
