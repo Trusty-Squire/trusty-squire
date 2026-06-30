@@ -23,6 +23,18 @@ export interface InstallRouteDeps {
   now?: () => Date;
 }
 
+// Real client IP behind Fly's proxy. `req.ip` is the proxy's address (Fastify
+// trustProxy is off), so it's identical for every caller and useless for a
+// per-IP cap. Fly sets `fly-client-ip` to the true client; fall back to the
+// first x-forwarded-for hop, then req.ip.
+function clientIp(req: FastifyRequest): string {
+  const fly = req.headers["fly-client-ip"];
+  if (typeof fly === "string" && fly.trim().length > 0) return fly.trim();
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) return xff.split(",")[0]!.trim();
+  return req.ip ?? "unknown";
+}
+
 export async function registerInstallRoute(
   fastify: FastifyInstance,
   // signupsDisabled is the SIGNUPS_DISABLED global kill switch (checklist #10),
@@ -32,6 +44,29 @@ export async function registerInstallRoute(
   opts: { deps: InstallRouteDeps; signupsDisabled: boolean },
 ): Promise<void> {
   const now = (): Date => opts.deps.now?.() ?? new Date();
+
+  // Per-IP rolling-hour cap on token issuance. /v1/install is unauthed
+  // (pre-account, so the per-account limiter can't cover it) and each mint
+  // inserts a DB row — without a cap a single source could flood the DB + the
+  // funnel metrics (load test #12 surfaced this as the one unthrottled write
+  // path). Generous by default so legit re-installs and modest shared-NAT use
+  // never trip it; tune via INSTALL_IP_HOURLY_LIMIT, `<= 0` disables. In-memory /
+  // single-instance, mirroring the per-account limiter.
+  const IP_HOURLY_LIMIT = Number.parseInt(process.env.INSTALL_IP_HOURLY_LIMIT ?? "100", 10);
+  const ipHits = new Map<string, number[]>();
+  const overIpRate = (ip: string): boolean => {
+    if (IP_HOURLY_LIMIT <= 0) return false;
+    const t = now().getTime();
+    const cutoff = t - 3_600_000;
+    const arr = (ipHits.get(ip) ?? []).filter((x) => x > cutoff);
+    if (arr.length >= IP_HOURLY_LIMIT) {
+      ipHits.set(ip, arr);
+      return true;
+    }
+    arr.push(t);
+    ipHits.set(ip, arr);
+    return false;
+  };
 
   // POST /v1/install — issues a fresh machine token. No auth required.
   // The MCP install CLI calls this on first run.
@@ -44,6 +79,10 @@ export async function registerInstallRoute(
   fastify.post("/v1/install", async (req, reply) => {
     if (opts.signupsDisabled) {
       reply.code(503).send({ error: "signups_disabled" });
+      return;
+    }
+    if (overIpRate(clientIp(req))) {
+      reply.code(429).send({ error: "rate_limited", scope: "ip", limit_per_hour: IP_HOURLY_LIMIT });
       return;
     }
     const asn = extractAsnFromBody(req.body);

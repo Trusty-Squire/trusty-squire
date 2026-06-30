@@ -56,10 +56,9 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
   - [x] Egress DEFAULT cap: a grant minted without a rate now gets
     `EGRESS_DEFAULT_RATE_PER_HOUR` (default 1000) instead of unlimited; explicit
     rate still overrides. +test. [was user item #2]
-  - [ ] Follow-up (not launch-blocking): **account-creation rate limiting is
-    IP-based** (unauthed, no account_id yet) — not covered by the per-account
-    limiter. Add a per-IP cap on the signup/create route before/at launch if
-    signup-spam shows up.
+  - [x] Per-IP cap on `POST /v1/install` shipped (`INSTALL_IP_HOURLY_LIMIT`,
+    default 100, keyed off Fly's `fly-client-ip`; 429 `scope:ip`). Closes the
+    unthrottled-write-path gap the #12 load test surfaced. +3 tests.
 
 ## Tier 2 — launch readiness (HN-bounce / correctness)
 
