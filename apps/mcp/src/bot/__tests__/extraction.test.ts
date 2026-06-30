@@ -1,5 +1,5 @@
 // Unit tests for the pure extraction decision primitives (strangler slice 4 —
-// DESIGN-extraction-engine.md). Browser-free. Pins the truncated-vs-full priority
+// docs/ARCHITECTURE.md). Browser-free. Pins the truncated-vs-full priority
 // (the S3 masked-key trap) + the final resolution that extractCredentials owns.
 
 import { describe, expect, it } from "vitest";

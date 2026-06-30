@@ -1,7 +1,7 @@
 // ProvisionEvent store. One row per provision request across ALL
 // dispatch paths (replay-served, replay-fell-back, no-skill-bot).
 // Renamed + widened from ProvisionAttempt (bot-only) — see
-// docs/DESIGN-provision-event-dashboard.md.
+// docs/ARCHITECTURE.md.
 //
 // Together with SkillRecord this is the source of truth for
 // /v1/services/:slug/health AND the new operator dashboard's cache-hit

@@ -213,7 +213,7 @@ interface Session {
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
-  // Phase A operator-recipe capture (docs/DESIGN-operator-skills.md): the
+  // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
   // ordered, TEXT-targeted action trace of this session, so a successful run can
   // be `remember`ed as a replayable rail. Records visible text + non-secret
   // params only — sealed secret values stay in secretSlots, never the trace.
@@ -1827,10 +1827,14 @@ async function solveCaptchaWithTokenSolver(
 ): Promise<{ solved: boolean; outcome: string }> {
   if (!solver.isAvailable()) return { solved: false, outcome: "no_key" };
 
-  if (variant === "recaptcha_v2") {
+  if (variant === "recaptcha_v2" || variant === "recaptcha_v3") {
     const sitekey = await browser.extractRecaptchaSitekey();
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const res = await solver.solveRecaptchaV2({ sitekey, pageUrl: browser.currentUrl() });
+    const res = await solver.solveRecaptchaV2({
+      sitekey,
+      pageUrl: browser.currentUrl(),
+      ...(variant === "recaptcha_v3" ? { invisible: true } : {}),
+    });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
     const injected = await browser.injectRecaptchaToken(res.token);
     if (!injected) return { solved: false, outcome: "inject_failed" };
@@ -1894,11 +1898,12 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
   let tokenSolverOutcome: string | null = null;
 
   if (!token && det.variant === "recaptcha_v3") {
+    // Try the in-browser invisible execution first; if it mints no token AND a
+    // 2Captcha key is configured, escalate to the token solver (best-effort —
+    // #279). With NO solver configured, solveCaptchaWithTokenSolver returns
+    // "no_key" and a v3 failure stays an IP/behavior scoring wall (needs_user →
+    // captcha_wall below), NOT a "set up 2Captcha" prompt.
     solvedBySubstrate = await session.browser.triggerInvisibleRecaptcha(9_000);
-    token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
-  } else if (!token && (det.variant === "recaptcha_v2" || det.variant === "hcaptcha" || det.variant === "turnstile")) {
-    const solved = await session.browser.solveVisibleCaptcha(30_000);
-    solvedBySubstrate = solved.found && solved.solved;
     token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
     if (!token) {
       const solver = await buildTwoCaptchaSolver(session);
@@ -1906,13 +1911,26 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
       tokenSolverOutcome = tokenSolved.outcome;
       token = tokenSolved.solved;
     }
+  } else if (!token && (det.variant === "recaptcha_v2" || det.variant === "hcaptcha" || det.variant === "turnstile")) {
+    // #279: route a configured token solver FIRST for the checkbox-family
+    // captchas; solveCaptchaWithTokenSolver returns outcome "no_key" when none
+    // is configured, so we fall through to the visible-captcha click below.
+    const solver = await buildTwoCaptchaSolver(session);
+    const tokenSolved = await solveCaptchaWithTokenSolver(solver, session.browser, det.variant);
+    tokenSolverOutcome = tokenSolved.outcome;
+    token = tokenSolved.solved;
+    if (!token) {
+      const solved = await session.browser.solveVisibleCaptcha(30_000);
+      solvedBySubstrate = solved.found && solved.solved;
+      token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
+    }
   }
 
   const clear = await session.browser.waitForCaptchaChallengeToSettle(token ? 5_000 : 15_000);
   const settled =
     det.variant === "unknown"
       ? clear
-      : token && clear;
+      : token && (clear || tokenSolverOutcome === "ok");
 
   // Fail-fast: if we couldn't clear it, hand the host a specific, actionable
   // reason so it stops driving immediately. `no_key` means a 2Captcha solver
@@ -1922,7 +1940,10 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
   let needs_user: NeedsUserCaptcha | undefined;
   if (!settled) {
     needs_user =
-      tokenSolverOutcome === "no_key"
+      // "set up 2Captcha" advice only fits the checkbox-family captchas a solver
+      // can actually clear. An invisible/v3 failure with no key is a scoring wall
+      // → captcha_wall (proxy / manual), even though the solver was attempted.
+      tokenSolverOutcome === "no_key" && det.variant !== "recaptcha_v3"
         ? {
             gate: "captcha_solver",
             message:
@@ -1969,7 +1990,7 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
 // thick session is STILL LIVE, so this is resumable, not a give-up. The host
 // asks the user for the code (SMS / authenticator / not-yet-delivered email),
 // then types it with operate_act and keeps driving. Session + vault moat
-// preserved. See docs/DESIGN-wall-handoff.md.
+// preserved. See docs/ARCHITECTURE.md.
 export interface NeedsUserCode {
   wall: "verification_code";
   message: string;

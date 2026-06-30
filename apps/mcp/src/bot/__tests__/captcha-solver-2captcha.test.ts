@@ -99,6 +99,28 @@ describe("TwoCaptchaSolver — happy path", () => {
     expect(res.durationMs).toBeGreaterThanOrEqual(0);
   });
 
+  it("passes the invisible flag for invisible reCAPTCHA", async () => {
+    const fetchFn = mockFetch({
+      inResponse: { body: { status: 1, request: "abc123" } },
+      resResponses: [{ body: { status: 1, request: "the-token-bytes" } }],
+    });
+    const solver = new TwoCaptchaSolver({
+      apiKey: "k",
+      fetchFn,
+      sleepFn: noSleep,
+    });
+
+    const res = await solver.solveRecaptchaV2({
+      sitekey: "6Le-test",
+      pageUrl: "https://target.example/",
+      invisible: true,
+    });
+
+    expect(res.kind).toBe("ok");
+    const firstUrl = String(vi.mocked(fetchFn).mock.calls[0]?.[0]);
+    expect(firstUrl).toContain("invisible=1");
+  });
+
   it("polls past NOT_READY responses before returning the token", async () => {
     const fetchFn = mockFetch({
       inResponse: { body: { status: 1, request: "abc123" } },

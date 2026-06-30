@@ -2122,7 +2122,7 @@ describe("promoteToSkill — output passes SkillSchema", () => {
   });
 });
 
-// ── Multi-credential synthesis (Phase C per docs/DESIGN-multi-credential.md) ──
+// ── Multi-credential synthesis ──
 
 // Twitter-class fixture: 3 distinct credentials extracted from copy
 // buttons with different surrounding labels.

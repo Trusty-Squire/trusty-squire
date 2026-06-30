@@ -1,6 +1,6 @@
 // promote-to-skill.ts — Stage 1 of the Skill Promoter pipeline.
 //
-// See docs/DESIGN-skill-promoter.md. The synthesizer is the bridge
+// See docs/ARCHITECTURE.md. The synthesizer is the bridge
 // between "the bot captured something" (PostVerifyStep + DOM-grounded
 // inventory dumps) and "the registry has a Skill" (text-based replay
 // graph + credential spec).
@@ -119,7 +119,7 @@ export interface PromoteRejection {
     | "inventory_entry_not_found"
     | "credential_spec_inference_failed"
     | "schema_invalid"
-    // Multi-credential paths (Phase C per docs/DESIGN-multi-credential.md).
+    // Multi-credential paths (Phase C per docs/ARCHITECTURE.md).
     // `duplicate_credential_produces`: two extract rounds derived the
     // same `produces` name (e.g. both labeled "API Key"). Operator
     // fixes by hand-editing the capture labels or re-running the
@@ -307,8 +307,7 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
     });
   }
 
-  // Stage 1.c.5 — multi-cred dispatch (Phase B/C per docs/DESIGN-
-  // multi-credential.md). Count extract-class steps; if >1 AND each
+  // Stage 1.c.5 — multi-cred dispatch. Count extract-class steps; if >1 AND each
   // has a distinct derivable `produces` name, upgrade to the multi-
   // cred shape (named extract kinds + multiple credentials). On any
   // failure (collision, unparseable label) we REJECT rather than

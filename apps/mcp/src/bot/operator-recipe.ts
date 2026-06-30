@@ -1,5 +1,5 @@
 // operator-recipe.ts — Phase A of "user-saved operator workflows as skills"
-// (docs/DESIGN-operator-skills.md). A LOCAL artifact (deliberately NOT the
+// (docs/ARCHITECTURE.md). A LOCAL artifact (deliberately NOT the
 // registry Skill schema yet — that bump is Phase B) that captures a successful
 // operate run so it can be replayed by name.
 //

@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/mcp",
-  "version": "1.0.9-rc.1",
+  "version": "1.0.9-rc.2",
   "license": "MIT",
   "mcpName": "io.github.Trusty-Squire/mcp",
   "type": "module",

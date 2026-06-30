@@ -1,7 +1,7 @@
 -- Rename ProvisionAttempt -> ProvisionEvent. The model widened from
 -- "one row per universal-bot signup outcome" to "one row per provision
 -- request across all dispatch paths" (replay-served / fell-back /
--- no-skill-bot). See docs/DESIGN-provision-event-dashboard.md.
+-- no-skill-bot). See docs/ARCHITECTURE.md.
 --
 -- Additive, non-destructive: the table + data are renamed in place and
 -- new nullable columns are appended. Existing rows keep working; the
