@@ -133,7 +133,7 @@ silent failures.
      browser login (noVNC).
   Every install is account-bound — there is no anonymous tier.
   Provisioning is free during beta (the signup quota + `402 payment_required`
-  paywall were removed; see `docs/BUSINESS-MODEL.md`). See the 2026-05-18
+  paywall were removed). See the 2026-05-18
   streamlined-oauth-onboarding CEO plan (now combined with the 2026-05-19
   single-tier collapse).
   - **0.6.0 — install preflight (rc.15).** Re-installs with a valid
@@ -435,9 +435,9 @@ bin symlink and would catch any regression of the above.
 unless `BILLING_ENABLED=true`/`1` (`/v1/billing/checkout` returns `503
 billing_disabled`), so a stray Upgrade click can't charge anyone even with a
 live Stripe key. The signup-quota `402 payment_required` paywall was removed
-(provisioning is free); see `docs/BUSINESS-MODEL.md` for the planned Free/$20-Pro
-model (egress + audit + future rotation, gated on control-plane routes, NOT
-signup count). When billing is enabled, the web app's `/billing` page opens
+(provisioning is free). Paid plans are not finalized — the future direction is a
+Free/Pro split gated on control-plane routes (egress + audit + future rotation),
+NOT signup count. When billing is enabled, the web app's `/billing` page opens
 Stripe Checkout (`POST /v1/billing/checkout`, web-session-authed); on payment
 Stripe fires `/v1/webhooks/stripe` which flips `subscription_status` to `active`.
 Manage/cancel via the Customer Portal (`POST /v1/billing/portal`). `Account`

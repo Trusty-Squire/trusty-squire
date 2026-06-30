@@ -55,7 +55,7 @@ export default function PrivacyPage() {
           </li>
           <li>We do not sell your data, and we do not read your stored secrets.</li>
           <li>
-            You can export or permanently delete everything at any time.
+            You can permanently delete everything at any time.
           </li>
         </ul>
 
@@ -122,10 +122,10 @@ export default function PrivacyPage() {
 
         <h2>Retention &amp; your rights</h2>
         <p>
-          You can <strong>export</strong> all of your data and{" "}
-          <strong>permanently erase</strong> it — credentials and the audit
-          trail — from the web vault at any time. Operational logs and audit
-          events are retained on a rolling window and then deleted automatically.
+          You can <strong>permanently erase</strong> all of your data —
+          credentials and the audit trail — from the web vault at any time.
+          Operational logs and audit events are retained on a rolling window and
+          then deleted automatically.
         </p>
 
         <h2>Contact</h2>

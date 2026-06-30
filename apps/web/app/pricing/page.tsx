@@ -29,70 +29,22 @@ export default function PricingPage() {
         </div>
       </nav>
 
-      {/* ---------------- HEADER ---------------- */}
+      {/* ---------------- HEADER (stub — paid plans not finalized) ---------------- */}
       <header className="price-hero">
         <div className="wrap">
-          <h1>Simple pricing</h1>
+          <h1>Free during beta</h1>
           <p>
-            Provisioning is free. You pay when your code goes to production —
-            for the price of your AI editor.
+            Trusty Squire is free while in beta — every feature unlocked, no
+            card required. We haven&apos;t finalized paid plans yet; pricing will
+            be announced here before anything changes.
+          </p>
+          <p>
+            <Link className="pill" href="/start">
+              Install
+            </Link>
           </p>
         </div>
       </header>
-
-      {/* ---------------- TIERS ---------------- */}
-      <section className="wrap">
-        <p className="price-beta">
-          Free while in beta — Pro features are unlocked for everyone, no card
-          required. Pricing below is where it&apos;s headed.
-        </p>
-        <div className="price-grid">
-          {/* Free */}
-          <div className="tier">
-            <div className="tier-name">Free</div>
-            <div className="tier-price">
-              <span className="amt">$0</span>
-            </div>
-            <div className="tier-tag">For building and personal projects.</div>
-            <Link className="tier-cta" href="/start">
-              Install
-            </Link>
-            <ul className="tier-feats">
-              <li>Signup &amp; SaaS provisioning</li>
-              <li>Operate tasks behind any login</li>
-              <li>Write-only vault</li>
-              <li>Personal use via the injecting proxy</li>
-              <li>7-day audit trail</li>
-              <li>Manual rotation</li>
-            </ul>
-          </div>
-
-          {/* Pro — focal */}
-          <div className="tier featured">
-            <div className="tier-name">Pro</div>
-            <div className="tier-price">
-              <span className="amt">$20</span>
-              <span className="per">/mo</span>
-            </div>
-            <div className="tier-tag">For shipping real apps to production.</div>
-            <Link className="tier-cta primary" href="/start">
-              Install
-            </Link>
-            <ul className="tier-feats">
-              <li>Everything in Free</li>
-              <li>
-                <strong>Egress grants</strong> — scoped, revocable keys for
-                deployed apps
-              </li>
-              <li>365-day audit trail + export</li>
-              <li>Generous fair-use egress</li>
-              <li>
-                <strong>Automated rotation</strong> <em>(coming soon)</em>
-              </li>
-            </ul>
-          </div>
-        </div>
-      </section>
 
       {/* ---------------- FOOTER ---------------- */}
       <footer>
