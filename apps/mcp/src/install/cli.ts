@@ -1095,7 +1095,10 @@ async function writeAgentConfig(
     ui.hint(`  Residential proxy baked in: ${args.proxyUrl}`);
   }
   if (args.noRegistry) {
-    ui.hint("  Skill registry disabled — every signup goes through the universal bot");
+    ui.hint(
+      "  Skill registry disabled — signups are driven fresh by your agent each time " +
+        "(no shared skill replay).",
+    );
   }
 }
 
