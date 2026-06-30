@@ -45,15 +45,17 @@ survive drift. The resolution rule that threads this: **split specificity by
 axis, because the operator validates every hint live.**
 
 ```
-                 SPECIFIC  ───────────────────────────────►  brittle
+                 SPECIFIC  ───────────────────────────────►  drift-exposed
   SEMANTIC axis  │ "key is under APIs & Services →            (wrong = one
   (location +    │  Credentials, grab the auto-created        wasted look,
-   decisions)    │  browser key; use Google login;            operator re-
-                 │  skip the billing wizard"      ◄── AIM     observes)
+   decisions)    │  browser key; use Google login;           operator re-
+                 │  skip the billing wizard"     ◄── DEFAULT  observes)
                  │
-  MECHANISM axis │ "#submit-btn-v2 at (412,308),     ◄── NEVER (wrong = silent
-  (how to act)   │  exact microcopy, 250ms wait,             confident misclick;
-                 │  https://app/t/abc123?psid=..."           this is blind replay)
+  MECHANISM axis │ recalled selector / element id,  ◄── TIE-BREAK ONLY
+  (how to act)   │  tagged "as of last run, verify":         (matches a live
+                 │  rank CURRENTLY-VISIBLE candidates,        candidate → use;
+                 │  never conjure a non-visible target;       no match → drop;
+                 │  no coordinates / timing / microcopy       never a silent misclick)
 ```
 
 - **Be as specific as useful on the SEMANTIC axis.** Which auth method works,
@@ -61,10 +63,19 @@ axis, because the operator validates every hint live.**
   optional detour to skip, the ordered sub-goals of a composite chain. The
   operator re-observes, so a wrong semantic hint costs one re-look, not a
   failure. This is where the exploration cost on composites actually lives.
-- **Be maximally non-specific on the MECHANISM axis.** No selectors, no
-  coordinates, no exact button microcopy, no timing, no per-account / single-use
-  URLs. A frozen mechanism that drifted produces a confident wrong action with no
-  signal. This is the brittleness we are refusing to reintroduce.
+- **Mechanism is allowed only as a disambiguate-only tie-breaker.** A recalled
+  selector / element identity may *rank* among the candidates the operator
+  CURRENTLY observes; it may NEVER justify acting on a target that is not
+  currently visible. The detail ranks candidates, it never creates them. So a
+  stale mechanism hint costs nothing (it matches no live candidate and is
+  dropped), while a valid one instantly resolves an ambiguous click (icon-only
+  button, repeated label). This is safe because the host LLM operator observes
+  and judges before acting, unlike the blind executor that made replay brittle.
+  Carry every mechanism field tagged "as of last run, verify". **Drop coordinates
+  outright** (they drift with viewport/layout and carry no semantic value to rank
+  with). Never store timing, exact microcopy, or per-account / single-use URLs.
+  Note: selectors can embed per-account ids (`id="user-12345-row"`), so they
+  widen the scrub surface (see producer).
 
 Mental model: a hint is what a knowledgeable human says over your shoulder. It
 names landmarks and decisions, never keystrokes. The operator owns perception and
@@ -124,6 +135,10 @@ the extraction result. Generalization rules, applied here:
 - **credential.location** from where `operate_extract` found the key (the field
   label / page), `shape` from the extracted value's prefix + length (never the
   value), `names` from the store keys.
+- **Mechanism tier (optional, A/B-gated, off by default)** — when emitted, attach
+  to a step the recalled stable selector / element identity (never coordinates),
+  scrubbed of per-account ids, tagged with the run date. The measurement harness
+  gates it on; consumed under the disambiguate-only rule above.
 
 ### Consumer — `renderSkillHint` → `renderServiceHint` (CHANGE)
 
@@ -156,12 +171,17 @@ We have a believed mechanism with strong anecdotes on hard tasks and **no data**
 (the sample is too thin to quantify the lift). So the first thing built is the
 instrumentation, in the same change as the producer:
 
-- Log per provision: `{service, complexity, hint_present: bool, outcome:
-  success|fail, duration_s, turns}`.
+- Log per provision: `{service, complexity, hint_tier: none|semantic|
+  semantic+mechanism, outcome: success|fail, duration_s, turns}`.
 - This yields hint-on vs hint-off success rate and time-to-success, bucketed by
   task complexity, so the lift becomes a number. Feed the pipe and measure it
   together; let the accumulating real provisions tell us how much to invest in
   richer hints.
+- **First A/B: the mechanism sublayer.** Ship semantic-only as the default, then
+  A/B add the disambiguate-only mechanism tier and measure whether it lifts
+  success/time or drags the operator toward stale targets. This settles, with
+  data, the open argument over whether recalled selectors help or anchor — rather
+  than guessing. `hint_tier` is the A/B arm.
 
 ```
 ServiceHint produced ──► registry ──► resolveRouteHint ──► operator first observation
