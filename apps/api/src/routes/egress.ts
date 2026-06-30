@@ -115,6 +115,11 @@ export const registerEgressRoutes: FastifyPluginAsync<{
   deps: ApiDeps;
   egressGrantStore: EgressGrantStore;
   requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
+  // EGRESS_DISABLED global kill switch (checklist #10). When engaged, BOTH the
+  // mint route and the transparent proxy 503 — killing existing grants too is
+  // deliberate (that's what a panic switch is for). Build-time flag, threaded
+  // from server.ts like billingEnabled.
+  egressDisabled: boolean;
   proxyExecutor?: HttpProxyExecutor;
   now?: () => Date;
 }> = async (fastify, opts) => {
@@ -157,6 +162,10 @@ export const registerEgressRoutes: FastifyPluginAsync<{
 
   // ── Mint (agent) ──────────────────────────────────────────────
   fastify.post("/v1/egress/grants", { preHandler: opts.requireAgent }, async (req, reply) => {
+    if (opts.egressDisabled) {
+      reply.code(503).send({ error: "egress_disabled" });
+      return;
+    }
     const auth = req.auth!;
     if (auth.kind !== "agent") return;
     const parsed = mintBody.safeParse(req.body);
@@ -260,6 +269,12 @@ export const registerEgressRoutes: FastifyPluginAsync<{
   fastify.all<{ Params: { grant: string; "*": string } }>(
     "/v1/egress/:grant/*",
     async (req, reply) => {
+      // EGRESS_DISABLED kills the proxy for EXISTING grants too — the panic
+      // switch must stop live workloads, not just new mints.
+      if (opts.egressDisabled) {
+        reply.code(503).send({ error: "egress_disabled" });
+        return;
+      }
       const authz = req.headers.authorization ?? "";
       const token = /^Bearer\s+(.+)$/i.exec(authz)?.[1]?.trim() ?? "";
       let grant;

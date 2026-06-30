@@ -128,6 +128,19 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
       },
     );
 
+  // Global kill switches (checklist #10) — read at server-build time, exactly
+  // like BILLING_ENABLED. A flip is `flyctl secrets set SIGNUPS_DISABLED=1`,
+  // which restarts the machine (~30s); there is no runtime reload by design
+  // (one fewer moving part, and consistent with every other env knob). All
+  // three DEFAULT TO ENABLED / not-killed — only "1" or "true" engages a kill.
+  const killSwitchEngaged = (name: string): boolean =>
+    process.env[name] === "1" || process.env[name] === "true";
+  const signupsDisabled = killSwitchEngaged("SIGNUPS_DISABLED");
+  const egressDisabled = killSwitchEngaged("EGRESS_DISABLED");
+  // Non-empty → the product is in maintenance and the string is the operator's
+  // message for a web banner to read off GET /v1/status.
+  const maintenanceMessage = process.env.MAINTENANCE_MESSAGE ?? "";
+
   const logger =
     process.env.VITEST === "true" || process.env.NODE_ENV === "test"
       ? false
@@ -189,12 +202,17 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   });
 
   await fastify.register(registerAuthRoute, { deps, requireWeb: auth.requireWeb });
-  await fastify.register(registerOAuthRoute, { deps });
+  // SIGNUPS_DISABLED gates fresh account creation in the OAuth callback —
+  // existing identities/accounts still sign in (see oauth.ts).
+  await fastify.register(registerOAuthRoute, { deps, signupsDisabled });
   await fastify.register(registerInstallRoute, {
     deps: {
       machineTokenStore: deps.machineTokenStore,
       ...(deps.now !== undefined ? { now: deps.now } : {}),
     },
+    // SIGNUPS_DISABLED — machine-token issuance is the first step of a fresh
+    // install, so the kill switch 503s it.
+    signupsDisabled,
   });
   await fastify.register(registerCaptchaEventsRoute, {
     deps: {
@@ -262,6 +280,9 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps,
     egressGrantStore: opts.egressGrantStore ?? deps.egressGrantStore,
     requireAgent: auth.requireAgent,
+    // EGRESS_DISABLED 503s both the mint route AND the transparent proxy —
+    // killing existing grants too is the point of the switch (see egress.ts).
+    egressDisabled,
     ...(opts.proxyExecutor !== undefined ? { proxyExecutor: opts.proxyExecutor } : {}),
   });
   const installBaseUrl = opts.installBaseUrl ?? `${defaultPwaBaseUrl()}/install`;
@@ -287,6 +308,17 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   // must NOT depend on the DB, or a DB wedge would trigger an API restart loop
   // that can't fix the DB.
   fastify.get("/health", async () => ({ ok: true }));
+
+  // Public status surface (no auth) — the single place to read what the global
+  // kill switches (checklist #10) have flipped, and the data a web maintenance
+  // banner reads. Mirrors the build-time flags; restart the machine to change.
+  fastify.get("/v1/status", async () => ({
+    ok: true,
+    signups_enabled: !signupsDisabled,
+    egress_enabled: !egressDisabled,
+    maintenance: maintenanceMessage.length > 0,
+    message: maintenanceMessage,
+  }));
 
   // Readiness — verifies the DB actually answers. Point an external uptime
   // monitor here to get paged when the DB wedges (the 256MB OOM failure mode):
