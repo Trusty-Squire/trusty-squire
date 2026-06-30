@@ -102,6 +102,28 @@ describe("Egress Grants — /v1/egress", () => {
     expect(seen.at(-1)?.method).toBe("POST");
   });
 
+  it("base_url advertises the forwarded (https) scheme so the Authorization header survives the edge", async () => {
+    // Behind Fly, req.protocol is "http" (TLS terminates at the edge). Advertising
+    // http:// makes a backend follow the http→https redirect, dropping the auth
+    // header → a spurious 401 on the first call. base_url must carry x-forwarded-proto.
+    const account = await h.deps.accountStore.createAccount("https@example.test", "H");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/egress/grants",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
+        "x-forwarded-proto": "https",
+      },
+      payload: { service: "OpenAI" },
+    });
+    const j = res.json() as { base_url: string };
+    expect(j.base_url.startsWith("https://")).toBe(true);
+  });
+
   it("rejects a bad/missing egress token (401) and never calls upstream", async () => {
     const account = await h.deps.accountStore.createAccount("b@example.test", "B");
     const cookie = await webCookie(h.deps, account.id);
