@@ -2,24 +2,22 @@
 
 ## 1.0.10 (2026-06-30)
 
-- chore: drop universal-bot/agent.ts cruft from logs + comments
-- chore: retire the orphaned eval corpus (apps/mcp/corpus/eval)
-- docs: fix CLAUDE.md pointers to design docs #279 deleted
-- refactor(mcp): one ordered `detail` knob for observation verbosity (1.0.10-rc.3)
-- feat(mcp): compact observation default-on + Phase 2 escalation API (1.0.10-rc.2)
-- test(mcp): compact-vs-full information-equivalence eval
-- feat(mcp): compact operate observation payload behind BOT_OBSERVE_COMPACT (default off)
-- release(mcp): 1.0.9 — promote rc line to stable (connect channel fix, recipe entry_url, captcha+docs)
-- docs: simplify public docs and fix captcha solver
-- fix(mcp): operator-recipes capture a stable entry_url + drop single-use links
-- fix(mcp): connect provider-session probe launches system Chrome (channel:"chrome")
-- docs: remove the Pricing section from the README (#277)
-- docs: remove the Pricing section from the README
-- feat(web): remove the pricing page for now (#276)
-- release(mcp): 1.0.8-rc.1 — connect heartbeat + OpenRouter proxy removal
-- docs(readme): 10-example marketing section (ship 1.0.6-rc.2 to next)
-- chore(release): sync staging to main (1.0.6-rc.1)
-- fix(connect): don't re-pair (noVNC) when the bot profile is merely busy
+Promotes the 1.0.10 line (rc.1 → rc.3) to stable. Highlights:
+
+- **Compact operate observations, default-on.** `observeSession` now emits a
+  compact perception payload — drops the `screen`/`accessibility` re-encodings,
+  omits null/empty/false element fields, drops `container` (redundant with
+  `path`), and returns `value_len` instead of raw values. ~50% smaller per turn
+  with no perception loss (proven by an information-equivalence eval).
+- **One ordered verbosity knob.** A single per-call `detail: none|compact|full`
+  on `operate_observe` (compact|full) and `operate_act` (none|compact|full) —
+  `full` restores the legacy payload for an ambiguous step, `none` is a bare ack
+  so chained fills don't each echo the page. Replaces the short-lived
+  `BOT_OBSERVE_COMPACT` env + `include` option from the rc line.
+- **Cleanup:** retired the orphaned eval corpus (`apps/mcp/corpus/eval`, dead
+  since the autonomous planner was removed), rebranded the `[universal-bot]` log
+  prefixes to `[operator]`, and pruned stale `agent.ts`/doc references in
+  comments. No behavior change.
 
 ## 1.0.10-rc.3 (2026-06-30)
 
