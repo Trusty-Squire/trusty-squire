@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.10-rc.3 (2026-06-30)
+
+- refactor(mcp): collapse the observation-verbosity controls into **one ordered
+  per-call knob** `detail: none|compact|full` on both `operate_observe`
+  (compact|full) and `operate_act` (none|compact|full). Removed the
+  `BOT_OBSERVE_COMPACT` env default (payload shape has no server-side blast
+  radius — nothing for an operator to revert; compact is simply the hardcoded
+  default) and the `operate_observe` `include` option (broke the linear ladder;
+  `full` is the escalation). Same behavior, one coherent vocabulary the planner
+  sets per call.
+
 ## 1.0.10-rc.2 (2026-06-30)
 
 - feat(mcp): compact observation is now **default-on** (`BOT_OBSERVE_COMPACT`
