@@ -130,8 +130,12 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
   Covers the can't-unpublish fact, the npx-cache caveat, fix-forward, and the
   Fly/API rollback path. Grounded on the live state (latest=1.0.7).
 
-- [ ] **12. Crude load test.** Simulate a few hundred concurrent connects + vault
-  ops + egress calls to find the breaking point BEFORE HN does.
+- [x] **12. Load test.** `tools/loadtest.mjs` + findings in `docs/LOAD-TEST.md`.
+  Prod read-path baseline (1 GB DB): /health 3,300+ rps, /readyz ~1,100 rps
+  (DB-pool ceiling ~conc 50), **0 errors at every level**, graceful latency
+  degradation, no wedge. Orders of magnitude over a human-paced connect storm.
+  Open follow-ups: per-IP cap on /v1/install (unthrottled write path) + the
+  write-path ceiling is unmeasured (avoided polluting prod data).
 
 ## Tier 4 — later (when traffic justifies it)
 
