@@ -95,11 +95,6 @@ The raw secret is never handed back to the agent — it's stored write-only and 
 published to the registry, so the next person provisioning that service replays it in
 ~30s instead of the agent re-figuring it out.
 
-## Pricing
-
-Free during beta — every feature unlocked, no card required. Paid plans aren't
-finalized yet; pricing will be announced before anything changes.
-
 ---
 
 ## Development
