@@ -61,12 +61,22 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
 
 ## Tier 2 — launch readiness (HN-bounce / correctness)
 
-- [ ] **5. Ship 1.0.7 → `latest`.** `npx @trusty-squire/mcp` currently pulls
-  1.0.6 (no 2Captcha vaulting). Promote before pointing HN at it.
+- [x] **5. Ship 1.0.7 → `latest`.** DONE (PR #261). `npm dist-tags` → `latest:
+  1.0.7` — carries 2Captcha vaulting + the fail-fast captcha gate + the
+  10-example README. Reconciled the main↔staging divergence (merge: only
+  package.json/CHANGELOG conflicted; CLAUDE.md auto-merged).
 
-- [ ] **6. Clean-machine `connect` test.** Run on a fresh box/container (no Chrome
-  profile, no keychain, headless + Xvfb). That's the actual first impression and
-  the most likely place strangers bounce.
+- [x] **6. Clean-machine `connect` test.** DONE — full-range self-test PASSED on
+  a fresh box (different user/home): tool surface, vault read, provision via
+  Google OAuth → extract → store → use, egress grant mint/use, audit ledger,
+  revoke → 403, browser close. Secrets stayed server-side throughout. The
+  install-time `✖ provider session check` proved cosmetic (the provision OAuth
+  worked). Two real bugs found + fixed:
+  - [x] stale "universal bot" copy in the `--no-registry` connect output
+    (`cli.ts`) — reworded. Ships in the next mcp release.
+  - [x] `grant_app_access` advertised `base_url` as `http://` → Fly's http→https
+    redirect dropped the Authorization header → spurious 401 on a backend's
+    first call. Now honors `x-forwarded-proto` (https). +test. Deploys with this.
 
 - [~] **7. Fail-fast gate UX.** [user item #1] 2 of 3 gates done.
   - [x] **Captcha:** `operate_captcha_gate` returns a structured

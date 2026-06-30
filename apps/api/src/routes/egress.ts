@@ -201,7 +201,18 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       now: now().toISOString(),
     });
     await opts.egressGrantStore.create(grant);
-    const base = `${req.protocol}://${req.headers.host ?? "egress.trustysquire.ai"}/v1/egress/${grant.id}`;
+    // Fly terminates TLS at the edge and forwards HTTP internally, so
+    // req.protocol reads "http". Advertising that as base_url makes a backend
+    // follow the http→https redirect, and the Authorization header is dropped on
+    // the protocol hop → a spurious 401 on the FIRST call to the grant. Honor the
+    // edge's x-forwarded-proto (the real public scheme); fall back to req.protocol
+    // for local dev where it isn't set.
+    const fwdProto = req.headers["x-forwarded-proto"];
+    const proto =
+      typeof fwdProto === "string" && fwdProto.length > 0
+        ? fwdProto.split(",")[0]!.trim()
+        : req.protocol;
+    const base = `${proto}://${req.headers.host ?? "egress.trustysquire.ai"}/v1/egress/${grant.id}`;
     reply.code(201).send({
       grant_id: grant.id,
       base_url: base,
