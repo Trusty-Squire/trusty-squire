@@ -8,6 +8,44 @@ are isolated at the bottom so the actionable list stays scannable.
 
 ---
 
+## Launch readiness — post-launch follow-ups (2026-06-30)
+
+The production/launch checklist (secrets audit, KMS fail-closed, DB capacity +
+Telegram `/readyz` alert, per-account + egress + per-IP-install rate caps, the
+Fly-Grafana single-pane dashboard, global kill switches, the npm rollback
+runbook, and the load test) is **complete and deployed** — folded here from the
+retired `todos.md` (full history in git). None of the below blocks launch.
+
+- **SMS / phone-verification gate** [feature]. No bot-side phone handling or
+  setting exists; some services gate signup on an SMS code. This is the
+  product-side complement to the AB6 `sms_phone` manual denylist below — a real
+  phone setting + fail-fast/relay path, not a UX tweak.
+- **Headless `connect`: auto-set `TRUSTY_SQUIRE_SESSION_FILE=1` when `DISPLAY` is
+  unset.** The heartbeat (no more dead-looking sign-in wait) shipped; this is the
+  other half — a headless box's ephemeral OS keychain doesn't persist the
+  session, so `connect` re-loops the noVNC page every run unless the var is
+  exported globally. Detect headless and default the durable file session.
+- **Web maintenance-banner UI.** `GET /v1/status` already exposes `maintenance` +
+  `message` (from the `MAINTENANCE_MESSAGE` kill switch); the frontend just needs
+  to read it and render a banner.
+- **DB HA replica** [infra, when traffic justifies]. `trusty-squire-db` is a
+  single node; a replica survives a node death mid-launch and lifts the ~1,100
+  rps read ceiling (`docs/LOAD-TEST.md`). Bigger lift.
+- **Separate the egress proxy from the API server** [infra, when traffic
+  justifies]. Launch-appropriate version (per-account + per-grant caps) shipped;
+  full split (a separate Fly process/machine pool sharing the DB) later.
+- **Write-path load ceiling unmeasured.** The load test exercised read paths only
+  (avoided polluting prod data); the `/v1/install` + OAuth write ceiling is
+  inferred, not measured.
+- **Legal review of the privacy policy + ToS** [owner, not code]. `apps/web`
+  `/privacy` + `/terms` are engineer-drafted, not counsel-reviewed.
+- **Team / Pro tier — VouchFlow `signPayload` as the first-party signing
+  backbone** [parked]. Signed vault mandates → approval workflows +
+  device-attested vault access + tamper-evident compliance audit. Decision open:
+  bundle vs wedge. Related to P4 below.
+
+---
+
 ## Where we are (2026-06-27, `@trusty-squire/mcp@0.9.19-rc.24`)
 
 Since the 0.9.3 snapshot this section used to carry: the closed loop (virgin
