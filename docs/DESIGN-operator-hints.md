@@ -92,28 +92,40 @@ replay, not inventing a new capture system.
 
 ## Hint schema
 
+A hint is a **delta sheet, not a manual** (decision Q2). A frontier agent already
+knows the general procedure ("to add Google login you set up Firebase Auth and
+enable the Google provider") from training + web search, and re-narrating it back
+does not help execution anyway — what trips the agent on a live page is "where is
+the button now," which observation handles. So the hint stores only what a smart
+agent would not already know or would get wrong:
+
 ```jsonc
 ServiceHint {
   service: "firebase",                    // slug
-  complexity: "composite",                // "simple" | "composite" — gates serving
-  auth: { method: "google_oauth",         // the decision that took trial to find
+  auth: { method: "google_oauth",         // which path survives (empirical, time-specific)
           note: "email signup hits the anti-bot wall; use Google" },
-  steps: [                                 // the MAP, landmark-level, ordered
-    { goal: "Create a Firebase project",        landmark_path: "console.firebase.google.com" },
-    { goal: "Enable Authentication → Google provider" },
-    { goal: "Open Project Settings → General" }
-  ],
   credential: {
-    location: "Project Settings → General → Web API key",   // semantic, not a selector
-    shape: "AIzaSy… ~39 chars",                              // so the operator knows it when it sees it
+    location: "Project Settings → General → Web API key",   // where it lives in the CURRENT UI
+    shape: "AIzaSy… ~39 chars",                              // so the agent knows it when it sees it, and stops
     names: ["web_api_key"]
   },
-  skip: ["billing setup wizard is optional"]   // known detours (the wizard-budget-exhaustion trap)
+  gotchas: [                               // the delta sheet — traps + ordering, NOT a procedure
+    "skip the billing setup wizard, it is optional (wizard-budget-exhaustion trap)",
+    "create the GCP project before the Firebase step or the provider enable dead-ends"
+  ]
 }
 ```
 
-Every field is semantic and advisory. No selectors, no coordinates, no
-per-account URLs. `landmark_path` is host/path only, never query params.
+There is deliberately NO ordered `steps[]` procedural map: the agent supplies the
+procedure from its own knowledge; the registry supplies the corrections. Every
+field is semantic and advisory. No selectors, no coordinates, no per-account
+URLs.
+
+**Caveat (measured, not designed-around):** the model's prior is frozen at its
+training cutoff, so a procedure it confidently remembers can be stale. That is
+still a *delta* (a correction in `gotchas`), not a reason to store a map. It just
+means deltas matter more for high-UI-churn services — a bucket for the harness,
+not a schema change.
 
 ## Components
 
@@ -122,16 +134,20 @@ per-account URLs. `landmark_path` is host/path only, never query params.
 At verified success (see below), build a `ServiceHint` from the lean trace plus
 the extraction result. Generalization rules, applied here:
 
-- **Auth method** from which OAuth/email path the trace actually took.
-- **Steps** by collapsing the trace to landmark transitions: a new `step` per
-  distinct host/path the operator settled on, labelled with the `text_match` of
-  the action that advanced it, with run-specific literals stripped (the project
-  name, the user's email, tenant ids). Reuse the existing `scrubKnownEmail` +
-  extend it to a general identity-literal scrub.
-- **landmark_path** = the URL reduced to host + path. Strip all query params (the
-  `psid=` / `redirect_to=` / tenant-id class). `isSingleUseUrl` already gates
-  trace `goto`s; apply the same gate to entry/landmark URLs (Codex flagged
-  `startUrl` was not covered).
+- **Auth method** from which OAuth/email path the trace actually took. Auto-
+  extractable from a single success.
+- **gotchas are NOT cleanly extractable from one success.** A successful run does
+  not announce "I skipped the wizard" or "the provider enable dead-ended until I
+  created the GCP project first." So gotchas come from two harder sources, not
+  from naive trace collapse: (a) the operator surfacing them when it recovers
+  from a dead-end (it knows it backtracked), and (b) failure-vs-success diffing
+  over accumulated runs (which the measurement harness already logs). v1 emits
+  auth + credential automatically; gotchas start empty and fill from (a)/(b).
+  This is the honest hard part of the producer.
+- **URL scrub** on anything stored (credential.location pages, any recalled URL):
+  reduce to host + path, strip all query params (`psid=` / `redirect_to=` /
+  tenant-id class), and gate with `isSingleUseUrl` (Codex flagged `startUrl` was
+  not covered). Extend `scrubKnownEmail` to a general identity-literal scrub.
 - **credential.location** from where `operate_extract` found the key (the field
   label / page), `shape` from the extracted value's prefix + length (never the
   value), `names` from the store keys.
@@ -202,7 +218,7 @@ ServiceHint produced ──► registry ──► resolveRouteHint ──► ope
 | Hint carries a per-account URL that slipped the scrub | Operator navigates to a dead tenant URL. Mitigation: landmark_path is host+path only + `isSingleUseUrl` gate; deny-test on the producer. |
 | Hint produced from an unverified run | Poisoned map served to the next user. Mitigation: the verified-success gate above. |
 | Identity literal (name/org) in a step label | PII in a shared record. Mitigation: identity-literal scrub in `synthesizeHint`; deny-test. |
-| Trivial service gets a hint | Wasted production + serving, no lift. Mitigation: `complexity` gate; only composites are served. |
+| Service with no non-obvious delta | Producer would emit an empty/trivial hint, no lift. Mitigation: emit nothing when auth is the obvious default AND the key is at the obvious place AND there are no gotchas. A hint exists only when it carries a real delta. This replaces the old `simple/composite` gate (Q2). |
 
 ## NOT in scope
 
@@ -226,17 +242,38 @@ ServiceHint produced ──► registry ──► resolveRouteHint ──► ope
 | Postcondition check | `verifyPostcondition:1552` | Reuse as the verified-success gate. |
 | Extraction | `extractCredentials` | Source of `credential.location/shape/names`. |
 
-## Open questions
+## Decisions (resolved 2026-06-30)
 
-1. **Registry artifact: new `/hints` type, or a hint-only Skill entry?** Decides
-   the bulk of the server work. Recommend a dedicated hint record.
-2. **Complexity signal: who labels `simple` vs `composite`?** The host agent
-   declares multi-host up front (`allowed_hosts` on `operate_start`), which is a
-   usable proxy. Confirm that is enough or whether a turn-count threshold is
-   needed.
-3. **Hint conflict: two successful runs of the same service disagree on the
-   map.** Last-write-wins, merge, or keep-the-one-with-better-measured-outcome.
-   Tied to deliverable #1's data.
+- **Q1 — dedicated `/hints` record + store, NOT a hint-only Skill entry.**
+  Retiring the replay path is a **strangler, not a delete**: the Skill table is
+  the *current* hint source (`renderSkillHint`) and the housekeeper still uses it.
+  Order: (1) build `/hints` + store, (2) migrate hint-relevant fields out of the
+  curated active Skills into `/hints`, (3) repoint `resolveRouteHint` at `/hints`,
+  (4) confirm hints still serve, (5) THEN retire the Skill table, onboarding-
+  capture corpus, `promoteToSkill`, and `operate_use`. Retiring before step 4
+  blanks the live hint path and breaks the housekeeper.
+- **Q2 — delta sheets, not procedural maps; the task→hint MAPPING is the real
+  work.** No fat `steps[]` (above). The harder, first-class piece this surfaces:
+  `resolveRouteHint` today keys off ONE service URL slug, but a composite task
+  ("add Google login") has no single URL — it decomposes across GCP + Firebase +
+  the app. So a **task → hints index** that recognizes intent and returns the
+  right delta sheet per leg is needed, and it is bigger than the hint storage. The
+  old `simple/composite` labeling question dissolves: a hint exists only when it
+  carries a real delta (see failure modes), so there is nothing to gate on
+  complexity.
+- **Q3 — last-write-wins biased by measured outcome, deferred.** Reconciliation
+  of two disagreeing successful runs waits until the harness (deliverable #1) is
+  logging success/time, so "better measured outcome" is a real signal.
+
+## Components (additional)
+
+### Task → hint index (NEW, the Q2 work)
+
+Recognize the provisioning task's intent and the host(s) the operator is on, and
+return the delta sheet(s) for each leg. For a single-service signup this is the
+current URL-keyed lookup. For a composite it is a 1→N mapping (one task → hints
+for GCP + Firebase). This is the larger build the delta-sheet decision pulls
+forward; the storage is the easy half.
 
 ## Review outcome (plan-eng-review + Codex, 2026-06-30)
 
@@ -268,9 +305,6 @@ Findings folded into the rewrite: (1) `OperatorRecipe` ≠ registry `Skill`, no 
 
 - **CODEX:** surfaced the load-bearing schema gap the first-pass review missed; its recommendation (don't build a Recipe→Skill translator) was absorbed and then superseded by the hint reframe (produce neither a recipe nor a Skill).
 - **CROSS-MODEL:** first-pass review favored promoting the recipe; Codex favored reviving capture for `promoteToSkill`; the user's field evidence on replay brittleness overrode both — the artifact is a hint, not a replay script.
-- **VERDICT:** ENG review complete, spec rewritten and self-consistent. Not CLEARED for implementation — 3 decisions remain open below.
+- **VERDICT:** ENG review complete, spec rewritten and self-consistent, all 3 open decisions resolved (Q1 dedicated `/hints` + strangler retirement of the replay Skill path; Q2 delta sheets not maps, with the task→hint index as the real build; Q3 last-write-wins biased by measured outcome, deferred). Ready to scope implementation — the task→hint index is the largest piece, gotcha extraction is the honest hard part.
 
-**UNRESOLVED DECISIONS:**
-- Q1 — Registry artifact: a dedicated `/hints` record (recommended) vs a hint-only `Skill` entry. Decides the bulk of server work.
-- Q2 — Complexity signal: is `operate_start`'s multi-host `allowed_hosts` a sufficient `simple`/`composite` label, or is a turn-count threshold needed.
-- Q3 — Hint conflict resolution when two successful runs disagree: last-write-wins vs merge vs better-measured-outcome (tied to the deliverable-#1 data).
+NO UNRESOLVED DECISIONS
