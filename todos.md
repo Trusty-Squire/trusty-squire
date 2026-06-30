@@ -97,11 +97,26 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
   - NOTE: engineer-drafted first version, NOT legal-reviewed — have counsel
     review before a real launch.
 
+## Tier 2.5 — connect-flow UX (found 2026-06-29 on a headless VPS)
+
+- [ ] **Headless `connect` hangs at the noVNC step.** On a no-DISPLAY box
+  (datacenter VPS, e.g. AS23470 ReliableSite) connect prints the
+  `vnc.trustysquire.ai/#p=…` URL then blocks on the sign-in poll with NO
+  timeout and NO heartbeat — looks dead even when it's working. Fixes:
+  (a) emit a "still waiting for sign-in…" heartbeat every ~15s + a bounded
+  timeout with a resume hint; (b) the headless keychain is ephemeral, so
+  set `TRUSTY_SQUIRE_SESSION_FILE=1` automatically when DISPLAY is unset
+  (today the user must export it globally or connect re-loops the page).
+
 ## Tier 3 — survive launch day (observability / ops)
 
-- [ ] **9. Error tracking + live dashboard.** Instrument the API (Sentry creds
-  already vaulted) so failures are visible in real time; add request/error-rate
-  + egress-volume metrics. Can't fix what we can't watch.
+- [x] **9. Live dashboard (funnel + health + 5xx) in Fly Grafana.** Private
+  Prometheus exporter on the API (`/metrics`, port 9091, 6PN-only; PRs #264 +
+  #265 incl. the IPv6-bind fix) emits `squire_*` funnel/health gauges; Fly
+  scrapes them into "Prometheus on Fly". Dashboard JSON committed at
+  `apps/api/observability/launch-dashboard.json` (5xx from `fly_edge_http_responses_count`;
+  all queries verified live via the vaulted Fly token). Import = paste into
+  fly-metrics.net. Sentry stays the error-triage click-through, not a watched pane.
 
 - [ ] **10. Global kill switches.** Extend the `BILLING_ENABLED` flag pattern:
   disable new-account creation / egress / a maintenance banner, flippable fast
