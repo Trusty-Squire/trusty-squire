@@ -39,6 +39,7 @@ import {
   type PostconditionResult,
   type PostconditionSnapshot,
   checkSuccessSignal,
+  isSingleUseUrl,
   writeRecipe,
 } from "./operator-recipe.js";
 import {
@@ -217,6 +218,11 @@ interface Session {
   // be `remember`ed as a replayable rail. Records visible text + non-secret
   // params only — sealed secret values stay in secretSlots, never the trace.
   actionTrace: TraceEntry[];
+  // The session's START url (service_url at operate_start, or the resolved
+  // entry on an operate_use replay). Persisted as the recipe's canonical
+  // entry_url so a replay always opens at a STABLE page, never a mid-flow
+  // single-use link inferred from the trace.
+  startUrl: string;
   // PR2 — whether this session may read the inbox for email verification. From
   // the install-time consent flag; gates awaitVerification (fail-closed).
   consentInboxRead: boolean;
@@ -1046,6 +1052,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     sealedFieldKeys: new Set(),
     lastElements: [],
     actionTrace: [],
+    startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
     userEmail: loggedInEmail("google", opts.profileDir),
     ...(opts.api !== undefined ? { api: opts.api } : {}),
@@ -1369,6 +1376,17 @@ function recordTrace(
   action: ProvisionAction,
   el: InteractiveElement | null,
 ): void {
+  // Never freeze a single-use link (email-verify / magic / reset token) into
+  // the recipe — it's dead on the next replay. The host agent re-plans the
+  // verification step live (operate_await_verification fetches a FRESH link)
+  // when it reaches that state, per the "recipe is a MAP, not a script" model.
+  if (action.kind === "goto" && isSingleUseUrl(action.url)) {
+    // Log only the host — never the token-bearing URL.
+    let host = "?";
+    try { host = new URL(action.url).host; } catch { /* keep "?" */ }
+    audit(session.id, "trace_skip_single_use_goto", { url_host: host });
+    return;
+  }
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
@@ -1415,6 +1433,9 @@ export async function rememberRecipe(
     name: opts.name,
     schema_version: 1,
     goal: opts.goal,
+    // Canonical, stable replay entry — the page the session started at, never a
+    // mid-flow single-use link inferred from the trace.
+    entry_url: session.startUrl,
     allowed_hosts: [...new Set(egressSeedHosts(session))],
     trace: session.actionTrace,
     secrets,
