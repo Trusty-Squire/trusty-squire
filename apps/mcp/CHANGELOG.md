@@ -1,5 +1,20 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.9 (2026-06-30)
+
+Promotes the 1.0.9-rc line to stable. Full detail in the rc.1 / rc.2 entries below.
+
+- fix(mcp): `connect` provider-session probe launches the system Chrome
+  (`channel:"chrome"`) — fixes the spurious "Provider session check failed
+  (continuing)" ✗ on every connect. (#278)
+- fix(mcp): operator-recipes record a stable `entry_url` and drop single-use
+  links, so `operate_use` replays no longer open on a dead token page. (#280)
+- fix(captcha): configured 2Captcha token solve counts the gate as settled;
+  invisible reCAPTCHA passes the `invisible` flag; v3 escalates to the solver
+  only when a key is configured (else it stays a `captcha_wall`). (#279)
+- docs: canonical `docs/ARCHITECTURE.md` + docs index; stale public design/E2E
+  docs removed. (#279)
+
 ## 1.0.9-rc.2 (2026-06-30)
 
 - fix(captcha): a successful 2Captcha token solve now counts the gate as
