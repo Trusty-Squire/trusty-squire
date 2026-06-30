@@ -695,13 +695,21 @@ async function connect(args: Argv): Promise<void> {
       clearAllProviderMarkers();
       for (const p of actual) markProviderLoggedIn(p);
     }
-  } catch {
+  } catch (err) {
     // Best-effort: a probe failure (rare — playwright launch should
     // succeed if the install confirm just opened Chrome there) just
     // leaves the marker as-is. The downstream secondary prompt's
     // logic still has the maybeOfferSecondaryProvider escape hatch
     // (yes/no prompt with the default-yes), so the user can still
     // reach GitHub even if we mis-identified the live state.
+    //
+    // Surface the reason on stderr so this never recurs invisibly: the
+    // empty catch once hid a launch error (probe missing channel:"chrome",
+    // reaching for an absent bundled Chromium) behind the bare "(continuing)"
+    // ✗ for months, while the stale marker still printed "connected".
+    console.error(
+      `[connect] provider-session probe failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 
   // Backfill connected_providers from the (now-fresh) bot-side marker.

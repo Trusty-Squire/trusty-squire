@@ -4,6 +4,8 @@
 // are the deterministic pieces that can be.
 
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import {
   binaryOnPath,
   classifyGoogleAuthState,
@@ -15,6 +17,33 @@ import {
   scopesAreBasic,
   scrapeGoogleScopePhrases,
 } from "../google-login.js";
+
+// Regression guard for the connect-flow "Provider session check failed
+// (continuing)" ✗. Every persistent-context launch in this module must pass
+// channel:"chrome" — the system Chrome the login flow signs in with. The
+// provider-session probe once omitted it, reaching for an absent bundled
+// Chromium and throwing on EVERY connect, while the stale on-disk marker still
+// printed "connected". A source-shape invariant is the cheapest durable guard:
+// the launches spawn real Chrome and can't be unit-exercised here.
+describe("bot Chrome launch consistency", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("../google-login.ts", import.meta.url)),
+    "utf8",
+  );
+
+  it("every launchPersistentContext call sets channel:\"chrome\"", () => {
+    // `.launchPersistentContext(` matches real calls; the bare interface-method
+    // declaration (no leading dot) is intentionally excluded.
+    const calls = [...source.matchAll(/\.launchPersistentContext\(/g)];
+    expect(calls.length).toBeGreaterThan(0);
+    // For each call site, the option object (up to the closing of the call)
+    // must declare channel:"chrome". Scan the ~600 chars after each call open.
+    for (const m of calls) {
+      const window = source.slice(m.index, m.index + 600);
+      expect(window).toMatch(/channel:\s*"chrome"/);
+    }
+  });
+});
 
 describe("extractGoogleAccountEmail (PR3 capture-at-login)", () => {
   it("prefers the OneGoogle account-chip aria-label", () => {
