@@ -1,5 +1,26 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.10 (2026-06-30)
+
+- chore: drop universal-bot/agent.ts cruft from logs + comments
+- chore: retire the orphaned eval corpus (apps/mcp/corpus/eval)
+- docs: fix CLAUDE.md pointers to design docs #279 deleted
+- refactor(mcp): one ordered `detail` knob for observation verbosity (1.0.10-rc.3)
+- feat(mcp): compact observation default-on + Phase 2 escalation API (1.0.10-rc.2)
+- test(mcp): compact-vs-full information-equivalence eval
+- feat(mcp): compact operate observation payload behind BOT_OBSERVE_COMPACT (default off)
+- release(mcp): 1.0.9 — promote rc line to stable (connect channel fix, recipe entry_url, captcha+docs)
+- docs: simplify public docs and fix captcha solver
+- fix(mcp): operator-recipes capture a stable entry_url + drop single-use links
+- fix(mcp): connect provider-session probe launches system Chrome (channel:"chrome")
+- docs: remove the Pricing section from the README (#277)
+- docs: remove the Pricing section from the README
+- feat(web): remove the pricing page for now (#276)
+- release(mcp): 1.0.8-rc.1 — connect heartbeat + OpenRouter proxy removal
+- docs(readme): 10-example marketing section (ship 1.0.6-rc.2 to next)
+- chore(release): sync staging to main (1.0.6-rc.1)
+- fix(connect): don't re-pair (noVNC) when the bot profile is merely busy
+
 ## 1.0.10-rc.3 (2026-06-30)
 
 - refactor(mcp): collapse the observation-verbosity controls into **one ordered
