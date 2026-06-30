@@ -131,25 +131,43 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   },
 };
 
-const observeSchema = z.object({ session_id: z.string().min(1) });
+const observeSchema = z.object({
+  session_id: z.string().min(1),
+  // Payload shape. Default is compact (text + actionable elements, ~50% smaller).
+  // Pass "full" for the legacy screen+accessibility+full-elements payload.
+  detail: z.enum(["compact", "full"]).optional(),
+  // In compact mode, re-add a heavy view on demand for a genuinely ambiguous
+  // step (e.g. nested occlusion) without going all the way to "full".
+  include: z.array(z.enum(["screen", "accessibility"])).optional(),
+});
 
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
-    "Re-read the current page of a provisioning session: returns {url, text, " +
-    "screen, accessibility, elements}. Each element has a fresh generated `ref` " +
-    "to pass back as operate_act.target, plus `label`/`href` for reading. " +
-    "Refs are scoped to the latest observation; stale refs fail loudly, so call " +
-    "operate_observe and retry with the new ref. Legacy label targets still " +
-    "work, but exact refs are safer on pages with repeated labels.",
+    "Re-read the current page of a provisioning session. DEFAULT is a COMPACT " +
+    "payload: {url, text, elements} where each element has a fresh `ref` (pass as " +
+    "operate_act.target) plus label/role/href/path/value_len — empty fields and " +
+    "the redundant screen/accessibility trees are omitted (~50% smaller). Pass " +
+    "detail:\"full\" for the legacy screen+accessibility+full-elements payload, or " +
+    "include:[\"screen\"|\"accessibility\"] to re-add just one view for an ambiguous " +
+    "step. Refs are scoped to the latest observation; stale refs fail loudly, so " +
+    "re-observe and retry with the new ref.",
   inputSchema: observeSchema,
   jsonInputSchema: {
     type: "object",
     required: ["session_id"],
-    properties: { session_id: { type: "string" } },
+    properties: {
+      session_id: { type: "string" },
+      detail: { type: "string", enum: ["compact", "full"] },
+      include: { type: "array", items: { type: "string", enum: ["screen", "accessibility"] } },
+    },
   },
   async handler(args) {
-    return await observe(args.session_id);
+    const opts: { compact?: boolean; include?: Array<"screen" | "accessibility"> } = {};
+    if (args.detail === "full") opts.compact = false;
+    else if (args.detail === "compact") opts.compact = true;
+    if (args.include !== undefined) opts.include = args.include;
+    return await observe(args.session_id, opts);
   },
 };
 
@@ -169,6 +187,11 @@ const actSchema = z.object({
   slot: z.string().min(1).max(60).optional(),
   // scroll: which way to move the viewport (default "down").
   direction: z.enum(["down", "up", "bottom", "top"]).optional(),
+  // How much perception to return AFTER the action. "none" = a minimal ack
+  // (action ran; no page dump) for chained fills — call operate_observe before
+  // the next ref-targeted act. "compact"/"full" force the shape. Default: the
+  // env shape (compact).
+  observe: z.enum(["none", "compact", "full"]).optional(),
 });
 
 function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
@@ -216,7 +239,10 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "on the current site; the value never leaves the browser), scroll (direction " +
     "down/up/bottom/top, default down — reveal below-the-fold controls on a long " +
     "form, then operate_observe to pick up the newly-visible elements). If a " +
-    "target ref is stale, call operate_observe and retry with a fresh ref.",
+    "target ref is stale, call operate_observe and retry with a fresh ref. " +
+    "Pass observe:\"none\" to skip the page dump for chained fills (then " +
+    "operate_observe before the next ref action); observe:\"compact\"|\"full\" " +
+    "force the returned payload shape (default: compact).",
   inputSchema: actSchema,
   jsonInputSchema: {
     type: "object",
@@ -237,10 +263,11 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       host: { type: "string" },
       slot: { type: "string" },
       direction: { type: "string", enum: ["down", "up", "bottom", "top"] },
+      observe: { type: "string", enum: ["none", "compact", "full"] },
     },
   },
   async handler(args) {
-    return await act(args.session_id, buildAction(args));
+    return await act(args.session_id, buildAction(args), args.observe ? { observe: args.observe } : {});
   },
 };
 
