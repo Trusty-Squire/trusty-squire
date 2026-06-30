@@ -209,7 +209,19 @@ export async function detectActiveProviderSessions(
   const chromium = resolveChromium();
   const ctx = await launchWithProfileGate(profileDir, () =>
     chromium.launchPersistentContext(profileDir, {
+      // channel:"chrome" — launch the SAME system Chrome the login flow
+      // (runDisplayedChrome / runHeadlessChrome) uses. Without it Playwright
+      // reaches for its bundled Chromium, which isn't installed on boxes that
+      // run Chrome via the system channel — so this probe was the ONE launch
+      // in the connect flow that threw "Executable doesn't exist", surfacing
+      // as the spurious "Provider session check failed (continuing)" ✗ on
+      // every connect while the markers it left behind still printed
+      // "connected". The session cookies live in the profile dir regardless of
+      // which Chromium reads them, so matching the login launcher is enough.
+      channel: "chrome",
       headless: true,
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
     }),
   );
   try {
