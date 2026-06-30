@@ -1,5 +1,18 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.8-rc.1 (2026-06-30)
+
+- feat(mcp): the headless `connect` sign-in wait now shows a heartbeat with
+  remaining time instead of sitting on a blank cursor (it looked frozen on
+  no-DISPLAY VPS boxes). (#271)
+- refactor(mcp): removed the dead OpenRouter LLM-proxy client — the BYOK
+  `OPENROUTER_API_KEY` install prompt and the `UNIVERSAL_BOT_LLM_TIER` /
+  `UNIVERSAL_BOT_PREFER_CHEAP` knobs are gone (we don't use OpenRouter; the
+  in-process planner was already retired). OpenRouter stays a provisionable
+  service. (#269)
+- fix(mcp): reworded stale "universal bot" copy in the `--no-registry` connect
+  output. (#263)
+
 ## 1.0.7 (2026-06-29)
 
 Promotes the 1.0.7-rc line to stable: **2Captcha key vaulting** (your own key,
