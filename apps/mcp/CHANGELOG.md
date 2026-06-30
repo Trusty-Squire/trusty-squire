@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.10-rc.2 (2026-06-30)
+
+- feat(mcp): compact observation is now **default-on** (`BOT_OBSERVE_COMPACT`
+  opt out with `=0`), after the information-equivalence eval + live format-smoke.
+- feat(mcp): `operate_observe({ detail:"compact"|"full", include:["screen"|"accessibility"] })`
+  — `full` restores the legacy payload; `include` re-adds one heavy view on demand.
+- feat(mcp): `operate_act({ observe:"none"|"compact"|"full" })` — `none` returns a
+  minimal ack so chained fills don't each echo the page (the per-act multiplier).
+
 ## 1.0.10-rc.1 (2026-06-30)
 
 - feat(mcp): compact operate observation payload behind `BOT_OBSERVE_COMPACT`

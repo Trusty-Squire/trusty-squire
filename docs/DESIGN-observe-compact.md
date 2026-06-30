@@ -37,9 +37,11 @@ Inside `elements`:
    `screen` region-tree and `accessibility` flat-tree are not needed to choose an
    action. `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
 
-## Phase 1 — compact encoder (low risk, behind a flag)
+## Phase 1 — compact encoder ✅ shipped, DEFAULT-ON
 
-Gate: `BOT_OBSERVE_COMPACT` (default **off**). When on, `observeSession`:
+Gate: `BOT_OBSERVE_COMPACT` (default **on** since 1.0.10-rc.2, after the
+information-equivalence eval + live format-smoke passed; opt out with `=0`).
+When on, `observeSession`:
 
 - **Omit `screen` + `accessibility`** (the two re-encodings). Also skip computing
   them (CPU win).
@@ -62,11 +64,18 @@ Projected: ~50 KB → ~17–20 KB per turn (≈60% cut) with **zero perception l
 ~74% but is deferred to the eval — `ref` is the machine target, `path` is the
 human/planner disambiguator for repeated labels / modal overlays.
 
-## Phase 2 — escalation API (after evals)
+## Phase 2 — escalation API
 
-- `operate_observe({ detail: "compact" | "full", include?: ["screen" | "accessibility"] })`.
-- `operate_act({ observe?: "none" | "compact" | "diff" | "default" })` — the real
-  multiplier: most acts (type/check) need an ack/diff, not a full re-perception.
+✅ shipped (1.0.10-rc.2):
+- `operate_observe({ detail: "compact" | "full", include?: ["screen" | "accessibility"] })`
+  — `full` restores the legacy payload; `include` re-adds just one heavy view for
+  an ambiguous step without going all the way to full.
+- `operate_act({ observe?: "none" | "compact" | "full" })` — the multiplier:
+  `none` returns a minimal ack (action ran; no page dump) so chained fills don't
+  each echo the page (call `operate_observe` before the next ref-targeted act);
+  `compact`/`full` force the shape. Default = the env shape (compact).
+
+deferred (Phase 2.5, only if evidence demands):
 - `scope: { ref }` + `depth` for sub-tree reads on heavy consoles.
 - `since_observation_id` diffs (guard for stale refs — diffs are additive, refs
   still re-issued each generation).
