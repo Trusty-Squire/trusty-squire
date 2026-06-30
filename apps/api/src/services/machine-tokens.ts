@@ -1,7 +1,7 @@
 // Machine token store. A machine_token is the bot-internal credential
-// the operator driver uses for the LLM proxy + the operator inbox-OTP
-// service; it's bound to the user's account during the install-claim
-// handshake (see routes/mcp-install.ts).
+// the operator driver uses for the operator inbox-OTP service; it's
+// bound to the user's account during the install-claim handshake
+// (see routes/mcp-install.ts).
 //
 // There is no signup quota: provisioning is free during beta. The 402
 // paywall + per-token counter were removed (see routes/inbox.ts).

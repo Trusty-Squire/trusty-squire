@@ -37,7 +37,7 @@ export interface PairingTokenRecord {
   account_id: string | null;
   // Machine token declared by the CLI at /initiate. On /claim the
   // server binds it to the authenticating account so the bot's
-  // LLM-proxy + inbox calls credit the right account.
+  // inbox-OTP calls credit the right account.
   machine_token: string | null;
   // Browser-side install choices. These ride back to the CLI with the
   // one-time agent token so the local MCP config matches what the user

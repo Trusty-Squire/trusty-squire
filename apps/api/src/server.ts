@@ -12,7 +12,6 @@ import { makeAuthMiddleware } from "./auth/middleware.js";
 import { registerInstallRoute } from "./routes/install.js";
 import { registerCaptchaEventsRoute } from "./routes/captcha-events.js";
 import { registerAdminFunnelRoute } from "./routes/admin-funnel.js";
-import { registerLLMRoute } from "./routes/llm.js";
 import { registerBillingRoute } from "./routes/billing.js";
 import { registerStripeWebhookRoute } from "./routes/stripe-webhook.js";
 import { stripeClientFromEnv } from "./services/stripe-client.js";
@@ -252,13 +251,6 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   });
   await fastify.register(registerStripeWebhookRoute, {
     deps: { accountStore: deps.accountStore, stripe: stripeClient },
-  });
-  await fastify.register(registerLLMRoute, {
-    deps: {
-      machineTokenStore: deps.machineTokenStore,
-      llmUsageTracker: deps.llmUsageTracker,
-      ...(deps.now !== undefined ? { now: deps.now } : {}),
-    },
   });
   await fastify.register(registerVaultRoute, {
     deps,

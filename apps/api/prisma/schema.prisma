@@ -63,8 +63,6 @@ model MachineToken {
 // residential-proxy work (Tier S1) is actually worth doing.
 //
 // Retention: short. These are operational telemetry, not user data.
-// 30-day sweep handled by the existing retention cron alongside
-// LLMUsageEvent.
 model CaptchaEvent {
   id              String   @id @default(cuid())
   occurred_at     DateTime @default(now())
@@ -107,25 +105,6 @@ model CaptchaEvent {
   @@index([proxied, blocked])
   @@index([captcha_variant, signup_succeeded])
   @@index([stealth_profile, blocked])
-}
-
-// Rolling per-machine-token LLM-call ledger. The proxy at /v1/llm/chat
-// inserts one row per call; the rate limiter counts rows in the last
-// hour. We don't bother purging old rows here — the count is cheap
-// and a daily cron could trim entries older than 24h if it becomes an
-// issue. (At 150 calls/hour × 1000 machines × 24h = 3.6M rows/day,
-// which is fine to retain for ~30 days before pruning.)
-model LLMUsageEvent {
-  id              String   @id @default(cuid())
-  machine_token   String
-  occurred_at     DateTime @default(now())
-  // Optional cost-tracking fields surfaced by OpenRouter. Helpful for
-  // "which user is burning the most spend" reports.
-  input_tokens    Int?
-  output_tokens   Int?
-  tier            String?
-
-  @@index([machine_token, occurred_at])
 }
 
 // MCP pair-flow tokens. 10-minute TTL; single-use claim. Expiry is

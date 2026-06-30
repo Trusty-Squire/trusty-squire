@@ -27,7 +27,6 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/vault/use` | agent | Retrieve a vault credential for allowed egress |
 | `POST` | `/v1/vault/browser-fill` | agent | Seal login/password fields for allowed browser sign-in hosts |
 | `GET` | `/v1/vault/credentials` | web | List vault credentials |
-| `GET` | `/v1/llm/credits` | web | Current LLM credit state |
 | `GET` | `/health` | none | Liveness |
 
 ## Auth model

@@ -511,7 +511,7 @@ export async function installPoll(
 
 // ── Machine-token issuance ─────────────────────────────────
 // The MCP install CLI calls /v1/install to mint a machine_token for
-// the bot's LLM-proxy + inbox-alias use. The machine_token is not the
+// the bot's operator inbox-OTP use. The machine_token is not the
 // user's auth — it's a bot-internal credential — and it gets bound to
 // the user's account immediately after via the install-claim flow.
 

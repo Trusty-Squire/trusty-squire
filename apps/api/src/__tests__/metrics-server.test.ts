@@ -11,7 +11,6 @@ const SNAPSHOT: MetricsSnapshot = {
   credentials_total: 2,
   egress_grants_total: 1,
   egress_grants_active: 1,
-  llm_events_total: 0,
   captcha_events_total: 0,
   vault_audit_events_total: 0,
   db_up: 1,

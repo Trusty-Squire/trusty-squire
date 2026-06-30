@@ -1,11 +1,11 @@
 // Shared "machine token OR admin bearer" authorization.
 //
-// Both /v1/inbox/* and /v1/llm/chat accept the same two auth modes:
+// The /v1/inbox/* routes accept two auth modes:
 //   1. the machine-token caller  — `X-Machine-Token: tsm_…` (or `Authorization: Bearer tsm_…`)
 //   2. Admin   — `Authorization: Bearer <UNIVERSAL_BOT_API_KEY>`
 //
-// This logic used to be hand-copied into inbox.ts and llm.ts, including a
-// hand-rolled constant-time compare. The two copies had already drifted,
+// This logic used to be hand-copied into the route handlers, including a
+// hand-rolled constant-time compare. The copies had already drifted,
 // so the single source of truth lives here.
 
 import { timingSafeEqual } from "node:crypto";

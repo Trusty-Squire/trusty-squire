@@ -8,12 +8,10 @@
 // events last month, M were on datacenter networks" and we know
 // whether the proxy work is worth doing.
 //
-// Why a dedicated table instead of stuffing this into LLMUsageEvent
-// or a generic "events" table: the cardinality is very different
-// (captchas are rare relative to LLM calls), the retention window is
-// likely different (we'd want longer history on captcha events for
-// trend analysis), and the query patterns are different (group-by
-// asn_class is what matters here).
+// Why a dedicated table instead of a generic "events" table: the
+// retention window is likely longer (we'd want history on captcha
+// events for trend analysis), and the query patterns are specific
+// (group-by asn_class is what matters here).
 
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 

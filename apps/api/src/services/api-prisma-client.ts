@@ -133,12 +133,6 @@ export interface ApiPrismaClient {
     // Funnel: tokens issued in a window (Panel 1, GET /v1/admin/funnel).
     count(args: { where: Record<string, unknown> }): Promise<number>;
   };
-  lLMUsageEvent: {
-    create(args: { data: Record<string, unknown> }): Promise<unknown>;
-    // Optional `where` so the metrics exporter can take a grand total
-    // (count()) while the rate-limiter passes a per-token window.
-    count(args?: { where?: Record<string, unknown> }): Promise<number>;
-  };
   // Captcha encounter ledger. Tightly typed for create() because that's
   // all PrismaCaptchaEventStore uses; readers (analytics queries) will
   // either come through raw SQL or use prisma directly via the full

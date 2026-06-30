@@ -32,7 +32,7 @@ for, faster than the manifest work paid for itself.
 
 **Tech stack:** TypeScript monorepo, pnpm workspaces, Fastify API,
 Playwright (headless Chromium), Prisma + Postgres, MCP SDK,
-OpenRouter for LLM, Resend for inbound + outbound mail.
+Resend for inbound + outbound mail.
 
 ## Objective Function (what this project optimizes for)
 
@@ -121,8 +121,8 @@ silent failures.
     operator-recipe replay (`operate_use`) the host agent composes per step.
 - **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
-  1. Issues a machine token (bot-internal credential for LLM proxy +
-     operator inbox-OTP service).
+  1. Issues a machine token (bot-internal credential for the operator
+     inbox-OTP service).
   2. Opens a browser so the user signs in (Google/GitHub) and confirms
      the machine — binds the install to the account, writes the
      account-bound `agent_session_token` to the local session file.
@@ -160,10 +160,6 @@ silent failures.
   bot returns `anti_bot_blocked` (distinct from the misleading
   `oauth_required` it used to return). Vendors detected: Cloudflare,
   Sucuri, DataDome, Imperva.
-- **LLM proxy** (`/v1/llm/chat`). User's machine talks to our API,
-  which forwards to OpenRouter using the operator's key. Per-machine
-  rolling rate limit (150/hour, default). Cost per IPInfo signup:
-  ~$0.0006.
 
 ### Verified by real signups
 | Service     | Result | Notes                                        |
@@ -427,9 +423,8 @@ bin symlink and would catch any regression of the above.
 | Secret | Purpose |
 |---|---|
 | `AUTH_DATABASE_URL`  | Postgres URL — `trustysquire` db (api schema) |
-| `OPENROUTER_API_KEY` | Operator's OpenRouter key for `/v1/llm/chat` proxy |
 | `RESEND_API_KEY` | Resend outbound notification mail |
-| `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` (operator-OTP / workspace-inbox polling) + `/v1/llm/chat` |
+| `UNIVERSAL_BOT_API_KEY` | Admin bearer for `/v1/inbox/*` (operator-OTP / workspace-inbox polling) |
 | `OPERATOR_IMAP_USER` / `OPERATOR_IMAP_PASSWORD` | IMAP creds for the operator's **single** mail identity — the bot's Google account (`lunchbox@trustysquire.ai`, the trustysquire.ai Workspace account, served by imap.gmail.com). Read-only — backs `operator-otp-poller.ts` for the `email_otp_required` gate (Porter, Koyeb, anthropic, other WorkOS-backed services whose OTP goes to the OAuth-bound inbox). The legacy `GMAIL_USER`/`GMAIL_APP_PASSWORD` names are still read as a fallback (un-migrated deploys). One identity, one inbox — do NOT reintroduce a separate personal-gmail credential. A Google account password change silently invalidates app passwords (no revocation notice); if the gate returns `imap_auth_failed`, regenerate the app password and reset the secret. Verify locally with `tools/test-operator-imap.mjs`. |
 | `SESSION_JWT_SECRET` | Auth — HS256 secret signing web-session JWTs. **Required in production**: the server throws on boot if unset (no insecure dev fallback). |
 | `STRIPE_SECRET_KEY` | Stripe secret key. Server creates Checkout + Billing-Portal sessions for `/v1/billing/*`. **Unset → billing routes register but 503** (`stripeClientFromEnv()` returns null). Use a `sk_test_` key until live billing is verified. |
@@ -547,16 +542,13 @@ extension state on launch and won't reload mid-session.
 ### Bot env knobs (set in the user's MCP config or shell)
 | Env var | Default | Effect |
 |---|---|---|
-| `UNIVERSAL_BOT_PREFER_CHEAP` | `true` | Gemini Flash primary, premium fallback only on parse-failure |
-| `UNIVERSAL_BOT_LLM_TIER` | `cheap` | Primary LLM tier — `cheap`, `premium`, or `free`. `free` routes through OpenRouter's free models with a paid escape-hatch; the closed-loop verifier worker sets this. End-user installs leave it unset. |
 | `TWOCAPTCHA_API_KEY` | — | Optional Tier 3 captcha solver — fallback after the Tier 2 click-and-wait times out on a reCAPTCHA v2 image challenge. ~$0.003/solve. Skipped for Turnstile + reCAPTCHA v3 (those score at the IP layer; solver tokens get rejected). **Preferred path is the VAULT, not this env var:** `connect`/`settings` advanced setup prompts for the key and stores it encrypted as the `2captcha` credential; the captcha gate spends it through the injecting proxy (`use_credential`, `${SECRET}` in the `key` query / `clientKey` body) so the raw key never lives in the bot process or the MCP config. `buildTwoCaptchaSolver` prefers the vaulted cred and falls back to this env var for back-compat. The 2Captcha solve is a back-channel token fetch (the v2 token is injected into the user's real browser session and isn't IP-bound), so routing it through the vault adds no target-side fingerprinting. |
 | `UNIVERSAL_BOT_PROXY_URL` | — | Residential proxy (`http://user:pass@host:port` or `socks5://host:port`). Unset → direct connection. Used only for datacenter-class egress (see `shouldRouteThroughProxy`) — residential users pay nothing. (The old operator-housekeeper egress/proxy model was retired with the codex-verify refactor — the housekeeper no longer drives its own browser.) |
 | `UNIVERSAL_BOT_PROXY_ALWAYS` | `false` | Force the proxy on regardless of detected ASN class — for networks that misclassify as `unknown`. |
-| `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for `/v1/llm/chat` proxy + the operator inbox-OTP service |
+| `TRUSTY_SQUIRE_MACHINE_TOKEN` | (from session) | Machine token for the operator inbox-OTP service |
 | `TRUSTY_SQUIRE_ACCOUNT_ID` | (from session) | Operator account ID (auto-promote attribution on provisions). End-user installs read this from session.json. |
 | `TRUSTY_SQUIRE_API_BASE` | `https://trusty-squire-api.fly.dev` | API base URL |
 | `TRUSTY_SQUIRE_SESSION_FILE` | — | `1`/`true`/`yes` forces the durable file session backend (`~/.config/trusty-squire/session.json`) over the OS keychain. Set it **globally** (so `connect` and the spawned server agree) on headless boxes where the keychain is present-but-ephemeral (gnome-keyring "session" collection) — otherwise the session isn't persisted and `connect` re-opens the install/noVNC page every run. |
-| `OPENROUTER_API_KEY` / `ANTHROPIC_API_KEY` | — | BYOK fallback; skipped when machine token is set |
 
 ### Housekeeper — extracted to its own repo
 
@@ -579,20 +571,13 @@ housekeeper repo.
 ### Server env knobs (`trusty-squire-api`)
 | Env var | Default | Effect |
 |---|---|---|
-| `LLM_HOURLY_LIMIT` | `150` | Per-machine-token rolling rate cap for `/v1/llm/chat` |
 | `API_ACCOUNT_HOURLY_LIMIT` | `1000` | Per-account rolling-hour cap on the authed control plane (every `requireWeb`/`requireAgent`/`requireAny` route — vault store/list/use, grant mint, etc.). DoS backstop; returns `429 {error:rate_limited, scope:account}`. The deployed-app egress PROXY runs on a separate grant-token path with its own per-grant cap, so this doesn't throttle workloads. `<= 0` disables. In-memory / single-instance. |
 | `EGRESS_DEFAULT_RATE_PER_HOUR` | `1000` | Default per-grant rate cap applied when `grant_app_access` is called WITHOUT `rate_limit_per_hour` (was unlimited-by-default — abuse protection). An explicit `rate_limit_per_hour` (1..100000) still overrides. |
 | `BILLING_ENABLED` | `false` | Free-during-beta kill-switch. Unless `true`/`1`, `/v1/billing/checkout` returns `503 billing_disabled` so no one is charged even with a live Stripe key. |
 | `SIGNUPS_DISABLED` | `false` (signups ENABLED) | Global kill switch (checklist #10). When `1`/`true`, `POST /v1/install` returns `503 signups_disabled` AND the OAuth callback refuses to create a BRAND-NEW account (redirects to `/login?error=signups_disabled`). Existing accounts/identities still sign in. Read at build time — flip with `flyctl secrets set SIGNUPS_DISABLED=1` (restarts the machine, ~30s). |
 | `EGRESS_DISABLED` | `false` (egress ENABLED) | Global kill switch (checklist #10). When `1`/`true`, both `POST /v1/egress/grants` (mint) and the transparent proxy `ALL /v1/egress/:grant/*` return `503 egress_disabled` — this intentionally kills EXISTING grants too (the point of a panic switch). Flip with `flyctl secrets set EGRESS_DISABLED=1` (restarts the machine, ~30s). |
 | `MAINTENANCE_MESSAGE` | `""` (no maintenance) | Global maintenance banner string (checklist #10). Non-empty → `GET /v1/status` returns `maintenance:true` + `message:<this>` for a web banner to read. Empty = no maintenance. Read at build time — set with `flyctl secrets set MAINTENANCE_MESSAGE="..."` (restarts the machine, ~30s). `GET /v1/status` (public, no auth) also surfaces `signups_enabled` / `egress_enabled`. |
-| `LLM_PROXY_CHEAP_MODEL` | `google/gemini-flash-1.5` | Cheap-tier model |
-| `LLM_PROXY_PREMIUM_MODEL` | `openai/gpt-4o` | Premium-tier fallback model |
-| `LLM_PROXY_FREE_MODEL` | `openrouter/free` | Free-tier primary — OpenRouter's curated free router (verifier worker). Survives the sunset-and-replace churn that took out the prior pinned-ID setup (0.8.2-rc.9). |
-| `LLM_PROXY_FREE_FALLBACK_1` | `google/gemini-flash-1.5-8b` | Cheap paid backstop. Reasoning-model variability can give the router an empty-content reply; this catches that case instead of falling to the full paid escape. |
-| `LLM_PROXY_FREE_ESCAPE` | `google/gemini-2.0-flash-001` | Paid escape-hatch when the router + cheap backstop both fail. Costs less than cheap-tier defaults. |
 | `PAIRING_TOKEN_RETENTION_HOURS` | `1` | PairingToken row sweep |
-| `LLM_EVENT_RETENTION_DAYS` | `30` | LLMUsageEvent row sweep |
 | `VAULT_AUDIT_RETENTION_DAYS` | `365` | VaultAuditEvent row sweep (the who-touched-my-keys trail). Kept a year — long enough for a compromise investigation, bounded so it doesn't grow forever. |
 | `VAULT_ROTATION_STALE_DAYS` | `90` | Age (since last change) past which a credential is flagged `stale` in the list response. Advisory nudge, not enforced. |
 

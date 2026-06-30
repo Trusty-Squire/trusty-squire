@@ -3,7 +3,6 @@
 // Schedule:
 //   Hourly:
 //     - Delete PairingToken older than 1h
-//     - Delete LLMUsageEvent older than 30d
 //     - Delete VaultAuditEvent older than 365d
 //
 // Running this in-process is fine for v1: one machine, one schedule.
@@ -21,13 +20,11 @@ export interface RetentionCronDeps {
   now?: () => Date;
   // Tunables (env-overridable in production).
   pairingTokenRetentionHours?: number;
-  llmEventRetentionDays?: number;
   vaultAuditRetentionDays?: number;
 }
 
 export interface RetentionCronStats {
   pairing_tokens_deleted: number;
-  llm_events_deleted: number;
   vault_audit_deleted: number;
   duration_ms: number;
   errors: string[];
@@ -36,7 +33,6 @@ export interface RetentionCronStats {
 export class RetentionCron {
   private readonly now: () => Date;
   private readonly pairingTokenRetentionHours: number;
-  private readonly llmEventRetentionDays: number;
   private readonly vaultAuditRetentionDays: number;
   private timer: NodeJS.Timeout | null = null;
   private lastRunAt: Date | null = null;
@@ -46,8 +42,6 @@ export class RetentionCron {
     this.now = deps.now ?? (() => new Date());
     this.pairingTokenRetentionHours = deps.pairingTokenRetentionHours
       ?? Number.parseInt(process.env.PAIRING_TOKEN_RETENTION_HOURS ?? "1", 10);
-    this.llmEventRetentionDays = deps.llmEventRetentionDays
-      ?? Number.parseInt(process.env.LLM_EVENT_RETENTION_DAYS ?? "30", 10);
     // Vault audit is the security event trail (who-touched-my-keys), so
     // it's kept far longer than ops telemetry — a year by default. Long
     // enough to be useful for an after-the-fact compromise investigation,
@@ -102,14 +96,12 @@ export class RetentionCron {
     const startedAt = this.now();
     const stats: RetentionCronStats = {
       pairing_tokens_deleted: 0,
-      llm_events_deleted: 0,
       vault_audit_deleted: 0,
       duration_ms: 0,
       errors: [],
     };
 
     const pairingCutoff = new Date(startedAt.getTime() - this.pairingTokenRetentionHours * HOUR_MS);
-    const llmCutoff = new Date(startedAt.getTime() - this.llmEventRetentionDays * DAY_MS);
     const vaultAuditCutoff = new Date(startedAt.getTime() - this.vaultAuditRetentionDays * DAY_MS);
 
     if (this.deps.authPrisma !== undefined) {
@@ -120,21 +112,6 @@ export class RetentionCron {
         stats.pairing_tokens_deleted = r.count;
       } catch (err) {
         stats.errors.push(`pairing sweep: ${err instanceof Error ? err.message : String(err)}`);
-      }
-
-      // LLM events are append-only. The rate limiter only looks at the
-      // last hour, so anything older than 30 days is purely audit and
-      // can be trimmed.
-      try {
-        // deleteMany on LLMUsageEvent uses an unindexed column in the
-        // where clause; cap with a `take`-style hard limit via
-        // raw delete... actually deleteMany is fine for our row counts.
-        const r = await (this.deps.authPrisma.lLMUsageEvent as unknown as {
-          deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
-        }).deleteMany({ where: { occurred_at: { lt: llmCutoff } } });
-        stats.llm_events_deleted = r.count;
-      } catch (err) {
-        stats.errors.push(`llm event delete: ${err instanceof Error ? err.message : String(err)}`);
       }
 
       // Vault audit trail. Append-only security log; rows past the

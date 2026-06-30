@@ -230,7 +230,7 @@ export const registerMcpInstallRoute: FastifyPluginAsync<{
 
       // Bind the machine_token declared at /initiate to this account.
       // Subsequent quota + rate-limit checks are per-account, so the
-      // bot's LLM-proxy + inbox calls (which authenticate with the
+      // bot's inbox-OTP calls (which authenticate with the
       // machine_token) credit the right account.
       if (record.machine_token !== null) {
         try {

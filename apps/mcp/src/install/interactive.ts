@@ -24,17 +24,11 @@ import chalk from "chalk";
 import { detectInstalledAgents, AGENTS, type AgentTarget } from "./agents.js";
 import { normalizeProxyUrl } from "./proxy-url.js";
 
-// What the picker resolves to. The caller spreads this into its Argv
-// + threads the LLM bits into writeAgentConfig. The picker no longer
-// asks about OAuth providers — the install wizard rendered in the
-// bot's Chrome owns that conversation as of 0.8.2.
+// What the picker resolves to. The caller spreads this into its Argv.
+// The picker no longer asks about OAuth providers — the install wizard
+// rendered in the bot's Chrome owns that conversation as of 0.8.2.
 export interface InteractiveConfig {
   target: AgentTarget;
-  // Legacy shape retained for config-writing compatibility. The signup
-  // session agent now drives planning through the Trusty Squire backend by
-  // default, so the picker no longer asks users to choose an LLM.
-  llmChoice: LlmChoice;
-  byokKey?: string;
   // Optional residential proxy URL (UNIVERSAL_BOT_PROXY_URL).
   proxyUrl?: string;
   // Managed registry router. The endpoint is product-owned; advanced setup only
@@ -52,17 +46,6 @@ export interface InteractiveConfig {
   twoCaptchaKey?: string;
   advancedConfigured: boolean;
 }
-
-export type LlmChoice =
-  // Default: we pay, ~10 free signups, then upgrade prompt.
-  | "managed_free"
-  // BYOK paths — written as raw env vars in the MCP config, the
-  // server's LLM client routes through them and skips our proxy.
-  | "byok_openrouter"
-  | "byok_anthropic"
-  | "byok_openai"
-  // Power user: explicit "don't write any LLM env, I'll set them myself."
-  | "skip";
 
 // Heuristic: should we run the picker, or fall through to the existing
 // flag-driven flow? Run interactive when:
@@ -291,11 +274,8 @@ export async function runInteractiveSetup(opts: {
       : {}),
   });
 
-  const llmChoice: LlmChoice = "managed_free";
-
   const config: InteractiveConfig = {
     target,
-    llmChoice,
     ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
     registryEnabled: advanced.registryEnabled,
     ...(advanced.consentOperatorInboxOtp !== undefined
@@ -340,7 +320,6 @@ export async function runSettingsSetup(opts: {
     advanced.consentOperatorInboxOtp ?? opts.initialConsentOperatorInboxOtp ?? false;
   const config: InteractiveConfig = {
     target,
-    llmChoice: "managed_free",
     ...(advanced.proxyUrl !== undefined ? { proxyUrl: advanced.proxyUrl } : {}),
     registryEnabled: advanced.registryEnabled,
     consentOperatorInboxOtp,

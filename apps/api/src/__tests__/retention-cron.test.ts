@@ -21,12 +21,6 @@ function makeFakes(): {
     calls,
     authPrisma: {
       machineToken: {} as never,
-      lLMUsageEvent: {
-        deleteMany: async (args: { where: Record<string, unknown> }) => {
-          calls.push({ table: "LLMUsageEvent", op: "deleteMany", where: args.where });
-          return { count: 4 };
-        },
-      } as unknown as never,
       pairingToken: {
         deleteMany: async (args: { where: Record<string, unknown> }) => {
           calls.push({ table: "PairingToken", op: "deleteMany", where: args.where });
@@ -51,14 +45,12 @@ describe("RetentionCron", () => {
       authPrisma,
       now: () => now,
       pairingTokenRetentionHours: 1,
-      llmEventRetentionDays: 30,
       vaultAuditRetentionDays: 365,
     });
 
     const stats = await cron.runOnce();
 
     expect(stats.pairing_tokens_deleted).toBe(2);
-    expect(stats.llm_events_deleted).toBe(4);
     expect(stats.vault_audit_deleted).toBe(5);
     expect(stats.errors).toEqual([]);
 
@@ -73,12 +65,6 @@ describe("RetentionCron", () => {
     expect(pairingDelete).toBeDefined();
     const pairingWhere = pairingDelete!.where["created_at"] as { lt: Date };
     expect(pairingWhere.lt).toEqual(new Date("2026-01-15T11:00:00Z"));
-
-    // LLM event cutoff: now - 30 days
-    const llmDelete = calls.find((c) => c.table === "LLMUsageEvent");
-    expect(llmDelete).toBeDefined();
-    const llmWhere = llmDelete!.where["occurred_at"] as { lt: Date };
-    expect(llmWhere.lt).toEqual(new Date("2025-12-16T12:00:00Z"));
   });
 
   it("aggregates errors per section without crashing", async () => {
@@ -91,11 +77,6 @@ describe("RetentionCron", () => {
             throw new Error("pairing boom");
           },
         } as never,
-        lLMUsageEvent: {
-          deleteMany: async () => {
-            throw new Error("llm boom");
-          },
-        } as unknown as never,
         vaultAuditEvent: {
           deleteMany: async () => {
             throw new Error("vault boom");
@@ -106,10 +87,9 @@ describe("RetentionCron", () => {
     });
 
     const stats = await cron.runOnce();
-    expect(stats.errors).toHaveLength(3);
+    expect(stats.errors).toHaveLength(2);
     expect(stats.errors[0]).toMatch(/pairing/);
-    expect(stats.errors[1]).toMatch(/llm event/);
-    expect(stats.errors[2]).toMatch(/vault audit/);
+    expect(stats.errors[1]).toMatch(/vault audit/);
   });
 
   it("status() exposes last-run state", async () => {
@@ -130,7 +110,6 @@ describe("RetentionCron", () => {
     });
     const stats = await cron.runOnce();
     expect(stats.pairing_tokens_deleted).toBe(0);
-    expect(stats.llm_events_deleted).toBe(0);
     expect(stats.vault_audit_deleted).toBe(0);
     expect(stats.errors).toEqual([]);
   });

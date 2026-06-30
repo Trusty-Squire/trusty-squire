@@ -78,7 +78,7 @@ export function makeAuthMiddleware(deps: AuthDeps) {
   // backstop so one token can't hammer vault store/list/use, grant mint, etc.
   // Generous (the deployed-app egress PROXY runs on a SEPARATE grant-token path
   // with its own per-grant cap, so this won't throttle workloads). In-memory /
-  // single-instance, like the LLM + grant limiters. `<= 0` disables it.
+  // single-instance, like the grant limiter. `<= 0` disables it.
   const ACCOUNT_HOURLY_LIMIT = Number.parseInt(
     process.env.API_ACCOUNT_HOURLY_LIMIT ?? "1000",
     10,
