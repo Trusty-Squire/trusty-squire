@@ -11,6 +11,7 @@ import {
   checkSuccessSignal,
   fillTemplate,
   recipeEntryUrl,
+  isSingleUseUrl,
   operatorRecipeDir,
   type OperatorRecipe,
 } from "../operator-recipe.js";
@@ -153,5 +154,73 @@ describe("fillTemplate + recipeEntryUrl", () => {
 
   it("recipeEntryUrl is null when no goto exists", () => {
     expect(recipeEntryUrl({ ...RECIPE, trace: [{ action: { kind: "click", text_match: "x" } }] })).toBeNull();
+  });
+});
+
+// Regression for the plunk-recipe replay bug (2026-06-30): a single-use
+// email-verify token URL was frozen into the trace as a goto AND became the
+// replay entry, so operate_use opened on an expired-token "Verification failed"
+// page every time.
+describe("single-use link handling (replay-entry safety)", () => {
+  it("isSingleUseUrl flags verify/magic/reset links carrying an opaque token", () => {
+    expect(
+      isSingleUseUrl(
+        "https://next-app.useplunk.com/auth/verify-email?token=52b0afc93ef2e162f0abfa96b209c7abda1abc53ef63cf9923222f7df9395ef4",
+      ),
+    ).toBe(true);
+    expect(isSingleUseUrl("https://app.example.com/magic?code=ab12cd34ef56gh78ij90")).toBe(true);
+    expect(
+      isSingleUseUrl("https://example.com/password-reset/Xy7Kp2Qm9Tw4Rs6Lf0Bn3"),
+    ).toBe(true);
+    expect(isSingleUseUrl("https://id.example.com/confirm?oobCode=AB12cd34EF56gh78IJ90kl")).toBe(true);
+  });
+
+  it("isSingleUseUrl does NOT flag stable app URLs", () => {
+    expect(isSingleUseUrl("https://openrouter.ai/settings/keys")).toBe(false);
+    expect(isSingleUseUrl("https://vouchflow.dev/settings/apps/app_083e0004")).toBe(false);
+    expect(isSingleUseUrl("https://app.posthog.com/project/123/settings")).toBe(false);
+    // verify-ish path but NO opaque token → a real settings page, keep it
+    expect(isSingleUseUrl("https://example.com/account/confirm-email-change")).toBe(false);
+    // short/non-token query value → not single-use
+    expect(isSingleUseUrl("https://example.com/verify?token=123")).toBe(false);
+    expect(isSingleUseUrl("not a url")).toBe(false);
+  });
+
+  it("recipeEntryUrl prefers entry_url over trace gotos", () => {
+    const r: OperatorRecipe = {
+      ...RECIPE,
+      entry_url: "https://service.example.com/signup",
+      trace: [{ action: { kind: "goto", url_template: "https://service.example.com/dashboard" } }],
+    };
+    expect(recipeEntryUrl(r)).toBe("https://service.example.com/signup");
+  });
+
+  it("recipeEntryUrl fallback skips a single-use goto and picks the next stable one", () => {
+    const r: OperatorRecipe = {
+      ...RECIPE,
+      entry_url: undefined,
+      trace: [
+        { action: { kind: "goto", url_template: "https://svc.example.com/verify-email?token=ab12cd34ef56gh78ij90kl" } },
+        { action: { kind: "goto", url_template: "https://svc.example.com/login" } },
+      ],
+    };
+    expect(recipeEntryUrl(r)).toBe("https://svc.example.com/login");
+  });
+
+  it("recipeEntryUrl is null when the only goto is single-use (no dead-page entry)", () => {
+    const r: OperatorRecipe = {
+      ...RECIPE,
+      entry_url: undefined,
+      trace: [
+        { action: { kind: "goto", url_template: "https://svc.example.com/verify-email?token=ab12cd34ef56gh78ij90kl" } },
+      ],
+    };
+    expect(recipeEntryUrl(r)).toBeNull();
+  });
+
+  it("entry_url round-trips through the schema (write/read)", async () => {
+    const r: OperatorRecipe = { ...RECIPE, name: "entry-url-roundtrip", entry_url: "https://svc.example.com/start" };
+    await writeRecipe(r);
+    expect((await readRecipe("entry-url-roundtrip")).entry_url).toBe("https://svc.example.com/start");
   });
 });
