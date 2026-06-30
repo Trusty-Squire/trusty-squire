@@ -32,6 +32,7 @@ import {
   hasExistingAccountSignal,
   hasUnlinkedOAuthAccountSignal,
   makeTwoCaptchaVaultProxy,
+  toCompactElement,
 } from "../provision-session.js";
 import { looksLikeCodeIdentifier, findCredentialTokens } from "../credential-shape.js";
 
@@ -56,6 +57,93 @@ function el(partial: Partial<InteractiveElement>): InteractiveElement {
     ...partial,
   };
 }
+
+describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
+  const NONE = new Set<string>();
+
+  it("omits empty fields — a bare button is just ref/label/tag", () => {
+    const c = toCompactElement(el({ tag: "button", visibleText: "Continue" }), "@g1:x", NONE);
+    expect(c).toEqual({ ref: "@g1:x", label: "Continue", tag: "button" });
+    // no null keys serialized
+    expect(Object.values(c).every((v) => v !== null && v !== undefined)).toBe(true);
+  });
+
+  it("keeps role/type/href/testId/path; drops the redundant container", () => {
+    const c = toCompactElement(
+      el({
+        tag: "a",
+        role: "link",
+        type: null,
+        visibleText: "Docs",
+        href: "/docs",
+        testId: "docs-link",
+        screenPath: "nav:main > link:docs",
+        container: "nav:main",
+      }),
+      "@g1:d",
+      NONE,
+    );
+    expect(c.href).toBe("/docs");
+    expect(c.testId).toBe("docs-link");
+    expect(c.path).toBe("nav:main > link:docs");
+    expect("container" in c).toBe(false); // redundant with path
+    expect("value" in c).toBe(false);
+  });
+
+  it("reports value_len, never the raw value; masks sealed via the placeholder length", () => {
+    const filled = toCompactElement(
+      el({ tag: "input", type: "text", value: "hello@example.com" }),
+      "@g1:e",
+      NONE,
+    );
+    expect(filled.value_len).toBe("hello@example.com".length);
+    expect("value" in filled).toBe(false);
+
+    const sealedKey = elementRef(el({ tag: "input", type: "password", value: "supersecret" }));
+    const sealed = toCompactElement(
+      el({ tag: "input", type: "password", value: "supersecret" }),
+      "@g1:p",
+      new Set([sealedKey]),
+    );
+    // value_len reflects the [sealed] placeholder, never the secret length
+    expect(sealed.value_len).toBe("[sealed]".length);
+  });
+
+  it("keeps checked for real checkables (true AND false), omits when null", () => {
+    expect(toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a", NONE).checked).toBe(true);
+    expect(toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b", NONE).checked).toBe(false);
+    expect("checked" in toCompactElement(el({ tag: "button", checked: null }), "@g1:c", NONE)).toBe(false);
+  });
+
+  it("emits topmost only when false and occluded_by only when set", () => {
+    const occluded = toCompactElement(
+      el({ tag: "button", visibleText: "Hidden", topmost: false, occludedBy: "modal:dialog" }),
+      "@g1:o",
+      NONE,
+    );
+    expect(occluded.topmost).toBe(false);
+    expect(occluded.occluded_by).toBe("modal:dialog");
+    const top = toCompactElement(el({ tag: "button", visibleText: "Top", topmost: true }), "@g1:t", NONE);
+    expect("topmost" in top).toBe(false);
+    expect("occluded_by" in top).toBe(false);
+  });
+
+  it("is materially smaller than the full element shape", () => {
+    const e = el({
+      tag: "a", role: "link", visibleText: "Pricing", href: "/pricing",
+      screenPath: "navigation:skip-to-contentopenroutersearch > link:pricing",
+      container: "navigation:skip-to-contentopenroutersearch", topmost: true,
+    });
+    const full = {
+      ref: "@g1:z", label: "Pricing", tag: "a", role: "link", type: null, value: null,
+      checked: null, href: "/pricing", testId: null,
+      path: "navigation:skip-to-contentopenroutersearch > link:pricing",
+      container: "navigation:skip-to-contentopenroutersearch", topmost: true, occluded_by: null,
+    };
+    const compactBytes = JSON.stringify(toCompactElement(e, "@g1:z", NONE)).length;
+    expect(compactBytes).toBeLessThan(JSON.stringify(full).length * 0.6);
+  });
+});
 
 describe("elementRef", () => {
   it("prefers visibleText, then falls back through the label chain", () => {

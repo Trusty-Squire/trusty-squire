@@ -77,24 +77,30 @@ export interface ObservedElement {
   // generated refs are safer on pages with repeated labels.
   label: string;
   tag: string;
-  role: string | null;
-  type: string | null;
-  value: string | null;
-  checked: boolean | null;
+  // Below ref/label/tag, fields are nullable in FULL mode (emitted as null) and
+  // OMITTED entirely in compact mode (BOT_OBSERVE_COMPACT) when empty — hence
+  // optional. `value_len` replaces `value` in compact (never the raw value).
+  role?: string | null;
+  type?: string | null;
+  value?: string | null;
+  value_len?: number;
+  checked?: boolean | null;
   // Link target, so the agent can see where a nav item goes and `goto` it
   // directly instead of guessing URLs (a live LangWatch run hit a 404 guessing
   // /settings because the sidebar "Settings" is a hover-expand with the real
   // path only in its href). Null for non-link elements.
-  href: string | null;
+  href?: string | null;
   // The site's own stable test hook (data-testid/-cy/-qa), the most
   // refactor-resilient target when present.
-  testId: string | null;
+  testId?: string | null;
   // DOM-derived screen context for non-vision host agents. `path` is a compact
   // targetable label such as "dialog:finish-account > button:create-account".
-  path: string | null;
-  container: string | null;
-  topmost: boolean | null;
-  occluded_by: string | null;
+  path?: string | null;
+  // `container` is redundant with `path` (path = "<container> > <kind>:<label>")
+  // and is OMITTED in compact mode.
+  container?: string | null;
+  topmost?: boolean | null;
+  occluded_by?: string | null;
 }
 
 export interface ScreenRegion {
@@ -137,6 +143,11 @@ export interface Observation {
   // remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
   elements: ObservedElement[];
+  // Compact-mode (BOT_OBSERVE_COMPACT) bookkeeping so omission is never silent:
+  // the full element count (compact keeps all elements, just lighter), and
+  // whether the page text was capped at the 4000-char limit. Absent in full mode.
+  elements_total?: number;
+  text_truncated?: boolean;
   // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
   // required a live Google session that was absent. The task did NOT start; the
   // host asks the user to connect, then retries. No browser was driven.
@@ -1174,6 +1185,38 @@ export function generatePassword(length = 24): string {
   return chars.join("");
 }
 
+// Compact observation payload (docs/DESIGN-observe-compact.md). Drops the two
+// redundant re-encodings (screen + accessibility), omits empty element fields,
+// drops `container` (redundant with `path`), and reports value LENGTH not value.
+// Default OFF; flip after the planner eval confirms no ref-selection regression.
+function observeCompactEnabled(): boolean {
+  const v = process.env.BOT_OBSERVE_COMPACT;
+  return v === "1" || v === "true" || v === "on";
+}
+
+// One element, compacted: ref/label/tag always; every other field omitted when
+// empty. `value`→`value_len` (never the raw value — keeps the sealed-field moat);
+// `checked` kept for real checkables (true OR false), omitted when null;
+// `topmost` only when false (the informative case); `container` dropped.
+export function toCompactElement(
+  el: InteractiveElement,
+  ref: string,
+  sealed: ReadonlySet<string>,
+): ObservedElement {
+  const out: ObservedElement = { ref, label: presentLabel(el, sealed), tag: el.tag };
+  if (el.role) out.role = el.role;
+  if (el.type) out.type = el.type;
+  const v = presentFieldValue(el, sealed);
+  if (v !== null && v.length > 0) out.value_len = v.length;
+  if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
+  if (el.href) out.href = el.href;
+  if (el.testId) out.testId = el.testId;
+  if (el.screenPath) out.path = el.screenPath;
+  if (el.topmost === false) out.topmost = false;
+  if (el.occludedBy) out.occluded_by = el.occludedBy;
+  return out;
+}
+
 async function observeSession(session: Session): Promise<Observation> {
   session.browser.recoverActivePage();
   widenAllowedHostsFromCurrentUrl(session);
@@ -1182,8 +1225,28 @@ async function observeSession(session: Session): Promise<Observation> {
   const elements = await session.browser.extractInteractiveElements();
   session.lastElements = elements;
   const text = await session.browser.extractVisibleText();
-  const normalizedText = text.replace(/\s+/g, " ").trim().slice(0, 4000);
+  const normalizedFull = text.replace(/\s+/g, " ").trim();
+  const normalizedText = normalizedFull.slice(0, 4000);
   const guidance = provisionPerceptionGuidance(normalizedText);
+  const refs = provisionElementRefs(elements, generation);
+  const refOf = (el: InteractiveElement): string =>
+    refs.get(el) ?? provisionElementRef(el, generation);
+
+  // Compact path: text + actionable elements only. No screen/accessibility (the
+  // two re-encodings of the same nodes), empty fields omitted. ~60% smaller.
+  if (observeCompactEnabled()) {
+    return {
+      session_id: session.id,
+      url: session.browser.currentUrl(),
+      text: normalizedText,
+      ...(guidance !== undefined ? { guidance } : {}),
+      elements: elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys)),
+      elements_total: elements.length,
+      ...(normalizedFull.length > 4000 ? { text_truncated: true } : {}),
+    };
+  }
+
+  // Full path — byte-identical to the pre-compact payload.
   const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
   const accessibility = buildAccessibilitySnapshot(
     elements,
@@ -1191,7 +1254,6 @@ async function observeSession(session: Session): Promise<Observation> {
     undefined,
     session.sealedFieldKeys,
   );
-  const refs = provisionElementRefs(elements, generation);
   return {
     session_id: session.id,
     url: session.browser.currentUrl(),
@@ -1200,7 +1262,7 @@ async function observeSession(session: Session): Promise<Observation> {
     ...(screen !== undefined ? { screen } : {}),
     ...(accessibility !== undefined ? { accessibility } : {}),
     elements: elements.map((el) => ({
-      ref: refs.get(el) ?? provisionElementRef(el, generation),
+      ref: refOf(el),
       label: presentLabel(el, session.sealedFieldKeys),
       tag: el.tag,
       role: el.role,
