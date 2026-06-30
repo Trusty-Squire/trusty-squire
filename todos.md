@@ -109,8 +109,11 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
   disable new-account creation / egress / a maintenance banner, flippable fast
   if something goes sideways mid-launch.
 
-- [ ] **11. npm rollback plan.** Can't unpublish — so the move is publish a patch
-  + move the `latest` tag. Have it written down and ready.
+- [x] **11. npm rollback plan.** Runbook at `docs/RELEASE-ROLLBACK.md` + a ready
+  one-command script `tools/rollback-mcp.sh <good> [bad]` (moves the `latest`
+  dist-tag back + deprecates the bad version via the npm Automation token).
+  Covers the can't-unpublish fact, the npx-cache caveat, fix-forward, and the
+  Fly/API rollback path. Grounded on the live state (latest=1.0.7).
 
 - [ ] **12. Crude load test.** Simulate a few hundred concurrent connects + vault
   ops + egress calls to find the breaking point BEFORE HN does.
