@@ -52,7 +52,7 @@ export interface SignupResult {
   // present), else "baseline". The CaptchaEvent A/B tag that lets us
   // measure whether isolated-world execution (closing mainWorldExecution
   // + webdriver tells) lowers block rate — see
-  // docs/DESIGN-antibot-hardening.md.
+  // docs/ARCHITECTURE.md.
   stealth_profile?: "baseline" | "cdp_hardened";
 
   // Skill provenance: which path produced this result. Legacy field from the

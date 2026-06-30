@@ -494,7 +494,7 @@ async function connect(args: Argv): Promise<void> {
       // Backfill connected_providers from the bot-side marker on
       // pre-rc.5 sessions, so the preflight cache is current.
       for (const p of preflight.providers) await recordConnectedProvider(p);
-      // DESIGN-connect-session-validation: we short-circuited because Google is
+      // Connect session validation: we short-circuited because Google is
       // valid + bound, but if the bot's GitHub session validated DEAD, proactively
       // offer to reconnect it — a dead GitHub session is exactly why people re-run
       // connect (GitHub-OAuth signups fail). Skippable; non-interactive notices.
@@ -551,7 +551,7 @@ async function connect(args: Argv): Promise<void> {
     }
   }
 
-  // DESIGN-connect-session-validation: a SCOPED force-relogin=github on an
+  // Connect session validation: a SCOPED force-relogin=github on an
   // already-bound account is a GitHub-only login — Google's gate is already
   // satisfied (the account is bound + its session is what we'd re-bind), so we
   // must NOT drag the Google-first account-binding confirm page into it. Route

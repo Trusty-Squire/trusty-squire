@@ -358,7 +358,7 @@ export interface RecordVerifierOutcomeResult {
     | "none";         // counters bumped, no status change
 }
 
-// Promotion threshold — see DESIGN-skill-promoter.md and the
+// Promotion threshold — see docs/ARCHITECTURE.md and the
 // closed-loop strategy. ONE verifier success flips pending-review
 // → active. The verifier IS the trust signal: a single full
 // browser replay that ended in a validator-passing credential is

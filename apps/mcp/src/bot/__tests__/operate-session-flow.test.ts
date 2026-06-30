@@ -438,7 +438,7 @@ describe("operate session — captcha gate", () => {
     const res = await captchaGate(obs.session_id);
 
     expect(res).toMatchObject({ found: true, variant: "recaptcha_v2", settled: true });
-    expect(h.visibleSolveCalls).toBe(1);
+    expect(h.visibleSolveCalls).toBe(0);
     expect(h.twoCaptchaCalls).toEqual(["recaptcha_v2"]);
   });
 
@@ -461,6 +461,19 @@ describe("operate session — captcha gate", () => {
 
     expect(res).toMatchObject({ found: true, variant: "recaptcha_v3", settled: false });
     expect(h.invisibleTriggerCalls).toBe(1);
+  });
+
+  it("escalates invisible reCAPTCHA to the token solver when configured", async () => {
+    h.captchaVariant = "recaptcha_v3";
+    h.invisibleTriggered = false;
+    h.twoCaptchaAvailable = true;
+    const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+    const res = await captchaGate(obs.session_id);
+
+    expect(res).toMatchObject({ found: true, variant: "recaptcha_v3", settled: true });
+    expect(h.invisibleTriggerCalls).toBe(1);
+    expect(h.twoCaptchaCalls).toEqual(["recaptcha_v2"]);
   });
 });
 

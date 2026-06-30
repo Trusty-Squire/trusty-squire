@@ -1,6 +1,6 @@
 // Panel 1 acquisition-funnel: API-side counts (accounts + machine
 // tokens) for GET /v1/admin/funnel. See
-// docs/DESIGN-provision-event-dashboard.md. Counts only, no PII — the
+// docs/ARCHITECTURE.md. Counts only, no PII — the
 // registry stitches these together with its own ProvisionEvent stages.
 
 import type { ApiPrismaClient } from "./api-prisma-client.js";

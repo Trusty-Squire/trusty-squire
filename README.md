@@ -133,8 +133,9 @@ trusty-squire/
     └── skill-schema/ Learned-skill wire contract (Zod), shared by the mcp client and the registry server
 ```
 
-See [`CLAUDE.md`](CLAUDE.md) for architecture, deploy, and npm-distribution details, and
-[`docs/`](docs/) for the design docs.
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the canonical architecture
+and security model. The rest of [`docs/`](docs/) is limited to current public
+runbooks and product notes.
 
 ### Conventions
 

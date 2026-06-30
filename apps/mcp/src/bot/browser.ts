@@ -53,7 +53,7 @@ export type StealthProfile = "baseline" | "cdp_hardened";
 // evaluations in an isolated world and removes the automation tells —
 // mainWorldExecution, navigator.webdriver, viewport — that Turnstile /
 // reCAPTCHA-v3 / Google's consent SPA score on). See
-// docs/DESIGN-antibot-hardening.md.
+// docs/ARCHITECTURE.md.
 //
 // 2026-06-08 — DEFAULT FLIPPED ON. The baseline (playwright-extra +
 // stealth) self-inflicts a detectable navigator.webdriver via its manual
@@ -100,7 +100,7 @@ function getChromium(): typeof baseChromium {
       // crashed the OAuth flow. NO playwright-extra/stealth wrap here: the
       // stealth plugin's manual `navigator.webdriver` defineProperty
       // RE-ADDS a detectable property (proven counterproductive) — patchright
-      // does it right. See docs/DESIGN-antibot-hardening.md.
+      // does it right. See docs/ARCHITECTURE.md.
       const patchright = require("patchright") as { chromium: typeof baseChromium };
       cachedChromium = patchright.chromium;
       activeStealthProfile = "cdp_hardened";

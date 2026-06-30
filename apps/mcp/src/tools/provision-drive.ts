@@ -586,7 +586,7 @@ export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   },
 };
 
-// ── operator-recipe tools (Phase A — docs/DESIGN-operator-skills.md) ──
+// ── operator-recipe tools (Phase A — docs/ARCHITECTURE.md) ──
 
 const rememberSchema = z.object({
   session_id: z.string().min(1),

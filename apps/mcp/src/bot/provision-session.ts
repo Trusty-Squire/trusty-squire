@@ -208,7 +208,7 @@ interface Session {
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
-  // Phase A operator-recipe capture (docs/DESIGN-operator-skills.md): the
+  // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
   // ordered, TEXT-targeted action trace of this session, so a successful run can
   // be `remember`ed as a replayable rail. Records visible text + non-secret
   // params only — sealed secret values stay in secretSlots, never the trace.
@@ -1729,10 +1729,14 @@ async function solveCaptchaWithTokenSolver(
   const solver = new TwoCaptchaSolver();
   if (!solver.isAvailable()) return { solved: false, outcome: "no_key" };
 
-  if (variant === "recaptcha_v2") {
+  if (variant === "recaptcha_v2" || variant === "recaptcha_v3") {
     const sitekey = await browser.extractRecaptchaSitekey();
     if (sitekey === null) return { solved: false, outcome: "missing_sitekey" };
-    const res = await solver.solveRecaptchaV2({ sitekey, pageUrl: browser.currentUrl() });
+    const res = await solver.solveRecaptchaV2({
+      sitekey,
+      pageUrl: browser.currentUrl(),
+      ...(variant === "recaptcha_v3" ? { invisible: true } : {}),
+    });
     if (res.kind !== "ok") return { solved: false, outcome: res.kind };
     const injected = await browser.injectRecaptchaToken(res.token);
     if (!injected) return { solved: false, outcome: "inject_failed" };
@@ -1798,14 +1802,21 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
   if (!token && det.variant === "recaptcha_v3") {
     solvedBySubstrate = await session.browser.triggerInvisibleRecaptcha(9_000);
     token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
-  } else if (!token && (det.variant === "recaptcha_v2" || det.variant === "hcaptcha" || det.variant === "turnstile")) {
-    const solved = await session.browser.solveVisibleCaptcha(30_000);
-    solvedBySubstrate = solved.found && solved.solved;
-    token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
     if (!token) {
       const tokenSolved = await solveCaptchaWithTokenSolver(session.browser, det.variant);
       tokenSolverOutcome = tokenSolved.outcome;
       token = tokenSolved.solved;
+    }
+  } else if (!token && (det.variant === "recaptcha_v2" || det.variant === "hcaptcha" || det.variant === "turnstile")) {
+    if (new TwoCaptchaSolver().isAvailable()) {
+      const tokenSolved = await solveCaptchaWithTokenSolver(session.browser, det.variant);
+      tokenSolverOutcome = tokenSolved.outcome;
+      token = tokenSolved.solved;
+    }
+    if (!token) {
+      const solved = await session.browser.solveVisibleCaptcha(30_000);
+      solvedBySubstrate = solved.found && solved.solved;
+      token = solvedBySubstrate || (await session.browser.waitForCaptchaResponseToken(2_000));
     }
   }
 
@@ -1813,7 +1824,7 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
   const settled =
     det.variant === "unknown"
       ? clear
-      : token && clear;
+      : token && (clear || tokenSolverOutcome === "ok");
   audit(sessionId, "captcha_gate", {
     found: true,
     variant: det.variant,
@@ -1831,7 +1842,7 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
 // thick session is STILL LIVE, so this is resumable, not a give-up. The host
 // asks the user for the code (SMS / authenticator / not-yet-delivered email),
 // then types it with operate_act and keeps driving. Session + vault moat
-// preserved. See docs/DESIGN-wall-handoff.md.
+// preserved. See docs/ARCHITECTURE.md.
 export interface NeedsUserCode {
   wall: "verification_code";
   message: string;

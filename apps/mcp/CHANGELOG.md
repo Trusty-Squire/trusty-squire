@@ -174,7 +174,7 @@ production audit cleared out dead code + stale docs.
   local recipe (goal + text-targeted rail + sealed-slot references + a
   machine-checkable postcondition) and replay it by name — planner-on-rails,
   verified before close (the anti-false-green gate). Secrets are stored as slot
-  references, never values. See `docs/DESIGN-operator-skills.md`.
+  references, never values. See `docs/ARCHITECTURE.md`.
 - Persistent single-session operate-driver harness (`tools/op-driver.mjs`).
 
 **Extraction hardening**
@@ -277,7 +277,7 @@ Prerelease (`next`). connect now proactively fixes a dead GitHub session.
 ## 0.9.19-rc.21 (2026-06-27)
 
 Prerelease (`next`). First slice of the connect/session-validation redesign
-(`docs/DESIGN-connect-session-validation.md`).
+(`docs/ARCHITECTURE.md`).
 
 - **fix(connect):** `--force-relogin=github` on an already-bound account now
   routes straight to a **GitHub-only login** (with the account chooser, since the
@@ -620,7 +620,7 @@ credential-broker moat.
   tools. `parseVerification` (OTP/link parsing) and the targeting/scoping logic
   are unit-tested. Full mcp suite green (2148 passed).
 - Design + remaining hardening (consent-at-install) tracked in
-  `docs/DESIGN-host-planner-perception.md`.
+  `docs/ARCHITECTURE.md`.
 
 ## 0.9.18 (2026-06-24)
 
@@ -1185,7 +1185,7 @@ Operational hardening after the 0.9.0 live run burned a residential exit.
 
 Post-OAuth navigation: deterministic planner, N1 planner wins (eval- AND
 live-validated), an offline eval harness, and a flakiness taxonomy
-(docs/DESIGN-planner-navigation-eval.md).
+(docs/ARCHITECTURE.md).
 
 ### Bot behavior (shipped)
 - **Deterministic planner (temperature 0).** The post-verify navigation planner,

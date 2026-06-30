@@ -1,7 +1,7 @@
 # Eval corpus — post-OAuth navigation planner
 
 The committed, **redacted** corpus for the navigation-planner eval
-(`docs/DESIGN-planner-navigation-eval.md`, Workstream A). Two sets, two jobs:
+(`docs/ARCHITECTURE.md`, Workstream A). Two sets, two jobs:
 
 ```
 corpus/eval/
