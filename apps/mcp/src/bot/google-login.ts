@@ -935,10 +935,27 @@ async function runHeadlessChrome(
 
 // Shared timed-poll helper. `check` is invoked every 3s until it
 // resolves true or the deadline passes.
-async function pollUntil(deadline: number, check: () => Promise<boolean>): Promise<boolean> {
+// Emits a heartbeat to stderr every ~20s while waiting. After the noVNC banner
+// (or the Chrome window) opens, this loop is otherwise silent for up to the full
+// deadline — which is the connect-hang report: a headless box printed the
+// sign-in URL and then sat on a blank cursor, looking frozen. The heartbeat
+// (with remaining time) makes it obviously alive; quick completions (< 20s,
+// e.g. an already-valid session) print nothing.
+async function pollUntil(
+  deadline: number,
+  check: () => Promise<boolean>,
+  heartbeatMessage = "Still waiting for you to finish signing in — the URL/window above stays live until you do.",
+): Promise<boolean> {
+  const beatEveryMs = 20_000;
+  let lastBeat = Date.now();
   while (Date.now() < deadline) {
     if (await check()) return true;
     await new Promise((r) => setTimeout(r, 3000));
+    if (Date.now() - lastBeat >= beatEveryMs) {
+      lastBeat = Date.now();
+      const minsLeft = Math.max(1, Math.ceil((deadline - Date.now()) / 60_000));
+      console.error(chalk.dim(`   ⏳ ${heartbeatMessage} (~${minsLeft} min left)`));
+    }
   }
   return false;
 }

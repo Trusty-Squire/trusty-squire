@@ -101,7 +101,7 @@ Ordered by importance. Work top-down. `[ ]` = todo, `[~]` = in progress, `[x]` =
 
 ## Tier 2.5 — connect-flow UX (found 2026-06-29 on a headless VPS)
 
-- [ ] **Headless `connect` hangs at the noVNC step.** On a no-DISPLAY box
+- [~] **Headless `connect` hangs at the noVNC step.** (a) heartbeat DONE; On a no-DISPLAY box
   (datacenter VPS, e.g. AS23470 ReliableSite) connect prints the
   `vnc.trustysquire.ai/#p=…` URL then blocks on the sign-in poll with NO
   timeout and NO heartbeat — looks dead even when it's working. Fixes:
