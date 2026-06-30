@@ -97,11 +97,8 @@ published to the registry, so the next person provisioning that service replays 
 
 ## Pricing
 
-- **Free** — provision, operate, store keys, personal proxy use, 7-day audit, manual rotation.
-- **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, and
-  automated rotation _(coming soon)_. Free while in beta.
-
-See [`docs/BUSINESS-MODEL.md`](docs/BUSINESS-MODEL.md) for the full model.
+Free during beta — every feature unlocked, no card required. Paid plans aren't
+finalized yet; pricing will be announced before anything changes.
 
 ---
 
