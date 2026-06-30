@@ -37,10 +37,14 @@ function safeNext(value: string | undefined): string {
   return "/vault";
 }
 
-export const registerOAuthRoute: FastifyPluginAsync<{ deps: ApiDeps }> = async (
-  fastify,
-  opts,
-) => {
+export const registerOAuthRoute: FastifyPluginAsync<{
+  deps: ApiDeps;
+  // SIGNUPS_DISABLED global kill switch (checklist #10). When engaged, a
+  // callback that resolves to a BRAND-NEW account is refused — but an existing
+  // identity or same-email account still signs in (returning users are never
+  // blocked). Build-time flag, threaded from server.ts like billingEnabled.
+  signupsDisabled: boolean;
+}> = async (fastify, opts) => {
   const config = loadOAuthConfig();
   const callbackUri = (provider: string): string =>
     `${config.callbackBaseUrl}/v1/auth/oauth/${provider}/callback`;
@@ -172,6 +176,14 @@ export const registerOAuthRoute: FastifyPluginAsync<{ deps: ApiDeps }> = async (
         account = await opts.deps.accountStore.findAccountByEmail(identity.email);
       }
       if (account === null) {
+        // SIGNUPS_DISABLED: this is the ONLY place a fresh account is created,
+        // and we only reach here after the identity-, web-session-, and
+        // same-email lookups above all missed — i.e. a genuinely new signup.
+        // Block it (redirect to the login error state, matching how this route
+        // signals every other failure) rather than create the account.
+        if (opts.signupsDisabled) {
+          return reply.redirect(`${config.appBaseUrl}/login?error=signups_disabled`);
+        }
         account = await opts.deps.accountStore.createAccount(
           identity.email,
           identity.display_name,

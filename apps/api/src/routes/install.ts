@@ -25,7 +25,11 @@ export interface InstallRouteDeps {
 
 export async function registerInstallRoute(
   fastify: FastifyInstance,
-  opts: { deps: InstallRouteDeps },
+  // signupsDisabled is the SIGNUPS_DISABLED global kill switch (checklist #10),
+  // computed once at server-build time and threaded in (same pattern as
+  // billingEnabled). Issuing a machine token is the first step of a fresh
+  // install, so when the kill is engaged this route 503s instead of minting.
+  opts: { deps: InstallRouteDeps; signupsDisabled: boolean },
 ): Promise<void> {
   const now = (): Date => opts.deps.now?.() ?? new Date();
 
@@ -38,6 +42,10 @@ export async function registerInstallRoute(
   // garbage shapes get dropped silently rather than 400'd because the
   // captcha analytics value is "nice to have," not gate-blocking.
   fastify.post("/v1/install", async (req, reply) => {
+    if (opts.signupsDisabled) {
+      reply.code(503).send({ error: "signups_disabled" });
+      return;
+    }
     const asn = extractAsnFromBody(req.body);
     const record = await opts.deps.machineTokenStore.issue(now(), asn ?? undefined);
     reply.code(201).send({
