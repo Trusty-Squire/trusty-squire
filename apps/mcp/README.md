@@ -80,7 +80,7 @@ A thin local MCP server that drives a real browser on your machine:
 ## Configuration
 
 No setup needed for normal use — `connect` wires everything up. Advanced bot
-knobs (residential proxy, LLM tier, per-run call cap, API gateway override) are
+knobs (residential proxy, per-run call cap, API gateway override) are
 documented in [the repo](https://github.com/Trusty-Squire/trusty-squire).
 
 ## Security & privacy

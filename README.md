@@ -95,14 +95,6 @@ The raw secret is never handed back to the agent — it's stored write-only and 
 published to the registry, so the next person provisioning that service replays it in
 ~30s instead of the agent re-figuring it out.
 
-## Pricing
-
-- **Free** — provision, operate, store keys, personal proxy use, 7-day audit, manual rotation.
-- **Pro ($20/mo)** — egress grants for deployed apps, 365-day audit + export, and
-  automated rotation _(coming soon)_. Free while in beta.
-
-See [`docs/BUSINESS-MODEL.md`](docs/BUSINESS-MODEL.md) for the full model.
-
 ---
 
 ## Development

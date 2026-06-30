@@ -1,17 +1,26 @@
 # Changelog — @trusty-squire/mcp
 
-## 1.0.8-rc.1 (2026-06-30)
+## 1.0.9-rc.1 (2026-06-30)
 
-- feat(mcp): the headless `connect` sign-in wait now shows a heartbeat with
-  remaining time instead of sitting on a blank cursor (it looked frozen on
-  no-DISPLAY VPS boxes). (#271)
+- fix(mcp): the `connect` provider-session probe now launches the system Chrome
+  (`channel:"chrome"`) like the login flow, instead of reaching for an absent
+  bundled Chromium — fixes the spurious "Provider session check failed
+  (continuing)" ✗ on every connect (the catch also surfaces the real error). (#278)
+- fix(mcp): operator-recipes record a stable `entry_url` and drop single-use
+  links (email-verify / magic / reset tokens) from the trace, so `operate_use`
+  replays no longer open on a dead "invalid or expired token" page. (#280)
+
+## 1.0.8 (2026-06-30)
+
+Promotes 1.0.8-rc.1 to stable.
+
+- feat(mcp): the headless `connect` sign-in wait shows a heartbeat with remaining
+  time instead of sitting on a blank cursor (looked frozen on no-DISPLAY boxes). (#271)
 - refactor(mcp): removed the dead OpenRouter LLM-proxy client — the BYOK
   `OPENROUTER_API_KEY` install prompt and the `UNIVERSAL_BOT_LLM_TIER` /
-  `UNIVERSAL_BOT_PREFER_CHEAP` knobs are gone (we don't use OpenRouter; the
-  in-process planner was already retired). OpenRouter stays a provisionable
-  service. (#269)
-- fix(mcp): reworded stale "universal bot" copy in the `--no-registry` connect
-  output. (#263)
+  `UNIVERSAL_BOT_PREFER_CHEAP` knobs are gone (the in-process planner was already
+  retired). OpenRouter stays a provisionable service. (#269)
+- fix(mcp): reworded stale "universal bot" copy in the `--no-registry` connect output. (#263)
 
 ## 1.0.7 (2026-06-29)
 
