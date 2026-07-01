@@ -15,7 +15,7 @@ import {
   type OnboardingRoundCapture,
 } from "../onboarding-capture.js";
 import { promoteToSkill } from "../promote-to-skill.js";
-import { captureObserved } from "../provision-session.js";
+import { captureObserved, buildProvisionMeasurement } from "../provision-session.js";
 import { renderSkillHint } from "../skill-hint.js";
 import type { InteractiveElement } from "../browser.js";
 import type { Skill } from "@trusty-squire/skill-schema";
@@ -240,5 +240,26 @@ describe("producer: operate action → capture round mapping (captureObserved)",
     expect(captureObserved({ kind: "press", key: "Enter" }, null)).toBeNull();
     // A click with no resolved element can't produce a targetable step.
     expect(captureObserved({ kind: "click", target: "x" }, null)).toBeNull();
+  });
+});
+
+describe("deliverable #1: hint-lift measurement", () => {
+  it("computes the measurement row (hint_present, outcome, duration, turns)", () => {
+    expect(
+      buildProvisionMeasurement({
+        service: "firebase", hintServed: true, outcome: "success",
+        startedAt: 1_000_000, now: 1_090_000, turns: 7,
+      }),
+    ).toEqual({ service: "firebase", hint_present: true, outcome: "success", duration_s: 90, turns: 7 });
+  });
+
+  it("clamps a negative duration and reflects hint_present=false", () => {
+    const m = buildProvisionMeasurement({
+      service: "x", hintServed: false, outcome: "fail",
+      startedAt: 2_000, now: 1_000, turns: 0,
+    });
+    expect(m.duration_s).toBe(0);
+    expect(m.hint_present).toBe(false);
+    expect(m.outcome).toBe("fail");
   });
 });

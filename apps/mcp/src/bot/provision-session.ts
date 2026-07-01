@@ -247,6 +247,11 @@ interface Session {
   // html only on the extract round. Accumulated live; written + promoted at
   // operate_finish_task on a verified success.
   captureRounds: OnboardingRoundCapture[];
+  // Deliverable #1 measurement (docs/DESIGN-operator-hints.md): when the session
+  // started and whether a registry hint was served this run, so finish emits the
+  // hint-on vs hint-off lift signal (success rate + time, bucketed).
+  startedAt: number;
+  hintServed: boolean;
   // The session's START url (service_url at operate_start, or the resolved
   // entry on an operate_use replay). Persisted as the recipe's canonical
   // entry_url so a replay always opens at a STABLE page, never a mid-flow
@@ -1082,6 +1087,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     lastElements: [],
     actionTrace: [],
     captureRounds: [],
+    startedAt: Date.now(),
+    hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
     userEmail: loggedInEmail("google", opts.profileDir),
@@ -1609,6 +1616,55 @@ export async function captureAndPromoteSession(
       reason: `synthesis_error: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
+}
+
+// ── Deliverable #1: hint-lift measurement ──────────────────────────────────
+
+export interface ProvisionMeasurement {
+  service: string;
+  hint_present: boolean;
+  outcome: "success" | "fail";
+  duration_s: number;
+  turns: number;
+}
+
+// Pure so the shape is unit-testable without a live session or a clock.
+export function buildProvisionMeasurement(args: {
+  service: string;
+  hintServed: boolean;
+  outcome: "success" | "fail";
+  startedAt: number;
+  now: number;
+  turns: number;
+}): ProvisionMeasurement {
+  return {
+    service: args.service,
+    hint_present: args.hintServed,
+    outcome: args.outcome,
+    duration_s: Math.max(0, Math.round((args.now - args.startedAt) / 1000)),
+    turns: args.turns,
+  };
+}
+
+// Emit the hint-on vs hint-off lift signal for a finished provision — structured
+// stderr JSON so it aggregates like the other provision-audit lines. This is the
+// raw signal deliverable #1 buckets into success-rate + time by hint_present.
+export function emitProvisionMeasurement(
+  sessionId: string,
+  outcome: "success" | "fail",
+): ProvisionMeasurement | null {
+  const session = sessions.get(sessionId);
+  if (session === undefined) return null;
+  const m = buildProvisionMeasurement({
+    service: captureService(session),
+    hintServed: session.hintServed,
+    outcome,
+    startedAt: session.startedAt,
+    now: Date.now(),
+    turns: session.actionTrace.length,
+  });
+  process.stderr.write(`${JSON.stringify({ marker: "provision-measurement", ...m })}\n`);
+  return m;
 }
 
 async function settleAfterStateChange(browser: BrowserController): Promise<void> {

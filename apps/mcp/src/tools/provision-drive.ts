@@ -26,6 +26,7 @@ import {
   rememberRecipe,
   verifyPostcondition,
   captureAndPromoteSession,
+  emitProvisionMeasurement,
   type ProvisionAction,
 } from "../bot/provision-session.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
@@ -604,6 +605,10 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
         stored !== null && blocked === undefined
           ? await autoPromoteProvision(args.session_id)
           : undefined;
+      emitProvisionMeasurement(
+        args.session_id,
+        stored !== null && blocked === undefined ? "success" : "fail",
+      );
       const closed = await finishProvisionSession(args.session_id);
       return {
         kind: "credentials" as const,
@@ -620,6 +625,10 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
       args.verify_recipe !== undefined
         ? await verifyPostcondition(args.session_id, (await readRecipe(args.verify_recipe)).postcondition)
         : undefined;
+    emitProvisionMeasurement(
+      args.session_id,
+      verified === undefined || verified.confirmed ? "success" : "fail",
+    );
     const closed = await finishProvisionSession(args.session_id);
     return {
       kind: "result" as const,
