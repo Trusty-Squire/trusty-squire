@@ -89,7 +89,15 @@ async function autoPromoteProvision(sessionId: string): Promise<string> {
   try {
     const promoted = await captureAndPromoteSession(sessionId);
     if (promoted.kind === "skipped") return `skipped:${promoted.reason}`;
-    if (promoted.kind !== "ok") return `rejected:${promoted.error_kind ?? "unknown"}`;
+    if (promoted.kind !== "ok") {
+      // Surface the rejection DETAIL (e.g. the ZodError for schema_invalid), not
+      // just the kind — a bare "rejected:schema_invalid" is undiagnosable.
+      const detail =
+        "detail" in promoted && typeof promoted.detail === "string"
+          ? ` — ${promoted.detail.replace(/\s+/g, " ").slice(0, 400)}`
+          : "";
+      return `rejected:${promoted.error_kind ?? "unknown"}${detail}`;
+    }
     const accountId = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
     if (accountId === undefined || accountId.length === 0) return "produced:no_account";
     const client = clientFromEnv(accountId);

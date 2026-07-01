@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.12 (2026-07-01)
+
+- **fix (critical): the accumulation loop never closed for any real service.**
+  The producer derived a skill's service slug from the registrable host
+  (`resend.com`), which fails SkillSchema's slug regex (no dots), so every real
+  provision's synthesized skill was rejected `schema_invalid` and nothing
+  published. Now derived exactly like the hint lookup (`serviceSlugFromUrl` →
+  `canonicalizeServiceSlug`): a valid dot-free slug that matches the key the next
+  provision reads, so the loop closes.
+- `auto_promote` now surfaces the rejection detail, not just the error kind.
+
 ## 1.0.11 (2026-07-01)
 
 **The operator-hints loop.** A verified provision now feeds the registry, and the

@@ -50,6 +50,7 @@ import {
   type OnboardingRoundCapture,
 } from "./onboarding-capture.js";
 import { promoteToSkill, type PromoteResult } from "./promote-to-skill.js";
+import { canonicalizeServiceSlug } from "@trusty-squire/skill-schema";
 import type { PostVerifyStep } from "./provision-types.js";
 import {
   looksLikeCodeIdentifier,
@@ -1515,9 +1516,24 @@ function recordTrace(
 
 // ── Medium capture → skill (docs/DESIGN-operator-hints.md) ──────────────────
 
-// Service slug for the capture: the registrable host of the start URL.
+// The service SLUG for the capture. It MUST be produced the same way
+// resolveRouteHint looks a hint up (serviceSlugFromUrl → canonicalizeServiceSlug)
+// or the produced skill lands under a different key and the loop never closes;
+// and it MUST be a valid SkillSchema slug (lowercase-with-dashes, NO dots) or
+// parseSkill rejects the whole skill as schema_invalid. registrableHost
+// ("resend.com") satisfied neither — the bug that made every real provision's
+// auto-promote fail. Exported for the regression test.
+export function captureServiceSlug(startUrl: string): string {
+  try {
+    const host = new URL(startUrl).hostname.toLowerCase().replace(/^www\./, "");
+    return canonicalizeServiceSlug(host);
+  } catch {
+    return "unknown";
+  }
+}
+
 function captureService(session: Session): string {
-  return registrableHost(session.startUrl) ?? "unknown";
+  return captureServiceSlug(session.startUrl);
 }
 
 // Map a live operate action + the element it hit to the PostVerifyStep the
