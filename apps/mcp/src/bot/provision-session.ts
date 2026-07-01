@@ -568,7 +568,25 @@ function appSurfaceMarkers(pageText: string): string[] {
   return [...new Set(markers)].slice(0, 8);
 }
 
+// A login / OAuth-chooser page — an auth WALL, not the authenticated app surface.
+// Marketing/nav words on a login page ("developers", "api", "docs") otherwise
+// tripped authenticatedAppSurfaceMarkers into steering the agent to "prefer app
+// navigation" on an auth-gated page. MEASURED 2026-07-01 (Groq /authenticate:
+// "Create Account or Login … Continue with Google/GitHub/SSO/email").
+export function looksLikeLoginChooser(pageText: string): boolean {
+  const text = pageText.replace(/\s+/g, " ").trim();
+  const continueWith = (
+    text.match(/\bcontinue with (?:google|github|microsoft|sso|email|apple|gitlab)\b/gi) ?? []
+  ).length;
+  return (
+    continueWith >= 2 ||
+    /\bcreate account or (?:log|sign)\s?in\b/i.test(text) ||
+    /\b(?:log|sign)\s?in to (?:your account|continue)\b/i.test(text)
+  );
+}
+
 function authenticatedAppSurfaceMarkers(pageText: string): string[] {
+  if (looksLikeLoginChooser(pageText)) return []; // auth wall, not the app surface
   const markers = appSurfaceMarkers(pageText);
   const modeMarkers = visibleModeMarkers(pageText);
   if (modeMarkers.length > 0) return markers;
@@ -675,9 +693,12 @@ function isBillingObjectActionTarget(target: string): boolean {
 }
 
 export function provisionPerceptionGuidance(pageText: string): string | undefined {
+  const loginChooser = looksLikeLoginChooser(pageText);
   const appMarkers = authenticatedAppSurfaceMarkers(pageText);
   const modeMarkers = visibleModeMarkers(pageText);
-  const setupOverlay = hasAccountSetupOverlay(pageText);
+  // "Create Account or Login" on a login page false-matches the setup-overlay
+  // check; don't treat a login chooser as an authenticated setup surface.
+  const setupOverlay = !loginChooser && hasAccountSetupOverlay(pageText);
   const parts: string[] = [];
 
   // Stale signup URL — the page 404'd. Recover the real entry instead of looping

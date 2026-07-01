@@ -3541,3 +3541,24 @@ describe("promoteToSkill — duplicate placeholder disambiguated by name", () =>
     expect(fill.label_hint).toBe("company");
   });
 });
+
+describe("entry-url: per-account id in the path (Deepgram / Neon)", () => {
+  it("hasEphemeralPathSegment catches a project UUID and an org-<digits> slug", () => {
+    expect(hasEphemeralPathSegment("/project/68b812fb-f90f-4a08-a235-a64a01123aa9")).toBe(true);
+    expect(hasEphemeralPathSegment("/app/org-nameless-base-41435035/projects")).toBe(true);
+    // stable pages must NOT trip it
+    expect(hasEphemeralPathSegment("/projects")).toBe(false);
+    expect(hasEphemeralPathSegment("/settings/api-keys")).toBe(false);
+    expect(hasEphemeralPathSegment("/team-settings")).toBe(false);
+  });
+  it("stableSignupEntryUrl falls back to the origin when the path is account-scoped", () => {
+    expect(
+      stableSignupEntryUrl("https://console.deepgram.com/project/68b812fb-f90f-4a08-a235-a64a01123aa9/keys", []),
+    ).toBe("https://console.deepgram.com/");
+    expect(
+      stableSignupEntryUrl("https://console.neon.tech/app/org-nameless-base-41435035/projects", []),
+    ).toBe("https://console.neon.tech/");
+    // a clean url is preserved
+    expect(stableSignupEntryUrl("https://app.resend.com/signup", [])).toBe("https://app.resend.com/signup");
+  });
+});

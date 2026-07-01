@@ -109,6 +109,16 @@ function resolveField(fields: Record<string, string>, name: string | undefined):
   if (fields.value !== undefined) return fields.value;
   const keys = Object.keys(fields);
   if (keys.length === 1) return fields[keys[0]!]!;
+  // Multiple fields, no "value": prefer the ONE whose name reads as the secret
+  // (api_key/secret/token/key/password), excluding metadata (id/name/label). This
+  // lets a bare ${SECRET} — e.g. an egress grant's `Bearer ${SECRET}` — resolve on
+  // a multi-field credential (Deepgram id/name/secret) instead of erroring.
+  const SECRETISH =
+    /(?:secret|api[_-]?key|access[_-]?key|auth[_-]?token|\btoken\b|password|private[_-]?key|\bkey\b)/i;
+  const NON_SECRET =
+    /^(?:id|name|label|username|user|email|public[_-]?key|client[_-]?id|account[_-]?id)$/i;
+  const secretish = keys.filter((k) => SECRETISH.test(k) && !NON_SECRET.test(k));
+  if (secretish.length === 1) return fields[secretish[0]!]!;
   throw new ProxyError(
     "secret_ambiguous",
     "credential has multiple fields — use ${SECRET.<field>}",

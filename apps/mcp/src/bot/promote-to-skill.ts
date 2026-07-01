@@ -1146,6 +1146,11 @@ export function hasEphemeralPathSegment(path: string): boolean {
     if (seg.length === 0) return false;
     if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(seg)) return true; // uuid
     if (/^[0-9a-f]{24,}$/i.test(seg)) return true; // long hex blob
+    // Account-scope id: an org/team/project/workspace prefix + a generated tail
+    // with a 4+ digit run (Neon: org-nameless-base-41435035). The digit-run
+    // requirement keeps stable pages like /project or /team-settings out.
+    if (/^(?:org|team|ws|proj|project|account|acct|workspace|tenant|grp|group)[-_].*\d{4,}/i.test(seg))
+      return true;
     return false;
   });
 }
@@ -1248,6 +1253,17 @@ export function stableSignupEntryUrl(
   rounds: readonly OnboardingCaseFile[],
 ): string {
   const generalized = generalizeCapturedUrl(url);
+  // A per-account id in the PATH (project/org/team UUID or org-…-<digits> slug)
+  // can't replay on another account and leaks THIS user's id into a shared skill.
+  // Fall back to the app ORIGIN, which routes to the user's own default resource
+  // after login. MEASURED 2026-07-01 (Deepgram entry was
+  // console.deepgram.com/project/<uuid>; Neon /app/org-nameless-base-41435035/…).
+  try {
+    const u0 = new URL(generalized);
+    if (hasEphemeralPathSegment(u0.pathname)) return `${u0.origin}/`;
+  } catch {
+    /* fall through — relative/malformed handled below */
+  }
   if (!captureLooksLikeSignupForm(rounds)) return generalized;
   try {
     const u = new URL(generalized);
