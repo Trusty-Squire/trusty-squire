@@ -69,4 +69,33 @@ describe("pickVerificationLink", () => {
     expect(pickVerificationLink(links)).toBe("https://cloud.langfuse.com/auth/verify?token=abc");
     expect(pickVerificationLink(["https://static.langfuse.com/langfuse_logo_transactional_email.png"])).toBeNull();
   });
+
+  it("picks a NextAuth-style magic link with no verify/confirm keyword (the Loops bug)", () => {
+    // Loops (a Next.js app) emails a bare /api/auth/callback link with a token —
+    // no "verify"/"confirm"/"activate" anywhere, so it used to score 0 → null.
+    const links = [
+      "https://app.loops.so/unsubscribe?u=9",
+      "https://app.loops.so/api/auth/callback/email?callbackUrl=https%3A%2F%2Fapp.loops.so%2F&token=1a2b3c4d5e&email=x%40y.com",
+    ];
+    expect(pickVerificationLink(links)).toBe(
+      "https://app.loops.so/api/auth/callback/email?callbackUrl=https%3A%2F%2Fapp.loops.so%2F&token=1a2b3c4d5e&email=x%40y.com",
+    );
+  });
+
+  it("picks a bare token magic link with no auth path keyword", () => {
+    expect(pickVerificationLink(["https://app.example.com/login?token=xyz789"])).toBe(
+      "https://app.example.com/login?token=xyz789",
+    );
+  });
+
+  it("matches a token behind an HTML-escaped separator", () => {
+    expect(
+      pickVerificationLink(["https://app.example.com/api/auth/callback/email?x=1&amp;token=abc"]),
+    ).toBe("https://app.example.com/api/auth/callback/email?x=1&token=abc");
+  });
+
+  it("does NOT false-positive on a plain dashboard link (no token/auth/magic signal)", () => {
+    const links = ["https://app.example.com/dashboard", "https://example.com/unsubscribe?u=1"];
+    expect(pickVerificationLink(links)).toBeNull();
+  });
 });
