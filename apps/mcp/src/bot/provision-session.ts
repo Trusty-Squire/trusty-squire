@@ -645,6 +645,22 @@ export function hasUnlinkedOAuthAccountSignal(pageText: string): boolean {
   );
 }
 
+// A stale/404 signup URL — the page is a "not found" shell, not a signup form.
+// Retrying the same URL loops; the fix is to recover the real signup entry. Guard
+// on length so a long app page that merely mentions "404" (an error-log widget, a
+// metrics tile) doesn't trip it — a real 404 page is sparse.
+export function hasNotFoundPageSignal(pageText: string): boolean {
+  const text = pageText.replace(/\s+/g, " ").trim();
+  if (text.length > 600) return false;
+  return (
+    /\b404\b/.test(text) ||
+    /\bpage not found\b/i.test(text) ||
+    /page (?:you(?:'re| are)? looking for )?(?:does\s?n'?t exist|not found|can'?t be found|could\s?n'?t be found)/i.test(
+      text,
+    )
+  );
+}
+
 function isAccountSetupActionTarget(target: string): boolean {
   return /\b(?:create|finish|complete|set up|setup)\s+(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
     target,
@@ -663,6 +679,18 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
   const modeMarkers = visibleModeMarkers(pageText);
   const setupOverlay = hasAccountSetupOverlay(pageText);
   const parts: string[] = [];
+
+  // Stale signup URL — the page 404'd. Recover the real entry instead of looping
+  // on a dead URL (OpenRouter/Loops /signup both 404; the real forms are
+  // /register etc.). First so it leads when the page is just a not-found shell.
+  if (hasNotFoundPageSignal(pageText)) {
+    parts.push(
+      "Not-found page (404): this signup URL is stale — do NOT stop or report a wall. " +
+        "Recover the real signup entry: try another path on this host (/register, " +
+        "/sign-up, /join, /get-started), or navigate to the site's ROOT domain " +
+        "(allow_host it if needed) and click the 'Sign up' / 'Get started' / 'Register' link.",
+    );
+  }
 
   // One-time secret reveal — extract NOW; it vanishes if you navigate away.
   if (hasOneTimeSecretModal(pageText)) {
