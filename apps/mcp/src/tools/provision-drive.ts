@@ -579,7 +579,12 @@ const finishTaskSchema = z.object({
   store: storeShape.optional(),
   // result kind: a human-readable outcome + optional bounded structured data.
   summary: z.string().max(4000).optional(),
-  data: z.record(z.string().max(4000)).optional(),
+  // Accept scalar values (a "task done" flag is naturally a boolean/number) and
+  // coerce to string so the trail stays Record<string,string> — rejecting a bare
+  // boolean forced callers to stringify by hand.
+  data: z
+    .record(z.union([z.string().max(4000), z.number(), z.boolean()]).transform(String))
+    .optional(),
   // result kind: verify a saved operator-recipe's postcondition before closing
   // (the anti-false-green gate). `verified.confirmed` reflects the machine check.
   verify_recipe: z.string().min(1).max(80).optional(),
