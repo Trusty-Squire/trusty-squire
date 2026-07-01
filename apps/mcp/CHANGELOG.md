@@ -2,28 +2,12 @@
 
 ## 1.0.13 (2026-07-01)
 
-- fix(mcp): resolve account id from session.json, not env-only — end-user loop was dead
-- chore(release): resync staging with main; hold on rc channel (1.0.12-rc.1 / 0.1.4-rc.1)
-- docs(changelog): tighten 1.0.12 entry
-- release(mcp): 1.0.12
-- fix(mcp): producer used a dotted host as the service slug → every auto-promote failed
-- chore(release): resync staging with main; hold on the rc channel (1.0.11-rc.1 / 0.1.4-rc.1)
-- docs(changelog): tighten 1.0.11 stable entry
-- release(mcp): 1.0.11
-- feat: operator-hints follow-ups — PII backfill, OAuth fallback logic, boot-version log
-- fix(registry): reconcile old skills with the guidance paradigm + close deploy skew
-- release: skill-schema 0.1.4-rc.1 + mcp 1.0.11-rc.1 (operator-hints)
-- feat(mcp): Deliverable #1 — hint-lift measurement (slice 4)
-- feat(mcp): producer — operate_* provision → capture → skill → publish (slice 3)
-- feat(mcp): PII gate — redact identity fill values at synthesis (slice 2)
-- feat(mcp): OAuth available[] generalization, capture→synth→render (slice 1)
-- docs(spec): resolve R2-b — keep serving pending-review skills as hints
-- docs(spec): resolve R2-a — medium capture shape, verified against the corpus
-- docs(spec): rewrite on steps[]-as-guidance + eng review round 2
-- docs(spec): resolve the 3 open decisions (Q1/Q2/Q3)
-- docs(spec): refine hint resolution — mechanism as disambiguate-only tie-breaker
-- docs: spec — operator hints (rewrite of recipe-to-registry)
-- chore(release): resync staging with main; hold staging on the rc channel
+- **fix (critical): the registry loop was dead for every end-user install.** The
+  hint read and the auto-promote write resolved the account id from
+  `process.env` only, but `connect` binds end-user installs by writing
+  `account_id` to `session.json` (only the registry URL goes to the env). So no
+  hint was served and `auto_promote` returned `produced:no_account`. Now falls
+  back to `session.json`, matching the documented design.
 
 ## 1.0.12 (2026-07-01)
 
