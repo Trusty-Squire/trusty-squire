@@ -111,6 +111,15 @@ const ClickOAuthButtonStepSchema = z
           "the bot's findFirstOAuthButton ranker is the reference " +
           "implementation.",
       ),
+    available: z
+      .array(z.enum(["google", "github"]))
+      .optional()
+      .describe(
+        "Every OAuth provider the signup page offered this run. The operator " +
+          "PREFERS `provider` (the one used) but may fall back to any provider " +
+          "here that has a live session, rather than dead-ending on needs_login. " +
+          "Optional; absent means only `provider` is known (older skills).",
+      ),
     provenance: ProvenanceSchema,
   })
   .strict();

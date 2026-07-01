@@ -1,0 +1,161 @@
+// End-to-end proof of the operator-hints loop (docs/DESIGN-operator-hints.md):
+// a captured provision → promoteToSkill synthesis → renderSkillHint guidance,
+// driven through the REAL pipeline (captureOnboardingRound writes the integrity-
+// chained rounds; promoteToSkill reads them; renderSkillHint projects the skill).
+//
+// The one thing no automated test can cover is a live-browser signup against a
+// real site. Everything downstream of the capture is proven here.
+
+import { mkdtempSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, expect, it } from "vitest";
+import {
+  captureOnboardingRound,
+  type OnboardingRoundCapture,
+} from "../onboarding-capture.js";
+import { promoteToSkill } from "../promote-to-skill.js";
+import { renderSkillHint } from "../skill-hint.js";
+import type { InteractiveElement } from "../browser.js";
+import type { Skill } from "@trusty-squire/skill-schema";
+
+function el(overrides: Partial<InteractiveElement>): InteractiveElement {
+  return {
+    index: 0, tag: "button", type: null, id: null, name: null, placeholder: null,
+    ariaLabel: null, role: null, labelText: null, visibleText: null,
+    selector: "button", visible: true, inViewport: true, inConsentWidget: false,
+    value: null, title: null, href: null,
+    ...overrides,
+  };
+}
+
+let counter = 0;
+function uniqueService(): string {
+  counter += 1;
+  return `hintsvc-${Date.now().toString(36)}-${counter}`;
+}
+
+// Write rounds through the real capture path, return the synthesizer inputs.
+function setupCaptures(rounds: OnboardingRoundCapture[]): {
+  dir: string; service: string; runId: string;
+} {
+  const dir = mkdtempSync(join(tmpdir(), "hints-e2e-"));
+  const prev = process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+  process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = dir;
+  try {
+    for (const r of rounds) captureOnboardingRound(r);
+  } finally {
+    if (prev === undefined) delete process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE;
+    else process.env.TRUSTY_SQUIRE_ONBOARDING_CAPTURE = prev;
+  }
+  const sample = readdirSync(dir).find((f) => f.endsWith(".json"));
+  if (sample === undefined) throw new Error("setupCaptures wrote no files");
+  const service = rounds[0]!.service;
+  const slug = service.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+  const afterSlug = sample.slice(slug.length + 1);
+  const runId = afterSlug.slice(0, afterSlug.lastIndexOf("-r"));
+  return { dir, service, runId };
+}
+
+// A 3-round signup: OAuth (with a provider MENU) → navigate to keys → extract.
+function oauthSignupRounds(
+  service: string,
+  opts: { githubOffered: boolean },
+): OnboardingRoundCapture[] {
+  const oauthInventory: InteractiveElement[] = [
+    el({ index: 0, tag: "button", role: "button", visibleText: "Continue with Google", selector: "button.oauth-google" }),
+  ];
+  if (opts.githubOffered) {
+    oauthInventory.push(
+      el({ index: 1, tag: "button", role: "button", visibleText: "Continue with GitHub", selector: "button.oauth-github" }),
+    );
+  }
+  return [
+    {
+      service, round: 0, oauth: true,
+      state: {
+        url: "https://svc.example.com/signup", title: "Sign up",
+        html: "<html><body>Continue with Google Continue with GitHub</body></html>",
+        screenshot: "data:image/png;base64,iVBORw0KGgo=",
+      },
+      inventory: oauthInventory,
+      observed: { kind: "click", selector: "button.oauth-google", reason: "Continue with Google" },
+    },
+    {
+      service, round: 1, oauth: true,
+      state: {
+        url: "https://svc.example.com/account/tokens", title: "API Tokens",
+        html: "<html><body>Create Token</body></html>",
+        screenshot: "data:image/png;base64,iVBORw0KGgo=",
+      },
+      inventory: [
+        el({ index: 0, tag: "button", role: "button", visibleText: "Create Token", selector: "button.create-token" }),
+      ],
+      observed: { kind: "click", selector: "button.create-token", reason: "Create a new API token" },
+    },
+    {
+      service, round: 2, oauth: true,
+      state: {
+        url: "https://svc.example.com/account/tokens", title: "API Tokens",
+        html:
+          "<html><body>New Token db3a32ea-dd1b-4e28-9680-db2991c81e3e " +
+          "<button>Copy</button></body></html>",
+        screenshot: "data:image/png;base64,iVBORw0KGgo=",
+      },
+      inventory: [
+        el({ index: 0, tag: "button", role: "button", visibleText: "Copy", ariaLabel: "Copy to clipboard", selector: "button.copy-token" }),
+      ],
+      observed: {
+        kind: "extract",
+        reason: "The full API token db3a32ea-dd1b-4e28-9680-db2991c81e3e is shown; copy it now.",
+      },
+    },
+  ];
+}
+
+function oauthStep(skill: Skill): Extract<Skill["steps"][number], { kind: "click_oauth_button" }> {
+  const s = skill.steps.find((x) => x.kind === "click_oauth_button");
+  if (s === undefined || s.kind !== "click_oauth_button") throw new Error("no click_oauth_button step synthesized");
+  return s;
+}
+
+describe("operator-hints E2E: capture → synthesize → render", () => {
+  it("records the OAuth menu (available[]) and surfaces it as guidance", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(oauthSignupRounds(service, { githubOffered: true }));
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    // Synthesizer: the login step carries the whole menu the page offered.
+    const step = oauthStep(result.skill);
+    expect(step.provider).toBe("google");
+    expect(step.available).toEqual(["google", "github"]);
+
+    // Renderer: the operator is told which providers the service offers.
+    const hint = renderSkillHint(result.skill);
+    expect(hint).toContain("offers sign-in with: google, github");
+    expect(hint).toContain("this run used google");
+    // And the durable post-auth route to the key is still there.
+    expect(hint).toContain("the key");
+  });
+
+  it("omits available[] when only one provider was offered (byte-equivalence guard)", () => {
+    const service = uniqueService();
+    const { dir, runId } = setupCaptures(oauthSignupRounds(service, { githubOffered: false }));
+
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    const step = oauthStep(result.skill);
+    expect(step.provider).toBe("google");
+    // A single-option menu is redundant with `provider` — omitted, so pre-
+    // `available` skills stay byte-identical.
+    expect(step.available).toBeUndefined();
+
+    // Renderer falls back to [provider] and still names the option.
+    expect(renderSkillHint(result.skill)).toContain("offers sign-in with: google");
+  });
+});

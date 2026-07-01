@@ -860,12 +860,18 @@ function translateStep(
       // clicks specially (checks loggedInProviders before clicking).
       const oauthProvider = detectOAuthProvider(hintResult.hint);
       if (oauthProvider !== null) {
+        // Record the whole menu the page offered, but only when it adds signal
+        // (more than just the provider we used). A single-option menu is
+        // redundant with `provider` and would only bloat the skill — omitting
+        // it keeps single-provider skills byte-identical to pre-`available`.
+        const available = detectAvailableProviders(inventory);
         return {
           kind: "ok",
           step: {
             kind: "click_oauth_button",
             provider: oauthProvider,
             text_match: hintResult.hint,
+            ...(available.length > 1 ? { available } : {}),
             provenance,
           },
         };
@@ -2415,6 +2421,24 @@ function detectOAuthProvider(hint: string): "google" | "github" | null {
   if (/\bgoogle\b/.test(lower)) return "google";
   if (/\bgithub\b/.test(lower)) return "github";
   return null;
+}
+
+// The OAuth menu the signup page offered THIS round: scan every element's
+// visible text for a known provider. Feeds click_oauth_button.available so the
+// operator can fall back to a provider it has a session for instead of dead-
+// ending on the one this run happened to use. Stable order (google, github)
+// keeps the field deterministic across runs.
+function detectAvailableProviders(
+  inventory: readonly InteractiveElement[],
+): ("google" | "github")[] {
+  const found = new Set<"google" | "github">();
+  for (const el of inventory) {
+    const text = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.title ?? ""}`.trim();
+    if (text.length === 0) continue;
+    const p = detectOAuthProvider(text);
+    if (p !== null) found.add(p);
+  }
+  return (["google", "github"] as const).filter((p) => found.has(p));
 }
 
 function inferOAuthProvider(steps: SkillStep[]): "google" | "github" | null {
