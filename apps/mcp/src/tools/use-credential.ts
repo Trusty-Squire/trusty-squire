@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { assertApi, type Tool } from "./index.js";
+import { ApiCallError } from "../api-client.js";
 import { ALWAYS_LOAD_META } from "./always-load.js";
 
 // Direct, single-call proxy. The agent names a credential (by reference
@@ -74,11 +75,31 @@ export const useCredentialTool: Tool<z.infer<typeof inputSchema>> = {
       ...(args.http.body !== undefined ? { body: args.http.body } : {}),
       ...(args.http.query !== undefined ? { query: args.http.query } : {}),
     };
-    const res = await api.useCredential({
-      ...(args.reference !== undefined ? { reference: args.reference } : {}),
-      ...(args.service !== undefined ? { service: args.service } : {}),
-      http,
-    });
-    return { response: res.response };
+    try {
+      const res = await api.useCredential({
+        ...(args.reference !== undefined ? { reference: args.reference } : {}),
+        ...(args.service !== undefined ? { service: args.service } : {}),
+        http,
+      });
+      return { response: res.response };
+    } catch (err) {
+      // On an ambiguous service match the server returns the candidate
+      // references, but the bare error message dropped them — surface them so
+      // the agent retries with an exact `reference` instead of a blind
+      // list_credentials round-trip.
+      if (err instanceof ApiCallError && err.code === "ambiguous_service") {
+        const raw = (err.body as { candidates?: unknown } | undefined)?.candidates;
+        const candidates = Array.isArray(raw)
+          ? raw.filter((c): c is string => typeof c === "string")
+          : [];
+        const list = candidates.length > 0 ? candidates.join(", ") : "(see list_credentials)";
+        throw new Error(
+          `Multiple stored credentials match service "${args.service ?? ""}". Retry ` +
+            `use_credential with one of these exact "reference" values instead of ` +
+            `"service": ${list}. Call list_credentials to see their labels if you need to choose.`,
+        );
+      }
+      throw err;
+    }
   },
 };

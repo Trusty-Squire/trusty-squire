@@ -31,6 +31,7 @@ import {
   hasOneTimeSecretModal,
   hasExistingAccountSignal,
   hasUnlinkedOAuthAccountSignal,
+  hasNotFoundPageSignal,
   makeTwoCaptchaVaultProxy,
   toCompactElement,
 } from "../provision-session.js";
@@ -881,6 +882,28 @@ describe("hasExistingAccountSignal (real-identity already registered — OpenRou
     const g = provisionPerceptionGuidance("Invalid credentials. Please try again.");
     expect(g).toContain("Existing account");
     expect(g).toContain("LOGGING IN");
+  });
+});
+
+describe("hasNotFoundPageSignal (stale/404 signup URL)", () => {
+  it("detects a sparse 404 page (the Loops /signup case)", () => {
+    expect(hasNotFoundPageSignal("404 L'oops! The page you're looking for doesn't exist. Home")).toBe(true);
+    expect(hasNotFoundPageSignal("Page not found")).toBe(true);
+    expect(hasNotFoundPageSignal("Sorry, that page couldn't be found.")).toBe(true);
+  });
+  it("does NOT fire on a real signup form", () => {
+    expect(hasNotFoundPageSignal("Sign up for Loops Work Email First Name Company Sign up")).toBe(false);
+  });
+  it("does NOT fire on a long app page that merely mentions 404", () => {
+    const longPage = "Dashboard ".repeat(80) + "HTTP 404 errors this week: 3";
+    expect(longPage.length).toBeGreaterThan(600);
+    expect(hasNotFoundPageSignal(longPage)).toBe(false);
+  });
+  it("steers to recovery via provisionPerceptionGuidance", () => {
+    const g = provisionPerceptionGuidance("404 The page you're looking for doesn't exist.");
+    expect(g).toBeDefined();
+    expect(g!.toLowerCase()).toContain("stale");
+    expect(g!.toLowerCase()).toContain("/register");
   });
 });
 

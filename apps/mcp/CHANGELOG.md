@@ -1,5 +1,15 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.18 (2026-07-01)
+
+- **fix: `use_credential` on an ambiguous service now lists the candidate
+  references** (and points at `list_credentials`) instead of a bare
+  `ambiguous_service` — no blind round-trip to disambiguate.
+- **fix: a 404 signup URL now steers to recovery.** New not-found-page detection
+  tells the agent to try `/register` / `/sign-up` / the root-domain signup link
+  instead of looping on a stale `/signup` (unblocks Loops/OpenRouter, and the
+  email fallback after an unlinked-OAuth "account not found").
+
 ## 1.0.17 (2026-07-01)
 
 - **fix: `operate_await_verification` returned `link:null` for magic-link emails.**
