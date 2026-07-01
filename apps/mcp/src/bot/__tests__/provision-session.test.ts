@@ -924,9 +924,11 @@ describe("looksLikeLoginChooser (auth wall, not the app surface)", () => {
     const groq =
       "Build Fast Create Account or Login Last used Continue with Google Continue with GitHub Continue with SSO or Continue with email developers api keys";
     expect(looksLikeLoginChooser(groq)).toBe(true);
-    // the false "authenticated app — prefer app navigation" steer must NOT fire
+    // neither the "authenticated app / prefer app navigation" steer NOR the
+    // "onboarding/setup form" fill-the-fields steer should fire on a login page
     const g = provisionPerceptionGuidance(groq) ?? "";
     expect(g).not.toMatch(/prefer app navigation|no test\/sandbox/i);
+    expect(g).not.toMatch(/onboarding\/setup form/i);
   });
   it("does NOT fire on the real authenticated dashboard", () => {
     expect(looksLikeLoginChooser("Products Developers API Keys Team Billing Usage")).toBe(false);
