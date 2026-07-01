@@ -44,6 +44,7 @@ export {
 export type { FailureClass } from "./failure-taxonomy.js";
 export {
   canonicalizeServiceSlug,
+  serviceSlugFromHost,
   equivalentServiceSlugs,
   serviceSlugLookupOrder,
 } from "./service-slugs.js";

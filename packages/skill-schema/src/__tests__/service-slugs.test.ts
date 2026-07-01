@@ -32,3 +32,15 @@ describe("service slug canonicalization", () => {
     expect(serviceSlugLookupOrder("anthropic")).toEqual(["anthropic-api", "anthropic"]);
   });
 });
+
+import { serviceSlugFromHost } from "../service-slugs.js";
+describe("serviceSlugFromHost (main-label slug)", () => {
+  it("takes the registrable domain's main label, not the dot-dashed host", () => {
+    expect(serviceSlugFromHost("resend.com")).toBe("resend");
+    expect(serviceSlugFromHost("www.railway.com")).toBe("railway");
+    expect(serviceSlugFromHost("console.neon.tech")).toBe("neon");
+    expect(serviceSlugFromHost("app.posthog.com")).toBe("posthog");
+    // alias still applies (anthropic → anthropic-api)
+    expect(serviceSlugFromHost("anthropic.com")).toBe("anthropic-api");
+  });
+});

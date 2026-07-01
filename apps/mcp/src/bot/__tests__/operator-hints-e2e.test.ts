@@ -258,6 +258,11 @@ describe("producer: service slug (regression — captureService returned a dotte
       expect(slug).toMatch(/^[a-z0-9][a-z0-9-]*$/); // valid SkillSchema service slug (no dots)
       expect(slug).toBe(serviceSlugFromUrl(url)); // == what resolveRouteHint looks up → loop closes
     }
+    // And it's the MAIN LABEL ("resend"), not the dot-dashed host ("resend-com"),
+    // so new skills share the namespace with agent/housekeeper skills.
+    expect(captureServiceSlug("https://resend.com/signup")).toBe("resend");
+    expect(captureServiceSlug("https://www.railway.com/")).toBe("railway");
+    expect(captureServiceSlug("https://console.neon.tech/signup")).toBe("neon");
   });
 });
 

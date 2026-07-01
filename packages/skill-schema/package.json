@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/skill-schema",
-  "version": "0.1.4-rc.1",
+  "version": "0.1.5-rc.1",
   "type": "module",
   "description": "Type-checked learned-skill schema for Trusty Squire. Defines the wire contract every registry-stored skill is validated against, shared by the mcp client and the registry server.",
   "license": "MIT",
