@@ -11,6 +11,8 @@
 
 export {
   SKILL_SCHEMA_VERSION,
+  isIdentityFieldLabel,
+  orderedOAuthProviders,
   SkillSchema,
   SkillStepSchema,
   SkillCredentialSpecSchema,

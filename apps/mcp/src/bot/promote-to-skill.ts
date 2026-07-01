@@ -38,6 +38,7 @@ import { createHash } from "node:crypto";
 import {
   parseSkill,
   validateReplayGraph,
+  isIdentityFieldLabel,
   SKILL_SCHEMA_VERSION,
   type Skill,
   type SkillCredentialSpec,
@@ -1431,6 +1432,11 @@ function isOwnFormControlLabelEcho(
 // scrub must happen at synthesis, not rely on the verifier) and each replay fills
 // the run's own identity.
 function looksLikeIdentityInput(el: InteractiveElement): boolean {
+  // Shared classifier (skill-schema isIdentityFieldLabel) so the synthesis-time
+  // scrub and the registry backfill of pre-scrub skills can never diverge. Scope
+  // is a person's NAME + COMPANY/ORG only — NOT billing/address fields (needed
+  // for replay; one ${IDENTITY} slot can't disambiguate several) and NOT
+  // "display name" / "your name" (often a handle, not PII).
   const hay = [
     el.placeholder ?? "",
     el.labelText ?? "",
@@ -1438,20 +1444,8 @@ function looksLikeIdentityInput(el: InteractiveElement): boolean {
     el.name ?? "",
     el.id ?? "",
     el.title ?? "",
-  ]
-    .join(" ")
-    .toLowerCase();
-  // Scope: a person's NAME and their COMPANY/ORG — the clearest "who you are"
-  // PII (the spec's stated scope). Deliberately NOT billing/address fields
-  // (zip/city/state): those are less identifying, are needed for replay, and
-  // collapsing several of them into one ${IDENTITY} slot would make a
-  // multi-field address form un-replayable.
-  // Only the unambiguous real-name / org fields. NOT "display name" / "your
-  // name" (often a chosen handle, not PII) — redacting those is over-reach that
-  // harms replay fidelity for no privacy gain.
-  return /\b(?:full[\s_-]*name|first[\s_-]*name|last[\s_-]*name|company|organi[sz]ation|business[\s_-]*name)\b/.test(
-    hay,
-  );
+  ].join(" ");
+  return isIdentityFieldLabel(hay);
 }
 
 function looksLikeTokenNameInput(el: InteractiveElement): boolean {

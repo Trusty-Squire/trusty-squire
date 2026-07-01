@@ -3,6 +3,7 @@
 // to keep this app's dep surface minimal).
 
 import Fastify from "fastify";
+import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 import { registerSkillsRoute } from "./routes/skills.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAdminDashboardRoute } from "./routes/admin-dashboard.js";
@@ -332,4 +333,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   }
   const server = await buildServer(serverOpts);
   await server.listen({ port, host: "0.0.0.0" });
+  // Surface the schema version baked into THIS image so a client↔registry skew
+  // (a schema bump that didn't redeploy the registry) is visible in logs rather
+  // than manifesting as mysterious 400s on POST /skills. The registry runtime-
+  // imports skill-schema, so this is the version it will parse against.
+  server.log.info(
+    { skill_schema_version: SKILL_SCHEMA_VERSION, port },
+    "registry listening — skill-schema parser version for this image",
+  );
 }

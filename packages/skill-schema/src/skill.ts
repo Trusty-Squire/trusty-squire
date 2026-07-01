@@ -697,6 +697,37 @@ export type SkillStatus = z.infer<typeof SkillStatusSchema>;
 
 export const SKILL_SCHEMA_VERSION = 1 as const;
 
+// isIdentityFieldLabel — does a fill field's label denote a person's NAME or
+// their COMPANY/ORG (PII)? Shared by the mcp synthesizer's upload-time scrub and
+// the registry's one-time backfill of pre-scrub skills, so both classify
+// identically. Deliberately NOT billing/address fields (needed for replay; one
+// ${IDENTITY} slot can't disambiguate several of them).
+export function isIdentityFieldLabel(label: string): boolean {
+  return /\b(?:full[\s_-]*name|first[\s_-]*name|last[\s_-]*name|company|organi[sz]ation|business[\s_-]*name)\b/i.test(
+    label,
+  );
+}
+
+// orderedOAuthProviders — the provider preference a replay/verify pass should
+// try, in order. Prefer the recorded `provider` (the one the capture used), then
+// any OTHER provider the page offered (`available[]`) that the current session is
+// logged into. An empty result means needs_login: no offered provider has a
+// session. This is the fallback that lets a menu-skill verify against a bot whose
+// session doesn't match the pinned provider.
+export function orderedOAuthProviders(
+  step: { provider: "google" | "github"; available?: readonly ("google" | "github")[] },
+  sessionProviders: readonly ("google" | "github")[],
+): ("google" | "github")[] {
+  const sessions = new Set(sessionProviders);
+  const menu = step.available ?? [step.provider];
+  const ordered: ("google" | "github")[] = [];
+  if (sessions.has(step.provider)) ordered.push(step.provider);
+  for (const p of menu) {
+    if (p !== step.provider && sessions.has(p) && !ordered.includes(p)) ordered.push(p);
+  }
+  return ordered;
+}
+
 export const SkillSchema = z
   .object({
     schema_version: z
