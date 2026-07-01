@@ -467,13 +467,19 @@ export class InMemorySkillStore implements SkillStore {
           skill.demotion_reason = `rot:${failureKind}`;
           transition = "retired";
         } else if (skill.status === "active") {
-          // Regressed — demote (eligible for auto-rediscovery, T5).
-          skill.status = "demoted";
-          skill.payload.status = "demoted";
+          // Guidance paradigm (docs/DESIGN-operator-hints.md reconcile edge 2): a
+          // rotted blind replay means the exact STEPS drifted, not that the MAP
+          // is useless — the operator adapts. DOWNGRADE active → pending-review
+          // (still served as a hint per R2-b) and re-prove it, instead of
+          // demoting to router-skip. Reset the rot counter for a fresh verify
+          // window; persistent rot then retires via the pending-review path
+          // above. A fresh success re-promotes it to active.
+          skill.status = "pending-review";
+          skill.payload.status = "pending-review";
           skill.demotion_reason = `rot:${failureKind}`;
-          // Stop re-testing — rediscovery or operator action is needed.
+          skill.consecutive_verifier_failures = 0;
           skill.next_freshness_due_at = null;
-          transition = "demoted";
+          transition = "downgraded";
         }
       }
     }

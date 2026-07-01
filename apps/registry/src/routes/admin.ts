@@ -157,6 +157,7 @@ export const registerAdminRoutes: FastifyPluginAsync<AdminRouteDeps> = async (
       if (
         opts.demotionWebhookUrl !== undefined &&
         (result.transition === "demoted" ||
+          result.transition === "downgraded" ||
           result.transition === "retired" ||
           result.transition === "quarantined")
       ) {
