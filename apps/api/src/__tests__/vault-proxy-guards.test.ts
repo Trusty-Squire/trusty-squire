@@ -49,9 +49,25 @@ describe("substituteSecret (single + multi field)", () => {
     expect(out.headers!["x-key"]).toBe("shh");
   });
 
-  it("${SECRET} on a multi-field credential is ambiguous", () => {
+  it("${SECRET} on a multi-field credential is ambiguous when no field reads as the secret", () => {
     expect(
       syncCode(() => substituteSecret({ ...base, headers: { a: "${SECRET}" } }, { x: "1", y: "2" })),
+    ).toBe("secret_ambiguous");
+  });
+
+  it("${SECRET} picks the secret-ish field on a multi-field credential (Deepgram id/name/secret)", () => {
+    const out = substituteSecret(
+      { ...base, headers: { authorization: "Bearer ${SECRET}" } },
+      { id: "proj_1", name: "Default", secret: "dg-abc123" },
+    );
+    expect(out.headers!.authorization).toBe("Bearer dg-abc123");
+  });
+
+  it("${SECRET} stays ambiguous when TWO fields read as secrets", () => {
+    expect(
+      syncCode(() =>
+        substituteSecret({ ...base, headers: { a: "${SECRET}" } }, { api_key: "k1", api_key_2: "k2" }),
+      ),
     ).toBe("secret_ambiguous");
   });
 

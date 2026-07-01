@@ -32,6 +32,7 @@ import {
   hasExistingAccountSignal,
   hasUnlinkedOAuthAccountSignal,
   hasNotFoundPageSignal,
+  looksLikeLoginChooser,
   buildVerificationSearchQuery,
   makeTwoCaptchaVaultProxy,
   toCompactElement,
@@ -915,6 +916,20 @@ describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
     expect(link).toBe(
       "https://app.loops.so/api/auth/callback/email?callbackUrl=https%3A%2F%2Fapp.loops.so%2Fadd-domain&token=REDACTED&email=x%40y.com",
     );
+  });
+});
+
+describe("looksLikeLoginChooser (auth wall, not the app surface)", () => {
+  it("detects Groq's login chooser and suppresses the app-navigation steer", () => {
+    const groq =
+      "Build Fast Create Account or Login Last used Continue with Google Continue with GitHub Continue with SSO or Continue with email developers api keys";
+    expect(looksLikeLoginChooser(groq)).toBe(true);
+    // the false "authenticated app — prefer app navigation" steer must NOT fire
+    const g = provisionPerceptionGuidance(groq) ?? "";
+    expect(g).not.toMatch(/prefer app navigation|no test\/sandbox/i);
+  });
+  it("does NOT fire on the real authenticated dashboard", () => {
+    expect(looksLikeLoginChooser("Products Developers API Keys Team Billing Usage")).toBe(false);
   });
 });
 

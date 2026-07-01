@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.23 (2026-07-01)
+
+- **fix: skill `entry_url` no longer bakes in a per-account id** (Deepgram
+  `/project/<uuid>`, Neon `/app/org-…-<digits>`) — falls back to the app origin,
+  which routes to the user's own default resource after login.
+- **fix: egress `${SECRET}` resolves on a multi-field credential** by picking the
+  secret-ish field (api_key/secret/token…), instead of erroring `secret_ambiguous`
+  (server-side; deploys with this release).
+- **fix: no more "prefer app navigation" steer on a login page** — a login/OAuth
+  chooser is recognized as an auth wall, not the authenticated app surface.
+
 ## 1.0.22 (2026-07-01)
 
 - **fix: `operate_finish_task.data` accepts scalar values** (boolean/number),
