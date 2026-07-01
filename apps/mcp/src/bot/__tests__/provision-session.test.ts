@@ -1046,6 +1046,9 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
       expect(r.needs_user.wall).toBe("google_session");
       expect(r.needs_user.resume).toBe("connect");
       expect(r.needs_user.message).toMatch(/has NOT started/i);
+      // Must steer to --force-relogin: plain `connect` short-circuits on the
+      // cached "connected" marker and won't refresh a stale session.
+      expect(r.needs_user.message).toMatch(/--force-relogin/);
     }
   });
   it("fails closed when only a non-Google provider is live (no autonomous login)", () => {
