@@ -1070,8 +1070,10 @@ export function googleSessionGate(
       wall: "google_session",
       message:
         "No live Google session in the bot profile, so the operator cannot act " +
-        "as you yet. Run `npx @trusty-squire/mcp connect` (or refresh the Google " +
-        "login) and retry — the task has NOT started and nothing was changed.",
+        "as you yet. Refresh it with `npx @trusty-squire/mcp connect --force-relogin` " +
+        "— plain `connect` may report 'already connected' from a cached marker and " +
+        "skip the sign-in, so it will NOT fix a stale/expired session. Then retry " +
+        "— the task has NOT started and nothing was changed.",
       resume: "connect",
     },
   };

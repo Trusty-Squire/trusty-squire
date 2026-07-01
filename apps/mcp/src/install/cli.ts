@@ -550,7 +550,11 @@ async function connect(args: Argv): Promise<void> {
       if (!preflight.providers.includes("github")) {
         await offerGithubReloginIfDead(args, target, agent);
       }
-      ui.hint(`Pass ${ui.code("--force-relogin")} to switch accounts.`);
+      ui.hint(
+        `Pass ${ui.code("--force-relogin")} to switch accounts or to refresh a ` +
+          `stale/expired session (this "connected" check reads cached cookies, ` +
+          `which can outlive the real session).`,
+      );
       return;
     }
   }

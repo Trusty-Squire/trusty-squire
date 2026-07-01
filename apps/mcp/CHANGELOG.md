@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.26 (2026-07-01)
+
+- **fix: a stale Google session is now recoverable.** After the bot's Google
+  session went stale, plain `connect` reported "Already connected" (the preflight
+  reads cached cookie presence, which outlives a server-invalidated session) and
+  skipped relogin. The `google_session` wall now steers to
+  `connect --force-relogin` and explains why plain `connect` won't refresh a stale
+  session; the "Already connected" hint names the stale-session case too.
+
 ## 1.0.25 (2026-07-01)
 
 - **fix: no onboarding/setup-form steer on a login chooser.** 1.0.23 stopped the
