@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.13 (2026-07-01)
+
+- **fix (critical): the registry loop was dead for every end-user install.** The
+  hint read and the auto-promote write resolved the account id from
+  `process.env` only, but `connect` binds end-user installs by writing
+  `account_id` to `session.json` (only the registry URL goes to the env). So no
+  hint was served and `auto_promote` returned `produced:no_account`. Now falls
+  back to `session.json`, matching the documented design.
+
 ## 1.0.12 (2026-07-01)
 
 - **fix (critical): the accumulation loop never closed for any real service.**

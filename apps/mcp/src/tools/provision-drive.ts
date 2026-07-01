@@ -56,12 +56,29 @@ async function readInboxConsent(): Promise<boolean> {
   }
 }
 
+// The account the install is bound to. Operator/CI runs set it in the env;
+// end-user installs bind it in session.json (connect writes it there, NOT to the
+// MCP config env). Reading env-only silently disabled BOTH the hint read and the
+// auto-promote write for every end-user install — resolve from the session file
+// as the fallback so the registry loop works off a normal `connect`.
+async function resolveAccountId(): Promise<string | undefined> {
+  const fromEnv = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+  if (fromEnv !== undefined && fromEnv.length > 0) return fromEnv;
+  try {
+    const data = await (await openSessionStorage()).read();
+    const id = data?.account_id;
+    return id !== undefined && id.length > 0 ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Best-effort: ask the registry for a known route for this service so the agent
 // drives on rails instead of ad-hoc. Returns undefined on any miss (no skill,
 // no registry configured, network error) — the agent just drives without it.
 async function resolveRouteHint(serviceUrl: string): Promise<string | undefined> {
   try {
-    const accountId = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+    const accountId = await resolveAccountId();
     if (accountId === undefined || accountId.length === 0) return undefined;
     const client = clientFromEnv(accountId);
     if (client === null) return undefined;
@@ -98,7 +115,7 @@ async function autoPromoteProvision(sessionId: string): Promise<string> {
           : "";
       return `rejected:${promoted.error_kind ?? "unknown"}${detail}`;
     }
-    const accountId = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+    const accountId = await resolveAccountId();
     if (accountId === undefined || accountId.length === 0) return "produced:no_account";
     const client = clientFromEnv(accountId);
     if (client === null) return "produced:no_registry";
