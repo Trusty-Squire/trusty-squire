@@ -1238,8 +1238,13 @@ export function toCompactElement(
   const out: ObservedElement = { ref, label: presentLabel(el, sealed), tag: el.tag };
   if (el.role) out.role = el.role;
   if (el.type) out.type = el.type;
-  const v = presentFieldValue(el, sealed);
-  if (v !== null && v.length > 0) out.value_len = v.length;
+  // value_len is a LENGTH signal, not the value — report the REAL character count.
+  // presentFieldValue masks a sealed field to "[sealed]" (8 chars), so using its
+  // length made a correctly-filled 19-char email read as value_len:8 and misled
+  // the agent into thinking its fill truncated. The length isn't the secret (the
+  // min_value_len postcondition already uses the real length for the same reason).
+  const realLen = (el.value ?? "").length;
+  if (realLen > 0) out.value_len = realLen;
   if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
   if (el.href) out.href = el.href;
   if (el.testId) out.testId = el.testId;

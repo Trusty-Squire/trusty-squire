@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.16 (2026-07-01)
+
+- **fix: a filled sealed field reported `value_len: 8` (the `[sealed]` placeholder
+  length), not the real fill.** A correctly-typed 19-char email read as truncated,
+  so the agent fought a phantom bug across email/password signups. `value_len` now
+  reports the real character count (a length signal, not the value — the value
+  stays hidden).
+- **fix: login guidance no longer tells the agent to use an OAuth provider a page
+  doesn't offer.** On an email-only signup it now hedges (use the session provider
+  if offered, else sign up with email) instead of chasing a missing button.
+
 ## 1.0.15 (2026-07-01)
 
 - **fix: new skills landed in a separate slug namespace.** The producer and hint
