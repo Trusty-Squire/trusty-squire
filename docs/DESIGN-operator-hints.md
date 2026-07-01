@@ -239,13 +239,6 @@ Round-2 findings folded: (1) `promoteToSkill` needs rich onboarding case files, 
 
 - **CODEX:** re-sequenced to capture+PII → renderer → OAuth `available[]`, and corrected four overstated "reuse" claims. Absorbed into the Sequencing section.
 - **CROSS-MODEL:** the review and Codex agree the OAuth `available[]` change I led with is the least-impactful piece and should be last; the capture pipeline is the load-bearing dependency.
-- **VERDICT:** Not CLEARED for implementation. The approach is sound but the sequence was wrong and the largest dependency (operator capture → case file) was under-weighted. Two decisions now open.
+- **VERDICT:** CLEARED for implementation. Approach settled, sequence corrected (capture+PII → renderer → OAuth `available[]`), and both round-2 decisions resolved. R2-a: medium capture (verified byte-safe by static read + a 1,575-run corpus measurement, 0.06% visibility impact absorbed by the extract-only inferer). R2-b: keep serving pending-review skills as advisory hints (cheap under operator-guidance consumption), with the PII scrub enforced as a hard gate at UPLOAD time — the verify pass guards replay quality, never privacy, and pending-review is served immediately.
 
-R2-a is now RESOLVED (see "Capture shape" above): the capture is **medium**
-(inventory + action + scrubbed URL per round; raw HTML on the extract round only;
-no screenshots), verified byte-safe by a static read of every HTML consumer plus a
-1,575-run corpus measurement (0.06% visibility-flag impact, absorbed by the
-extract-only inferer).
-
-**UNRESOLVED DECISIONS:**
-- R2-b — Hint trust gate: serve only verified (active) skills as hints, vs. keep the current design that also serves pending-review skills advisorily (code does the latter today). Lean: keep pending-review (advisory hints are cheap under operator-guidance consumption) and enforce PII at upload, not via the verify gate.
+NO UNRESOLVED DECISIONS
