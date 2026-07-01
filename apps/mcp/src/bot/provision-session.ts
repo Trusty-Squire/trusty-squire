@@ -2472,10 +2472,18 @@ export async function awaitVerification(
     await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
   }
 
-  const els = await browser.extractInteractiveElements();
-  const links = els
-    .map((e) => e.href)
-    .filter((h): h is string => typeof h === "string" && h.length > 0);
+  const hrefsOf = (els: readonly { href?: string | null }[]): string[] =>
+    els.map((e) => e.href).filter((h): h is string => typeof h === "string" && h.length > 0);
+
+  // The results LIST has snippets (enough for an OTP code) but NOT the body's
+  // links, so a magic/verification LINK needs the mail OPENED. Merge both so an
+  // OTP-in-snippet still works if opening fails (non-regressing fallback).
+  let links = hrefsOf(await browser.extractInteractiveElements());
+  const opened = await browser.openFirstMailResult().catch(() => false);
+  if (opened) {
+    text = `${text}\n${await browser.extractVisibleText()}`;
+    links = [...links, ...hrefsOf(await browser.extractInteractiveElements())];
+  }
   const { code, link } = parseVerification(text, links);
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {
