@@ -4,7 +4,7 @@
 // best-effort guidance, NOT a script: the agent still drives; if the live page
 // diverges it falls back to its own judgment.
 
-import { canonicalizeServiceSlug, type Skill, type SkillStep } from "@trusty-squire/skill-schema";
+import { serviceSlugFromHost, type Skill, type SkillStep } from "@trusty-squire/skill-schema";
 import type { OAuthProviderId } from "./oauth-providers.js";
 
 // Login guidance built from the user's ACTUAL live sessions (the bot knows
@@ -33,8 +33,9 @@ export function loginSessionGuidance(liveProviders: readonly OAuthProviderId[]):
 // agent is provisioning so provision_start can look the skill up.
 export function serviceSlugFromUrl(url: string): string | null {
   try {
-    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
-    return canonicalizeServiceSlug(host);
+    // Main-label slug ("resend.com" → "resend"), NOT the dot-dashed host
+    // ("resend-com") — see serviceSlugFromHost.
+    return serviceSlugFromHost(new URL(url).hostname);
   } catch {
     return null;
   }

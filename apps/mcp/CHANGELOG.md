@@ -1,5 +1,15 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.15 (2026-07-01)
+
+- **fix: new skills landed in a separate slug namespace.** The producer and hint
+  lookup slugged `resend.com` → `resend-com` (dot dashed), while agent/housekeeper
+  skills are `resend` — so freshly-published skills never superseded old ones and
+  the slug lookup missed them, and the next provision fell back to the stale skill
+  by host. Now derives the slug from the domain's main label (`resend.com` →
+  `resend`, `console.neon.tech` → `neon`) via a shared `serviceSlugFromHost`, so
+  producer, lookup, and existing skills share one namespace. Ships skill-schema 0.1.5.
+
 ## 1.0.14 (2026-07-01)
 
 - **fix: skill entry_url pointed at a post-login page and the OAuth step was

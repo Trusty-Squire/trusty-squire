@@ -19,6 +19,20 @@ export function canonicalizeServiceSlug(slug: string): string {
   return SERVICE_SLUG_ALIASES[normalized] ?? normalized;
 }
 
+// Canonical service slug from a HOSTNAME: the registrable domain's MAIN label.
+// "resend.com" → "resend", "console.neon.tech" → "neon", "app.x.com" → "x".
+// Feeding the full host to canonicalizeServiceSlug dashed the dot ("resend-com"),
+// fragmenting the namespace from the clean agent/housekeeper slugs so new skills
+// never superseded old ones and the slug lookup missed them. Used by BOTH the
+// hint lookup (serviceSlugFromUrl) and the producer so a skill lands under the
+// SAME slug the next provision reads.
+export function serviceSlugFromHost(host: string): string {
+  const clean = host.trim().toLowerCase().replace(/^www\./, "");
+  const parts = clean.split(".").filter((p) => p.length > 0);
+  const main = parts.length >= 2 ? parts[parts.length - 2]! : (parts[0] ?? clean);
+  return canonicalizeServiceSlug(main);
+}
+
 export function equivalentServiceSlugs(slug: string): string[] {
   const canonical = canonicalizeServiceSlug(slug);
   const out = new Set<string>([canonical]);

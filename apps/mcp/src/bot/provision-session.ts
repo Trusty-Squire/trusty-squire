@@ -50,7 +50,7 @@ import {
   type OnboardingRoundCapture,
 } from "./onboarding-capture.js";
 import { promoteToSkill, type PromoteResult } from "./promote-to-skill.js";
-import { canonicalizeServiceSlug } from "@trusty-squire/skill-schema";
+import { serviceSlugFromHost } from "@trusty-squire/skill-schema";
 import type { PostVerifyStep } from "./provision-types.js";
 import {
   looksLikeCodeIdentifier,
@@ -1532,8 +1532,7 @@ function recordTrace(
 // auto-promote fail. Exported for the regression test.
 export function captureServiceSlug(startUrl: string): string {
   try {
-    const host = new URL(startUrl).hostname.toLowerCase().replace(/^www\./, "");
-    return canonicalizeServiceSlug(host);
+    return serviceSlugFromHost(new URL(startUrl).hostname);
   } catch {
     return "unknown";
   }
