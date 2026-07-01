@@ -188,6 +188,36 @@ Corrections to specific spec claims:
   fallback (`skills.ts:193`), by design (a hint is advisory). So "verified only"
   is stricter than the current intent; decide deliberately.
 
+## Capture shape (R2-a — RESOLVED & VERIFIED)
+
+The capture is **medium**, not rich, not the lean trace. Three rules:
+
+- **Every round:** scrubbed `url` (host + path, per-run tokens stripped) + `action`
+  + structured `inventory` (each element's label/role/tag/testId/href/path). The
+  inventory is the observation the operator already fetches every turn, so
+  capturing it is near-free. **No screenshot.**
+- **Extract round only:** additionally keep raw `html` — that is the input the
+  key-extraction step is synthesized from (`extract_via_regex` / copy-button /
+  labeled).
+- **Visibility flag:** computed from the extract round only (the existing
+  `inferVisibilityFromRounds`, `promote-to-skill.ts:2110`). No per-round text
+  crumb.
+
+**Why this is byte-safe (verified, not asserted):**
+- Test 1 (static read of every HTML consumer): step synthesis and extract
+  synthesis read HTML **only on the extract round** (`translateStep`'s `case
+  "extract"` at 1032/1036; `rounds[last].state.html` at 2221/2313). The only
+  consumer of *non-extract-round* HTML is the visibility flag.
+- Test 2 (measured over 1,575 real corpus runs): dropping non-extract HTML changes
+  the `visibility` flag on **1 run (0.06%)** — the sole case where a show-once
+  banner lived only off the extract round. Routing visibility through the
+  extract-only inferer absorbs it.
+- Screenshots have **0** synthesis reads — dropped unconditionally.
+
+Effect: ~4.6GB-for-1,575-runs (rich) → order-of tens of MB. PII surface shrinks
+from "every page's full DOM, every step" to "structured labels + one HTML page
+per run."
+
 ## Decisions carried from prior review
 
 - Reuse `steps[]`, do NOT build a new `/hints` artifact (the schema is the
@@ -211,6 +241,11 @@ Round-2 findings folded: (1) `promoteToSkill` needs rich onboarding case files, 
 - **CROSS-MODEL:** the review and Codex agree the OAuth `available[]` change I led with is the least-impactful piece and should be last; the capture pipeline is the load-bearing dependency.
 - **VERDICT:** Not CLEARED for implementation. The approach is sound but the sequence was wrong and the largest dependency (operator capture → case file) was under-weighted. Two decisions now open.
 
+R2-a is now RESOLVED (see "Capture shape" above): the capture is **medium**
+(inventory + action + scrubbed URL per round; raw HTML on the extract round only;
+no screenshots), verified byte-safe by a static read of every HTML consumer plus a
+1,575-run corpus measurement (0.06% visibility-flag impact, absorbed by the
+extract-only inferer).
+
 **UNRESOLVED DECISIONS:**
-- R2-a — Capture approach: persist the rich per-step observations the operator already makes as onboarding case-file rounds, vs. write a lossy `actionTrace → OnboardingCaseFile` translator. Decides the bulk of the work.
-- R2-b — Hint trust gate: serve only verified (active) skills as hints, vs. keep the current design that also serves pending-review skills advisorily. The code currently does the latter.
+- R2-b — Hint trust gate: serve only verified (active) skills as hints, vs. keep the current design that also serves pending-review skills advisorily (code does the latter today). Lean: keep pending-review (advisory hints are cheap under operator-guidance consumption) and enforce PII at upload, not via the verify gate.
