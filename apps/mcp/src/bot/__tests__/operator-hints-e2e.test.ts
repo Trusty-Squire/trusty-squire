@@ -15,8 +15,8 @@ import {
   type OnboardingRoundCapture,
 } from "../onboarding-capture.js";
 import { promoteToSkill } from "../promote-to-skill.js";
-import { captureObserved, buildProvisionMeasurement } from "../provision-session.js";
-import { renderSkillHint } from "../skill-hint.js";
+import { captureObserved, buildProvisionMeasurement, captureServiceSlug } from "../provision-session.js";
+import { renderSkillHint, serviceSlugFromUrl } from "../skill-hint.js";
 import type { InteractiveElement } from "../browser.js";
 import type { Skill } from "@trusty-squire/skill-schema";
 
@@ -240,6 +240,24 @@ describe("producer: operate action → capture round mapping (captureObserved)",
     expect(captureObserved({ kind: "press", key: "Enter" }, null)).toBeNull();
     // A click with no resolved element can't produce a targetable step.
     expect(captureObserved({ kind: "click", target: "x" }, null)).toBeNull();
+  });
+});
+
+describe("producer: service slug (regression — captureService returned a dotted host → schema_invalid)", () => {
+  it("produces a valid dot-free SkillSchema slug that MATCHES the hint-lookup slug", () => {
+    // The bug: captureService used registrableHost → "resend.com", which fails
+    // SkillSchema's service regex (^[a-z0-9][a-z0-9-]*$, no dots) so parseSkill
+    // rejected EVERY real provision's synthesized skill as schema_invalid, and
+    // even a valid slug had to equal serviceSlugFromUrl or the loop wouldn't close.
+    for (const url of [
+      "https://resend.com/signup",
+      "https://www.railway.com/",
+      "https://console.neon.tech/signup",
+    ]) {
+      const slug = captureServiceSlug(url);
+      expect(slug).toMatch(/^[a-z0-9][a-z0-9-]*$/); // valid SkillSchema service slug (no dots)
+      expect(slug).toBe(serviceSlugFromUrl(url)); // == what resolveRouteHint looks up → loop closes
+    }
   });
 });
 
