@@ -1,5 +1,15 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.17 (2026-07-01)
+
+- **fix: `operate_await_verification` returned `link:null` for magic-link emails.**
+  The link scorer only credited `verify`/`confirm`/`activate`, so a Next.js /
+  NextAuth confirmation link (`/api/auth/callback/email?token=…`, as Loops and
+  Supabase/Clerk/Auth0 send) scored 0 and was dropped even when it was the only
+  actionable link. Now also credits auth-callback/magic/passwordless paths and
+  token-bearing query params (and decodes `&amp;` before scoring). Non-verification
+  links (dashboard, unsubscribe) are unaffected.
+
 ## 1.0.16 (2026-07-01)
 
 - **fix: a filled sealed field reported `value_len: 8` (the `[sealed]` placeholder

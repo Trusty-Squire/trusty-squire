@@ -10,21 +10,35 @@
 // earlier version returned links[0] anyway, navigating the bot straight
 // to an unsubscribe URL.
 export function pickVerificationLink(links: readonly string[]): string | null {
-  const scored = links.map((url) => {
+  const scored = links.map((raw) => {
+    // Decode HTML-escaped separators BEFORE scoring so `&amp;token=` matches the
+    // token heuristic below, not just at return time.
+    const url = raw.replace(/&amp;/gi, "&");
     const lower = url.toLowerCase();
     let score = 0;
     if (isEmailAssetLink(lower)) score -= 50;
-    if (lower.includes("verify") || lower.includes("confirm")) score += 10;
-    if (lower.includes("activate")) score += 8;
-    if (lower.includes("welcome")) score += 3;
     if (lower.includes("unsubscribe") || lower.includes("preferences")) score -= 10;
+    // Explicit verification vocabulary — the strongest, unambiguous signal.
+    if (lower.includes("verify") || lower.includes("confirm")) score += 10;
+    if (lower.includes("activate") || lower.includes("activation")) score += 8;
+    // Magic-link / passwordless / auth-callback shapes. A verification link often
+    // carries NONE of the words above: a Next.js app (Loops) emails a bare
+    // `/api/auth/callback/email?token=…`, and Supabase/Clerk/Auth0 send
+    // `/auth/…?token=…`. Without these two heuristics such a link scored 0 and was
+    // dropped as `link:null` even though it was the only actionable link.
+    if (/(?:\/auth\/|\/callback\/|magic[-_]?link|passwordless|sign[-_]?in)/.test(lower)) score += 6;
+    if (
+      /[?&](?:token|otp|oob[-_]?code|confirmation[-_]?token|verification[-_]?token|access[-_]?token|auth[-_]?token|code)=/.test(
+        lower,
+      )
+    )
+      score += 6;
+    if (lower.includes("welcome")) score += 3;
     return { url, score };
   });
   scored.sort((a, b) => b.score - a.score);
   const top = scored[0];
-  return top !== undefined && top.score > 0
-    ? top.url.replace(/&amp;/gi, "&")
-    : null;
+  return top !== undefined && top.score > 0 ? top.url : null;
 }
 
 function isEmailAssetLink(rawUrl: string): boolean {
