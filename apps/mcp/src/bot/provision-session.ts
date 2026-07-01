@@ -2389,10 +2389,11 @@ export function buildVerificationResult(
   const needs_user: NeedsUserCode = {
     wall: "verification_code",
     message:
-      "No verification code found in the inbox automatically. The service may " +
-      "have sent it by SMS or an authenticator app, or it hasn't arrived yet. " +
-      "Ask the user for the code, then type it into the verification field with " +
-      "operate_act and continue — the session is still live.",
+      "No verification email found in the inbox YET. Most often it just hasn't " +
+      "arrived (they commonly take 10–30s) — call operate_await_verification AGAIN " +
+      "in a few seconds. If it still fails, the code may have gone by SMS/" +
+      "authenticator: ask the user for it and type it with operate_act. The " +
+      "session stays live either way.",
     resume: "code",
   };
   return { session_id: sessionId, found, code, link, needs_user };
@@ -2461,30 +2462,37 @@ export async function awaitVerification(
   }
 
   const query = buildVerificationSearchQuery(opts.sender);
-  // Internal navigation (not an agent goto) — sanctioned read of the user's mail.
-  await browser.goto(`https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`);
-
-  // Poll briefly for the result list / opened mail to render text.
-  let text = "";
-  for (let i = 0; i < 6; i++) {
-    text = await browser.extractVisibleText();
-    if (text.length > 200) break;
-    await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
-  }
-
+  const searchUrl = `https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`;
   const hrefsOf = (els: readonly { href?: string | null }[]): string[] =>
     els.map((e) => e.href).filter((h): h is string => typeof h === "string" && h.length > 0);
 
-  // The results LIST has snippets (enough for an OTP code) but NOT the body's
-  // links, so a magic/verification LINK needs the mail OPENED. Merge both so an
-  // OTP-in-snippet still works if opening fails (non-regressing fallback).
-  let links = hrefsOf(await browser.extractInteractiveElements());
-  const opened = await browser.openFirstMailResult().catch(() => false);
-  if (opened) {
-    text = `${text}\n${await browser.extractVisibleText()}`;
-    links = [...links, ...hrefsOf(await browser.extractInteractiveElements())];
+  // A verification email commonly lands 10–30s AFTER the trigger, so a single
+  // search misses it and hands back "not found" the agent has to re-issue. Re-run
+  // the search up to 3× with a short wait between attempts within this one call.
+  let code: string | null = null;
+  let link: string | null = null;
+  for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
+    if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
+    // Internal navigation (not an agent goto) — sanctioned read of the user's mail.
+    await browser.goto(searchUrl);
+    // Poll briefly for the result list / opened mail to render text.
+    let text = "";
+    for (let i = 0; i < 6; i++) {
+      text = await browser.extractVisibleText();
+      if (text.length > 200) break;
+      await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
+    }
+    // The results LIST has snippets (enough for an OTP code) but NOT the body's
+    // links, so a magic/verification LINK needs the mail OPENED. Merge both so an
+    // OTP-in-snippet still works if opening fails (non-regressing fallback).
+    let links = hrefsOf(await browser.extractInteractiveElements());
+    const opened = await browser.openFirstMailResult().catch(() => false);
+    if (opened) {
+      text = `${text}\n${await browser.extractVisibleText()}`;
+      links = [...links, ...hrefsOf(await browser.extractInteractiveElements())];
+    }
+    ({ code, link } = parseVerification(text, links));
   }
-  const { code, link } = parseVerification(text, links);
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {
     sender: opts.sender ?? null,

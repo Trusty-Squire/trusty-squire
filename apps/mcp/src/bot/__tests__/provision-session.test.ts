@@ -439,9 +439,11 @@ describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
     expect(r.found).toBe(false);
     expect(r.needs_user).toEqual({
       wall: "verification_code",
-      message: expect.stringContaining("Ask the user for the code"),
+      // Steers to a retry first (emails lag the trigger), then the user-ask fallback.
+      message: expect.stringContaining("operate_await_verification AGAIN"),
       resume: "code",
     });
+    expect(r.needs_user?.message.toLowerCase()).toContain("ask the user");
   });
 });
 

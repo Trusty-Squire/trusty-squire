@@ -349,6 +349,10 @@ export class SkillRegistryClient {
       `${this.baseUrl}/skills`,
       { "content-type": "application/json", "x-account-id": this.accountId },
       JSON.stringify({ skill, signature }),
+      // The registry Fly machine auto-stops; a publish after idle pays a cold
+      // start that blows the 3s read default (Brevo auto-promote timed out). Give
+      // the publish write more room — it's off the provision hot path.
+      15000,
     );
     if (attempt.kind === "err") return { kind: "unavailable", reason: attempt.reason };
     const response = attempt.response;
@@ -539,12 +543,12 @@ export class SkillRegistryClient {
     });
   }
 
-  private async withTimeout<T>(promise: Promise<T>): Promise<T> {
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs = this.timeoutMs): Promise<T> {
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
-        () => reject(new Error(`registry call timed out after ${this.timeoutMs}ms`)),
-        this.timeoutMs,
+        () => reject(new Error(`registry call timed out after ${timeoutMs}ms`)),
+        timeoutMs,
       );
     });
     try {
@@ -602,6 +606,7 @@ export class SkillRegistryClient {
     url: string,
     headers: Record<string, string>,
     body: string,
+    timeoutMs?: number,
   ): Promise<{ kind: "ok"; response: Response } | { kind: "err"; reason: string }> {
     const delays = [0, 250];
     let lastReason = "";
@@ -615,6 +620,7 @@ export class SkillRegistryClient {
       try {
         response = await this.withTimeout(
           this.fetchFn(url, { method: "POST", headers, body }),
+          timeoutMs,
         );
         return { kind: "ok", response };
       } catch (err) {

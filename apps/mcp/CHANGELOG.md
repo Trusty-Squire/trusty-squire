@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.22 (2026-07-01)
+
+- **fix: `operate_finish_task.data` accepts scalar values** (boolean/number),
+  coerced to string — a bare boolean used to be rejected with "Expected string".
+- **fix: `operate_await_verification` retries the search up to 3× within one call**
+  (verification emails commonly arrive 10–30s after the trigger, so a single
+  search missed them). The first-miss message steers to retry first, not a
+  misleading "SMS/authenticator" hint.
+- **fix: skill publish gets a 15s timeout** (was the 3s read default) — the
+  registry auto-stops, so an auto-promote after idle timed out on the cold start.
+
 ## 1.0.21 (2026-07-01)
 
 - **fix: `await_verification` now actually opens the mail row** (1.0.20's CSS
