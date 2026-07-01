@@ -947,11 +947,17 @@ function translateStep(
       const matchedInput = inventory.find((e) => e.selector === observed.selector);
       const inputLooksLikeTokenName =
         matchedInput !== undefined && looksLikeTokenNameInput(matchedInput);
+      // Identity fields checked AFTER token-name so a "token name" field still
+      // maps to ${TOKEN_NAME}; a "full name" / "company" field is PII → redact.
+      const inputLooksLikeIdentity =
+        matchedInput !== undefined && looksLikeIdentityInput(matchedInput);
       const valueTemplate = looksLikeEmail
         ? "${EMAIL_ALIAS}"
         : looksGenerated || inputLooksLikeTokenName
           ? "${TOKEN_NAME}"
-          : literal;
+          : inputLooksLikeIdentity
+            ? "${IDENTITY}"
+            : literal;
       return {
         kind: "ok",
         step: {
@@ -1419,6 +1425,35 @@ function isOwnFormControlLabelEcho(
 // Railway, Baseten, Resend, Vercel, OpenAI, etc. without
 // false-positiving on signup forms' "Name" fields (which lack the
 // surrounding API/token vocabulary).
+// Identity fields (name, company, phone, address) — the value typed here is the
+// USER's PII. Templatize to ${IDENTITY} so the literal never bakes into a shared
+// skill (the R2-b upload PII gate: pending-review is served immediately, so the
+// scrub must happen at synthesis, not rely on the verifier) and each replay fills
+// the run's own identity.
+function looksLikeIdentityInput(el: InteractiveElement): boolean {
+  const hay = [
+    el.placeholder ?? "",
+    el.labelText ?? "",
+    el.ariaLabel ?? "",
+    el.name ?? "",
+    el.id ?? "",
+    el.title ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  // Scope: a person's NAME and their COMPANY/ORG — the clearest "who you are"
+  // PII (the spec's stated scope). Deliberately NOT billing/address fields
+  // (zip/city/state): those are less identifying, are needed for replay, and
+  // collapsing several of them into one ${IDENTITY} slot would make a
+  // multi-field address form un-replayable.
+  // Only the unambiguous real-name / org fields. NOT "display name" / "your
+  // name" (often a chosen handle, not PII) — redacting those is over-reach that
+  // harms replay fidelity for no privacy gain.
+  return /\b(?:full[\s_-]*name|first[\s_-]*name|last[\s_-]*name|company|organi[sz]ation|business[\s_-]*name)\b/.test(
+    hay,
+  );
+}
+
 function looksLikeTokenNameInput(el: InteractiveElement): boolean {
   const hay = [
     el.placeholder ?? "",

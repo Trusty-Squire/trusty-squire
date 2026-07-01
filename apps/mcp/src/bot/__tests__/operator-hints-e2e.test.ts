@@ -158,4 +158,63 @@ describe("operator-hints E2E: capture → synthesize → render", () => {
     // Renderer falls back to [provider] and still names the option.
     expect(renderSkillHint(result.skill)).toContain("offers sign-in with: google");
   });
+
+  it("PII gate: a typed identity value is redacted, never baked into the shared skill", () => {
+    const service = uniqueService();
+    const rounds: OnboardingRoundCapture[] = [
+      {
+        service, round: 0, oauth: false,
+        state: {
+          url: "https://svc.example.com/signup", title: "Sign up",
+          html: "<html><body>Full name Create account</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          el({ index: 0, tag: "input", type: "text", labelText: "Full name", placeholder: "Full name", selector: "#full-name" }),
+          el({ index: 1, tag: "button", role: "button", visibleText: "Create account", selector: "button.submit" }),
+        ],
+        observed: { kind: "fill", selector: "#full-name", value: "Jane Doe", reason: "Fill the full name to sign up" },
+      },
+      {
+        service, round: 1, oauth: false,
+        state: {
+          url: "https://svc.example.com/account/tokens", title: "API Tokens",
+          html: "<html><body>Create Token</body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          el({ index: 0, tag: "button", role: "button", visibleText: "Create Token", selector: "button.create-token" }),
+        ],
+        observed: { kind: "click", selector: "button.create-token", reason: "Create a new API token" },
+      },
+      {
+        service, round: 2, oauth: false,
+        state: {
+          url: "https://svc.example.com/account/tokens", title: "API Tokens",
+          html:
+            "<html><body>New Token db3a32ea-dd1b-4e28-9680-db2991c81e3e " +
+            "<button>Copy</button></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          el({ index: 0, tag: "button", role: "button", visibleText: "Copy", ariaLabel: "Copy to clipboard", selector: "button.copy-token" }),
+        ],
+        observed: { kind: "extract", reason: "The full API token db3a32ea-dd1b-4e28-9680-db2991c81e3e is shown; copy it now." },
+      },
+    ];
+
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+
+    // The deny assertion: the run's typed name is nowhere in the shared skill.
+    expect(JSON.stringify(result.skill)).not.toContain("Jane Doe");
+    // The name field's value was templatized to the identity slot.
+    const fillStep = result.skill.steps.find((s) => s.kind === "fill");
+    expect(fillStep).toBeDefined();
+    if (fillStep !== undefined && "value_template" in fillStep) {
+      expect(fillStep.value_template).toBe("${IDENTITY}");
+    }
+  });
 });
