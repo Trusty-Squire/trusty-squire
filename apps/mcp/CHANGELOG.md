@@ -1,5 +1,15 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.19 (2026-07-01)
+
+- **fix: `operate_await_verification` missed passwordless "Login link" emails
+  (`found:false`).** The inbox search required verify/confirm/code/otp/password —
+  none of which appear in a passwordless magic-link email (Loops: "Please login…
+  Login") — so the email was never found and the 1.0.17 link parser never ran.
+  The search now also covers login / "sign in" / "magic link" / activate / welcome
+  vocabulary. Verified live against the real Loops login email + its
+  `/api/auth/callback/email?token=…` link.
+
 ## 1.0.18 (2026-07-01)
 
 - **fix: `use_credential` on an ambiguous service now lists the candidate

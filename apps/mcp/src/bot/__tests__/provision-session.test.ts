@@ -32,6 +32,7 @@ import {
   hasExistingAccountSignal,
   hasUnlinkedOAuthAccountSignal,
   hasNotFoundPageSignal,
+  buildVerificationSearchQuery,
   makeTwoCaptchaVaultProxy,
   toCompactElement,
 } from "../provision-session.js";
@@ -882,6 +883,36 @@ describe("hasExistingAccountSignal (real-identity already registered — OpenRou
     const g = provisionPerceptionGuidance("Invalid credentials. Please try again.");
     expect(g).toContain("Existing account");
     expect(g).toContain("LOGGING IN");
+  });
+});
+
+describe("buildVerificationSearchQuery (finds passwordless mail)", () => {
+  it("covers passwordless sign-in / login vocabulary, not just OTP words", () => {
+    // Regression: a Loops "Login link" email ("Please login… Login") has none of
+    // verify/confirm/code/otp, so the old query missed it → found:false.
+    const q = buildVerificationSearchQuery();
+    expect(q).toContain("login");
+    expect(q).toContain('"sign in"');
+    expect(q).toContain("verify");
+    expect(q).toContain("newer_than:1d");
+    expect(q).not.toContain("from:");
+  });
+  it("prepends the sender filter when given", () => {
+    expect(buildVerificationSearchQuery("mail.loops.so")).toContain("from:mail.loops.so");
+  });
+  it("end-to-end: the real Loops login email now yields its magic link", () => {
+    // The actual email body + the actual /api/auth/callback link (token redacted).
+    const body =
+      "Please login to Loops by clicking the button below. Login Alternatively, you can click here. If you didn't request this, please reply.";
+    const links = [
+      "https://loops.so",
+      "https://app.loops.so/api/auth/callback/email?callbackUrl=https%3A%2F%2Fapp.loops.so%2Fadd-domain&token=REDACTED&email=x%40y.com",
+      "https://loops.so?utm_source=footer",
+    ];
+    const { link } = parseVerification(body, links);
+    expect(link).toBe(
+      "https://app.loops.so/api/auth/callback/email?callbackUrl=https%3A%2F%2Fapp.loops.so%2Fadd-domain&token=REDACTED&email=x%40y.com",
+    );
   });
 });
 
