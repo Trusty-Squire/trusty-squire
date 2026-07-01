@@ -2419,6 +2419,23 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
   return { session_id: sessionId, found: false, code: null, link: null, needs_user };
 }
 
+// The inbox search query. Covers verification/OTP AND passwordless sign-in /
+// magic-link vocabulary — a passwordless "Login link" email (Loops: "Please
+// login… Login") carries NONE of the OTP words, so the old keyword clause
+// excluded the very email we needed and await returned found:false. MEASURED
+// 2026-07-01 (Loops login magic link: body has "login", link is
+// /api/auth/callback/email?token=…, which pickVerificationLink now extracts).
+// Exported for unit tests.
+export function buildVerificationSearchQuery(sender?: string): string {
+  return [
+    sender !== undefined && sender.length > 0 ? `from:${sender}` : "",
+    "newer_than:1d",
+    '(verify OR verification OR confirm OR confirmation OR code OR otp OR passcode OR password OR login OR "log in" OR "sign in" OR "sign-in" OR signin OR "magic link" OR activate OR activation OR welcome)',
+  ]
+    .filter((s) => s.length > 0)
+    .join(" ");
+}
+
 export async function awaitVerification(
   sessionId: string,
   opts: AwaitVerificationOptions = {},
@@ -2443,12 +2460,7 @@ export async function awaitVerification(
     return buildConsentRefusal(sessionId);
   }
 
-  const filters = [
-    opts.sender !== undefined && opts.sender.length > 0 ? `from:${opts.sender}` : "",
-    "newer_than:1d",
-    "(verify OR verification OR confirm OR code OR otp OR password)",
-  ].filter((s) => s.length > 0);
-  const query = filters.join(" ");
+  const query = buildVerificationSearchQuery(opts.sender);
   // Internal navigation (not an agent goto) — sanctioned read of the user's mail.
   await browser.goto(`https://mail.google.com/mail/u/0/#search/${encodeURIComponent(query)}`);
 
