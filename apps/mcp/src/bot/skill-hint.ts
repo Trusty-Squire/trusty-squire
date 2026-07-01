@@ -82,10 +82,26 @@ export function renderSkillHint(skill: Skill): string {
     `Known route for "${skill.service}" — a MAP, not a script. Drive toward it; ` +
       `fall back to your own judgment if the live page diverges.`,
     `- entry: ${skill.signup_url}`,
-    // NB: login guidance is NOT here — it's composed at provision_start from the
-    // user's live sessions (loginSessionGuidance), because that's session-state,
-    // not skill-state.
+    // NB: WHICH session to use is composed at provision_start from the user's
+    // live sessions (loginSessionGuidance) — that's session-state. What the
+    // service OFFERS (below) is skill-state the session path can't know.
   ];
+
+  // The OAuth menu the service offers, recorded from a real signup. Distinct
+  // from session guidance: this tells the operator which providers are even
+  // options so it can match them against the sessions the user has, and fall
+  // back off `provider` instead of dead-ending.
+  const oauthStep = skill.steps.find(
+    (s): s is Extract<SkillStep, { kind: "click_oauth_button" }> =>
+      s.kind === "click_oauth_button",
+  );
+  if (oauthStep !== undefined) {
+    const offered = oauthStep.available ?? [oauthStep.provider];
+    lines.push(
+      `- this service offers sign-in with: ${offered.join(", ")} — use whichever ` +
+        `you already have a live session for (this run used ${oauthStep.provider}).`,
+    );
+  }
 
   // The durable value: the post-auth path to the key.
   const route = postAuthBreadcrumb(skill.steps);

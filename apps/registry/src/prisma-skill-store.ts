@@ -479,17 +479,23 @@ export class PrismaSkillStore implements SkillStore {
           })) as unknown as PrismaSkillRow;
           transition = "retired";
         } else if (skill.status === "active") {
-          // Regressed — demote and stop re-testing. demoted (not
-          // quarantined) → eligible for auto-rediscovery (T5).
+          // Guidance paradigm (docs/DESIGN-operator-hints.md reconcile edge 2): a
+          // rotted blind replay means the STEPS drifted, not that the MAP is
+          // useless. DOWNGRADE active → pending-review (still served as a hint
+          // per R2-b) and re-prove it, instead of demoting to router-skip. Reset
+          // the rot counter for a fresh verify window; persistent rot then
+          // retires via the pending-review path above; a fresh success
+          // re-promotes to active.
           skill = (await tx.skillRecord.update({
             where: { skill_id: input.skill_id },
             data: {
-              status: "demoted",
+              status: "pending-review",
+              consecutive_verifier_failures: 0,
               next_freshness_due_at: null,
               demotion_reason: `rot:${failureKind}`,
             },
           })) as unknown as PrismaSkillRow;
-          transition = "demoted";
+          transition = "downgraded";
         }
       }
 

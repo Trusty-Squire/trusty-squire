@@ -56,20 +56,11 @@ describe("reactivate() resets verifier flow state", () => {
       signed_at: new Date(),
       signed_by: "test",
     });
-    // Demote the skill via three consecutive verifier failures.
-    // recordVerifierOutcome's demote branch (active + 3 cvf) sets:
-    //   - status='demoted'
-    //   - next_freshness_due_at=null
-    // and leaves consecutive_verifier_failures=3.
-    // We need the skill to first be in 'active' with verifier_succeeded
-    // already high enough that the consecutive failures push to demoted
-    // — the test fixture starts pending-review-less because we inserted
-    // status='active' directly. But the in-memory store's insert path
-    // sets verifier_succeeded=0, so the failures-branch only demotes
-    // when status==='active'. Two failures with status=active is enough
-    // to reach cvf=3 and demote. Let's drive that.
-    // T4: only ROT failures advance the demote counter, so these verifier
-    // failures carry a rot failure_kind (step_failed) to drive demotion.
+    // Drive the rot counter up (2 rot failures, still active), then MANUALLY
+    // demote. The verifier now DOWNGRADES rot to pending-review and resets the
+    // counter (reconcile edge 2), so the "demoted with a stale nonzero counter"
+    // state that reactivate() must clean up comes from the operator/CLI demote
+    // path, which leaves consecutive_verifier_failures intact.
     await store.recordVerifierOutcome({
       skill_id: "01REACT00000000000000000XX",
       kind: "failure",
@@ -82,16 +73,13 @@ describe("reactivate() resets verifier flow state", () => {
       failure_kind: "step_failed",
       reason: "f2",
     });
-    const demoteResult = await store.recordVerifierOutcome({
-      skill_id: "01REACT00000000000000000XX",
-      kind: "failure",
-      failure_kind: "step_failed",
-      reason: "f3 — demotes",
-    });
-    expect(demoteResult.transition).toBe("demoted");
-    expect(demoteResult.record.status).toBe("demoted");
-    expect(demoteResult.record.consecutive_verifier_failures).toBe(3);
-    expect(demoteResult.record.next_freshness_due_at).toBeNull();
+    const demoted = await store.manuallyDemote(
+      "01REACT00000000000000000XX",
+      "needs re-capture",
+    );
+    expect(demoted).not.toBeNull();
+    expect(demoted!.status).toBe("demoted");
+    expect(demoted!.consecutive_verifier_failures).toBe(2); // stale counter reactivate must reset
 
     // Reactivate — and verify the verifier state is clean.
     const reactivated = await store.reactivate("01REACT00000000000000000XX");
@@ -113,7 +101,9 @@ describe("reactivate() resets verifier flow state", () => {
       signed_at: new Date(),
       signed_by: "test",
     });
-    for (let i = 0; i < 3; i++) {
+    // 2 rot failures (cvf=2, still active), then manual demote (leaves cvf
+    // intact) — the verifier itself now downgrades+resets rather than demotes.
+    for (let i = 0; i < 2; i++) {
       await store.recordVerifierOutcome({
         skill_id: "01REACT00000000000000000XX",
         kind: "failure",
@@ -121,6 +111,7 @@ describe("reactivate() resets verifier flow state", () => {
         reason: `f${i + 1}`,
       });
     }
+    await store.manuallyDemote("01REACT00000000000000000XX", "needs re-capture");
     await store.reactivate("01REACT00000000000000000XX");
     const oneFailure = await store.recordVerifierOutcome({
       skill_id: "01REACT00000000000000000XX",

@@ -17,6 +17,11 @@ on:
     branches: [main, staging]
     paths:
       - "apps/registry/**"
+      # The registry runtime-imports @trusty-squire/skill-schema (workspace:*)
+      # and builds it from source in the image — so a schema bump MUST redeploy
+      # the registry or it runs a stale parser (mirrors release-api.yml). This
+      # is the fix for the skew that made click_oauth_button.available[] 400.
+      - "packages/skill-schema/**"
       - "pnpm-lock.yaml"
       - ".github/workflows/release-registry.yml"
 

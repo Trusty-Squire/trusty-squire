@@ -353,7 +353,8 @@ export interface RecordVerifierOutcomeResult {
     | "promoted"      // pending-review reached 1 success → active
     | "superseded"    // verified duplicate lost to an existing protected active row
     | "retired"       // pending-review reached the failure threshold → deleted
-    | "demoted"       // active reached 3 consecutive ROT failures → demoted
+    | "demoted"       // active manually/legacy demoted → router skips (auto-rot no longer produces this)
+    | "downgraded"    // active rotted → pending-review: still served as a hint (R2-b), re-proven, not skipped
     | "quarantined"   // verifier hit a terminal WALL → quarantined (needs human)
     | "none";         // counters bumped, no status change
 }

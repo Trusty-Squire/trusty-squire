@@ -25,8 +25,11 @@ import {
   generatePassword,
   rememberRecipe,
   verifyPostcondition,
+  captureAndPromoteSession,
+  emitProvisionMeasurement,
   type ProvisionAction,
 } from "../bot/provision-session.js";
+import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
   readRecipe,
   renderOperatorRecipeHint,
@@ -75,6 +78,34 @@ async function resolveRouteHint(serviceUrl: string): Promise<string | undefined>
     return outcome.kind === "found" ? renderSkillHint(outcome.result.skill) : undefined;
   } catch {
     return undefined;
+  }
+}
+
+// Verified success → synthesize the run into a pending-review skill and publish
+// it so the next provision of this service gets a hint. The registry gates
+// activation on the verifier replay, so this upload is best-effort: every
+// outcome is recorded in the finish_task result trail, nothing is thrown.
+async function autoPromoteProvision(sessionId: string): Promise<string> {
+  try {
+    const promoted = await captureAndPromoteSession(sessionId);
+    if (promoted.kind === "skipped") return `skipped:${promoted.reason}`;
+    if (promoted.kind !== "ok") return `rejected:${promoted.error_kind ?? "unknown"}`;
+    const accountId = process.env.TRUSTY_SQUIRE_ACCOUNT_ID;
+    if (accountId === undefined || accountId.length === 0) return "produced:no_account";
+    const client = clientFromEnv(accountId);
+    if (client === null) return "produced:no_registry";
+    let signature: string;
+    try {
+      signature = signSkillForPublish(promoted.skill).signature;
+    } catch {
+      // No signing key — the registry ignores the signature (the verifier is
+      // the trust signal), so a valid-shaped base64url placeholder is accepted.
+      signature = "A".repeat(86);
+    }
+    const res = await client.publishSkill(promoted.skill, signature);
+    return res.kind === "ok" ? `published:${res.status}` : `publish_failed:${res.reason}`;
+  } catch (err) {
+    return `error:${err instanceof Error ? err.message : String(err)}`;
   }
 }
 
@@ -565,6 +596,19 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
         Object.keys(extracted.credentials).length > 0
           ? await persistExtracted(args.session_id, extracted.credentials, args.store, api)
           : null;
+      // Verified success — a real credential was vaulted and nothing blocked.
+      // Capture the run as a pending-review skill so the NEXT provision of this
+      // service gets a hint (docs/DESIGN-operator-hints.md). Runs while the
+      // session is still alive (before finishProvisionSession); best-effort,
+      // never fails the provision.
+      const autoPromote =
+        stored !== null && blocked === undefined
+          ? await autoPromoteProvision(args.session_id)
+          : undefined;
+      emitProvisionMeasurement(
+        args.session_id,
+        stored !== null && blocked === undefined ? "success" : "fail",
+      );
       const closed = await finishProvisionSession(args.session_id);
       return {
         kind: "credentials" as const,
@@ -572,6 +616,7 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
         candidate_count: extracted.candidate_count,
         ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
         stored_credential: stored,
+        ...(autoPromote !== undefined ? { auto_promote: autoPromote } : {}),
       };
     }
     // result kind — optionally verify a saved recipe's postcondition (the
@@ -580,6 +625,10 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
       args.verify_recipe !== undefined
         ? await verifyPostcondition(args.session_id, (await readRecipe(args.verify_recipe)).postcondition)
         : undefined;
+    emitProvisionMeasurement(
+      args.session_id,
+      verified === undefined || verified.confirmed ? "success" : "fail",
+    );
     const closed = await finishProvisionSession(args.session_id);
     return {
       kind: "result" as const,

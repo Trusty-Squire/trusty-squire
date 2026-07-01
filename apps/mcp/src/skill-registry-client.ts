@@ -334,6 +334,35 @@ export class SkillRegistryClient {
     }
   }
 
+  // Publish a synthesized skill as pending-review. The registry gates
+  // activation on the verifier replay, not on this upload (it accepts any
+  // signature), so this is a best-effort fire: a failure never disrupts the
+  // provision that produced the skill.
+  async publishSkill(
+    skill: Skill,
+    signature: string,
+  ): Promise<
+    | { kind: "ok"; skill_id: string; status: string }
+    | { kind: "unavailable"; reason: string }
+  > {
+    const attempt = await this.fetchPostWithRetry(
+      `${this.baseUrl}/skills`,
+      { "content-type": "application/json", "x-account-id": this.accountId },
+      JSON.stringify({ skill, signature }),
+    );
+    if (attempt.kind === "err") return { kind: "unavailable", reason: attempt.reason };
+    const response = attempt.response;
+    if (!response.ok) {
+      return { kind: "unavailable", reason: `registry returned HTTP ${response.status}` };
+    }
+    try {
+      const body = (await response.json()) as { skill_id?: string; status?: string };
+      return { kind: "ok", skill_id: body.skill_id ?? "", status: body.status ?? "pending-review" };
+    } catch {
+      return { kind: "ok", skill_id: "", status: "pending-review" };
+    }
+  }
+
   /**
    * Drop a cached skill entry so the next fetch re-queries the
    * registry. Used after a replay failure to make sure a freshly-

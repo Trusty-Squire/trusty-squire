@@ -459,7 +459,7 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
     await server.close();
   });
 
-  it("demotes active after 3 consecutive verifier failures", async () => {
+  it("downgrades active → pending-review after 3 consecutive verifier failures", async () => {
     const { skillStore, build } = buildAdminServer();
     const server = await build();
     const skillId = id("B4");
@@ -491,8 +491,9 @@ describe("POST /admin/skills/:id/verifier-outcome", () => {
       });
       lastBody = res.json();
     }
-    expect(lastBody!.transition).toBe("demoted");
-    expect(lastBody!.status).toBe("demoted");
+    // Reconcile edge 2: rot downgrades (still served as a hint), not demote/skip.
+    expect(lastBody!.transition).toBe("downgraded");
+    expect(lastBody!.status).toBe("pending-review");
     expect(lastBody!.next_freshness_due_at).toBeNull();
     await server.close();
   });

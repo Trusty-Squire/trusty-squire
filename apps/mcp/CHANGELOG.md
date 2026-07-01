@@ -1,5 +1,28 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.11 (2026-07-01)
+
+**The operator-hints loop.** A verified provision now feeds the registry, and the
+next provision of that service gets a hint — closing the "registry never
+accumulates from real provisions" gap. Ships with skill-schema 0.1.4.
+
+- **Producer:** a verified `operate_finish_task` (credential vaulted, not blocked)
+  captures the run as a MEDIUM capture (structured inventory + action + scrubbed
+  URL per step; raw HTML only on the extract round; no screenshots), synthesizes a
+  skill, and publishes it pending-review — served back as a hint on the next
+  provision. Best-effort; never fails the provision.
+- **PII gate at upload:** identity fill values (name/company/org) redact to
+  `${IDENTITY}` at synthesis; a `backfill-pii` script re-scrubs pre-existing
+  skills. Secret-bearing actions never enter a shared skill.
+- **OAuth `available[]`:** the login step records the whole provider menu the page
+  offered, surfaced as guidance and available for replay fallback.
+- **Guidance-paradigm reconciliation (registry):** a rotted blind-replay now
+  DOWNGRADES a skill (active → pending-review, still served as a hint, re-proven)
+  instead of demoting it out of the router. Deploy-skew fix so a schema bump
+  redeploys the registry.
+- **Measurement:** a `provision-measurement` line per finish for the hint-on vs
+  hint-off lift.
+
 ## 1.0.10 (2026-06-30)
 
 Promotes the 1.0.10 line (rc.1 → rc.3) to stable. Highlights:

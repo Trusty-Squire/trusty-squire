@@ -58,15 +58,17 @@ async function fail(store: InMemorySkillStore, id: string, failure_kind: string)
 const ID = (n: number) => `01CLASSIFY00000000000000${String(n).padStart(2, "0")}`;
 
 describe("verifier demotion classifier (T4)", () => {
-  it("rot ×3 demotes, persists demotion_reason, counter at 3", async () => {
+  it("rot ×3 DOWNGRADES active → pending-review (still served as a hint), resets counter", async () => {
     const store = new InMemorySkillStore();
     await insertActive(store, ID(1));
     await fail(store, ID(1), "step_failed");
     await fail(store, ID(1), "validator_failed");
     const third = await fail(store, ID(1), "extraction_failed");
-    expect(third.transition).toBe("demoted");
-    expect(third.record.status).toBe("demoted");
-    expect(third.record.consecutive_verifier_failures).toBe(3);
+    // Guidance paradigm (reconcile edge 2): rot no longer demotes → router-skip;
+    // it downgrades to pending-review (still served, re-proven).
+    expect(third.transition).toBe("downgraded");
+    expect(third.record.status).toBe("pending-review");
+    expect(third.record.consecutive_verifier_failures).toBe(0); // reset for a fresh verify window
     expect(third.record.demotion_reason).toBe("rot:extraction_failed");
     expect(third.record.next_freshness_due_at).toBeNull();
   });
@@ -119,9 +121,11 @@ describe("verifier demotion classifier (T4)", () => {
     await fail(store, ID(6), "step_failed"); // cvf 1
     await fail(store, ID(6), "needs_login"); // transient — no count, no reset
     await fail(store, ID(6), "step_failed"); // cvf 2
-    const demote = await fail(store, ID(6), "validator_failed"); // cvf 3 → demote
-    expect(demote.transition).toBe("demoted");
-    expect(demote.record.consecutive_verifier_failures).toBe(3);
+    const demote = await fail(store, ID(6), "validator_failed"); // cvf 3 → downgrade
+    // The transition firing proves cvf reached 3 (transient didn't reset it);
+    // the counter then resets to 0 for the fresh pending-review verify window.
+    expect(demote.transition).toBe("downgraded");
+    expect(demote.record.consecutive_verifier_failures).toBe(0);
   });
 
   it("a verifier SUCCESS resets the rot counter", async () => {

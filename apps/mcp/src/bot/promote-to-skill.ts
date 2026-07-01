@@ -38,6 +38,7 @@ import { createHash } from "node:crypto";
 import {
   parseSkill,
   validateReplayGraph,
+  isIdentityFieldLabel,
   SKILL_SCHEMA_VERSION,
   type Skill,
   type SkillCredentialSpec,
@@ -860,12 +861,18 @@ function translateStep(
       // clicks specially (checks loggedInProviders before clicking).
       const oauthProvider = detectOAuthProvider(hintResult.hint);
       if (oauthProvider !== null) {
+        // Record the whole menu the page offered, but only when it adds signal
+        // (more than just the provider we used). A single-option menu is
+        // redundant with `provider` and would only bloat the skill — omitting
+        // it keeps single-provider skills byte-identical to pre-`available`.
+        const available = detectAvailableProviders(inventory);
         return {
           kind: "ok",
           step: {
             kind: "click_oauth_button",
             provider: oauthProvider,
             text_match: hintResult.hint,
+            ...(available.length > 1 ? { available } : {}),
             provenance,
           },
         };
@@ -941,11 +948,17 @@ function translateStep(
       const matchedInput = inventory.find((e) => e.selector === observed.selector);
       const inputLooksLikeTokenName =
         matchedInput !== undefined && looksLikeTokenNameInput(matchedInput);
+      // Identity fields checked AFTER token-name so a "token name" field still
+      // maps to ${TOKEN_NAME}; a "full name" / "company" field is PII → redact.
+      const inputLooksLikeIdentity =
+        matchedInput !== undefined && looksLikeIdentityInput(matchedInput);
       const valueTemplate = looksLikeEmail
         ? "${EMAIL_ALIAS}"
         : looksGenerated || inputLooksLikeTokenName
           ? "${TOKEN_NAME}"
-          : literal;
+          : inputLooksLikeIdentity
+            ? "${IDENTITY}"
+            : literal;
       return {
         kind: "ok",
         step: {
@@ -1413,6 +1426,28 @@ function isOwnFormControlLabelEcho(
 // Railway, Baseten, Resend, Vercel, OpenAI, etc. without
 // false-positiving on signup forms' "Name" fields (which lack the
 // surrounding API/token vocabulary).
+// Identity fields (name, company, phone, address) — the value typed here is the
+// USER's PII. Templatize to ${IDENTITY} so the literal never bakes into a shared
+// skill (the R2-b upload PII gate: pending-review is served immediately, so the
+// scrub must happen at synthesis, not rely on the verifier) and each replay fills
+// the run's own identity.
+function looksLikeIdentityInput(el: InteractiveElement): boolean {
+  // Shared classifier (skill-schema isIdentityFieldLabel) so the synthesis-time
+  // scrub and the registry backfill of pre-scrub skills can never diverge. Scope
+  // is a person's NAME + COMPANY/ORG only — NOT billing/address fields (needed
+  // for replay; one ${IDENTITY} slot can't disambiguate several) and NOT
+  // "display name" / "your name" (often a handle, not PII).
+  const hay = [
+    el.placeholder ?? "",
+    el.labelText ?? "",
+    el.ariaLabel ?? "",
+    el.name ?? "",
+    el.id ?? "",
+    el.title ?? "",
+  ].join(" ");
+  return isIdentityFieldLabel(hay);
+}
+
 function looksLikeTokenNameInput(el: InteractiveElement): boolean {
   const hay = [
     el.placeholder ?? "",
@@ -2415,6 +2450,24 @@ function detectOAuthProvider(hint: string): "google" | "github" | null {
   if (/\bgoogle\b/.test(lower)) return "google";
   if (/\bgithub\b/.test(lower)) return "github";
   return null;
+}
+
+// The OAuth menu the signup page offered THIS round: scan every element's
+// visible text for a known provider. Feeds click_oauth_button.available so the
+// operator can fall back to a provider it has a session for instead of dead-
+// ending on the one this run happened to use. Stable order (google, github)
+// keeps the field deterministic across runs.
+function detectAvailableProviders(
+  inventory: readonly InteractiveElement[],
+): ("google" | "github")[] {
+  const found = new Set<"google" | "github">();
+  for (const el of inventory) {
+    const text = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.title ?? ""}`.trim();
+    if (text.length === 0) continue;
+    const p = detectOAuthProvider(text);
+    if (p !== null) found.add(p);
+  }
+  return (["google", "github"] as const).filter((p) => found.has(p));
 }
 
 function inferOAuthProvider(steps: SkillStep[]): "google" | "github" | null {

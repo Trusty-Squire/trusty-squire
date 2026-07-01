@@ -71,17 +71,17 @@ describe("GET /admin/needs-human (T6)", () => {
     await server.close();
   });
 
-  it("lists a rot-demoted skill with its reason", async () => {
+  it("a rot skill downgrades to pending-review and does NOT need a human (self-heals)", async () => {
     const { server, insertActive, fail } = await setup();
     await insertActive("neon");
     await fail("neon", "step_failed");
     await fail("neon", "step_failed");
-    await fail("neon", "validator_failed"); // 3rd rot → demoted
+    await fail("neon", "validator_failed"); // 3rd rot → DOWNGRADE (reconcile edge 2), not demote
     const body = await worklist(server);
-    const neon = body.items.find((i) => i.service === "neon");
-    expect(neon?.status).toBe("demoted");
-    expect(neon?.reason).toBe("rot:validator_failed");
-    expect(neon?.needs).toBe("rediscovery-or-manual");
+    // Rot no longer produces a human-worklist item: it downgrades to
+    // pending-review (still served as a hint, re-proven by the verifier). Only
+    // walls (quarantine) and operator demotes surface here now.
+    expect(body.items.find((i) => i.service === "neon")).toBeUndefined();
     await server.close();
   });
 
