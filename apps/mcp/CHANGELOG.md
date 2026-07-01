@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.20 (2026-07-01)
+
+- **fix: `operate_await_verification` never read a magic LINK — only the results
+  list.** It extracted hrefs from the search-results list (snippets + Gmail chrome
+  links), but a verification/magic link lives in the email BODY, which only
+  renders when the mail is opened. So OTP codes worked (visible in the snippet)
+  but passwordless magic links returned `found:false` even after 1.0.19 let the
+  mail be found. Now opens the first result before extracting, and merges body +
+  list (so OTP-in-snippet still works if opening fails). Measured against the real
+  Loops login email.
+
 ## 1.0.19 (2026-07-01)
 
 - **fix: `operate_await_verification` missed passwordless "Login link" emails

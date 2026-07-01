@@ -58,6 +58,9 @@ vi.mock("../browser.js", () => ({
     async extractVisibleText(): Promise<string> {
       return h.visibleText;
     }
+    async openFirstMailResult(): Promise<boolean> {
+      return false;
+    }
     async waitForInteractiveDom(): Promise<void> {}
     async waitForCaptchaChallengeToSettle(): Promise<boolean> {
       return h.captchaSettled;
