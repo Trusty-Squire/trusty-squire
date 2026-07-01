@@ -723,8 +723,9 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
     );
   }
 
-  // Onboarding / org-creation form — fill it, don't treat it as a wall.
-  if (isOnboardingOrOrgForm(pageText)) {
+  // Onboarding / org-creation form — fill it, don't treat it as a wall. NOT on a
+  // login chooser: "Create Account or Login" (Groq) false-matched as a setup form.
+  if (!loginChooser && isOnboardingOrOrgForm(pageText)) {
     parts.push(
       "Onboarding/setup form: this is NOT a wall and NOT a failure. It gates the " +
         "keys/dashboard behind a setup step. Fill the required fields with sensible " +

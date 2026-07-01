@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.25 (2026-07-01)
+
+- **fix: no onboarding/setup-form steer on a login chooser.** 1.0.23 stopped the
+  "prefer app navigation" steer on a login page but the separate "onboarding form —
+  fill the fields" steer still fired ("Create Account or Login" matched it). A
+  login/OAuth chooser now gets no authenticated-surface guidance at all.
+
 ## 1.0.24 (2026-07-01)
 
 - **fix: `operate_extract` now returns prefixless all-uppercase API keys**
