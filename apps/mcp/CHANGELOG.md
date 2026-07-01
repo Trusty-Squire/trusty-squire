@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.21 (2026-07-01)
+
+- **fix: `await_verification` now actually opens the mail row** (1.0.20's CSS
+  selector missed — the row never opened, so a magic link still couldn't be read).
+  Opens the conversation via `extractInteractiveElements` + the humanized
+  positional click `operate_act` uses (Gmail's `div[role=link]` rows don't fire on
+  a synthetic click). Validated live against the real Loops login email: the row
+  opens and its `/api/auth/callback?token=…` link is extracted.
+
 ## 1.0.20 (2026-07-01)
 
 - **fix: `operate_await_verification` never read a magic LINK — only the results

@@ -1583,24 +1583,27 @@ export class BrowserController {
   async openFirstMailResult(): Promise<boolean> {
     if (!this.page) return false;
     const before = this.page.url();
-    // tr.zA — Gmail's conversation-row class (stable for years); the role-based
-    // fallbacks cover DOM variants without depending on obfuscated classes.
-    // Lead with the observed div-based conversation row (role=link inside the
-    // mail list), fall back to the classic tr.zA row. The URL-change guard below
-    // means a click that DOESN'T open a thread just falls through to the next
-    // selector, so a wrong match can't strand us.
-    const selectors = ["div[role='main'] div[role='link']", "tr.zA", "div[role='main'] tr"];
-    for (const sel of selectors) {
-      const loc = this.page.locator(sel).first();
-      if ((await loc.count().catch(() => 0)) === 0) continue;
-      await loc.scrollIntoViewIfNeeded({ timeout: 2000 }).catch(() => {});
-      await loc.click({ timeout: 4000 }).catch(() => {});
-      for (let i = 0; i < 8; i++) {
-        const now = this.page.url();
-        // An opened conversation appends a message id to the #search/#inbox hash.
-        if (now !== before && /\/[A-Za-z0-9_-]{12,}$/.test(now)) return true;
-        await this.page.waitForTimeout(300).catch(() => {});
-      }
+    // Find the conversation ROW the same way the observation layer does — a
+    // role=link element with a substantial subject label (Gmail chrome
+    // affordances like "Gmail"/"Compose"/"Inbox" are short or not role=link) —
+    // and open it with this.click(), the SAME positional click that works
+    // interactively. The prior CSS-selector + synthetic .click() missed: Gmail
+    // rows are div[role=link] whose delegated jsaction handler a plain click may
+    // not fire. MEASURED 2026-07-01 (Loops "Login link": the results list has no
+    // /api/auth/callback href; opening the row reveals it).
+    const els = await this.extractInteractiveElements();
+    const row = els.find(
+      (e) =>
+        e.role === "link" &&
+        (e.visibleText ?? e.ariaLabel ?? e.labelText ?? "").trim().length > 25,
+    );
+    if (row === undefined) return false;
+    await this.click(row.selector).catch(() => {});
+    for (let i = 0; i < 10; i++) {
+      const now = this.page.url();
+      // An opened conversation appends a message id to the #search/#inbox hash.
+      if (now !== before && /\/[A-Za-z0-9_-]{12,}$/.test(now)) return true;
+      await this.page.waitForTimeout(300).catch(() => {});
     }
     return false;
   }
