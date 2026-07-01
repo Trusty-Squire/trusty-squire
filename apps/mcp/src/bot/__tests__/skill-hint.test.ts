@@ -23,12 +23,20 @@ describe("serviceSlugFromUrl", () => {
 describe("loginSessionGuidance", () => {
   it("prefers Google when the user has multiple live sessions", () => {
     const g = loginSessionGuidance(["github", "google"]);
-    expect(g).toContain('use "google"');
-    expect(g).toContain("LIVE session for google, github");
+    expect(g).toContain('prefer "google"');
+    expect(g).toContain("live session for google, github");
   });
 
   it("uses the only live session when there's one", () => {
-    expect(loginSessionGuidance(["github"])).toContain('use "github"');
+    expect(loginSessionGuidance(["github"])).toContain('prefer "github"');
+  });
+
+  it("hedges on the page offering OAuth — falls back to email if no button", () => {
+    // Regression: telling the agent to use google on an email-only signup
+    // (Postmark) sent it chasing a button that wasn't there.
+    const g = loginSessionGuidance(["google"]).toLowerCase();
+    expect(g).toContain("if the page offers");
+    expect(g).toContain("email");
   });
 
   it("falls back to method-agnostic guidance when no live session", () => {

@@ -23,9 +23,14 @@ export function loginSessionGuidance(liveProviders: readonly OAuthProviderId[]):
     ? "google"
     : (liveProviders[0] as OAuthProviderId);
   const ordered = [preferred, ...liveProviders.filter((p) => p !== preferred)];
+  // Hedge on what the PAGE offers — this is session-state, composed before the
+  // page is seen, so it can't assume an OAuth button exists. Telling the agent to
+  // "use google" on an email-only signup (Postmark) sent it chasing a button that
+  // wasn't there. Prefer the session provider IF offered; else fall back to email.
   return (
-    `- login: the user has a LIVE session for ${ordered.join(", ")} — use "${preferred}" ` +
-    `(preferred). The account may already exist; log IN with that provider, don't re-sign-up.`
+    `- login: the user has a live session for ${ordered.join(", ")} (prefer "${preferred}"). ` +
+    `IF the page offers one of those as a sign-in option, use it — the account may already ` +
+    `exist, so log IN, don't re-sign-up. If there's no such button, sign up with email.`
   );
 }
 

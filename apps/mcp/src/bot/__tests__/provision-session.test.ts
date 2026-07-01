@@ -90,7 +90,7 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     expect("value" in c).toBe(false);
   });
 
-  it("reports value_len, never the raw value; masks sealed via the placeholder length", () => {
+  it("reports the REAL value_len (a length signal, not the value) — even for sealed fields", () => {
     const filled = toCompactElement(
       el({ tag: "input", type: "text", value: "hello@example.com" }),
       "@g1:e",
@@ -105,8 +105,11 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
       "@g1:p",
       new Set([sealedKey]),
     );
-    // value_len reflects the [sealed] placeholder, never the secret length
-    expect(sealed.value_len).toBe("[sealed]".length);
+    // value_len is the REAL length (fill-verification signal), NOT "[sealed]".length
+    // (8) — that made a correctly-filled field read as truncated. The value itself
+    // stays hidden (never serialized); only its length is reported.
+    expect(sealed.value_len).toBe("supersecret".length);
+    expect("value" in sealed).toBe(false);
   });
 
   it("keeps checked for real checkables (true AND false), omits when null", () => {
