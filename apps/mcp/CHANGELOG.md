@@ -2,20 +2,26 @@
 
 ## 1.0.11 (2026-07-01)
 
-- feat: operator-hints follow-ups — PII backfill, OAuth fallback logic, boot-version log
-- fix(registry): reconcile old skills with the guidance paradigm + close deploy skew
-- release: skill-schema 0.1.4-rc.1 + mcp 1.0.11-rc.1 (operator-hints)
-- feat(mcp): Deliverable #1 — hint-lift measurement (slice 4)
-- feat(mcp): producer — operate_* provision → capture → skill → publish (slice 3)
-- feat(mcp): PII gate — redact identity fill values at synthesis (slice 2)
-- feat(mcp): OAuth available[] generalization, capture→synth→render (slice 1)
-- docs(spec): resolve R2-b — keep serving pending-review skills as hints
-- docs(spec): resolve R2-a — medium capture shape, verified against the corpus
-- docs(spec): rewrite on steps[]-as-guidance + eng review round 2
-- docs(spec): resolve the 3 open decisions (Q1/Q2/Q3)
-- docs(spec): refine hint resolution — mechanism as disambiguate-only tie-breaker
-- docs: spec — operator hints (rewrite of recipe-to-registry)
-- chore(release): resync staging with main; hold staging on the rc channel
+**The operator-hints loop.** A verified provision now feeds the registry, and the
+next provision of that service gets a hint — closing the "registry never
+accumulates from real provisions" gap. Ships with skill-schema 0.1.4.
+
+- **Producer:** a verified `operate_finish_task` (credential vaulted, not blocked)
+  captures the run as a MEDIUM capture (structured inventory + action + scrubbed
+  URL per step; raw HTML only on the extract round; no screenshots), synthesizes a
+  skill, and publishes it pending-review — served back as a hint on the next
+  provision. Best-effort; never fails the provision.
+- **PII gate at upload:** identity fill values (name/company/org) redact to
+  `${IDENTITY}` at synthesis; a `backfill-pii` script re-scrubs pre-existing
+  skills. Secret-bearing actions never enter a shared skill.
+- **OAuth `available[]`:** the login step records the whole provider menu the page
+  offered, surfaced as guidance and available for replay fallback.
+- **Guidance-paradigm reconciliation (registry):** a rotted blind-replay now
+  DOWNGRADES a skill (active → pending-review, still served as a hint, re-proven)
+  instead of demoting it out of the router. Deploy-skew fix so a schema bump
+  redeploys the registry.
+- **Measurement:** a `provision-measurement` line per finish for the hint-on vs
+  hint-off lift.
 
 ## 1.0.10 (2026-06-30)
 
