@@ -15,6 +15,7 @@ import {
   type OnboardingRoundCapture,
 } from "../onboarding-capture.js";
 import { promoteToSkill } from "../promote-to-skill.js";
+import { captureObserved } from "../provision-session.js";
 import { renderSkillHint } from "../skill-hint.js";
 import type { InteractiveElement } from "../browser.js";
 import type { Skill } from "@trusty-squire/skill-schema";
@@ -216,5 +217,28 @@ describe("operator-hints E2E: capture → synthesize → render", () => {
     if (fillStep !== undefined && "value_template" in fillStep) {
       expect(fillStep.value_template).toBe("${IDENTITY}");
     }
+  });
+});
+
+describe("producer: operate action → capture round mapping (captureObserved)", () => {
+  const el = (selector: string): InteractiveElement => ({
+    index: 0, tag: "button", type: null, id: null, name: null, placeholder: null,
+    ariaLabel: null, role: null, labelText: null, visibleText: "Continue",
+    selector, visible: true, inViewport: true, inConsentWidget: false,
+    value: null, title: null, href: null,
+  });
+
+  it("maps click / type / goto / oauth_click to the right synthesizer step", () => {
+    expect(captureObserved({ kind: "click", target: "x" }, el("#btn"))).toMatchObject({ kind: "click", selector: "#btn" });
+    expect(captureObserved({ kind: "js_click", target: "x" }, el("#btn"))).toMatchObject({ kind: "click", selector: "#btn" });
+    expect(captureObserved({ kind: "oauth_click", target: "x" }, el("#g"))).toMatchObject({ kind: "click", selector: "#g" });
+    expect(captureObserved({ kind: "type", target: "x", text: "hello" }, el("#in"))).toMatchObject({ kind: "fill", selector: "#in", value: "hello" });
+    expect(captureObserved({ kind: "goto", url: "https://svc.example.com/keys" }, null)).toMatchObject({ kind: "navigate", url: "https://svc.example.com/keys" });
+  });
+
+  it("drops non-synthesizable actions (press) — the safety default, never a phantom step", () => {
+    expect(captureObserved({ kind: "press", key: "Enter" }, null)).toBeNull();
+    // A click with no resolved element can't produce a targetable step.
+    expect(captureObserved({ kind: "click", target: "x" }, null)).toBeNull();
   });
 });

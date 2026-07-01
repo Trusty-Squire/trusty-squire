@@ -43,6 +43,15 @@ import {
   writeRecipe,
 } from "./operator-recipe.js";
 import {
+  captureOnboardingRound,
+  currentRunId,
+  resetCaptureChain,
+  resolveCaptureDir,
+  type OnboardingRoundCapture,
+} from "./onboarding-capture.js";
+import { promoteToSkill, type PromoteResult } from "./promote-to-skill.js";
+import type { PostVerifyStep } from "./provision-types.js";
+import {
   looksLikeCodeIdentifier,
   looksLikeCredentialValue,
   isCredentialNoise,
@@ -233,6 +242,11 @@ interface Session {
   // be `remember`ed as a replayable rail. Records visible text + non-secret
   // params only — sealed secret values stay in secretSlots, never the trace.
   actionTrace: TraceEntry[];
+  // MEDIUM capture rounds for skill synthesis at verified success (docs/DESIGN-
+  // operator-hints.md): inventory + action + url per step, no screenshots, raw
+  // html only on the extract round. Accumulated live; written + promoted at
+  // operate_finish_task on a verified success.
+  captureRounds: OnboardingRoundCapture[];
   // The session's START url (service_url at operate_start, or the resolved
   // entry on an operate_use replay). Persisted as the recipe's canonical
   // entry_url so a replay always opens at a STABLE page, never a mid-flow
@@ -1067,6 +1081,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     sealedFieldKeys: new Set(),
     lastElements: [],
     actionTrace: [],
+    captureRounds: [],
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
     userEmail: loggedInEmail("google", opts.profileDir),
@@ -1405,6 +1420,7 @@ export async function act(
   // recorded inbox click would bake the email's subject into a shared recipe.
   if (!isInboxReadHost(browser.currentUrl())) {
     recordTrace(session, action, resolvedEl);
+    recordCaptureRound(session, action, resolvedEl);
   }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
@@ -1488,6 +1504,111 @@ function recordTrace(
     case "oauth_click": a = { kind: "oauth_click", ...withText }; break;
   }
   session.actionTrace.push({ action: a });
+}
+
+// ── Medium capture → skill (docs/DESIGN-operator-hints.md) ──────────────────
+
+// Service slug for the capture: the registrable host of the start URL.
+function captureService(session: Session): string {
+  return registrableHost(session.startUrl) ?? "unknown";
+}
+
+// Map a live operate action + the element it hit to the PostVerifyStep the
+// synthesizer consumes. Only skill-synthesizable kinds map; the rest (press,
+// scroll, oauth_settle, allow_host, type_secret) return null and are skipped —
+// a type_secret must NEVER carry its sealed value into a shared skill.
+export function captureObserved(
+  action: ProvisionAction,
+  el: InteractiveElement | null,
+): PostVerifyStep | null {
+  switch (action.kind) {
+    case "click":
+    case "js_click":
+    case "oauth_click":
+      return el === null
+        ? null
+        : { kind: "click", selector: el.selector, reason: traceTextFor(el) ?? action.kind };
+    case "type":
+      // Non-secret value; the synthesizer applies the email/token/identity PII
+      // scrub. type_secret is a different kind and is skipped above.
+      return el === null
+        ? null
+        : { kind: "fill", selector: el.selector, value: action.text, reason: traceTextFor(el) ?? "fill" };
+    case "goto":
+      return { kind: "navigate", url: action.url, reason: "navigate" };
+    default:
+      return null;
+  }
+}
+
+// Accumulate one MEDIUM round: inventory + action + url, no html/screenshot.
+function recordCaptureRound(
+  session: Session,
+  action: ProvisionAction,
+  el: InteractiveElement | null,
+): void {
+  const observed = captureObserved(action, el);
+  if (observed === null) return;
+  session.captureRounds.push({
+    service: captureService(session),
+    round: session.captureRounds.length,
+    oauth: action.kind === "oauth_click",
+    state: { url: session.browser.currentUrl(), title: "", html: "", screenshot: "" },
+    inventory: session.lastElements,
+    observed,
+  });
+}
+
+// The EXTRACT round is the one round that keeps raw html — the key-extraction
+// step is synthesized from the page where the credential is shown.
+async function recordExtractRound(session: Session): Promise<void> {
+  let html = "";
+  try {
+    html = (await session.browser.getState()).html;
+  } catch {
+    /* best-effort — the copy-button/inventory extract path still works */
+  }
+  session.captureRounds.push({
+    service: captureService(session),
+    round: session.captureRounds.length,
+    oauth: false,
+    state: { url: session.browser.currentUrl(), title: "", html, screenshot: "" },
+    inventory: session.lastElements,
+    observed: { kind: "extract", reason: "extract the credential shown on the page" },
+  });
+}
+
+// Record the extract round from the live page, then write the accumulated medium
+// rounds through the real capture path (integrity chain) and synthesize a skill.
+// Best-effort: any failure returns a skip and never disrupts the parent
+// provision. The caller publishes the returned skill.
+export async function captureAndPromoteSession(
+  sessionId: string,
+): Promise<PromoteResult | { kind: "skipped"; reason: string }> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) return { kind: "skipped", reason: "unknown_session" };
+  const dir = resolveCaptureDir();
+  if (dir === null) return { kind: "skipped", reason: "capture_disabled" };
+  if (!session.captureRounds.some((r) => r.observed.kind === "extract")) {
+    await recordExtractRound(session);
+  }
+  const hasExtract = session.captureRounds.some((r) => r.observed.kind === "extract");
+  if (!hasExtract || session.captureRounds.length < 2) {
+    return { kind: "skipped", reason: "too_few_rounds" };
+  }
+  const service = captureService(session);
+  try {
+    resetCaptureChain(service);
+    for (const r of session.captureRounds) captureOnboardingRound(r);
+    const runId = currentRunId(service);
+    if (runId === undefined) return { kind: "skipped", reason: "no_run_id" };
+    return promoteToSkill({ dir, service, run_id: runId });
+  } catch (err) {
+    return {
+      kind: "skipped",
+      reason: `synthesis_error: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 async function settleAfterStateChange(browser: BrowserController): Promise<void> {
