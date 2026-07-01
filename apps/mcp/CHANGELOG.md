@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.14 (2026-07-01)
+
+- **fix: skill entry_url pointed at a post-login page and the OAuth step was
+  dropped.** The producer recorded each capture round's URL *after* the action
+  navigated, but paired it with the pre-action inventory — so an OAuth click that
+  redirected made round 0's URL the dashboard, corrupting `entry_url` (→ `/emails`
+  instead of `/signup`) and dropping the login step (so `available[]` never
+  surfaced in the hint). Now records the pre-action URL. Fixes both.
+
 ## 1.0.13 (2026-07-01)
 
 - **fix (critical): the registry loop was dead for every end-user install.** The
