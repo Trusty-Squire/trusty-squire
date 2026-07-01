@@ -93,6 +93,14 @@ describe("looksLikeCredentialValue (the tight host-side gate, distinct from the 
     expect(looksLikeCredentialValue("loader.tweetTombstone")).toBe(false);
     expect(looksLikeCredentialValue("GOCSPX-••••3f")).toBe(false);
   });
+  it("accepts a long prefixless all-uppercase key (the ScrapingBee case)", () => {
+    // 80-char uppercase A-Z0-9, no separator — synthetic, same shape as the real key.
+    expect(looksLikeCredentialValue("CA82IVZMZTPQ8XMCMZAXD2F76VJPQRSTUVWX0123456789ABCDEFGHJKLMNPQRSTUVWXYZ0123456789AB")).toBe(true);
+  });
+  it("still rejects a lowercase-hex hash (sha256) and a mixed-case session token", () => {
+    expect(looksLikeCredentialValue("a".repeat(64))).toBe(false); // all-a: no digit + code-noise
+    expect(looksLikeCredentialValue("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")).toBe(false); // sha256 lowercase hex
+  });
 });
 
 describe("pickRelaxedNearCopyCredential (prefixless key beside a copy/reveal affordance)", () => {

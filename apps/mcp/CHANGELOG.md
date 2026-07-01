@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.24 (2026-07-01)
+
+- **fix: `operate_extract` now returns prefixless all-uppercase API keys**
+  (ScrapingBee: 80-char A-Z0-9, no separator) instead of `no_legit_credential`.
+  They were rejected twice — as an env-var name (that check is now length-bounded)
+  and by the credential gate (now accepts a ≥40-char uppercase-alphanumeric key,
+  still distinct from lowercase-hex hashes and session tokens). Measured against
+  the real key format.
+
 ## 1.0.23 (2026-07-01)
 
 - **fix: skill `entry_url` no longer bakes in a per-account id** (Deepgram

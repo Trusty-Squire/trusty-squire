@@ -46,7 +46,10 @@ export function isCredentialNoise(value: string): boolean {
   if (/^v?\d+\.\d+\.\d+(?:[-+.][A-Za-z0-9.-]+)?$/.test(v)) return true;
   if (/^https?:\/\//i.test(v)) return true;
   if (/^trusty-squire-dogfood-\d{8}$/i.test(v)) return true;
-  if (/^[A-Z][A-Z0-9_]{2,}=?$/.test(v)) return true;
+  // Env-var NAME (API_KEY, DATABASE_URL) — but bounded: real names are short. An
+  // 80-char all-uppercase string is a prefixless KEY (ScrapingBee), not an env
+  // var, and must reach the credential gate. Cap at 39 chars (key gate needs ≥40).
+  if (/^[A-Z][A-Z0-9_]{2,38}=?$/.test(v)) return true;
   if (/^key_[A-Za-z0-9]{16,}$/i.test(v)) return true;
   // A masked/truncated display is not a real value (canonical glyph test — was
   // `includes("…")||includes("...")` here, now unified so a `••••`/`****` mask is
@@ -137,6 +140,12 @@ export function looksLikeCredentialValue(value: string): boolean {
   return (
     findCredentialTokens(v).includes(v) ||
     /^eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(v) ||
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v)
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v) ||
+    // A long, PREFIXLESS all-uppercase alphanumeric key (ScrapingBee: 80-char
+    // A-Z0-9, no separator) — the strict token scanners need a prefix/separator
+    // and missed it. Pure-uppercase ≥40 with BOTH letters and digits is a
+    // deliberate key shape, distinct from lowercase-hex hashes and mixed-case
+    // session tokens. MEASURED 2026-07-01 (ScrapingBee dashboard key).
+    (/^[A-Z0-9]{40,}$/.test(v) && /[A-Z]/.test(v) && /[0-9]/.test(v))
   );
 }
