@@ -1328,6 +1328,13 @@ export async function act(
     ...("url" in action ? { url: action.url } : {}),
   });
 
+  // The URL the action is taken ON — captured BEFORE the action navigates. The
+  // capture round pairs this with the pre-action inventory + observed; using
+  // currentUrl() after the action recorded the POST-navigation URL (an OAuth
+  // click that redirected turned round 0's URL into the post-login dashboard,
+  // corrupting the skill's entry_url and the login step).
+  const urlBeforeAction = browser.currentUrl();
+
   // Captured for the operator-recipe trace: the element a target action
   // resolved to, so we record the VISIBLE text it acted on (not the ref).
   let resolvedEl: InteractiveElement | null = null;
@@ -1428,7 +1435,7 @@ export async function act(
   // recorded inbox click would bake the email's subject into a shared recipe.
   if (!isInboxReadHost(browser.currentUrl())) {
     recordTrace(session, action, resolvedEl);
-    recordCaptureRound(session, action, resolvedEl);
+    recordCaptureRound(session, action, resolvedEl, urlBeforeAction);
   }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
@@ -1569,6 +1576,7 @@ function recordCaptureRound(
   session: Session,
   action: ProvisionAction,
   el: InteractiveElement | null,
+  urlAtObservation: string,
 ): void {
   const observed = captureObserved(action, el);
   if (observed === null) return;
@@ -1576,7 +1584,9 @@ function recordCaptureRound(
     service: captureService(session),
     round: session.captureRounds.length,
     oauth: action.kind === "oauth_click",
-    state: { url: session.browser.currentUrl(), title: "", html: "", screenshot: "" },
+    // The URL the inventory + action belong to (pre-action), NOT the post-
+    // navigation URL — see urlBeforeAction in act().
+    state: { url: urlAtObservation, title: "", html: "", screenshot: "" },
     inventory: session.lastElements,
     observed,
   });
