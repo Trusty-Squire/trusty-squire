@@ -2,44 +2,13 @@
 
 ## 1.0.17 (2026-07-01)
 
-- fix(mcp): pickVerificationLink dropped magic-link/auth-callback URLs (link:null)
-- chore(release): resync staging with main (no-op pins)
-- docs(changelog): tighten 1.0.16 entry
-- release(mcp): 1.0.16
-- fix(mcp): value_len reported the [sealed] placeholder length (8), not the real fill
-- chore(release): resync staging with main (no-op pins)
-- docs(changelog): tighten 1.0.15 entry
-- release(mcp): 1.0.15
-- fix(mcp): derive service slug from the domain MAIN LABEL, not the dot-dashed host
-- chore(release): resync staging with main (no-op pins)
-- docs(changelog): tighten 1.0.14 entry
-- release(mcp): 1.0.14
-- fix(mcp): capture round URL is pre-action, not post-navigation
-- chore(release): resync staging with main; pin to existing rc tags (no-op)
-- docs(changelog): tighten 1.0.13 entry
-- release(mcp): 1.0.13
-- fix(mcp): resolve account id from session.json, not env-only — end-user loop was dead
-- chore(release): resync staging with main; hold on rc channel (1.0.12-rc.1 / 0.1.4-rc.1)
-- docs(changelog): tighten 1.0.12 entry
-- release(mcp): 1.0.12
-- fix(mcp): producer used a dotted host as the service slug → every auto-promote failed
-- chore(release): resync staging with main; hold on the rc channel (1.0.11-rc.1 / 0.1.4-rc.1)
-- docs(changelog): tighten 1.0.11 stable entry
-- release(mcp): 1.0.11
-- feat: operator-hints follow-ups — PII backfill, OAuth fallback logic, boot-version log
-- fix(registry): reconcile old skills with the guidance paradigm + close deploy skew
-- release: skill-schema 0.1.4-rc.1 + mcp 1.0.11-rc.1 (operator-hints)
-- feat(mcp): Deliverable #1 — hint-lift measurement (slice 4)
-- feat(mcp): producer — operate_* provision → capture → skill → publish (slice 3)
-- feat(mcp): PII gate — redact identity fill values at synthesis (slice 2)
-- feat(mcp): OAuth available[] generalization, capture→synth→render (slice 1)
-- docs(spec): resolve R2-b — keep serving pending-review skills as hints
-- docs(spec): resolve R2-a — medium capture shape, verified against the corpus
-- docs(spec): rewrite on steps[]-as-guidance + eng review round 2
-- docs(spec): resolve the 3 open decisions (Q1/Q2/Q3)
-- docs(spec): refine hint resolution — mechanism as disambiguate-only tie-breaker
-- docs: spec — operator hints (rewrite of recipe-to-registry)
-- chore(release): resync staging with main; hold staging on the rc channel
+- **fix: `operate_await_verification` returned `link:null` for magic-link emails.**
+  The link scorer only credited `verify`/`confirm`/`activate`, so a Next.js /
+  NextAuth confirmation link (`/api/auth/callback/email?token=…`, as Loops and
+  Supabase/Clerk/Auth0 send) scored 0 and was dropped even when it was the only
+  actionable link. Now also credits auth-callback/magic/passwordless paths and
+  token-bearing query params (and decodes `&amp;` before scoring). Non-verification
+  links (dashboard, unsubscribe) are unaffected.
 
 ## 1.0.16 (2026-07-01)
 
