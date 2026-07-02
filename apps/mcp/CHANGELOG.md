@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.33 (2026-07-02)
+
+- **fix: don't strip OIDC-required params from `signup_url`** (corrects 1.0.32).
+  1.0.32's param-strip included `client_id`/`redirect_uri`/`response_type`, which an
+  OIDC authorize/registration endpoint (neon's Keycloak) needs to render — stripping
+  them would break the entry. The OAuth cruft (`iss`/`scope`/`authuser`/`prompt`/…)
+  is still stripped, so the Deepgram `/signup?iss=…` case still cleans fully.
+
 ## 1.0.32 (2026-07-02)
 
 - fix(mcp): strip OAuth query cruft from a synthesized signup_url

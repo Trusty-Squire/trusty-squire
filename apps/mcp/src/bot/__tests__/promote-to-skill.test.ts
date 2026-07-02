@@ -3569,4 +3569,14 @@ describe("entry-url: per-account id in the path (Deepgram / Neon)", () => {
       ),
     ).toBe("https://console.deepgram.com/signup");
   });
+  it("KEEPS OIDC-required params so an authorize/registration endpoint isn't broken (neon Keycloak)", () => {
+    const out = stableSignupEntryUrl(
+      "https://console.neon.tech/realms/prod-realm/protocol/openid-connect/registrations?client_id=neon&redirect_uri=https%3A%2F%2Fconsole.neon.tech%2Fcb&response_type=code&scope=openid&state=abc123",
+      [],
+    );
+    expect(out).toContain("client_id=neon");
+    expect(out).toContain("response_type=code");
+    expect(out).not.toContain("state="); // per-run → stripped
+    expect(out).not.toContain("scope="); // cruft → stripped
+  });
 });

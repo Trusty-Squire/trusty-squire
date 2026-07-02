@@ -1157,8 +1157,13 @@ export function hasEphemeralPathSegment(path: string): boolean {
 
 // Query params whose VALUE is a per-run session/auth token. Stripping them
 // turns a captured deep link back into a stable entry replay can reproduce.
+// NB: strip OAuth RESPONSE/hint cruft (iss, authuser, prompt, hd, login_hint,
+// scope, …) but NOT the OIDC-REQUIRED request params (client_id, redirect_uri,
+// response_type, code_challenge) — a signup_url that IS an OIDC authorize/
+// registration endpoint (neon's Keycloak /openid-connect/registrations) needs
+// them to render, so stripping them would break the entry.
 const EPHEMERAL_URL_PARAM =
-  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce|email|signup_email|user_email|iss|scope|authuser|prompt|response_type|client_id|redirect_uri|hd|login_hint|approval_prompt|include_granted_scopes|code_challenge|code_challenge_method)$/i;
+  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce|email|signup_email|user_email|iss|scope|authuser|prompt|hd|login_hint|approval_prompt|include_granted_scopes)$/i;
 
 // Strip per-run session params from a captured URL, byte-preserving any URL
 // that has none. Used for navigate steps + the inferred signup_url so a stale
