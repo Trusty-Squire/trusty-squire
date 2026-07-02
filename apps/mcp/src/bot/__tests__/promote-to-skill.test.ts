@@ -3561,4 +3561,12 @@ describe("entry-url: per-account id in the path (Deepgram / Neon)", () => {
     // a clean url is preserved
     expect(stableSignupEntryUrl("https://app.resend.com/signup", [])).toBe("https://app.resend.com/signup");
   });
+  it("strips OAuth query cruft from the entry url (Deepgram /signup?iss=…&prompt=none)", () => {
+    expect(
+      stableSignupEntryUrl(
+        "https://console.deepgram.com/signup?iss=https%3A%2F%2Faccounts.google.com&scope=email+profile&authuser=0&prompt=none",
+        [],
+      ),
+    ).toBe("https://console.deepgram.com/signup");
+  });
 });

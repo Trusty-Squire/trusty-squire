@@ -1158,7 +1158,7 @@ export function hasEphemeralPathSegment(path: string): boolean {
 // Query params whose VALUE is a per-run session/auth token. Stripping them
 // turns a captured deep link back into a stable entry replay can reproduce.
 const EPHEMERAL_URL_PARAM =
-  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce|email|signup_email|user_email)$/i;
+  /^(psid|sid|session|session_id|sessionid|token|access_token|auth|state|code|redirect_to|continue|ticket|nonce|email|signup_email|user_email|iss|scope|authuser|prompt|response_type|client_id|redirect_uri|hd|login_hint|approval_prompt|include_granted_scopes|code_challenge|code_challenge_method)$/i;
 
 // Strip per-run session params from a captured URL, byte-preserving any URL
 // that has none. Used for navigate steps + the inferred signup_url so a stale
