@@ -535,15 +535,35 @@ export async function issueMachineToken(
   apiBaseUrl: string,
   fetchImpl: typeof fetch = fetch,
   asn?: InstallAsnPayload,
+  timeoutMs = 30000,
 ): Promise<MachineInstallResponse> {
-  const init: RequestInit = { method: "POST" };
+  // Bound the request. With no timeout, a cold-starting API (Fly auto-stop) or a
+  // stalled mobile connection hung `connect` indefinitely at "Issuing machine
+  // token" — 30s is generous enough for a cold start but fails LOUDLY (retryable)
+  // instead of hanging forever.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const init: RequestInit = { method: "POST", signal: controller.signal };
   if (asn !== undefined) {
     init.headers = { "content-type": "application/json" };
     init.body = JSON.stringify({ asn });
   }
-  const res = await fetchImpl(`${apiBaseUrl}/v1/install`, init);
-  if (!res.ok) throw new ApiCallError(res.status, "install_failed", "machine install failed");
-  return (await res.json()) as MachineInstallResponse;
+  try {
+    const res = await fetchImpl(`${apiBaseUrl}/v1/install`, init);
+    if (!res.ok) throw new ApiCallError(res.status, "install_failed", "machine install failed");
+    return (await res.json()) as MachineInstallResponse;
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new ApiCallError(
+        0,
+        "install_timeout",
+        `machine install timed out after ${timeoutMs}ms — the API may be waking up; re-run connect`,
+      );
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 // G15: shorten the headless install's cloudflared tunnel URL to a
