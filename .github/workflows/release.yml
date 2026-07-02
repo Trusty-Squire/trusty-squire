@@ -331,15 +331,15 @@ jobs:
 
       # ---- Publish to the official MCP registry (github.com/mcp) -----------
       # github.com/mcp mirrors registry.modelcontextprotocol.io. We keep
-      # io.github.Trusty-Squire/mcp current there by republishing on every npm
-      # release, so the catalog never drifts (it was stuck at 0.7.1 while npm
-      # was 0.8.x). Auth is GitHub Actions OIDC (the `id-token: write`
-      # permission above) — the registry verifies the token's repo owner
-      # (Trusty-Squire) against the io.github.Trusty-Squire namespace, so no
-      # stored secret. server.json is synced to the just-published npm version
-      # first (the registry rejects a server.json npm version npm doesn't
-      # serve — hence this runs only after the live-on-registry check passes).
-      # Non-fatal: a registry hiccup must not fail an otherwise-good npm release.
+      # ai.trustysquire/trusty-squire current there by republishing on every
+      # npm release, so the catalog never drifts. Auth is DNS-based: the
+      # registry verifies ownership of the ai.trustysquire namespace against a
+      # TXT record on trustysquire.ai signed by MCP_REGISTRY_DNS_KEY (the
+      # Ed25519 private key, hex). server.json is synced to the just-published
+      # npm version first — the registry rejects a server.json npm version npm
+      # doesn't serve, AND cross-checks that the npm package's `mcpName` equals
+      # this server.json `name`, hence this runs only after the live-on-registry
+      # check passes. Non-fatal: a registry hiccup must not fail a good npm release.
       - name: Publish to MCP registry (github.com/mcp)
         continue-on-error: true
         run: |
@@ -356,9 +356,11 @@ jobs:
           echo "server.json synced to $V; downloading mcp-publisher ..."
           curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
             | tar -xz mcp-publisher
-          ./mcp-publisher login github-oidc
+          ./mcp-publisher login dns --domain trustysquire.ai --private-key "$MCP_REGISTRY_DNS_KEY"
           ./mcp-publisher publish
           echo "✓ Published $V to the MCP registry."
+        env:
+          MCP_REGISTRY_DNS_KEY: ${{ secrets.MCP_REGISTRY_DNS_KEY }}
 
       - name: Verify tarball contents (case "connect" sentinel)
         run: |

@@ -1,21 +1,30 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.Trusty-Squire/mcp",
-  "description": "Credential broker that signs your AI agent up to SaaS dev tools, within a signed spending mandate.",
+  "name": "ai.trustysquire/trusty-squire",
+  "title": "Trusty Squire",
+  "description": "Coding agent signs up for SaaS and vaults the API keys write-only: never in .env or agent context.",
   "repository": {
     "url": "https://github.com/Trusty-Squire/trusty-squire",
     "source": "github",
     "subfolder": "apps/mcp"
   },
-  "version": "0.8.8",
+  "version": "1.0.34",
   "packages": [
     {
       "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@trusty-squire/mcp",
-      "version": "0.8.8",
+      "version": "1.0.34",
       "transport": {
         "type": "stdio"
-      }
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "server",
+          "description": "Run the MCP server. The package's default command is the interactive `connect` setup, so clients MUST pass `server` to launch the stdio server. Run `npx @trusty-squire/mcp connect` once beforehand to bind the install to your account."
+        }
+      ]
     }
   ]
 }

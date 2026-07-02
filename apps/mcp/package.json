@@ -1,8 +1,8 @@
 {
   "name": "@trusty-squire/mcp",
-  "version": "1.0.33",
+  "version": "1.0.34",
   "license": "MIT",
-  "mcpName": "io.github.Trusty-Squire/mcp",
+  "mcpName": "ai.trustysquire/trusty-squire",
   "type": "module",
   "description": "Local MCP server vibe coding agents install. Thin relay to the Trusty Squire API, with the bundled universal signup bot.",
   "main": "./dist/server.js",
