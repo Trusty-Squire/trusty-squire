@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "trusty-squire": {
+      "command": "npx",
+      "args": ["-y", "@trusty-squire/mcp", "server"]
+    }
+  }
+}
