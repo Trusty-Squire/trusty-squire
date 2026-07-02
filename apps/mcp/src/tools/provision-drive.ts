@@ -843,6 +843,23 @@ export const provisionPrepareLoginTool: Tool<z.infer<typeof prepareLoginSchema>>
   },
 };
 
+// The signin_url's host is, by definition, where this login gets filled back —
+// but the agent's login_hosts don't always include it (it stored the apex while
+// the form lives on app.<domain>, so browser-fill 403'd login_host_not_allowed).
+// Fold the signin_url host into login_hosts so a credential can always be filled
+// at its own signin_url. Exported for tests. MEASURED 2026-07-02 (Plunk).
+export function withSigninHost(loginHosts: readonly string[], signinUrl?: string): string[] {
+  if (signinUrl === undefined) return [...loginHosts];
+  let host: string;
+  try {
+    host = new URL(signinUrl).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return [...loginHosts];
+  }
+  if (host.length === 0 || loginHosts.includes(host)) return [...loginHosts];
+  return [...loginHosts, host];
+}
+
 const storeLoginSchema = z.object({
   session_id: z.string().min(1),
   service: z.string().min(1).max(120),
@@ -861,7 +878,8 @@ export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
     "username_password credential so the user can sign back in. Reads the sealed " +
     "slots server-side; raw values are never returned to you. Pass the exact " +
     "login hosts where this credential may be filled; use *.example.com only " +
-    "when subdomains are intentionally allowed.",
+    "when subdomains are intentionally allowed. The signin_url host (if given) is " +
+    "always included, so the credential can be filled at its own sign-in page.",
   inputSchema: storeLoginSchema,
   jsonInputSchema: {
     type: "object",
@@ -889,7 +907,7 @@ export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
       fields: { login, password },
       type: "username_password",
       auth_strategy: "username_password",
-      login_hosts: args.login_hosts,
+      login_hosts: withSigninHost(args.login_hosts, args.signin_url),
       ...(args.signin_url !== undefined ? { signin_url: args.signin_url } : {}),
       ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
     });
