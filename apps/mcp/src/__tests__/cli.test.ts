@@ -6,8 +6,33 @@
 // the install confirm itself.
 
 import { describe, expect, it, vi } from "vitest";
-import { parseArgs } from "../install/cli.js";
+import { parseArgs, applyInstallPreferences } from "../install/cli.js";
 import { normalizeProxyUrl } from "../install/proxy-url.js";
+import type { SessionData } from "../session.js";
+
+describe("applyInstallPreferences (fresh interactive consent must win)", () => {
+  const base: SessionData = {
+    api_base_url: "https://x",
+    saved_at: "t",
+    consent_operator_inbox_otp: true, // the user just answered YES in the CLI
+    consent_skillify_telemetry: true,
+  };
+  const stalePrefs = { registry_enabled: false, consent_operator_inbox_otp: false };
+
+  it("interactive (applyServerPrefs=false): keeps the local consent, ignores stale server prefs", () => {
+    const out = applyInstallPreferences(base, stalePrefs, false);
+    expect(out.consent_operator_inbox_otp).toBe(true);
+    expect(out.consent_skillify_telemetry).toBe(true);
+  });
+  it("non-interactive (applyServerPrefs=true): inherits the server prefs", () => {
+    const out = applyInstallPreferences(base, stalePrefs, true);
+    expect(out.consent_operator_inbox_otp).toBe(false);
+    expect(out.consent_skillify_telemetry).toBe(false);
+  });
+  it("undefined server prefs → baseSession unchanged either way", () => {
+    expect(applyInstallPreferences(base, undefined, true).consent_operator_inbox_otp).toBe(true);
+  });
+});
 
 describe("parseArgs --proxy-url", () => {
   it("parses --proxy-url into proxyUrl", () => {
