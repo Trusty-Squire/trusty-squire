@@ -14,6 +14,7 @@
     "start": "node dist/server.js",
     "publish:adapter": "tsx src/publish.ts",
     "backfill:pii": "tsx src/backfill-pii.ts",
+    "backfill:entry-url": "tsx src/backfill-entry-url.ts",
     "prisma:validate": "prisma validate --schema=prisma/schema.prisma",
     "prisma:generate": "prisma generate --schema=prisma/schema.prisma",
     "prisma:migrate:dev": "prisma migrate dev --schema=prisma/schema.prisma"
