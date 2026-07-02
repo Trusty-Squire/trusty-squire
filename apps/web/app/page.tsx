@@ -176,6 +176,7 @@ export default function Page() {
               Trusty Squire
             </Link>
             <div className="foot-l">
+              <Link href="/blog">Blog</Link>
               <Link href="/privacy">Privacy</Link>
               <Link href="/terms">Terms</Link>
               <a href={NPM_URL}>npm</a>
