@@ -98,4 +98,16 @@ describe("pickVerificationLink", () => {
     const links = ["https://app.example.com/dashboard", "https://example.com/unsubscribe?u=1"];
     expect(pickVerificationLink(links)).toBeNull();
   });
+
+  it("picks the NEWEST link when a thread has several (avoids an expired token)", () => {
+    // Gmail renders a thread oldest→newest; the last matching link is the fresh
+    // re-send. Both score equally, so the tie must break to the later one.
+    const links = [
+      "https://app.loops.so/api/auth/callback/email?token=OLD_EXPIRED&email=x%40y.com",
+      "https://app.loops.so/api/auth/callback/email?token=NEW_FRESH&email=x%40y.com",
+    ];
+    expect(pickVerificationLink(links)).toBe(
+      "https://app.loops.so/api/auth/callback/email?token=NEW_FRESH&email=x%40y.com",
+    );
+  });
 });
