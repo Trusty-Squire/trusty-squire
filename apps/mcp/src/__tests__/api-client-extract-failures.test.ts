@@ -32,3 +32,20 @@ describe("ApiClient extract-failure diagnostics", () => {
     });
   });
 });
+
+import { issueMachineToken } from "../api-client.js";
+
+describe("issueMachineToken timeout (no more indefinite connect hang)", () => {
+  it("aborts and throws install_timeout when the API never responds", async () => {
+    // A fetch that never resolves but rejects on abort — the stalled-API case.
+    const hangingFetch = ((_url: unknown, init?: { signal?: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+        );
+      })) as unknown as typeof fetch;
+    await expect(
+      issueMachineToken("https://x.invalid", hangingFetch, undefined, 20),
+    ).rejects.toMatchObject({ code: "install_timeout" });
+  });
+});
