@@ -2,19 +2,19 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "ai.trustysquire/trusty-squire",
   "title": "Trusty Squire",
-  "description": "Coding agent signs up for SaaS and vaults the API keys write-only: never in .env or agent context.",
+  "description": "Never touch a signup form or paste an API key again. Your coding agent does both, safely.",
   "repository": {
     "url": "https://github.com/Trusty-Squire/trusty-squire",
     "source": "github",
     "subfolder": "apps/mcp"
   },
-  "version": "1.0.34",
+  "version": "1.0.35",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "@trusty-squire/mcp",
-      "version": "1.0.34",
+      "version": "1.0.35",
       "transport": {
         "type": "stdio"
       },
