@@ -10,7 +10,7 @@
 // earlier version returned links[0] anyway, navigating the bot straight
 // to an unsubscribe URL.
 export function pickVerificationLink(links: readonly string[]): string | null {
-  const scored = links.map((raw) => {
+  const scored = links.map((raw, index) => {
     // Decode HTML-escaped separators BEFORE scoring so `&amp;token=` matches the
     // token heuristic below, not just at return time.
     const url = raw.replace(/&amp;/gi, "&");
@@ -34,9 +34,13 @@ export function pickVerificationLink(links: readonly string[]): string | null {
     )
       score += 6;
     if (lower.includes("welcome")) score += 3;
-    return { url, score };
+    return { url, score, index };
   });
-  scored.sort((a, b) => b.score - a.score);
+  // Ties break to the LATER link. In a multi-message verification thread (Gmail
+  // renders oldest→newest top-to-bottom, and a re-sent link supersedes older
+  // ones), the freshest token is the last matching link — taking the first
+  // handed back an EXPIRED token. MEASURED 2026-07-01 (Loops repeated logins).
+  scored.sort((a, b) => b.score - a.score || b.index - a.index);
   const top = scored[0];
   return top !== undefined && top.score > 0 ? top.url : null;
 }
