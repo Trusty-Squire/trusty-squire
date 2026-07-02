@@ -112,6 +112,36 @@ describe("claude-code config writer", () => {
     );
     expect(parsed.mcpServers.squire.env.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("claude-code");
   });
+
+  // Regression: the merge keeps prior keys, so a REMOVED flag would linger in a
+  // user's config forever. Dead keys (UNIVERSAL_BOT_PREFER_CHEAP, retired with
+  // the in-process planner) must be pruned on the next connect.
+  it("prunes dead env keys left by an older connect", async () => {
+    // Seed a config with the stale flag, as an old connect would have written it.
+    await fs.writeFile(
+      AGENTS["claude-code"].config_path(),
+      JSON.stringify({
+        mcpServers: {
+          squire: {
+            command: "npx",
+            args: ["-y", "@trusty-squire/mcp"],
+            env: { UNIVERSAL_BOT_PREFER_CHEAP: "true", TRUSTY_SQUIRE_AGENT_IDENTITY: "claude-code" },
+          },
+        },
+      }),
+      "utf8",
+    );
+    await AGENTS["claude-code"].writeConfig({
+      command: "npx",
+      args: ["-y", "@trusty-squire/mcp"],
+      env: { TRUSTY_SQUIRE_AGENT_IDENTITY: "claude-code" },
+    });
+    const parsed = JSON.parse(await fs.readFile(AGENTS["claude-code"].config_path(), "utf8")) as {
+      mcpServers: { squire: { env: Record<string, string> } };
+    };
+    expect("UNIVERSAL_BOT_PREFER_CHEAP" in parsed.mcpServers.squire.env).toBe(false);
+    expect(parsed.mcpServers.squire.env.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("claude-code");
+  });
 });
 
 describe("cursor + cline JSON writers", () => {

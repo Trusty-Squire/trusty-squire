@@ -1,5 +1,86 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.27 (2026-07-02)
+
+- fix(mcp): prune dead env keys from the config on connect (UNIVERSAL_BOT_PREFER_CHEAP)
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.26 entry
+- release(mcp): 1.0.26
+- fix(mcp): steer a stale Google session to --force-relogin, not plain connect
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.25 entry
+- release(mcp): 1.0.25
+- fix(mcp): don't emit the onboarding/setup-form steer on a login chooser
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.24 entry
+- release(mcp): 1.0.24
+- fix(mcp): extract prefixless all-uppercase API keys (ScrapingBee) — were rejected
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.23 entry
+- release(mcp): 1.0.23
+- fix: entry-url per-account id + egress multi-field ${SECRET} + login-page guidance
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.22 entry
+- release(mcp): 1.0.22
+- fix(mcp): finish_task scalar data + verification retry/wording + longer publish timeout
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.21 entry
+- release(mcp): 1.0.21
+- fix(mcp): open the mail row via extractInteractiveElements + this.click, not CSS
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.20 entry
+- release(mcp): 1.0.20
+- fix(mcp): await_verification reads the results LIST, never the opened mail's links
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.19 entry
+- release(mcp): 1.0.19
+- fix(mcp): await_verification missed passwordless "Login link" emails (found:false)
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.18 entry
+- release(mcp): 1.0.18
+- fix(mcp): surface ambiguous-service candidates + 404 signup-URL recovery guidance
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.17 entry
+- release(mcp): 1.0.17
+- fix(mcp): pickVerificationLink dropped magic-link/auth-callback URLs (link:null)
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.16 entry
+- release(mcp): 1.0.16
+- fix(mcp): value_len reported the [sealed] placeholder length (8), not the real fill
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.15 entry
+- release(mcp): 1.0.15
+- fix(mcp): derive service slug from the domain MAIN LABEL, not the dot-dashed host
+- chore(release): resync staging with main (no-op pins)
+- docs(changelog): tighten 1.0.14 entry
+- release(mcp): 1.0.14
+- fix(mcp): capture round URL is pre-action, not post-navigation
+- chore(release): resync staging with main; pin to existing rc tags (no-op)
+- docs(changelog): tighten 1.0.13 entry
+- release(mcp): 1.0.13
+- fix(mcp): resolve account id from session.json, not env-only — end-user loop was dead
+- chore(release): resync staging with main; hold on rc channel (1.0.12-rc.1 / 0.1.4-rc.1)
+- docs(changelog): tighten 1.0.12 entry
+- release(mcp): 1.0.12
+- fix(mcp): producer used a dotted host as the service slug → every auto-promote failed
+- chore(release): resync staging with main; hold on the rc channel (1.0.11-rc.1 / 0.1.4-rc.1)
+- docs(changelog): tighten 1.0.11 stable entry
+- release(mcp): 1.0.11
+- feat: operator-hints follow-ups — PII backfill, OAuth fallback logic, boot-version log
+- fix(registry): reconcile old skills with the guidance paradigm + close deploy skew
+- release: skill-schema 0.1.4-rc.1 + mcp 1.0.11-rc.1 (operator-hints)
+- feat(mcp): Deliverable #1 — hint-lift measurement (slice 4)
+- feat(mcp): producer — operate_* provision → capture → skill → publish (slice 3)
+- feat(mcp): PII gate — redact identity fill values at synthesis (slice 2)
+- feat(mcp): OAuth available[] generalization, capture→synth→render (slice 1)
+- docs(spec): resolve R2-b — keep serving pending-review skills as hints
+- docs(spec): resolve R2-a — medium capture shape, verified against the corpus
+- docs(spec): rewrite on steps[]-as-guidance + eng review round 2
+- docs(spec): resolve the 3 open decisions (Q1/Q2/Q3)
+- docs(spec): refine hint resolution — mechanism as disambiguate-only tie-breaker
+- docs: spec — operator hints (rewrite of recipe-to-registry)
+- chore(release): resync staging with main; hold staging on the rc channel
+
 ## 1.0.26 (2026-07-01)
 
 - **fix: a stale Google session is now recoverable.** After the bot's Google
