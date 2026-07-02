@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.35 (2026-07-02)
+
+- **chore: snappier MCP registry description.** "Never touch a signup form or
+  paste an API key again. Your coding agent does both, safely." — matched to the
+  site's hero copy. Registry versions are immutable, so this is a copy-only patch
+  release; CI republishes the `ai.trustysquire/trusty-squire` entry with it.
+
 ## 1.0.34 (2026-07-02)
 
 - **chore: list in the MCP registry under the `ai.trustysquire` namespace.**
