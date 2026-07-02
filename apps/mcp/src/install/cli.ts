@@ -663,7 +663,13 @@ async function connect(args: Argv): Promise<void> {
     consent_skillify_telemetry: consent.skillifyTelemetry,
     consent_operator_inbox_otp: consent.operatorInboxOtp,
   };
-  const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser);
+  const session = await runInstallClaim(
+    args.apiBase,
+    target,
+    baseSession,
+    args.skipBrowser,
+    !wantInteractive,
+  );
   if (session === null) {
     ui.fail(
       `Install didn't complete — browser confirm never finished. ` +
@@ -1119,6 +1125,13 @@ async function runInstallClaim(
   target: AgentTarget,
   baseSession: SessionData,
   skipBrowser: boolean,
+  // Whether to let the SERVER's stored install_preferences override the local
+  // session's consent/proxy. Only for the non-interactive path (CI / re-install
+  // inheritance). In the interactive flow the user JUST answered these questions,
+  // so baseSession is authoritative — applying stale server prefs there silently
+  // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
+  // await_verification refused despite the user consenting).
+  applyServerPrefs: boolean,
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
   const initiate = await installInitiate(
@@ -1196,7 +1209,7 @@ async function runInstallClaim(
     const ok = await pollForClaim(apiBase, initiate.setup_code);
     if (ok === null) return null;
     return {
-      ...applyInstallPreferences(baseSession, ok.preferences),
+      ...applyInstallPreferences(baseSession, ok.preferences, applyServerPrefs),
       api_base_url: apiBase,
       saved_at: new Date().toISOString(),
       agent_session_token: ok.token,
@@ -1231,7 +1244,7 @@ async function runInstallClaim(
   }
 
   return {
-    ...applyInstallPreferences(baseSession, state.value.preferences),
+    ...applyInstallPreferences(baseSession, state.value.preferences, applyServerPrefs),
     api_base_url: apiBase,
     saved_at: new Date().toISOString(),
     agent_session_token: state.value.token,
@@ -1239,11 +1252,17 @@ async function runInstallClaim(
   };
 }
 
-function applyInstallPreferences(
+// Overlay the server's stored install_preferences onto the local session. Only
+// when `applyServerPrefs` (the non-interactive path): in the interactive flow the
+// user just answered these questions, so baseSession is authoritative and applying
+// stale server prefs would silently discard a fresh consent choice. Exported for
+// tests.
+export function applyInstallPreferences(
   baseSession: SessionData,
   preferences: ClaimResult["preferences"] | undefined,
+  applyServerPrefs: boolean,
 ): SessionData {
-  if (preferences === undefined) return baseSession;
+  if (!applyServerPrefs || preferences === undefined) return baseSession;
   const proxy = preferences.proxy_url?.trim();
   return {
     ...baseSession,
