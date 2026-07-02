@@ -1,5 +1,15 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.34 (2026-07-02)
+
+- **chore: list in the MCP registry under the `ai.trustysquire` namespace.**
+  Switched the registry namespace from `io.github.*` to the domain-verified
+  `ai.trustysquire/trusty-squire` (DNS-signed ownership of trustysquire.ai),
+  corrected the package `mcpName` to match, and added the required `server`
+  run-arg to `server.json` (clients must pass it — the bin defaults to the
+  interactive `connect`). Release CI now auto-publishes to the MCP registry via
+  DNS auth on every release, so the catalog entry never drifts.
+
 ## 1.0.33 (2026-07-02)
 
 - **fix: don't strip OIDC-required params from `signup_url`** (corrects 1.0.32).
