@@ -177,6 +177,7 @@ import {
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
   provisionStoreLoginTool,
+  withSigninHost,
 } from "../../tools/provision-drive.js";
 import type { ApiClient } from "../../api-client.js";
 
@@ -720,5 +721,22 @@ describe("observation detail ladder (none < compact < full)", () => {
     const full = await act(obs.session_id, { kind: "scroll", direction: "down" }, "full");
     expect(full.screen).toBeDefined();
     expect(full.accessibility).toBeDefined();
+  });
+});
+
+describe("withSigninHost (operate_store_login — cover the sign-in page's host)", () => {
+  it("folds the signin_url host into login_hosts (the Plunk browser-fill 403)", () => {
+    // Agent stored the apex, but the login form lives on app.<domain> — the
+    // signin_url host must be a valid fill target.
+    expect(withSigninHost(["useplunk.com"], "https://app.useplunk.com/login")).toEqual([
+      "useplunk.com",
+      "app.useplunk.com",
+    ]);
+  });
+  it("does not duplicate an already-listed host, strips www, no-ops without a signin_url", () => {
+    expect(withSigninHost(["app.useplunk.com"], "https://app.useplunk.com/login")).toEqual(["app.useplunk.com"]);
+    expect(withSigninHost(["x.com"], "https://www.x.com/login")).toEqual(["x.com"]);
+    expect(withSigninHost(["x.com"], undefined)).toEqual(["x.com"]);
+    expect(withSigninHost(["x.com"], "not a url")).toEqual(["x.com"]);
   });
 });
