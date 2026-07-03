@@ -125,7 +125,16 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
   // Injectable for tests (the SSRF guard would reject a loopback echo).
   proxyExecutor?: HttpProxyExecutor;
 }> = async (fastify, opts) => {
-  const executor = opts.proxyExecutor ?? new HttpProxyExecutor();
+  // use_credential responses flow back to the AGENT (into its context), so this
+  // is capped well below the egress path's 16MB. The old 10KB default was too
+  // small for real API responses and web pages — an agent GETting a Shopify HTML
+  // page tripped it. Default 2MB; tune via VAULT_USE_MAX_RESPONSE_BYTES without a
+  // redeploy. Guard a non-numeric / <= 0 env so a bad value can't disable the cap.
+  const envMax = Number(process.env.VAULT_USE_MAX_RESPONSE_BYTES);
+  const useMaxResponseBytes =
+    Number.isFinite(envMax) && envMax > 0 ? envMax : 2 * 1024 * 1024;
+  const executor =
+    opts.proxyExecutor ?? new HttpProxyExecutor({ maxResponseBytes: useMaxResponseBytes });
 
   async function resolveCredential(authAccountId: string, selector: { reference?: string; service?: string }, reply: FastifyReply) {
     const owned = await opts.deps.credentialStore.listByAccount(authAccountId);
