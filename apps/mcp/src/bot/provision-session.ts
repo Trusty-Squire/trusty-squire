@@ -300,6 +300,49 @@ function audit(sessionId: string, event: string, detail: Record<string, unknown>
   );
 }
 
+// operate_start's browser launch is the one UNBOUNDED step in the session
+// bootstrap: on a fresh box the first launch downloads Chromium and spins up a
+// virtual display (Xvfb), and a wedged profile lock or missing browser deps can
+// otherwise hang it indefinitely — a real dogfood run sat on a silent ~30-min
+// hang here with zero feedback (the worst first-run failure: the user assumes
+// it's broken and never comes back). Cap it so a stuck launch fails LOUDLY with
+// an actionable message. The default is generous (a cold Chromium download is
+// legitimately multi-minute — better to wait than false-fail a slow-but-working
+// launch); tune with BOT_START_TIMEOUT_MS. On timeout we close() the
+// half-launched browser so a wedged Chrome can't keep the profile lock and brick
+// the next attempt.
+const START_TIMEOUT_MS = Number(process.env.BOT_START_TIMEOUT_MS) || 600_000;
+
+async function startBrowserBounded(browser: BrowserController, sessionId: string): Promise<void> {
+  audit(sessionId, "browser_launch", {
+    note: "first launch may download Chromium + start Xvfb; slow but one-time",
+    timeout_ms: START_TIMEOUT_MS,
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error("__browser_start_timeout__")), START_TIMEOUT_MS);
+  });
+  try {
+    await Promise.race([browser.start(), timeout]);
+  } catch (err) {
+    if (err instanceof Error && err.message === "__browser_start_timeout__") {
+      // Release the wedged Chrome/profile lock so the next operate_start isn't bricked.
+      await browser.close().catch(() => undefined);
+      throw new Error(
+        `operate_start: browser did not launch within ${Math.round(START_TIMEOUT_MS / 1000)}s. ` +
+          "On a fresh machine the first launch downloads Chromium and starts a virtual display " +
+          "(Xvfb) — slow but one-time. A hang this long usually means the browser binaries or Xvfb " +
+          "are missing on this box. Retry once (a partial download resumes and later launches reuse " +
+          "the cache); if it recurs, run `npx @trusty-squire/mcp connect` here to install the browser " +
+          "deps, or raise BOT_START_TIMEOUT_MS to wait longer.",
+      );
+    }
+    throw err;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 // ── pure helpers (exported for unit tests) ──
 
 const norm = (s: string | null | undefined): string =>
@@ -1118,7 +1161,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
   });
-  await browser.start();
+  await startBrowserBounded(browser, id);
   const targetHost = registrableHost(opts.serviceUrl);
   const seedHosts = [
     ...(targetHost !== null ? [targetHost] : []),
