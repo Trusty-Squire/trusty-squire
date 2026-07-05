@@ -70,6 +70,23 @@ function metadataStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 }
 
+// A login credential is identified by its `auth_strategy` — the canonical signal
+// store_credential sets for username/password logins. The legacy top-level `type`
+// is NOT reliably "username_password": a credential stored the documented way
+// (auth_strategy:"username_password", no explicit type) has type=null, so gating
+// browser-fill on `type` alone rejected valid login credentials with a spurious
+// 400 unsupported_credential_type (#326), forcing plaintext password typing.
+// Check both signals; auth_strategy is authoritative.
+function isUsernamePasswordCredential(selected: {
+  type?: string | null;
+  metadata?: Record<string, unknown>;
+}): boolean {
+  return (
+    selected.type === "username_password" ||
+    selected.metadata?.auth_strategy === "username_password"
+  );
+}
+
 const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
   "co.uk", "org.uk", "gov.uk", "ac.uk", "com.au", "net.au", "org.au",
   "co.jp", "co.nz", "co.in", "com.br", "co.za", "com.cn",
@@ -184,7 +201,7 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
         ...(data.service !== undefined ? { service: data.service } : {}),
       }, reply);
       if (selected === null) return;
-      if (selected.type === "username_password") {
+      if (isUsernamePasswordCredential(selected)) {
         reply.code(400).send({
           error: "unsupported_credential_type",
           hint: "username_password credentials can only be used through browser fill.",
@@ -248,7 +265,7 @@ export const registerVaultAccessRoute: FastifyPluginAsync<{
         ...(data.service !== undefined ? { service: data.service } : {}),
       }, reply);
       if (selected === null) return;
-      if (selected.type !== "username_password") {
+      if (!isUsernamePasswordCredential(selected)) {
         reply.code(400).send({ error: "unsupported_credential_type" });
         return;
       }
