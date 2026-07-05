@@ -2400,6 +2400,11 @@ export interface VerificationResult {
   // trips through the host. Enter it with operate_act type_secret{slot,target}.
   sealed?: boolean;
   slot?: SlotHandle;
+  // The sender address the code/link was read from (e.g. "search-api@brave.com"),
+  // best-effort from the opened mail header. Lets the caller VERIFY the code came
+  // from the expected service before using it — a broad (no-sender) search can
+  // surface an unrelated sender's OTP, so this makes a wrong-sender grab visible.
+  source_from?: string;
 }
 
 export interface AwaitVerificationOptions {
@@ -2442,6 +2447,16 @@ export function parseVerification(
   return { code, link };
 }
 
+// Best-effort sender address from an OPENED Gmail message: Gmail renders the
+// header as "Name <addr@domain>". Returned as source_from so a caller can verify
+// the code came from the expected service — a no-sender search can otherwise
+// surface an unrelated sender's OTP (Brave signup 2026-07-04: a GO2bank code was
+// grabbed instead of Brave's). Exported for unit tests.
+export function extractSenderEmail(text: string): string | null {
+  const m = /<([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})>/.exec(text);
+  return m !== null ? m[1]!.toLowerCase() : null;
+}
+
 // Pure: assemble the verification result. When neither a code nor a link was
 // found, the thick session is still live, so this is a RESUMABLE hand-back
 // (Flow A) — the host asks the user for the code and types it — not a give-up.
@@ -2450,9 +2465,11 @@ export function buildVerificationResult(
   sessionId: string,
   code: string | null,
   link: string | null,
+  sourceFrom: string | null = null,
 ): VerificationResult {
   const found = code !== null || link !== null;
-  if (found) return { session_id: sessionId, found, code, link };
+  const src = sourceFrom !== null ? { source_from: sourceFrom } : {};
+  if (found) return { session_id: sessionId, found, code, link, ...src };
   const needs_user: NeedsUserCode = {
     wall: "verification_code",
     message:
@@ -2463,7 +2480,7 @@ export function buildVerificationResult(
       "session stays live either way.",
     resume: "code",
   };
-  return { session_id: sessionId, found, code, link, needs_user };
+  return { session_id: sessionId, found, code, link, needs_user, ...src };
 }
 
 // PR2 — consent refusal. The user has not consented to the operator reading
@@ -2538,31 +2555,40 @@ export async function awaitVerification(
   // the search up to 3× with a short wait between attempts within this one call.
   let code: string | null = null;
   let link: string | null = null;
+  let sourceFrom: string | null = null;
   for (let attempt = 0; attempt < 3 && code === null && link === null; attempt++) {
+    sourceFrom = null;
     if (attempt > 0) await browser.waitForCaptchaChallengeToSettle(4000, 0).catch(() => false);
     // Internal navigation (not an agent goto) — sanctioned read of the user's mail.
     await browser.goto(searchUrl);
-    // Poll briefly for the result list / opened mail to render text.
-    let text = "";
+    // Poll briefly for the result list to render.
+    let listText = "";
     for (let i = 0; i < 6; i++) {
-      text = await browser.extractVisibleText();
-      if (text.length > 200) break;
+      listText = await browser.extractVisibleText();
+      if (listText.length > 200) break;
       await browser.waitForCaptchaChallengeToSettle(1200, 0).catch(() => false);
     }
-    // The results LIST has snippets (enough for an OTP code) but NOT the body's
-    // links, so a magic/verification LINK needs the mail OPENED. Merge both so an
-    // OTP-in-snippet still works if opening fails (non-regressing fallback).
-    let links = hrefsOf(await browser.extractInteractiveElements());
+    const listLinks = hrefsOf(await browser.extractInteractiveElements());
     const opened = await browser.openFirstMailResult().catch(() => false);
     if (opened) {
-      text = `${text}\n${await browser.extractVisibleText()}`;
-      links = [...links, ...hrefsOf(await browser.extractInteractiveElements())];
+      // Parse the OPENED email as the AUTHORITATIVE source. Merging the
+      // results-list snippets let an UNRELATED sender's code (a bank OTP shown in
+      // the list) override the target email's link — a real wrong-code grab
+      // (Brave signup 2026-07-04: a GO2bank "verification code is 580210" beat
+      // Brave's verify LINK). The list snippets stay a fallback only, for when the
+      // mail won't open (an OTP-in-snippet still works then).
+      const openedText = await browser.extractVisibleText();
+      const openedLinks = hrefsOf(await browser.extractInteractiveElements());
+      sourceFrom = extractSenderEmail(openedText);
+      ({ code, link } = parseVerification(openedText, [...openedLinks, ...listLinks]));
+    } else {
+      ({ code, link } = parseVerification(listText, listLinks));
     }
-    ({ code, link } = parseVerification(text, links));
   }
   const found = code !== null || link !== null;
   audit(sessionId, "await_verification", {
     sender: opts.sender ?? null,
+    source_from: sourceFrom,
     has_code: code !== null,
     has_link: link !== null,
     sealed: opts.intoSlot !== undefined && code !== null,
@@ -2572,9 +2598,17 @@ export async function awaitVerification(
   // code, and enters it with type_secret. The link (not secret) is still returned.
   if (opts.intoSlot !== undefined && code !== null) {
     const handle = stashSecretSlot(sessionId, opts.intoSlot, code);
-    return { session_id: sessionId, found: true, code: null, link, sealed: true, slot: handle };
+    return {
+      session_id: sessionId,
+      found: true,
+      code: null,
+      link,
+      sealed: true,
+      slot: handle,
+      ...(sourceFrom !== null ? { source_from: sourceFrom } : {}),
+    };
   }
-  return buildVerificationResult(sessionId, code, link);
+  return buildVerificationResult(sessionId, code, link, sourceFrom);
 }
 
 export interface FinishResult {

@@ -535,8 +535,13 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
   description:
     "Read the user's OWN inbox through their signed-in browser session (no IMAP, " +
     "no mail token) to complete email verification: returns {found, code, link, " +
-    "needs_user?}. Pass `sender` (e.g. 'resend.com') to scope the search. On " +
-    "found=true, type the code with operate_act or goto the link. PREFER passing " +
+    "source_from, needs_user?}. ALWAYS pass `sender` (e.g. 'brave.com') to scope " +
+    "the search — a no-sender search can grab a code from an UNRELATED email; the " +
+    "returned `source_from` is the sender the code/link came from, so verify it " +
+    "matches the service before using the code. On found=true, type the code with " +
+    "operate_act, or — for a magic/verification LINK — `goto` the returned link " +
+    "directly (do NOT click it inside Gmail; Gmail opens external links in a new " +
+    "tab that won't drive the session). PREFER passing " +
     "`into_slot` (e.g. 'otp'): the code is sealed into a slot (you get a masked " +
     "handle, not the digits) and you enter it with operate_act{type_secret, slot} " +
     "— the code never round-trips through you. On found=false a `needs_user` " +
