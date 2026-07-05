@@ -13,6 +13,7 @@ import {
   buildAccessibilitySnapshot,
   isInboxReadHost,
   parseVerification,
+  extractSenderEmail,
   buildVerificationResult,
   buildConsentRefusal,
   redactEmailForTrace,
@@ -445,6 +446,25 @@ describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
       resume: "code",
     });
     expect(r.needs_user?.message.toLowerCase()).toContain("ask the user");
+  });
+});
+
+describe("extractSenderEmail (source_from provenance — wrong-sender guard)", () => {
+  it("pulls the sender from a Gmail 'Name <addr>' header", () => {
+    const text = "Brave Search API <search-api@brave.com> 8:55 PM to me Please verify";
+    expect(extractSenderEmail(text)).toBe("search-api@brave.com");
+  });
+
+  it("lowercases the address and returns null when no angled sender is present", () => {
+    expect(extractSenderEmail("Support <No-Reply@Example.COM> hi")).toBe("no-reply@example.com");
+    expect(extractSenderEmail("Your verification code is 123456")).toBeNull();
+  });
+
+  it("buildVerificationResult surfaces source_from when provided, omits it otherwise", () => {
+    expect(buildVerificationResult("sk_1", "492013", null, "search-api@brave.com").source_from).toBe(
+      "search-api@brave.com",
+    );
+    expect(buildVerificationResult("sk_1", "492013", null).source_from).toBeUndefined();
   });
 });
 

@@ -304,6 +304,52 @@ describe("goose YAML writer", () => {
   });
 });
 
+describe("hermes YAML writer", () => {
+  it("creates an mcp_servers.squire stdio entry Hermes will load", async () => {
+    await AGENTS.hermes.writeConfig({
+      command: "node",
+      args: ["/abs/dist/bin.js", "server"],
+      env: { TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes" },
+    });
+    expect(AGENTS.hermes.config_path().endsWith("/.hermes/config.yaml")).toBe(true);
+    const raw = await fs.readFile(AGENTS.hermes.config_path(), "utf8");
+    const parsed = yamlParse(raw) as {
+      mcp_servers: {
+        squire: { command: string; args: string[]; env: unknown; enabled: boolean };
+      };
+    };
+    // Hermes uses command/args/env (NOT goose's cmd/envs) in a keyed map.
+    expect(parsed.mcp_servers.squire.command).toBe("node");
+    expect(parsed.mcp_servers.squire.args).toEqual(["/abs/dist/bin.js", "server"]);
+    expect(parsed.mcp_servers.squire.env).toEqual({ TRUSTY_SQUIRE_AGENT_IDENTITY: "hermes" });
+    expect(parsed.mcp_servers.squire.enabled).toBe(true);
+  });
+
+  it("preserves other mcp_servers and merges prior env on re-install", async () => {
+    const { stringify: yamlStringify } = await import("yaml");
+    const filePath = AGENTS.hermes.config_path();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(
+      filePath,
+      yamlStringify({
+        mcp_servers: {
+          filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
+          squire: { command: "node", args: ["old", "server"], env: { UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080" } },
+        },
+      }),
+    );
+    // A re-install that omits --proxy-url must not wipe the prior value.
+    await AGENTS.hermes.writeConfig({ command: "node", args: ["new", "server"], env: {} });
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = yamlParse(raw) as {
+      mcp_servers: { filesystem: unknown; squire: { args: string[]; env: Record<string, string> } };
+    };
+    expect(parsed.mcp_servers.filesystem).toBeDefined();
+    expect(parsed.mcp_servers.squire.args).toEqual(["new", "server"]);
+    expect(parsed.mcp_servers.squire.env.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
+  });
+});
+
 describe("continue YAML writer", () => {
   it("writes the mcpServers array with a squire entry", async () => {
     await AGENTS.continue.writeConfig({

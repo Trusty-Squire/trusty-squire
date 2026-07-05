@@ -47,7 +47,8 @@ export type AgentTarget =
   | "codex"
   | "goose"
   | "cline"
-  | "continue";
+  | "continue"
+  | "hermes";
 
 export interface AgentDefinition {
   target: AgentTarget;
@@ -271,6 +272,59 @@ const goose: AgentDefinition = {
   },
 };
 
+// ── hermes ──────────────────────────────────────────────────
+
+// Hermes Agent (Nous Research) is MCP-native and reads ~/.hermes/config.yaml
+// with an `mcp_servers` MAP keyed by a chosen name. A stdio entry uses
+// `command`/`args`/`env` (NOT goose's cmd/envs) plus an optional `enabled`.
+// We merge into `mcp_servers.squire`, preserving the user's other servers and
+// their prior env (present-flag wins, absent-flag preserves) — and absorb env
+// from legacy-keyed entries before deleting them so a stale pin can't linger.
+
+const hermes: AgentDefinition = {
+  target: "hermes",
+  display_name: "Hermes",
+  config_path: () => path.join(home(), ".hermes", "config.yaml"),
+  detect: async () => exists(path.join(home(), ".hermes")),
+  writeConfig: async (input) => {
+    const filePath = hermes.config_path();
+    let data: Record<string, unknown> = {};
+    try {
+      const raw = await fs.readFile(filePath, "utf8");
+      const parsed = yamlParse(raw);
+      if (parsed !== null && typeof parsed === "object") {
+        data = parsed as Record<string, unknown>;
+      }
+    } catch (err) {
+      if ((err as { code?: string }).code !== "ENOENT") throw err;
+    }
+    const servers =
+      data.mcp_servers !== undefined && typeof data.mcp_servers === "object"
+        ? (data.mcp_servers as Record<string, unknown>)
+        : {};
+    const legacyEnvs = LEGACY_SERVER_KEYS.reduce<Record<string, string>>(
+      (acc, key) => ({ ...acc, ...priorServerEnv(servers[key], "env") }),
+      {},
+    );
+    const priorEnv = {
+      ...legacyEnvs,
+      ...priorServerEnv(servers[SERVER_KEY], "env"),
+    };
+    for (const key of LEGACY_SERVER_KEYS) {
+      delete servers[key];
+    }
+    servers[SERVER_KEY] = {
+      command: input.command,
+      args: input.args,
+      env: { ...priorEnv, ...input.env },
+      enabled: true,
+    };
+    data.mcp_servers = servers;
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, yamlStringify(data), { mode: 0o600 });
+  },
+};
+
 // ── cline ───────────────────────────────────────────────────
 
 const cline: AgentDefinition = {
@@ -380,6 +434,7 @@ export const AGENTS: Record<AgentTarget, AgentDefinition> = {
   goose,
   cline,
   continue: continueAgent,
+  hermes,
 };
 
 export async function detectInstalledAgents(): Promise<AgentDefinition[]> {
