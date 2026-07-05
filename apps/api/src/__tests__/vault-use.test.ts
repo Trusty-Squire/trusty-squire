@@ -272,6 +272,46 @@ describe("POST /v1/vault/browser-fill", () => {
     expect(keys.decrypt(body.encrypted_fields.password!)).toBe("correct-horse");
   });
 
+  // #326: stored the documented way — auth_strategy set, `type` OMITTED (so the
+  // credential's type is null). The gate must recognize it as a login credential
+  // via auth_strategy; it used to 400 unsupported_credential_type, forcing the
+  // operator to type the password in plaintext.
+  it("accepts a login credential stored with auth_strategy but no explicit type (#326)", async () => {
+    const account = await h.deps.accountStore.createAccount("u2@example.test", "U");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const stored = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: {
+        service: "dsers",
+        fields: { username: "ada@example.test", password: "correct-horse" },
+        auth_strategy: "username_password",
+        login_hosts: ["www.dsers.com"],
+      },
+    });
+    expect(stored.statusCode).toBe(201);
+    const reference = (stored.json() as { reference: string }).reference;
+    const keys = fillKeyPair();
+
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/browser-fill",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: {
+        reference,
+        current_host: "https://www.dsers.com/application/login",
+        fields: ["username", "password"],
+        encrypted_response_public_key: keys.publicKey,
+      },
+    });
+
+    expect(res.statusCode).toBe(200);
+    const body = res.json() as { encrypted_fields: Record<string, string> };
+    expect(keys.decrypt(body.encrypted_fields.password!)).toBe("correct-horse");
+  });
+
   it("does not let an exact login host match a subdomain", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const cookie = await webCookie(h.deps, account.id);
