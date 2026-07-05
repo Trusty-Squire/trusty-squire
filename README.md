@@ -79,7 +79,7 @@ npx @trusty-squire/mcp connect
 
 That issues your account, signs you in (Google/GitHub), and writes the MCP config for
 your agent. Then ask your agent to do any of the above in plain language. Full install
-notes (Claude Code, Cursor, Codex, Goose, Cline, Continue) live in the
+notes (Claude Code, Cursor, Codex, Goose, Cline, Continue, Hermes) live in the
 [npm package README](apps/mcp/README.md).
 
 ## How it works

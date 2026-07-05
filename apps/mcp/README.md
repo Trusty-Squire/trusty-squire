@@ -37,7 +37,7 @@ and writes the MCP config. Restart your agent to pick up the tools. To pin a tar
 npx @trusty-squire/mcp connect --target=goose
 ```
 
-Supported agents: `claude-code`, `cursor`, `codex`, `goose`, `cline`, `continue`.
+Supported agents: `claude-code`, `cursor`, `codex`, `goose`, `cline`, `continue`, `hermes`.
 
 ## Example
 
