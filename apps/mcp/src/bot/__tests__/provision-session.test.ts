@@ -38,7 +38,7 @@ import {
   makeTwoCaptchaVaultProxy,
   toCompactElement,
 } from "../provision-session.js";
-import { looksLikeCodeIdentifier, findCredentialTokens } from "../credential-shape.js";
+import { looksLikeCodeIdentifier, findCredentialTokens, keyFamilyPrefix } from "../credential-shape.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
 // the rest get inert defaults so the fixtures stay readable.
@@ -596,6 +596,30 @@ describe("findCredentialTokens (multi-credential extraction)", () => {
       live_write_key: "vsk_live_1536ea69786f3d176afde8d0d93cab852070245c",
       live_read_key: "vsk_live_read_3cd42451654aac8db0263d13de871f3741dd513e",
     });
+  });
+});
+
+describe("keyFamilyPrefix (multi-key surfacing gate — Resend capture bug 2026-07-09)", () => {
+  it("returns the vendor prefix before the first separator", () => {
+    expect(keyFamilyPrefix("re_ABC123def456ghi789jkl012")).toBe("re");
+    expect(keyFamilyPrefix("vsk_sandbox_write_20af25f2668a65ae268625ab2235e765")).toBe("vsk");
+    expect(keyFamilyPrefix("xai-4Y7FDyM7kQ2bX9wZ1aL3pR")).toBe("xai");
+  });
+
+  it("is null for a prefixless / separatorless key (deepinfra-shape)", () => {
+    expect(keyFamilyPrefix("Hb1bT6VZJdM2cvxVKdm2WCL3kdg6VNNz")).toBeNull();
+  });
+
+  it("a genuine second key repeats the family; a cross-family page token does not", () => {
+    // VouchFlow: vsk_ write + vsk_ read → same family → surfaced as api_key_2.
+    expect(keyFamilyPrefix("vsk_sandbox_read_02ae44b1c9d3e6f7a8b9c0d1e2f3a4b5")).toBe(
+      keyFamilyPrefix("vsk_sandbox_write_20af25f2668a65ae268625ab2235e765"),
+    );
+    // A Resend dashboard's mcp-… widget token is a DIFFERENT family than the re_
+    // key (synthetic shapes) → must NOT match → never surfaced onto the Resend cred.
+    expect(keyFamilyPrefix("mcp-abcdefgh_x1y2z3w4")).not.toBe(
+      keyFamilyPrefix("re_ABC123def456ghi789jkl012"),
+    );
   });
 });
 
