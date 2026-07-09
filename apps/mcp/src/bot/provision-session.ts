@@ -57,6 +57,7 @@ import {
   looksLikeCredentialValue,
   isCredentialNoise,
   findCredentialTokens,
+  keyFamilyPrefix,
   pickRelaxedNearCopyCredential,
 } from "./credential-shape.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -2089,15 +2090,25 @@ export async function extractCredentials(sessionId: string): Promise<ExtractResu
     }
   }
 
-  // Multi-credential: a service may present several keys of the same shape
-  // (VouchFlow shows sandbox write AND read). The single-key extraction.ts
-  // policy stops at the first; collect every distinct credential-shaped token
-  // and surface the ones the primary missed as api_key_2, api_key_3, …
+  // Multi-credential: a service may present several keys of the SAME family
+  // (VouchFlow shows a vsk_ write AND a vsk_ read). Surface only tokens that
+  // repeat a family already captured for THIS service — a cross-family token that
+  // merely shares the page (a Resend dashboard's mcp-… widget beside the real re_
+  // key) is page noise, not a second credential, and surfacing it pollutes the
+  // credential + allow-lists an unrelated token to the service host (capture bug
+  // 2026-07-09). A prefixless primary (deepinfra) yields no family, so no extras.
+  const families = new Set(
+    Object.values(credentials)
+      .map((v) => (typeof v === "string" ? keyFamilyPrefix(v) : null))
+      .filter((f): f is string => f !== null),
+  );
   const have = new Set(Object.values(credentials));
   let n = 1;
   for (const tok of findCredentialTokens(haystack)) {
     if (have.has(tok)) continue;
     if (n >= 8) break; // cap extras so page noise can't flood the result
+    const fam = keyFamilyPrefix(tok);
+    if (fam === null || !families.has(fam)) continue;
     have.add(tok);
     n += 1;
     credentials[`api_key_${n}`] = tok;

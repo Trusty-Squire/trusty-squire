@@ -96,6 +96,18 @@ export function looksLikeCredentialToken(token: string): boolean {
     .some((s) => s.length >= 10 && /[A-Za-z]/.test(s) && /[0-9]/.test(s));
 }
 
+// The vendor FAMILY of a key = the leading letters before its first separator.
+// (re_… → "re", vsk_sandbox_write_… → "vsk", xai-… → "xai".) A genuine SECOND
+// credential from the same service repeats this family — VouchFlow shows a vsk_
+// write key AND a vsk_ read key. A token of a DIFFERENT family that merely sits
+// on the same dashboard (a Resend page's mcp-… widget token beside the real re_
+// key) does NOT, and must not be surfaced as api_key_2 (capture bug 2026-07-09).
+// Returns null for a prefixless / separatorless key.
+export function keyFamilyPrefix(token: string): string | null {
+  const m = /^([A-Za-z]{2,})[_-]/.exec(token.trim());
+  return m !== null ? m[1]!.toLowerCase() : null;
+}
+
 // Last-resort acceptance for a PREFIXLESS, SEPARATORLESS key — the shape the
 // strict scanners (extractApiKeyFromText, findCredentialTokens) deliberately
 // refuse from raw page text, because a bare 32-char base62 string is
