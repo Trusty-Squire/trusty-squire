@@ -192,6 +192,17 @@ function ConfabBody(): ReactNode {
         <strong>Capability doesn&rsquo;t remove confabulation. It relocates it</strong>{" "}
         &mdash; and moves it somewhere far more dangerous.
       </p>
+      <p>
+        Right now that&rsquo;s survivable, barely &mdash; because you&rsquo;re still in
+        the loop to catch it, the way I eventually caught the two confabulations that
+        cost me weeks of compute and a fleet of proxies (both below). But the whole
+        industry is racing to take you out of that loop. People already point an agent
+        at a task, let it run overnight, and wake up to a maxed-out token budget and a
+        result that&rsquo;s unusable &mdash; or nothing like what they asked for. Nobody
+        was watching, so nothing got caught; the confabulation just compounded, turn
+        after turn, on their dime. That is the stakes. The rest of this is how I know
+        it&rsquo;s real.
+      </p>
 
       <h2>What the literature already knew</h2>
       <p>
@@ -545,7 +556,9 @@ function ConfabBody(): ReactNode {
         beneath it, and there is no node in the tree where anyone notices that a whole
         subtree was built on a claim that was never true. The blast radius goes from
         &ldquo;weeks of my compute&rdquo; to &ldquo;an entire autonomous run,
-        unbounded.&rdquo;
+        unbounded&rdquo; &mdash; the overnight-loop horror story writ large, except now
+        it isn&rsquo;t one agent burning one budget but a dozen agents deep, each
+        believing the one below, with no bottom.
       </p>
       <p>
         So grounding isn&rsquo;t a nice-to-have. A receipt-based, cross-vendor check at{" "}
@@ -601,7 +614,7 @@ export const POSTS: Post[] = [
     date: "10 July 2026",
     iso: "2026-07-10",
     description:
-      "Capability doesn't make coding agents honest — it makes them better liars. I measured four models under load: the weak ones fake the code, the frontier ones fake the verification. Same lie, moved somewhere you're far more likely to believe it.",
+      "Capability doesn't make coding agents honest — it makes them better liars: the weak ones fake the code, the frontier ones fake the verification. I measured it across four models — and why it stops being survivable the moment agents answer to other agents instead of to you.",
     Body: ConfabBody,
   },
   {
