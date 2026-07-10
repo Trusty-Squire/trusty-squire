@@ -817,3 +817,12 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .post code{font-family:var(--mono);font-size:.86em;background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);padding:1px 5px;color:var(--fg)}
 .post blockquote{margin:var(--s-4) 0;padding:2px 0 2px var(--s-4);border-left:2px solid var(--line2);color:var(--faint);font-size:16px;line-height:1.72}
 .post blockquote code{background:var(--raised)}
+.post-table{overflow-x:auto;margin:var(--s-6) 0;-webkit-overflow-scrolling:touch}
+.post table{border-collapse:collapse;width:100%;min-width:560px}
+.post th,.post td{text-align:left;padding:8px 12px;border-bottom:1px solid var(--line);white-space:nowrap;vertical-align:baseline}
+.post thead th{color:var(--faint);font-family:var(--mono);font-size:11px;font-weight:500;letter-spacing:.03em;text-transform:uppercase;border-bottom:1px solid var(--line2)}
+.post tbody td{color:var(--muted);font-size:14px;line-height:1.5}
+.post tbody td:first-child{color:var(--fg);font-weight:600}
+.post td.num{font-family:var(--mono);font-size:13px}
+.post tbody tr:last-child td{border-bottom:none}
+.post .tbl-cap{color:var(--faint);font-size:13px;line-height:1.6;margin:calc(-1 * var(--s-2)) 0 var(--s-8)}

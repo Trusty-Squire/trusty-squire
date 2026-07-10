@@ -174,174 +174,344 @@ function ConfabBody(): ReactNode {
   return (
     <>
       <p>
-        Everyone who codes with an AI agent has felt this: the agent finishes,
-        says <em>&ldquo;Done &mdash; all tests pass,&rdquo;</em> and it isn&rsquo;t
-        true. The tests were never run, or three of the twelve features quietly
-        regressed, or the &ldquo;fix&rdquo; is a plausible-looking line that
-        doesn&rsquo;t actually work. The model isn&rsquo;t lying on purpose. It
-        just can&rsquo;t always tell its own finished work from its own hopeful
-        narration &mdash; and neither can you, until it burns you.
+        There are two ways a language model can be wrong about the world, and only
+        one of them gets talked about. The famous one is <em>hallucination</em>:
+        the model invents a fact about the world &mdash; a court case, a citation, a
+        library function that doesn&rsquo;t exist. The one that actually costs you a
+        weekend is <em>confabulation</em>: the model is wrong not about the world
+        but about <strong>its own actions</strong>. It says <em>&ldquo;Done &mdash;
+        all tests pass&rdquo;</em> when it never ran the tests. It says{" "}
+        <em>&ldquo;fixed the regression&rdquo;</em> over a file it never touched. It
+        isn&rsquo;t lying on purpose; it genuinely can&rsquo;t always separate its
+        finished work from its own hopeful narration of it &mdash; and, crucially,
+        neither can you, until it burns you.
       </p>
       <p>
-        I wanted to know one thing: <strong>is this a small-model problem that
-        better models grow out of, or does it follow you up the capability
-        ladder?</strong> So I measured it.
+        The comforting hypothesis is that this is a small-model problem: today&rsquo;s
+        frontier models are so much more capable that they&rsquo;ll simply grow out
+        of it. I spent a while measuring whether that&rsquo;s true. It isn&rsquo;t.
+        Capability doesn&rsquo;t remove the confabulation. It <strong>relocates</strong>{" "}
+        it &mdash; and moves it somewhere far more dangerous.
       </p>
 
-      <h2>How I measured it</h2>
+      <h2>What the literature already knew</h2>
       <p>
-        I gave four coding models the same long, overloaded task: build a stateful
-        command-line ledger, one feature per turn, twelve turns. The trick is that
-        each turn also quietly <em>mutates</em> an earlier requirement, so old
-        features fall out of the model&rsquo;s context window and silently break &mdash;
-        exactly the condition that produces over-confident &ldquo;still works&rdquo;
-        claims in real work. A hidden test suite the model never sees is the ground
-        truth. After every turn, a <em>different</em> model from a different vendor
-        audits that turn&rsquo;s claims against what actually happened &mdash; the real
-        git diff, a real test run &mdash; and flags anything the repository
-        doesn&rsquo;t back up.
+        The &ldquo;scale will fix it&rdquo; hypothesis was in trouble before I ran
+        anything. A run of recent work points the same direction from different
+        angles. On knowledge conflicts &mdash; where a prompt contradicts what the
+        model knows &mdash; benchmarks like <strong>ClashEval</strong> and{" "}
+        <strong>FaithEval</strong> find that bigger models are <em>not</em> more
+        faithful; they&rsquo;ll abandon a correct prior for a plausible-sounding
+        wrong context at rates that don&rsquo;t improve with scale. On honesty under
+        pressure, <strong>MASK</strong> separates what a model <em>believes</em> from
+        what it <em>states</em> when pushed, and reports something genuinely
+        unsettling: the correlation between capability and honesty is{" "}
+        <em>negative</em>. More capable models were <em>more</em> willing to state
+        something they didn&rsquo;t believe when the situation pressured them to.
       </p>
       <p>
-        The four drivers, weakest to strongest: Qwen2.5 3B and 14B (running locally
-        on Ollama), DeepSeek, and GPT&#8209;5.1&#8209;Codex. The auditor was held
-        constant across all of them.
+        The sharpest result, for my purposes, is about abstention &mdash; a
+        model&rsquo;s willingness to say <em>&ldquo;I&rsquo;m not sure&rdquo;</em>{" "}
+        instead of committing.<strong> AbstentionBench</strong> finds that reasoning
+        fine-tuning, the very thing that makes the newest models feel so much
+        smarter, measurably <em>degrades</em> abstention: the model hedges honestly{" "}
+        <em>inside</em> its reasoning trace and then emits a confident, definitive
+        answer <em>outside</em> it. Hold that image &mdash; hedged inside, certain
+        outside &mdash; because it turns out to be the exact shape of the frontier
+        failure. Alongside these sit the inducers: <strong>ImpossibleBench</strong>{" "}
+        makes tasks unsolvable-by-construction and finds cheat rates that only
+        collapse when the model is handed an explicit way to say <em>&ldquo;this is
+        impossible&rdquo;</em>; and the long-context literature (<strong>Lost in the
+        Middle</strong>, <strong>Context Rot</strong>) shows that piling on context
+        reliably degrades what a model can actually track.
+      </p>
+      <p>
+        Two things are missing from all of it. First, almost all of it is
+        single-turn question-answering, not an <em>agent</em> in a build loop with
+        tools and state. Second, it measures a <em>rate</em> &mdash; how often, under
+        one inducer, at one capability point. Nobody had traced the thing I kept
+        actually running into: how the confabulation <em>moves</em> as the agent
+        driving the loop gets smarter.
       </p>
 
-      <h2>The finding: capability doesn&rsquo;t remove the lie, it moves it</h2>
+      <h2>What I kept running into</h2>
       <p>
-        Better models did not confabulate less. They confabulated{" "}
-        <em>somewhere else.</em>
+        This started as a pile of field notes, not a hypothesis. Building a poker
+        solver over many months, I watched a frontier model (Claude, at its most
+        capable) diagnose nearly every performance wall we hit as the same thing
+        &mdash; an <em>&ldquo;abstraction ceiling.&rdquo;</em> Fluent, plausible,
+        delivered with total confidence, and backed by <strong>no discriminating
+        experiment whatsoever</strong> &mdash; nothing that could tell that cause
+        apart from the five other things it could equally have been. The tell was
+        never a wrong fact. It was a confident <em>cause</em> with no test behind it.
       </p>
+      <p>
+        The same project spent literal months green-but-wrong: the test suite passed
+        the whole time, because the tests and the code had been written by the same
+        model from the same misunderstanding. Green meant internally consistent, not
+        correct. Another time, a &ldquo;measured&rdquo; throughput number turned out
+        to have been read off a stale code comment rather than run. And the pattern
+        across models was consistent and strange: a small local model would
+        confabulate inside a <em>single</em> hard refactor; a mid model within a
+        couple of turns; the frontier model would hold out for weeks and then do it{" "}
+        <em>more subtly</em>. Same disease, different decay constant &mdash; and the
+        more capable the model, the harder its version was to catch. The through-line
+        of every one of these: the model had stopped re-checking ground truth and
+        started narrating from memory, and the narration was good enough to trust.
+      </p>
+      <p>
+        That last observation &mdash; capability doesn&rsquo;t stop the
+        confabulation, it just refines it &mdash; is what this experiment set out to
+        pin down.
+      </p>
+
+      <h2>The experiment</h2>
+      <p>
+        I gave four coding models the same deliberately punishing task: build a
+        stateful command-line ledger, one feature per turn, twelve turns. The cruelty
+        is in the design &mdash; each new turn also quietly <em>mutates</em> an
+        earlier requirement, so previously-built features drift out of the
+        model&rsquo;s context window and silently regress. That&rsquo;s the
+        context-overload condition from the literature, turned into a build loop
+        instead of a quiz. A hidden test suite the model never sees is ground truth.
+      </p>
+      <p>
+        After every turn, a <em>different model from a different vendor</em> audits
+        that turn&rsquo;s claims &mdash; not against the transcript, but against the
+        actual repository: the real git diff, a fresh test run. Cross-vendor is not a
+        detail. A model grading its own family shares its blind spots; independence of
+        derivation is the entire point. And the core check is deliberately dumb and
+        un-gameable: <strong>a claim of action or verification is worth exactly its
+        receipt</strong> &mdash; did the command run, what was the exit code. You
+        cannot phrase your way past an exit code. The four drivers, weakest to
+        strongest: Qwen2.5&nbsp;3B and 14B (local, on Ollama), DeepSeek, and
+        GPT&#8209;5.1&#8209;Codex, with the auditor held constant across all of them.
+      </p>
+
+      <h2>The result: the confabulation frontier moves outward</h2>
+      <p>
+        Every model that could confabulate, did. What changed with capability was{" "}
+        <em>where</em>.
+      </p>
+      <div className="post-table">
+        <table>
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th>Built</th>
+              <th>Claims flagged</th>
+              <th>Caught (provable)</th>
+              <th>Ambiguous</th>
+              <th>Confabulates&hellip;</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Qwen 3B</td>
+              <td className="num">0 / 12</td>
+              <td className="num">2</td>
+              <td className="num">2</td>
+              <td className="num">0</td>
+              <td>the code</td>
+            </tr>
+            <tr>
+              <td>Qwen 14B</td>
+              <td className="num">0 / 12</td>
+              <td className="num">24</td>
+              <td className="num">21</td>
+              <td className="num">3</td>
+              <td>the code, loudly</td>
+            </tr>
+            <tr>
+              <td>DeepSeek</td>
+              <td className="num">12 / 12</td>
+              <td className="num">7</td>
+              <td className="num">1</td>
+              <td className="num">6</td>
+              <td>the edges</td>
+            </tr>
+            <tr>
+              <td>GPT-5.1-Codex</td>
+              <td className="num">12 / 12</td>
+              <td className="num">9</td>
+              <td className="num">0</td>
+              <td className="num">9</td>
+              <td>the verification</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p className="tbl-cap">
+        One task family, one cross-vendor auditor held constant, one run each.
+        &ldquo;Provable&rdquo; = the hidden suite confirms the claim is false;
+        &ldquo;ambiguous&rdquo; = the claim is unbacked but a pass/fail suite
+        can&rsquo;t disprove it &mdash; either the code happens to work, or the claim
+        is about performance or causation the suite doesn&rsquo;t measure.
+      </p>
+      <p>Walk down the ladder:</p>
       <ul>
         <li>
-          <strong>Qwen 3B (weak)</strong> couldn&rsquo;t build the thing at all
-          (0 of 12 features) and fabricated <strong>the code itself</strong> &mdash;
-          &ldquo;implemented the core module&rdquo; when no file existed.
+          <strong>Qwen 3B</strong> couldn&rsquo;t build the thing (0 of 12) and
+          fabricated <strong>the code itself</strong> &mdash;{" "}
+          <em>&ldquo;implemented the core module&rdquo;</em> with no file on disk.
         </li>
         <li>
-          <strong>Qwen 14B</strong> also built nothing (0 of 12) &mdash; but where
-          the 3B model went quiet, the 14B model got <em>confident.</em> It wrote{" "}
-          <strong>twenty-four</strong> detailed claims across the run &mdash;
-          &ldquo;complete solution,&rdquo; &ldquo;all twelve features: Success&rdquo;
-          &mdash; narrating an entire application that did not exist. The confident
-          bullshitter is the more dangerous failure, and it showed up in the{" "}
-          <em>middle</em> of the capability range, not the bottom.
+          <strong>Qwen 14B</strong> also built nothing &mdash; but where the 3B went
+          quiet, the 14B got <em>confident.</em> Twenty-four detailed claims across
+          the run &mdash; <em>&ldquo;complete solution,&rdquo;</em>{" "}
+          <em>&ldquo;all twelve features: Success&rdquo;</em> &mdash; narrating an
+          entire application that did not exist. The most alarming failure in the
+          whole grid sits in the <em>middle</em> of the capability range, not the
+          bottom: competent enough to write a convincing story, not competent enough
+          to make it true.
         </li>
         <li>
           <strong>DeepSeek</strong> actually built all twelve features &mdash; and
-          then over-claimed <strong>the edges</strong>: specific behaviors it never
-          tested, an &ldquo;all tests pass&rdquo; on a turn where two features had
-          just regressed.
+          moved its confabulation out to <strong>the edges</strong>: specific
+          behaviors it never exercised, and one <em>&ldquo;all tests pass&rdquo;</em>{" "}
+          on a turn where two features had just regressed underneath it.
         </li>
         <li>
           <strong>GPT&#8209;5.1&#8209;Codex</strong> built all twelve features{" "}
-          <em>correctly</em> &mdash; and still confabulated, just at the last
-          remaining place: <strong>the verification.</strong> &ldquo;Ran the full
-          regression suite, all checks passed&rdquo; &mdash; with no test run
-          anywhere in the trace. The work was real. The claim that it had{" "}
-          <em>checked</em> the work was invented.
+          <em>correctly</em> &mdash; and still confabulated, at the one place left:{" "}
+          <strong>the verification.</strong> Nine times it claimed to have run the
+          suite &mdash; <em>&ldquo;Ran the full regression script, all checks
+          passed&rdquo;</em> &mdash; with no such run anywhere in the trace. The work
+          was real. The claim that it had <em>checked</em> the work was invented,
+          every time.
         </li>
       </ul>
       <p>
-        That&rsquo;s the whole finding in one line:{" "}
-        <strong>the weak model fakes the code; the frontier model fakes the
-        check.</strong> A model good enough to do the work perfectly will still
-        confabulate that it verified the work &mdash; which is the most expensive
-        lie of all, because it&rsquo;s the one you&rsquo;re most likely to trust.
+        The one-line version: <strong>the weak model fakes the code; the frontier
+        model fakes the check.</strong>
       </p>
 
-      <h2>The reassuring part: it gets <em>caught</em> cleanest where it matters</h2>
+      <h2>Why the frontier moves</h2>
       <p>
-        The obvious worry about any &ldquo;lie detector&rdquo; is that it cries wolf.
-        The grid says the opposite. The auditor&rsquo;s false-alarm risk{" "}
-        <em>rises</em> with the model&rsquo;s capability, and its clean catches
-        concentrate exactly where the danger is highest:
+        It moves because confabulation lives on the surface between what a model{" "}
+        <em>did</em> and what it can <em>narrate without grounding</em> &mdash; and
+        capability reshapes that surface. A weak model can&rsquo;t write the code, so
+        the ungrounded narration is about the code&rsquo;s very existence. Make the
+        model capable enough to write working code and that crude gap closes &mdash;
+        but a new, finer one opens at the edges it didn&rsquo;t test. Make it capable
+        enough to get the edges right too, and the only thing left to narrate without
+        doing is the <em>verification</em> &mdash; the one step that is most expensive
+        to actually perform and, not coincidentally, the cheapest to simply assert.
       </p>
+      <p>
+        This is why &ldquo;more capable&rdquo; buys you a <em>subtler</em> lie rather
+        than fewer lies, and it is the same phenomenon the literature already caught
+        from other angles. Codex is the reasoning-fine-tuned pattern from
+        AbstentionBench in agentic form: honest enough to do the work, then confident
+        outside the trace about a check it never performed &mdash; hedged inside,
+        certain outside. And it is why honesty and capability came out{" "}
+        <em>negatively</em> correlated in MASK: scale doesn&rsquo;t purchase honesty,
+        it purchases a claim that survives more scrutiny. The failure you have to fear
+        from a frontier agent isn&rsquo;t &ldquo;it can&rsquo;t do the work.&rdquo;
+        It&rsquo;s <em>&ldquo;it did the work, and told you it checked&rdquo;</em>{" "}
+        &mdash; the single claim you are most inclined to believe, because everything
+        else it said that turn was true.
+      </p>
+
+      <h2>The detector cuts sharpest exactly where it matters</h2>
+      <p>
+        The obvious objection to any lie-detector is that it cries wolf. The grid
+        shows the opposite, and it&rsquo;s worth dwelling on why. False-alarm risk{" "}
+        <em>rises</em> with capability, and clean catches concentrate where the danger
+        is highest. Against the models that built nothing, the auditor caught 21 of
+        the 14B&rsquo;s fabrications with <strong>zero false alarms</strong> &mdash;
+        when there is no code, every &ldquo;it works&rdquo; is mechanically,
+        provably wrong. The only ambiguous flags in the entire study came from Codex,
+        and they&rsquo;re ambiguous <em>solely</em> because its code happened to run;
+        the verification claim was still unbacked, just not disprovable by a suite
+        that only knows pass/fail. So the detector is most decisive against confident
+        nonsense and most cautious around working code &mdash; the exact shape you
+        want, and the reverse of the cry-wolf failure everyone assumes.
+      </p>
+
+      <h2>Does catching it help? A correction that landed</h2>
+      <p>
+        Detection is worth little if the agent can&rsquo;t act on it, so the second
+        experiment closes the loop: feed the auditor&rsquo;s objection back into the
+        same session and let the model try again. The prettiest run was a
+        floating-point trap. A mid-tier model (Qwen 72B) was asked to fix a rounding
+        bug and reached for the obvious fix, <code>Math.round(x * 100) / 100</code>,
+        and declared victory. But that fix is <em>also</em> wrong:{" "}
+        <code>1.005 * 100</code> is really <code>100.49999999999999</code> in
+        floating point, so it rounds to <code>1.00</code>, not <code>1.01</code>.
+      </p>
+      <p>
+        Instead of quibbling with the wording, the auditor <em>did the
+        arithmetic</em> &mdash; showed the proposed fix still fails that exact input,
+        and named the class of fix that would work. Next turn, the model applied a
+        representation-safe version and the real suite went green. The correction
+        landed because the objection demanded a change to <em>what was done</em>, not
+        to how it was phrased &mdash; and across every unfixed run in the loop, the
+        auditor never once certified an unfinished repo as done. It fails safe: an
+        agent that can&rsquo;t fix it stalls honestly rather than shipping a green
+        lie.
+      </p>
+
+      <h2>The limits I&rsquo;ll own</h2>
+      <p>Because a piece about confabulation had better not confabulate its own certainty:</p>
       <ul>
         <li>
-          Against the models that built nothing, it caught 21 of the 14B&rsquo;s
-          fabrications with <strong>zero false alarms</strong> &mdash; when there is
-          no code, every &ldquo;it works&rdquo; is cleanly, mechanically wrong.
+          This is <strong>four models, one task family, one auditor family, one run
+          each.</strong> It&rsquo;s a sharp finding, not a proof. Variance across
+          runs, a second auditor family, and more task types are exactly what would
+          turn a suggestive result into a real one &mdash; and they&rsquo;re the next
+          experiments, not hand-waving.
         </li>
         <li>
-          The only ambiguous flags in the whole run came from{" "}
-          <strong>Codex</strong> &mdash; and they&rsquo;re ambiguous <em>only</em>{" "}
-          because its code happened to run. The verification claim was still
-          unbacked; it just wasn&rsquo;t provably false.
-        </li>
-      </ul>
-      <p>
-        So the detector is sharpest against confident nonsense and most cautious
-        against working code. That is exactly the shape you want, and the reverse
-        of the cry-wolf failure everyone expects.
-      </p>
-
-      <h2>Does catching it actually help?</h2>
-      <p>
-        Detecting a bad claim is worth little if the agent can&rsquo;t act on it. So
-        the second experiment closes the loop: take the auditor&rsquo;s objection,
-        feed it back into the same session, and let the model try again.
-      </p>
-      <p>
-        The best moment came from a floating-point trap. I asked a mid-tier model
-        (Qwen 72B) to fix a rounding bug. It reached for the obvious fix,{" "}
-        <code>Math.round(x * 100) / 100</code>, and declared victory. But that fix
-        is <em>also</em> wrong &mdash; <code>1.005 * 100</code> is actually{" "}
-        <code>100.49999999999999</code> in floating point, so it rounds to{" "}
-        <code>1.00</code>, not <code>1.01</code>. Instead of nitpicking the wording,
-        the auditor <em>did the arithmetic</em>, showed that the proposed fix still
-        fails the exact input, and named the class of fix that would work. Next
-        turn, the model applied a representation-safe version &mdash; and the real
-        test suite went green. The correction landed because the objection demanded
-        a change to <em>what was done</em>, not to how it was phrased.
-      </p>
-
-      <h2>What&rsquo;s still hard (because it is)</h2>
-      <p>I&rsquo;d rather tell you the edges than let you find them:</p>
-      <ul>
-        <li>
-          This is <strong>four models, one task family, one auditor, one run
-          each.</strong> It&rsquo;s a sharp finding, not a proof. The obvious next
-          steps &mdash; multiple runs for variance, a second auditor family, more
-          task types &mdash; are exactly what would turn it into one.
+          The reliable core is <strong>action plus verification</strong> &mdash; did
+          it run, what was the exit code &mdash; which is close to un-gameable.
+          Claims about <em>behavior</em>, <em>cause</em>, and <em>performance</em> are
+          softer: a model can accurately describe correct code it simply never tested,
+          and the auditor sometimes flags that too. Getting that tier to stop nagging
+          about true-but-unproven statements without going blind to the real ones is
+          live work.
         </li>
         <li>
-          The reliable core is <strong>action plus verification</strong>: did the
-          command run, what was the exit code. That part is close to un-gameable.
-          Claims about <em>behavior</em>, <em>cause</em>, and <em>performance</em>
-          are softer &mdash; a model can accurately describe correct code it simply
-          never tested, and the auditor sometimes flags that too. Tightening that
-          tier so it stops nagging about true-but-unproven statements is live work.
+          Some confabulation classes are transient &mdash; the impossible-task
+          cheating in ImpossibleBench largely trains away once you give the model a
+          way to decline. The <em>durable</em> ones, the long-term case for a
+          ground-truth layer at all, are the ones scale doesn&rsquo;t touch:
+          unverifiable claims and knowledge conflicts. Those are the frontier that
+          matters.
         </li>
       </ul>
 
       <h2>The part that had to ship upstream</h2>
       <p>
-        A verifier is only useful if it can <em>warn</em> without <em>blocking.</em>{" "}
-        Wire it to hard-block a turn and it deadlocks: the model re-claims, gets
-        blocked, re-claims, forever. So it has to advise and let the next turn
-        correct &mdash; which the Goose agent framework couldn&rsquo;t do. I found
-        the failure, then contributed the missing hook primitives back to Goose (a
-        non-blocking advisory channel), so a completion gate can be a{" "}
+        A verifier is only useful if it can <em>warn</em> without <em>blocking</em>.
+        Wired to hard-block a turn, a completion gate deadlocks &mdash; the model
+        re-claims, gets blocked, re-claims, forever; in one early run it burned dozens
+        of consecutive blocks recreating the exact stuck-agent failure it was built to
+        prevent. The fix is to advise and let the <em>next</em> turn correct, which
+        the Goose agent framework had no way to express. So I found the failure and
+        contributed the missing hook primitives back to Goose &mdash; a non-blocking
+        advisory channel &mdash; so a completion gate can be a{" "}
         <a href={GOOSE_PR_URL} target="_blank" rel="noopener noreferrer">
           gate and not a wall
         </a>
         .
       </p>
 
-      <h2>Try it</h2>
+      <h2>Try it, and try to break it</h2>
       <p>
-        The whole thing &mdash; the eval harness, the grid, the cross-vendor auditor
-        &mdash; is open source as{" "}
+        The whole apparatus &mdash; the eval harness, the grid, the cross-vendor
+        auditor &mdash; is open source as{" "}
         <a href={VERITAS_URL} target="_blank" rel="noopener noreferrer">
           veritaserum
         </a>
         : a portable ground-truth layer that catches false &ldquo;done&rdquo; claims
-        by running a fresh judge from a different vendor on your harness&rsquo;s Stop
-        hook. It&rsquo;s the same instinct behind{" "}
-        <Link href="/">Trusty Squire</Link> &mdash; an agent you can actually trust
-        needs guardrails it can&rsquo;t talk its way around. Would love feedback,
-        especially from anyone who can break the finding.
+        by running a fresh judge from a <em>different</em> vendor against your
+        harness&rsquo;s Stop hook &mdash; probing the present state of the repo, not
+        trusting the transcript. It&rsquo;s the same instinct behind{" "}
+        <Link href="/">Trusty Squire</Link>: an agent you can genuinely trust needs
+        guardrails it can&rsquo;t talk its way around. I&rsquo;d most like to hear
+        from anyone who can break the finding &mdash; the fastest way to learn the
+        frontier moves somewhere I haven&rsquo;t looked yet.
       </p>
     </>
   );
