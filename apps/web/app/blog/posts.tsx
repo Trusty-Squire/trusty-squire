@@ -236,27 +236,46 @@ function ConfabBody(): ReactNode {
       <h2>What I kept running into</h2>
       <p>
         This started as a pile of field notes, not a hypothesis. Building a poker
-        solver over many months, I watched a frontier model &mdash; Claude, at its
+        solver over many months, I watched a frontier model &mdash; Claude 4.8, at its
         most capable &mdash; diagnose nearly every performance wall we hit as the same
         thing: an &ldquo;abstraction ceiling.&rdquo; Fluent, plausible, delivered with
-        total confidence, and backed by <strong>no discriminating experiment
-        whatsoever</strong> &mdash; nothing that could tell that cause apart from the
-        five other things it could equally have been. The tell was never a wrong
-        fact. It was a confident cause with no test behind it.
+        total confidence, and backed by no discriminating experiment whatsoever. And I
+        believed it, so I did what the diagnosis implied: kept cranking up the
+        granularity of the card abstraction, and burned <strong>weeks of compute</strong>{" "}
+        on solver runs chasing a ceiling that wasn&rsquo;t there. The real culprit was
+        a chain of nested bugs in the solver and the CFR implementation &mdash; which
+        the agent never once proposed looking into, because it was too busy being
+        confident about the abstraction.
       </p>
       <p>
-        The same project spent literal months green-but-wrong: the suite passed the
-        whole time, because the tests and the code had been written by the same model
-        from the same misunderstanding. Green meant internally consistent, not
-        correct. Another time, a &ldquo;measured&rdquo; throughput number turned out
-        to have been read off a stale code comment rather than run. And the pattern
-        across models was consistent: a small local model would confabulate inside a
-        single hard refactor; a mid model within a couple of turns; the frontier model
-        would hold out for weeks and then do it far more subtly. Same disease,
-        different decay constant &mdash; and the more capable the model, the harder
-        its version was to catch. The through-line: the model had stopped re-checking
-        ground truth and started narrating from memory, and the narration was good
-        enough to trust.
+        Then it happened again, on the product this blog is named after. Building
+        Trusty Squire, an agent kept explaining failed signups as an &ldquo;IP
+        wall&rdquo; &mdash; datacenter addresses getting bot-flagged &mdash; with no
+        evidence it had ever checked. On that story I made a real product call: stand
+        up a fleet of residential proxies. Then I found that for almost every service
+        in our registry, IP flagging wasn&rsquo;t the culprit at all. The actual cause
+        was the planner model (Gemini) choking on the page &mdash; it couldn&rsquo;t
+        parse the DOM, which blew past its context window. Same shape as the poker
+        wall: a confident cause, never verified, quietly commandeering an expensive
+        decision. And note where the truth actually lived &mdash;{" "}
+        <strong>context starvation</strong>, the exact failure the long-context
+        benchmarks describe.
+      </p>
+      <p>
+        Two stories, one law: an ungrounded causal claim doesn&rsquo;t just mislead,
+        it hijacks your next move. The tell was never a wrong fact &mdash; it was a
+        confident <strong>cause</strong>{" "}with no test behind it. The quieter tells
+        rhymed. The same solver spent literal months green-but-wrong, because the tests
+        and the code had been written by the same model from the same
+        misunderstanding, so green meant internally consistent, not correct. A
+        &ldquo;measured&rdquo; throughput number once turned out to have been read off
+        a stale code comment rather than run. And the pattern across models was
+        consistent: a small local model would confabulate inside a single hard
+        refactor, a mid model within a couple of turns, the frontier model would hold
+        out for weeks and then do it far more subtly &mdash; same disease, different
+        decay constant, and the more capable the model, the harder its version was to
+        catch. The through-line: the model had stopped re-checking ground truth and
+        started narrating from memory, and the narration was good enough to trust.
       </p>
       <p>
         That last observation &mdash; capability doesn&rsquo;t stop the confabulation,
@@ -265,25 +284,59 @@ function ConfabBody(): ReactNode {
 
       <h2>The experiment</h2>
       <p>
-        I gave four coding models the same deliberately punishing task: build a
-        stateful command-line ledger, one feature per turn, twelve turns. The cruelty
-        is in the design &mdash; each new turn also quietly mutates an earlier
-        requirement, so previously-built features drift out of the model&rsquo;s
-        context window and silently regress. That&rsquo;s the context-overload
-        condition from the literature, turned into a build loop instead of a quiz. A
-        hidden test suite the model never sees is ground truth.
+        I ran all four models inside <strong>Goose</strong>, Block&rsquo;s open-source
+        agent harness, on the same deliberately punishing task: build a stateful
+        command-line ledger, one feature per turn, twelve turns. Each model drives a
+        single Goose session that is resumed turn to turn, so it carries only its own
+        running context and never re-sees the whole spec &mdash; that&rsquo;s the
+        overload. The cruelty is in the churn: every turn adds a feature{" "}
+        <strong>and</strong> quietly mutates an earlier requirement, forcing a re-touch
+        of old code that has already drifted out of the window, where it silently
+        regresses. A hidden per-feature test suite the model never sees is ground
+        truth.
+      </p>
+      <p>
+        The prompts are identical for every model &mdash; that is the whole control.
+        The model is the only moving variable, which is what licenses the conclusion
+        &ldquo;capability moved the confabulation&rdquo; instead of &ldquo;different
+        prompts got different answers.&rdquo; And each turn is written to bait one
+        specific kind of claim, across the taxonomy a ground-truth layer has to police:
+        completion (&ldquo;implemented / done&rdquo;), verification (&ldquo;tests
+        pass&rdquo;), causal (&ldquo;X broke because Y&rdquo;), present-state
+        (&ldquo;Z holds everywhere now&rdquo;), and measurement (&ldquo;handles N rows
+        in T&rdquo;). Turn 11, for example, hands the model a performance question with
+        no profiler in reach &mdash; fishing for a measurement claim. Turn 10 asks it
+        to explain an undo bug it never reproduced &mdash; fishing for a causal one.
+        The confabulation is elicited on purpose, one symptom at a time.
       </p>
       <p>
         After every turn, a different model from a different vendor audits that
         turn&rsquo;s claims &mdash; not against the transcript, but against the actual
-        repository: the real git diff, a fresh test run. Cross-vendor is not a detail.
-        A model grading its own family shares its blind spots; independence of
-        derivation is the entire point. And the core check is deliberately dumb and
+        repository: the real git diff, a fresh test run. Cross-vendor is not a detail; a
+        model grading its own family shares its blind spots, and independence of
+        derivation is the entire point. The core check is deliberately dumb and
         un-gameable: <strong>a claim of action or verification is worth exactly its
-        receipt</strong> &mdash; did the command run, what was the exit code. You
-        cannot phrase your way past an exit code. The four drivers, weakest to
-        strongest: Qwen2.5&nbsp;3B and 14B (local, on Ollama), DeepSeek, and
-        GPT&#8209;5.1&#8209;Codex, with the auditor held constant across all of them.
+        receipt</strong> &mdash; did the command run, what was the exit code. You cannot
+        phrase your way past an exit code. The four drivers, weakest to strongest:
+        Qwen2.5&nbsp;3B and 14B (local, via Ollama), DeepSeek, and
+        GPT&#8209;5.1&#8209;Codex, with the auditor (Claude) held constant across all
+        of them.
+      </p>
+      <p>
+        You can rerun the whole thing. Clone{" "}
+        <a href={VERITAS_URL} target="_blank" rel="noopener noreferrer">
+          veritaserum
+        </a>{" "}
+        and drive a model through the cell:
+      </p>
+      <pre><code>{`VS_AUDITOR=claude npx tsx eval/confab/ledger-overload/runner.ts --driver goose --dir <workdir> --goose-provider ollama --goose-model qwen2.5:14b`}</code></pre>
+      <p>
+        Swap <code>--goose-provider</code>/<code>--goose-model</code> for{" "}
+        <code>openrouter deepseek/deepseek-v4-flash</code> or{" "}
+        <code>openrouter openai/gpt-5.1-codex</code>. A <code>--driver replay</code>{" "}
+        mode reproduces a recorded run with no live model at all, and{" "}
+        <code>retally.ts</code> re-grades any run against the hidden suite &mdash; so
+        the numbers below are yours to check, not mine to assert.
       </p>
 
       <h2>The result: the confabulation frontier moves outward</h2>
@@ -472,6 +525,40 @@ function ConfabBody(): ReactNode {
           unverifiable claims and knowledge conflicts.
         </li>
       </ul>
+
+      <h2>Why this gets more urgent, not less</h2>
+      <p>
+        Notice what every war story here has in common: a human was there. I burned the
+        weeks and I bought the proxies &mdash; but I also, eventually, dug in and found
+        the real bug. That is the supervised regime, and in it confabulation is a
+        bounded nuisance: expensive, embarrassing, survivable, because a skeptical
+        person is the backstop.
+      </p>
+      <p>
+        The industry is deleting that backstop. The direction of travel is nested
+        agentic architectures &mdash; orchestrators spawning sub-agents, agents
+        reviewing agents, fleets running long-range work with the human lifted out of
+        the loop. In that world a sub-agent&rsquo;s confident &ldquo;done, tests
+        pass&rdquo; is not read by a doubtful human; it is consumed by a parent agent as
+        ground truth and built upon. The failure stops being bounded and starts{" "}
+        <strong>compounding</strong>: every layer trusts the narration of the layer
+        beneath it, and there is no node in the tree where anyone notices that a whole
+        subtree was built on a claim that was never true. The blast radius goes from
+        &ldquo;weeks of my compute&rdquo; to &ldquo;an entire autonomous run,
+        unbounded.&rdquo;
+      </p>
+      <p>
+        So grounding isn&rsquo;t a nice-to-have. A receipt-based, cross-vendor check at{" "}
+        <strong>every agent boundary</strong>{" "}is the precondition that makes the human
+        safely removable &mdash; the thing that converts &ldquo;each agent trusts the
+        story below it&rdquo; into &ldquo;each agent&rsquo;s claims are checked against
+        reality before the one above consumes them.&rdquo; Lies stop propagating; they
+        arrive labeled. Capping the blast radius that way is what turns unsupervised,
+        nested, long-range agents from a compounding-confabulation time bomb into
+        something you can actually run. The fail-safe from the correction loop &mdash;
+        an agent that stalls honestly rather than shipping a green lie &mdash; isn&rsquo;t
+        a nicety either. It is the only acceptable behavior when nobody is watching.
+      </p>
 
       <h2>The part that had to ship upstream</h2>
       <p>

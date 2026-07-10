@@ -826,3 +826,5 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .post td.num{font-family:var(--mono);font-size:13px}
 .post tbody tr:last-child td{border-bottom:none}
 .post .tbl-cap{color:var(--faint);font-size:13px;line-height:1.6;margin:calc(-1 * var(--s-2)) 0 var(--s-8)}
+.post pre{margin:var(--s-4) 0;padding:var(--s-4);background:var(--surface);border:1px solid var(--line);border-radius:var(--r-sm);overflow-x:auto;-webkit-overflow-scrolling:touch}
+.post pre code{background:none;border:none;padding:0;border-radius:0;font-size:13px;line-height:1.6;color:var(--fg);white-space:pre}
