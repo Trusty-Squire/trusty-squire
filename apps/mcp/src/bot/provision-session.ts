@@ -1198,6 +1198,22 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     has_hint: opts.hint !== undefined,
   });
   await browser.goto(opts.serviceUrl);
+  // A cookie/consent overlay (Usercentrics/OneTrust/…) renders after load and its
+  // backdrop occludes the ENTIRE form — the agent then sees every element
+  // occluded_by a div and gives up, or falls back to the only thing that looks
+  // clickable (e.g. a "Connect wallet" CTA on the Robinhood faucet). Dismiss it
+  // BEFORE the first observation so the real actionable form is operable.
+  // dismissConsentBanner() existed but had NO call sites (dead code); it only
+  // clicks banner-specific CTAs (accept/reject all), so a false click is unlikely.
+  // Best-effort + one retry, since the widget lazy-loads a beat after the goto.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const cta = await browser.dismissConsentBanner().catch(() => null);
+    if (cta !== null) {
+      audit(id, "consent_dismissed", { cta });
+      break;
+    }
+    if (attempt === 0) await browser.waitForCaptchaChallengeToSettle(800, 0).catch(() => false);
+  }
   const observation = await observeSession(session);
   // Tell the agent which provider the user actually has a live session for
   // (Google-preferred) — the bot knows from the profile cookies, so the agent

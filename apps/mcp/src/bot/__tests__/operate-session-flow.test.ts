@@ -36,6 +36,8 @@ const h = vi.hoisted(() => ({
     | { kind: "solve_timeout"; durationMs: number }
     | { kind: "solver_error"; reason: string },
   twoCaptchaCalls: [] as string[],
+  consentDismissCalls: 0,
+  consentCta: null as string | null,
 }));
 
 vi.mock("../browser.js", () => ({
@@ -64,6 +66,10 @@ vi.mock("../browser.js", () => ({
     async waitForInteractiveDom(): Promise<void> {}
     async waitForCaptchaChallengeToSettle(): Promise<boolean> {
       return h.captchaSettled;
+    }
+    async dismissConsentBanner(): Promise<string | null> {
+      h.consentDismissCalls += 1;
+      return h.consentCta;
     }
     async waitForCaptchaResponseToken(): Promise<boolean> {
       return h.captchaToken;
@@ -206,6 +212,8 @@ beforeEach(() => {
   h.oauthStatus = "already_valid";
   h.typed = [];
   h.gotos = [];
+  h.consentDismissCalls = 0;
+  h.consentCta = null;
   h.started = 0;
   h.currentUrl = "";
   h.elements = [];
@@ -225,6 +233,24 @@ beforeEach(() => {
 });
 afterEach(async () => {
   await closeAllProvisionSessions();
+});
+
+describe("operate_start — consent-overlay auto-dismiss", () => {
+  // Regression: dismissConsentBanner() shipped as DEAD CODE (zero call sites), so
+  // a cookie/consent overlay (Usercentrics/OneTrust) occluded the whole form and
+  // the agent gave up — the Robinhood-faucet bug. operate_start must call it
+  // before the first observation.
+  it("calls dismissConsentBanner before the first observation", async () => {
+    await startProvisionSession({ serviceUrl: "https://faucet.example.com/" });
+    expect(h.consentDismissCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  it("stops retrying as soon as a banner CTA is clicked", async () => {
+    h.consentCta = "Reject all";
+    await startProvisionSession({ serviceUrl: "https://faucet.example.com/" });
+    // Dismissed on the first attempt → the second (retry) attempt is skipped.
+    expect(h.consentDismissCalls).toBe(1);
+  });
 });
 
 describe("operate session — multi-host allow-set + allow_host", () => {
