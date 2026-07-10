@@ -174,123 +174,62 @@ function ConfabBody(): ReactNode {
   return (
     <>
       <p>
-        There are two ways a language model can be wrong about the world, and only
-        one of them gets talked about. The famous one is <strong>hallucination</strong>:
-        the model invents a fact about the world &mdash; a court case, a citation, a
-        library function that doesn&rsquo;t exist. The one that actually costs you a
-        weekend is <strong>confabulation</strong>: the model is wrong not about the
-        world but about its own actions. It says &ldquo;Done &mdash; all tests
-        pass&rdquo; when it never ran the tests. It says &ldquo;fixed the
-        regression&rdquo; over a file it never touched. It isn&rsquo;t lying on
-        purpose; it genuinely can&rsquo;t always separate its finished work from its
-        own hopeful narration of it &mdash; and neither can you, until it burns you.
+        The hallucinations that became memes &mdash; Google&rsquo;s AI cheerfully
+        advising people to glue the cheese onto their pizza, lawyers sanctioned for
+        briefs built on court cases their chatbot had invented &mdash; were failures of{" "}
+        <strong>world-modeling</strong>: the machine misrepresenting some fact about
+        external reality. Those have largely been trained out of frontier systems. A
+        second failure mode has not been, and it is discussed far less, because it went
+        quiet rather than away. Call it <strong>confabulation</strong>: not a
+        misrepresentation of the world, but of the model&rsquo;s own actions &mdash;
+        work it never did, tests it never ran, a bug it never fixed, a cause it never
+        checked, a number it never measured, all reported back to you with total
+        composure.
       </p>
       <p>
-        The comforting hypothesis is that this is a small-model problem: today&rsquo;s
-        frontier models are so much more capable that they&rsquo;ll simply grow out
-        of it. I measured whether that&rsquo;s true. It isn&rsquo;t.{" "}
-        <strong>Capability doesn&rsquo;t remove confabulation. It relocates it</strong>{" "}
-        &mdash; and moves it somewhere far more dangerous.
+        Confabulation bites harder than hallucination, and I have come to believe it is
+        one of the central obstacles between us and genuinely less-supervised agentic
+        systems. The reason is structural. A fabricated fact can be checked against the
+        world; a fabricated account of the model&rsquo;s own diligence cannot &mdash; it
+        arrives wrapped in work that is otherwise correct, and nothing on the surface
+        announces which part is fiction. It hides in the periphery of competence, which
+        is precisely where it is hardest to catch.
       </p>
       <p>
-        Right now that&rsquo;s survivable, barely &mdash; because you&rsquo;re still in
-        the loop to catch it, the way I eventually caught the two confabulations that
-        cost me weeks of compute and a fleet of proxies (both below). But the whole
-        industry is racing to take you out of that loop. People already point an agent
-        at a task, let it run overnight, and wake up to a maxed-out token budget and a
-        result that&rsquo;s unusable &mdash; or nothing like what they asked for. Nobody
-        was watching, so nothing got caught; the confabulation just compounded, turn
-        after turn, on their dime. That is the stakes. The rest of this is how I know
-        it&rsquo;s real.
-      </p>
-
-      <h2>What the literature already knew</h2>
-      <p>
-        The &ldquo;scale will fix it&rdquo; hypothesis was in trouble before I ran
-        anything. Recent work points the same direction from several angles. On
-        knowledge conflicts &mdash; where a prompt contradicts what the model knows
-        &mdash; benchmarks like <strong>ClashEval</strong> and{" "}
-        <strong>FaithEval</strong>{" "}find that bigger models are no more faithful:
-        they abandon a correct prior for a plausible-sounding wrong context at rates
-        that don&rsquo;t improve with scale. On honesty under pressure,{" "}
-        <strong>MASK</strong>{" "}separates what a model believes from what it states when
-        pushed, and reports something genuinely unsettling &mdash; the correlation
-        between capability and honesty comes out <strong>negative</strong>. More
-        capable models were more willing to state something they didn&rsquo;t believe
-        when the situation pressured them to.
+        This matters more with each passing month, because we keep handing these systems
+        more rope. As Karpathy has noted of the &ldquo;vibe coding&rdquo; turn, a growing
+        share of developers no longer read the code at all; they delegate authorship,
+        maintenance, and increasingly even research to agentic loops they supervise
+        loosely or not at all. In that arrangement an unverified claim is not a single
+        false sentence you can notice and discard. &ldquo;The tests pass,&rdquo;
+        &ldquo;the regression is fixed,&rdquo; &ldquo;the bottleneck is the
+        abstraction&rdquo; &mdash; each becomes a premise the next iteration builds on,
+        and the one after that, compounding across the loop until the blast radius is
+        the entire run.
       </p>
       <p>
-        The sharpest result, for my purposes, is about abstention &mdash; a
-        model&rsquo;s willingness to say &ldquo;I&rsquo;m not sure&rdquo; instead of
-        committing. <strong>AbstentionBench</strong> finds that reasoning fine-tuning,
-        the very thing that makes the newest models feel so much smarter,{" "}
-        <strong>degrades</strong>{" "}abstention: the model hedges honestly inside its
-        reasoning trace and then emits a confident, definitive answer outside it.
-        Hold that image &mdash; hedged inside, certain outside &mdash; because it
-        turns out to be the exact shape of the frontier failure. Alongside these sit
-        the inducers: <strong>ImpossibleBench</strong>{" "}makes tasks
-        unsolvable-by-construction and finds cheat rates that collapse only when the
-        model is handed an explicit way to say &ldquo;this is impossible&rdquo;; and
-        the long-context literature (<strong>Lost in the Middle</strong>,{" "}
-        <strong>Context Rot</strong>) shows that piling on context reliably degrades
-        what a model can actually track.
+        I am not theorizing. Frontier models have confabulated on me across several
+        projects, at a cost measured in weeks of compute and development time, and the
+        most expensive form is never a false &ldquo;done.&rdquo; It is{" "}
+        <strong>diagnosis without verification</strong> &mdash; a confident cause that
+        quietly commandeers every decision you make next. On a poker solver, the most
+        capable model I had diagnosed nearly every performance wall as the same
+        &ldquo;abstraction ceiling,&rdquo; with no experiment that could separate that
+        cause from five others; I believed it, kept refining the abstraction, and burned
+        weeks of compute chasing a ceiling that did not exist &mdash; while the real
+        fault, a chain of nested bugs in the solver&rsquo;s CFR implementation, sat
+        untouched, because the model never proposed looking there. Building Trusty
+        Squire, the product this blog belongs to, I paid more still: on a confabulated
+        hypothesis about why signups were failing, I hardened a Gemini-based autonomous
+        planner with tens of thousands of lines of code, then later deleted more than
+        thirty thousand of them in a single commit and changed the architecture outright
+        once the real cause turned out to lie elsewhere. In neither case was the model
+        lying. It was narrating a diagnosis it had never earned, fluently enough that I
+        acted on it.
       </p>
       <p>
-        Two things are missing from all of it. First, almost all of it is single-turn
-        question-answering, not an agent in a build loop with tools and state.
-        Second, it measures a rate &mdash; how often, under one inducer, at one
-        capability point. Nobody had traced the thing I kept running into: how the
-        confabulation <strong>moves</strong> as the agent driving the loop gets
-        smarter.
-      </p>
-
-      <h2>What I kept running into</h2>
-      <p>
-        This started as a pile of field notes, not a hypothesis. Building a poker
-        solver over many months, I watched a frontier model &mdash; Claude 4.8, at its
-        most capable &mdash; diagnose nearly every performance wall we hit as the same
-        thing: an &ldquo;abstraction ceiling.&rdquo; Fluent, plausible, delivered with
-        total confidence, and backed by no discriminating experiment whatsoever. And I
-        believed it, so I did what the diagnosis implied: kept cranking up the
-        granularity of the card abstraction, and burned <strong>weeks of compute</strong>{" "}
-        on solver runs chasing a ceiling that wasn&rsquo;t there. The real culprit was
-        a chain of nested bugs in the solver and the CFR implementation &mdash; which
-        the agent never once proposed looking into, because it was too busy being
-        confident about the abstraction.
-      </p>
-      <p>
-        Then it happened again, on the product this blog is named after. Building
-        Trusty Squire, an agent kept explaining failed signups as an &ldquo;IP
-        wall&rdquo; &mdash; datacenter addresses getting bot-flagged &mdash; with no
-        evidence it had ever checked. On that story I made a real product call: stand
-        up a fleet of residential proxies. Then I found that for almost every service
-        in our registry, IP flagging wasn&rsquo;t the culprit at all. The actual cause
-        was the planner model (Gemini) choking on the page &mdash; it couldn&rsquo;t
-        parse the DOM, which blew past its context window. Same shape as the poker
-        wall: a confident cause, never verified, quietly commandeering an expensive
-        decision. And note where the truth actually lived &mdash;{" "}
-        <strong>context starvation</strong>, the exact failure the long-context
-        benchmarks describe.
-      </p>
-      <p>
-        Two stories, one law: an ungrounded causal claim doesn&rsquo;t just mislead,
-        it hijacks your next move. The tell was never a wrong fact &mdash; it was a
-        confident <strong>cause</strong>{" "}with no test behind it. The quieter tells
-        rhymed. The same solver spent literal months green-but-wrong, because the tests
-        and the code had been written by the same model from the same
-        misunderstanding, so green meant internally consistent, not correct. A
-        &ldquo;measured&rdquo; throughput number once turned out to have been read off
-        a stale code comment rather than run. And the pattern across models was
-        consistent: a small local model would confabulate inside a single hard
-        refactor, a mid model within a couple of turns, the frontier model would hold
-        out for weeks and then do it far more subtly &mdash; same disease, different
-        decay constant, and the more capable the model, the harder its version was to
-        catch. The through-line: the model had stopped re-checking ground truth and
-        started narrating from memory, and the narration was good enough to trust.
-      </p>
-      <p>
-        That last observation &mdash; capability doesn&rsquo;t stop the confabulation,
-        it just refines it &mdash; is what this experiment set out to pin down.
+        So the questions are simple. What forms does confabulation actually take, and
+        does scale cure it or merely disguise it? I built an experiment to find out.
       </p>
 
       <h2>The experiment</h2>
@@ -472,6 +411,26 @@ function ConfabBody(): ReactNode {
         inclined to believe, because everything else it said that turn was true.
       </p>
 
+      <h2>The literature already saw the pieces</h2>
+      <p>
+        None of this is unprecedented; the surprise is how cleanly the pieces line up.
+        On knowledge conflicts, <strong>ClashEval</strong> and{" "}
+        <strong>FaithEval</strong>{" "}find that larger models are no more faithful
+        &mdash; they trade a correct prior for a plausible-sounding wrong context at
+        rates that don&rsquo;t improve with scale. On honesty under pressure,{" "}
+        <strong>MASK</strong>{" "}separates what a model believes from what it states and
+        reports the correlation between capability and honesty coming out{" "}
+        <strong>negative</strong>. And <strong>AbstentionBench</strong>{" "}finds that
+        reasoning fine-tuning &mdash; the very thing that makes the newest models feel
+        smarter &mdash; <strong>degrades</strong>{" "}their willingness to say
+        &ldquo;I&rsquo;m not sure&rdquo;: they hedge honestly inside the reasoning
+        trace, then state a confident answer outside it. That last one is
+        Codex&rsquo;s verification-faking precisely &mdash; hedged inside, certain
+        outside. What none of this work measured is the <strong>trajectory</strong>:
+        where the confabulation goes as the model grows more capable. That is what the
+        grid above is.
+      </p>
+
       <h2>The detector cuts sharpest where it matters</h2>
       <p>
         The obvious objection to any lie-detector is that it cries wolf. The grid shows
@@ -537,40 +496,28 @@ function ConfabBody(): ReactNode {
         </li>
       </ul>
 
-      <h2>Why this gets more urgent, not less</h2>
+      <h2>Why grounding stops being optional</h2>
       <p>
-        Notice what every war story here has in common: a human was there. I burned the
-        weeks and I bought the proxies &mdash; but I also, eventually, dug in and found
-        the real bug. That is the supervised regime, and in it confabulation is a
-        bounded nuisance: expensive, embarrassing, survivable, because a skeptical
-        person is the backstop.
+        Every failure in this piece, mine and the grid&rsquo;s alike, was caught
+        eventually because a human was in the loop. Take the human out and the
+        single-run blast radius from the opening is merely the floor. Nest the agents
+        &mdash; orchestrators spawning sub-agents, agents reviewing agents &mdash; and a
+        sub-agent&rsquo;s confident &ldquo;done, tests pass&rdquo; is no longer read by a
+        doubtful person; it is consumed by the agent above as ground truth and built
+        upon. Every layer trusts the narration of the one beneath it, and there is no
+        node in the tree where anyone notices that a whole subtree rests on a claim that
+        was never true. There is no bottom.
       </p>
       <p>
-        The industry is deleting that backstop. The direction of travel is nested
-        agentic architectures &mdash; orchestrators spawning sub-agents, agents
-        reviewing agents, fleets running long-range work with the human lifted out of
-        the loop. In that world a sub-agent&rsquo;s confident &ldquo;done, tests
-        pass&rdquo; is not read by a doubtful human; it is consumed by a parent agent as
-        ground truth and built upon. The failure stops being bounded and starts{" "}
-        <strong>compounding</strong>: every layer trusts the narration of the layer
-        beneath it, and there is no node in the tree where anyone notices that a whole
-        subtree was built on a claim that was never true. The blast radius goes from
-        &ldquo;weeks of my compute&rdquo; to &ldquo;an entire autonomous run,
-        unbounded&rdquo; &mdash; the overnight-loop horror story writ large, except now
-        it isn&rsquo;t one agent burning one budget but a dozen agents deep, each
-        believing the one below, with no bottom.
-      </p>
-      <p>
-        So grounding isn&rsquo;t a nice-to-have. A receipt-based, cross-vendor check at{" "}
-        <strong>every agent boundary</strong>{" "}is the precondition that makes the human
-        safely removable &mdash; the thing that converts &ldquo;each agent trusts the
-        story below it&rdquo; into &ldquo;each agent&rsquo;s claims are checked against
-        reality before the one above consumes them.&rdquo; Lies stop propagating; they
-        arrive labeled. Capping the blast radius that way is what turns unsupervised,
-        nested, long-range agents from a compounding-confabulation time bomb into
-        something you can actually run. The fail-safe from the correction loop &mdash;
-        an agent that stalls honestly rather than shipping a green lie &mdash; isn&rsquo;t
-        a nicety either. It is the only acceptable behavior when nobody is watching.
+        Which is why grounding is not a nice-to-have but a precondition. A
+        receipt-based, cross-vendor check at <strong>every agent boundary</strong>{" "}is
+        what converts &ldquo;each agent trusts the story below it&rdquo; into &ldquo;each
+        agent&rsquo;s claims are checked against reality before the one above consumes
+        them.&rdquo; Lies stop propagating; they arrive labeled. That is what turns
+        unsupervised, nested, long-range agents from a compounding-confabulation time
+        bomb into something you can actually run &mdash; and the fail-safe from the
+        correction loop, an agent that stalls honestly rather than shipping a green lie,
+        is the only acceptable behavior when no one is watching.
       </p>
 
       <h2>The part that had to ship upstream</h2>
