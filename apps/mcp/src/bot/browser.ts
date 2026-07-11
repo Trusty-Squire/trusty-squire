@@ -6454,23 +6454,52 @@ export class BrowserController {
         const alreadyMatched = new Set<Element>(collected);
         const MAX_CARDS = 16;
         const raw: Element[] = [];
-        const scan = document.querySelectorAll("div,li,article,section,label");
-        for (const el of Array.from(scan)) {
-          if (raw.length >= MAX_CARDS) break;
-          if (alreadyMatched.has(el)) continue;
-          if (!isVisible(el)) continue;
-          if (window.getComputedStyle(el).cursor !== "pointer") continue;
-          const r = el.getBoundingClientRect();
-          if (r.width < 40 || r.height < 24 || r.width > 900 || r.height > 600) continue;
-          const txt = clean(el.textContent);
-          if (txt === null || txt.length < 2 || txt.length > 120) continue;
-          try {
-            if (el.querySelector(SELECTOR) !== null) continue;
-          } catch {
-            continue;
+        // Eligible tags: generic containers OR any custom element (hyphenated
+        // tag). Mirror of exported isBareClickableCardTag — keep in sync.
+        // 1inch onboarding renders each choice as a custom UI-kit element
+        // (<uikit-internal-chip data-test-id="activity-chip-…">) with
+        // cursor:pointer but no button/role/input semantics and no div/section
+        // wrapper, so the SELECTOR walk AND the old div-only scan both missed
+        // it, leaving the planner no clickable target.
+        const isCardTag = (t: string): boolean =>
+          t === "div" || t === "li" || t === "article" ||
+          t === "section" || t === "label" || t.includes("-");
+        // Walk the light DOM AND every open shadow root — a UI-kit chip can
+        // live inside a web component's shadow tree.
+        const scanRoot = (root: Document | ShadowRoot): void => {
+          if (root == null || typeof root.querySelectorAll !== "function") return;
+          for (const el of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
+            if (raw.length >= MAX_CARDS) break;
+            if (el.shadowRoot !== null) scanRoot(el.shadowRoot);
+            const tag = el.tagName.toLowerCase();
+            if (!isCardTag(tag)) continue;
+            if (alreadyMatched.has(el)) continue;
+            if (!isVisible(el)) continue;
+            if (window.getComputedStyle(el).cursor !== "pointer") continue;
+            const r = el.getBoundingClientRect();
+            if (r.width < 40 || r.height < 24 || r.width > 900 || r.height > 600) continue;
+            const txt = clean(el.textContent);
+            const hasText = txt !== null && txt.length >= 2 && txt.length <= 120;
+            // A custom element whose label renders inside its shadow DOM has an
+            // empty textContent — qualify it on a stable test-id instead, which
+            // is exactly what a QA-instrumented chip carries.
+            const testId =
+              el.getAttribute("data-testid") ??
+              el.getAttribute("data-test-id") ??
+              el.getAttribute("data-test") ??
+              el.getAttribute("data-cy") ??
+              el.getAttribute("data-qa");
+            const hasTestId = tag.includes("-") && testId !== null && testId.length > 0;
+            if (!hasText && !hasTestId) continue;
+            try {
+              if (el.querySelector(SELECTOR) !== null) continue;
+            } catch {
+              continue;
+            }
+            raw.push(el);
           }
-          raw.push(el);
-        }
+        };
+        scanRoot(document);
         // Keep only the outermost clickable per nest (Chakra cards wrap an
         // inner <p>; cursor:pointer inherits, so both match — we want the card).
         const rawSet = new Set(raw);
@@ -7730,6 +7759,31 @@ export function collectAcrossShadowRoots(
   };
   walk(root);
   return collected;
+}
+
+// Tag eligibility for the "bare clickable card" pass in
+// extractInteractiveElements. A selectable onboarding choice that carries no
+// button/anchor/input/role semantics is collected only when it is a generic
+// container (div/li/article/section/label) OR a CUSTOM ELEMENT — any element
+// whose tag name contains a hyphen. 1inch's onboarding renders each activity
+// choice as `<uikit-internal-chip data-test-id="activity-chip-aiAgents">`; the
+// old div-only scan missed the custom tag, so the chip never entered the
+// planner's inventory and neither click nor js_click could resolve it (both
+// re-resolve against the inventory). Standard interactive/text tags are handled
+// by the SELECTOR walk and must NOT be re-collected here.
+// Kept in sync with the inline `isCardTag` inside extractInteractiveElements —
+// a page.evaluate body can't call module code, so the production copy is inline;
+// change both together.
+export function isBareClickableCardTag(tag: string): boolean {
+  const t = tag.toLowerCase();
+  return (
+    t === "div" ||
+    t === "li" ||
+    t === "article" ||
+    t === "section" ||
+    t === "label" ||
+    t.includes("-")
+  );
 }
 
 //
