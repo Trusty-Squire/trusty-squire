@@ -139,6 +139,11 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   // Non-empty → the product is in maintenance and the string is the operator's
   // message for a web banner to read off GET /v1/status.
   const maintenanceMessage = process.env.MAINTENANCE_MESSAGE ?? "";
+  // Free-during-beta: billing is OFF unless explicitly enabled. Surfaced on
+  // GET /v1/status so the web app can hide the Upgrade/Billing UI entirely
+  // rather than letting a user click through to a checkout that 503s.
+  const billingEnabled =
+    process.env.BILLING_ENABLED === "true" || process.env.BILLING_ENABLED === "1";
 
   const logger =
     process.env.VITEST === "true" || process.env.NODE_ENV === "test"
@@ -244,7 +249,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
       stripe: stripeClient,
       // Free-during-beta: checkout stays OFF unless explicitly enabled, so a
       // stray Upgrade click can't charge anyone even with a live Stripe key.
-      billingEnabled: process.env.BILLING_ENABLED === "true" || process.env.BILLING_ENABLED === "1",
+      billingEnabled,
       webBaseUrl: defaultPwaBaseUrl(),
     },
     requireWeb: auth.requireWeb,
@@ -308,6 +313,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     ok: true,
     signups_enabled: !signupsDisabled,
     egress_enabled: !egressDisabled,
+    billing_enabled: billingEnabled,
     maintenance: maintenanceMessage.length > 0,
     message: maintenanceMessage,
   }));
