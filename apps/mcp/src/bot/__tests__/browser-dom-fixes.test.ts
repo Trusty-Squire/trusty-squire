@@ -5,7 +5,11 @@
 // exercised without a live browser.
 
 import { describe, it, expect } from "vitest";
-import { pickClickLocator, collectAcrossShadowRoots } from "../browser.js";
+import {
+  pickClickLocator,
+  collectAcrossShadowRoots,
+  isBareClickableCardTag,
+} from "../browser.js";
 
 describe("pickClickLocator — strict-mode click disambiguation (regression #61)", () => {
   // FakeLoc satisfies the helper's `L extends { first(): L }` constraint.
@@ -91,5 +95,31 @@ describe("collectAcrossShadowRoots — guard against roots with no querySelector
     const host = el("host", inner);
     const tree = root([el("outer")], [host]);
     expect(tagsOf(collectAcrossShadowRoots(tree, "sel")).sort()).toEqual(["inner", "outer"]);
+  });
+});
+
+describe("isBareClickableCardTag — custom-element chip eligibility (1inch)", () => {
+  it("accepts the generic container tags the div-only scan already covered", () => {
+    for (const t of ["div", "li", "article", "section", "label"]) {
+      expect(isBareClickableCardTag(t)).toBe(true);
+    }
+  });
+
+  it("accepts a custom element (hyphenated tag) — the 1inch uikit chip", () => {
+    // <uikit-internal-chip data-test-id="activity-chip-aiAgents"> — the tag the
+    // old div-only scan missed, so the chip never reached the inventory.
+    expect(isBareClickableCardTag("uikit-internal-chip")).toBe(true);
+    expect(isBareClickableCardTag("my-card")).toBe(true);
+  });
+
+  it("is case-insensitive (DOM tagName is uppercase)", () => {
+    expect(isBareClickableCardTag("UIKIT-INTERNAL-CHIP")).toBe(true);
+    expect(isBareClickableCardTag("DIV")).toBe(true);
+  });
+
+  it("rejects standard interactive/text tags handled by the SELECTOR walk", () => {
+    for (const t of ["span", "p", "h1", "a", "button", "input", "svg"]) {
+      expect(isBareClickableCardTag(t)).toBe(false);
+    }
   });
 });
