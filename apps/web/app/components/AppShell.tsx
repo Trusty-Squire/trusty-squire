@@ -11,6 +11,10 @@ interface PlanStatus {
   cancel_at: string | null;
 }
 
+interface StatusFlags {
+  billing_enabled: boolean;
+}
+
 function isPro(status: PlanStatus | null): boolean {
   return (
     status !== null &&
@@ -23,9 +27,30 @@ export function AppShell({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [plan, setPlan] = useState<PlanStatus | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  // Free-during-beta: billing is off, so the whole billing surface (Upgrade,
+  // plan chip, Billing menu) stays hidden. Gated on the server's billing_enabled
+  // flag from GET /v1/status (public). Default false → fail-safe hidden, so a
+  // failed status fetch never surfaces a checkout that would only 503.
+  const [billingEnabled, setBillingEnabled] = useState(false);
+
+  useEffect(() => {
+    let stopped = false;
+    apiGet<StatusFlags>("/v1/status")
+      .then((s) => {
+        if (!stopped) setBillingEnabled(s.billing_enabled === true);
+      })
+      .catch(() => {
+        /* keep billing hidden on error */
+      });
+    return () => {
+      stopped = true;
+    };
+  }, []);
 
   // Plan pill — at-a-glance tier. Best-effort: if it fails, no pill renders.
+  // Only meaningful when billing is enabled.
   useEffect(() => {
+    if (!billingEnabled) return;
     let stopped = false;
     apiGet<PlanStatus>("/v1/billing/status")
       .then((s) => {
@@ -37,7 +62,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => {
       stopped = true;
     };
-  }, []);
+  }, [billingEnabled]);
 
   async function signOut() {
     setMenuOpen(false);
@@ -68,8 +93,10 @@ export function AppShell({ children }: { children: ReactNode }) {
           </Link>
 
           {/* Split by intent: free → an Upgrade action; paid → a quiet status
-              chip (a label, not a control). Management lives in Account ▾. */}
-          {plan !== null &&
+              chip (a label, not a control). Management lives in Account ▾.
+              Hidden entirely while billing is disabled (free-during-beta). */}
+          {billingEnabled &&
+            plan !== null &&
             (isPro(plan) ? (
               <span className="plan-chip">Pro</span>
             ) : (
@@ -95,9 +122,11 @@ export function AppShell({ children }: { children: ReactNode }) {
               <>
                 <div className="acct-backdrop" onClick={() => setMenuOpen(false)} aria-hidden />
                 <div className="acct-dropdown" role="menu">
-                  <Link role="menuitem" href="/billing" onClick={() => setMenuOpen(false)}>
-                    Billing
-                  </Link>
+                  {billingEnabled && (
+                    <Link role="menuitem" href="/billing" onClick={() => setMenuOpen(false)}>
+                      Billing
+                    </Link>
+                  )}
                   <button type="button" role="menuitem" onClick={signOut}>
                     Sign out
                   </button>

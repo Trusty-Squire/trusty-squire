@@ -163,6 +163,7 @@ describe("EGRESS_DISABLED — /v1/egress", () => {
 describe("GET /v1/status — kill-switch + maintenance surface", () => {
   it("all enabled, no maintenance, when nothing is flipped", async () => {
     for (const v of KILL_VARS) setEnv(v, undefined);
+    setEnv("BILLING_ENABLED", undefined);
     await buildWith();
     const res = await server.inject({ method: "GET", url: "/v1/status" });
     expect(res.statusCode).toBe(200);
@@ -170,6 +171,7 @@ describe("GET /v1/status — kill-switch + maintenance surface", () => {
       ok: true,
       signups_enabled: true,
       egress_enabled: true,
+      billing_enabled: false,
       maintenance: false,
       message: "",
     });
@@ -179,6 +181,7 @@ describe("GET /v1/status — kill-switch + maintenance surface", () => {
     setEnv("SIGNUPS_DISABLED", "1");
     setEnv("EGRESS_DISABLED", "true");
     setEnv("MAINTENANCE_MESSAGE", "Back at 5pm UTC");
+    setEnv("BILLING_ENABLED", undefined);
     await buildWith();
     const res = await server.inject({ method: "GET", url: "/v1/status" });
     expect(res.statusCode).toBe(200);
@@ -186,9 +189,19 @@ describe("GET /v1/status — kill-switch + maintenance surface", () => {
       ok: true,
       signups_enabled: false,
       egress_enabled: false,
+      billing_enabled: false,
       maintenance: true,
       message: "Back at 5pm UTC",
     });
+  });
+
+  it("surfaces billing_enabled:true when BILLING_ENABLED is set (web shows the Upgrade UI)", async () => {
+    for (const v of KILL_VARS) setEnv(v, undefined);
+    setEnv("BILLING_ENABLED", "1");
+    await buildWith();
+    const res = await server.inject({ method: "GET", url: "/v1/status" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ billing_enabled: true });
   });
 
   it("needs no auth (public banner data)", async () => {
