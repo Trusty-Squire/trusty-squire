@@ -64,6 +64,7 @@ import {
 import { waitForProfileFree } from "../bot/profile.js";
 import type { BrowserContext } from "playwright";
 import { VERSION } from "../version.js";
+import { ensureLatestVersion } from "./version-check.js";
 import * as ui from "./ui.js";
 import {
   runInteractiveSetup,
@@ -365,6 +366,10 @@ export async function runCli(argv: string[]): Promise<void> {
   loadHarvesterEnvFile();
   switch (args.command) {
     case "connect":
+      // `npx …/mcp connect` reuses a stale local copy instead of fetching the
+      // latest, and connect then pins the host config to that stale version.
+      // Re-exec on the current release first so the one-liner alone lands it.
+      await ensureLatestVersion(argv);
       await connect(args);
       return;
     case "logout":

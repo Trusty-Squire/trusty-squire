@@ -27,14 +27,14 @@ drives the multi-step setup behind any login.
 ## Install
 
 ```bash
-npx @trusty-squire/mcp connect
+npx @trusty-squire/mcp@latest connect
 ```
 
 That issues your account, signs you in (Google/GitHub), auto-detects your coding agent,
 and writes the MCP config. Restart your agent to pick up the tools. To pin a target:
 
 ```bash
-npx @trusty-squire/mcp connect --target=goose
+npx @trusty-squire/mcp@latest connect --target=goose
 ```
 
 Supported agents: `claude-code`, `cursor`, `codex`, `goose`, `cline`, `continue`, `hermes`.
