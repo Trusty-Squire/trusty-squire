@@ -74,7 +74,7 @@ secrets stay put.
 Trusty Squire runs as a local MCP server. Point your coding agent at it:
 
 ```bash
-npx @trusty-squire/mcp connect
+npx @trusty-squire/mcp@latest connect
 ```
 
 That issues your account, signs you in (Google/GitHub), and writes the MCP config for
