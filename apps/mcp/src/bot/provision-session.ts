@@ -206,7 +206,12 @@ export type ProvisionAction =
   | { kind: "type_secret"; slot: string; target: string }
   // Reveal below-the-fold controls on a long SPA form, then re-observe to pick
   // up the newly-visible elements (heavy consoles render fields off-viewport).
-  | { kind: "scroll"; direction?: "down" | "up" | "bottom" | "top" };
+  | { kind: "scroll"; direction?: "down" | "up" | "bottom" | "top" }
+  // Attach a LOCAL file. target = the visible upload button/menu-item (or the
+  // file <input>); path = an absolute local file path. The bot sets the file via
+  // Playwright (filechooser/setInputFiles), so the OS dialog is never driven.
+  // Not recorded in skill recipes — a machine-local path isn't portable.
+  | { kind: "upload"; target: string; path: string };
 
 // Where a host on the allow-set came from. start = declared at operate_start;
 // mid_session = added via an allow_host action; auto_widen = an organic
@@ -1519,6 +1524,7 @@ export async function act(
     case "click":
     case "js_click":
     case "type":
+    case "upload":
     case "oauth_click": {
       const blockReason = shouldBlockUnsafeProvisionAction(
         await browser.extractVisibleText(),
@@ -1542,7 +1548,14 @@ export async function act(
       if (action.kind === "click") await browser.click(el.selector);
       else if (action.kind === "js_click") await browser.clickViaJs(el.selector);
       else if (action.kind === "type") await browser.type(el.selector, action.text);
-      else await browser.startOAuth(el.selector);
+      else if (action.kind === "upload") {
+        await browser.uploadFile(el.selector, action.path);
+        audit(sessionId, "upload", {
+          target: action.target,
+          path: action.path,
+          host: registrableHost(browser.currentUrl()),
+        });
+      } else await browser.startOAuth(el.selector);
       if (action.kind !== "type") await settleAfterStateChange(browser);
       break;
     }
@@ -1619,6 +1632,9 @@ function recordTrace(
     audit(session.id, "trace_skip_single_use_goto", { url_host: host });
     return;
   }
+  // An upload attaches a machine-local file — not portable, never part of a
+  // shared recipe. Skip it here (the action is still in the audit trail).
+  if (action.kind === "upload") return;
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};

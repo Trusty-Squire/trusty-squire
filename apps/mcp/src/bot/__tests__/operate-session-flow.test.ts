@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
   providers: ["google"] as string[],
   oauthStatus: "already_valid" as string,
   typed: [] as Array<{ selector: string; text: string }>,
+  uploads: [] as Array<{ selector: string; filePath: string }>,
   gotos: [] as string[],
   started: 0,
   currentUrl: "",
@@ -127,6 +128,9 @@ vi.mock("../browser.js", () => ({
     }
     async click(): Promise<void> {}
     async clickViaJs(): Promise<void> {}
+    async uploadFile(selector: string, filePath: string): Promise<void> {
+      h.uploads.push({ selector, filePath });
+    }
     async startOAuth(): Promise<void> {}
     async settleAfterOAuth(): Promise<void> {}
     async pressKey(): Promise<void> {}
@@ -211,6 +215,7 @@ beforeEach(() => {
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
   h.typed = [];
+  h.uploads = [];
   h.gotos = [];
   h.consentDismissCalls = 0;
   h.consentCta = null;
@@ -337,6 +342,24 @@ describe("operate session — sealed credential transfer", () => {
     await expect(
       act(obs.session_id, { kind: "type_secret", slot: "missing", target: "Field" }),
     ).rejects.toThrow(/no sealed slot/i);
+  });
+
+  it("upload resolves the target and attaches the local file (no OS dialog)", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://drive.google.com/" });
+    h.elements = [elem({ visibleText: "File upload", selector: "#upload-btn" })];
+    await act(obs.session_id, { kind: "upload", target: "File upload", path: "/tmp/clip.mp4" });
+    // Target resolved from the inventory → the file is set on that element; the
+    // action never touches an OS file picker.
+    expect(h.uploads).toEqual([{ selector: "#upload-btn", filePath: "/tmp/clip.mp4" }]);
+  });
+
+  it("upload fails loudly when the target isn't in the inventory", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://drive.google.com/" });
+    h.elements = [];
+    await expect(
+      act(obs.session_id, { kind: "upload", target: "File upload", path: "/tmp/clip.mp4" }),
+    ).rejects.toThrow(/no element matched target/i);
+    expect(h.uploads).toEqual([]);
   });
 });
 

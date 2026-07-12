@@ -223,10 +223,13 @@ const actSchema = z.object({
   session_id: z.string().min(1),
   kind: z.enum([
     "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
-    "allow_host", "type_secret", "scroll",
+    "allow_host", "type_secret", "scroll", "upload",
   ]),
   target: z.string().min(1).max(200).optional(),
   text: z.string().max(4096).optional(),
+  // upload: absolute path to a LOCAL file to attach to `target` (the upload
+  // button/menu-item, or the file <input>).
+  path: z.string().min(1).max(4096).optional(),
   url: z.string().url().optional(),
   key: z.string().min(1).max(40).optional(),
   // allow_host: a bare hostname to cross into mid-session.
@@ -270,6 +273,8 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
       return { kind: "type_secret", slot: need(args.slot, "slot"), target: need(args.target, "target") };
     case "scroll":
       return { kind: "scroll", ...(args.direction !== undefined ? { direction: args.direction } : {}) };
+    case "upload":
+      return { kind: "upload", target: need(args.target, "target"), path: need(args.path, "path") };
   }
 }
 
@@ -286,7 +291,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "captured into a sealed slot via operate_extract{into_slot} into a field " +
     "on the current site; the value never leaves the browser), scroll (direction " +
     "down/up/bottom/top, default down — reveal below-the-fold controls on a long " +
-    "form, then operate_observe to pick up the newly-visible elements). If a " +
+    "form, then operate_observe to pick up the newly-visible elements), " +
+    "upload (target + path — attach a LOCAL file: target is the visible upload " +
+    "button/menu-item (or the file <input>), path is an absolute local file " +
+    "path. The bot sets the file via the browser's file chooser, so no OS dialog " +
+    "is driven and no API credential is needed — it uses the session you're " +
+    "already signed into). If a " +
     "target ref is stale, call operate_observe and retry with a fresh ref. " +
     "detail (default \"compact\") controls the returned payload: \"none\" skips it " +
     "entirely for chained fills (then operate_observe before the next ref action), " +
@@ -301,11 +311,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
         type: "string",
         enum: [
           "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
-          "allow_host", "type_secret", "scroll",
+          "allow_host", "type_secret", "scroll", "upload",
         ],
       },
       target: { type: "string" },
       text: { type: "string" },
+      path: { type: "string" },
       url: { type: "string" },
       key: { type: "string" },
       host: { type: "string" },
