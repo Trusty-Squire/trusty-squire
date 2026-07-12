@@ -1984,6 +1984,42 @@ export class BrowserController {
     }
   }
 
+  // Attach a LOCAL file without driving the OS file dialog. If `selector`
+  // resolves to an <input type=file>, set the file on it directly — this works
+  // even when the input is visually hidden, which most upload widgets are.
+  // Otherwise treat `selector` as the visible trigger (button / menu item /
+  // styled label): clicking it opens a file chooser, which Playwright intercepts
+  // so the native dialog is never touched. This is how the operator uploads
+  // (Drive, S3 consoles, any web form) through the session the user is already
+  // signed into — no API credential, no password. Bounded by the session's
+  // domain scope, so a file can only reach the site the task is already on.
+  async uploadFile(selector: string, filePath: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+      throw new Error(`upload: local file not found or not a regular file: ${filePath}`);
+    }
+    const page = this.page;
+    const locator = page.locator(selector).first();
+    const isFileInput = await locator
+      .evaluate((el) => el instanceof HTMLInputElement && el.type === "file")
+      .catch(() => false);
+    if (isFileInput) {
+      await locator.setInputFiles(filePath);
+      return;
+    }
+    // Register the chooser waiter BEFORE the click so the event can't be missed.
+    const chooserPromise = page.waitForEvent("filechooser", { timeout: 15_000 });
+    await locator.click();
+    const chooser = await chooserPromise.catch(() => null);
+    if (chooser === null) {
+      throw new Error(
+        `upload: clicking "${selector}" did not open a file picker within 15s. ` +
+          `Target the upload button (or the file <input>) and retry.`,
+      );
+    }
+    await chooser.setFiles(filePath);
+  }
+
   async click(selector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // Radio/checkbox inputs — especially the visually-hidden kind behind a
