@@ -186,6 +186,7 @@ describe("goose YAML writer", () => {
           enabled: boolean;
           name: string;
           type: string;
+          description: string;
         };
       };
     };
@@ -196,6 +197,9 @@ describe("goose YAML writer", () => {
     expect(parsed.extensions.squire.enabled).toBe(true);
     expect(parsed.extensions.squire.name).toBe("squire");
     expect(parsed.extensions.squire.type).toBe("stdio");
+    expect(parsed.extensions.squire.description).toBe(
+      "Trusty Squire signs up / in to websites for you so you don’t have to.",
+    );
   });
 
   it("preserves other extensions", async () => {

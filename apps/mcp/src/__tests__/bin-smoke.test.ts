@@ -17,7 +17,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pkgRoot = fileURLToPath(new URL("../../", import.meta.url));
+const repoRoot = path.resolve(pkgRoot, "../..");
 const distBin = path.join(pkgRoot, "dist", "bin.js");
+const canonicalReadme = path.join(repoRoot, "README.md");
+const packageReadme = path.join(pkgRoot, "README.md");
+const tagline = "Trusty Squire signs up / in to websites for you so you don’t have to.";
 
 let tmpDir: string;
 
@@ -35,14 +39,37 @@ afterAll(async () => {
 });
 
 describe("package manifest", () => {
-  it("declares exactly one bin, `mcp` -> dist/bin.js", async () => {
+  it("declares the executable and plain-language discovery metadata", async () => {
     // npx auto-resolves `npx @trusty-squire/mcp <cmd>` only when the
     // package has a single bin (or one named for the unscoped package).
     // Multiple bins, none matching, was the original install bug.
-    const pkg = JSON.parse(
-      await fs.readFile(path.join(pkgRoot, "package.json"), "utf8"),
-    ) as { bin: Record<string, string> };
+    const pkg = JSON.parse(await fs.readFile(path.join(pkgRoot, "package.json"), "utf8")) as {
+      bin: Record<string, string>;
+      description: string;
+      homepage: string;
+      keywords: string[];
+    };
     expect(pkg.bin).toEqual({ mcp: "./dist/bin.js" });
+    expect(pkg.description).toBe(tagline);
+    expect(pkg.homepage).toBe("https://trustysquire.ai");
+    expect(pkg.keywords).toEqual(
+      expect.arrayContaining([
+        "mcp",
+        "coding-agent",
+        "browser-automation",
+        "website-signup",
+        "website-login",
+      ]),
+    );
+
+    const rootPkg = JSON.parse(await fs.readFile(path.join(repoRoot, "package.json"), "utf8")) as {
+      description: string;
+    };
+    const registry = JSON.parse(await fs.readFile(path.join(pkgRoot, "server.json"), "utf8")) as {
+      description: string;
+    };
+    expect(rootPkg.description).toBe(tagline);
+    expect(registry.description).toBe(tagline);
   });
 });
 
@@ -55,21 +82,32 @@ describe("package manifest", () => {
 const skipPack = process.env.MCP_SKIP_PACK_SMOKE === "1";
 
 describe.skipIf(skipPack)("packed tarball", () => {
-  it("ships dist/bin.js with a node shebang", async () => {
+  it("ships the executable and the canonical README", async () => {
     const packDir = path.join(tmpDir, "pack");
     await fs.mkdir(packDir, { recursive: true });
     execFileSync("pnpm", ["pack", "--pack-destination", packDir], { cwd: pkgRoot });
+    expect(existsSync(packageReadme), "postpack removed the generated README").toBe(false);
+
     const tgz = readdirSync(packDir).find((f) => f.endsWith(".tgz"));
     expect(tgz, "pnpm pack produced a .tgz").toBeDefined();
     const tgzPath = path.join(packDir, tgz!);
 
     const listing = execFileSync("tar", ["-tzf", tgzPath], { encoding: "utf8" });
     expect(listing).toContain("package/dist/bin.js");
+    expect(listing).toContain("package/README.md");
 
     const binContent = execFileSync("tar", ["-xzOf", tgzPath, "package/dist/bin.js"], {
       encoding: "utf8",
     });
     expect(binContent.startsWith("#!/usr/bin/env node")).toBe(true);
+
+    const packedReadme = execFileSync("tar", ["-xzOf", tgzPath, "package/README.md"]);
+    const rootReadme = await fs.readFile(canonicalReadme);
+    expect(
+      packedReadme.equals(rootReadme),
+      "packed README matches the root README byte-for-byte",
+    ).toBe(true);
+    expect(packedReadme.toString("utf8")).toContain(tagline);
   }, 60_000);
 });
 
