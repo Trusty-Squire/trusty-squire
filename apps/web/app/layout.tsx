@@ -29,9 +29,6 @@ export const metadata: Metadata = {
     "Trusty Squire lets Claude Code, Codex, Cursor, and other coding agents sign up for websites, sign in, configure services, and save API keys without putting them in chat or code.",
   metadataBase: new URL("https://trustysquire.ai"),
   applicationName: "Trusty Squire",
-  verification: {
-    google: "GwbhB5WdgXX97tpbr4gkBeZ4Jxlet1Ue9OH4lgUxLkc",
-  },
   keywords: [
     "AI agent website signup",
     "coding agent MCP",
