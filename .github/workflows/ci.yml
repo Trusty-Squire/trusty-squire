@@ -125,6 +125,7 @@ jobs:
             "@trusty-squire/skill-schema"
             "@trusty-squire/registry"
             "@trusty-squire/vault"
+            "@trusty-squire/web"
           )
           for p in "${PKGS[@]}"; do
             echo "::group::$p"

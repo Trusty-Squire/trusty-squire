@@ -1,14 +1,16 @@
 import Link from "next/link";
 import { Shield } from "../components/Shield";
+import { publicMetadata } from "../lib/public-metadata";
 
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
 const GITHUB_URL = "https://github.com/trusty-squire/trusty-squire";
 const CONTACT = "support@trustysquire.ai";
 
-export const metadata = {
-  title: "Terms of Service — Trusty Squire",
-  description: "The terms governing your use of Trusty Squire during the beta.",
-};
+export const metadata = publicMetadata(
+  "Terms of service",
+  "The terms governing your use of Trusty Squire during the beta.",
+  "/terms",
+);
 
 export default function TermsPage() {
   return (
