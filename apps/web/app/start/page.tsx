@@ -3,22 +3,30 @@
 // npm README). Distinct from /install, which is the token-gated
 // OAuth-binding wizard the CLI opens.
 
-import type { Metadata } from "next";
 import Link from "next/link";
 import { CopyChip } from "../components/CopyChip";
 import { Shield } from "../components/Shield";
+import { publicMetadata } from "../lib/public-metadata";
 
 const DOCS_URL = "https://github.com/trusty-squire/trusty-squire#readme";
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
 const GITHUB_URL = "https://github.com/trusty-squire/trusty-squire";
 
-const AGENTS = ["claude-code", "cursor", "codex", "goose", "cline", "continue"];
+const AGENTS = [
+  "claude-code",
+  "cursor",
+  "codex",
+  "goose",
+  "cline",
+  "continue",
+  "hermes",
+];
 
-export const metadata: Metadata = {
-  title: "Install Trusty Squire",
-  description:
-    "Install the Trusty Squire MCP in one command — it auto-detects your coding agent and wires up the tools.",
-};
+export const metadata = publicMetadata(
+  "Install for your coding agent",
+  "Install Trusty Squire in one command. The installer detects Claude Code, Codex, Cursor, and other supported agents and writes their MCP configuration.",
+  "/start",
+);
 
 export default function StartPage() {
   return (

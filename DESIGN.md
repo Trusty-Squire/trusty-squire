@@ -5,7 +5,7 @@
 > Don't deviate without explicit approval. Flag any code that diverges.
 
 ## Product Context
-- **What this is:** A credential broker / vault. AI coding agents provision SaaS on a user's behalf; the keys land here, encrypted.
+- **What this is:** Trusty Squire signs up and signs in to websites for developers working through coding agents. Generated credentials land in an encrypted vault instead of chat, source code, or `.env` files.
 - **Who it's for:** Developers who live in the terminal (Claude Code, Cursor, Codex, Goose).
 - **Space:** Developer infrastructure / secrets management.
 - **Surfaces:** marketing landing (`/`), public getting-started (`/start`), auth (`/login`), the app (`/vault`, `/vault/new`, `/agents`). `/install` is the token-gated OAuth-binding wizard the CLI opens (centered auth-card), distinct from `/start`.

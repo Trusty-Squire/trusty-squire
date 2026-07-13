@@ -1,3 +1,4 @@
+import type { Metadata } from "next";
 import Link from "next/link";
 import { CopyChip } from "./components/CopyChip";
 import { Reveal } from "./components/Reveal";
@@ -6,6 +7,60 @@ import { Shield } from "./components/Shield";
 const DOCS_URL = "https://github.com/trusty-squire/trusty-squire#readme";
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
 const GITHUB_URL = "https://github.com/trusty-squire/trusty-squire";
+
+export const metadata: Metadata = {
+  alternates: { canonical: "https://trustysquire.ai/" },
+};
+
+const EXAMPLES = [
+  {
+    href: "/use-cases/website-signup",
+    prompt: "Sign me up for Resend and save the API key.",
+  },
+  {
+    href: "/use-cases/sign-in-and-configure",
+    prompt: "Sign in to Sentry and configure the webhook.",
+  },
+  {
+    href: "/use-cases/website-signup",
+    prompt: "Set up Resend, Sentry, PostHog, and Postgres for this app.",
+  },
+  {
+    href: "/use-cases/sign-in-and-configure",
+    prompt: "Add Google OAuth without showing me the client secret.",
+  },
+  {
+    href: "/use-cases/api-keys-without-env",
+    prompt: "Let my app call OpenAI without giving it the OpenAI key.",
+  },
+  {
+    href: "/use-cases/api-keys-without-env",
+    prompt: "That app token leaked. Revoke its access now.",
+  },
+] as const;
+
+const HOME_JSON_LD = {
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Organization",
+      "@id": "https://trustysquire.ai/#organization",
+      name: "Trusty Squire",
+      url: "https://trustysquire.ai/",
+      logo: "https://trustysquire.ai/logo-400.png",
+      sameAs: [GITHUB_URL, NPM_URL],
+    },
+    {
+      "@type": "WebSite",
+      "@id": "https://trustysquire.ai/#website",
+      url: "https://trustysquire.ai/",
+      name: "Trusty Squire",
+      description:
+        "Trusty Squire signs up and signs in to websites for developers using coding agents.",
+      publisher: { "@id": "https://trustysquire.ai/#organization" },
+    },
+  ],
+};
 
 // A single static terminal still — the one product surface. No typing
 // animation, no caret, no spinners; the precision carries it.
@@ -21,18 +76,18 @@ function ProductStill() {
       <div className="panel-body">
         <div className="ln">
           <span className="g">$</span>
-          <span className="usr">provision stripe</span>
+          <span className="usr">sign me up for resend</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
           <span className="sq">squire</span>
-          <span> signing up — oauth, verification, key extraction…</span>
+          <span> opening resend.com · signup, verification, API key…</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
           <span className="ok">✓</span>
           <span> key sealed → vault&nbsp;</span>
-          <span className="key">sk_live_••••••••••</span>
+          <span className="key">re_••••••••••</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
@@ -46,6 +101,12 @@ function ProductStill() {
 export default function Page() {
   return (
     <main>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify(HOME_JSON_LD).replace(/</g, "\\u003c"),
+        }}
+      />
       <noscript>
         <style>{`.reveal{opacity:1!important;transform:none!important}`}</style>
       </noscript>
@@ -58,6 +119,8 @@ export default function Page() {
             Trusty Squire
           </Link>
           <div className="nav-r">
+            <Link href="/use-cases">Use cases</Link>
+            <Link href="/integrations">Agents</Link>
             <a href={GITHUB_URL}>GitHub</a>
             <Link className="signin" href="/login">
               Sign in
@@ -81,15 +144,21 @@ export default function Page() {
             <span className="eyebrow">
               <b>MCP</b> · built for agentic coding
             </span>
-            <h1>
-              Vibe code.{" "}
-              <span className="dim">Your trusty squire handles the rest.</span>
-            </h1>
+            <h1>Trusty Squire signs up / in to websites for you so you don’t have to.</h1>
             <p className="sub">
-              Your squire signs up for the SaaS you need, does the click-work
-              behind every login, and seals each key in a vault that never leaks
-              it. You just keep shipping.
+              Your coding agent opens the real website, completes signup or sign-in, finishes setup,
+              and saves generated credentials without putting them in chat, code, or{" "}
+              <code>.env</code>.
             </p>
+            <ol className="hero-asks">
+              {EXAMPLES.map((example, index) => (
+                <li key={example.prompt}>
+                  <Link href={example.href}>
+                    <span>{String(index + 1).padStart(2, "0")}</span>“{example.prompt}”
+                  </Link>
+                </li>
+              ))}
+            </ol>
             <div className="cta">
               <CopyChip />
               <a className="docs" href={DOCS_URL}>
@@ -121,33 +190,33 @@ export default function Page() {
           <div className="cap-body">
             <h3>Your agent handles signups</h3>
             <p>
-              Ask for a service — your squire creates the account, clears the
-              verification email, and brings back the API key. No fifteen-tab
-              signup detour, right inside Claude Code, Codex, Goose, and Cursor.
+              Ask for a service. Your squire creates the account, works through
+              available verification, and stores the generated API key. No
+              fifteen-tab signup detour, right inside Claude Code, Codex, Goose,
+              and Cursor.
             </p>
           </div>
         </Reveal>
         <Reveal className="cap">
           <div className="cap-num">02 / vault</div>
           <div className="cap-body">
-            <h3>No secret ever leaves the vault</h3>
+            <h3>Use keys without exposing them</h3>
             <p>
-              Stop scattering keys across <span className="m">.env</span> files
-              and cloud secret stores. Keys go in write-only; your code uses them
-              through a proxy that injects the value server-side and never hands
-              it back — so there&apos;s nothing to leak.
+              Stop scattering keys across <span className="m">.env</span> files.
+              Keys go into the vault; a proxy injects each value into the provider
+              request server-side without returning it to the agent or consuming
+              app.
             </p>
           </div>
         </Reveal>
         <Reveal className="cap">
           <div className="cap-num">03 / operate</div>
           <div className="cap-body">
-            <h3>Operate anything behind a login</h3>
+            <h3>Finish setup behind a login</h3>
             <p>
-              Complete complex tasks hidden behind auth walls with a single
-              prompt — wire up OAuth across consoles, configure webhooks, stand
-              up projects. Your squire does the click-work; the secret never
-              crosses into chat.
+              Wire up OAuth across consoles, configure webhooks, and stand up
+              projects. Your squire does the authenticated click-work while the
+              secret stays out of chat.
             </p>
           </div>
         </Reveal>
@@ -176,6 +245,8 @@ export default function Page() {
               Trusty Squire
             </Link>
             <div className="foot-l">
+              <Link href="/use-cases">Use cases</Link>
+              <Link href="/integrations">Agents</Link>
               <Link href="/blog">Blog</Link>
               <Link href="/privacy">Privacy</Link>
               <Link href="/terms">Terms</Link>
