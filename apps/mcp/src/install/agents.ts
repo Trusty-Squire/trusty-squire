@@ -263,7 +263,7 @@ const goose: AgentDefinition = {
       // extension by `name` — both are required for it to appear.
       enabled: true,
       bundled: false,
-      description: "Trusty Squire — credential broker + universal signup bot",
+      description: "Trusty Squire signs up / in to websites for you so you don’t have to.",
       timeout: 300,
     };
     data.extensions = extensions;

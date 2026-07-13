@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Never touch a signup form or paste an API key again.",
+  "description": "Trusty Squire signs up / in to websites for you so you don’t have to.",
   "type": "module",
   "scripts": {
     "build": "pnpm -r build",

@@ -4,7 +4,22 @@
   "license": "MIT",
   "mcpName": "ai.trustysquire/trusty-squire",
   "type": "module",
-  "description": "Local MCP server vibe coding agents install. Thin relay to the Trusty Squire API, with the bundled universal signup bot.",
+  "description": "Trusty Squire signs up / in to websites for you so you don’t have to.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agent",
+    "coding-agent",
+    "browser-automation",
+    "website-signup",
+    "website-login",
+    "saas",
+    "api-keys",
+    "secrets-management",
+    "claude-code",
+    "cursor",
+    "codex"
+  ],
   "main": "./dist/server.js",
   "bin": {
     "mcp": "./dist/bin.js"
@@ -21,7 +36,7 @@
     "url": "git+https://github.com/Trusty-Squire/trusty-squire.git",
     "directory": "apps/mcp"
   },
-  "homepage": "https://github.com/Trusty-Squire/trusty-squire#readme",
+  "homepage": "https://trustysquire.ai",
   "bugs": {
     "url": "https://github.com/Trusty-Squire/trusty-squire/issues"
   },
@@ -35,6 +50,8 @@
     "test:cov": "vitest run --coverage",
     "dev:server": "tsx src/bin.ts server",
     "install:dev": "tsx src/bin.ts install",
+    "prepack": "node scripts/package-readme.mjs stage",
+    "postpack": "node scripts/package-readme.mjs clean",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

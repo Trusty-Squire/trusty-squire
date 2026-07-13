@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "ai.trustysquire/trusty-squire",
   "title": "Trusty Squire",
-  "description": "Never touch a signup form or paste an API key again. Your coding agent does both, safely.",
+  "description": "Trusty Squire signs up / in to websites for you so you don’t have to.",
   "repository": {
     "url": "https://github.com/Trusty-Squire/trusty-squire",
     "source": "github",
