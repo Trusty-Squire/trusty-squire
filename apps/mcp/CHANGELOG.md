@@ -1,5 +1,40 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.42 (2026-07-13)
+
+- **Trusty Squire now explains itself in one sentence:** “Trusty Squire signs
+  up / in to websites for you so you don’t have to.” Concrete signup, sign-in,
+  setup, safe-use, and revocation asks now come before implementation details.
+- **GitHub and npm now share one authored README.** The npm pack lifecycle
+  copies the repository README into the tarball byte-for-byte and removes the
+  generated package-local copy afterward; regression tests cover normal,
+  interrupted, and conflicting pack states.
+- **Discovery metadata now uses the same plain-language description.** npm
+  keywords, product homepage, MCP Registry copy, and Goose configuration no
+  longer lead with internal product terminology.
+- **Website runs handle more of the real page.** Trusty Squire can dismiss
+  consent overlays before observing, treat custom-element onboarding chips as
+  clickable targets, and fail loudly instead of hanging on a stuck browser
+  launch.
+- **Setup and sign-in flows cover more everyday work.** `operate_act` can
+  attach a local file, Hermes is an install target, `connect` repairs stale
+  installed versions, and email verification better filters wrong-sender codes
+  while giving clearer magic-link guidance.
+- **Credential extraction avoids cross-family duplicates.** A page token from
+  one credential family is no longer surfaced as a second API key.
+
+## 1.0.42-rc.1 (2026-07-13)
+
+- **Trusty Squire now explains itself in one sentence:** “Trusty Squire signs
+  up / in to websites for you so you don’t have to.” Concrete signup, sign-in,
+  setup, safe-use, and revocation asks now come before implementation details.
+- **GitHub and npm now share one authored README.** The npm pack lifecycle
+  copies the repository README into the tarball byte-for-byte and removes the
+  generated package-local copy afterward; a smoke test prevents future drift.
+- **Discovery metadata now uses the same plain-language description.** npm
+  keywords, product homepage, MCP Registry copy, and Goose configuration no
+  longer lead with internal product terminology.
+
 ## 1.0.35 (2026-07-02)
 
 - **chore: snappier MCP registry description.** "Never touch a signup form or
