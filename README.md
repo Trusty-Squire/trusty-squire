@@ -27,8 +27,8 @@ Try asking your coding agent:
 
 Trusty Squire is an MCP server for Claude Code, Cursor, Codex, and other coding
 agents. It opens the real website, completes the signup or sign-in flow, handles the
-setup behind the login, and saves generated credentials without putting them in chat,
-source code, or an `.env` file.
+setup behind the login, and stores generated credentials in the vault instead of
+returning them through credential tools or writing them to source code or an `.env` file.
 
 ## Install
 
@@ -54,7 +54,7 @@ and `hermes`.
 2. Trusty Squire opens a real browser session and works through the site one step at a
    time. It can use your existing Google or GitHub session when you choose that option.
 3. If the site creates an API key or client secret, Trusty Squire stores it directly in
-   your vault. The raw value is not returned to the coding agent.
+   your vault. The credential extraction result does not return the raw value.
 4. Your agent can use the saved credential through Trusty Squire, or give your app a
    scoped, rate-limited token that you can revoke without rotating the underlying key.
 
@@ -63,12 +63,13 @@ rediscover every click.
 
 ## How secrets are handled
 
-- Generated credentials do not appear in the model context, chat transcript, source
-  code, `.env` files, or the consuming app.
+- Credential tools do not return stored values or write them to source code, `.env`
+  files, or the consuming app. Browser screenshots and diagnostic captures can contain
+  whatever was visible on the page, so treat those diagnostics as sensitive.
 - When an API call needs a credential, Trusty Squire injects it into the request on the
   server side. The API provider receives its credential; the caller does not.
 - A deployed app receives a scoped Trusty Squire token instead of the provider key.
-  Access can be rate-limited, spend-capped where supported, audited, and revoked.
+  Access can be rate-limited, audited, and revoked.
 - Trusty Squire does not type your Google or GitHub password. You sign in in a real
   browser, and the browser keeps that session.
 - If a site needs a decision or action that should be yours, the run stops and asks

@@ -35,9 +35,9 @@ const ListInputSchema = z.object({
 export const listExtractFailuresTool: Tool<z.infer<typeof ListInputSchema>> = {
   name: "list_extract_failures",
   description:
-    "List recent credential-extraction diagnostic snapshots from Trusty Squire website runs. " +
-    "When a flow reaches a generated credential but `extractCredentials()` returns null " +
-    "(the token is visible in the screenshot but not found in the DOM), Trusty Squire " +
+    "List recent extract-failure diagnostic snapshots uploaded by the universal signup bot. " +
+    "When a signup completes but `extractCredentials()` returned null (the bot saw the token " +
+    "in the screenshot but the regex extractor couldn't find it in the DOM), the bot auto- " +
     "uploads the DOM + screenshot to the registry. Use this tool to discover what snapshots " +
     "exist; then call `get_extract_failure` with an id to pull the actual HTML + screenshot. " +
     "Returns metadata only — id, service, url, step_label, upload time, byte sizes. " +
