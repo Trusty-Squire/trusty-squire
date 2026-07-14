@@ -100,6 +100,9 @@ with `docker compose -f docker-compose.dev.yml down`; add `-v` to reset their da
 
 Requirements: Node 20.11.0 (`.nvmrc`), pnpm 8.15+, Docker, and Docker Compose.
 
+Product language and public-web changes should follow [PRODUCT.md](PRODUCT.md) and
+[DESIGN.md](DESIGN.md).
+
 ### Repository structure
 
 ```text

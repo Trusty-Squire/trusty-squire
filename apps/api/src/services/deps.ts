@@ -121,6 +121,28 @@ export interface BuildInMemoryDepsOpts {
   pollIntervalMs?: number;
 }
 
+// Run a bounded liveness probe with a single retry. A genuinely wedged DB fails
+// BOTH attempts — the wedge is sustained — so /readyz still goes 503 (within
+// ~2×timeout). A momentary blip — a checkpoint write, a GC pause on the API
+// machine, a one-off network hiccup — clears on the retry, so a single 2s flap
+// no longer pages an on-call human for a service that self-recovers in seconds.
+export async function probeWithRetry(
+  probe: () => Promise<void>,
+  retryDelayMs: number,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await probe();
+      return true;
+    } catch {
+      if (attempt === 0) {
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    }
+  }
+  return false;
+}
+
 export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   // Auth Prisma client — loaded once and shared across the account,
   // session, agent-session, pairing-token, and machine-token stores.
@@ -230,19 +252,18 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
   const pingDb = async (): Promise<boolean> => {
     // No DB wired (in-memory dev/test) → always ready.
     if (authPrisma === null) return true;
-    try {
-      // Cheap DB touch (the narrowed client has no $queryRaw); time-capped so a
-      // wedged/unreachable DB fails fast instead of hanging the probe.
+    // Cheap DB touch (the narrowed client has no $queryRaw); time-capped so a
+    // wedged/unreachable DB fails fast instead of hanging the probe.
+    const probe = async (): Promise<void> => {
       await Promise.race([
         authPrisma.machineToken.count({ where: { token: "__readyz_probe__" } }),
         new Promise<never>((_, reject) =>
           setTimeout(() => reject(new Error("db ping timeout")), 2000),
         ),
       ]);
-      return true;
-    } catch {
-      return false;
-    }
+    };
+    // One retry absorbs a single transient blip; a real wedge fails both.
+    return probeWithRetry(probe, 250);
   };
 
   // Metrics exporter only makes sense against a real DB. 15s TTL matches a

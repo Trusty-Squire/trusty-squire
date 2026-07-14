@@ -1,15 +1,16 @@
 import Link from "next/link";
 import { Shield } from "../components/Shield";
+import { publicMetadata } from "../lib/public-metadata";
 
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
 const GITHUB_URL = "https://github.com/trusty-squire/trusty-squire";
 const CONTACT = "privacy@trustysquire.ai";
 
-export const metadata = {
-  title: "Privacy Policy — Trusty Squire",
-  description:
-    "How Trusty Squire handles your data and the credentials you store — encrypted at rest, never read back to the agent.",
-};
+export const metadata = publicMetadata(
+  "Privacy policy",
+  "How Trusty Squire handles account data, browser sessions, diagnostics, and the credentials you choose to store.",
+  "/privacy",
+);
 
 export default function PrivacyPage() {
   return (

@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
 import { Shield } from "../../components/Shield";
+import { articleMetadata } from "../../lib/public-metadata";
 import { POSTS, getPost } from "../posts";
 
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
@@ -18,8 +19,13 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { slug } = await params;
   const post = getPost(slug);
-  if (post === undefined) return { title: "Not found — Trusty Squire" };
-  return { title: `${post.title} — Trusty Squire`, description: post.description };
+  if (post === undefined) return { title: "Not found" };
+  return articleMetadata(
+    post.title,
+    post.description,
+    `/blog/${post.slug}`,
+    post.iso,
+  );
 }
 
 export default async function PostPage({

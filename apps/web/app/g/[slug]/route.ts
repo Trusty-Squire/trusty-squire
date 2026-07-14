@@ -12,6 +12,8 @@
 
 import { NextResponse } from "next/server";
 
+const ROBOTS_HEADER = "noindex, nofollow";
+
 const API_BASE =
   process.env.API_PROXY_TARGET ??
   (process.env.NODE_ENV === "production"
@@ -61,7 +63,9 @@ export async function GET(
   // verbatim — fragments are preserved (browsers honor them per
   // long-standing convention, even though HTTP/1.1 didn't formally
   // permit fragments in Location until RFC 7231).
-  return NextResponse.redirect(body.url, 302);
+  const response = NextResponse.redirect(body.url, 302);
+  response.headers.set("X-Robots-Tag", ROBOTS_HEADER);
+  return response;
 }
 
 // Minimal styled error page. Plain HTML rather than a React Server
@@ -93,6 +97,9 @@ function htmlError(status: number, message: string): NextResponse {
 </html>`;
   return new NextResponse(html, {
     status,
-    headers: { "content-type": "text/html; charset=utf-8" },
+    headers: {
+      "content-type": "text/html; charset=utf-8",
+      "X-Robots-Tag": ROBOTS_HEADER,
+    },
   });
 }

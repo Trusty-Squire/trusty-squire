@@ -1,15 +1,16 @@
 import Link from "next/link";
 import { Shield } from "../components/Shield";
+import { publicMetadata } from "../lib/public-metadata";
 import { POSTS } from "./posts";
 
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
 const GITHUB_URL = "https://github.com/Trusty-Squire/trusty-squire";
 
-export const metadata = {
-  title: "Blog — Trusty Squire",
-  description:
-    "Notes from building a credential broker for AI coding agents — anti-bot, vaults, and how secrets should work in an agent world.",
-};
+export const metadata = publicMetadata(
+  "Blog",
+  "Notes from building Trusty Squire: website signup automation, coding agents, credential safety, and the work behind authenticated setup.",
+  "/blog",
+);
 
 export default function BlogIndex() {
   return (
