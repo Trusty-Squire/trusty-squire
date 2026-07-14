@@ -3,7 +3,7 @@
 // cloudflared) and is validated by running it, not unit-tested — these
 // are the deterministic pieces that can be.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
@@ -14,9 +14,42 @@ import {
   extractOAuthScopes,
   findFreePort,
   hasDisplay,
+  pollUntil,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
 } from "../google-login.js";
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("pollUntil phase-aware heartbeat", () => {
+  it("resolves a heartbeat callback lazily after the wait phase changes", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T20:00:00.000Z"));
+    let message = "waiting for sign-in";
+    let done = false;
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const waiting = pollUntil(
+      Date.now() + 60_000,
+      async () => done,
+      () => message,
+    );
+
+    await vi.advanceTimersByTimeAsync(21_000);
+    expect(stderr.mock.calls.at(-1)?.[0]).toContain("waiting for sign-in");
+
+    message = "sign-in complete — click Finish";
+    await vi.advanceTimersByTimeAsync(21_000);
+    expect(stderr.mock.calls.at(-1)?.[0]).toContain("sign-in complete — click Finish");
+
+    done = true;
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(waiting).resolves.toBe(true);
+  });
+});
 
 // Regression guard for the connect-flow "Provider session check failed
 // (continuing)" ✗. Every persistent-context launch in this module must pass

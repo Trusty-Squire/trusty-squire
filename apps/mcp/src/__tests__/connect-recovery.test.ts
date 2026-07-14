@@ -6,11 +6,15 @@
 //       an already-provisioned account redirects to /vault, not only on
 //       the explicit /install/done. isClaimTerminalUrl encodes that.
 
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   agentTokenStillValid,
+  claimHeartbeatMessage,
   decideProvisioned,
   isClaimTerminalUrl,
+  shouldCompleteInstallClaim,
 } from "../install/cli.js";
 import type { SessionData } from "../session.js";
 
@@ -91,9 +95,11 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
 
   it("NOT provisioned when the session is null or missing a required field", () => {
     expect(decideProvisioned(null, true, ["google"])).toBeNull();
-    const { agent_session_token: _omit, ...noAgentToken } = fullSession;
+    const noAgentToken = { ...fullSession };
+    delete noAgentToken.agent_session_token;
     expect(decideProvisioned(noAgentToken as SessionData, true, [])).toBeNull();
-    const { account_id: _omit2, ...noAccount } = fullSession;
+    const noAccount = { ...fullSession };
+    delete noAccount.account_id;
     expect(decideProvisioned(noAccount as SessionData, true, [])).toBeNull();
   });
 });
@@ -114,5 +120,69 @@ describe("isClaimTerminalUrl (fix #3: noVNC teardown)", () => {
     expect(isClaimTerminalUrl("https://trustysquire.ai/install?token=abc")).toBe(false);
     expect(isClaimTerminalUrl("https://trustysquire.ai/login?next=/vault")).toBe(false);
     expect(isClaimTerminalUrl("https://accounts.google.com/o/oauth2/v2/auth")).toBe(false);
+  });
+});
+
+describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
+  it("completes force-relogin as soon as the account claim succeeds", () => {
+    expect(
+      shouldCompleteInstallClaim(
+        true,
+        true,
+        "https://trustysquire.ai/install?token=abc",
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps first-time onboarding open for the explicit Finish step", () => {
+    expect(
+      shouldCompleteInstallClaim(
+        true,
+        false,
+        "https://trustysquire.ai/install?token=abc",
+      ),
+    ).toBe(false);
+  });
+
+  it("completes first-time onboarding after Finish reaches a terminal page", () => {
+    expect(
+      shouldCompleteInstallClaim(
+        true,
+        false,
+        "https://trustysquire.ai/install/done",
+      ),
+    ).toBe(true);
+  });
+
+  it("never completes before the account claim succeeds", () => {
+    expect(
+      shouldCompleteInstallClaim(
+        false,
+        true,
+        "https://trustysquire.ai/install/done",
+      ),
+    ).toBe(false);
+  });
+
+  it("is wired to the parsed --force-relogin flag in connect", () => {
+    const cliSource = readFileSync(
+      fileURLToPath(new URL("../install/cli.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(cliSource).toMatch(/completeOnClaim:\s*args\.forceRelogin/);
+    expect(cliSource).toMatch(/context\.pages\(\)\[0\]\?\.url\(\)/);
+  });
+});
+
+describe("claimHeartbeatMessage (claimed install awaiting Finish)", () => {
+  it("asks for sign-in only before the install is claimed", () => {
+    expect(claimHeartbeatMessage(false)).toMatch(/finish signing in/i);
+  });
+
+  it("asks for the Finish click after sign-in has claimed the install", () => {
+    const message = claimHeartbeatMessage(true);
+    expect(message).toMatch(/sign-in complete/i);
+    expect(message).toMatch(/click Finish/i);
+    expect(message).not.toMatch(/waiting.*signing in/i);
   });
 });
