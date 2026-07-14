@@ -673,7 +673,10 @@ async function connect(args: Argv): Promise<void> {
     target,
     baseSession,
     args.skipBrowser,
-    !wantInteractive,
+    {
+      applyServerPrefs: !wantInteractive,
+      completeOnClaim: args.forceRelogin,
+    },
   );
   if (session === null) {
     ui.fail(
@@ -1125,18 +1128,46 @@ export function isClaimTerminalUrl(url: string): boolean {
   );
 }
 
+// First-time setup stays open after the account claim so the user can finish
+// optional setup. A forced re-login has no remaining setup contract: once the
+// new account claim is in hand, keeping Chrome/noVNC alive is just a hang.
+export function shouldCompleteInstallClaim(
+  claimed: boolean,
+  completeOnClaim: boolean,
+  installPageUrl: string | undefined,
+): boolean {
+  if (!claimed) return false;
+  return (
+    completeOnClaim ||
+    (installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl))
+  );
+}
+
+// During normal onboarding, claim happens before the browser's Finish step.
+// Keep the terminal message aligned with that two-phase flow.
+export function claimHeartbeatMessage(claimed: boolean): string {
+  return claimed
+    ? "Sign-in complete — click Finish in the browser to close it and continue."
+    : "Still waiting for you to finish signing in — the URL/window above stays live until you do.";
+}
+
 async function runInstallClaim(
   apiBase: string,
   target: AgentTarget,
   baseSession: SessionData,
   skipBrowser: boolean,
-  // Whether to let the SERVER's stored install_preferences override the local
-  // session's consent/proxy. Only for the non-interactive path (CI / re-install
-  // inheritance). In the interactive flow the user JUST answered these questions,
-  // so baseSession is authoritative — applying stale server prefs there silently
-  // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
-  // await_verification refused despite the user consenting).
-  applyServerPrefs: boolean,
+  options: {
+    // Whether to let the SERVER's stored install_preferences override the local
+    // session's consent/proxy. Only for the non-interactive path (CI / re-install
+    // inheritance). In the interactive flow the user JUST answered these questions,
+    // so baseSession is authoritative — applying stale server prefs there silently
+    // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
+    // await_verification refused despite the user consenting).
+    applyServerPrefs: boolean;
+    // Forced re-login is complete when the fresh account claim succeeds. Normal
+    // onboarding stays open for its explicit Finish step and optional setup.
+    completeOnClaim: boolean;
+  },
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
   const initiate = await installInitiate(
@@ -1150,16 +1181,15 @@ async function runInstallClaim(
   // Wrapper object so TS can narrow `state.value` after a `=== null`
   // check at the call site — bare closure-captured `let` doesn't.
   const state: { value: ClaimResult | null } = { value: null };
-  // 0.8.2 — the wizard's "Finish" button navigates to /install/done.
-  // The bot waits for that URL before closing Chrome, so the user
-  // gets a chance to complete optional step 2 (GitHub) AND any
-  // future steps (payment). The API poll still runs so we cache
-  // the agent_session_token from the /claim moment, but it no longer
-  // triggers Chrome teardown on its own.
+  // 0.8.2 — the normal wizard's "Finish" button navigates to
+  // /install/done. First-time onboarding waits for that URL so the user gets a
+  // chance to complete optional setup. Forced re-login instead ends at the API
+  // claim because there is no remaining onboarding contract to wait for.
   const pollOnce = async (context: BrowserContext): Promise<boolean> => {
-    // Keep state.value warm — the install moves to "claimed" the
-    // instant the user finishes step 1, even though we don't tear
-    // down until they hit /install/done.
+    let claimedThisPoll = false;
+    // Keep state.value warm — the install moves to "claimed" the instant the
+    // user finishes step 1. Normal onboarding waits for /install/done; forced
+    // re-login tears down at this claim.
     if (state.value === null) {
       const status = await installPoll(apiBase, initiate.setup_code);
       if (status.status === "claimed" && status.agent_session_token !== undefined) {
@@ -1170,24 +1200,32 @@ async function runInstallClaim(
             ? { preferences: status.install_preferences }
             : {}),
         };
+        claimedThisPoll = true;
       } else if (status.status === "expired") {
         // Bail loudly: state.value stays null and the caller
         // reports the install never completed.
         return true;
       }
     }
-    // Tear down once the claim is in hand AND the confirm flow has
-    // reached a terminal page. /install/done is the explicit Finish
-    // target, but an already-provisioned account skips the wizard and
-    // redirects straight to /vault — without recognizing that too, the
-    // bot's Chrome (and the headless noVNC tunnel) never closes and the
-    // user is left staring at a live tunnel after the claim already
-    // succeeded. Gate on state.value so a stale /vault tab open BEFORE
-    // the claim can't trigger a premature teardown.
-    if (state.value !== null) {
-      for (const page of context.pages()) {
-        if (isClaimTerminalUrl(page.url())) return true;
-      }
+    // A forced re-login ends at claim. Normal onboarding still waits for a
+    // terminal route. In both cases an unclaimed stale /vault tab cannot close
+    // the browser prematurely.
+    if (
+      shouldCompleteInstallClaim(
+        state.value !== null,
+        options.completeOnClaim,
+        // Both browser runners navigate pages()[0] to the install URL. Only
+        // follow that page: a restored background /vault tab must not make
+        // normal onboarding close before the real install page reaches Finish.
+        context.pages()[0]?.url(),
+      )
+    ) {
+      return true;
+    }
+    // Only ask for Finish when the browser is still on the wizard. Returning
+    // users can land directly on /vault, where no Finish button exists.
+    if (claimedThisPoll) {
+      console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
     }
     return false;
   };
@@ -1214,7 +1252,11 @@ async function runInstallClaim(
     const ok = await pollForClaim(apiBase, initiate.setup_code);
     if (ok === null) return null;
     return {
-      ...applyInstallPreferences(baseSession, ok.preferences, applyServerPrefs),
+      ...applyInstallPreferences(
+        baseSession,
+        ok.preferences,
+        options.applyServerPrefs,
+      ),
       api_base_url: apiBase,
       saved_at: new Date().toISOString(),
       agent_session_token: ok.token,
@@ -1231,6 +1273,7 @@ async function runInstallClaim(
     confirmUrl: initiate.confirm_url,
     pollUntilClaimed: pollOnce,
     apiBaseUrl: apiBase,
+    heartbeatMessage: () => claimHeartbeatMessage(state.value !== null),
   });
 
   // rc.33 — surface the underlying error instead of letting the outer
@@ -1249,7 +1292,11 @@ async function runInstallClaim(
   }
 
   return {
-    ...applyInstallPreferences(baseSession, state.value.preferences, applyServerPrefs),
+    ...applyInstallPreferences(
+      baseSession,
+      state.value.preferences,
+      options.applyServerPrefs,
+    ),
     api_base_url: apiBase,
     saved_at: new Date().toISOString(),
     agent_session_token: state.value.token,
