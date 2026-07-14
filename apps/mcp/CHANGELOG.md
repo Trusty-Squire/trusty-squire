@@ -1,5 +1,21 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.43 (2026-07-14)
+
+- **Forced relogin now finishes when sign-in finishes.** After
+  `connect --force-relogin` is claimed by the API, Trusty Squire tears down the
+  temporary Chrome/noVNC session instead of leaving the terminal waiting at
+  login. First-time setup still waits for the user to select **Finish**, and
+  restored background tabs cannot end onboarding early.
+
+## 1.0.43-rc.1 (2026-07-14)
+
+- **Forced relogin now finishes when sign-in finishes.** After
+  `connect --force-relogin` is claimed by the API, Trusty Squire tears down the
+  temporary Chrome/noVNC session instead of leaving the terminal waiting at
+  login. First-time setup still waits for the user to select **Finish**, and
+  restored background tabs cannot end onboarding early.
+
 ## 1.0.42 (2026-07-13)
 
 - **Trusty Squire now explains itself in one sentence:** “Trusty Squire signs
