@@ -144,6 +144,10 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     ).toBe(false);
   });
 
+  it("keeps first-time onboarding open until its primary page is available", () => {
+    expect(shouldCompleteInstallClaim(true, false, undefined)).toBe(false);
+  });
+
   it("completes first-time onboarding after Finish reaches a terminal page", () => {
     expect(
       shouldCompleteInstallClaim(

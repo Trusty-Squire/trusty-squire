@@ -49,6 +49,54 @@ describe("pollUntil phase-aware heartbeat", () => {
     await vi.advanceTimersByTimeAsync(3_000);
     await expect(waiting).resolves.toBe(true);
   });
+
+  it("prints a fixed heartbeat string without invoking callback logic", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T20:00:00.000Z"));
+    let done = false;
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const waiting = pollUntil(
+      Date.now() + 60_000,
+      async () => done,
+      "fixed install heartbeat",
+    );
+
+    await vi.advanceTimersByTimeAsync(21_000);
+    expect(stderr.mock.calls.at(-1)?.[0]).toContain("fixed install heartbeat");
+
+    done = true;
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(waiting).resolves.toBe(true);
+  });
+
+  it("uses the default sign-in heartbeat when no override is provided", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T20:00:00.000Z"));
+    let done = false;
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const waiting = pollUntil(Date.now() + 60_000, async () => done);
+
+    await vi.advanceTimersByTimeAsync(21_000);
+    expect(stderr.mock.calls.at(-1)?.[0]).toContain(
+      "Still waiting for you to finish signing in",
+    );
+
+    done = true;
+    await vi.advanceTimersByTimeAsync(3_000);
+    await expect(waiting).resolves.toBe(true);
+  });
+
+  it("returns false when the deadline expires", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-07-14T20:00:00.000Z"));
+
+    const waiting = pollUntil(Date.now() + 5_000, async () => false);
+
+    await vi.advanceTimersByTimeAsync(6_000);
+    await expect(waiting).resolves.toBe(false);
+  });
 });
 
 // Regression guard for the connect-flow "Provider session check failed
