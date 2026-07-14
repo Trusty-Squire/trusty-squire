@@ -656,6 +656,9 @@ export interface RunInBotChromeOpts {
   // long cloudflared URL is printed verbatim. The headless path is
   // the only consumer; the display path skips the banner entirely.
   apiBaseUrl?: string;
+  // The install flow has a sign-in phase followed by an explicit Finish
+  // step. Resolve this lazily so its heartbeat describes the current phase.
+  heartbeatMessage?: string | (() => string);
 }
 
 export async function runInBotChrome(
@@ -711,7 +714,11 @@ async function runDisplayedChrome(
     console.error(
       `\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`,
     );
-    const ok = await pollUntil(opts.deadline, () => opts.pollUntilDone(context));
+    const ok = await pollUntil(
+      opts.deadline,
+      () => opts.pollUntilDone(context),
+      opts.heartbeatMessage,
+    );
     if (ok && opts.onSuccess !== undefined) {
       // Best-effort: a hook failure must not pretend the user's login
       // didn't happen. They did the work; the caller will read the
@@ -926,7 +933,11 @@ async function runHeadlessChrome(
       //    set — opening a second context after teardown is racy and
       //    silently fails on profile lock), then tear the whole stack
       //    down.
-      const ok = await pollUntil(opts.deadline, () => opts.pollUntilDone(context));
+      const ok = await pollUntil(
+        opts.deadline,
+        () => opts.pollUntilDone(context),
+        opts.heartbeatMessage,
+      );
       if (ok && opts.onSuccess !== undefined) {
         try { await opts.onSuccess(context); } catch { /* swallow */ }
       }
@@ -953,10 +964,11 @@ async function runHeadlessChrome(
 // sign-in URL and then sat on a blank cursor, looking frozen. The heartbeat
 // (with remaining time) makes it obviously alive; quick completions (< 20s,
 // e.g. an already-valid session) print nothing.
-async function pollUntil(
+export async function pollUntil(
   deadline: number,
   check: () => Promise<boolean>,
-  heartbeatMessage = "Still waiting for you to finish signing in — the URL/window above stays live until you do.",
+  heartbeatMessage: string | (() => string) =
+    "Still waiting for you to finish signing in — the URL/window above stays live until you do.",
 ): Promise<boolean> {
   const beatEveryMs = 20_000;
   let lastBeat = Date.now();
@@ -966,7 +978,9 @@ async function pollUntil(
     if (Date.now() - lastBeat >= beatEveryMs) {
       lastBeat = Date.now();
       const minsLeft = Math.max(1, Math.ceil((deadline - Date.now()) / 60_000));
-      console.error(chalk.dim(`   ⏳ ${heartbeatMessage} (~${minsLeft} min left)`));
+      const message =
+        typeof heartbeatMessage === "function" ? heartbeatMessage() : heartbeatMessage;
+      console.error(chalk.dim(`   ⏳ ${message} (~${minsLeft} min left)`));
     }
   }
   return false;
@@ -1117,6 +1131,8 @@ export async function openInstallConfirmInBotChrome(opts: {
   // tunnel URL before printing it in the banner. Same value the
   // install handshake calls against; threaded down to the rig.
   apiBaseUrl?: string;
+  // Phase-aware terminal copy supplied by connect.
+  heartbeatMessage?: string | (() => string);
 }): Promise<{ status: "claimed" | "timeout" | "error"; detail?: string }> {
   const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
@@ -1132,6 +1148,9 @@ export async function openInstallConfirmInBotChrome(opts: {
         `Sign in there to connect this machine — you only sign in once.`,
       pollUntilDone: (context) => opts.pollUntilClaimed(context),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
+      ...(opts.heartbeatMessage !== undefined
+        ? { heartbeatMessage: opts.heartbeatMessage }
+        : {}),
       // The user's sign-in inside this Chrome leaves a provider session
       // in the persistent profile. We don't know WHICH provider they
       // used (Google or GitHub), so probe both cookie sets and mark
