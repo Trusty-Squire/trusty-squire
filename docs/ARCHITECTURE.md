@@ -1,10 +1,11 @@
 # Trusty Squire Architecture
 
-Trusty Squire is a credential broker and vault for AI coding agents. A user asks
-their agent to provision a service, operate a console, or wire a secret into an
-app. Trusty Squire drives the browser and provider APIs, stores credentials in a
-write-only vault, and lets code use those credentials through scoped grants
-without exposing raw secret values to the agent.
+Trusty Squire signs up and signs in to websites for developers working through
+AI coding agents. A user asks their agent to create an account, finish setup
+behind a login, or connect a service to an app. Trusty Squire drives the browser
+and provider APIs, stores generated credentials in a write-only vault, and lets
+code use them through scoped grants without exposing raw secret values to the
+agent.
 
 This document is the canonical project overview. If another document disagrees
 with it, this document wins.
