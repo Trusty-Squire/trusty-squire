@@ -1,5 +1,18 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.44 (2026-07-16)
+
+- **Stored browser extraction is write-only end to end.** When
+  `operate_extract` saves a generated credential to the vault, its MCP response
+  now omits the extracted values and returns only non-secret vault metadata.
+- **The egress-grant boundary is explicit.** `grant_app_access` still returns a
+  scoped, revocable token once for backend deployment, but its tool and README
+  documentation now state that this token can enter model context and direct
+  zero-token-exposure callers to `use_credential`.
+- **GitHub and npm share the new discovery README.** The canonical packaged
+  README now leads with website signup, the vault boundary, reviewed service
+  examples, honest limits, and absolute repository links that work on npm.
+
 ## 1.0.43 (2026-07-14)
 
 - **Forced relogin now finishes when sign-in finishes.** After

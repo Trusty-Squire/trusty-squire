@@ -34,8 +34,8 @@ a{color:inherit;text-decoration:none}
 *:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:5px}
 .wrap{max-width:1080px;margin:0 auto;padding:0 var(--s-8)}
 
-/* nav */
-nav{position:sticky;top:0;z-index:20;background:rgba(8,8,10,.72);
+/* site navigation */
+.site-nav{position:sticky;top:0;z-index:20;background:rgba(8,8,10,.72);
   backdrop-filter:blur(12px);border-bottom:1px solid var(--line)}
 .nav-in{display:flex;align-items:center;justify-content:space-between;
   height:60px;max-width:1080px;margin:0 auto;padding:0 var(--s-8)}
@@ -833,6 +833,13 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 /* Public use-case and agent guides share the landing's ruled, editorial
    vocabulary. The rows are navigation and prose, never a card grid. */
 .discovery{width:min(920px,100%);margin:0 auto;padding:var(--s-20) var(--s-8) var(--s-24)}
+.breadcrumbs{margin-bottom:var(--s-8);font-family:var(--mono);font-size:12px;color:var(--faint)}
+.breadcrumbs ol{display:flex;align-items:center;flex-wrap:wrap;gap:var(--s-2);list-style:none}
+.breadcrumbs li{display:flex;align-items:center;gap:var(--s-2)}
+.breadcrumbs li:not(:last-child)::after{content:"/";color:var(--line)}
+.breadcrumbs a{color:var(--muted)}
+.breadcrumbs a:hover{color:var(--accent)}
+.breadcrumbs [aria-current="page"]{color:var(--fg)}
 .discovery-head{max-width:800px;padding-bottom:var(--s-20)}
 .discovery-head-compact{padding-bottom:var(--s-12)}
 .discovery-kicker{font-family:var(--mono);font-size:12px;letter-spacing:.08em;
@@ -933,6 +940,24 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .hero-asks a:hover{color:var(--fg)}
 .hero-asks a:hover span{color:var(--accent)}
 
+/* Direct-answer block for search engines and coding agents. It keeps the
+   landing page's ruled editorial rhythm instead of adding another card. */
+.home-explainer{display:grid;grid-template-columns:180px minmax(0,650px);gap:var(--s-8);
+  margin-top:var(--s-20);padding-top:var(--s-12);padding-bottom:var(--s-4);
+  border-top:1px solid var(--line)}
+.home-explainer-label{font-family:var(--mono);font-size:12px;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--accent);padding-top:5px}
+.home-explainer h2{font-size:clamp(1.9rem,3.6vw,2.7rem);font-weight:600;
+  letter-spacing:-.035em;line-height:1.08}
+.home-explainer h3{margin-top:var(--s-8);font-size:18px;font-weight:600;
+  letter-spacing:-.018em}
+.home-explainer p,.home-explainer li{font-size:15.5px;line-height:1.72;color:var(--muted)}
+.home-explainer p{margin-top:var(--s-4)}
+.home-explainer ol{margin-top:var(--s-4);padding-left:1.3em}
+.home-explainer li{margin-top:var(--s-2);padding-left:var(--s-2)}
+.home-explainer .home-limit{margin-top:var(--s-6);padding-top:var(--s-4);
+  border-top:1px solid var(--line);color:var(--fg)}
+
 @media(max-width:780px){
   .discovery{padding:var(--s-16) var(--s-6) var(--s-20)}
   .discovery-head{padding-bottom:var(--s-16)}
@@ -940,6 +965,7 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
   .discovery-label{flex-direction:row;align-items:baseline;gap:var(--s-3)}
   .discovery-index>a{grid-template-columns:38px 1fr auto;gap:var(--s-3)}
   .hero-asks{grid-template-columns:1fr}
+  .home-explainer{grid-template-columns:1fr;gap:var(--s-4);margin-top:var(--s-16)}
   .hero-asks li:nth-child(odd),.hero-asks li:nth-child(even){padding:0;border-left:0}
   .foot-l{width:100%;justify-content:flex-start;gap:10px 18px}
 }

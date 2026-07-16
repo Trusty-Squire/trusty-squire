@@ -13,10 +13,15 @@ export const metadata = publicMetadata(
 export default function CodexIntegrationPage() {
   return (
     <DiscoveryDetail
+      breadcrumbs={[
+        { name: "Home", path: "/" },
+        { name: "Agent integrations", path: "/integrations" },
+        { name: "Codex", path: "/integrations/codex" },
+      ]}
       eyebrow="Integration / Codex CLI"
       title="Sign up and sign in to websites from Codex"
       deck="Connect Trusty Squire to Codex so it can finish browser setup work and use saved credentials without returning their raw values."
-      installCommand="npx @trusty-squire/mcp@latest connect --target=codex"
+      installCommand="npx @trusty-squire/mcp connect --target=codex"
       examples={[
         {
           prompt: "Sign in to Sentry and configure the webhook.",
@@ -24,11 +29,11 @@ export default function CodexIntegrationPage() {
             "Codex keeps the integration goal in view while Trusty Squire works behind the login.",
         },
         {
-          prompt: "Set up Resend, Sentry, PostHog, and Postgres for this app.",
+          prompt: "Set up Clerk, Cerebras, DeepInfra, and Zilliz Cloud for this app.",
           result: "Coordinate several provider setups from the same coding session.",
         },
         {
-          prompt: "Let my app call OpenAI without giving it the OpenAI key.",
+          prompt: "Let my app call OpenRouter without giving it the OpenRouter key.",
           result: "Create scoped app access instead of placing the provider key in the project.",
         },
       ]}

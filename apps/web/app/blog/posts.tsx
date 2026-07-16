@@ -16,6 +16,8 @@ export interface Post {
   date: string;
   /** ISO date for <time dateTime> + sorting. */
   iso: string;
+  /** ISO date for substantive revisions; defaults to `iso`. */
+  modifiedIso?: string;
   /** Meta description + the excerpt shown on the index. */
   description: string;
   Body: () => ReactNode;
@@ -48,24 +50,24 @@ function LastMileBody(): ReactNode {
 
       <h2>What it does</h2>
       <p>
-        You ask once — <em>&ldquo;sign me up for Resend and wire it in,&rdquo;</em>{" "}
-        or <em>&ldquo;stand up my whole stack.&rdquo;</em> Your coding agent
-        (Claude Code, Cursor, Codex, Goose) drives a scoped browser that signs up
-        for the service, handles the email verification, grabs the API key, and
-        drops it into an encrypted vault.
+        You ask once:{" "}
+        <em>&ldquo;sign me up for Clerk and wire the Backend API in.&rdquo;</em>{" "}
+        Your coding agent (Claude Code, Cursor, Codex, Goose) drives a scoped
+        browser that signs up for the service, handles the email verification,
+        captures the API key, and sends it directly to an encrypted vault.
       </p>
       <p>
-        Provision a whole backend — email, database, analytics, error tracking,
-        deploy — in one ask, without opening a single dashboard. If your stack
-        leans on a pile of third-party services, this collapses the
-        setup-and-configuration slog from an afternoon into a couple of minutes.
+        For a reviewed service flow, that removes the dashboard handoff from the
+        coding loop. The public service catalog starts with five evidence-checked
+        examples; the larger active registry inventory is published separately
+        and expands only after each flow passes review.
       </p>
       <p>
         I tried OpenAI&rsquo;s Operator and browser-use for this first. They can
         drive a browser, but they&rsquo;re general-purpose bots built to be
-        watched, and they punt the moment there&rsquo;s a login, a captcha, or an
-        API key to handle — which is the entire task. The insight that made this
-        work: the coding agent you already have is a great <em>planner</em>; what
+        watched, and they often stall at a signup wall, bot check, or API-key
+        handoff. Those steps are the task. The insight that made this work: the
+        coding agent you already have is a great <em>planner</em>; what
         it&rsquo;s missing is a <em>driver</em> — a scoped browser and a safe
         place to put what it finds.
       </p>
@@ -569,6 +571,7 @@ export const POSTS: Post[] = [
     title: "Your coding agent can build your whole app — except sign up for the services it needs",
     date: "2 July 2026",
     iso: "2026-07-02",
+    modifiedIso: "2026-07-15",
     description:
       "Your coding agent builds the whole app, then stalls at every signup form. Trusty Squire provisions the services your stack needs and vaults the keys write-only — setup in minutes, not an afternoon.",
     Body: LastMileBody,

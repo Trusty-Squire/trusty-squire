@@ -93,6 +93,16 @@ jobs:
       # built skill-schema dist — the exact path that broke at 0.9.14 release.
       - name: Build mcp (production)
         run: pnpm -F @trusty-squire/mcp build
+      # Discovery pages must exist in the initial HTML. A Next production build
+      # exercises static params, metadata routes, JSON-LD, sitemap, llms files,
+      # and the Open Graph image instead of relying on no-emit typechecking.
+      - name: Build web (production)
+        run: pnpm -F @trusty-squire/web build
+      # The live active registry is the eligibility source for service content.
+      # Fail closed when a service disappears, appears, or changes skill ID so a
+      # stale public catalog cannot merge unnoticed.
+      - name: Verify service catalog against active registry
+        run: pnpm seo:verify-services
 
   test:
     runs-on: ubuntu-latest

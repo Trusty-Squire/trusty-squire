@@ -1,8 +1,15 @@
 import type { MetadataRoute } from "next";
 import { POSTS } from "./blog/posts";
+import { COMPARISON_ROUTES } from "./compare/content";
+import { GUIDE_SLUGS } from "./guides/content";
+import { SERVICE_PAGE_SAMPLES } from "./services/service-content";
 
 const SITE_URL = "https://trustysquire.ai";
-const DISCOVERY_UPDATED = "2026-07-13T00:00:00.000Z";
+const DISCOVERY_UPDATED = "2026-07-15T00:00:00.000Z";
+const BLOG_UPDATED = POSTS.reduce((latest, post) => {
+  const updated = post.modifiedIso ?? post.iso;
+  return updated > latest ? updated : latest;
+}, "");
 
 const PUBLIC_ROUTES: MetadataRoute.Sitemap = [
   {
@@ -46,14 +53,50 @@ const PUBLIC_ROUTES: MetadataRoute.Sitemap = [
     priority: 0.8,
   })),
   {
+    url: `${SITE_URL}/services`,
+    lastModified: DISCOVERY_UPDATED,
+    changeFrequency: "weekly",
+    priority: 0.95,
+  },
+  ...SERVICE_PAGE_SAMPLES.map((service) => ({
+    url: `${SITE_URL}/services/${service.registry.service}`,
+    lastModified: DISCOVERY_UPDATED,
+    changeFrequency: "monthly" as const,
+    priority: 0.75,
+  })),
+  {
+    url: `${SITE_URL}/guides`,
+    lastModified: DISCOVERY_UPDATED,
+    changeFrequency: "monthly",
+    priority: 0.9,
+  },
+  ...GUIDE_SLUGS.map((slug) => ({
+    url: `${SITE_URL}/guides/${slug}`,
+    lastModified: DISCOVERY_UPDATED,
+    changeFrequency: "monthly" as const,
+    priority: 0.8,
+  })),
+  {
+    url: `${SITE_URL}/compare`,
+    lastModified: DISCOVERY_UPDATED,
+    changeFrequency: "monthly",
+    priority: 0.85,
+  },
+  ...COMPARISON_ROUTES.map((comparison) => ({
+    url: `${SITE_URL}/compare/${comparison.slug}`,
+    lastModified: DISCOVERY_UPDATED,
+    changeFrequency: "monthly" as const,
+    priority: 0.75,
+  })),
+  {
     url: `${SITE_URL}/blog`,
-    lastModified: POSTS[0]?.iso ?? DISCOVERY_UPDATED,
+    lastModified: BLOG_UPDATED || DISCOVERY_UPDATED,
     changeFrequency: "weekly",
     priority: 0.7,
   },
   ...POSTS.map((post) => ({
     url: `${SITE_URL}/blog/${post.slug}`,
-    lastModified: post.iso,
+    lastModified: post.modifiedIso ?? post.iso,
     changeFrequency: "yearly" as const,
     priority: 0.6,
   })),

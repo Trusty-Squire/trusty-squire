@@ -13,21 +13,26 @@ export const metadata = publicMetadata(
 export default function WebsiteSignupPage() {
   return (
     <DiscoveryDetail
+      breadcrumbs={[
+        { name: "Home", path: "/" },
+        { name: "Use cases", path: "/use-cases" },
+        { name: "Website signup", path: "/use-cases/website-signup" },
+      ]}
       eyebrow="Use case / website signup"
       title="Let your coding agent sign you up for websites"
       deck="Trusty Squire opens the real signup page, works through the flow one step at a time, and saves generated credentials directly to your vault."
       examples={[
         {
-          prompt: "Sign me up for Resend and save the API key.",
+          prompt: "Sign me up for Zilliz Cloud and save the API key.",
           result:
             "Create the account, complete the available verification steps, and store the generated key.",
         },
         {
-          prompt: "Create a PostHog account for this new app.",
+          prompt: "Create a Clerk account for this new app.",
           result: "Move from the public signup page into the authenticated project setup.",
         },
         {
-          prompt: "Set up Resend, Sentry, PostHog, and Postgres for this app.",
+          prompt: "Set up Clerk, Cerebras, DeepInfra, and Zilliz Cloud for this app.",
           result: "Work through several service signups as one project outcome.",
         },
       ]}
@@ -73,9 +78,10 @@ export default function WebsiteSignupPage() {
     >
       <h3>Use service names as requests, not support promises</h3>
       <p>
-        Resend, PostHog, Sentry, and Postgres are concrete examples of the work developers ask for.
-        Website flows change, and some services add gates that require you. Trusty Squire should
-        report that boundary clearly rather than pretending a blocked signup completed.
+        Braintrust, Cerebras, Clerk, DeepInfra, and Zilliz Cloud are active services with reviewed
+        sample pages backed by signup evidence in Trusty Squire&apos;s registry. Website flows
+        change, and some services add gates that require you. Trusty Squire reports that boundary
+        clearly instead of pretending a blocked signup completed.
       </p>
 
       <h3>Your identity stays under your control</h3>

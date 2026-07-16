@@ -14,17 +14,22 @@ export const metadata = publicMetadata(
 export default function ApiKeysWithoutEnvPage() {
   return (
     <DiscoveryDetail
+      breadcrumbs={[
+        { name: "Home", path: "/" },
+        { name: "Use cases", path: "/use-cases" },
+        { name: "API keys without .env", path: "/use-cases/api-keys-without-env" },
+      ]}
       eyebrow="Use case / credential safety"
       title="Use API keys without putting them in chat, code, or .env"
       deck="Trusty Squire stores generated credentials, injects them into provider requests server-side, and can give deployed apps scoped access you can revoke."
       examples={[
         {
-          prompt: "Sign me up for Resend and save the API key.",
+          prompt: "Sign me up for Zilliz Cloud and save the API key.",
           result:
             "Capture the generated key into the vault instead of copying it through the conversation.",
         },
         {
-          prompt: "Let my deployed app call OpenAI without giving it the OpenAI key.",
+          prompt: "Let my deployed app call OpenRouter without giving it the OpenRouter key.",
           result:
             "Issue scoped app access while the provider credential stays out of the consuming app.",
         },
