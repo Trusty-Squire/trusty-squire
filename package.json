@@ -11,6 +11,7 @@
     "typecheck": "pnpm -r --if-present typecheck",
     "lint": "eslint \"packages/**/*.{ts,tsx}\" \"apps/**/*.{ts,tsx}\" --no-error-on-unmatched-pattern",
     "format": "prettier --write \"packages/**/*.{ts,tsx}\" \"apps/**/*.{ts,tsx}\"",
+    "seo:verify-services": "tsx tools/verify-service-catalog.ts",
     "registry:publish": "pnpm --filter @trusty-squire/registry publish:adapter",
     "release:mcp": "node tools/release-mcp.mjs"
   },

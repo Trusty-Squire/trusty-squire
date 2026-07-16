@@ -28,6 +28,7 @@ import {
   captureAndPromoteSession,
   emitProvisionMeasurement,
   type ProvisionAction,
+  type ExtractResult,
 } from "../bot/provision-session.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
@@ -361,12 +362,21 @@ const storeJsonProps = {
 
 // Vault-store an extracted credential. Shared by extract + the credentials
 // terminal so the stored record is byte-identical regardless of entry point.
+export interface StoredCredentialMetadata {
+  reference: string;
+  service: string;
+  label: string | undefined;
+  field_names: string[];
+  allowed_hosts: string[];
+  updated: boolean;
+}
+
 async function persistExtracted(
   sessionId: string,
   credentials: Record<string, string>,
   store: StoreSpec,
   api: ApiClient,
-): Promise<{ reference: string; service: string; label: string | undefined; field_names: string[]; allowed_hosts: string[]; updated: boolean }> {
+): Promise<StoredCredentialMetadata> {
   const observedHosts = [
     ...new Set([...(store.egress_hosts ?? []), ...observedHostsForSession(sessionId)]),
   ];
@@ -394,6 +404,28 @@ async function persistExtracted(
   };
 }
 
+/**
+ * Build the MCP-visible result after a successful vault write.
+ *
+ * `ExtractResult.credentials` contains the raw values read from the browser. A
+ * stored extraction must never spread that object back into the MCP response:
+ * the host/model receives only non-secret extraction and vault metadata.
+ */
+export function storedExtractResult(
+  extracted: ExtractResult,
+  stored: StoredCredentialMetadata,
+) {
+  return {
+    session_id: extracted.session_id,
+    url: extracted.url,
+    candidate_count: extracted.candidate_count,
+    ...(extracted.blocked_reason !== undefined
+      ? { blocked_reason: extracted.blocked_reason }
+      : {}),
+    stored_credential: stored,
+  };
+}
+
 const extractSchema = z.object({
   session_id: z.string().min(1),
   // Sealed transfer: stash the extracted secret in a session-local slot and
@@ -416,7 +448,8 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     "`api_key` (or `api_key_truncated` if only a masked display was reachable) " +
     "plus named fields for multi-credential services. Pass `store` to immediately " +
     "save the extracted credential into the Trusty Squire vault with the session's " +
-    "observed hosts as allowed_hosts seed. If `blocked_reason` is set, " +
+    "observed hosts as allowed_hosts seed; when `store` is used, the response omits " +
+    "credential values and returns only vault metadata. If `blocked_reason` is set, " +
     "the page is a login wall / anti-bot interstitial with NO credential present " +
     "(do not treat the empty result as a real key) — drive an interactive login " +
     "or hand back to the user. Call when you have navigated to the keys page. " +
@@ -501,7 +534,7 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
       throw new Error("operate_extract store requires an active Trusty Squire session");
     }
     const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
-    return { ...extracted, stored_credential: stored };
+    return storedExtractResult(extracted, stored);
   },
 };
 

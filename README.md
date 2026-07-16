@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://trustysquire.ai" target="_blank" rel="noopener noreferrer">
-    <img width="84" height="84" src="https://trustysquire.ai/logo.svg" alt="Trusty Squire" />
+    <img width="84" height="84" src="https://trustysquire.ai/logo.svg" alt="Trusty Squire shield" />
   </a>
 </p>
 
@@ -16,76 +16,106 @@
 
 <p align="center"><strong>Trusty Squire signs up / in to websites for you so you don’t have to.</strong></p>
 
-Try asking your coding agent:
+Operator-style browser tools can build most of an integration, then stall at the signup wall or bot detection. Trusty Squire gets the real account provisioned and finishes the setup.
 
-- **“Sign me up for Resend and save the API key.”**
-- **“Sign in to Sentry and configure the webhook.”**
-- **“Set up Resend, Sentry, PostHog, and Postgres for this app.”**
-- **“Add Google OAuth to my app without showing me the client secret.”**
-- **“Let my deployed app call OpenAI without giving it the OpenAI key.”**
-- **“That app token leaked — revoke its access now.”**
+Trusty Squire is an MCP server for Claude Code, Codex, Cursor, Goose, and other coding agents. It opens the real website, completes signup or sign-in, and saves generated credentials in an encrypted, write-only vault. The raw provider secret does not need to enter the agent's context, source code, or `.env`, so it cannot be copied into a commit.
 
-Trusty Squire is an MCP server for Claude Code, Cursor, Codex, and other coding
-agents. It opens the real website, completes the signup or sign-in flow, handles the
-setup behind the login, and stores generated credentials in the vault instead of
-returning them through credential tools or writing them to source code or an `.env` file.
+## One prompt
+
+```text
+Use Trusty Squire to create a Clerk account for this app, save the generated secret key, allow api.clerk.com for server-side requests, and wire it in without putting the raw key in chat, code, or .env.
+```
+
+Your coding agent plans the job. Trusty Squire operates the website, stores the generated key, and can issue your backend a scoped grant. The backend calls the provider through Trusty Squire, which injects the provider key on the server side.
+
+Other useful asks:
+
+- “Create a Render API key for deployment automation and keep it out of this conversation.”
+- “Set up OpenRouter without returning its API key to this conversation.”
+- “That app grant leaked. Revoke it without rotating the provider key.”
 
 ## Install
 
 ```bash
-npx @trusty-squire/mcp@latest connect
+npx @trusty-squire/mcp connect
 ```
 
-`connect` signs you in with Google or GitHub, detects your coding agent, and writes its
-MCP configuration. Restart the agent, then ask it to do one of the jobs above.
+`connect` signs you in with Google or GitHub, detects your coding agent, and merges the `squire` MCP server into its existing configuration. Restart the agent and ask for the finished website outcome. Trusty Squire is free to start.
 
-To choose an agent explicitly:
+To choose a target explicitly:
 
 ```bash
-npx @trusty-squire/mcp@latest connect --target=codex
+npx @trusty-squire/mcp connect --target=codex
 ```
 
-Supported targets: `claude-code`, `cursor`, `codex`, `goose`, `cline`, `continue`,
-and `hermes`.
+Supported targets: `claude-code`, `cursor`, `codex`, `goose`, `cline`, `continue`, and `hermes`.
 
-## What happens when you ask
+## What happens
 
-1. Your coding agent tells Trusty Squire which website and task you asked for.
-2. Trusty Squire opens a real browser session and works through the site one step at a
-   time. It can use your existing Google or GitHub session when you choose that option.
-3. If the site creates an API key or client secret, Trusty Squire stores it directly in
-   your vault. The credential extraction result does not return the raw value.
-4. Your agent can use the saved credential through Trusty Squire, or give your app a
-   scoped, rate-limited token that you can revoke without rotating the underlying key.
+1. Your coding agent names the website and the account, setup, or credential it needs.
+2. Trusty Squire opens a real browser and works through the service flow one step at a time. It can use a Google or GitHub session that you explicitly connect.
+3. When the site reveals an API key or client secret, Trusty Squire captures it into the vault without returning the raw value through its credential tools.
+4. The agent can make an authenticated request through Trusty Squire or create a host-scoped, rate-limited app grant.
+5. Successful flows can become signed registry skills, so later runs can replay verified steps instead of rediscovering every click.
 
-Successful website flows can be saved and replayed, so the next run does not have to
-rediscover every click.
+If a site requires a phone, hard CAPTCHA, payment, or a human decision, the run stops and tells you. It does not guess or pretend the signup completed.
 
-## How secrets are handled
+## Supported services
 
-- Credential tools do not return stored values or write them to source code, `.env`
-  files, or the consuming app. Browser screenshots and diagnostic captures can contain
-  whatever was visible on the page, so treat those diagnostics as sensitive.
-- When an API call needs a credential, Trusty Squire injects it into the request on the
-  server side. The API provider receives its credential; the caller does not.
-- A deployed app receives a scoped Trusty Squire token instead of the provider key.
-  Access can be rate-limited, audited, and revoked.
-- Trusty Squire does not type your Google or GitHub password. You sign in in a real
-  browser, and the browser keeps that session.
-- If a site needs a decision or action that should be yours, the run stops and asks
-  you instead of guessing.
+Discovery pages are generated only for services with an active skill in the Trusty Squire registry. The first five detailed pages cover Braintrust, Cerebras, Clerk, DeepInfra, and Zilliz Cloud. Each sample has explicit signup evidence in its active registry record and a provider request checked against official API documentation. The service hub also lists every active registry entry; the remaining detail pages stay unpublished until their workflow and unique content pass review.
+
+Browse the [active service catalog](https://trustysquire.ai/services). Maintainers can detect registry drift before merging with:
+
+```bash
+pnpm seo:verify-services
+```
+
+The registry controls which service pages exist. An external list is never used to claim support.
+
+## Keep provider keys out of agent context
+
+Ask the agent to create a scoped backend grant:
+
+```text
+Grant this backend access to Clerk through Trusty Squire with a limit of 100 requests per hour.
+```
+
+Before minting the grant, make `api.clerk.com` the credential's primary allowed host in the Vault. The egress proxy refuses every other upstream host. This explicit policy step is required when the signup host and provider API host differ.
+
+The agent calls the real MCP tool with the service and requested limit:
+
+```text
+grant_app_access({
+  service: "clerk",
+  rate_limit_per_hour: 100
+})
+```
+
+The result contains a host-scoped egress `base_url` and a `token`, not the Clerk secret key. The token is returned once through the MCP result and remains valid until revoked. That means the scoped grant token can enter agent context; it is not the provider key. Move it directly into backend-only deployment secret storage, never browser code, logs, or source control. If you need zero grant-token exposure to the model, use `use_credential` for agent-initiated requests instead. Trusty Squire removes the grant authorization at the boundary and injects the vaulted provider credential into the upstream request.
+
+## Security and threat model
+
+- Provider credentials are encrypted in the vault and are write-only to agent credential tools. Those tools return references or authenticated results, not stored plaintext.
+- The raw provider key is injected only into the outbound provider request. It does not need to land in chat, generated code, the consuming app, or the project's `.env` file.
+- App grants are host-scoped, auditable, rate-limitable, and independently revocable. A leaked grant can be revoked without rotating the provider key.
+- You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
+- Browser screenshots and diagnostics can contain whatever a website visibly rendered. Treat diagnostic artifacts as sensitive and do not ask an agent to re-observe a page after a secret is shown.
+- Trusty Squire does not bypass phone verification, hard CAPTCHAs, payment authorization, or decisions that belong to a person. It stops for human input.
+
+See [Architecture and security](https://github.com/trusty-squire/trusty-squire/blob/main/docs/ARCHITECTURE.md) for the system boundaries and data flow.
 
 ## MCP tools
 
-- `operate_start`, `operate_observe`, and `operate_act` open a website, read the page,
-  and act one step at a time.
-- `operate_extract` captures a credential from the current page into a sealed slot or
-  stores it in the vault.
-- `operate_remember` and `operate_use` save and replay a successful website flow.
-- `list_credentials` and `use_credential` find saved credentials and make authenticated
-  API calls without returning their raw values.
-- `grant_app_access` and `revoke_app_access` give an app scoped access and take it away.
-- `audit_log` shows credential activity without exposing credential values.
+- `operate_start`, `operate_observe`, and `operate_act` open a website, inspect the current state, and perform one browser action at a time.
+- `operate_extract` captures a generated credential into a sealed slot or the vault.
+- `operate_remember` and `operate_use` save and replay successful website flows.
+- `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
+- `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
+- `audit_log` reports credential activity without exposing credential values.
+
+## One README for GitHub and npm
+
+This root file is the canonical README. The npm pack lifecycle copies it into `@trusty-squire/mcp` byte-for-byte, then removes the generated package-local copy after packing. GitHub and npm therefore publish the same product explanation.
 
 ## Development
 
@@ -95,32 +125,27 @@ cd trusty-squire
 ./scripts/bootstrap.sh
 ```
 
-After bootstrap, `pnpm typecheck` and `pnpm test` should pass. Stop the local services
-with `docker compose -f docker-compose.dev.yml down`; add `-v` to reset their data.
+After bootstrap, `pnpm typecheck` and `pnpm test` should pass. Stop local services with `docker compose -f docker-compose.dev.yml down`; add `-v` to reset their data.
 
 Requirements: Node 20.11.0 (`.nvmrc`), pnpm 8.15+, Docker, and Docker Compose.
 
-Product language and public-web changes should follow [PRODUCT.md](PRODUCT.md) and
-[DESIGN.md](DESIGN.md).
-
-### Repository structure
+Repository map:
 
 ```text
 trusty-squire/
 ├── apps/
 │   ├── api/        Accounts, OAuth, machine tokens, proxy, inbox, vault, and billing
-│   ├── mcp/        The MCP server coding agents install; browser and credential tools
-│   ├── registry/   Signed, replayable website skills and their verification service
-│   └── web/        Public site and vault UI
+│   ├── mcp/        MCP server, browser operation tools, and credential tools
+│   ├── registry/   Signed website skills and verification service
+│   └── web/        Marketing site and vault UI
 └── packages/
     ├── vault/        Encrypted credential storage and audit log
     ├── inbox/        Email verification code and link extraction
     └── skill-schema/ Shared schema for replayable website skills
 ```
 
-See [docs/ARCHITECTURE.md](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/ARCHITECTURE.md)
-for the architecture and security model.
+Product and public-web changes should follow [PRODUCT.md](https://github.com/trusty-squire/trusty-squire/blob/main/PRODUCT.md) and [DESIGN.md](https://github.com/trusty-squire/trusty-squire/blob/main/DESIGN.md).
 
 ## License
 
-[MIT](https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE) © Trusty Squire
+[MIT](https://github.com/trusty-squire/trusty-squire/blob/main/LICENSE) © Trusty Squire

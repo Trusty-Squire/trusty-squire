@@ -26,7 +26,7 @@ export const metadata: Metadata = {
     template: "%s | Trusty Squire",
   },
   description:
-    "Trusty Squire lets Claude Code, Codex, Cursor, and other coding agents sign up for websites, sign in, configure services, and save API keys without putting them in chat or code.",
+    "Trusty Squire is an MCP server that lets Claude Code, Codex, Cursor, and other coding agents sign up for websites and save API keys outside chat, code, and .env.",
   metadataBase: new URL("https://trustysquire.ai"),
   applicationName: "Trusty Squire",
   keywords: [
@@ -35,30 +35,33 @@ export const metadata: Metadata = {
     "Claude Code MCP",
     "Codex MCP",
     "Cursor MCP",
+    "MCP credential vault",
+    "AI agent secrets management",
+    "automate website signup",
     "API keys without .env",
   ],
   openGraph: {
     title: "Trusty Squire: AI agents that sign up and sign in to websites",
     description:
-      "Let your coding agent sign up for websites, sign in, configure services, and save generated credentials without putting them in chat, code, or .env.",
+      "An MCP server that gets coding agents through website signup and stores generated credentials outside chat, code, and .env.",
     url: "https://trustysquire.ai/",
     siteName: "Trusty Squire",
     type: "website",
     images: [
       {
-        url: "/logo-400.png",
-        width: 400,
-        height: 400,
-        alt: "Trusty Squire shield mark",
+        url: "/opengraph-image",
+        width: 1200,
+        height: 630,
+        alt: "Trusty Squire completing a website signup and sealing the generated API key",
       },
     ],
   },
   twitter: {
-    card: "summary",
+    card: "summary_large_image",
     title: "Trusty Squire: AI agents that sign up and sign in to websites",
     description:
-      "Let your coding agent sign up, sign in, configure services, and save generated credentials without putting them in chat or code.",
-    images: ["/logo-400.png"],
+      "An MCP server that gets coding agents through website signup and stores generated credentials outside chat, code, and .env.",
+    images: ["/opengraph-image"],
   },
   icons: {
     icon: "/favicon.svg",

@@ -1,8 +1,10 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import type { Metadata } from "next";
+import { JsonLd } from "../../components/JsonLd";
 import { Shield } from "../../components/Shield";
 import { articleMetadata } from "../../lib/public-metadata";
+import { articleJsonLd, breadcrumbJsonLd } from "../../lib/structured-data";
 import { POSTS, getPost } from "../posts";
 
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
@@ -25,14 +27,11 @@ export async function generateMetadata({
     post.description,
     `/blog/${post.slug}`,
     post.iso,
+    post.modifiedIso,
   );
 }
 
-export default async function PostPage({
-  params,
-}: {
-  params: Promise<{ slug: string }>;
-}) {
+export default async function PostPage({ params }: { params: Promise<{ slug: string }> }) {
   const { slug } = await params;
   const post = getPost(slug);
   if (post === undefined) notFound();
@@ -40,7 +39,23 @@ export default async function PostPage({
 
   return (
     <main>
-      <nav>
+      <JsonLd
+        data={articleJsonLd({
+          title: post.title,
+          description: post.description,
+          path: `/blog/${post.slug}`,
+          datePublished: post.iso,
+          dateModified: post.modifiedIso ?? post.iso,
+        })}
+      />
+      <JsonLd
+        data={breadcrumbJsonLd([
+          { name: "Home", path: "/" },
+          { name: "Blog", path: "/blog" },
+          { name: post.title, path: `/blog/${post.slug}` },
+        ])}
+      />
+      <nav className="site-nav">
         <div className="nav-in">
           <Link className="brand" href="/">
             <Shield size={22} glyph />

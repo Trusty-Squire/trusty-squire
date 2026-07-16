@@ -13,18 +13,23 @@ export const metadata = publicMetadata(
 export default function CursorIntegrationPage() {
   return (
     <DiscoveryDetail
+      breadcrumbs={[
+        { name: "Home", path: "/" },
+        { name: "Agent integrations", path: "/integrations" },
+        { name: "Cursor", path: "/integrations/cursor" },
+      ]}
       eyebrow="Integration / Cursor"
       title="Sign up and sign in to websites from Cursor"
       deck="Add Trusty Squire to Cursor, restart it, and ask for the signup, configuration, or credential outcome your app needs."
-      installCommand="npx @trusty-squire/mcp@latest connect --target=cursor"
+      installCommand="npx @trusty-squire/mcp connect --target=cursor"
       examples={[
         {
-          prompt: "Sign me up for Resend and save the API key.",
+          prompt: "Sign me up for Clerk and save the API key.",
           result:
             "Keep working in Cursor while Trusty Squire completes the website flow and stores the key.",
         },
         {
-          prompt: "Configure PostHog and Sentry for this app.",
+          prompt: "Configure Braintrust and Cerebras for this app.",
           result: "Finish project setup in both dashboards from one development task.",
         },
         {

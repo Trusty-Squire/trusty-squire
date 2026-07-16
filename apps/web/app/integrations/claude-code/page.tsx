@@ -13,13 +13,18 @@ export const metadata = publicMetadata(
 export default function ClaudeCodeIntegrationPage() {
   return (
     <DiscoveryDetail
+      breadcrumbs={[
+        { name: "Home", path: "/" },
+        { name: "Agent integrations", path: "/integrations" },
+        { name: "Claude Code", path: "/integrations/claude-code" },
+      ]}
       eyebrow="Integration / Claude Code"
       title="Sign up and sign in to websites from Claude Code"
       deck="Connect Trusty Squire to Claude Code, then describe the website outcome you want. The installer merges the squire server into Claude's existing MCP configuration."
-      installCommand="npx @trusty-squire/mcp@latest connect --target=claude-code"
+      installCommand="npx @trusty-squire/mcp connect --target=claude-code"
       examples={[
         {
-          prompt: "Sign me up for Resend and save the API key.",
+          prompt: "Sign me up for Zilliz Cloud and save the API key.",
           result:
             "Claude plans the task while Trusty Squire drives the website and stores the generated credential.",
         },

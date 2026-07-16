@@ -103,27 +103,26 @@ describe("package README lifecycle", () => {
 });
 
 describe("canonical README discovery order", () => {
-  it("puts the six concrete asks directly after the tagline", async () => {
+  it("puts the wedge, trust boundary, and verified Clerk prompt after the tagline", async () => {
     const readme = await fs.readFile(canonicalReadme, "utf8");
     const lines = readme
       .split("\n")
       .map((line) => line.trim())
       .filter(Boolean);
     const taglineAt = lines.findIndex((line) => line.includes(tagline));
-    const asks = [
-      "- **“Sign me up for Resend and save the API key.”**",
-      "- **“Sign in to Sentry and configure the webhook.”**",
-      "- **“Set up Resend, Sentry, PostHog, and Postgres for this app.”**",
-      "- **“Add Google OAuth to my app without showing me the client secret.”**",
-      "- **“Let my deployed app call OpenAI without giving it the OpenAI key.”**",
-      "- **“That app token leaked — revoke its access now.”**",
-    ];
 
     expect(taglineAt).toBeGreaterThanOrEqual(0);
-    expect(lines.slice(taglineAt + 1, taglineAt + 8)).toEqual([
-      "Try asking your coding agent:",
-      ...asks,
+    expect(lines[taglineAt + 1]).toContain("stall at the signup wall or bot detection");
+    expect(lines[taglineAt + 2]).toMatch(/^Trusty Squire is an MCP server/);
+    expect(lines[taglineAt + 2]).toContain("encrypted, write-only vault");
+    expect(lines.slice(taglineAt + 3, taglineAt + 7)).toEqual([
+      "## One prompt",
+      "```text",
+      "Use Trusty Squire to create a Clerk account for this app, save the generated secret key, allow api.clerk.com for server-side requests, and wire it in without putting the raw key in chat, code, or .env.",
+      "```",
     ]);
-    expect(lines[taglineAt + 8]).toMatch(/^Trusty Squire is an MCP server/);
+    expect(readme).not.toContain("Sign in to Sentry");
+    expect(readme).not.toContain("Resend");
+    expect(readme).not.toContain("/provider/path");
   });
 });

@@ -14,6 +14,11 @@ export const metadata = publicMetadata(
 export default function SignInAndConfigurePage() {
   return (
     <DiscoveryDetail
+      breadcrumbs={[
+        { name: "Home", path: "/" },
+        { name: "Use cases", path: "/use-cases" },
+        { name: "Sign in and configure", path: "/use-cases/sign-in-and-configure" },
+      ]}
       eyebrow="Use case / sign in and configure"
       title="Let your coding agent sign in and finish setup"
       deck="Use a browser session you choose, then let Trusty Squire handle the settings, console, and integration work that lives behind the login."

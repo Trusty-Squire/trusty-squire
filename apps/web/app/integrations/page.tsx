@@ -44,8 +44,8 @@ export default function IntegrationsPage() {
       <div>
         <p>
           The installer also supports Goose, Cline, Continue, and Hermes. Run{" "}
-          <code>npx @trusty-squire/mcp@latest connect</code> to let it detect installed agents, or
-          pass a target explicitly.
+          <code>npx @trusty-squire/mcp connect</code> to let it detect installed agents, or pass a
+          target explicitly.
         </p>
         <p>
           Each installer path merges a server named <code>squire</code> into the agent’s existing

@@ -1,0 +1,128 @@
+.answer {
+  max-width: 650px;
+  padding: var(--s-6);
+  border: 1px solid var(--line2);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.answer p {
+  color: var(--fg);
+  font-size: 17px;
+  line-height: 1.68;
+}
+
+.answer p + p {
+  margin-top: var(--s-4);
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.answer ul,
+.sources ul {
+  margin: var(--s-4) 0 0;
+  padding-left: 1.15em;
+}
+
+.answer li,
+.sources li {
+  margin-top: var(--s-2);
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.62;
+}
+
+.proseSection + .proseSection {
+  margin-top: var(--s-8);
+  padding-top: var(--s-8);
+  border-top: 1px solid var(--line);
+}
+
+.limit {
+  margin: var(--s-6) 0;
+  padding: var(--s-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+
+.limit strong {
+  display: block;
+  color: var(--fg);
+  font-size: 14px;
+}
+
+.faqWrap {
+  padding: var(--s-12) 0;
+  border-top: 1px solid var(--line);
+}
+
+.faqWrap :global(.faq-section) {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: var(--s-8);
+}
+
+.faqWrap :global(.faq-section) > h2 {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+
+.faqWrap :global(.faq-section) dl {
+  max-width: 650px;
+  border-bottom: 1px solid var(--line);
+}
+
+.faqWrap :global(.faq-section) dl > div {
+  padding: var(--s-6) 0;
+  border-top: 1px solid var(--line);
+}
+
+.faqWrap :global(.faq-section) dl > div:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.faqWrap :global(.faq-section) dt {
+  color: var(--fg);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.faqWrap :global(.faq-section) dd {
+  margin-top: var(--s-2);
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.65;
+}
+
+.sources {
+  max-width: 650px;
+}
+
+.sources p {
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.62;
+}
+
+.sources a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 780px) {
+  .answer {
+    padding: var(--s-4);
+  }
+
+  .faqWrap :global(.faq-section) {
+    grid-template-columns: 1fr;
+    gap: var(--s-6);
+  }
+}
