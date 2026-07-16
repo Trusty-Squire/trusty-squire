@@ -1,6 +1,6 @@
 # Changelog — @trusty-squire/mcp
 
-## 1.0.44 (2026-07-15)
+## 1.0.44-rc.1 (2026-07-16)
 
 - **Stored browser extraction is write-only end to end.** When
   `operate_extract` saves a generated credential to the vault, its MCP response
