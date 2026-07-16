@@ -1,8 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { CopyChip } from "./components/CopyChip";
+import { JsonLd } from "./components/JsonLd";
 import { Reveal } from "./components/Reveal";
 import { Shield } from "./components/Shield";
+import { softwareApplicationJsonLd } from "./lib/structured-data";
 
 const DOCS_URL = "https://github.com/trusty-squire/trusty-squire#readme";
 const NPM_URL = "https://www.npmjs.com/package/@trusty-squire/mcp";
@@ -14,24 +16,24 @@ export const metadata: Metadata = {
 
 const EXAMPLES = [
   {
-    href: "/use-cases/website-signup",
-    prompt: "Sign me up for Resend and save the API key.",
+    href: "/services/braintrust",
+    prompt: "Sign up for Braintrust and save its API key outside agent context.",
   },
   {
-    href: "/use-cases/sign-in-and-configure",
-    prompt: "Sign in to Sentry and configure the webhook.",
+    href: "/services/cerebras",
+    prompt: "Set up Cerebras inference without putting its API key in this project.",
   },
   {
-    href: "/use-cases/website-signup",
-    prompt: "Set up Resend, Sentry, PostHog, and Postgres for this app.",
+    href: "/services/clerk",
+    prompt: "Sign up for Clerk, create an app, and save the secret key.",
   },
   {
-    href: "/use-cases/sign-in-and-configure",
-    prompt: "Add Google OAuth without showing me the client secret.",
+    href: "/services/deepinfra",
+    prompt: "Create a DeepInfra account and wire the vaulted token into my backend.",
   },
   {
-    href: "/use-cases/api-keys-without-env",
-    prompt: "Let my app call OpenAI without giving it the OpenAI key.",
+    href: "/services/zilliz",
+    prompt: "Sign up for Zilliz Cloud and keep its API key out of .env.",
   },
   {
     href: "/use-cases/api-keys-without-env",
@@ -76,18 +78,18 @@ function ProductStill() {
       <div className="panel-body">
         <div className="ln">
           <span className="g">$</span>
-          <span className="usr">sign me up for resend</span>
+          <span className="usr">sign me up for Clerk and wire it into this app</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
           <span className="sq">squire</span>
-          <span> opening resend.com · signup, verification, API key…</span>
+          <span> opening Clerk · email signup, secret key…</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
           <span className="ok">✓</span>
           <span> key sealed → vault&nbsp;</span>
-          <span className="key">re_••••••••••</span>
+          <span className="key">cred_clerk_••••••</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
@@ -101,25 +103,22 @@ function ProductStill() {
 export default function Page() {
   return (
     <main>
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{
-          __html: JSON.stringify(HOME_JSON_LD).replace(/</g, "\\u003c"),
-        }}
-      />
+      <JsonLd data={HOME_JSON_LD} />
+      <JsonLd data={softwareApplicationJsonLd} />
       <noscript>
         <style>{`.reveal{opacity:1!important;transform:none!important}`}</style>
       </noscript>
 
       {/* ---------------- NAV ---------------- */}
-      <nav>
+      <nav className="site-nav">
         <div className="nav-in">
           <Link className="brand" href="/">
             <Shield size={22} glyph />
             Trusty Squire
           </Link>
           <div className="nav-r">
-            <Link href="/use-cases">Use cases</Link>
+            <Link href="/services">Services</Link>
+            <Link href="/guides">Guides</Link>
             <Link href="/integrations">Agents</Link>
             <a href={GITHUB_URL}>GitHub</a>
             <Link className="signin" href="/login">
@@ -146,9 +145,9 @@ export default function Page() {
             </span>
             <h1>Trusty Squire signs up / in to websites for you so you don’t have to.</h1>
             <p className="sub">
-              Your coding agent opens the real website, completes signup or sign-in, finishes setup,
-              and saves generated credentials without putting them in chat, code, or{" "}
-              <code>.env</code>.
+              Browser operators often stop at signup walls and bot detection. Trusty Squire opens
+              the real website, completes signup or sign-in, finishes setup, and saves generated
+              credentials without putting them in chat, code, or <code>.env</code>.
             </p>
             <ol className="hero-asks">
               {EXAMPLES.map((example, index) => (
@@ -183,6 +182,30 @@ export default function Page() {
         </Reveal>
       </section>
 
+      <section className="wrap home-explainer" aria-labelledby="what-is-trusty-squire">
+        <div className="home-explainer-label">What developers ask</div>
+        <div>
+          <h2 id="what-is-trusty-squire">What is Trusty Squire?</h2>
+          <p>
+            Trusty Squire is an MCP server for coding agents. Claude Code, Codex, Cursor, or Goose
+            plans the job; Trusty Squire operates the website and keeps the generated secret on the
+            safe side of the boundary.
+          </p>
+          <h3>How does it work?</h3>
+          <ol>
+            <li>Your agent names the website and the finished outcome.</li>
+            <li>Trusty Squire drives the real signup, sign-in, or setup flow.</li>
+            <li>
+              The credential is encrypted in a write-only vault and injected server-side when used.
+            </li>
+          </ol>
+          <p className="home-limit">
+            If a site requires a phone, hard CAPTCHA, payment, or a decision only you should make,
+            the run stops and tells you instead of guessing.
+          </p>
+        </div>
+      </section>
+
       {/* ---------------- CAPABILITIES ---------------- */}
       <section className="wrap caps">
         <Reveal className="cap">
@@ -190,10 +213,9 @@ export default function Page() {
           <div className="cap-body">
             <h3>Your agent handles signups</h3>
             <p>
-              Ask for a service. Your squire creates the account, works through
-              available verification, and stores the generated API key. No
-              fifteen-tab signup detour, right inside Claude Code, Codex, Goose,
-              and Cursor.
+              Ask for a service. Your squire creates the account, works through available
+              verification, and stores the generated API key. No fifteen-tab signup detour, right
+              inside Claude Code, Codex, Goose, and Cursor.
             </p>
           </div>
         </Reveal>
@@ -202,10 +224,9 @@ export default function Page() {
           <div className="cap-body">
             <h3>Use keys without exposing them</h3>
             <p>
-              Stop scattering keys across <span className="m">.env</span> files.
-              Keys go into the vault; a proxy injects each value into the provider
-              request server-side without returning it to the agent or consuming
-              app.
+              Stop scattering keys across <span className="m">.env</span> files. Keys go into the
+              vault; a proxy injects each value into the provider request server-side without
+              returning it to the agent or consuming app.
             </p>
           </div>
         </Reveal>
@@ -214,9 +235,8 @@ export default function Page() {
           <div className="cap-body">
             <h3>Finish setup behind a login</h3>
             <p>
-              Wire up OAuth across consoles, configure webhooks, and stand up
-              projects. Your squire does the authenticated click-work while the
-              secret stays out of chat.
+              Wire up OAuth across consoles, configure webhooks, and stand up projects. Your squire
+              does the authenticated click-work while the secret stays out of chat.
             </p>
           </div>
         </Reveal>
@@ -245,6 +265,9 @@ export default function Page() {
               Trusty Squire
             </Link>
             <div className="foot-l">
+              <Link href="/services">Services</Link>
+              <Link href="/guides">Guides</Link>
+              <Link href="/compare">Compare</Link>
               <Link href="/use-cases">Use cases</Link>
               <Link href="/integrations">Agents</Link>
               <Link href="/blog">Blog</Link>

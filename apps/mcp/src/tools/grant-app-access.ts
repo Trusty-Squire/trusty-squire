@@ -30,10 +30,13 @@ are OPT-IN and UNLIMITED by default: pass \`rate_limit_per_hour\` and/or
 \`spend_cap_usd\` ONLY if the caller wants a cap. Omit them for no rate/spend limit
 (the grant is still revocable + host-scoped + audited).
 
-SECURITY: the token is BACKEND-ONLY. It is metered spend until revoked — never
-put it in client/browser code. It is strictly safer than the raw key (scoped to
-one credential's hosts, rate-limited, instantly revocable, audited), but it is
-still a bearer secret. Revoke any time; revocation is instant and needs no key
+SECURITY: the token is returned once through this MCP result, so it is visible to
+the host/model even though the raw provider key is not. Move it directly into
+BACKEND-ONLY deployment secret storage; never put it in client/browser code,
+logs, or source control. It is strictly safer than the raw key (scoped to one
+credential's hosts, rate-limitable, instantly revocable, audited), but it is
+still a bearer secret. Use use_credential instead when zero grant-token exposure
+to the model is required. Revoke any time; revocation is instant and needs no key
 rotation.`;
 
 export const grantAppAccessTool: Tool<z.infer<typeof inputSchema>> = {
@@ -55,7 +58,9 @@ export const grantAppAccessTool: Tool<z.infer<typeof inputSchema>> = {
     const res = await api.grantAppAccess({
       ...(args.reference !== undefined ? { reference: args.reference } : {}),
       ...(args.service !== undefined ? { service: args.service } : {}),
-      ...(args.rate_limit_per_hour !== undefined ? { rate_limit_per_hour: args.rate_limit_per_hour } : {}),
+      ...(args.rate_limit_per_hour !== undefined
+        ? { rate_limit_per_hour: args.rate_limit_per_hour }
+        : {}),
       ...(args.spend_cap_usd !== undefined ? { spend_cap_usd: args.spend_cap_usd } : {}),
     });
     return res;

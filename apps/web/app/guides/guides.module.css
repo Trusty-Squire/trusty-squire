@@ -1,0 +1,54 @@
+.faqWrap {
+  padding-top: var(--s-12);
+  margin-top: var(--s-12);
+  border-top: 1px solid var(--line);
+}
+
+.faqWrap :global(.faq-section) {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: var(--s-8);
+}
+
+.faqWrap :global(.faq-section) > h2 {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.015em;
+}
+
+.faqWrap :global(.faq-section) dl {
+  max-width: 650px;
+  border-bottom: 1px solid var(--line);
+}
+
+.faqWrap :global(.faq-section) dl > div {
+  padding: var(--s-6) 0;
+  border-top: 1px solid var(--line);
+}
+
+.faqWrap :global(.faq-section) dl > div:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.faqWrap :global(.faq-section) dt {
+  color: var(--fg);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.faqWrap :global(.faq-section) dd {
+  margin-top: var(--s-2);
+  color: var(--muted);
+  font-size: 14.5px;
+  line-height: 1.65;
+}
+
+@media (max-width: 780px) {
+  .faqWrap :global(.faq-section) {
+    grid-template-columns: 1fr;
+    gap: var(--s-6);
+  }
+}

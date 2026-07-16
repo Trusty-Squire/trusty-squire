@@ -15,7 +15,7 @@ export const metadata = publicMetadata(
 export default function PrivacyPage() {
   return (
     <main>
-      <nav>
+      <nav className="site-nav">
         <div className="nav-in">
           <Link className="brand" href="/">
             <Shield size={22} glyph />

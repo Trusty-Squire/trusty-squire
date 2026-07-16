@@ -1,6 +1,9 @@
 import type { ReactNode } from "react";
 import Link from "next/link";
+import { breadcrumbJsonLd, type BreadcrumbItem } from "../lib/structured-data";
+import { Breadcrumbs } from "./Breadcrumbs";
 import { CopyChip } from "./CopyChip";
+import { JsonLd } from "./JsonLd";
 import { MarketingFooter, MarketingNav } from "./MarketingChrome";
 
 export interface DiscoveryExample {
@@ -28,6 +31,7 @@ interface DiscoveryDetailProps {
   related: DiscoveryLink[];
   children: ReactNode;
   installCommand?: string;
+  breadcrumbs?: readonly BreadcrumbItem[];
 }
 
 export function DiscoveryDetail({
@@ -39,12 +43,19 @@ export function DiscoveryDetail({
   related,
   children,
   installCommand,
+  breadcrumbs,
 }: DiscoveryDetailProps) {
   return (
     <>
       <MarketingNav />
       <main>
         <article className="discovery">
+          {breadcrumbs === undefined ? null : (
+            <>
+              <Breadcrumbs items={breadcrumbs} />
+              <JsonLd data={breadcrumbJsonLd(breadcrumbs)} />
+            </>
+          )}
           <header className="discovery-head">
             <p className="discovery-kicker">{eyebrow}</p>
             <h1>{title}</h1>

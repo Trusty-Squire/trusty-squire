@@ -9,6 +9,7 @@
 //   - credential egress seed excludes mid_session task scope
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { constants, publicEncrypt } from "node:crypto";
+import type * as GoogleLoginModule from "../google-login.js";
 
 const h = vi.hoisted(() => ({
   providers: ["google"] as string[],
@@ -161,7 +162,7 @@ vi.mock("../captcha-solver-2captcha.js", () => ({
 }));
 
 vi.mock("../google-login.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../google-login.js")>();
+  const actual = await importOriginal<typeof GoogleLoginModule>();
   return {
     ...actual,
     detectActiveProviderSessions: async () => h.providers,
@@ -187,6 +188,7 @@ import {
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
   provisionStoreLoginTool,
+  storedExtractResult,
   withSigninHost,
 } from "../../tools/provision-drive.js";
 import type { ApiClient } from "../../api-client.js";
@@ -360,6 +362,33 @@ describe("operate session — sealed credential transfer", () => {
       act(obs.session_id, { kind: "upload", target: "File upload", path: "/tmp/clip.mp4" }),
     ).rejects.toThrow(/no element matched target/i);
     expect(h.uploads).toEqual([]);
+  });
+});
+
+describe("operate_extract — vault-store response", () => {
+  it("never returns extracted credential values after storing them", () => {
+    const rawSecret = "sk-live-must-never-reach-the-model";
+    const result = storedExtractResult(
+      {
+        session_id: "session-1",
+        url: "https://example.com/api-keys",
+        credentials: { api_key: rawSecret, client_secret: "also-secret" },
+        candidate_count: 2,
+      },
+      {
+        reference: "cred_123",
+        service: "example",
+        label: undefined,
+        field_names: ["api_key", "client_secret"],
+        allowed_hosts: ["api.example.com"],
+        updated: false,
+      },
+    );
+
+    expect(result).not.toHaveProperty("credentials");
+    expect(JSON.stringify(result)).not.toContain(rawSecret);
+    expect(JSON.stringify(result)).not.toContain("also-secret");
+    expect(result.stored_credential.reference).toBe("cred_123");
   });
 });
 
@@ -732,7 +761,13 @@ describe("operate session — PR3c username/password login (capture-at-login sou
 describe("observation detail ladder (none < compact < full)", () => {
   it("default is compact: no screen/accessibility, value_len, elements_total, no container", async () => {
     h.elements = [
-      elem({ tag: "input", type: "text", value: "acme", screenPath: "form:x > input:org", container: "form:x" }),
+      elem({
+        tag: "input",
+        type: "text",
+        value: "acme",
+        screenPath: "form:x > input:org",
+        container: "form:x",
+      }),
     ];
     h.visibleText = "Org";
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
@@ -748,7 +783,14 @@ describe("observation detail ladder (none < compact < full)", () => {
   });
 
   it("operate_observe detail:'full' restores the screen + accessibility views", async () => {
-    h.elements = [elem({ tag: "button", visibleText: "Go", screenPath: "main:x > button:go", container: "main:x" })];
+    h.elements = [
+      elem({
+        tag: "button",
+        visibleText: "Go",
+        screenPath: "main:x > button:go",
+        container: "main:x",
+      }),
+    ];
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     const full = await observe(obs.session_id, "full");
     expect(full.screen).toBeDefined();
@@ -765,7 +807,14 @@ describe("observation detail ladder (none < compact < full)", () => {
   });
 
   it("operate_act detail:'full' returns the legacy payload", async () => {
-    h.elements = [elem({ tag: "button", visibleText: "Go", screenPath: "main:x > button:go", container: "main:x" })];
+    h.elements = [
+      elem({
+        tag: "button",
+        visibleText: "Go",
+        screenPath: "main:x > button:go",
+        container: "main:x",
+      }),
+    ];
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
     const full = await act(obs.session_id, { kind: "scroll", direction: "down" }, "full");
     expect(full.screen).toBeDefined();
@@ -783,7 +832,9 @@ describe("withSigninHost (operate_store_login — cover the sign-in page's host)
     ]);
   });
   it("does not duplicate an already-listed host, strips www, no-ops without a signin_url", () => {
-    expect(withSigninHost(["app.useplunk.com"], "https://app.useplunk.com/login")).toEqual(["app.useplunk.com"]);
+    expect(withSigninHost(["app.useplunk.com"], "https://app.useplunk.com/login")).toEqual([
+      "app.useplunk.com",
+    ]);
     expect(withSigninHost(["x.com"], "https://www.x.com/login")).toEqual(["x.com"]);
     expect(withSigninHost(["x.com"], undefined)).toEqual(["x.com"]);
     expect(withSigninHost(["x.com"], "not a url")).toEqual(["x.com"]);

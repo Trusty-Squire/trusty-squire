@@ -1,19 +1,29 @@
 import type { Metadata } from "next";
 
-const SITE_URL = "https://trustysquire.ai";
+export const SITE_URL = "https://trustysquire.ai";
 const SOCIAL_IMAGE = {
-  url: "/logo-400.png",
-  width: 400,
-  height: 400,
-  alt: "Trusty Squire shield mark",
+  url: "/opengraph-image",
+  width: 1200,
+  height: 630,
+  alt: "Trusty Squire completing a website signup and sealing the generated API key",
 };
 
-export function publicMetadata(title: string, description: string, path: string): Metadata {
+interface PublicMetadataOptions {
+  /** Use when the supplied title already includes the Trusty Squire brand. */
+  absoluteTitle?: boolean;
+}
+
+export function publicMetadata(
+  title: string,
+  description: string,
+  path: string,
+  options: PublicMetadataOptions = {},
+): Metadata {
   const url = new URL(path, SITE_URL).toString();
-  const socialTitle = `${title} | Trusty Squire`;
+  const socialTitle = options.absoluteTitle ? title : `${title} | Trusty Squire`;
 
   return {
-    title,
+    title: options.absoluteTitle ? { absolute: title } : title,
     description,
     alternates: { canonical: url },
     openGraph: {
@@ -25,7 +35,7 @@ export function publicMetadata(title: string, description: string, path: string)
       images: [SOCIAL_IMAGE],
     },
     twitter: {
-      card: "summary",
+      card: "summary_large_image",
       title: socialTitle,
       description,
       images: [SOCIAL_IMAGE.url],
@@ -38,6 +48,7 @@ export function articleMetadata(
   description: string,
   path: string,
   publishedTime: string,
+  modifiedTime: string = publishedTime,
 ): Metadata {
   const metadata = publicMetadata(title, description, path);
   return {
@@ -46,6 +57,7 @@ export function articleMetadata(
       ...metadata.openGraph,
       type: "article",
       publishedTime,
+      modifiedTime,
     },
   };
 }
