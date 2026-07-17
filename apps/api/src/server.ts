@@ -5,6 +5,8 @@
 // a customised dep bundle.
 
 import { createRequire } from "node:module";
+import { performance } from "node:perf_hooks";
+import type { Writable } from "node:stream";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyCookie from "@fastify/cookie";
 import { startMetricsServer } from "./metrics-server.js";
@@ -52,6 +54,9 @@ export interface BuildServerOpts {
   // routes (no live Stripe calls, no real signature). Production leaves
   // this undefined → built from STRIPE_SECRET_KEY env (null when unset).
   stripeClient?: import("./services/stripe-client.js").StripeClient;
+  // Test seam for asserting structured logs. Supplying a stream enables the
+  // same redacted Pino logger production uses, at debug level.
+  logStream?: Writable;
 }
 
 // Base URL of the web app that install/approval links point at. The
@@ -146,11 +151,13 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     process.env.BILLING_ENABLED === "true" || process.env.BILLING_ENABLED === "1";
 
   const logger =
-    process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+    opts.logStream === undefined &&
+    (process.env.VITEST === "true" || process.env.NODE_ENV === "test")
       ? false
       : {
-          level: process.env.LOG_LEVEL ?? "info",
+          level: opts.logStream === undefined ? (process.env.LOG_LEVEL ?? "info") : "debug",
           redact: { paths: [...SECRET_REDACT_PATHS], censor: "[redacted]" },
+          ...(opts.logStream !== undefined ? { stream: opts.logStream } : {}),
         };
   const fastify = Fastify({ logger });
 
@@ -321,11 +328,52 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
   // Readiness — verifies the DB actually answers. Point an external uptime
   // monitor here to get paged when the DB wedges (the 256MB OOM failure mode):
   // 200 {ready:true} when healthy, 503 {ready:false} when the DB is unreachable.
-  fastify.get("/readyz", async (_req, reply) => {
-    const ready = await deps.pingDb();
+  fastify.get("/readyz", async (req, reply) => {
+    const startedAt = performance.now();
+    // Echo Fastify's correlation ID so an uptime-monitor event can be joined
+    // directly to the structured probe-attempt logs for this request.
+    reply.header("x-request-id", req.id);
+    let observedAttempts = 0;
+    let lastFailure: { failure_class: string; error_code?: string } | undefined;
+
+    const ready = await deps.pingDb((attempt) => {
+      observedAttempts += 1;
+      const context = { event: "readiness_db_probe_attempt", ...attempt };
+      if (attempt.outcome === "failure") {
+        lastFailure = {
+          failure_class: attempt.failure_class,
+          ...(attempt.error_code !== undefined ? { error_code: attempt.error_code } : {}),
+        };
+        req.log.warn(context, "readiness database probe attempt failed");
+        return;
+      }
+      req.log.debug(context, "readiness database probe attempt succeeded");
+    });
+
+    const totalDurationMs = Math.max(0, Math.round((performance.now() - startedAt) * 100) / 100);
     if (!ready) {
+      req.log.error(
+        {
+          event: "readiness_db_probe_failed",
+          observed_attempts: observedAttempts,
+          total_duration_ms: totalDurationMs,
+          ...(lastFailure ?? {}),
+        },
+        "readiness database probe failed after retry",
+      );
       reply.code(503);
       return { ready: false, db: "unreachable" };
+    }
+    if (observedAttempts > 1) {
+      req.log.info(
+        {
+          event: "readiness_db_probe_recovered",
+          observed_attempts: observedAttempts,
+          total_duration_ms: totalDurationMs,
+          ...(lastFailure ?? {}),
+        },
+        "readiness database probe recovered on retry",
+      );
     }
     return { ready: true };
   });
