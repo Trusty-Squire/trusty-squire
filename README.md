@@ -14,7 +14,7 @@
   <a href="https://github.com/Trusty-Squire/trusty-squire/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="license" /></a>
 </p>
 
-<p align="center"><strong>Trusty Squire signs up for websites and gets the API keys, so your coding agent doesn’t have to.</strong></p>
+<p align="center"><strong>Trusty Squire signs up / in to websites for you so you don’t have to.</strong></p>
 
 Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically** — then saves each key in an encrypted, write-only vault instead of your chat, your code, or your `.env`. The raw provider secret never needs to enter the agent's context, so it can't be pasted into a commit or leaked in a log.
 

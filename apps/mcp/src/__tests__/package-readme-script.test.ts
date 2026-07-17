@@ -9,7 +9,7 @@ const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const repoRoot = path.resolve(packageRoot, "../..");
 const script = path.join(packageRoot, "scripts", "package-readme.mjs");
 const canonicalReadme = path.join(repoRoot, "README.md");
-const tagline = "Trusty Squire signs up for websites and gets the API keys, so your coding agent doesn’t have to.";
+const tagline = "Trusty Squire signs up / in to websites for you so you don’t have to.";
 
 let tmpDir: string;
 let source: string;
