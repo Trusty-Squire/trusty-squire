@@ -16,9 +16,11 @@
 
 <p align="center"><strong>Trusty Squire signs up / in to websites for you so you don’t have to.</strong></p>
 
-Operator-style browser tools can build most of an integration, then stall at the signup wall or bot detection. Trusty Squire gets the real account provisioned and finishes the setup.
+Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically** — then saves each key in an encrypted, write-only vault instead of your chat, your code, or your `.env`. The raw provider secret never needs to enter the agent's context, so it can't be pasted into a commit or leaked in a log.
 
-Trusty Squire is an MCP server for Claude Code, Codex, Cursor, Goose, and other coding agents. It opens the real website, completes signup or sign-in, and saves generated credentials in an encrypted, write-only vault. The raw provider secret does not need to enter the agent's context, source code, or `.env`, so it cannot be copied into a commit.
+It is not a secrets manager for keys you already have, and not a browser-automation framework you script per site. Point your agent at a service — “set up Clerk and wire in the key” — and Trusty Squire opens a real browser, works through signup or sign-in one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and captures the generated key. When a real person is required (phone, hard CAPTCHA, payment), it stops and says so rather than pretending the signup completed.
+
+**Built to be handed the keys.** Provider secrets are write-only: the agent's credential tools return references and authenticated results, never stored plaintext. Backend access is a host-scoped, rate-limited, independently revocable grant, so a leaked token is killed without rotating the provider key — and you connect Google or GitHub yourself in a real browser, so the agent never types your password. Full [threat model below](#security-and-threat-model).
 
 ## One prompt
 
