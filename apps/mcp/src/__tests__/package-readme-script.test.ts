@@ -9,7 +9,7 @@ const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const repoRoot = path.resolve(packageRoot, "../..");
 const script = path.join(packageRoot, "scripts", "package-readme.mjs");
 const canonicalReadme = path.join(repoRoot, "README.md");
-const tagline = "Trusty Squire signs up / in to websites for you so you don’t have to.";
+const tagline = "Trusty Squire signs up for websites and gets the API keys, so your coding agent doesn’t have to.";
 
 let tmpDir: string;
 let source: string;
@@ -103,7 +103,7 @@ describe("package README lifecycle", () => {
 });
 
 describe("canonical README discovery order", () => {
-  it("puts the wedge, trust boundary, and verified Clerk prompt after the tagline", async () => {
+  it("puts the value prop, disambiguation, trust line, and verified Clerk prompt after the tagline", async () => {
     const readme = await fs.readFile(canonicalReadme, "utf8");
     const lines = readme
       .split("\n")
@@ -112,10 +112,11 @@ describe("canonical README discovery order", () => {
     const taglineAt = lines.findIndex((line) => line.includes(tagline));
 
     expect(taglineAt).toBeGreaterThanOrEqual(0);
-    expect(lines[taglineAt + 1]).toContain("stall at the signup wall or bot detection");
-    expect(lines[taglineAt + 2]).toMatch(/^Trusty Squire is an MCP server/);
-    expect(lines[taglineAt + 2]).toContain("encrypted, write-only vault");
-    expect(lines.slice(taglineAt + 3, taglineAt + 7)).toEqual([
+    expect(lines[taglineAt + 1]).toContain("retrieve the API keys automatically");
+    expect(lines[taglineAt + 1]).toContain("encrypted, write-only vault");
+    expect(lines[taglineAt + 2]).toContain("not a secrets manager for keys you already have");
+    expect(lines[taglineAt + 3]).toContain("Built to be handed the keys");
+    expect(lines.slice(taglineAt + 4, taglineAt + 8)).toEqual([
       "## One prompt",
       "```text",
       "Use Trusty Squire to create a Clerk account for this app, save the generated secret key, allow api.clerk.com for server-side requests, and wire it in without putting the raw key in chat, code, or .env.",
