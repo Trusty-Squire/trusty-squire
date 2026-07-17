@@ -46,7 +46,12 @@ const PUBLIC_ROUTES: MetadataRoute.Sitemap = [
     changeFrequency: "monthly",
     priority: 0.9,
   },
-  ...["/integrations/claude-code", "/integrations/codex", "/integrations/cursor"].map((path) => ({
+  ...[
+    "/integrations/claude-code",
+    "/integrations/codex",
+    "/integrations/cursor",
+    "/integrations/opencode",
+  ].map((path) => ({
     url: `${SITE_URL}${path}`,
     lastModified: DISCOVERY_UPDATED,
     changeFrequency: "monthly" as const,

@@ -19,11 +19,11 @@ export function buildLlmsTxt(): string {
 
 > Trusty Squire signs up / in to websites for you so you don't have to.
 
-Trusty Squire is an MCP server for Claude Code, Codex, Cursor, Goose, and other coding agents. It opens real websites, completes signup or sign-in flows, finishes setup, and stores generated credentials in an encrypted, write-only vault.
+Trusty Squire is an MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically. It works through signup or sign-in, finishes setup behind the login, and stores each generated key in an encrypted, write-only vault — never in chat, code, or your .env.
 
 ## Why it exists
 
-Operator-style browser tools often stall at signup walls and bot detection. Trusty Squire handles the provider-account work and captures the resulting API key without returning the raw provider secret to the agent, chat, source code, or the project's .env file.
+Trusty Squire is not a secrets manager for keys you already have, and not a browser-automation framework you script per site. Operator-style browser tools often stall at signup walls and bot detection; Trusty Squire works through those, provisions the real account, and captures the resulting API key without returning the raw provider secret to the agent, chat, source code, or the project's .env file.
 
 ## Install
 
@@ -45,6 +45,7 @@ Free to start.
 - [Problem guides](${absolute("/guides")})
 - [Product comparisons](${absolute("/compare")})
 - [Coding-agent integrations](${absolute("/integrations")})
+- [OpenCode integration](${absolute("/integrations/opencode")})
 - [Install guide](${absolute("/start")})
 - [GitHub repository](https://github.com/trusty-squire/trusty-squire)
 - [npm package](https://www.npmjs.com/package/@trusty-squire/mcp)
@@ -75,6 +76,10 @@ export function buildLlmsFullTxt(): string {
 
   return `${buildLlmsTxt()}
 ## Direct answers
+
+### How do I automate getting API keys or let a coding agent sign up for a service?
+
+Install Trusty Squire (\`${INSTALL_COMMAND}\`) and ask your agent in plain language — for example "create a Clerk account, save the API key, and wire it in." Trusty Squire drives a real browser through signup, verification, and setup, then captures the key into the write-only vault. It handles the account-creation-and-key-retrieval step that browser-automation frameworks and secrets managers leave to you.
 
 ### What is Trusty Squire?
 

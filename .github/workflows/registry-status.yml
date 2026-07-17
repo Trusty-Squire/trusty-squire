@@ -1,0 +1,75 @@
+name: MCP Registry Status
+
+# Manual utility to change a server's status in the official MCP registry
+# (registry.modelcontextprotocol.io). Authenticates via GitHub OIDC, which
+# authorizes the io.github.<org>/* namespace for workflows running in this
+# org — no secrets, no interactive device-flow login. Use it to deprecate,
+# delete, or restore a version of an io.github.Trusty-Squire/* server.
+#
+# (The ai.trustysquire/* server is published + kept current automatically by
+# release.yml via DNS auth; this workflow is for the github-namespace entries.)
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_name:
+        description: "Full server name (e.g. io.github.Trusty-Squire/mcp)"
+        required: true
+        type: string
+      status:
+        description: "New status"
+        required: true
+        type: choice
+        options: [deprecated, deleted, active]
+        default: deprecated
+      all_versions:
+        description: "Apply to all versions of the server"
+        required: true
+        type: boolean
+        default: true
+      version:
+        description: "Specific version (used only when all_versions is false)"
+        required: false
+        type: string
+      message:
+        description: "Optional message explaining the change"
+        required: false
+        type: string
+
+permissions:
+  id-token: write # required for `mcp-publisher login github-oidc`
+  contents: read
+
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" \
+            | tar -xz mcp-publisher
+          ./mcp-publisher --help >/dev/null
+
+      - name: Authenticate to the registry (GitHub OIDC)
+        run: ./mcp-publisher login github-oidc
+
+      - name: Update server status
+        env:
+          SERVER: ${{ inputs.server_name }}
+          NEW_STATUS: ${{ inputs.status }}
+          ALL: ${{ inputs.all_versions }}
+          VERSION: ${{ inputs.version }}
+          MESSAGE: ${{ inputs.message }}
+        run: |
+          args=(status --status "$NEW_STATUS")
+          if [ -n "$MESSAGE" ]; then args+=(--message "$MESSAGE"); fi
+          if [ "$ALL" = "true" ]; then
+            args+=(--all-versions "$SERVER")
+          else
+            if [ -z "$VERSION" ]; then
+              echo "::error::version is required when all_versions is false"; exit 1
+            fi
+            args+=("$SERVER" "$VERSION")
+          fi
+          echo "Running: mcp-publisher ${args[*]}"
+          ./mcp-publisher "${args[@]}"

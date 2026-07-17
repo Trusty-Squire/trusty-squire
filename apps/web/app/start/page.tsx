@@ -16,6 +16,7 @@ const AGENTS = [
   "claude-code",
   "cursor",
   "codex",
+  "opencode",
   "goose",
   "cline",
   "continue",
@@ -53,8 +54,8 @@ export default function StartPage() {
         </span>
         <h1>Install Trusty Squire</h1>
         <p className="start-sub">
-          One command. It auto-detects your coding agent and writes the MCP
-          config — no manual setup.
+          One command. It auto-detects your coding agent and writes the MCP config — no manual
+          setup.
         </p>
         <div className="cta">
           <CopyChip />
@@ -70,8 +71,7 @@ export default function StartPage() {
             ))}
           </div>
           <p className="start-note">
-            Pin a specific target with{" "}
-            <code>npx @trusty-squire/mcp connect --target=goose</code>.
+            Pin a specific target with <code>npx @trusty-squire/mcp connect --target=goose</code>.
           </p>
         </section>
 
@@ -83,8 +83,8 @@ export default function StartPage() {
               <div>
                 <b>Run the command</b>
                 <p>
-                  Paste it into your terminal. The installer detects your agent
-                  and writes the config.
+                  Paste it into your terminal. The installer detects your agent and writes the
+                  config.
                 </p>
               </div>
             </div>
@@ -93,8 +93,8 @@ export default function StartPage() {
               <div>
                 <b>Restart your agent</b>
                 <p>
-                  Restart Claude Code, Cursor, Codex, Goose, Cline, or Continue
-                  so it picks up the new tools.
+                  Restart Claude Code, Cursor, Codex, OpenCode, Goose, Cline, or Continue so it
+                  picks up the new tools.
                 </p>
               </div>
             </div>
@@ -103,9 +103,8 @@ export default function StartPage() {
               <div>
                 <b>Sign in to bind the machine</b>
                 <p>
-                  A browser opens so you can confirm the install.{" "}
-                  <Link href="/login">Sign in</Link> to connect your account and
-                  open your vault.
+                  A browser opens so you can confirm the install. <Link href="/login">Sign in</Link>{" "}
+                  to connect your account and open your vault.
                 </p>
               </div>
             </div>
@@ -115,8 +114,7 @@ export default function StartPage() {
         <section className="start-sec">
           <h2>More</h2>
           <p className="start-note">
-            <a href={DOCS_URL}>Read the docs</a> &nbsp;·&nbsp;{" "}
-            <a href={NPM_URL}>View on npm</a>
+            <a href={DOCS_URL}>Read the docs</a> &nbsp;·&nbsp; <a href={NPM_URL}>View on npm</a>
           </p>
         </section>
       </main>

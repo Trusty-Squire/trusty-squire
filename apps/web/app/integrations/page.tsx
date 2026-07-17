@@ -3,7 +3,7 @@ import { DiscoveryHub } from "../components/DiscoveryPages";
 import { publicMetadata } from "../lib/public-metadata";
 
 const description =
-  "Connect Trusty Squire to Claude Code, Codex, Cursor, Goose, Cline, Continue, or Hermes, then ask your coding agent to sign up and sign in to websites.";
+  "Connect Trusty Squire to Claude Code, Codex, Cursor, OpenCode, Goose, Cline, Continue, or Hermes, then ask your coding agent to sign up and sign in to websites.";
 
 export const metadata = publicMetadata(
   "Use Trusty Squire with your coding agent",
@@ -30,6 +30,12 @@ const ITEMS = [
     description:
       "Write the squire server into Cursor's MCP configuration and start asking for website outcomes.",
   },
+  {
+    href: "/integrations/opencode",
+    title: "OpenCode",
+    description:
+      "Add Trusty Squire to OpenCode as a local MCP server without replacing your model, permissions, or other tools.",
+  },
 ];
 
 export default function IntegrationsPage() {
@@ -40,10 +46,10 @@ export default function IntegrationsPage() {
       deck="Connect once, restart your agent, then ask it to handle a signup, sign-in, configuration, or credential job in ordinary language."
       items={ITEMS}
     >
-      <h2>One MCP server, seven targets</h2>
+      <h2>One MCP server, eight targets</h2>
       <div>
         <p>
-          The installer also supports Goose, Cline, Continue, and Hermes. Run{" "}
+          The installer also supports OpenCode, Goose, Cline, Continue, and Hermes. Run{" "}
           <code>npx @trusty-squire/mcp connect</code> to let it detect installed agents, or pass a
           target explicitly.
         </p>
