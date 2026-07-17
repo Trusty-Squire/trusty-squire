@@ -127,9 +127,7 @@ describe("claude-code config writer", () => {
     const parsed = JSON.parse(raw) as {
       mcpServers: { squire: { env: Record<string, string> } };
     };
-    expect(parsed.mcpServers.squire.env.UNIVERSAL_BOT_PROXY_URL).toBe(
-      "socks5://127.0.0.1:1080",
-    );
+    expect(parsed.mcpServers.squire.env.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
     expect(parsed.mcpServers.squire.env.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("claude-code");
   });
 
@@ -145,7 +143,10 @@ describe("claude-code config writer", () => {
           squire: {
             command: "npx",
             args: ["-y", "@trusty-squire/mcp"],
-            env: { UNIVERSAL_BOT_PREFER_CHEAP: "true", TRUSTY_SQUIRE_AGENT_IDENTITY: "claude-code" },
+            env: {
+              UNIVERSAL_BOT_PREFER_CHEAP: "true",
+              TRUSTY_SQUIRE_AGENT_IDENTITY: "claude-code",
+            },
           },
         },
       }),
@@ -289,9 +290,7 @@ describe("goose YAML writer", () => {
       "@trusty-squire/mcp@0.9.19-rc.12",
       "server",
     ]);
-    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe(
-      "socks5://127.0.0.1:1080",
-    );
+    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
     expect(parsed.extensions.squire.envs.TRUSTY_SQUIRE_REGISTRY_URL).toBe(
       "https://registry.trustysquire.ai",
     );
@@ -321,9 +320,7 @@ describe("goose YAML writer", () => {
     const parsed = yamlParse(raw) as {
       extensions: { squire: { envs: Record<string, string> } };
     };
-    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe(
-      "socks5://127.0.0.1:1080",
-    );
+    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
     expect(parsed.extensions.squire.envs.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("goose");
   });
 });
@@ -357,8 +354,15 @@ describe("hermes YAML writer", () => {
       filePath,
       yamlStringify({
         mcp_servers: {
-          filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
-          squire: { command: "node", args: ["old", "server"], env: { UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080" } },
+          filesystem: {
+            command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+          },
+          squire: {
+            command: "node",
+            args: ["old", "server"],
+            env: { UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080" },
+          },
         },
       }),
     );
@@ -414,21 +418,14 @@ describe("codex TOML writer", () => {
       };
     };
     expect(parsed.mcp_servers.squire.command).toBe("npx");
-    expect(parsed.mcp_servers.squire.args).toEqual([
-      "-y",
-      "@trusty-squire/mcp",
-      "server",
-    ]);
+    expect(parsed.mcp_servers.squire.args).toEqual(["-y", "@trusty-squire/mcp", "server"]);
     expect(parsed.mcp_servers.squire.env).toEqual({ TS_LOG: "info" });
   });
 
   it("preserves the user's other config.toml entries", async () => {
     const filePath = AGENTS.codex.config_path();
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.writeFile(
-      filePath,
-      tomlStringify({ model: "gpt-5", approval_policy: "untrusted" }),
-    );
+    await fs.writeFile(filePath, tomlStringify({ model: "gpt-5", approval_policy: "untrusted" }));
     await AGENTS.codex.writeConfig({
       command: "npx",
       args: ["server"],
@@ -577,9 +574,7 @@ describe("opencode JSONC writer", () => {
       ...input,
       env: { TRUSTY_SQUIRE_AGENT_IDENTITY: "opencode" },
     });
-    const parsed = jsoncParse(
-      await fs.readFile(AGENTS.opencode.config_path(), "utf8"),
-    ) as {
+    const parsed = jsoncParse(await fs.readFile(AGENTS.opencode.config_path(), "utf8")) as {
       mcp: { squire: { environment: Record<string, string> } };
     };
     expect(parsed.mcp.squire.environment.TRUSTY_SQUIRE_REGISTRY_URL).toBeUndefined();

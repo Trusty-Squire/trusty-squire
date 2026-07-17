@@ -18,6 +18,8 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as BotModule from "../bot/index.js";
+import type * as GoogleLoginModule from "../bot/google-login.js";
 
 // Module-level mocks for the install pipeline's external collaborators.
 // Hoisted by vitest before the install/cli.js import below, so the
@@ -44,7 +46,7 @@ vi.mock("../api-client.js", () => ({
 vi.mock("../bot/index.js", async () => {
   // Preserve the real exports the install CLI uses for typing while
   // stubbing the network-hitting detectAsn.
-  const actual = await vi.importActual<typeof import("../bot/index.js")>("../bot/index.js");
+  const actual = await vi.importActual<typeof BotModule>("../bot/index.js");
   return {
     ...actual,
     detectAsn: vi.fn(async () => null),
@@ -62,7 +64,7 @@ vi.mock("keytar", () => {
 // other export (the wider bot module re-imports things like
 // `scopesAreBasic` from this file).
 vi.mock("../bot/google-login.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../bot/google-login.js")>();
+  const actual = await importOriginal<typeof GoogleLoginModule>();
   return {
     ...actual,
     ensureOAuthSession: vi.fn(async () => ({ status: "logged_in" as const })),
@@ -144,10 +146,9 @@ describe("connect --target=<agent> writes a valid config", () => {
       );
       // Skill-registry URL is written when registry participation is enabled.
       // That same choice is also the user's skillification consent.
-      expect(
-        raw,
-        `${target}: config should set TRUSTY_SQUIRE_REGISTRY_URL when enabled`,
-      ).toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
+      expect(raw, `${target}: config should set TRUSTY_SQUIRE_REGISTRY_URL when enabled`).toMatch(
+        /TRUSTY_SQUIRE_REGISTRY_URL/,
+      );
     });
   }
 
@@ -177,11 +178,7 @@ describe("connect --target=<agent> writes a valid config", () => {
     });
     const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
     expect(raw).not.toMatch(/TRUSTY_SQUIRE_REGISTRY_URL/);
-    const sessionPath = path.join(
-      process.env.XDG_CONFIG_HOME!,
-      "trusty-squire",
-      "session.json",
-    );
+    const sessionPath = path.join(process.env.XDG_CONFIG_HOME!, "trusty-squire", "session.json");
     const session = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
       consent_skillify_telemetry?: boolean;
       consent_operator_inbox_otp?: boolean;
@@ -206,11 +203,7 @@ describe("connect --target=<agent> writes a valid config", () => {
       const raw = await fs.readFile(AGENTS[TARGETS[0]!].config_path(), "utf8");
       expect(raw).toMatch(/registry\.trustysquire\.ai/);
       expect(raw).not.toMatch(/staging\.registry\.test/);
-      const sessionPath = path.join(
-        process.env.XDG_CONFIG_HOME!,
-        "trusty-squire",
-        "session.json",
-      );
+      const sessionPath = path.join(process.env.XDG_CONFIG_HOME!, "trusty-squire", "session.json");
       const session = JSON.parse(await fs.readFile(sessionPath, "utf8")) as {
         consent_skillify_telemetry?: boolean;
         consent_operator_inbox_otp?: boolean;

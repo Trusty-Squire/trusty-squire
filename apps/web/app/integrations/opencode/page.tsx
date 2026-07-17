@@ -15,7 +15,7 @@ const FAQS: readonly FaqItem[] = [
   {
     question: "Where does Trusty Squire configure OpenCode?",
     answer:
-      "It updates the effective OpenCode global JSON or JSONC config, respecting OPENCODE_CONFIG and XDG_CONFIG_HOME. Existing settings, comments, and other MCP servers are preserved.",
+      "It updates the effective OpenCode global JSON or JSONC config, respecting OPENCODE_CONFIG and XDG_CONFIG_HOME. Existing settings, surrounding comments, and other MCP servers are preserved.",
   },
   {
     question: "Can OpenCode use an API key without putting it in .env?",
@@ -106,12 +106,15 @@ export default function OpenCodeIntegrationPage() {
           OpenCode normally reads <code>~/.config/opencode/opencode.json</code> or{" "}
           <code>opencode.jsonc</code>. The installer respects custom <code>OPENCODE_CONFIG</code>{" "}
           and <code>XDG_CONFIG_HOME</code> locations, then makes a targeted JSONC-aware edit. It
-          preserves comments, models, providers, permissions, plugins, and unrelated MCP servers.
+          preserves surrounding comments, models, providers, permissions, plugins, and unrelated MCP
+          servers while refreshing the managed <code>squire</code> entry. That entry uses
+          OpenCode&apos;s command-array format and a 30-second startup timeout. Account and session
+          tokens are never written to this configuration.
         </p>
 
         <h3>Control when the MCP tools are available</h3>
         <p>
-          OpenCode exposes enabled MCP tools to the model. Set the squire server's{" "}
+          OpenCode exposes enabled MCP tools to the model. Set the squire server&apos;s{" "}
           <code>enabled</code> field to <code>false</code> when you do not need it, or use an
           OpenCode permission such as <code>&quot;squire_*&quot;: &quot;ask&quot;</code> when you
           want approval before its tool calls. The installer does not overwrite your permission
@@ -120,10 +123,11 @@ export default function OpenCodeIntegrationPage() {
 
         <h3>The provider key remains behind the vault boundary</h3>
         <p>
-          Trusty Squire's credential tools return references and authenticated results, not stored
-          plaintext. The provider key does not need to enter OpenCode's transcript, generated
-          source, or local <code>.env</code>. Browser diagnostics can still contain whatever a
-          website visibly renders, so avoid re-observing a page after it displays a secret.
+          Trusty Squire&apos;s credential tools return references and authenticated results, not
+          stored plaintext. The provider key does not need to enter OpenCode&apos;s transcript,
+          generated source, or local <code>.env</code>. Browser diagnostics can still contain
+          whatever a website visibly renders, so avoid re-observing a page after it displays a
+          secret.
         </p>
 
         {FAQS.map((faq) => (

@@ -6,11 +6,11 @@ repository. Concise and precise. Keep it current.
 ## Project Overview
 
 **Trusty Squire signs up and signs in to websites for developers working through
-coding agents.** Claude Code, Cursor, Codex, Goose, Cline, and Continue can use
-it to create accounts, finish setup behind a login, and save generated
-credentials without putting them in chat, source code, or `.env` files. The MCP
-server runs on the user's machine; an API on Fly.io handles persistence and
-orchestration.
+coding agents.** The [README install section](README.md#install) owns the
+canonical supported-target list. Those agents can use Trusty Squire to create
+accounts, finish setup behind a login, and save generated credentials without
+putting them in chat, source code, or `.env` files. The MCP server runs on the
+user's machine; an API on Fly.io handles persistence and orchestration.
 
 **One provisioning path:**
 

@@ -86,9 +86,7 @@ async function readJsonIfExists(filePath: string): Promise<Record<string, unknow
   try {
     const raw = await fs.readFile(filePath, "utf8");
     const parsed = JSON.parse(raw);
-    return parsed !== null && typeof parsed === "object"
-      ? (parsed as Record<string, unknown>)
-      : {};
+    return parsed !== null && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
   } catch (err) {
     if ((err as { code?: string }).code === "ENOENT") return {};
     throw err;
@@ -248,11 +246,7 @@ const goose: AgentDefinition = {
   target: "goose",
   display_name: "Goose",
   config_path: () =>
-    path.join(
-      process.env.XDG_CONFIG_HOME ?? path.join(home(), ".config"),
-      "goose",
-      "config.yaml",
-    ),
+    path.join(process.env.XDG_CONFIG_HOME ?? path.join(home(), ".config"), "goose", "config.yaml"),
   detect: async () => exists(goose.config_path()),
   writeConfig: async (input) => {
     const filePath = goose.config_path();
@@ -374,8 +368,7 @@ const cline: AgentDefinition = {
       "settings",
       "cline_mcp_settings.json",
     ),
-  detect: async () =>
-    exists(path.join(vscodeGlobalStorage(), "saoudrizwan.claude-dev")),
+  detect: async () => exists(path.join(vscodeGlobalStorage(), "saoudrizwan.claude-dev")),
   writeConfig: async (input) => mergeMcpServersJson(cline.config_path(), input),
 };
 
