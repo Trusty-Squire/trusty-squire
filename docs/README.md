@@ -9,6 +9,10 @@ launch reader.
 - [VAULT-OPERATIONS.md](VAULT-OPERATIONS.md) is the operator runbook for the
   credential vault.
 - [DEPLOY-registry.md](DEPLOY-registry.md) covers deploying the skill registry.
+- [PROMPT-opencode-support.md](PROMPT-opencode-support.md) records the implementation brief for
+  first-class OpenCode MCP support.
+- [opencode-ecosystem-entry.md](opencode-ecosystem-entry.md) contains prepared upstream discovery
+  copy for review after the OpenCode target is released.
 - [BUSINESS-MODEL.md](BUSINESS-MODEL.md) records the current pricing and
   positioning model.
 

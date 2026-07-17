@@ -44,8 +44,8 @@ export default function OpenGraphImage() {
             Let your coding agent get the account and keep the key safe.
           </div>
           <div style={{ color: "#9a9aa4", fontSize: 23, lineHeight: 1.45 }}>
-            Signup, setup, and write-only credential storage for Claude Code, Codex, Cursor, and
-            Goose.
+            Signup, setup, and write-only credential storage for Claude Code, Codex, Cursor,
+            OpenCode, and Goose.
           </div>
         </div>
 

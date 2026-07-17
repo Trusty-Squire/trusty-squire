@@ -26,7 +26,7 @@ export const metadata: Metadata = {
     template: "%s | Trusty Squire",
   },
   description:
-    "Trusty Squire is an MCP server that lets Claude Code, Codex, Cursor, and other coding agents sign up for websites and save API keys outside chat, code, and .env.",
+    "Trusty Squire is an MCP server that lets Claude Code, Codex, Cursor, OpenCode, and other coding agents sign up for websites and save API keys outside chat, code, and .env.",
   metadataBase: new URL("https://trustysquire.ai"),
   applicationName: "Trusty Squire",
   keywords: [
@@ -35,6 +35,7 @@ export const metadata: Metadata = {
     "Claude Code MCP",
     "Codex MCP",
     "Cursor MCP",
+    "OpenCode MCP",
     "MCP credential vault",
     "AI agent secrets management",
     "automate website signup",

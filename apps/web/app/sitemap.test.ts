@@ -20,6 +20,7 @@ describe("public sitemap", () => {
         "https://trustysquire.ai/integrations/claude-code",
         "https://trustysquire.ai/integrations/codex",
         "https://trustysquire.ai/integrations/cursor",
+        "https://trustysquire.ai/integrations/opencode",
         "https://trustysquire.ai/services",
         "https://trustysquire.ai/guides",
         "https://trustysquire.ai/compare",

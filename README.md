@@ -16,7 +16,7 @@
 
 <p align="center"><strong>Trusty Squire signs up / in to websites for you so you don’t have to.</strong></p>
 
-Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically** — then saves each key in an encrypted, write-only vault instead of your chat, your code, or your `.env`. The raw provider secret never needs to enter the agent's context, so it can't be pasted into a commit or leaked in a log.
+Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically** — then saves each key in an encrypted, write-only vault instead of your chat, your code, or your `.env`. The raw provider secret never needs to enter the agent's context, so it can't be pasted into a commit or leaked in a log.
 
 It is not a secrets manager for keys you already have, and not a browser-automation framework you script per site. Point your agent at a service — “set up Clerk and wire in the key” — and Trusty Squire opens a real browser, works through signup or sign-in one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and captures the generated key. When a real person is required (phone, hard CAPTCHA, payment), it stops and says so rather than pretending the signup completed.
 
@@ -50,7 +50,7 @@ To choose a target explicitly:
 npx @trusty-squire/mcp connect --target=codex
 ```
 
-Supported targets: `claude-code`, `cursor`, `codex`, `goose`, `cline`, `continue`, and `hermes`.
+Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline`, `continue`, and `hermes`.
 
 ## What happens
 

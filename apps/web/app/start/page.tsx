@@ -16,6 +16,7 @@ const AGENTS = [
   "claude-code",
   "cursor",
   "codex",
+  "opencode",
   "goose",
   "cline",
   "continue",
@@ -93,8 +94,8 @@ export default function StartPage() {
               <div>
                 <b>Restart your agent</b>
                 <p>
-                  Restart Claude Code, Cursor, Codex, Goose, Cline, or Continue
-                  so it picks up the new tools.
+                  Restart Claude Code, Cursor, Codex, OpenCode, Goose, Cline,
+                  or Continue so it picks up the new tools.
                 </p>
               </div>
             </div>

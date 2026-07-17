@@ -2,9 +2,16 @@
 // how to merge a `squire` server entry into the existing config, and
 // how to detect whether the user has the agent installed.
 
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  applyEdits as applyJsoncEdits,
+  modify as modifyJsonc,
+  parse as parseJsonc,
+  printParseErrorCode,
+  type ParseError,
+} from "jsonc-parser";
 import { stringify as yamlStringify, parse as yamlParse } from "yaml";
 import { stringify as tomlStringify, parse as tomlParse } from "smol-toml";
 
@@ -48,7 +55,8 @@ export type AgentTarget =
   | "goose"
   | "cline"
   | "continue"
-  | "hermes";
+  | "hermes"
+  | "opencode";
 
 export interface AgentDefinition {
   target: AgentTarget;
@@ -116,7 +124,7 @@ const DEAD_ENV_KEYS: ReadonlySet<string> = new Set(["UNIVERSAL_BOT_PREFER_CHEAP"
 
 function priorServerEnv(
   existing: unknown,
-  field: "env" | "envs",
+  field: "env" | "envs" | "environment",
 ): Record<string, string> {
   if (existing === undefined || existing === null || typeof existing !== "object") {
     return {};
@@ -130,6 +138,13 @@ function priorServerEnv(
     if (typeof v === "string" && !DEAD_ENV_KEYS.has(k)) out[k] = v;
   }
   return out;
+}
+
+async function writeTextAtomic(filePath: string, contents: string): Promise<void> {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  const tmp = `${filePath}.tmp-${Date.now()}`;
+  await fs.writeFile(tmp, contents, { mode: 0o600 });
+  await fs.rename(tmp, filePath);
 }
 
 async function mergeMcpServersJson(filePath: string, input: WriteConfigInput): Promise<void> {
@@ -427,6 +442,139 @@ const codex: AgentDefinition = {
   },
 };
 
+// ── opencode ────────────────────────────────────────────────
+//
+// OpenCode reads a global JSON/JSONC config whose MCP shape differs from the
+// other JSON hosts: `mcp` (not `mcpServers`), a combined command array, and
+// `environment` (not `env`). Use jsonc-parser's surgical edits so comments,
+// trailing commas, and unrelated user settings survive a reconnect.
+
+function expandHome(filePath: string): string {
+  if (filePath === "~") return home();
+  if (filePath.startsWith(`~${path.sep}`) || filePath.startsWith("~/")) {
+    return path.join(home(), filePath.slice(2));
+  }
+  return filePath;
+}
+
+function opencodeConfigDir(): string {
+  return path.join(process.env.XDG_CONFIG_HOME ?? path.join(home(), ".config"), "opencode");
+}
+
+function opencodeConfigPath(): string {
+  const configured = process.env.OPENCODE_CONFIG?.trim();
+  if (configured) return path.resolve(expandHome(configured));
+
+  const configDir = opencodeConfigDir();
+  const jsoncPath = path.join(configDir, "opencode.jsonc");
+  const jsonPath = path.join(configDir, "opencode.json");
+  // OpenCode loads JSONC after JSON when both exist, so update the effective
+  // higher-precedence file instead of writing an entry that JSONC can mask.
+  if (existsSync(jsoncPath)) return jsoncPath;
+  return jsonPath;
+}
+
+function executableOnPath(command: string): boolean {
+  const pathValue = process.env.PATH;
+  if (!pathValue) return false;
+  const extensions =
+    process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";") : [""];
+  return pathValue
+    .split(path.delimiter)
+    .some((directory) =>
+      extensions.some((extension) => existsSync(path.join(directory, `${command}${extension}`))),
+    );
+}
+
+const JSONC_FORMATTING = {
+  insertSpaces: true,
+  tabSize: 2,
+  eol: "\n",
+} as const;
+
+function applyJsoncValue(raw: string, jsonPath: (string | number)[], value: unknown): string {
+  return applyJsoncEdits(
+    raw,
+    modifyJsonc(raw, jsonPath, value, { formattingOptions: JSONC_FORMATTING }),
+  );
+}
+
+async function writeOpenCodeConfig(filePath: string, input: WriteConfigInput): Promise<void> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(filePath, "utf8");
+  } catch (err) {
+    if ((err as { code?: string }).code !== "ENOENT") throw err;
+    raw = "{}\n";
+  }
+  if (raw.trim() === "") raw = "{}\n";
+
+  const errors: ParseError[] = [];
+  const parsed = parseJsonc(raw, errors, {
+    allowTrailingComma: true,
+    disallowComments: false,
+  });
+  if (errors.length > 0) {
+    const first = errors[0]!;
+    throw new Error(
+      `Cannot update OpenCode config ${filePath}: ${printParseErrorCode(first.error)} at offset ${first.offset}`,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Cannot update OpenCode config ${filePath}: expected a JSON object`);
+  }
+
+  const data = parsed as Record<string, unknown>;
+  const mcpIsObject =
+    data.mcp !== undefined &&
+    data.mcp !== null &&
+    typeof data.mcp === "object" &&
+    !Array.isArray(data.mcp);
+  const servers = mcpIsObject ? (data.mcp as Record<string, unknown>) : {};
+  const legacyEnvironments = LEGACY_SERVER_KEYS.reduce<Record<string, string>>(
+    (acc, key) => ({ ...acc, ...priorServerEnv(servers[key], "environment") }),
+    {},
+  );
+  const priorEnvironment = {
+    ...legacyEnvironments,
+    ...priorServerEnv(servers[SERVER_KEY], "environment"),
+  };
+  const squire = {
+    type: "local",
+    command: [input.command, ...input.args],
+    environment: { ...priorEnvironment, ...input.env },
+    enabled: true,
+    timeout: 30_000,
+  };
+
+  let updated = raw;
+  if (typeof data.$schema !== "string") {
+    updated = applyJsoncValue(updated, ["$schema"], "https://opencode.ai/config.json");
+  }
+  if (data.mcp !== undefined && !mcpIsObject) {
+    updated = applyJsoncValue(updated, ["mcp"], {});
+  }
+  for (const key of LEGACY_SERVER_KEYS) {
+    if (servers[key] !== undefined) {
+      updated = applyJsoncValue(updated, ["mcp", key], undefined);
+    }
+  }
+  updated = applyJsoncValue(updated, ["mcp", SERVER_KEY], squire);
+  if (!updated.endsWith("\n")) updated += "\n";
+  await writeTextAtomic(filePath, updated);
+}
+
+const opencode: AgentDefinition = {
+  target: "opencode",
+  display_name: "OpenCode",
+  config_path: opencodeConfigPath,
+  detect: async () =>
+    (await exists(opencodeConfigPath())) ||
+    (await exists(opencodeConfigDir())) ||
+    executableOnPath("opencode"),
+  writeConfig: async (input) => writeOpenCodeConfig(opencode.config_path(), input),
+};
+
 export const AGENTS: Record<AgentTarget, AgentDefinition> = {
   "claude-code": claudeCode,
   cursor,
@@ -435,6 +583,7 @@ export const AGENTS: Record<AgentTarget, AgentDefinition> = {
   cline,
   continue: continueAgent,
   hermes,
+  opencode,
 };
 
 export async function detectInstalledAgents(): Promise<AgentDefinition[]> {

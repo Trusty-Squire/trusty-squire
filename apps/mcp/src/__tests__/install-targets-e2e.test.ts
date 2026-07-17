@@ -1,5 +1,5 @@
-// E2E #3 — the install CLI works against the four host agents users
-// commonly run: claude-code, codex, goose, cursor. For each target,
+// E2E #3 — the install CLI works against the five host agents users
+// commonly run: claude-code, codex, goose, cursor, opencode. For each target,
 // this test:
 //   1. Runs the same connect() entrypoint runCli dispatches to.
 //   2. Mocks the external dependencies (API handshake + ASN detection
@@ -9,8 +9,8 @@
 //   4. Asserts the agent's config file is created at the agent's
 //      `config_path()` and contains a `squire` MCP server entry.
 //
-// Per-target write semantics (JSON for claude-code/cursor/cline, YAML
-// for goose, TOML for codex) are already covered by agents.test.ts.
+// Per-target write semantics (JSON for claude-code/cursor/cline, JSONC
+// for opencode, YAML for goose, TOML for codex) are covered by agents.test.ts.
 // This file proves the install pipeline drives the right writer for
 // each --target value.
 
@@ -81,7 +81,7 @@ vi.mock("../bot/google-login.js", async (importOriginal) => {
 import { connect } from "../install/cli.js";
 import { AGENTS } from "../install/agents.js";
 
-const TARGETS = ["claude-code", "codex", "goose", "cursor"] as const;
+const TARGETS = ["claude-code", "codex", "goose", "cursor", "opencode"] as const;
 
 let originalHome: string | undefined;
 let originalXdg: string | undefined;
