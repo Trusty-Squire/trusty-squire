@@ -5,18 +5,26 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { parse as jsoncParse } from "jsonc-parser";
 import { parse as yamlParse } from "yaml";
 import { parse as tomlParse, stringify as tomlStringify } from "smol-toml";
 import { AGENTS } from "../install/agents.js";
 
 let originalHome: string | undefined;
+let originalXdgConfigHome: string | undefined;
+let originalOpenCodeConfig: string | undefined;
+let originalPath: string | undefined;
 let tmpHome: string;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
+  originalXdgConfigHome = process.env.XDG_CONFIG_HOME;
+  originalOpenCodeConfig = process.env.OPENCODE_CONFIG;
+  originalPath = process.env.PATH;
   tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "ts-mcp-test-"));
   process.env.HOME = tmpHome;
   delete process.env.XDG_CONFIG_HOME;
+  delete process.env.OPENCODE_CONFIG;
 });
 
 afterEach(async () => {
@@ -25,6 +33,18 @@ afterEach(async () => {
   } else {
     delete process.env.HOME;
   }
+  if (originalXdgConfigHome !== undefined) {
+    process.env.XDG_CONFIG_HOME = originalXdgConfigHome;
+  } else {
+    delete process.env.XDG_CONFIG_HOME;
+  }
+  if (originalOpenCodeConfig !== undefined) {
+    process.env.OPENCODE_CONFIG = originalOpenCodeConfig;
+  } else {
+    delete process.env.OPENCODE_CONFIG;
+  }
+  if (originalPath !== undefined) process.env.PATH = originalPath;
+  else delete process.env.PATH;
   await fs.rm(tmpHome, { recursive: true, force: true });
 });
 
@@ -107,9 +127,7 @@ describe("claude-code config writer", () => {
     const parsed = JSON.parse(raw) as {
       mcpServers: { squire: { env: Record<string, string> } };
     };
-    expect(parsed.mcpServers.squire.env.UNIVERSAL_BOT_PROXY_URL).toBe(
-      "socks5://127.0.0.1:1080",
-    );
+    expect(parsed.mcpServers.squire.env.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
     expect(parsed.mcpServers.squire.env.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("claude-code");
   });
 
@@ -125,7 +143,10 @@ describe("claude-code config writer", () => {
           squire: {
             command: "npx",
             args: ["-y", "@trusty-squire/mcp"],
-            env: { UNIVERSAL_BOT_PREFER_CHEAP: "true", TRUSTY_SQUIRE_AGENT_IDENTITY: "claude-code" },
+            env: {
+              UNIVERSAL_BOT_PREFER_CHEAP: "true",
+              TRUSTY_SQUIRE_AGENT_IDENTITY: "claude-code",
+            },
           },
         },
       }),
@@ -269,9 +290,7 @@ describe("goose YAML writer", () => {
       "@trusty-squire/mcp@0.9.19-rc.12",
       "server",
     ]);
-    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe(
-      "socks5://127.0.0.1:1080",
-    );
+    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
     expect(parsed.extensions.squire.envs.TRUSTY_SQUIRE_REGISTRY_URL).toBe(
       "https://registry.trustysquire.ai",
     );
@@ -301,9 +320,7 @@ describe("goose YAML writer", () => {
     const parsed = yamlParse(raw) as {
       extensions: { squire: { envs: Record<string, string> } };
     };
-    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe(
-      "socks5://127.0.0.1:1080",
-    );
+    expect(parsed.extensions.squire.envs.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
     expect(parsed.extensions.squire.envs.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("goose");
   });
 });
@@ -337,8 +354,15 @@ describe("hermes YAML writer", () => {
       filePath,
       yamlStringify({
         mcp_servers: {
-          filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"] },
-          squire: { command: "node", args: ["old", "server"], env: { UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080" } },
+          filesystem: {
+            command: "npx",
+            args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+          },
+          squire: {
+            command: "node",
+            args: ["old", "server"],
+            env: { UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080" },
+          },
         },
       }),
     );
@@ -394,21 +418,14 @@ describe("codex TOML writer", () => {
       };
     };
     expect(parsed.mcp_servers.squire.command).toBe("npx");
-    expect(parsed.mcp_servers.squire.args).toEqual([
-      "-y",
-      "@trusty-squire/mcp",
-      "server",
-    ]);
+    expect(parsed.mcp_servers.squire.args).toEqual(["-y", "@trusty-squire/mcp", "server"]);
     expect(parsed.mcp_servers.squire.env).toEqual({ TS_LOG: "info" });
   });
 
   it("preserves the user's other config.toml entries", async () => {
     const filePath = AGENTS.codex.config_path();
     await fs.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.writeFile(
-      filePath,
-      tomlStringify({ model: "gpt-5", approval_policy: "untrusted" }),
-    );
+    await fs.writeFile(filePath, tomlStringify({ model: "gpt-5", approval_policy: "untrusted" }));
     await AGENTS.codex.writeConfig({
       command: "npx",
       args: ["server"],
@@ -422,5 +439,195 @@ describe("codex TOML writer", () => {
     expect(parsed.model).toBe("gpt-5");
     expect(parsed.approval_policy).toBe("untrusted");
     expect(parsed.mcp_servers.squire).toBeDefined();
+  });
+});
+
+describe("opencode JSONC writer", () => {
+  const input = {
+    command: "npx",
+    args: ["-y", "@trusty-squire/mcp", "server"],
+    env: {
+      TRUSTY_SQUIRE_AGENT_IDENTITY: "opencode",
+      TRUSTY_SQUIRE_REGISTRY_URL: "https://registry.trustysquire.ai",
+    },
+  };
+
+  it("creates the documented local MCP shape", async () => {
+    await AGENTS.opencode.writeConfig(input);
+
+    expect(AGENTS.opencode.config_path()).toBe(
+      path.join(tmpHome, ".config", "opencode", "opencode.json"),
+    );
+    const parsed = jsoncParse(await fs.readFile(AGENTS.opencode.config_path(), "utf8")) as {
+      $schema: string;
+      mcp: {
+        squire: {
+          type: string;
+          command: string[];
+          environment: Record<string, string>;
+          enabled: boolean;
+          timeout: number;
+          args?: unknown;
+          env?: unknown;
+        };
+      };
+    };
+    expect(parsed.$schema).toBe("https://opencode.ai/config.json");
+    expect(parsed.mcp.squire).toEqual({
+      type: "local",
+      command: ["npx", "-y", "@trusty-squire/mcp", "server"],
+      environment: input.env,
+      enabled: true,
+      timeout: 30_000,
+    });
+    expect(parsed.mcp.squire.args).toBeUndefined();
+    expect(parsed.mcp.squire.env).toBeUndefined();
+  });
+
+  it("preserves JSONC comments, trailing commas, settings, and other MCP servers", async () => {
+    const filePath = path.join(tmpHome, ".config", "opencode", "opencode.jsonc");
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(
+      filePath,
+      `{
+  // keep this model choice
+  "model": "anthropic/claude-sonnet-4-5",
+  "permission": { "bash": "ask", },
+  "mcp": {
+    // user's existing server
+    "context7": { "type": "remote", "url": "https://mcp.context7.com/mcp", },
+  },
+}
+`,
+    );
+
+    expect(AGENTS.opencode.config_path()).toBe(filePath);
+    await AGENTS.opencode.writeConfig(input);
+    const raw = await fs.readFile(filePath, "utf8");
+    const parsed = jsoncParse(raw) as {
+      model: string;
+      permission: { bash: string };
+      mcp: { context7: unknown; squire: unknown };
+    };
+    expect(raw).toContain("// keep this model choice");
+    expect(raw).toContain("// user's existing server");
+    expect(parsed.model).toBe("anthropic/claude-sonnet-4-5");
+    expect(parsed.permission.bash).toBe("ask");
+    expect(parsed.mcp.context7).toBeDefined();
+    expect(parsed.mcp.squire).toBeDefined();
+  });
+
+  it("repairs a non-object mcp value without losing other settings", async () => {
+    const filePath = AGENTS.opencode.config_path();
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, JSON.stringify({ model: "openai/gpt-5", mcp: false }));
+
+    await AGENTS.opencode.writeConfig(input);
+    const parsed = jsoncParse(await fs.readFile(filePath, "utf8")) as {
+      model: string;
+      mcp: { squire: unknown };
+    };
+    expect(parsed.model).toBe("openai/gpt-5");
+    expect(parsed.mcp.squire).toBeDefined();
+  });
+
+  it("preserves prior environment, prunes dead keys, and removes legacy aliases", async () => {
+    const filePath = path.join(tmpHome, ".config", "opencode", "opencode.jsonc");
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(
+      filePath,
+      JSON.stringify({
+        mcp: {
+          trustysquire: {
+            type: "local",
+            command: ["npx", "old-package", "server"],
+            environment: { UNIVERSAL_BOT_PROXY_URL: "socks5://127.0.0.1:1080" },
+          },
+          squire: {
+            type: "local",
+            command: ["npx", "older-package", "server"],
+            environment: {
+              UNIVERSAL_BOT_PREFER_CHEAP: "true",
+              TRUSTY_SQUIRE_AGENT_IDENTITY: "old-host",
+            },
+          },
+        },
+      }),
+    );
+
+    await AGENTS.opencode.writeConfig(input);
+    const parsed = jsoncParse(await fs.readFile(filePath, "utf8")) as {
+      mcp: {
+        trustysquire?: unknown;
+        squire: { environment: Record<string, string> };
+      };
+    };
+    expect(parsed.mcp.trustysquire).toBeUndefined();
+    expect(parsed.mcp.squire.environment.UNIVERSAL_BOT_PROXY_URL).toBe("socks5://127.0.0.1:1080");
+    expect(parsed.mcp.squire.environment.TRUSTY_SQUIRE_AGENT_IDENTITY).toBe("opencode");
+    expect(parsed.mcp.squire.environment.UNIVERSAL_BOT_PREFER_CHEAP).toBeUndefined();
+  });
+
+  it("removes registry routing when a reconnect opts out", async () => {
+    await AGENTS.opencode.writeConfig(input);
+    await AGENTS.opencode.writeConfig({
+      ...input,
+      env: { TRUSTY_SQUIRE_AGENT_IDENTITY: "opencode" },
+    });
+    const parsed = jsoncParse(await fs.readFile(AGENTS.opencode.config_path(), "utf8")) as {
+      mcp: { squire: { environment: Record<string, string> } };
+    };
+    expect(parsed.mcp.squire.environment.TRUSTY_SQUIRE_REGISTRY_URL).toBeUndefined();
+  });
+
+  it("updates a symlink target without replacing the link", async () => {
+    const managedPath = path.join(tmpHome, "dotfiles", "opencode.jsonc");
+    const linkedPath = path.join(tmpHome, ".config", "opencode", "opencode.jsonc");
+    await fs.mkdir(path.dirname(managedPath), { recursive: true });
+    await fs.mkdir(path.dirname(linkedPath), { recursive: true });
+    await fs.writeFile(managedPath, '{\n  "model": "openai/gpt-5",\n}\n');
+    await fs.symlink(managedPath, linkedPath);
+
+    await AGENTS.opencode.writeConfig(input);
+
+    expect((await fs.lstat(linkedPath)).isSymbolicLink()).toBe(true);
+    const parsed = jsoncParse(await fs.readFile(managedPath, "utf8")) as {
+      model: string;
+      mcp: { squire: unknown };
+    };
+    expect(parsed.model).toBe("openai/gpt-5");
+    expect(parsed.mcp.squire).toBeDefined();
+  });
+
+  it("is byte-idempotent", async () => {
+    await AGENTS.opencode.writeConfig(input);
+    const first = await fs.readFile(AGENTS.opencode.config_path(), "utf8");
+    await AGENTS.opencode.writeConfig(input);
+    const second = await fs.readFile(AGENTS.opencode.config_path(), "utf8");
+    expect(second).toBe(first);
+  });
+
+  it("honors XDG_CONFIG_HOME", async () => {
+    process.env.XDG_CONFIG_HOME = path.join(tmpHome, "xdg");
+    await AGENTS.opencode.writeConfig(input);
+    expect(AGENTS.opencode.config_path()).toBe(
+      path.join(tmpHome, "xdg", "opencode", "opencode.json"),
+    );
+    await expect(fs.access(AGENTS.opencode.config_path())).resolves.toBeUndefined();
+  });
+
+  it("honors OPENCODE_CONFIG, including a home-relative path", async () => {
+    process.env.OPENCODE_CONFIG = "~/.custom/opencode.jsonc";
+    await AGENTS.opencode.writeConfig(input);
+    expect(AGENTS.opencode.config_path()).toBe(path.join(tmpHome, ".custom", "opencode.jsonc"));
+    await expect(fs.access(AGENTS.opencode.config_path())).resolves.toBeUndefined();
+  });
+
+  it("detects an OpenCode executable on PATH without running it", async () => {
+    const binDir = path.join(tmpHome, "bin");
+    await fs.mkdir(binDir, { recursive: true });
+    await fs.writeFile(path.join(binDir, "opencode"), "must not execute", { mode: 0o755 });
+    process.env.PATH = binDir;
+    expect(await AGENTS.opencode.detect()).toBe(true);
   });
 });

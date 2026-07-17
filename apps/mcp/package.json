@@ -18,7 +18,8 @@
     "secrets-management",
     "claude-code",
     "cursor",
-    "codex"
+    "codex",
+    "opencode"
   ],
   "main": "./dist/server.js",
   "bin": {
@@ -48,6 +49,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:cov": "vitest run --coverage",
+    "smoke:opencode": "node scripts/smoke-opencode.mjs",
     "dev:server": "tsx src/bin.ts server",
     "install:dev": "tsx src/bin.ts install",
     "prepack": "node scripts/package-readme.mjs stage",
@@ -62,6 +64,7 @@
     "boxen": "^8.0.1",
     "canonicalize": "^2.0.0",
     "chalk": "^5.3.0",
+    "jsonc-parser": "^3.3.1",
     "open": "^10.1.0",
     "ora": "^8.1.1",
     "patchright": "^1.60.2",

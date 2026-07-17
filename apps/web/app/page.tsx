@@ -170,6 +170,7 @@ export default function Page() {
               <div className="badge">Codex</div>
               <div className="badge">Goose</div>
               <div className="badge">Cursor</div>
+              <div className="badge">OpenCode</div>
             </div>
           </div>
         </div>
@@ -187,9 +188,9 @@ export default function Page() {
         <div>
           <h2 id="what-is-trusty-squire">What is Trusty Squire?</h2>
           <p>
-            Trusty Squire is an MCP server for coding agents. Claude Code, Codex, Cursor, or Goose
-            plans the job; Trusty Squire operates the website and keeps the generated secret on the
-            safe side of the boundary.
+            Trusty Squire is an MCP server for coding agents. Claude Code, Codex, Cursor, OpenCode,
+            or Goose plans the job; Trusty Squire operates the website and keeps the generated
+            secret on the safe side of the boundary.
           </p>
           <h3>How does it work?</h3>
           <ol>
@@ -215,7 +216,7 @@ export default function Page() {
             <p>
               Ask for a service. Your squire creates the account, works through available
               verification, and stores the generated API key. No fifteen-tab signup detour, right
-              inside Claude Code, Codex, Goose, and Cursor.
+              inside Claude Code, Codex, OpenCode, Goose, and Cursor.
             </p>
           </div>
         </Reveal>

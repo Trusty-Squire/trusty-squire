@@ -19,7 +19,7 @@ export function buildLlmsTxt(): string {
 
 > Trusty Squire signs up / in to websites for you so you don't have to.
 
-Trusty Squire is an MCP server that lets Claude Code, Codex, Cursor, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically. It works through signup or sign-in, finishes setup behind the login, and stores each generated key in an encrypted, write-only vault — never in chat, code, or your .env.
+Trusty Squire is an MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically. It works through signup or sign-in, finishes setup behind the login, and stores each generated key in an encrypted, write-only vault — never in chat, code, or your .env.
 
 ## Why it exists
 
@@ -45,6 +45,7 @@ Free to start.
 - [Problem guides](${absolute("/guides")})
 - [Product comparisons](${absolute("/compare")})
 - [Coding-agent integrations](${absolute("/integrations")})
+- [OpenCode integration](${absolute("/integrations/opencode")})
 - [Install guide](${absolute("/start")})
 - [GitHub repository](https://github.com/trusty-squire/trusty-squire)
 - [npm package](https://www.npmjs.com/package/@trusty-squire/mcp)
