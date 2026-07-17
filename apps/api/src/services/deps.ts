@@ -11,6 +11,7 @@
 // captcha-event / inbox / vault.
 
 import { Buffer } from "node:buffer";
+import { performance } from "node:perf_hooks";
 import {
   CredentialVault,
   InMemoryCredentialStore,
@@ -100,7 +101,7 @@ export interface ApiDeps {
   // timeout-capped query so an external monitor catches a wedged DB (the 256MB
   // OOM failure mode). Resolves true when the DB answers, false on error/timeout.
   // Always true for the no-DB in-memory dev path.
-  pingDb: () => Promise<boolean>;
+  pingDb: (observe?: DbProbeObserver) => Promise<boolean>;
 
   // Funnel + health gauges for the private Prometheus exporter
   // (metrics-server.ts). Defined only on the Prisma path — the no-DB
@@ -112,6 +113,24 @@ export interface ApiDeps {
   // Test injection
   now?: () => Date;
 }
+
+export type DbProbeFailureClass = "timeout" | "database_error" | "unknown_error";
+
+export type DbProbeAttempt =
+  | {
+      attempt: 1 | 2;
+      outcome: "success";
+      duration_ms: number;
+    }
+  | {
+      attempt: 1 | 2;
+      outcome: "failure";
+      duration_ms: number;
+      failure_class: DbProbeFailureClass;
+      error_code?: string;
+    };
+
+export type DbProbeObserver = (result: DbProbeAttempt) => void | Promise<void>;
 
 export interface BuildInMemoryDepsOpts {
   sessionSecret: string;
@@ -129,18 +148,84 @@ export interface BuildInMemoryDepsOpts {
 export async function probeWithRetry(
   probe: () => Promise<void>,
   retryDelayMs: number,
+  observe?: DbProbeObserver,
 ): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt++) {
+    const startedAt = performance.now();
     try {
       await probe();
+      notifyProbeObserver(observe, {
+        attempt: (attempt + 1) as 1 | 2,
+        outcome: "success",
+        duration_ms: elapsedMs(startedAt),
+      });
       return true;
-    } catch {
+    } catch (error) {
+      const failure = classifyDbProbeFailure(error);
+      notifyProbeObserver(observe, {
+        attempt: (attempt + 1) as 1 | 2,
+        outcome: "failure",
+        duration_ms: elapsedMs(startedAt),
+        failure_class: failure.failure_class,
+        ...(failure.error_code !== undefined ? { error_code: failure.error_code } : {}),
+      });
       if (attempt === 0) {
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       }
     }
   }
   return false;
+}
+
+class DbProbeTimeoutError extends Error {
+  override readonly name = "DbProbeTimeoutError";
+}
+
+function elapsedMs(startedAt: number): number {
+  return Math.max(0, Math.round((performance.now() - startedAt) * 100) / 100);
+}
+
+function classifyDbProbeFailure(error: unknown): {
+  failure_class: DbProbeFailureClass;
+  error_code?: string;
+} {
+  if (error instanceof DbProbeTimeoutError || getErrorName(error) === "DbProbeTimeoutError") {
+    return { failure_class: "timeout" };
+  }
+
+  const errorCode = getSafePrismaErrorCode(error);
+  if (error instanceof Error || errorCode !== undefined) {
+    return {
+      failure_class: "database_error",
+      ...(errorCode !== undefined ? { error_code: errorCode } : {}),
+    };
+  }
+  return { failure_class: "unknown_error" };
+}
+
+function getErrorName(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("name" in error)) return undefined;
+  return typeof error.name === "string" ? error.name : undefined;
+}
+
+function getSafePrismaErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
+  const code = error.code;
+  return typeof code === "string" && /^P\d{4}$/.test(code) ? code : undefined;
+}
+
+function notifyProbeObserver(observe: DbProbeObserver | undefined, result: DbProbeAttempt): void {
+  if (observe === undefined) return;
+  try {
+    const observation = observe(result);
+    if (observation !== undefined) {
+      void observation.catch(() => {
+        // Diagnostics must never turn a healthy database probe into an outage.
+      });
+    }
+  } catch {
+    // Diagnostics must never turn a healthy database probe into an outage.
+  }
 }
 
 export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
@@ -249,7 +334,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
         })
       : null;
 
-  const pingDb = async (): Promise<boolean> => {
+  const pingDb = async (observe?: DbProbeObserver): Promise<boolean> => {
     // No DB wired (in-memory dev/test) → always ready.
     if (authPrisma === null) return true;
     // Cheap DB touch (the narrowed client has no $queryRaw); time-capped so a
@@ -258,12 +343,12 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
       await Promise.race([
         authPrisma.machineToken.count({ where: { token: "__readyz_probe__" } }),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("db ping timeout")), 2000),
+          setTimeout(() => reject(new DbProbeTimeoutError("database probe timed out")), 2000),
         ),
       ]);
     };
     // One retry absorbs a single transient blip; a real wedge fails both.
-    return probeWithRetry(probe, 250);
+    return probeWithRetry(probe, 250, observe);
   };
 
   // Metrics exporter only makes sense against a real DB. 15s TTL matches a
