@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.45 (2026-07-17)
+
+- **OpenCode is now a first-class install target.** Run
+  `npx @trusty-squire/mcp connect --target=opencode` to add Trusty Squire to
+  OpenCode's global MCP configuration. The installer auto-detects OpenCode,
+  preserves JSONC comments and unrelated settings, respects custom config
+  paths and symlinked dotfiles, and keeps credentials out of the config.
+- **Registry opt-out now survives reconnects.** Re-running `connect` with
+  `--no-registry` removes the installer-owned registry URL instead of reviving
+  an older value from the existing host configuration.
+
 ## 1.0.44 (2026-07-16)
 
 - **Stored browser extraction is write-only end to end.** When
