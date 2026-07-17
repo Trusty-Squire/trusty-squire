@@ -252,6 +252,47 @@ describe("probeWithRetry", () => {
     expect(JSON.stringify(attempts)).not.toContain("private database hostname");
   });
 
+  it.each([
+    {
+      label: "accepts a safe Prisma code from a non-Error object",
+      thrown: { code: "P1001" },
+      expected: { failure_class: "database_error", error_code: "P1001" },
+    },
+    {
+      label: "rejects a malformed database code",
+      thrown: { code: "P1", detail: "private database hostname" },
+      expected: { failure_class: "unknown_error" },
+    },
+    {
+      label: "classifies primitive failures without logging their value",
+      thrown: "private database hostname",
+      expected: { failure_class: "unknown_error" },
+    },
+  ])("$label", async ({ thrown, expected }) => {
+    const attempts: DbProbeAttempt[] = [];
+    const ready = await probeWithRetry(
+      async () => {
+        throw thrown;
+      },
+      0,
+      (attempt) => {
+        attempts.push(attempt);
+      },
+    );
+
+    expect(ready).toBe(false);
+    expect(attempts).toEqual([
+      expect.objectContaining(expected),
+      expect.objectContaining(expected),
+    ]);
+    expect(
+      attempts.every(
+        (attempt) => !("error_code" in attempt) || attempt.error_code === "P1001",
+      ),
+    ).toBe(true);
+    expect(JSON.stringify(attempts)).not.toContain("private database hostname");
+  });
+
   it("does not let an observer failure change readiness", async () => {
     const ready = await probeWithRetry(
       async () => undefined,
