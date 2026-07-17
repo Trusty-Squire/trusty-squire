@@ -1,0 +1,89 @@
+name: Deploy web
+
+# Tests + (on main) deploys the marketing site + blog (`@trusty-squire/web`)
+# to Fly (`trustysquire`, trustysquire.ai). Mirrors release-api.yml.
+#
+# The web app has no version semantics — it's a service, not a library. On a
+# push to main that touches apps/web (or the lockfile), run typecheck + tests,
+# then `flyctl deploy`. Adding a blog post, an integration page, or any web
+# change ships automatically instead of waiting on a manual `flyctl deploy`.
+#
+# WHY THIS EXISTS: apps/web was the one deployable with no CI deploy — every
+# content change needed a manual deploy from a laptop, exactly the decoupling
+# that lets prod drift from main (see release-api.yml for the API version of
+# this bug). CI-integrating the deploy keeps the live site in step with main.
+#
+# Path filter: only fires on changes that could affect the web image
+# (apps/web + the root lockfile). Unrelated commits to api/mcp/registry skip it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/web/**"
+      - "pnpm-lock.yaml"
+      - ".github/workflows/deploy-web.yml"
+
+# One deploy run at a time; don't cancel an in-flight rollout.
+concurrency:
+  group: deploy-web-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Free ~25GB by removing preinstalled toolchains we don't use — the
+      # monorepo's Next.js app blows past the runner's inode quota otherwise.
+      - name: Free disk space on runner
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL /opt/hostedtoolcache/PyPy /usr/local/share/boost /usr/local/share/powershell || true
+          sudo docker system prune -af --volumes || true
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 8.15.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20.11.0
+          cache: pnpm
+
+      # Install only the web app's dep tree, not the whole monorepo — same
+      # inode-quota reason as the api/registry/mcp release workflows.
+      - name: Install (web dep tree only)
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/web...'
+
+      - name: Typecheck
+        run: pnpm --filter '@trusty-squire/web' typecheck
+
+      - name: Test
+        run: pnpm --filter '@trusty-squire/web' test
+
+  deploy:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: superfly/flyctl-actions/setup-flyctl@master
+
+      # Deploy from the monorepo root: the web Dockerfile.fly does `COPY . .`
+      # then `pnpm install --frozen-lockfile`, so the build context must be the
+      # repo root (workspace + lockfile), same as the API deploy.
+      - name: Deploy to Fly
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${FLY_API_TOKEN:-}" ]]; then
+            echo "::error::FLY_API_TOKEN is not set. Add it as a repo secret before merging this workflow."
+            exit 1
+          fi
+          flyctl deploy --config apps/web/fly.toml --dockerfile apps/web/Dockerfile.fly --remote-only
