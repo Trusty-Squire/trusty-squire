@@ -571,6 +571,39 @@ describe("opencode JSONC writer", () => {
     expect(parsed.mcp.squire.environment.UNIVERSAL_BOT_PREFER_CHEAP).toBeUndefined();
   });
 
+  it("removes registry routing when a reconnect opts out", async () => {
+    await AGENTS.opencode.writeConfig(input);
+    await AGENTS.opencode.writeConfig({
+      ...input,
+      env: { TRUSTY_SQUIRE_AGENT_IDENTITY: "opencode" },
+    });
+    const parsed = jsoncParse(
+      await fs.readFile(AGENTS.opencode.config_path(), "utf8"),
+    ) as {
+      mcp: { squire: { environment: Record<string, string> } };
+    };
+    expect(parsed.mcp.squire.environment.TRUSTY_SQUIRE_REGISTRY_URL).toBeUndefined();
+  });
+
+  it("updates a symlink target without replacing the link", async () => {
+    const managedPath = path.join(tmpHome, "dotfiles", "opencode.jsonc");
+    const linkedPath = path.join(tmpHome, ".config", "opencode", "opencode.jsonc");
+    await fs.mkdir(path.dirname(managedPath), { recursive: true });
+    await fs.mkdir(path.dirname(linkedPath), { recursive: true });
+    await fs.writeFile(managedPath, '{\n  "model": "openai/gpt-5",\n}\n');
+    await fs.symlink(managedPath, linkedPath);
+
+    await AGENTS.opencode.writeConfig(input);
+
+    expect((await fs.lstat(linkedPath)).isSymbolicLink()).toBe(true);
+    const parsed = jsoncParse(await fs.readFile(managedPath, "utf8")) as {
+      model: string;
+      mcp: { squire: unknown };
+    };
+    expect(parsed.model).toBe("openai/gpt-5");
+    expect(parsed.mcp.squire).toBeDefined();
+  });
+
   it("is byte-idempotent", async () => {
     await AGENTS.opencode.writeConfig(input);
     const first = await fs.readFile(AGENTS.opencode.config_path(), "utf8");

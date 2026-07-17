@@ -121,6 +121,10 @@ async function writeJson(filePath: string, data: unknown): Promise<void> {
 // merge drops them on the next connect. UNIVERSAL_BOT_PREFER_CHEAP died with the
 // in-process planner retirement and is read nowhere.
 const DEAD_ENV_KEYS: ReadonlySet<string> = new Set(["UNIVERSAL_BOT_PREFER_CHEAP"]);
+const NON_PERSISTENT_ENV_KEYS: ReadonlySet<string> = new Set([
+  ...DEAD_ENV_KEYS,
+  "TRUSTY_SQUIRE_REGISTRY_URL",
+]);
 
 function priorServerEnv(
   existing: unknown,
@@ -135,16 +139,30 @@ function priorServerEnv(
   }
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(prior as Record<string, unknown>)) {
-    if (typeof v === "string" && !DEAD_ENV_KEYS.has(k)) out[k] = v;
+    if (typeof v === "string" && !NON_PERSISTENT_ENV_KEYS.has(k)) out[k] = v;
   }
   return out;
 }
 
 async function writeTextAtomic(filePath: string, contents: string): Promise<void> {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tmp = `${filePath}.tmp-${Date.now()}`;
+  let writePath = filePath;
+  try {
+    if ((await fs.lstat(filePath)).isSymbolicLink()) {
+      const linkedPath = path.resolve(path.dirname(filePath), await fs.readlink(filePath));
+      try {
+        writePath = await fs.realpath(linkedPath);
+      } catch (err) {
+        if ((err as { code?: string }).code !== "ENOENT") throw err;
+        writePath = linkedPath;
+      }
+    }
+  } catch (err) {
+    if ((err as { code?: string }).code !== "ENOENT") throw err;
+  }
+  await fs.mkdir(path.dirname(writePath), { recursive: true });
+  const tmp = `${writePath}.tmp-${Date.now()}`;
   await fs.writeFile(tmp, contents, { mode: 0o600 });
-  await fs.rename(tmp, filePath);
+  await fs.rename(tmp, writePath);
 }
 
 async function mergeMcpServersJson(filePath: string, input: WriteConfigInput): Promise<void> {

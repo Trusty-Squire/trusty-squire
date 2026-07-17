@@ -85,16 +85,19 @@ const TARGETS = ["claude-code", "codex", "goose", "cursor", "opencode"] as const
 
 let originalHome: string | undefined;
 let originalXdg: string | undefined;
+let originalOpenCodeConfig: string | undefined;
 let tmpHome: string;
 
 beforeEach(async () => {
   originalHome = process.env.HOME;
   originalXdg = process.env.XDG_CONFIG_HOME;
+  originalOpenCodeConfig = process.env.OPENCODE_CONFIG;
   tmpHome = await fs.mkdtemp(path.join(os.tmpdir(), "ts-install-e2e-"));
   process.env.HOME = tmpHome;
   // Some session-storage code paths read XDG_CONFIG_HOME directly —
   // re-anchor that too so nothing escapes the sandbox.
   process.env.XDG_CONFIG_HOME = path.join(tmpHome, ".config");
+  delete process.env.OPENCODE_CONFIG;
 });
 
 afterEach(async () => {
@@ -102,6 +105,11 @@ afterEach(async () => {
   else delete process.env.HOME;
   if (originalXdg !== undefined) process.env.XDG_CONFIG_HOME = originalXdg;
   else delete process.env.XDG_CONFIG_HOME;
+  if (originalOpenCodeConfig !== undefined) {
+    process.env.OPENCODE_CONFIG = originalOpenCodeConfig;
+  } else {
+    delete process.env.OPENCODE_CONFIG;
+  }
   await fs.rm(tmpHome, { recursive: true, force: true });
 });
 
