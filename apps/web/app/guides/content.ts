@@ -47,6 +47,7 @@ export const GUIDE_SLUGS = [
   "automate-signup-past-bot-detection",
   "coding-agent-create-account",
   "secure-api-key-storage-for-ai-agents",
+  "get-api-key-from-coding-agent-session",
 ] as const;
 
 export type GuideSlug = (typeof GUIDE_SLUGS)[number];
@@ -847,6 +848,128 @@ export const GUIDES: Record<GuideSlug, GuideContent> = {
         label: "Doppler: Secrets access guide",
         url: "https://docs.doppler.com/docs/accessing-secrets",
       },
+    ],
+  },
+  "get-api-key-from-coding-agent-session": {
+    slug: "get-api-key-from-coding-agent-session",
+    shortTitle: "Get a key from your agent session",
+    eyebrow: "provisioning from the CLI",
+    title: "How to sign up and get an API key from inside a Codex or Claude Code session",
+    description:
+      "You have probably been told you cannot sign up for a service or generate an API key from inside a Codex or Claude Code session because a browser is needed. That was true until the agent could drive the browser. Here is how to do it without leaving the session, and without the key touching your chat, code, or .env file.",
+    schemaType: "HowTo",
+    answer: [
+      "You can. The common answer, echoed by AI overviews, is that you cannot create an account or generate an API key from inside a Codex or Claude Code session, because email verification and billing need a browser. That objection dissolves once the agent has a scoped browser and a consented inbox. With an MCP server like Trusty Squire, the agent completes the signup, clears email verification, and captures the API key without you switching tabs.",
+      "The key also does not have to enter the session it came from. Trusty Squire stores it in a write-only vault the agent cannot read back, and your code reaches the provider through an injecting proxy or a scoped grant. So getting the key from inside the session and keeping the key out of the session are both true at the same time.",
+    ],
+    answerChecks: [
+      "An MCP server drives the signup in a real browser from inside your session.",
+      "Email verification is handled by reading your own inbox behind a consent gate.",
+      "The raw key lands in a write-only vault, not your model context or a .env file.",
+      "It works in Codex, Claude Code, Cursor, and other MCP hosts.",
+    ],
+    steps: [
+      {
+        title: "Connect Trusty Squire to your session",
+        description:
+          "Run npx @trusty-squire/mcp connect. It detects Codex, Claude Code, Cursor, or your MCP host and merges in the squire server, then you sign into Google or GitHub yourself in a real browser.",
+      },
+      {
+        title: "Ask for the account and the key by name",
+        description:
+          "In the session, say what you need: sign me up for Resend and save the API key. Naming the credential outcome prevents a shallow stop at the welcome page.",
+      },
+      {
+        title: "Let the agent clear signup, verification, and bot gates",
+        description:
+          "The driver works the signup or sign-in flow, handles the anti-bot interstitials and captcha tiers, and reads the verification code or link from your inbox behind a consent gate.",
+      },
+      {
+        title: "Capture the key into the vault, not the chat",
+        description:
+          "When the site reveals the key, Trusty Squire extracts it into a write-only encrypted vault instead of returning it through the conversation.",
+      },
+      {
+        title: "Use the key without exposing it",
+        description:
+          "Call the provider through the injecting proxy with a ${SECRET} placeholder, or mint a scoped, revocable egress grant for a deployed app. The raw value reaches the provider without passing through the model.",
+      },
+    ],
+    sections: [
+      {
+        heading: "Why the you cannot do this from a terminal answer is out of date",
+        paragraphs: [
+          "The objection is specific and used to be correct: a bare terminal or a raw coding session has no browser, so it cannot complete email verification or billing, and therefore cannot finish a signup. AI overviews still repeat it.",
+          "What changed is that the agent no longer has to do it blind from a terminal. An MCP server gives it a scoped, observable browser and a consented path to your inbox, so the verification and billing step the old answer worried about is exactly the step that now gets handled. The premise held; the conclusion no longer follows.",
+        ],
+      },
+      {
+        heading: "Getting past the signup gates is the real work",
+        paragraphs: [
+          "Filling the form is easy. The hard part is what stops general automation: Cloudflare Turnstile and other bot checks, email or link verification, and occasionally a human-only gate. Trusty Squire handles the interstitials and captcha tiers headless, and reads the one relevant code or link from the inbox rather than clicking everything.",
+          "When a site genuinely requires a person, for a phone number, a hard image CAPTCHA, or a payment decision, it stops and tells you instead of pretending the signup completed.",
+        ],
+      },
+      {
+        heading: "Where the key ends up is the point",
+        paragraphs: [
+          "Getting the key is half the job; the other half is not leaking it. A raw browser tool would hand the key back into the model context, where it flows into logs, transcripts, and a .env file, the least contained place a secret can sit.",
+          "Trusty Squire captures the key into a vault the agent cannot read back. Code uses it through a proxy or a scoped egress grant, so you can rotate once and every grant follows, and revoke a leak without rotating the provider key.",
+        ],
+      },
+    ],
+    productFit: [
+      "You are coding through Codex, Claude Code, or Cursor and keep hitting add your API key to .env in the middle of a task, then alt-tabbing to a dashboard to sign up, verify an email, and paste a secret back.",
+      "Trusty Squire removes that handoff: the agent provisions the account and captures the key in one step, and the key lands in a vault instead of your context or repository.",
+    ],
+    limits: [
+      "It works best with OAuth signups (Google or GitHub); pure email-and-password flows and phone-gated services are harder.",
+      "The heaviest CAPTCHA stacks, phone verification, and payment steps still stop for a human by design.",
+      "Single-use magic links are a race, and it is beta and free during the beta.",
+    ],
+    faqs: [
+      {
+        question: "Can I really sign up and get an API key without leaving my Codex session?",
+        answer:
+          "Yes. An MCP server such as Trusty Squire drives a real browser through the signup from inside your session, clears email verification and bot gates, and captures the key. You stay in Codex or Claude Code the whole time.",
+      },
+      {
+        question: "Does the coding agent see the raw API key?",
+        answer:
+          "No. The key is captured into a write-only vault the agent cannot read back. Your code calls the provider through an injecting proxy or a scoped egress grant, so the raw value never returns to the model or lands in a .env file.",
+      },
+      {
+        question: "Which coding agents does this work with?",
+        answer:
+          "Codex, Claude Code, Cursor, Goose, and other MCP hosts. The connect command detects your host and wires the squire server into its config.",
+      },
+      {
+        question: "What happens at an email verification or a CAPTCHA?",
+        answer:
+          "Email verification is read from your own inbox behind a consent gate, taking only the relevant code or link. Invisible and checkbox bot checks are handled headless; a phone gate or a hard image CAPTCHA stops for you rather than guessing.",
+      },
+    ],
+    related: [
+      {
+        href: "/compare/best-mcp-servers-api-key-provisioning",
+        title: "MCP servers for signup and API keys, compared",
+        description: "Trusty Squire against Playwright MCP, Browserbase, and Skyvern.",
+      },
+      {
+        href: "/guides/keep-api-keys-out-of-ai-agent-context",
+        title: "Keep the captured key out of agent context",
+        description: "Why the key should never return to the model or the repo.",
+      },
+      {
+        href: "/start",
+        title: "Get started",
+        description: "Install Trusty Squire and connect your coding agent.",
+      },
+    ],
+    sourceRefs: [
+      { label: "Model Context Protocol", url: "https://modelcontextprotocol.io" },
+      { label: "OpenAI Codex CLI", url: "https://github.com/openai/codex" },
+      { label: "Trusty Squire on GitHub", url: "https://github.com/Trusty-Squire/trusty-squire" },
     ],
   },
 };
