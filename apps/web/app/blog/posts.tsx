@@ -556,7 +556,133 @@ function ConfabBody(): ReactNode {
   );
 }
 
+function FrontierCommoditiesBody(): ReactNode {
+  return (
+    <>
+      <p>
+        The massive price disparity between Chinese inference tokens and US
+        frontier tokens was justified by a simple observation: the tokens were
+        not the same thing. The capability gap between something like DeepSeek V3
+        Flash and Anthropic&rsquo;s leading models was so large that the
+        10-to-100x price difference was easy to defend. The expensive tokens
+        unlocked use cases the cheap ones simply couldn&rsquo;t touch. Both were
+        commodities, sure, but it was like comparing petrol to coal, or gold to
+        copper. And many assumed the leading edge held by US frontier labs would
+        hold, or even widen, over time, justifying valuations approaching a
+        trillion dollars for OpenAI and Anthropic.
+      </p>
+      <p>
+        Kimi&rsquo;s K3 launch has led a lot of people to question the
+        infallibility of American dominance on the AI frontier. The marginal
+        output token, which had started to feel like an arbitrary accounting unit
+        designed to rip us off, given that per-token prices could differ 20x
+        while every consumer subscription costs roughly the same twenty dollars a
+        month, now looks a lot closer to a commodity than we thought. K3 has some
+        rough edges, but the consensus is that it has the same shape as a
+        frontier model and belongs in the same class: it landed at roughly half
+        of Opus 4.8&rsquo;s price, beat it on most software benchmarks, and took
+        frontend and design outright.
+      </p>
+      <p>
+        So the critical question is this: are inference tokens differentiated
+        tech IP that can command software-like premiums, or are they commodities?
+      </p>
+      <p>Two things complicate a clean answer.</p>
+      <p>
+        First, model performance is multi-dimensional. You&rsquo;re not comparing
+        points on a single axis, you&rsquo;re computing the distance between
+        vectors. If two models are sufficiently differentiated, then perceived
+        reliability or brand can still command a premium.
+      </p>
+      <p>
+        Second, there is real segmentation: your tokens are not our tokens, in
+        both difficulty and modality. It&rsquo;s absurd to spend frontier tokens
+        on image classification, and you can&rsquo;t meaningfully compare a
+        video-generation model to a coding model in the first place.
+      </p>
+      <p>
+        But the last few weeks have been like watching the playbook flip-flop
+        several times over. The market has been re-pricing the commodity question
+        in real time, with the loudest voices reversing their opinions in a
+        matter of days, sometimes hours. Fable 4 launches and blows everyone out
+        of the water, widely considered to be as much as eighteen months ahead of
+        the field. That leads Anthropic to decide its tokens are differentiated
+        enough to pull Fable 4 from its subscription plans. Then Grok 3, Sol 1.5,
+        even Mistral Large Spark launch and impress, and Anthropic is forced to
+        keep extending Fable access, because Fable&rsquo;s edge was being
+        commoditized in real time. I suspect Anthropic needed the &ldquo;we are
+        not a commodity&rdquo; narrative going into a trillion-dollar IPO. And I
+        suspect that now, in the wake of Kimi and Thinking Machines, it
+        won&rsquo;t be able to pull Fable or any future frontier model from its
+        subscription again. It would decimate the user base.
+      </p>
+      <p>
+        So it certainly feels, at this moment, like AI is commoditizing across a
+        handful of complexity levels and modalities. The open-weights and
+        sovereign-data movements are likely to accelerate that. And the open,
+        collaborative nature of global development is dismantling the objections
+        to commoditization in real time. Take the three biggest objections in
+        turn.
+      </p>
+      <p>
+        <strong>
+          1. American frontier labs will always lead, because of their head start
+          and their data moat.
+        </strong>{" "}
+        Maybe. But open models collaborate freely and build on each other, and
+        the new open labs have empirically shown a faster rate of progress. And
+        the distillation question cuts the wrong way for the moat: if there was
+        distillation, that is a stronger argument for commoditization, not a
+        weaker one, because it means any future edge won&rsquo;t persist either.
+      </p>
+      <p>
+        <strong>
+          2. Open models are a red herring, because the weights aren&rsquo;t
+          legible and self-hosting is too expensive anyway.
+        </strong>{" "}
+        But legibility was never the point. You don&rsquo;t need to read the
+        weights to build on them; you can use one model to extract intelligence
+        and make the next one better. And self-hosting was never about
+        individuals. The point is that when many providers host the same open
+        model, competition drives the marginal token down to the cost of
+        electricity.
+      </p>
+      <p>
+        <strong>
+          3. Geopolitics leaves Anthropic and OpenAI a captive market.
+        </strong>{" "}
+        But commoditization isn&rsquo;t constrained by borders or regulation.
+        Even if US enterprises never buy from Moonshot directly, the work
+        Moonshot does, along with every other open-weight lab in the world, helps
+        open labs like Thinking Machines, whose first open model shipped this
+        week, outcompete Anthropic. And there is no reason US firms can&rsquo;t
+        buy from allies: Sakana in Japan, or SEA-LION in Singapore, both aligned
+        with the open-weight movement.
+      </p>
+      <p>
+        The point of this post isn&rsquo;t to doom-and-gloom Anthropic or OpenAI.
+        I think the coincidence that so much of the open-model innovation has come
+        out of China has distracted us, or maybe just made things more
+        interesting, from the more significant fact underneath it: humanity has
+        discovered a commodity whose output keeps increasing at breakneck speed.
+        It is precisely because inference is commoditizing that intelligence can
+        be priced at the true cost of generating and serving it, and that a far
+        greater slice of humanity gets to benefit from it.
+      </p>
+    </>
+  );
+}
+
 export const POSTS: Post[] = [
+  {
+    slug: "frontier-commodities",
+    title: "Frontier commodities",
+    date: "17 July 2026",
+    iso: "2026-07-17",
+    description:
+      "The price gap between cheap and frontier inference tokens was defended as a capability gap. Kimi's K3, Fable, and a wave of open-weight labs are collapsing it in real time — and that commoditization is the good news.",
+    Body: FrontierCommoditiesBody,
+  },
   {
     slug: "smarter-coding-agents-are-better-liars",
     title: "Smarter Coding Agents Are Better Liars",

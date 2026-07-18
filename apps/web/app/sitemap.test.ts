@@ -25,6 +25,7 @@ describe("public sitemap", () => {
         "https://trustysquire.ai/guides",
         "https://trustysquire.ai/compare",
         "https://trustysquire.ai/blog",
+        "https://trustysquire.ai/blog/frontier-commodities",
         "https://trustysquire.ai/blog/smarter-coding-agents-are-better-liars",
         "https://trustysquire.ai/blog/the-last-mile-is-a-signup-form",
         "https://trustysquire.ai/privacy",
