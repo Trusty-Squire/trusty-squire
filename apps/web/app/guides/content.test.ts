@@ -3,9 +3,9 @@ import { generateMetadata, generateStaticParams } from "./[slug]/page";
 import { GUIDES, GUIDE_SLUGS, getGuide } from "./content";
 
 describe("guide discovery content", () => {
-  it("publishes the six planned static guide routes", () => {
-    expect(GUIDE_SLUGS).toHaveLength(6);
-    expect(new Set(GUIDE_SLUGS).size).toBe(6);
+  it("publishes the seven planned static guide routes", () => {
+    expect(GUIDE_SLUGS).toHaveLength(7);
+    expect(new Set(GUIDE_SLUGS).size).toBe(7);
     expect(generateStaticParams()).toEqual(GUIDE_SLUGS.map((slug) => ({ slug })));
     expect(getGuide("not-a-guide")).toBeUndefined();
   });
