@@ -36,6 +36,7 @@ export const COMPARISON_SLUGS = [
   "best-mcp-credential-management",
   "best-api-key-storage-ai-agents",
   "1password-mcp-aws-secrets-manager-alternatives",
+  "best-mcp-servers-api-key-provisioning",
 ] as const;
 
 export type ComparisonSlug = (typeof COMPARISON_SLUGS)[number];
@@ -993,6 +994,136 @@ export const COMPARISONS: Record<ComparisonSlug, ComparisonContent> = {
         href: "/compare/trusty-squire-vs-infisical-doppler",
         title: "Trusty Squire vs Infisical and Doppler",
         description: "Compare provisioning with developer secret platforms.",
+      },
+    ],
+  },
+  "best-mcp-servers-api-key-provisioning": {
+    slug: "best-mcp-servers-api-key-provisioning",
+    title: "Best MCP servers for signing up and getting API keys",
+    shortTitle: "MCP servers for signup and API keys",
+    eyebrow: "signup automation vs raw browser control",
+    description:
+      "An MCP server comparison for one job: letting an AI coding agent sign up to a service and get its API key. Trusty Squire against browser-automation MCP servers like Microsoft Playwright MCP, Browserbase, and Skyvern, and where the captured key actually ends up.",
+    answer: [
+      "If a coding agent needs to sign up for a service and get its API key, the MCP servers split into two layers. Trusty Squire is the one built for the whole loop: it drives signup or sign-in, clears email verification and bot gates, captures the generated key, and stores it write-only so the secret never enters the agent's context. Playwright MCP, Browserbase, and Skyvern give an agent a browser to drive, but you compose the signup flow and handle the key yourself.",
+      "So the question is less which is best than which layer you want. Choose Trusty Squire when the account or key does not exist yet and you want it captured without touching chat, code, or the .env file. Choose a raw browser-automation MCP server when you want low-level control and are willing to build the provisioning and secret handling around it.",
+    ],
+    columns: ["MCP server", "Primary job", "Signup and key capture", "Where the key goes", "Best fit"],
+    rows: [
+      {
+        criterion: "Trusty Squire",
+        values: [
+          "Purpose-built for coding agents: sign up, clear verification and bot gates, capture the API key, and use it through constrained tools.",
+          "Yes. It drives the full signup or sign-in flow, reads the email verification, and extracts the key end to end.",
+          "A write-only encrypted vault. The raw key is never returned to the agent; apps call through an injecting proxy or a scoped, revocable egress grant.",
+          "An agent that must create an account and get a key without the secret entering chat, code, or .env.",
+        ],
+      },
+      {
+        criterion: "Microsoft Playwright MCP",
+        values: [
+          "Official MCP server exposing raw browser control: navigate, click, type, and accessibility snapshots.",
+          "Primitives only. There is no built-in signup flow; you write the account creation, verification, and extraction logic yourself.",
+          "Nothing built in. Any key the agent reads lands in model context or wherever your own code puts it.",
+          "Teams that want low-level browser control and will build the provisioning and secret handling themselves.",
+        ],
+      },
+      {
+        criterion: "Browserbase and Stagehand",
+        values: [
+          "Hosted cloud browsers driven over MCP, with Stagehand adding higher-level, LLM-friendly actions.",
+          "Managed browser infrastructure, not a signup flow. You still compose the account creation and the key extraction.",
+          "No built-in credential vault. Captured keys go wherever your code stores them, and it needs its own API key to start.",
+          "Hosted, scalable browser automation where you own the flow and the secret storage.",
+        ],
+      },
+      {
+        criterion: "Skyvern",
+        values: [
+          "LLM-driven browser automation for form-heavy web workflows, available over MCP.",
+          "Can fill and submit forms, but it is a general workflow engine rather than a coding-agent signup-and-key broker.",
+          "Has its own credential store for workflow logins, using a different model than a write-only vault the agent cannot read back.",
+          "Recurring, form-heavy browser workflows and RPA-style automation beyond one-time provisioning.",
+        ],
+      },
+    ],
+    tableCaption:
+      "MCP servers for AI-agent browser work, compared by how much of the signup-to-key loop each one owns.",
+    scopeNote:
+      "This compares the browser-automation and provisioning layer, not secret storage for keys that already exist. A full setup often pairs a provisioning layer with a secret manager; see the storage comparisons below.",
+    sections: [
+      {
+        heading: "Raw browser control is not a finished signup",
+        paragraphs: [
+          "Playwright MCP and Browserbase hand an agent browser primitives: open a page, click, type, read a snapshot. That is genuinely useful, but the signup wall, the bot check, the email verification, and the moment the key is revealed are the actual work, and none of it is included. You script each service yourself and maintain it as forms change.",
+          "Trusty Squire finishes that loop. It handles the anti-bot interstitials and captcha tiers, reads the verification code or link from the inbox, and extracts the credential when the site reveals it. Where a general browser tool stalls at the gate, the purpose-built broker is designed to clear it.",
+        ],
+      },
+      {
+        heading: "Where the API key ends up is the real question",
+        paragraphs: [
+          "Getting the key is the easy half. The harder question is where it lands. With a raw browser-automation MCP server, the key the agent reads is in the model's context window, and from there it flows into logs, transcripts, and often a .env file. That is the least contained place a secret can be.",
+          "Trusty Squire captures the key into a write-only vault the agent cannot read back. When code needs the key it calls through an injecting proxy or a scoped egress grant, so the value reaches the provider without passing through the model. That boundary, not the browser driving, is the main reason to pick a provisioning broker over composing your own.",
+        ],
+      },
+      {
+        heading: "How to choose",
+        paragraphs: [
+          "Decide how much of the loop you want to own. If you want to build and maintain the signup and secret handling, a raw browser MCP gives you the most control. If you want the account created and the key captured and vaulted in one step, a purpose-built broker removes that work.",
+        ],
+        bullets: [
+          "Want raw browser primitives and full control: Playwright MCP or Browserbase.",
+          "Want recurring form-heavy or RPA-style workflows: Skyvern.",
+          "Want signup, key capture, and write-only storage in one step: Trusty Squire.",
+          "Whichever you pick, keep the captured key out of prompts, logs, and committed files.",
+        ],
+      },
+    ],
+    decision:
+      "Use Playwright MCP or Browserbase when you want raw browser control and will build the signup, verification, and secret handling yourself. Use Skyvern for recurring, form-heavy browser workflows. Use Trusty Squire when a coding agent must create the account and capture the key in one step, with the raw secret kept out of chat, code, and .env.",
+    faqs: [
+      {
+        question: "What is the best MCP server for signing up to websites and getting API keys?",
+        answer:
+          "For the full loop, Trusty Squire is purpose-built: it drives signup, clears verification and bot gates, captures the key, and stores it write-only. Playwright MCP, Browserbase, and Skyvern can drive a browser, but you build the signup flow and handle the key yourself.",
+      },
+      {
+        question: "Can Playwright MCP sign up for a service and save the API key?",
+        answer:
+          "It can drive the browser actions, but it has no built-in signup flow or credential storage. You write the account creation, email verification, and key extraction, and you decide where the key is stored. Any key the agent reads is in its context.",
+      },
+      {
+        question: "Does Trusty Squire replace Browserbase or Playwright MCP?",
+        answer:
+          "Not exactly; they are different layers. Browserbase and Playwright MCP provide browser control, while Trusty Squire provides a finished signup-to-key workflow plus a write-only vault. You can build a provisioning flow on the raw tools, or use the broker that already does it.",
+      },
+      {
+        question: "Where does the API key go after an MCP server captures it?",
+        answer:
+          "With a raw browser MCP server the key is read into the agent's context and then wherever your code puts it, often a .env file. Trusty Squire routes it into a write-only vault the agent cannot read back and injects it into provider calls through a proxy or a scoped egress grant.",
+      },
+    ],
+    sourceRefs: [
+      { label: "Model Context Protocol", url: "https://modelcontextprotocol.io" },
+      { label: "Microsoft Playwright MCP", url: "https://github.com/microsoft/playwright-mcp" },
+      { label: "Browserbase MCP server", url: "https://docs.browserbase.com/integrations/mcp/introduction" },
+      { label: "Skyvern", url: "https://www.skyvern.com" },
+    ],
+    related: [
+      {
+        href: "/compare/best-api-key-storage-ai-agents",
+        title: "Best API key storage for AI agents",
+        description: "Where to keep a key after it exists, across managers and vaults.",
+      },
+      {
+        href: "/compare/trusty-squire-vs-1password-mcp",
+        title: "Trusty Squire vs 1Password MCP",
+        description: "Provisioning a new credential versus using existing secrets.",
+      },
+      {
+        href: "/start",
+        title: "Get started",
+        description: "Install Trusty Squire and connect your coding agent.",
       },
     ],
   },
