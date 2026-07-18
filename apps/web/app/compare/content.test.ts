@@ -3,9 +3,9 @@ import { generateMetadata, generateStaticParams } from "./[slug]/page";
 import { COMPARISONS, COMPARISON_SLUGS, getComparison } from "./content";
 
 describe("comparison discovery content", () => {
-  it("publishes the six planned static comparison routes", () => {
-    expect(COMPARISON_SLUGS).toHaveLength(6);
-    expect(new Set(COMPARISON_SLUGS).size).toBe(6);
+  it("publishes the seven planned static comparison routes", () => {
+    expect(COMPARISON_SLUGS).toHaveLength(7);
+    expect(new Set(COMPARISON_SLUGS).size).toBe(7);
     expect(generateStaticParams()).toEqual(COMPARISON_SLUGS.map((slug) => ({ slug })));
     expect(getComparison("not-a-comparison")).toBeUndefined();
   });
