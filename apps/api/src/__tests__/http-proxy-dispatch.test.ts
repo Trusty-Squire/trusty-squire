@@ -16,15 +16,17 @@ import { HttpProxyExecutor, substituteSecret } from "../services/http-proxy.js";
 
 interface Captured {
   authorization: string;
+  userAgent: string;
 }
 
 // Spin up a loopback server, run `body` against its port, tear down.
 // The handler always returns 200 application/json {}; captured request
 // metadata is exposed for assertions.
 async function withServer(run: (port: number, captured: Captured) => Promise<void>): Promise<void> {
-  const captured: Captured = { authorization: "" };
+  const captured: Captured = { authorization: "", userAgent: "" };
   const server = createServer((req: IncomingMessage, res) => {
     captured.authorization = String(req.headers["authorization"] ?? "");
+    captured.userAgent = String(req.headers["user-agent"] ?? "");
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
   });
@@ -123,6 +125,35 @@ describe("HttpProxyExecutor — real defaultDispatch", () => {
         fields: { token: "s3cr3t-value" },
       });
       expect(captured.authorization).toBe("Bearer s3cr3t-value");
+    });
+  });
+
+  it("sends a default User-Agent when the caller provides none", async () => {
+    await withServer(async (port, captured) => {
+      await realProxy().execute({
+        accountId: "acct-test",
+        http: { method: "GET", url: `http://127.0.0.1:${port}/v4/x`, headers: {} },
+        fields: {},
+      });
+      // node:https sends no UA by default; the proxy must add one so providers
+      // like Zenodo don't 403 the header-less request as suspected scraping.
+      expect(captured.userAgent).toContain("trusty-squire");
+    });
+  });
+
+  it("lets the caller override the User-Agent without sending a duplicate", async () => {
+    await withServer(async (port, captured) => {
+      await realProxy().execute({
+        accountId: "acct-test",
+        http: {
+          method: "GET",
+          url: `http://127.0.0.1:${port}/v4/x`,
+          headers: { "User-Agent": "caller/9.9" },
+        },
+        fields: {},
+      });
+      // Exactly the caller's UA — a comma-joined value would mean two were sent.
+      expect(captured.userAgent).toBe("caller/9.9");
     });
   });
 });

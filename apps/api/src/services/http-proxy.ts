@@ -24,6 +24,11 @@ import { request as httpRequest } from "node:http";
 import { isIP } from "node:net";
 import { gunzipSync, inflateSync, brotliDecompressSync } from "node:zlib";
 
+// node:https/node:http send no User-Agent by default, and some providers
+// (e.g. Zenodo) reject a header-less request with 403 as suspected scraping.
+// Send a default UA on every proxied call; callers may still override it.
+const DEFAULT_USER_AGENT = "trusty-squire/1.0 (+https://trustysquire.ai)";
+
 export interface ProxyHttpRequest {
   method: string;
   url: string;
@@ -308,10 +313,17 @@ export class HttpProxyExecutor {
 
     const slot = this.acquire(input.accountId);
     try {
+      const hasUserAgent = Object.keys(resolved.headers ?? {}).some(
+        (k) => k.toLowerCase() === "user-agent",
+      );
       const dispatched = await this.dispatch({
         method: resolved.method,
         url,
-        headers: { ...resolved.headers, host: url.host },
+        headers: {
+          ...(hasUserAgent ? {} : { "User-Agent": DEFAULT_USER_AGENT }),
+          ...resolved.headers,
+          host: url.host,
+        },
         body: resolved.body,
         pinnedAddress: address,
         family,
