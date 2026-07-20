@@ -1229,17 +1229,35 @@ async function runInstallClaim(
         (await contextHasProviderSession(context, "google")) ||
         (await contextHasProviderSession(context, "github"));
     }
-    if (
-      shouldCompleteInstallClaim(
-        claimed,
-        options.completeOnClaim,
-        sessionSeeded,
-        // Both browser runners navigate pages()[0] to the install URL. Only
-        // follow that page: a restored background /vault tab must not make
-        // normal onboarding close before the real install page reaches Finish.
-        context.pages()[0]?.url(),
-      )
-    ) {
+    // Both browser runners navigate pages()[0] to the install URL. Only follow
+    // that page: a restored background /vault tab must not make normal
+    // onboarding close before the real install page reaches Finish.
+    const currentUrl = context.pages()[0]?.url();
+    const tearDown = shouldCompleteInstallClaim(
+      claimed,
+      options.completeOnClaim,
+      sessionSeeded,
+      currentUrl,
+    );
+    // DIAGNOSTIC (1.0.48-rc, remove once the cause is pinned): the
+    // red-close-between-two-Google-picks bug is not reproducible from a dev box,
+    // so trace the claim loop to stderr — which survives the noVNC collapsing.
+    // origin+path only (drops the ?token= so the line is safe to paste back).
+    const safeUrl = (() => {
+      if (currentUrl === undefined) return "<none>";
+      try {
+        const u = new URL(currentUrl);
+        return u.origin + u.pathname;
+      } catch {
+        return "<unparseable>";
+      }
+    })();
+    console.error(
+      `[connect-debug] url=${safeUrl} pages=${context.pages().length} ` +
+        `claimed=${claimed} completeOnClaim=${options.completeOnClaim} ` +
+        `seeded=${sessionSeeded} teardown=${tearDown}`,
+    );
+    if (tearDown) {
       return true;
     }
     // Only ask for Finish when the browser is still on the wizard. Returning
