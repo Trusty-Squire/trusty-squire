@@ -124,12 +124,38 @@ describe("isClaimTerminalUrl (fix #3: noVNC teardown)", () => {
 });
 
 describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
-  it("completes force-relogin as soon as the account claim succeeds", () => {
+  it("completes force-relogin once the provider session has seeded", () => {
+    expect(
+      shouldCompleteInstallClaim(
+        true, // claimed
+        true, // completeOnClaim (force-relogin)
+        true, // sessionSeeded
+        "https://trustysquire.ai/install?token=abc",
+      ),
+    ).toBe(true);
+  });
+
+  it("does NOT tear down force-relogin on a bare claim before the session seeds", () => {
+    // The bug: the API flips to `claimed` when the OAuth identity lands, which on
+    // a cold profile is BEFORE Google finishes (its second challenge). Tearing
+    // down here killed the noVNC mid-sign-in. Must stay open.
+    expect(
+      shouldCompleteInstallClaim(
+        true, // claimed
+        true, // completeOnClaim
+        false, // sessionSeeded — sign-in still in flight
+        "https://trustysquire.ai/install?token=abc",
+      ),
+    ).toBe(false);
+  });
+
+  it("completes force-relogin via a terminal page even if the seed check missed", () => {
     expect(
       shouldCompleteInstallClaim(
         true,
         true,
-        "https://trustysquire.ai/install?token=abc",
+        false, // not seeded…
+        "https://trustysquire.ai/install/done", // …but Finish reached
       ),
     ).toBe(true);
   });
@@ -139,19 +165,23 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
       shouldCompleteInstallClaim(
         true,
         false,
+        false,
         "https://trustysquire.ai/install?token=abc",
       ),
     ).toBe(false);
   });
 
   it("keeps first-time onboarding open until its primary page is available", () => {
-    expect(shouldCompleteInstallClaim(true, false, undefined)).toBe(false);
+    expect(shouldCompleteInstallClaim(true, false, false, undefined)).toBe(
+      false,
+    );
   });
 
   it("completes first-time onboarding after Finish reaches a terminal page", () => {
     expect(
       shouldCompleteInstallClaim(
         true,
+        false,
         false,
         "https://trustysquire.ai/install/done",
       ),
@@ -162,6 +192,7 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     expect(
       shouldCompleteInstallClaim(
         false,
+        true,
         true,
         "https://trustysquire.ai/install/done",
       ),
