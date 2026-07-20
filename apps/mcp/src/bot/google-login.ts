@@ -160,6 +160,17 @@ async function hasProviderSession(
   return cookies.some((c) => target.cookies.includes(c.name));
 }
 
+// Exported for the connect claim loop: does this LIVE context already hold the
+// given provider's session cookies? The force-relogin teardown gates on this so
+// it never closes the noVNC on the bare API claim while the interactive sign-in
+// (e.g. Google's cold-profile second challenge) is still in flight.
+export async function contextHasProviderSession(
+  context: BrowserContext,
+  provider: OAuthProviderId,
+): Promise<boolean> {
+  return hasProviderSession(context, LOGIN_TARGETS[provider]);
+}
+
 // VALIDATE a session instead of just spotting a cookie. A provider session that
 // expired server-side often leaves its `user_session` cookie sitting in the
 // profile, so name-presence false-positives ("the GitHub marker lies"). Here we

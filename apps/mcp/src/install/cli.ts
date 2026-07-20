@@ -48,6 +48,7 @@ import {
 } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
+  contextHasProviderSession,
   detectActiveProviderSessions,
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
@@ -1129,18 +1130,26 @@ export function isClaimTerminalUrl(url: string): boolean {
 }
 
 // First-time setup stays open after the account claim so the user can finish
-// optional setup. A forced re-login has no remaining setup contract: once the
-// new account claim is in hand, keeping Chrome/noVNC alive is just a hang.
+// optional setup. A forced re-login has no remaining onboarding contract — but
+// the account claim (agent token) is NOT the end of the interactive sign-in.
+// The API flips to `claimed` the moment the OAuth identity lands, which on a
+// cold profile is BEFORE the provider's browser session is fully seeded (Google
+// can still be mid-flow with a second cold-profile challenge). Tearing down on
+// the bare claim killed the noVNC out from under that challenge — the "two
+// number picks with a red-close between them" bug. So force-relogin now waits
+// for the provider session to actually seed (or an explicit terminal page)
+// before it closes; the deadline still bounds the wait.
 export function shouldCompleteInstallClaim(
   claimed: boolean,
   completeOnClaim: boolean,
+  sessionSeeded: boolean,
   installPageUrl: string | undefined,
 ): boolean {
   if (!claimed) return false;
-  return (
-    completeOnClaim ||
-    (installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl))
-  );
+  const terminal =
+    installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl);
+  if (completeOnClaim) return sessionSeeded || terminal;
+  return terminal;
 }
 
 // During normal onboarding, claim happens before the browser's Finish step.
@@ -1207,13 +1216,24 @@ async function runInstallClaim(
         return true;
       }
     }
-    // A forced re-login ends at claim. Normal onboarding still waits for a
-    // terminal route. In both cases an unclaimed stale /vault tab cannot close
-    // the browser prematurely.
+    // A forced re-login ends once the account is claimed AND the provider
+    // session has actually seeded — not on the bare claim, which can land while
+    // Google is still mid-sign-in on a cold profile. Only probe the live session
+    // when a force-relogin teardown is even possible (skips a cookie read on
+    // every poll of the normal onboarding flow). Either provider satisfies it:
+    // the binding sign-in seeds whichever one the user clicked.
+    const claimed = state.value !== null;
+    let sessionSeeded = false;
+    if (claimed && options.completeOnClaim) {
+      sessionSeeded =
+        (await contextHasProviderSession(context, "google")) ||
+        (await contextHasProviderSession(context, "github"));
+    }
     if (
       shouldCompleteInstallClaim(
-        state.value !== null,
+        claimed,
         options.completeOnClaim,
+        sessionSeeded,
         // Both browser runners navigate pages()[0] to the install URL. Only
         // follow that page: a restored background /vault tab must not make
         // normal onboarding close before the real install page reaches Finish.
