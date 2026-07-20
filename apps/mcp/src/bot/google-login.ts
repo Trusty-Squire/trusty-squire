@@ -471,20 +471,77 @@ export function findFreePort(): Promise<number> {
   });
 }
 
+// Standard install locations probed IN ADDITION to $PATH. A binary can be
+// installed yet invisible to `binaryOnPath` when the process that spawned
+// this one trimmed PATH — systemd units and agent/MCP spawns routinely drop
+// /usr/local/bin, which is exactly where cloudflared lands. Probing the
+// well-known dirs stops an installed binary from being reported "missing".
+const STANDARD_BIN_DIRS = [
+  "/usr/local/bin",
+  "/usr/bin",
+  "/bin",
+  "/usr/local/sbin",
+  "/usr/sbin",
+  "/sbin",
+] as const;
+
+// Is `bin` an executable on PATH (or in a standard bin dir)? A cheap
+// synchronous `command -v` that also probes well-known locations so an
+// installed-but-off-PATH binary isn't misreported as absent.
+export function binaryOnPath(bin: string): boolean {
+  const dirs = [...(process.env.PATH ?? "").split(":"), ...STANDARD_BIN_DIRS];
+  return dirs.some((p) => p.length > 0 && existsSync(join(p, bin)));
+}
+
+// cloudflared's .deb is published per-arch; pick the suffix matching this
+// machine so the suggested install command actually resolves.
+function cloudflaredDebArch(): string {
+  switch (process.arch) {
+    case "arm64":
+      return "arm64";
+    case "arm":
+      return "arm";
+    case "ia32":
+      return "386";
+    default:
+      return "amd64";
+  }
+}
+
+// Correct remediation for the specific binaries that are missing. cloudflared
+// is NOT in Debian/Ubuntu's default repos, so an apt-get line can never
+// install it — it needs Cloudflare's own package. The rest are plain apt
+// packages (websockify's noVNC assets ship in the `novnc` package, so both).
+export function installHint(missing: readonly string[]): string {
+  const aptPkgs = missing.flatMap((n) => {
+    if (n === "Xvfb") return ["xvfb"];
+    if (n === "x11vnc") return ["x11vnc"];
+    if (n === "websockify") return ["novnc", "websockify"];
+    return [];
+  });
+  const lines: string[] = [];
+  if (aptPkgs.length > 0) {
+    lines.push(`On Debian/Ubuntu: sudo apt-get install -y ${aptPkgs.join(" ")}`);
+  }
+  if (missing.includes("cloudflared")) {
+    const arch = cloudflaredDebArch();
+    lines.push(
+      "cloudflared is not in Debian/Ubuntu repos — install its package: " +
+        `curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}.deb ` +
+        "-o /tmp/cloudflared.deb && sudo dpkg -i /tmp/cloudflared.deb",
+    );
+  }
+  return lines.join("\n");
+}
+
 function requireBinaries(names: readonly string[]): void {
   const missing = names.filter((n) => !binaryOnPath(n));
   if (missing.length > 0) {
     throw new Error(
-      `headless login needs these not-installed binaries: ${missing.join(", ")}. ` +
-        `On Debian/Ubuntu: sudo apt-get install -y xvfb x11vnc novnc websockify`,
+      `headless login needs these not-installed binaries: ${missing.join(", ")}.\n` +
+        installHint(missing),
     );
   }
-}
-
-// Is `bin` an executable on PATH? A cheap synchronous `command -v`.
-export function binaryOnPath(bin: string): boolean {
-  const paths = (process.env.PATH ?? "").split(":");
-  return paths.some((p) => p.length > 0 && existsSync(join(p, bin)));
 }
 
 // --- path 2: headless — virtual display + noVNC + cloudflared ----------

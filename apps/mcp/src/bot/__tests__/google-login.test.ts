@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   binaryOnPath,
+  installHint,
   classifyGoogleAuthState,
   extractGoogleAccountEmail,
   extractGoogleNumberMatch,
@@ -145,6 +146,34 @@ describe("google-login env helpers", () => {
   it("binaryOnPath finds a real binary and rejects a fake one", () => {
     expect(binaryOnPath("sh")).toBe(true);
     expect(binaryOnPath("definitely-not-a-real-binary-xyz123")).toBe(false);
+  });
+
+  it("binaryOnPath still finds a standard-dir binary when PATH is trimmed", () => {
+    // Reproduces the cloudflared false-missing: a spawner (systemd/agent)
+    // drops /usr/local/bin etc., yet the binary is installed in a standard
+    // dir. `sh` lives in /bin — a standard dir — so it must resolve even
+    // with an empty PATH.
+    const saved = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      expect(binaryOnPath("sh")).toBe(true);
+    } finally {
+      process.env.PATH = saved;
+    }
+  });
+
+  it("installHint gives cloudflared its own step, not an apt line that omits it", () => {
+    const hint = installHint(["cloudflared"]);
+    // The old bug: cloudflared missing → an apt-get line that can't install it.
+    expect(hint).not.toMatch(/apt-get/);
+    expect(hint).toContain("cloudflared-linux-");
+    expect(hint).toContain("dpkg -i");
+  });
+
+  it("installHint maps each missing binary to its real package", () => {
+    const hint = installHint(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
+    expect(hint).toContain("apt-get install -y xvfb x11vnc novnc websockify");
+    expect(hint).toContain("cloudflared-linux-");
   });
 
   it("findFreePort returns a usable TCP port", async () => {
