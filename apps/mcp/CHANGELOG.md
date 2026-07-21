@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.48 (2026-07-21)
+
+- fix(mcp): plain-launch the connect Google login (CDP attach fails Google OAuth) (#377)
+
 ## 1.0.48-rc.2 (2026-07-20)
 
 - **Fix: `connect` Google sign-in failing with `/signin/rejected` on some
