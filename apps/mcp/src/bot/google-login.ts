@@ -843,7 +843,6 @@ async function runDisplayedChrome(
     });
     try {
       console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
-      console.error(`[connect-debug] launcher=plain_display chrome=${binary}`);
       const ok = await pollUntil(
         opts.deadline,
         () => opts.plainPollUntilDone!(opts.profileDir),
@@ -1075,13 +1074,6 @@ async function runHeadlessChrome(
     }
     activeContext = context;
     activeTeardown = teardownContext;
-    // Trace which launcher ran — survives the noVNC collapsing (stderr). The
-    // self-launch port is the fix under test for the Google device-prompt
-    // rejection; this line is how we confirm which path a real run took.
-    console.error(
-      `[connect-debug] launcher=${launcherMode} chrome=${chromeBinary ?? "<none>"} display=${display}`,
-    );
-
     try {
       // CDP path only: preflight + drive the first page to the URL. The plain
       // path has no context — plain Chrome's --app already opened opts.url.

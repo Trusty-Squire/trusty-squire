@@ -1241,11 +1241,6 @@ async function runInstallClaim(
       sessionSeeded,
       undefined,
     );
-    console.error(
-      `[connect-debug] launcher=plain claimed=${claimed} ` +
-        `completeOnClaim=${options.completeOnClaim} ` +
-        `seeded=${sessionSeeded} teardown=${tearDown}`,
-    );
     if (tearDown) {
       return true;
     }
