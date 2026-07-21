@@ -202,3 +202,76 @@ describe("PATCH /v1/vault/credentials/:id/allowed-hosts", () => {
     expect(res.statusCode).toBe(404);
   });
 });
+
+describe("PATCH /v1/vault/credentials/:id/login-hosts", () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await setup();
+  });
+  afterEach(async () => {
+    await h.server.close();
+  });
+
+  // Simulate the gap case: a multi-field id+password entry stored WITHOUT
+  // auth_strategy/login_hosts (as an agent's store_credential-without-hosts or
+  // a plain paste would leave it).
+  async function createLoginish(cookie: string, service = "ClubGG"): Promise<string> {
+    const res = await h.server.inject({
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: { service, fields: { login: "me@example.com", password: "hunter2" } },
+    });
+    const list = await h.server.inject({
+      method: "GET",
+      url: "/v1/vault/credentials",
+      headers: { cookie },
+    });
+    const creds = (list.json() as { credentials: Array<{ id: string; reference: string }> }).credentials;
+    const ref = (res.json() as { reference: string }).reference;
+    return creds.find((c) => c.reference === ref)!.id;
+  }
+
+  it("sets sign-in hosts and converts a plain entry into a login credential", async () => {
+    const account = await h.deps.accountStore.createAccount("u@example.test", "U");
+    const cookie = await makeWebSession(h.deps, account.id);
+    const id = await createLoginish(cookie);
+
+    const res = await h.server.inject({
+      method: "PATCH",
+      url: `/v1/vault/credentials/${id}/login-hosts`,
+      headers: { cookie, "content-type": "application/json" },
+      payload: { hosts: ["ClubGG.com", "https://clubgg.com/login", "clubgg.com"] },
+    });
+    expect(res.statusCode).toBe(200);
+    expect((res.json() as { login_hosts: string[] }).login_hosts).toEqual(["clubgg.com"]);
+
+    // The list now reports it as a username/password login with those hosts.
+    const list = await h.server.inject({
+      method: "GET",
+      url: "/v1/vault/credentials",
+      headers: { cookie },
+    });
+    const cred = (list.json() as {
+      credentials: Array<{ id: string; auth_strategy: string | null; login_hosts: string[] }>;
+    }).credentials.find((c) => c.id === id)!;
+    expect(cred.auth_strategy).toBe("username_password");
+    expect(cred.login_hosts).toEqual(["clubgg.com"]);
+  });
+
+  it("404s for another account's credential id", async () => {
+    const a = await h.deps.accountStore.createAccount("a@example.test", "A");
+    const b = await h.deps.accountStore.createAccount("b@example.test", "B");
+    const cookieA = await makeWebSession(h.deps, a.id);
+    const cookieB = await makeWebSession(h.deps, b.id);
+    const idA = await createLoginish(cookieA);
+
+    const res = await h.server.inject({
+      method: "PATCH",
+      url: `/v1/vault/credentials/${idA}/login-hosts`,
+      headers: { cookie: cookieB, "content-type": "application/json" },
+      payload: { hosts: ["clubgg.com"] },
+    });
+    expect(res.statusCode).toBe(404);
+  });
+});

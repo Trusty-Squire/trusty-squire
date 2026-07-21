@@ -138,6 +138,13 @@ export class InMemoryCredentialStore implements CredentialStore {
     r.allowed_hosts = [...hosts];
   }
 
+  async setLoginHosts(reference: string, hosts: string[]): Promise<void> {
+    const r = this.byReference.get(reference);
+    if (r === undefined) return;
+    // login_hosts + auth_strategy live in metadata; merge, don't clobber.
+    r.metadata = { ...r.metadata, login_hosts: [...hosts], auth_strategy: "username_password" };
+  }
+
   async setLabel(reference: string, label: string): Promise<void> {
     const r = this.byReference.get(reference);
     if (r === undefined) return;

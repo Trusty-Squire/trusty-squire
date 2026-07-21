@@ -1,81 +1,82 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../../components/AppShell";
+import { CredentialFields, type FieldsResult } from "../../components/CredentialFields";
+import { deriveLoginTarget, parseHostList } from "../../lib/hosts";
 import { ApiError, apiPost } from "../../lib/api";
 
-// Mirrors packages/vault/src/service-hosts.ts so the page can show the
-// derived allowlist live as you type a service.
-const KNOWN_HOSTS: Record<string, string[]> = {
-  openai: ["api.openai.com"],
-  anthropic: ["api.anthropic.com"],
-  github: ["api.github.com"],
-  stripe: ["api.stripe.com"],
-  resend: ["api.resend.com"],
-  sentry: ["sentry.io"],
-  openrouter: ["openrouter.ai"],
-  ipinfo: ["ipinfo.io"],
-  postmark: ["api.postmarkapp.com"],
-  render: ["api.render.com"],
-  vercel: ["api.vercel.com"],
-  alpaca: ["paper-api.alpaca.markets", "api.alpaca.markets", "data.alpaca.markets"],
-  fred: ["api.stlouisfed.org"],
-  stlouisfed: ["api.stlouisfed.org"],
-};
-
-function derivedHosts(service: string): string[] {
-  const slug = service.toLowerCase().replace(/[^a-z0-9]/g, "");
-  return KNOWN_HOSTS[slug] ?? [];
-}
-
-interface FieldRow {
-  name: string;
-  value: string;
-}
+type Kind = "api_key" | "login";
 
 export default function NewCredentialPage() {
   const router = useRouter();
+  // What kind of credential — an API key spent through the use_credential
+  // proxy, or a website login (id + password) browser-filled on sign-in hosts.
+  // Different storage (auth_strategy) and host semantics (allowed_hosts vs
+  // login_hosts), so the form reshapes rather than piling both onto one page.
+  const [kind, setKind] = useState<Kind>("api_key");
   const [service, setService] = useState("");
-  const [single, setSingle] = useState("");
-  const [multi, setMulti] = useState(false);
-  const [fields, setFields] = useState<FieldRow[]>([{ name: "", value: "" }]);
+  // API-key secret/fields — owned by the shared editor, surfaced here.
+  const [fields, setFields] = useState<FieldsResult>({ map: null, error: null });
+  // Website-login inputs.
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [reveal, setReveal] = useState(false);
+  // One field for a login: the website (sign-in URL or host). It names the
+  // credential (service), becomes the required login host, and — when a full
+  // URL is pasted — the signin_url. Collapses what used to be Service + Sign-in
+  // URL + Sign-in hosts into a single question. The rare multi-host case (fill
+  // on a different subdomain) is handled by editing the credential afterward.
+  const [website, setWebsite] = useState("");
   const [advanced, setAdvanced] = useState(false);
   const [label, setLabel] = useState("default");
   const [allowedHosts, setAllowedHosts] = useState("");
-  const [reveal, setReveal] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const hosts = useMemo(() => derivedHosts(service), [service]);
 
   const submit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
-      if (service.trim() === "") return;
-      const payload: Record<string, unknown> = { service: service.trim() };
+      const payload: Record<string, unknown> = {};
       if (label.trim() !== "" && label.trim() !== "default") payload.label = label.trim();
-      // Explicit allowed hosts (Advanced) → observed_hosts: the store unions
-      // them into the allowlist, so the key is usable immediately without a
-      // second trip to the Edit modal.
-      const hosts = Array.from(
-        new Set(allowedHosts.split(/[\n,]/).map((h) => h.trim()).filter((h) => h.length > 0)),
-      );
-      if (hosts.length > 0) payload.observed_hosts = hosts;
-      if (multi) {
-        const map: Record<string, string> = {};
-        for (const f of fields) {
-          if (f.name.trim() !== "" && f.value !== "") map[f.name.trim()] = f.value;
-        }
-        if (Object.keys(map).length === 0) {
-          setError("Add at least one named field with a value.");
+
+      if (kind === "login") {
+        // Website login: id + password, browser-filled on sign-in hosts. Sent
+        // as auth_strategy=username_password (browser-fill only, never proxied);
+        // canonical field names { login, password } match the seal default.
+        if (username.trim() === "" || password === "") {
+          setError("Enter both an email/username and a password.");
           return;
         }
-        payload.fields = map;
+        const { host, signinUrl } = deriveLoginTarget(website);
+        if (host === null) {
+          setError("Enter the website — its sign-in URL or host (e.g. clubgg.com).");
+          return;
+        }
+        // The site IS a login's identity — derive the service from it instead
+        // of asking for the same fact twice.
+        payload.service = host;
+        payload.auth_strategy = "username_password";
+        payload.fields = { login: username.trim(), password };
+        payload.login_hosts = [host];
+        if (signinUrl !== undefined) payload.signin_url = signinUrl;
       } else {
-        if (single === "") return;
-        payload.value = single;
+        // API key: spent through the use_credential proxy. Explicit hosts →
+        // observed_hosts, unioned server-side into the allowlist.
+        if (service.trim() === "") return;
+        payload.service = service.trim();
+        if (fields.map === null) {
+          setError(fields.error ?? "Add a secret, or at least one field with a value.");
+          return;
+        }
+        const map = fields.map;
+        if (Object.keys(map).length === 1 && "value" in map) payload.value = map.value;
+        else payload.fields = map;
+        const hosts = parseHostList(allowedHosts);
+        if (hosts.length > 0) payload.observed_hosts = hosts;
       }
+
       setBusy(true);
       setError(null);
       try {
@@ -90,7 +91,7 @@ export default function NewCredentialPage() {
         setBusy(false);
       }
     },
-    [service, label, allowedHosts, multi, fields, single, router],
+    [kind, service, label, allowedHosts, fields, username, password, website, router],
   );
 
   return (
@@ -99,104 +100,88 @@ export default function NewCredentialPage() {
         <div>
           <h1 className="app-title">New credential</h1>
           <p className="app-sub">
-            Encrypted, used only via the proxy, never shown to an agent.
+            {kind === "login"
+              ? "Encrypted; filled into sign-in pages for you, never shown to an agent."
+              : "Encrypted, used only via the proxy, never shown to an agent."}
           </p>
         </div>
       </div>
 
       <form className="form cred-form" onSubmit={submit}>
-        <div className="field">
-          <label htmlFor="service">Service</label>
-          <input
-            id="service"
-            value={service}
-            onChange={(e) => setService(e.target.value)}
-            placeholder="OpenAI"
-            autoComplete="off"
-            required
-          />
-          {service.trim() !== "" && (
-            <span className="field-hint">
-              {hosts.length > 0
-                ? `↳ proxy will allow ${hosts.join(", ")}`
-                : "↳ no default known — set Allowed hosts under Advanced to enable use_credential"}
-            </span>
-          )}
+        <div className="seg" role="group" aria-label="Credential kind">
+          <button type="button" aria-pressed={kind === "api_key"} onClick={() => setKind("api_key")}>
+            API key
+          </button>
+          <button type="button" aria-pressed={kind === "login"} onClick={() => setKind("login")}>
+            Website login
+          </button>
         </div>
 
-        {!multi ? (
-          <div className="field">
-            <label htmlFor="secret">Secret</label>
-            <input
-              id="secret"
-              className="mono"
-              type={reveal ? "text" : "password"}
-              value={single}
-              onChange={(e) => setSingle(e.target.value)}
-              placeholder="sk-…"
-              autoComplete="off"
-              required
-            />
-            <div className="field-row-actions">
-              <button type="button" className="linkbtn" onClick={() => setReveal((r) => !r)}>
-                {reveal ? "hide" : "show"}
-              </button>
-              <button
-                type="button"
-                className="linkbtn"
-                onClick={() => {
-                  setMulti(true);
-                  setFields(
-                    single !== "" ? [{ name: "value", value: single }, { name: "", value: "" }] : [{ name: "", value: "" }],
-                  );
-                }}
-              >
-                + Add field
-              </button>
+        {kind === "login" ? (
+          <>
+            <div className="field">
+              <label htmlFor="login-website">Website</label>
+              <input
+                id="login-website"
+                className="mono"
+                value={website}
+                onChange={(e) => setWebsite(e.target.value)}
+                placeholder="clubgg.com"
+                autoComplete="off"
+                required
+              />
+              <span className="field-hint">
+                The site this login is for — its name in your vault and the only
+                place Trusty Squire fills it. Paste the full sign-in URL
+                (https://…/login) to also pin the exact page.
+              </span>
             </div>
-          </div>
-        ) : (
-          <div className="field">
-            <label>Fields</label>
-            {fields.map((f, i) => (
-              <div className="field-pair" key={i}>
-                <input
-                  className="mono field-name"
-                  value={f.name}
-                  placeholder="access_key_id"
-                  autoComplete="off"
-                  onChange={(e) =>
-                    setFields((prev) => prev.map((p, j) => (j === i ? { ...p, name: e.target.value } : p)))
-                  }
-                />
-                <input
-                  className="mono"
-                  type="password"
-                  value={f.value}
-                  placeholder="value"
-                  autoComplete="off"
-                  onChange={(e) =>
-                    setFields((prev) => prev.map((p, j) => (j === i ? { ...p, value: e.target.value } : p)))
-                  }
-                />
-                <button
-                  type="button"
-                  className="field-remove"
-                  aria-label="Remove field"
-                  onClick={() => setFields((prev) => prev.filter((_, j) => j !== i))}
-                >
-                  ✕
+            <div className="field">
+              <label htmlFor="login-username">Email or username</label>
+              <input
+                id="login-username"
+                className="mono"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="me@example.com"
+                autoComplete="off"
+                required
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="login-password">Password</label>
+              <input
+                id="login-password"
+                className="mono"
+                type={reveal ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                autoComplete="off"
+                required
+              />
+              <div className="field-row-actions">
+                <button type="button" className="linkbtn" onClick={() => setReveal((r) => !r)}>
+                  {reveal ? "hide" : "show"}
                 </button>
               </div>
-            ))}
-            <button
-              type="button"
-              className="linkbtn"
-              onClick={() => setFields((prev) => [...prev, { name: "", value: "" }])}
-            >
-              + Add field
-            </button>
-          </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="field">
+              <label htmlFor="service">Service</label>
+              <input
+                id="service"
+                value={service}
+                onChange={(e) => setService(e.target.value)}
+                placeholder="OpenAI"
+                autoComplete="off"
+                required
+              />
+            </div>
+            <CredentialFields idPrefix="new" onChange={setFields} />
+          </>
         )}
 
         <button type="button" className="disclose" onClick={() => setAdvanced((a) => !a)}>
@@ -214,26 +199,26 @@ export default function NewCredentialPage() {
                 placeholder="default"
                 autoComplete="off"
               />
-              <span className="field-hint">
-                Keeps prod/dev keys for the same service apart.
-              </span>
+              <span className="field-hint">Keeps prod/dev entries for the same service apart.</span>
             </div>
-            <div className="field">
-              <label htmlFor="allowed-hosts">Allowed hosts</label>
-              <textarea
-                id="allowed-hosts"
-                className="mono"
-                value={allowedHosts}
-                onChange={(e) => setAllowedHosts(e.target.value)}
-                placeholder={hosts.length > 0 ? hosts.join("\n") : "api.example.com"}
-                rows={3}
-                autoComplete="off"
-              />
-              <span className="field-hint">
-                Hosts use_credential may call. One per line. Leave blank to use the
-                known default for this service (shown above), or set them here.
-              </span>
-            </div>
+            {kind === "api_key" && (
+              <div className="field">
+                <label htmlFor="allowed-hosts">Allowed hosts</label>
+                <textarea
+                  id="allowed-hosts"
+                  className="mono"
+                  value={allowedHosts}
+                  onChange={(e) => setAllowedHosts(e.target.value)}
+                  placeholder="api.example.com"
+                  rows={3}
+                  autoComplete="off"
+                />
+                <span className="field-hint">
+                  Hosts use_credential may call. One per line. Leave blank for known
+                  services (their API hosts are filled in automatically).
+                </span>
+              </div>
+            )}
           </>
         )}
 

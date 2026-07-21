@@ -80,6 +80,12 @@ export interface CredentialStore {
   // Clear deleted_at, bringing a soft-deleted credential back to active.
   restore(reference: string): Promise<void>;
   setAllowedHosts(reference: string, hosts: string[]): Promise<void>;
+  // Set the sign-in hosts of a username/password (browser-fill) credential —
+  // metadata.login_hosts. Also stamps metadata.auth_strategy =
+  // "username_password", so setting sign-in hosts on a plain multi-field entry
+  // converts it into a proper login credential. Distinct from setAllowedHosts:
+  // login_hosts gate browser-fill sealing, allowed_hosts gate the proxy.
+  setLoginHosts(reference: string, hosts: string[]): Promise<void>;
   // Rename an entry — updates the (non-secret) label only. Leaves the
   // encrypted payload + allowed_hosts untouched.
   setLabel(reference: string, label: string): Promise<void>;

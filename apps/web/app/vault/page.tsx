@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../components/AppShell";
 import { Modal } from "../components/Modal";
+import { CredentialFields, type FieldsResult } from "../components/CredentialFields";
+import { parseHostList } from "../lib/hosts";
 import {
   ApiError,
   apiDelete,
@@ -25,6 +27,11 @@ interface Cred {
   key_name: string | null;
   type: string;
   allowed_hosts: string[];
+  // username/password login creds: how they're stored + where they may be
+  // browser-filled. login_hosts (not allowed_hosts) is the meaningful host list
+  // for a login. Server returns these off metadata.
+  auth_strategy: string | null;
+  login_hosts: string[];
   // Brand domain for the favicon, derived server-side from the service
   // when allowed_hosts is empty (most existing creds). null = no icon.
   favicon_domain: string | null;
@@ -543,18 +550,25 @@ function EditModal({
 }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // Field editor — same shape as /vault/new. `single` is the lone-"value"
-  // sugar; otherwise editable name/value rows.
-  const [multi, setMulti] = useState(false);
-  const [single, setSingle] = useState("");
-  const [rows, setRows] = useState<{ name: string; value: string }[]>([]);
-  const [origMap, setOrigMap] = useState<Record<string, string>>({});
-  const [reveal, setReveal] = useState(false);
-  // Advanced: entry name + allowed hosts. Auto-open when there's no
-  // allowlist yet — that's the thing the user came to fix.
-  const [advanced, setAdvanced] = useState(cred.allowed_hosts.length === 0);
+  // Field editing is delegated to the shared <CredentialFields> editor; it
+  // reports the current map up here. origMap is the revealed starting point,
+  // used both to seed the editor and to detect whether the fields changed.
+  const [origMap, setOrigMap] = useState<Record<string, string> | null>(null);
+  const [fields, setFields] = useState<FieldsResult>({ map: null, error: null });
+  // A username/password login (browser-filled on sign-in hosts) vs an API key
+  // (spent through the proxy). The host list the user cares about differs:
+  // login_hosts for a login, allowed_hosts for a key. Detect a login by its
+  // auth_strategy, or — for a plain multi-field entry stored without one (id +
+  // password, login_hosts empty) — by the presence of a password-shaped field.
+  const isLogin =
+    cred.auth_strategy === "username_password" ||
+    cred.field_names.some((n) => /^(password|pass|passwd|secret)$/i.test(n));
+  const relevantHosts = isLogin ? cred.login_hosts : cred.allowed_hosts;
+  // Advanced: entry name + hosts. Auto-open when the meaningful host list is
+  // empty — that's the thing the user came to fix.
+  const [advanced, setAdvanced] = useState(relevantHosts.length === 0);
   const [label, setLabel] = useState(cred.label === "default" ? "" : cred.label);
-  const [hostsText, setHostsText] = useState(cred.allowed_hosts.join("\n"));
+  const [hostsText, setHostsText] = useState(relevantHosts.join("\n"));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -570,13 +584,6 @@ function EditModal({
         );
         if (cancelled) return;
         setOrigMap(res.fields);
-        const names = Object.keys(res.fields);
-        if (names.length === 1 && names[0] === "value") {
-          setSingle(res.fields.value ?? "");
-        } else {
-          setMulti(true);
-          setRows(names.map((n) => ({ name: n, value: res.fields[n] ?? "" })));
-        }
       } catch (err) {
         if (!cancelled) {
           setLoadError(err instanceof Error ? err.message : "Couldn't load this credential.");
@@ -591,60 +598,33 @@ function EditModal({
   }, [cred.id]);
 
   const save = useCallback(async () => {
+    // Build the full field map from the shared editor. PATCH /:id REPLACES the
+    // map, so this one call covers value edits, renames, adds, and removes.
+    const map = fields.map;
+    if (map === null) {
+      setError(fields.error ?? "Add at least one field with a value.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
-      // Build the full field map. PATCH /:id REPLACES the map, so this one
-      // call covers value edits, renames, adds, and removes.
-      let map: Record<string, string>;
-      if (multi) {
-        map = {};
-        for (const r of rows) {
-          const n = r.name.trim();
-          if (n === "") continue;
-          if (r.value === "") {
-            setError(`Field "${n}" needs a value (use ✕ to delete the field).`);
-            setBusy(false);
-            return;
-          }
-          if (map[n] !== undefined) {
-            setError(`Duplicate field name "${n}".`);
-            setBusy(false);
-            return;
-          }
-          map[n] = r.value;
-        }
-      } else {
-        if (single === "") {
-          setError("The secret can't be empty.");
-          setBusy(false);
-          return;
-        }
-        map = { value: single };
-      }
-      if (Object.keys(map).length === 0) {
-        setError("Add at least one field with a value.");
-        setBusy(false);
-        return;
-      }
-
       // 1. Label.
       const nextLabel = label.trim() === "" ? "default" : label.trim();
       if (nextLabel !== cred.label) {
         await apiPatch(`/v1/vault/credentials/${cred.id}/label`, { label: nextLabel });
       }
-      // 2. Allowed hosts.
-      const hosts = Array.from(
-        new Set(hostsText.split(/[\n,]/).map((h) => h.trim()).filter((h) => h.length > 0)),
-      );
+      // 2. Hosts — sign-in hosts (login_hosts) for a login, allowed hosts for a
+      //    key. Same textarea, different field + endpoint by credential kind.
+      const hosts = parseHostList(hostsText);
+      const prevHosts = isLogin ? cred.login_hosts : cred.allowed_hosts;
       const hostsChanged =
-        hosts.length !== cred.allowed_hosts.length ||
-        hosts.some((h, i) => h !== cred.allowed_hosts[i]);
+        hosts.length !== prevHosts.length || hosts.some((h, i) => h !== prevHosts[i]);
       if (hostsChanged) {
-        await apiPatch(`/v1/vault/credentials/${cred.id}/allowed-hosts`, { hosts });
+        const path = isLogin ? "login-hosts" : "allowed-hosts";
+        await apiPatch(`/v1/vault/credentials/${cred.id}/${path}`, { hosts });
       }
       // 3. Fields — only if they actually changed (avoid a needless rotate).
-      if (!sameMap(map, origMap)) {
+      if (origMap === null || !sameMap(map, origMap)) {
         await apiPatch(`/v1/vault/credentials/${cred.id}`, { fields: map });
       }
       onSaved();
@@ -656,7 +636,7 @@ function EditModal({
       }
       setBusy(false);
     }
-  }, [cred, multi, rows, single, origMap, label, hostsText, onSaved]);
+  }, [cred, fields, origMap, label, hostsText, isLogin, onSaved]);
 
   return (
     <Modal
@@ -671,82 +651,11 @@ function EditModal({
         {!loading && loadError !== null && <div className="form-err">{loadError}</div>}
         {!loading && loadError === null && (
           <>
-            {!multi ? (
-              <div className="field">
-                <label htmlFor={`edit-secret-${cred.id}`}>Secret</label>
-                <input
-                  id={`edit-secret-${cred.id}`}
-                  className="mono"
-                  type={reveal ? "text" : "password"}
-                  value={single}
-                  onChange={(e) => setSingle(e.target.value)}
-                  placeholder="sk-…"
-                  autoComplete="off"
-                />
-                <div className="field-row-actions">
-                  <button type="button" className="linkbtn" onClick={() => setReveal((r) => !r)}>
-                    {reveal ? "hide" : "show"}
-                  </button>
-                  <button
-                    type="button"
-                    className="linkbtn"
-                    onClick={() => {
-                      setMulti(true);
-                      setRows([{ name: "value", value: single }, { name: "", value: "" }]);
-                    }}
-                  >
-                    + Add field
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="field">
-                <label>Fields</label>
-                {rows.map((f, i) => (
-                  <div className="field-pair" key={i}>
-                    <input
-                      className="mono field-name"
-                      value={f.name}
-                      placeholder="name"
-                      autoComplete="off"
-                      onChange={(e) =>
-                        setRows((prev) => prev.map((p, j) => (j === i ? { ...p, name: e.target.value } : p)))
-                      }
-                    />
-                    <input
-                      className="mono"
-                      type={reveal ? "text" : "password"}
-                      value={f.value}
-                      placeholder="value"
-                      autoComplete="off"
-                      onChange={(e) =>
-                        setRows((prev) => prev.map((p, j) => (j === i ? { ...p, value: e.target.value } : p)))
-                      }
-                    />
-                    <button
-                      type="button"
-                      className="field-remove"
-                      aria-label="Remove field"
-                      onClick={() => setRows((prev) => prev.filter((_, j) => j !== i))}
-                    >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-                <div className="field-row-actions">
-                  <button type="button" className="linkbtn" onClick={() => setReveal((r) => !r)}>
-                    {reveal ? "hide values" : "show values"}
-                  </button>
-                  <button
-                    type="button"
-                    className="linkbtn"
-                    onClick={() => setRows((prev) => [...prev, { name: "", value: "" }])}
-                  >
-                    + Add field
-                  </button>
-                </div>
-              </div>
-            )}
+            <CredentialFields
+              idPrefix={`edit-${cred.id}`}
+              initialFields={origMap}
+              onChange={setFields}
+            />
 
             <button type="button" className="disclose" onClick={() => setAdvanced((a) => !a)}>
               {advanced ? "▾" : "▸"} Advanced
@@ -754,7 +663,7 @@ function EditModal({
             {advanced && (
               <>
                 <div className="field">
-                  <label htmlFor={`edit-label-${cred.id}`}>Entry name</label>
+                  <label htmlFor={`edit-label-${cred.id}`}>Label</label>
                   <input
                     id={`edit-label-${cred.id}`}
                     className="mono"
@@ -767,18 +676,22 @@ function EditModal({
                   <span className="field-hint">Tells entries of the same service apart (prod/dev).</span>
                 </div>
                 <div className="field">
-                  <label htmlFor={`edit-hosts-${cred.id}`}>Allowed hosts</label>
+                  <label htmlFor={`edit-hosts-${cred.id}`}>
+                    {isLogin ? "Sign-in hosts" : "Allowed hosts"}
+                  </label>
                   <textarea
                     id={`edit-hosts-${cred.id}`}
                     className="mono"
                     value={hostsText}
                     onChange={(e) => setHostsText(e.target.value)}
-                    placeholder="api.example.com"
+                    placeholder={isLogin ? "clubgg.com" : "api.example.com"}
                     rows={3}
                     autoComplete="off"
                   />
                   <span className="field-hint">
-                    use_credential can only call these hosts. One per line; empty = unusable until you add one.
+                    {isLogin
+                      ? "Sign-in pages where Trusty Squire may fill this login. One per line; empty = unusable until you add one."
+                      : "use_credential can only call these hosts. One per line; empty = unusable until you add one."}
                   </span>
                 </div>
               </>

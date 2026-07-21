@@ -368,6 +368,17 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .pill-btn.danger:hover{color:var(--err);border-color:rgba(255,107,107,.45)}
 .pill-btn:disabled{opacity:.45;cursor:default}
 
+/* segmented control — vault/new credential kind (API key | Website login).
+   One control, two mutually-exclusive choices; active = accent fill. */
+.seg{display:inline-flex;gap:2px;padding:2px;background:var(--surface);
+  border:1px solid var(--line2);border-radius:10px}
+.seg button{font:inherit;font-size:13px;padding:7px 15px;border-radius:8px;
+  border:0;background:transparent;color:var(--muted);cursor:pointer;
+  transition:color .12s,background .12s}
+.seg button:hover{color:var(--fg)}
+.seg button[aria-pressed="true"]{background:var(--accent-fill);color:#fff}
+.seg button:disabled{opacity:.5;cursor:default}
+
 /* loading / empty / error state block */
 .app-state{padding:72px 0;text-align:center}
 .app-state .big{font-size:16px;color:var(--fg);font-weight:600;
