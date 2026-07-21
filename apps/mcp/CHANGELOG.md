@@ -2,7 +2,11 @@
 
 ## 1.0.48 (2026-07-21)
 
-- fix(mcp): plain-launch the connect Google login (CDP attach fails Google OAuth) (#377)
+- **Promotes 1.0.48-rc.2 to stable: `connect` Google sign-in no longer fails
+  with `/signin/rejected`.** The login browser now runs plain (no CDP) so it
+  passes Google's OAuth "secure browser" check; completion is read from the API
+  + the on-disk cookie store. See the rc.2 entry below for the full root-cause
+  writeup. (#377)
 
 ## 1.0.48-rc.2 (2026-07-20)
 
