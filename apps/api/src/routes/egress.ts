@@ -357,13 +357,28 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       const qIdx = req.url.indexOf("?");
       if (qIdx >= 0) for (const [k, v] of new URLSearchParams(req.url.slice(qIdx + 1))) inboundQuery[k] = v;
 
-      const injected = applyAuthShape(shape, "${SECRET}", inboundHeaders, inboundQuery);
       const body =
         req.body === undefined || req.body === null
           ? undefined
           : typeof req.body === "string"
             ? req.body
             : JSON.stringify(req.body);
+
+      // If the app already placed a ${SECRET} marker (header/query/body) it is
+      // telling us exactly where the key goes — honor that and do NOT also stamp
+      // the stored auth_shape on top. A bearer-default shape would otherwise
+      // collide with, e.g., an `xi-api-key: ${SECRET}` placement, and the
+      // upstream rejects the extra Authorization header. The inbound
+      // `authorization` (the grant token) is already stripped above, so nothing
+      // leaks; the executor substitutes ${SECRET} wherever the app put it.
+      // auth_shape stays the fallback for dumb SDKs that can't place a marker.
+      const clientPlacedSecret =
+        Object.values(inboundHeaders).some((v) => v.includes("${SECRET}")) ||
+        Object.values(inboundQuery).some((v) => v.includes("${SECRET}")) ||
+        (body !== undefined && body.includes("${SECRET}"));
+      const injected = clientPlacedSecret
+        ? { headers: inboundHeaders, query: inboundQuery }
+        : applyAuthShape(shape, "${SECRET}", inboundHeaders, inboundQuery);
 
       try {
         const response = await opts.deps.vault.proxyResolvedCredential(
