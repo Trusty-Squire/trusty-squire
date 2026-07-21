@@ -17,7 +17,15 @@ import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
 export type AuthShape =
   | { kind: "bearer" }
   | { kind: "header"; name: string }
-  | { kind: "query"; param: string };
+  | { kind: "query"; param: string }
+  // Basic auth: the key is base64-encoded server-side (the client only holds the
+  // ${SECRET} placeholder, so it can't encode it itself — the one common method
+  // the client-placement path can't express). `username` undefined = key as the
+  // username with a blank password (Stripe-Basic); set = key as the password
+  // under that username (Mailgun `api:<key>`). Request-SIGNING schemes (AWS
+  // SigV4, webhook HMAC) are deliberately NOT modeled — they compute a signature
+  // over the request, not inject a value, and are rejected at store time.
+  | { kind: "basic"; username?: string };
 
 export interface EgressGrant {
   id: string; // "g_<opaque>" — appears in the egress base URL
@@ -47,6 +55,9 @@ export function parseAuthShape(raw: string | undefined | null): AuthShape {
   if (header) return { kind: "header", name: header[1]!.trim() };
   const query = /^query:(.+)$/i.exec(v);
   if (query) return { kind: "query", param: query[1]!.trim() };
+  if (v.toLowerCase() === "basic") return { kind: "basic" };
+  const basic = /^basic:(.+)$/i.exec(v);
+  if (basic) return { kind: "basic", username: basic[1]!.trim() };
   return { kind: "bearer" };
 }
 
@@ -76,6 +87,17 @@ export function applyAuthShape(
       break;
     case "query":
       outQuery[shape.param] = secret;
+      break;
+    case "basic":
+      // base64 must run AFTER the real key is substituted, so emit the
+      // ${SECRET_BASIC} transform the executor computes (see substituteAll):
+      // base64("<secret>:") or base64("<username>:<secret>"). The `secret`
+      // arg (the raw ${SECRET} placeholder) is intentionally unused here — a
+      // pre-substitution base64 would encode the placeholder, not the key.
+      outHeaders["authorization"] =
+        shape.username !== undefined
+          ? `Basic \${SECRET_BASIC.${shape.username}}`
+          : "Basic ${SECRET_BASIC}";
       break;
   }
   return { headers: outHeaders, query: outQuery };
