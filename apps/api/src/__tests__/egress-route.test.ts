@@ -366,6 +366,63 @@ describe("Egress Grants — /v1/egress", () => {
     expect(last.auth).toBeUndefined();
   });
 
+  it("injects Basic auth (key as username, blank password) — base64 server-side", async () => {
+    const account = await h.deps.accountStore.createAccount("basic@example.test", "B");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const store = await h.server.inject({
+      method: "POST", url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: {
+        service: "StripeBasic", value: "sk-the-real-secret", type: "api_key",
+        auth_shape: "basic", observed_hosts: ["api.stripe.com"],
+      },
+    });
+    expect(store.statusCode).toBe(201);
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "StripeBasic" });
+    const res = await h.server.inject({
+      method: "GET", url: `/v1/egress/${grant_id}/v1/charges`,
+      headers: { authorization: `Bearer ${egressToken}` },
+    });
+    expect(res.statusCode).toBe(200);
+    // base64("sk-the-real-secret:") — encoded AFTER substitution, not the placeholder.
+    expect(seen.at(-1)!.auth).toBe(`Basic ${Buffer.from("sk-the-real-secret:").toString("base64")}`);
+  });
+
+  it("injects Basic auth with a fixed username (Mailgun api:<key>)", async () => {
+    const account = await h.deps.accountStore.createAccount("basicu@example.test", "M");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    const store = await h.server.inject({
+      method: "POST", url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: {
+        service: "Mailgun", value: "key-123", type: "api_key",
+        auth_shape: "basic:api", observed_hosts: ["api.mailgun.net"],
+      },
+    });
+    expect(store.statusCode).toBe(201);
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "Mailgun" });
+    const res = await h.server.inject({
+      method: "POST", url: `/v1/egress/${grant_id}/v3/messages`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: {},
+    });
+    expect(res.statusCode).toBe(200);
+    expect(seen.at(-1)!.auth).toBe(`Basic ${Buffer.from("api:key-123").toString("base64")}`);
+  });
+
+  it("rejects a request-signing auth_shape (SigV4) at store time (400)", async () => {
+    const account = await h.deps.accountStore.createAccount("sig@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const res = await h.server.inject({
+      method: "POST", url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: { service: "AWS", value: "AKIAEXAMPLE", auth_shape: "sigv4" },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
   it("rejects an invalid auth_shape at store time (400)", async () => {
     const account = await h.deps.accountStore.createAccount("bad@example.test", "B");
     const cookie = await webCookie(h.deps, account.id);

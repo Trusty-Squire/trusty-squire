@@ -80,7 +80,10 @@ const storeBody = z
     auth_shape: z
       .string()
       .max(120)
-      .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
+      .regex(
+        /^(bearer|header:.+|query:.+|basic|basic:.+)$/,
+        "auth_shape must be bearer | header:<name> | query:<param> | basic[:<username>] — request-signing schemes (AWS SigV4, HMAC/webhook signatures) are not supported by egress grants",
+      )
       .optional(),
   })
   .refine((b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0), {

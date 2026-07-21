@@ -85,7 +85,7 @@ export class ProxyError extends Error {
 // a real brace), and the resolved VALUE is still CR/LF/NUL-checked, so
 // widening the NAME class is safe. Previously [A-Za-z0-9_]+ silently
 // failed to match such names → the literal placeholder shipped upstream.
-const TOKEN_SRC = "\\$\\{SECRET(_JSON)?(?:\\.([^}]+))?\\}";
+const TOKEN_SRC = "\\$\\{SECRET(_JSON|_BASIC)?(?:\\.([^}]+))?\\}";
 const MAX_HEADER_VALUE_BYTES = 8 * 1024;
 const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024;
 
@@ -131,9 +131,18 @@ function resolveField(fields: Record<string, string>, name: string | undefined):
 }
 
 function substituteAll(s: string, fields: Record<string, string>): string {
-  return s.replace(new RegExp(TOKEN_SRC, "g"), (_m, json: string | undefined, name: string | undefined) => {
+  return s.replace(new RegExp(TOKEN_SRC, "g"), (_m, variant: string | undefined, name: string | undefined) => {
+    if (variant === "_BASIC") {
+      // Basic auth: base64("<username>:<secret>"), or base64("<secret>:") when
+      // no username (key-as-username, blank-password). The username rides in the
+      // `.` slot — ${SECRET_BASIC} vs ${SECRET_BASIC.<username>} — so the secret
+      // itself is always the default field, never a named one.
+      const secret = resolveField(fields, undefined);
+      const userpass = name !== undefined ? `${name}:${secret}` : `${secret}:`;
+      return Buffer.from(userpass, "utf8").toString("base64");
+    }
     const value = resolveField(fields, name);
-    return json !== undefined ? jsonEscapeSecret(value) : value;
+    return variant === "_JSON" ? jsonEscapeSecret(value) : value;
   });
 }
 
