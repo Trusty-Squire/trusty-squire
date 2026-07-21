@@ -9,6 +9,7 @@ import {
   StaleProvisionRefError,
   AmbiguousProvisionTargetError,
   hostAllowed,
+  isSquireControlPlaneHost,
   elementRef,
   buildAccessibilitySnapshot,
   isInboxReadHost,
@@ -686,6 +687,55 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
     expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com", "tsagent.kinde.com"])).toBe(
       true,
     );
+  });
+
+  it("HARD-blocks Squire's own control plane even when the agent added it to the allow-set", () => {
+    // Confused-deputy guard: the operator browser is authed as the user, so it
+    // must never reach the vault UI / API — the denylist overrides the allow-set.
+    for (const url of [
+      "https://trustysquire.ai/vault",
+      "https://trustysquire.ai/vault/settings",
+      "https://www.trustysquire.ai/vault",
+      "https://trusty-squire-api.fly.dev/v1/vault/credentials",
+      "https://trustysquire.com/vault",
+    ]) {
+      expect(hostAllowed(url, ["trustysquire.ai", "trusty-squire-api.fly.dev", "trustysquire.com"])).toBe(
+        false,
+      );
+    }
+  });
+});
+
+describe("isSquireControlPlaneHost (confused-deputy denylist)", () => {
+  it("matches Squire's own web app + API, exact and subdomain", () => {
+    for (const h of [
+      "trustysquire.ai",
+      "www.trustysquire.ai",
+      "vault.trustysquire.ai",
+      "trustysquire.com",
+      "trusty-squire-api.fly.dev",
+    ]) {
+      expect(isSquireControlPlaneHost(h)).toBe(true);
+    }
+  });
+
+  it("does not match unrelated or lookalike hosts", () => {
+    for (const h of [
+      "trustysquire.ai.evil.com",
+      "nottrustysquire.ai",
+      "registry.example.com",
+      "api.openai.com",
+      "",
+    ]) {
+      expect(isSquireControlPlaneHost(h)).toBe(false);
+    }
+  });
+
+  it("refuses to widen the operator scope into the control plane via allow_host", () => {
+    for (const h of ["trustysquire.ai", "vault.trustysquire.ai", "trusty-squire-api.fly.dev"]) {
+      const r = validateAllowHost(h);
+      expect("error" in r).toBe(true);
+    }
   });
 });
 
