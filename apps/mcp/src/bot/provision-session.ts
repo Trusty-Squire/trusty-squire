@@ -525,6 +525,27 @@ export function resolveTarget(
   return best?.el ?? null;
 }
 
+// Squire's OWN control plane. The operator browser runs in the connect-seeded
+// profile, so it is authenticated as the user (a live Google session). It must
+// therefore NEVER be allowed to reach Squire's own web app / API: otherwise a
+// prompt-injected signup page could drive it to the user's vault UI, sign in
+// via that Google session, and read revealed secrets — defeating the
+// write-only model (a confused-deputy exfiltration path, confirmed 2026-07-21).
+// This denylist OVERRIDES the allow-set: no `goto` and no `allow_host` may
+// reach these hosts, regardless of what the agent declares. (Self-hosted
+// deployments on other domains should extend this list.)
+const SQUIRE_CONTROL_PLANE_HOSTS: readonly string[] = [
+  "trustysquire.ai",
+  "trustysquire.com",
+  "trusty-squire-api.fly.dev",
+];
+
+export function isSquireControlPlaneHost(host: string): boolean {
+  const h = host.trim().toLowerCase().replace(/\.$/, "");
+  if (h.length === 0) return false;
+  return SQUIRE_CONTROL_PLANE_HOSTS.some((d) => h === d || h.endsWith(`.${d}`));
+}
+
 // Domain-scope check for an agent-initiated goto. Allows the target host, any
 // subdomain of it, the configured auth hosts, and *.firebaseapp.com /
 // *.web.app auth handlers. Organic redirects are NOT routed through here.
@@ -535,6 +556,9 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
   } catch {
     return false;
   }
+  // Hard denylist first — Squire's own control plane is off-limits even if the
+  // agent widened the allow-set to include it.
+  if (isSquireControlPlaneHost(host)) return false;
   const ok = (allowed: string): boolean => host === allowed || host.endsWith(`.${allowed}`);
   if (allowedHosts.some(ok)) return true;
   if (DEFAULT_AUTH_HOSTS.some(ok)) return true;
@@ -572,6 +596,9 @@ export function validateAllowHost(raw: string): { host: string } | { error: stri
   if (labels.length < 2) return { error: "bare TLD / single-label host not allowed" };
   if (labels.some((l) => l.length === 0 || l.length > 63)) return { error: "invalid host label length" };
   if (TWO_LABEL_PUBLIC_SUFFIXES.has(v)) return { error: `"${v}" is a public suffix — widening to it would allow every subdomain` };
+  // Squire's own control plane is never a legitimate cross-host — refuse to
+  // widen the operator browser into the vault UI / API (confused-deputy guard).
+  if (isSquireControlPlaneHost(v)) return { error: "Squire's own control plane (the vault UI / API) is off-limits to the operator browser" };
   return { host: v };
 }
 
@@ -1456,6 +1483,26 @@ export async function act(
   // click that redirected turned round 0's URL into the post-login dashboard,
   // corrupting the skill's entry_url and the login step).
   const urlBeforeAction = browser.currentUrl();
+
+  // Defense-in-depth for the confused-deputy guard: if an ORGANIC redirect (not
+  // gated by hostAllowed) has landed the operator browser on Squire's own
+  // control plane, refuse to ACT on it — so the agent can't drive the vault
+  // login/OAuth or click "reveal". `goto` is still permitted so the agent can
+  // escape (and goto TO a control-plane host is already denied by hostAllowed).
+  if (action.kind !== "goto") {
+    let curHost: string | null = null;
+    try {
+      curHost = new URL(urlBeforeAction).hostname;
+    } catch {
+      curHost = null;
+    }
+    if (curHost !== null && isSquireControlPlaneHost(curHost)) {
+      throw new Error(
+        `action refused: the browser is on Squire's own control plane (${curHost}). ` +
+          `The operator may not act on the Trusty Squire vault/app — navigate away with goto.`,
+      );
+    }
+  }
 
   // Captured for the operator-recipe trace: the element a target action
   // resolved to, so we record the VISIBLE text it acted on (not the ref).

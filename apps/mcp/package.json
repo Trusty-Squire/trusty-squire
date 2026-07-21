@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/mcp",
-  "version": "1.0.48",
+  "version": "1.0.49",
   "license": "MIT",
   "mcpName": "ai.trustysquire/trusty-squire",
   "type": "module",

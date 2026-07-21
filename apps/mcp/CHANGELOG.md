@@ -1,5 +1,21 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.49 (2026-07-21)
+
+- **Security: fence the operator browser off Squire's own control plane.** The
+  `operate_*` browser runs in the connect-seeded profile, so it is authenticated
+  as the user (a live Google session). Nothing stopped an agent — or a
+  prompt-injected signup page — from driving it to `trustysquire.ai/vault`,
+  signing in via that Google session, and reading revealed secrets, defeating the
+  write-only model (a confused-deputy exfiltration path; confirmed live: the
+  vault loads authenticated in the operator browser). Added a hard denylist of
+  Squire's own hosts (`trustysquire.ai`, `trustysquire.com`,
+  `trusty-squire-api.fly.dev`) that overrides the agent-controlled allow-set:
+  `goto` to them is blocked (`hostAllowed`), `allow_host` refuses them
+  (`validateAllowHost`), and — for an organic redirect that lands there — the
+  operator may not `act` on a control-plane page (navigate away only). Residual
+  hardening for later: an API-side step-up on `/reveal`.
+
 ## 1.0.48 (2026-07-21)
 
 - **Promotes 1.0.48-rc.2 to stable: `connect` Google sign-in no longer fails
