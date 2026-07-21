@@ -41,7 +41,13 @@ import boxen from "boxen";
 import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
 import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, waitForProfileFree } from "./profile.js";
-import { markProviderLoggedIn, recordProviderEmail } from "./login-state.js";
+import {
+  launchPlainLoginBrowser,
+  launchSelfManagedLoginContext,
+  resolveChannelBinary,
+  selfLaunchEnabled,
+} from "./browser.js";
+import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -169,6 +175,45 @@ export async function contextHasProviderSession(
   provider: OAuthProviderId,
 ): Promise<boolean> {
   return hasProviderSession(context, LOGIN_TARGETS[provider]);
+}
+
+// Provider session cookie NAMES long/specific enough to detect by substring in
+// the raw on-disk Cookies DB. Bare short names (Google's "SID") are omitted —
+// they substring-collide with other cookie names.
+const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
+  google: ["__Secure-1PSID", "SAPISID"],
+  github: ["user_session"],
+};
+
+// Read a PLAIN login browser's provider session straight off disk. The connect
+// claim's login browser never attaches CDP (see launchPlainLoginBrowser — a
+// CDP attach fails Google's OAuth "secure browser" check), so there is no live
+// context to query. Chrome stores cookie NAMES as plaintext in the Cookies
+// SQLite b-tree pages, so a raw byte search reliably answers "did this
+// session's cookie get written" — dependency-free and Node-version-agnostic
+// (engines >=20; node:sqlite is 22.5+). Presence-only; never decrypts values.
+export function profileHasProviderCookies(
+  profileDir: string,
+  provider: OAuthProviderId,
+): boolean {
+  const markers = PROVIDER_COOKIE_MARKERS[provider];
+  // <profile>/Default/Cookies is the norm; a profile that never opened a window
+  // may only have <profile>/Cookies. Include the WAL sidecar — a just-written
+  // cookie may not be checkpointed into the main file yet.
+  const bases = [join(profileDir, "Default", "Cookies"), join(profileDir, "Cookies")];
+  for (const base of bases) {
+    for (const path of [base, `${base}-wal`]) {
+      if (!existsSync(path)) continue;
+      let text: string;
+      try {
+        text = readFileSync(path).toString("latin1");
+      } catch {
+        continue;
+      }
+      if (markers.some((m) => text.includes(m))) return true;
+    }
+  }
+  return false;
 }
 
 // VALIDATE a session instead of just spotting a cookie. A provider session that
@@ -727,6 +772,21 @@ export interface RunInBotChromeOpts {
   // The install flow has a sign-in phase followed by an explicit Finish
   // step. Resolve this lazily so its heartbeat describes the current phase.
   heartbeatMessage?: string | (() => string);
+  // PLAIN-BROWSER MODE (connect claim). When set, the login browser is launched
+  // as plain Chrome with NO CDP attach — required because Google's OAuth
+  // "secure browser" check rejects a CDP-attached Chrome (see
+  // launchPlainLoginBrowser). In this mode the browser is never driven: the
+  // user signs in over noVNC, and completion is detected via `plainPollUntilDone`
+  // (which reads the API + the on-disk cookie store, not a live context). The
+  // context-taking `pollUntilDone`/`onSuccess`/`preflight` above are IGNORED in
+  // this mode. `mcp login` does NOT set this (it stays on the CDP path).
+  plainProfileLogin?: boolean;
+  // Plain-mode completion predicate. Receives the profileDir instead of a live
+  // context; re-polled every ~3s. Required when plainProfileLogin is set.
+  plainPollUntilDone?: (profileDir: string) => Promise<boolean>;
+  // Plain-mode success hook, run after plainPollUntilDone returns true while the
+  // browser is still open (read which provider cookies seeded, etc.).
+  plainOnSuccess?: (profileDir: string) => Promise<void>;
 }
 
 export async function runInBotChrome(
@@ -758,6 +818,45 @@ export async function runInBotChrome(
 async function runDisplayedChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+  // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
+  // detect completion off the API + on-disk cookie store. See
+  // launchPlainLoginBrowser / RunInBotChromeOpts.plainProfileLogin.
+  if (opts.plainProfileLogin === true) {
+    if (opts.plainPollUntilDone === undefined) {
+      throw new Error("plainProfileLogin set without plainPollUntilDone");
+    }
+    const binary = resolveChannelBinary("chrome");
+    if (binary === null) {
+      throw new Error("no Chrome binary found for the plain login browser");
+    }
+    const proxyOpt = loginProxyOption();
+    const browser = await launchPlainLoginBrowser({
+      binary,
+      profileDir: opts.profileDir,
+      url: opts.url,
+      window: { width: 1280, height: 800 },
+      env: process.env,
+      // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
+      // proxy (direct). Connect from the box is the point anyway.
+      proxyServer: proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
+      extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
+    });
+    try {
+      console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
+      console.error(`[connect-debug] launcher=plain_display chrome=${binary}`);
+      const ok = await pollUntil(
+        opts.deadline,
+        () => opts.plainPollUntilDone!(opts.profileDir),
+        opts.heartbeatMessage,
+      );
+      if (ok && opts.plainOnSuccess !== undefined) {
+        try { await opts.plainOnSuccess(opts.profileDir); } catch { /* swallow */ }
+      }
+      return { status: ok ? "completed" : "timeout" };
+    } finally {
+      await browser.teardown();
+    }
+  }
   const chromium = resolveChromium();
   const context = await launchWithProfileGate(opts.profileDir, () =>
     chromium.launchPersistentContext(opts.profileDir, {
@@ -840,6 +939,11 @@ async function runHeadlessChrome(
   // Playwright handle, closed via context.close(). Tracked here so the
   // signal handler can release the profile lock before exiting.
   let activeContext: BrowserContext | undefined;
+  // Teardown for the login browser — for the self-launch path this ALSO kills
+  // the spawned Chrome child (a bare context.close() over CDP leaves it
+  // running), for the persistent fallback it's just context.close(). Tracked
+  // so the signal handler can release the profile lock before exiting.
+  let activeTeardown: (() => Promise<void>) | undefined;
 
   // Ensure nothing is orphaned if the process dies mid-flow. `exit`
   // covers a normal return; SIGTERM/SIGINT cover an interrupted run —
@@ -851,13 +955,13 @@ async function runHeadlessChrome(
       teardown(rig);
       process.exit(130);
     };
-    if (activeContext !== undefined) {
-      // Close the browser to release the persistent-profile lock — but
-      // cap the wait: a wedged Chrome under Xvfb can hang close()
-      // indefinitely, and the rig MUST still be torn down. Whichever
-      // wins (clean close, or the 3s cap), `finish` runs.
+    if (activeTeardown !== undefined) {
+      // Tear down the browser to release the persistent-profile lock (and
+      // kill the self-launched Chrome) — but cap the wait: a wedged Chrome
+      // under Xvfb can hang indefinitely, and the rig MUST still be torn
+      // down. Whichever wins (clean teardown, or the 3s cap), `finish` runs.
       const capped = new Promise<void>((r) => setTimeout(r, 3000));
-      Promise.race([activeContext.close().catch(() => undefined), capped]).then(
+      Promise.race([activeTeardown().catch(() => undefined), capped]).then(
         finish,
         finish,
       );
@@ -875,44 +979,119 @@ async function runHeadlessChrome(
     await new Promise((r) => setTimeout(r, 1500));
 
     // 2. Chrome on that display, persistent profile, window filling the display.
-    const chromium = resolveChromium();
-    const context = await launchWithProfileGate(opts.profileDir, () =>
-      chromium.launchPersistentContext(opts.profileDir, {
-      channel: "chrome",
-      headless: false,
-      viewport: null, // use the real window size
-      env: { ...process.env, DISPLAY: display },
-      // Drop --enable-automation: kills the "controlled by automated test
-      // software" infobar and the matching automation fingerprint.
-      ignoreDefaultArgs: ["--enable-automation"],
-      ...(loginProxyOption() !== undefined ? { proxy: loginProxyOption() } : {}),
-      args: [
-        `--window-position=0,0`,
-        `--window-size=${HEADLESS_W},${HEADLESS_H}`,
-        // App mode strips the tabs, URL bar, and the "unsupported
-        // command-line flag" warning that otherwise eat the top
-        // third of a phone-shaped framebuffer when viewed through
-        // noVNC. The install page gets the full window.
-        `--app=${opts.url}`,
-        "--disable-blink-features=AutomationControlled",
-        // Suppresses the "You are using an unsupported command-line
-        // flag: --no-sandbox" yellow infobar that otherwise eats the
-        // top strip of the framebuffer once we hand it to noVNC.
-        // Standard automation-test flag; doesn't affect OAuth/cookies.
-        "--test-type",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-      ],
-      }),
-    );
+    //    Self-launch + connectOverCDP is the STATE.md 2026-06-12 launcher fix:
+    //    a launchPersistentContext-driven Chrome carries the launch-time
+    //    instrumentation anti-bot (Cloudflare Turnstile, and — the bug this
+    //    ports the fix for — Google's sign-in device-prompt) reads as a bot,
+    //    while a self-launched Chrome attached over CDP does not. The signup
+    //    path (BrowserController) already migrated; the connect login was the
+    //    last consumer of the detectable launcher. Fall back to the old
+    //    launcher when self-launch is opted out (BOT_SELF_LAUNCH=0), Chrome
+    //    isn't resolvable as a real binary, or a credentialed proxy is set
+    //    (self-launch's --proxy-server can't carry proxy auth).
+    const proxyOpt = loginProxyOption();
+    const chromeBinary = resolveChannelBinary("chrome");
+    const useSelfLaunch =
+      selfLaunchEnabled() &&
+      chromeBinary !== null &&
+      (proxyOpt === undefined || proxyOpt.password === undefined);
+    const sharedChromeArgs = [
+      "--disable-blink-features=AutomationControlled",
+      // --test-type suppresses the "unsupported command-line flag:
+      // --no-sandbox" yellow infobar that otherwise eats the top strip of the
+      // phone-shaped framebuffer once handed to noVNC. Standard automation
+      // flag; doesn't affect OAuth/cookies.
+      "--test-type",
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
+    ] as const;
+    // PLAIN-BROWSER mode (connect claim): NO CDP at all — a CDP-attached Chrome
+    // fails Google's OAuth "secure browser" check (STATE.md 2026-07-20, fully
+    // bisected). `context` stays undefined; completion is read via
+    // plainPollUntilDone (API + on-disk cookies), never a live context.
+    const plain = opts.plainProfileLogin === true;
+    let context: BrowserContext | undefined;
+    let teardownContext: () => Promise<void>;
+    let launcherMode: "plain" | "self_launch" | "persistent";
+    if (plain) {
+      if (opts.plainPollUntilDone === undefined) {
+        throw new Error("plainProfileLogin set without plainPollUntilDone");
+      }
+      if (chromeBinary === null) {
+        throw new Error("no Chrome binary found for the plain login browser");
+      }
+      launcherMode = "plain";
+      const browser = await launchPlainLoginBrowser({
+        binary: chromeBinary,
+        profileDir: opts.profileDir,
+        url: opts.url,
+        window: { width: HEADLESS_W, height: HEADLESS_H },
+        env: { ...process.env, DISPLAY: display },
+        proxyServer: proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
+        extraArgs: sharedChromeArgs,
+      });
+      teardownContext = browser.teardown;
+    } else if (useSelfLaunch && chromeBinary !== null) {
+      launcherMode = "self_launch";
+      const launched = await launchSelfManagedLoginContext({
+        binary: chromeBinary,
+        profileDir: opts.profileDir,
+        // App mode (--app) strips tabs/URL bar so the install page gets the
+        // full phone-shaped framebuffer under noVNC.
+        initialUrl: opts.url,
+        appMode: true,
+        window: { width: HEADLESS_W, height: HEADLESS_H },
+        env: { ...process.env, DISPLAY: display },
+        proxyServer: proxyOpt?.server ?? null,
+        extraArgs: sharedChromeArgs,
+      });
+      context = launched.context;
+      teardownContext = launched.teardown;
+    } else {
+      launcherMode = "persistent";
+      const chromium = resolveChromium();
+      const persistent = await launchWithProfileGate(opts.profileDir, () =>
+        chromium.launchPersistentContext(opts.profileDir, {
+          channel: "chrome",
+          headless: false,
+          viewport: null, // use the real window size
+          env: { ...process.env, DISPLAY: display },
+          // Drop --enable-automation: kills the "controlled by automated test
+          // software" infobar and the matching automation fingerprint.
+          ignoreDefaultArgs: ["--enable-automation"],
+          ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
+          args: [
+            `--window-position=0,0`,
+            `--window-size=${HEADLESS_W},${HEADLESS_H}`,
+            `--app=${opts.url}`,
+            ...sharedChromeArgs,
+          ],
+        }),
+      );
+      context = persistent;
+      teardownContext = async (): Promise<void> => {
+        await persistent.close().catch(() => undefined);
+      };
+    }
     activeContext = context;
+    activeTeardown = teardownContext;
+    // Trace which launcher ran — survives the noVNC collapsing (stderr). The
+    // self-launch port is the fix under test for the Google device-prompt
+    // rejection; this line is how we confirm which path a real run took.
+    console.error(
+      `[connect-debug] launcher=${launcherMode} chrome=${chromeBinary ?? "<none>"} display=${display}`,
+    );
 
     try {
-      if (opts.preflight !== undefined && await opts.preflight(context)) {
-        return { status: "preflight_satisfied" };
+      // CDP path only: preflight + drive the first page to the URL. The plain
+      // path has no context — plain Chrome's --app already opened opts.url.
+      if (context !== undefined) {
+        if (opts.preflight !== undefined && await opts.preflight(context)) {
+          return { status: "preflight_satisfied" };
+        }
+        const page = context.pages()[0] ?? (await context.newPage());
+        await page.goto(opts.url, { waitUntil: "domcontentloaded" });
       }
-      const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto(opts.url, { waitUntil: "domcontentloaded" });
 
       // 3. x11vnc on the display — localhost-only, password-gated, -noshm
       //    (the box's X server lacks the shared-memory extension).
@@ -1003,18 +1182,31 @@ async function runHeadlessChrome(
       //    down.
       const ok = await pollUntil(
         opts.deadline,
-        () => opts.pollUntilDone(context),
+        () =>
+          context !== undefined
+            ? opts.pollUntilDone(context)
+            : opts.plainPollUntilDone!(opts.profileDir),
         opts.heartbeatMessage,
       );
-      if (ok && opts.onSuccess !== undefined) {
-        try { await opts.onSuccess(context); } catch { /* swallow */ }
+      if (ok) {
+        if (context !== undefined) {
+          if (opts.onSuccess !== undefined) {
+            try { await opts.onSuccess(context); } catch { /* swallow */ }
+          }
+        } else if (opts.plainOnSuccess !== undefined) {
+          try { await opts.plainOnSuccess(opts.profileDir); } catch { /* swallow */ }
+        }
       }
-      await context.close();
+      await teardownContext();
       return { status: ok ? "completed" : "timeout" };
     } finally {
-      await context.close().catch(() => undefined);
-      // Closed — the signal handler must not double-close it.
+      // Idempotent (self-launch teardown guards with a `torn` flag; the
+      // persistent fallback's close() is .catch-wrapped), so the success-path
+      // call above and this finally can both fire safely.
+      await teardownContext();
+      // Torn down — the signal handler must not double-tear it.
       activeContext = undefined;
+      activeTeardown = undefined;
     }
   } finally {
     teardown(rig);
@@ -1142,7 +1334,10 @@ export async function ensureOAuthSession(opts?: {
 // "Google Account: Ada Lovelace (ada@example.com)" on every Google surface, so
 // prefer that anchored match; fall back to the first email-shaped token (the
 // myaccount.google.com page renders the address prominently). Pure + exported
-// for unit tests — the live navigation that feeds it is captureGoogleEmail.
+// for unit tests. (Eager capture-at-login was removed with the plain-login
+// switch — it needed a live CDP context to scrape myaccount.google.com, which
+// the plain connect browser no longer has; provision scrapes the email per-run
+// when the marker is unset, so this is now the only consumer besides tests.)
 const EMAIL_TOKEN_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
 export function extractGoogleAccountEmail(pageText: string): string | null {
   const chip = /Google Account:[^()]*\(([^)]+)\)/i.exec(pageText);
@@ -1154,29 +1349,6 @@ export function extractGoogleAccountEmail(pageText: string): string | null {
   return any !== null ? any[0].trim() : null;
 }
 
-// Capture-at-login: with the profile's live Google session, read the account's
-// email once and persist it to the profile marker so provision can fill it as
-// the signup email (user-owned accounts) without a per-run scrape. Best-effort:
-// any failure leaves the marker unset and provision proceeds without a pre-known
-// email. Only meaningful for google (the inbox identity); github has no inbox.
-async function captureGoogleEmail(
-  context: BrowserContext,
-  profileDir: string,
-): Promise<void> {
-  let page: Awaited<ReturnType<BrowserContext["newPage"]>> | null = null;
-  try {
-    page = await context.newPage();
-    await page.goto("https://myaccount.google.com/", { waitUntil: "domcontentloaded", timeout: 15_000 });
-    const text = await page.evaluate(() => document.body.innerText).catch(() => "");
-    const email = extractGoogleAccountEmail(text);
-    if (email !== null) recordProviderEmail("google", email, profileDir);
-  } catch {
-    /* best-effort — no pre-known email this run */
-  } finally {
-    if (page !== null) await page.close().catch(() => undefined);
-  }
-}
-
 // Public entry for the install flow: opens the trustysquire /install
 // confirm URL in the bot's persistent Chrome profile, runs the
 // user-supplied check until the install is claimed (or the deadline
@@ -1186,13 +1358,13 @@ async function captureGoogleEmail(
 // Google for the bot" step after install.
 export async function openInstallConfirmInBotChrome(opts: {
   confirmUrl: string;
-  // Returns true when the install ceremony is fully done. The caller
-  // composes the predicate: typically "(install claim cached) AND
-  // (page navigated to /install/done)" — the wizard fires the
-  // navigation when the user clicks Finish, after the optional
-  // GitHub-connect step. The context argument lets the caller inspect
-  // page URLs without re-launching Chrome.
-  pollUntilClaimed: (context: BrowserContext) => Promise<boolean>;
+  // Returns true when the install ceremony is done. The login browser runs
+  // PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
+  // attach), so the predicate gets the profileDir, NOT a live context: it
+  // composes "(install claim cached, via the API) AND (provider session seeded,
+  // via profileHasProviderCookies)". There is no browser-URL signal in plain
+  // mode; completion keys off the API claim + on-disk cookies.
+  pollUntilClaimed: (profileDir: string) => Promise<boolean>;
   profileDir?: string;
   timeoutMinutes?: number;
   // G15: API base URL used to shorten the headless cloudflared
@@ -1214,44 +1386,33 @@ export async function openInstallConfirmInBotChrome(opts: {
       bannerLabel:
         `You'll see a Chrome window with the Trusty Squire install page. ` +
         `Sign in there to connect this machine — you only sign in once.`,
-      pollUntilDone: (context) => opts.pollUntilClaimed(context),
+      // PLAIN browser — no CDP. Google's OAuth flow (which this confirm page
+      // initiates) rejects a CDP-attached Chrome (STATE.md 2026-07-20). The
+      // context-taking pollUntilDone is never invoked in this mode; supply a
+      // stub to satisfy the (CDP-path) type.
+      plainProfileLogin: true,
+      pollUntilDone: () => Promise.resolve(false),
+      plainPollUntilDone: (dir) => opts.pollUntilClaimed(dir),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined
         ? { heartbeatMessage: opts.heartbeatMessage }
         : {}),
-      // The user's sign-in inside this Chrome leaves a provider session
-      // in the persistent profile. We don't know WHICH provider they
-      // used (Google or GitHub), so probe both cookie sets and mark
-      // whichever has live cookies. Runs while the context is still
-      // open — opening a second persistent context to the same profile
-      // right after teardown is racy and silently fails on profile-
-      // lock contention, which would leave the marker file empty and
-      // make the signup bot fall back to manual on every subsequent
-      // OAuth-only service.
-      onSuccess: async (context) => {
+      // The user's sign-in inside this Chrome leaves a provider session in the
+      // persistent profile. We don't know WHICH provider they used, so probe
+      // both cookie sets (from the on-disk store — no live context in plain
+      // mode) and mark whichever seeded.
+      plainOnSuccess: async (dir) => {
         for (const provider of ["google", "github"] as const) {
-          const target = LOGIN_TARGETS[provider];
-          // Probe BOTH cookie origins — modern Google cookies are
-          // `.google.com` domain so visible at www.google.com, but
-          // some get set on accounts.google.com specifically. Checking
-          // both catches the OAuth-redirect case (the user came
-          // through accounts.google.com, never visited www.google.com).
-          const origins = [target.cookieOrigin, "https://accounts.google.com"];
-          let hit = false;
-          for (const origin of origins) {
-            const cookies = await context.cookies(origin);
-            if (cookies.some((c) => target.cookies.includes(c.name))) {
-              hit = true;
-              break;
-            }
-          }
-          if (hit) {
-            markProviderLoggedIn(provider, profileDir);
-            // Capture-at-login: store the Google email now (the one moment it's
-            // certain) so provision fills it as the user-owned signup email.
-            if (provider === "google") await captureGoogleEmail(context, profileDir);
+          if (profileHasProviderCookies(dir, provider)) {
+            markProviderLoggedIn(provider, dir);
           }
         }
+        // NB: eager Google-email capture (captureGoogleEmail) needed a live
+        // context to scrape myaccount.google.com; the plain login path has
+        // none. It was only an optimization ("provision proceeds without a
+        // pre-known email" otherwise) — provision scrapes the email per-run
+        // when unset, so dropping eager capture is safe and keeping CDP off
+        // the OAuth login is the whole point of the plain path.
       },
     });
     if (result.status === "completed") {

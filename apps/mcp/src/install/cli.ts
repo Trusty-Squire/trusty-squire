@@ -48,10 +48,10 @@ import {
 } from "./agents.js";
 import { detectAsn, type AsnInfo } from "../bot/index.js";
 import {
-  contextHasProviderSession,
   detectActiveProviderSessions,
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
+  profileHasProviderCookies,
 } from "../bot/google-login.js";
 import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
@@ -63,7 +63,6 @@ import {
   markProviderLoggedIn,
 } from "../bot/login-state.js";
 import { waitForProfileFree } from "../bot/profile.js";
-import type { BrowserContext } from "playwright";
 import { VERSION } from "../version.js";
 import { ensureLatestVersion } from "./version-check.js";
 import * as ui from "./ui.js";
@@ -1149,6 +1148,12 @@ export function shouldCompleteInstallClaim(
   const terminal =
     installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl);
   if (completeOnClaim) return sessionSeeded || terminal;
+  // Normal onboarding waits for the explicit Finish (terminal URL) when a
+  // browser URL is available to watch. The PLAIN login browser (connect claim,
+  // no CDP) has NO URL signal — installPageUrl is undefined — so fall back to
+  // "claimed AND provider session seeded", which means the account is bound and
+  // the Google/GitHub session landed: functionally done.
+  if (installPageUrl === undefined) return sessionSeeded;
   return terminal;
 }
 
@@ -1194,11 +1199,13 @@ async function runInstallClaim(
   // /install/done. First-time onboarding waits for that URL so the user gets a
   // chance to complete optional setup. Forced re-login instead ends at the API
   // claim because there is no remaining onboarding contract to wait for.
-  const pollOnce = async (context: BrowserContext): Promise<boolean> => {
+  // Plain-login predicate: the connect claim browser runs plain (no CDP — a CDP
+  // attach fails Google's OAuth "secure browser" check), so completion is read
+  // from the API (claim) + the on-disk cookie store (seed), NOT a live context.
+  const pollOnce = async (profileDir: string): Promise<boolean> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
-    // user finishes step 1. Normal onboarding waits for /install/done; forced
-    // re-login tears down at this claim.
+    // user finishes signing in.
     if (state.value === null) {
       const status = await installPoll(apiBase, initiate.setup_code);
       if (status.status === "claimed" && status.agent_session_token !== undefined) {
@@ -1216,34 +1223,32 @@ async function runInstallClaim(
         return true;
       }
     }
-    // A forced re-login ends once the account is claimed AND the provider
-    // session has actually seeded — not on the bare claim, which can land while
-    // Google is still mid-sign-in on a cold profile. Only probe the live session
-    // when a force-relogin teardown is even possible (skips a cookie read on
-    // every poll of the normal onboarding flow). Either provider satisfies it:
-    // the binding sign-in seeds whichever one the user clicked.
+    // Tear down once the account is claimed AND the provider session has
+    // actually seeded — not on the bare claim, which can land while Google is
+    // still writing cookies on a cold profile. Read the seed straight off the
+    // profile's on-disk cookie store (no live context in plain mode). Either
+    // provider satisfies it: the binding sign-in seeds whichever the user used.
     const claimed = state.value !== null;
-    let sessionSeeded = false;
-    if (claimed && options.completeOnClaim) {
-      sessionSeeded =
-        (await contextHasProviderSession(context, "google")) ||
-        (await contextHasProviderSession(context, "github"));
-    }
-    if (
-      shouldCompleteInstallClaim(
-        claimed,
-        options.completeOnClaim,
-        sessionSeeded,
-        // Both browser runners navigate pages()[0] to the install URL. Only
-        // follow that page: a restored background /vault tab must not make
-        // normal onboarding close before the real install page reaches Finish.
-        context.pages()[0]?.url(),
-      )
-    ) {
+    const sessionSeeded =
+      claimed &&
+      (profileHasProviderCookies(profileDir, "google") ||
+        profileHasProviderCookies(profileDir, "github"));
+    // No browser URL to watch in plain mode — pass undefined so completion keys
+    // off claimed+seeded for BOTH force-relogin and normal onboarding.
+    const tearDown = shouldCompleteInstallClaim(
+      claimed,
+      options.completeOnClaim,
+      sessionSeeded,
+      undefined,
+    );
+    console.error(
+      `[connect-debug] launcher=plain claimed=${claimed} ` +
+        `completeOnClaim=${options.completeOnClaim} ` +
+        `seeded=${sessionSeeded} teardown=${tearDown}`,
+    );
+    if (tearDown) {
       return true;
     }
-    // Only ask for Finish when the browser is still on the wizard. Returning
-    // users can land directly on /vault, where no Finish button exists.
     if (claimedThisPoll) {
       console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
     }

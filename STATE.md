@@ -398,6 +398,184 @@ were all looking in the wrong layer. The cause was upstream of all of them — t
 launcher. The hypotheses are kept as the historical record (and because they're
 still true claims: e.g. the proxy IP really does score human — see the score probe).
 
+### ? OPEN (2026-07-20) — the SAME launcher tell in the `connect` Google sign-in (device-prompt / `/signin/rejected`)
+
+**Symptom.** `npx @trusty-squire/mcp connect` on a fresh **Hetzner** box (chad,
+`AS24940`): the noVNC Google login walks `accounts.google.com`
+`/signin/identifier → /challenge/pwd → /challenge/dp` then sits on `/challenge/dp`
+or lands on `/v3/signin/rejected`; user sees "two number picks that don't match".
+Worked on Hetzner before (user-confirmed), so datacenter-IP is NOT the discriminator.
+
+**H (grounded, PARTIALLY validated):** the connect login was the **last consumer
+of the detectable `launchPersistentContext` launcher** — the exact tell pinned
+above for Turnstile. `apps/mcp/src/bot/google-login.ts` (`runHeadlessChrome` /
+`runDisplayedChrome`) used its own `resolveChromium()` = playwright-extra+stealth
+on `launchPersistentContext`, and **never** went through `getChromium`(patchright)
+/ self-launch / `connectOverCDP`. `BrowserController` migrated 2026-06-12;
+google-login never did. (Note: patchright IS installed + loads in the published
+1.0.47 npx package — verified — but the login path doesn't *use* it. So "patchright
+not installed" is a red herring; the real gap is the launcher.)
+
+**FIX under test (2026-07-20).** Ported self-launch + `connectOverCDP` to the
+connect **headless** login: new standalone `launchSelfManagedLoginContext`
+(browser.ts, mirrors `launchSelfManagedContext`, BrowserController untouched);
+`runHeadlessChrome` self-launches when `selfLaunchEnabled()` && chrome binary
+resolves && no credentialed proxy, else falls back to the old launcher. Displayed
+path left on the old launcher (works for laptop users; untested change = untaken
+risk). `[connect-debug] launcher=self_launch|persistent` traces which ran.
+
+**VALIDATED without 2FA (lifecycle):** self-launch → connectOverCDP attaches
+(~870ms), `--app` install page is `pages()[0]` (noVNC shows the right window),
+CDP control works, 11 Chrome procs → 0 on teardown (no zombie), idempotent
+teardown, no profile-lock leak. typecheck+build clean, 63 login/self-launch tests
+pass.
+
+**✗ FALSIFIED (2026-07-20, real chad run, `~/ts-connect2.log`).** The self-launch
+port ENGAGED (`[connect-debug] launcher=self_launch chrome=/usr/bin/google-chrome
+display=:99`) and Google rejected **identically**: `/challenge/pwd → skotp →
+selection → dp → /v3/signin/rejected`. So the launcher is NOT the cause of the
+Google device-prompt rejection — Google's sign-in risk engine is a **different
+detector class than Turnstile** (account/device/IP risk, not launch
+instrumentation), and self-launch + connectOverCDP does not move it. The port is
+still correct hygiene (the connect login should match the migrated signup path)
+and is KEPT, but it is NOT the fix for this bug.
+
+**Where the evidence now points (unproven).** Rejection is at the account layer.
+Candidate causes, cheapest-falsifier-first:
+- **H-flag: the account/IP is throttled by Google after repeated automated
+  sign-ins.** Many `~/.npm/_npx/*/@trusty-squire/mcp` dirs = dozens of connect
+  runs = dozens of Google sign-ins from one Hetzner IP → "suspicious activity"
+  cooldown (hours–days). Fits "worked before, fails now." FALSIFIER: a plain
+  `google-chrome` sign-in of the same account on the same box (ZERO Playwright/
+  CDP) — if it ALSO hits `/signin/rejected`, it is Google/IP/account, not our
+  code, and no client change fixes it (wait out the flag / sign in once from a
+  trusted network / use a different account).
+- **H-newdevice/cold-profile:** force-relogin's cold profile + Hetzner IP trips
+  device-prompt every time; a warm/trusted profile would pass. FALSIFIER: same
+  account from a residential noVNC, or after pre-trusting the device.
+- **H-numbermatch-race:** "two number picks that don't match" = the browser's dp
+  challenge and the phone's push are from different sessions (a reload/second
+  attempt regenerates the number). Less likely — the Playwright context stayed
+  attached (pages=1, URLs advancing) — but the user-facing noVNC channel is
+  separate. FALSIFIER: single clean attempt, no reloads, still mismatches.
+**NEXT decisive probe = the plain-`google-chrome` test (H-flag falsifier).** Do
+NOT ship another client-side "fix" before it runs — two launcher-class fixes have
+now failed this exact bug.
+
+**✓✓ DECISIVE RESULT (2026-07-20): plain `google-chrome` SIGNS IN on this exact
+box + IP. H-flag / H-newdevice / IP-reputation ALL FALSIFIED — it's OUR flags.**
+Rigged a truly plain `google-chrome` (fresh cold profile, phone-shaped app-mode,
+NO Playwright / NO CDP / NO --remote-debugging / NO stealth) on chad, egress
+`65.109.30.58` (Helsinki FI), and the user completed the SAME account's Google
+sign-in — verified objectively by the profile Cookies DB carrying the full auth
+set (`SID, SAPISID, SSID, HSID, __Secure-1PSID, __Secure-3PSID, LSID`). So the
+Finnish Hetzner IP is NOT rejected by Google, the account is NOT flagged, and the
+device/geo is fine. The `/signin/rejected` is caused by something the connect
+automation ADDS that plain Chrome lacks. Remaining differences (connect self-
+launch argv/attach vs the working plain rig): `--test-type`,
+`--disable-blink-features=AutomationControlled`, `--password-store=basic`,
+`--lang=en-US`, `--remote-debugging-port` + patchright `connectOverCDP`. The two
+classic automation tells (`--test-type`, `--disable-blink-features=
+AutomationControlled`) are the prime suspects; the CDP attach is the other.
+NEXT: bisect flags-vs-CDP by adding ONLY `--test-type` +
+`--disable-blink-features=AutomationControlled` to the working plain rig — if it
+then rejects, the fix is to drop those flags from the connect login; if it still
+signs in, the tell is the CDP attach and the login must watch the profile Cookies
+DB instead of attaching over CDP.
+
+**✓✓✓ BROWSER FULLY EXONERATED (2026-07-20). It is NOT the browser at all — it's
+that connect signs in via OAUTH, not direct.** Three escalating rigs on chad, same
+box + Finnish IP, all completed the SAME account's Google sign-in (verified by the
+profile Cookies DB auth set each time):
+  1. plain `google-chrome` → SIGNED IN.
+  2. + `--test-type` + `--disable-blink-features=AutomationControlled` → SIGNED IN.
+  3. + `--remote-debugging-port` + patchright `connectOverCDP` + 3s `context.cookies()`
+     poll (connect's EXACT footprint) → SIGNED IN.
+So launcher, automation flags, AND the CDP attach are ALL exonerated for the Google
+sign-in. The ONLY remaining difference: rigs 1-3 navigated DIRECTLY to
+`accounts.google.com`; **connect opens `trustysquire.ai/install` and the sign-in is
+an OAuth authorization request** (Trusty Squire's OAuth app, Gmail restricted scope)
+— Google scrutinizes OAuth sign-ins (esp. to restricted scopes / from datacenter
+egress) far harder than a direct identity sign-in, and can hard-reject at the
+identity step (`/signin/rejected`) inside an OAuth `continue=` flow. Two live
+sub-hypotheses, BOTH in the connect FLOW not the browser:
+  - **H-oauth:** Google rejects the OAuth-context sign-in (app/scope/IP risk, or the
+    "this browser may not be secure" embedded/automation-OAuth policy).
+  - **H-race:** connect initiates TWO concurrent Google auth attempts (claim + seed)
+    → number-match numbers come from different sessions → "two picks that don't
+    match" → rejected. This specific symptom is UNexplained by a single clean login
+    (rigs 1-3 each had exactly one) — worth checking the connect flow for a double
+    login.
+NEXT (no more browser bisecting): read the connect claim flow — does it fire one or
+two Google logins, and confirm the sign-in is OAuth-initiated. The fix lives in the
+flow / OAuth config, NOT the launcher. The self-launch port already shipped is
+correct hygiene but is NOT this bug's fix; do not attribute a fix to it.
+
+**✓✓✓✓ ROOT CAUSE CONFIRMED (2026-07-20): CDP-attached browser × OAuth flow. The
+login browser must NOT be driven over CDP.** Final bisect cell — plain
+`google-chrome` pointed at connect's REAL `confirm_url`
+(`trustysquire.ai/install?token=…`, minted via `/v1/install` + `/v1/mcp/install/
+initiate`) — the user completed Google OAuth and the profile got the full auth
+cookie set AND **`/v1/mcp/install/<code>/status` returned `claimed`** (account
+`01KS39H3…`). So plain Chrome does connect's ENTIRE job. Truth table (all on chad,
+IP `65.109.30.58`):
+| browser | sign-in path | result |
+| plain | direct | ✅ |
+| plain + `--test-type`+`--disable-blink` | direct | ✅ |
+| self-launch + patchright `connectOverCDP` + cookie-poll | direct | ✅ |
+| **plain** | **OAuth (real confirm_url)** | ✅ + **claimed** |
+| self-launch + patchright `connectOverCDP` | **OAuth** | ❌ `/signin/rejected` (=connect) |
+Failure needs BOTH the CDP attach AND the OAuth flow; either alone passes. Google's
+OAuth authorization runs a "secure browser" integrity check (direct sign-in does
+not) that catches the CDP/automation attach. **Not `navigator.webdriver`** — probed
+connect's exact launch with AND without `--disable-blink-features=
+AutomationControlled`; both report `webdriver:false` (patchright manages it), so
+dropping that flag does NOT help. The tell is the CDP attachment itself.
+
+**THE FIX (validated in principle by the plain-OAuth+claimed run):** the connect /
+`mcp login` browser must run as PLAIN Chrome — NO `--remote-debugging-port`, NO
+`connectOverCDP` — and detect login/seed completion by polling the profile's
+on-disk Cookies SQLite for the auth-cookie NAMES (plaintext; values are encrypted
+but only presence is needed — proven by reading the DB in all 5 rounds). This makes
+the login browser byte-identical to the plain Chrome that passes Google's OAuth
+check. Implementation = replace the CDP `BrowserContext` handed to
+`runInBotChrome`'s `pollUntilDone`/`onSuccess`/`preflight` with a cookie-DB reader;
+launch Chrome without the debug port. (Note: launchPersistentContext — also CDP —
+worked on two OTHER Hetzners, so Google's OAuth CDP-detection is not 100%
+deterministic across IPs/time; removing CDP makes the login robust everywhere
+regardless.)
+
+**✓✓✓✓✓ CONFIRMED FIXED (2026-07-20, real chad `connect --force-relogin`,
+`~/ts-connect3.log`).** `[connect-debug] launcher=plain chrome=/usr/bin/google-chrome`,
+ZERO `signin/rejected` / `challenge/dp`, claim progressed `claimed=true` →
+`seeded=false` (Google still writing cookies) → `seeded=true teardown=true`, then
+`Session saved` + `Google connected`. The cookie-flush race handled itself (waited
+for the seed instead of tearing down on the bare claim). The plain-login switch is
+the fix; the earlier self-launch port is NOT (kept only as hygiene for the
+mcp-login CDP path). Plain-login path for the connect claim:
+- `launchPlainLoginBrowser` (browser.ts) — spawns Chrome with NO
+  `--remote-debugging-port` and NEVER `connectOverCDP`; returns only `{teardown}`.
+- `profileHasProviderCookies(profileDir, provider)` (google-login.ts) — reads the
+  provider session off the on-disk Cookies file by raw-bytes name substring
+  (dependency-free; engines `>=20` rules out `node:sqlite`). Presence-only.
+- `RunInBotChromeOpts.plainProfileLogin` + `plainPollUntilDone(profileDir)` +
+  `plainOnSuccess(profileDir)` — additive; `runHeadlessChrome`/`runDisplayedChrome`
+  branch to the plain launcher and pass profileDir (no context). `mcp login`
+  (GitHub liveness needs CDP + it's a DIRECT login, CDP-safe) is UNTOUCHED on the
+  CDP path.
+- `openInstallConfirmInBotChrome` sets `plainProfileLogin`; connect `pollOnce`
+  (cli.ts) now takes profileDir, reads seed via `profileHasProviderCookies`, and
+  `shouldCompleteInstallClaim` completes on claimed+seeded when the URL is
+  undefined (plain mode has no browser URL). Eager Google-email capture dropped on
+  the plain path (needed CDP; it was only an optimization — provision scrapes
+  per-run).
+Validated w/o 2FA: `launchPlainLoginBrowser` spawns Chrome with no debug port +
+clean idempotent teardown (no zombie); `profileHasProviderCookies` true/false
+correct incl. missing-file; 984 unit tests green (+4 cookie-probe, +1
+plain-completion). FINAL CHECK STILL OWED: a real `connect --force-relogin` on chad
+that reaches `[connect-debug] launcher=plain` and lands the claim (no
+`/signin/rejected`). Do NOT mark this done until that run passes.
+
 ---
 
 The recurring tar pit. Historical status (pre-fix): **cause NOT yet identified; the

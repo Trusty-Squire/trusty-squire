@@ -1,5 +1,29 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.48 (2026-07-21)
+
+- **Promotes 1.0.48-rc.2 to stable: `connect` Google sign-in no longer fails
+  with `/signin/rejected`.** The login browser now runs plain (no CDP) so it
+  passes Google's OAuth "secure browser" check; completion is read from the API
+  + the on-disk cookie store. See the rc.2 entry below for the full root-cause
+  writeup. (#377)
+
+## 1.0.48-rc.2 (2026-07-20)
+
+- **Fix: `connect` Google sign-in failing with `/signin/rejected` on some
+  boxes.** The connect claim opened its login browser over CDP
+  (`launchPersistentContext`/`connectOverCDP`), and Google's **OAuth** "secure
+  browser" integrity check rejects a CDP-attached Chrome — even self-launched,
+  even with patchright, even though the same browser passes a *direct*
+  `accounts.google.com` sign-in. Fully bisected on a live box: plain Chrome
+  completes the whole flow (sign-in **and** claim); a CDP-attached one hits
+  `/signin/rejected`. The connect login browser now runs **plain — no
+  `--remote-debugging-port`, no `connectOverCDP`** — and detects completion from
+  the API (claim) plus the profile's on-disk cookie store (seed), a
+  dependency-free read. `mcp login` (a direct login where CDP is safe) is
+  unchanged. Eager Google-email capture is dropped on the plain path (it needed
+  CDP; it was only an optimization — provision scrapes per-run when unset).
+
 ## 1.0.45 (2026-07-17)
 
 - **OpenCode is now a first-class install target.** Run
