@@ -2,7 +2,12 @@
 
 ## 1.0.49 (2026-07-21)
 
-- fix(mcp): fence the operator browser off Squire's own control plane (confused-deputy) (#380)
+- **Security (promotes 1.0.48-rc.3 to stable): fence the operator browser off
+  Squire's own control plane.** The `operate_*` browser is authenticated as the
+  user, so it could be driven (incl. by a prompt-injected page) to the vault UI
+  to read revealed secrets — a confused-deputy exfil path. Now hard-denied at the
+  nav layer (`goto`/`allow_host`/act-on-control-plane). See the rc.3 entry for the
+  full writeup. (#380)
 
 ## 1.0.48-rc.3 (2026-07-21)
 
