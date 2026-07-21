@@ -4,7 +4,9 @@
 // are the deterministic pieces that can be.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   binaryOnPath,
@@ -16,6 +18,7 @@ import {
   findFreePort,
   hasDisplay,
   pollUntil,
+  profileHasProviderCookies,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
 } from "../google-login.js";
@@ -23,6 +26,51 @@ import {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe("profileHasProviderCookies (plain-login on-disk seed check)", () => {
+  // The connect claim browser runs plain (no CDP — a CDP attach fails Google's
+  // OAuth "secure browser" check), so seeding is read from the profile's raw
+  // Cookies file. Chrome stores cookie NAMES as plaintext in the SQLite pages,
+  // so a byte-substring match answers "did this session's cookie get written".
+  const withProfile = (fileBytes: string | null, sub = "Default"): string => {
+    const dir = mkdtempSync(join(tmpdir(), "phpc-"));
+    if (fileBytes !== null) {
+      mkdirSync(join(dir, sub), { recursive: true });
+      writeFileSync(join(dir, sub, "Cookies"), Buffer.from(fileBytes, "latin1"));
+    }
+    return dir;
+  };
+
+  it("detects a Google session by its cookie name in the Cookies file", () => {
+    const dir = withProfile("SQLite format 3\0 ... SAPISID ... __Secure-1PSID ...");
+    expect(profileHasProviderCookies(dir, "google")).toBe(true);
+    // Only Google cookies present → github stays false.
+    expect(profileHasProviderCookies(dir, "github")).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("detects a GitHub session by user_session", () => {
+    const dir = withProfile("SQLite format 3\0 ... user_session ...");
+    expect(profileHasProviderCookies(dir, "github")).toBe(true);
+    expect(profileHasProviderCookies(dir, "google")).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns false for a cookieless profile and never throws on a missing file", () => {
+    const dir = withProfile("SQLite format 3\0 nothing useful here");
+    expect(profileHasProviderCookies(dir, "google")).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+    const missing = withProfile(null);
+    expect(profileHasProviderCookies(missing, "google")).toBe(false);
+    rmSync(missing, { recursive: true, force: true });
+  });
+
+  it("also finds cookies in the bare <profile>/Cookies layout", () => {
+    const dir = withProfile("SQLite format 3\0 SAPISID", ".");
+    expect(profileHasProviderCookies(dir, "google")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe("pollUntil phase-aware heartbeat", () => {
