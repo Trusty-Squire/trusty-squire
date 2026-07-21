@@ -655,6 +655,223 @@ export function stripCloudflareChallengeParams(rawUrl: string): string | null {
   return changed ? u.toString() : null;
 }
 
+export interface SelfLaunchedLogin {
+  context: BrowserContext;
+  // Idempotent: disconnects the CDP browser AND kills the self-launched
+  // Chrome child (a plain context.close() over CDP leaves the process
+  // running — the zombie-chrome leak). Also reaps the profile lock.
+  teardown: () => Promise<void>;
+}
+
+// Self-launch Chrome + connectOverCDP for the INTERACTIVE login (connect /
+// `mcp login`), instead of Playwright's launchPersistentContext.
+//
+// This is the STATE.md 2026-06-12 finding — the same launcher tell that fails
+// Cloudflare Turnstile from a launchPersistentContext-driven Chrome and passes
+// from a self-launched one — ported to the login path. BrowserController (the
+// signup path) already migrated; the connect login was the last consumer of
+// the detectable launcher. Kept STANDALONE (not a BrowserController method) so
+// the working signup path is untouched.
+//
+// Persistent profile is preserved: --user-data-dir=profileDir means the
+// provider session (Google/GitHub cookies) still lands in the bot's profile,
+// which the connect flow needs to seed for later Gmail-reading / OAuth signups.
+export async function launchSelfManagedLoginContext(params: {
+  binary: string;
+  profileDir: string;
+  initialUrl: string;
+  // App mode (--app=URL) opens a chromeless window — the connect noVNC path
+  // needs it so tabs/URL bar don't eat the phone-shaped framebuffer.
+  appMode: boolean;
+  window: { width: number; height: number };
+  env: NodeJS.ProcessEnv;
+  // Server-only proxy (self-launch can't carry SOCKS/HTTP auth — the caller
+  // falls back to launchPersistentContext for credentialed proxies).
+  proxyServer: string | null;
+  extraArgs?: readonly string[];
+}): Promise<SelfLaunchedLogin> {
+  let child: ChildProcess | null = null;
+  const endpoint = await withChromeStartupLock(async () => {
+    const port = await findFreePort();
+    clearStaleSingletonLock(params.profileDir);
+    const argv = [
+      `--remote-debugging-port=${port}`,
+      "--remote-debugging-address=127.0.0.1",
+      `--user-data-dir=${params.profileDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--password-store=basic",
+      "--window-position=0,0",
+      `--window-size=${params.window.width},${params.window.height}`,
+      "--lang=en-US",
+      ...(params.extraArgs ?? []),
+      ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+      // NB: we build argv ourselves, so Playwright's --enable-automation
+      // (and the rest of its launch instrumentation — the actual Turnstile
+      // tell) is never added. That is the whole point of self-launching.
+      params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
+    ];
+    const spawned = spawn(params.binary, argv, {
+      env: params.env,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    child = spawned;
+    registerSelfManagedChrome(spawned);
+    let chromeStderr = "";
+    spawned.stderr?.on("data", (chunk: Buffer) => {
+      chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+    });
+    try {
+      return await waitForDevtools(port, 30_000);
+    } catch (err) {
+      try {
+        spawned.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      reapLeakedProfileHolder(params.profileDir);
+      const detail = chromeStderr.trim();
+      throw new Error(
+        `${err instanceof Error ? err.message : String(err)}` +
+          `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+      );
+    }
+  });
+
+  const launcher = getChromium();
+  const browser = await launcher.connectOverCDP(endpoint);
+  const ctx = browser.contexts()[0];
+  if (ctx === undefined) {
+    throw new Error("self-launched login Chrome exposed no default browser context");
+  }
+
+  let torn = false;
+  const teardown = async (): Promise<void> => {
+    if (torn) return;
+    torn = true;
+    // Disconnect the CDP browser first; over connectOverCDP this leaves the
+    // real Chrome running, so kill the child explicitly (SIGTERM, then a
+    // hard SIGKILL after a short grace) to avoid the zombie-chrome leak.
+    try {
+      await browser.close();
+    } catch {
+      /* best-effort disconnect */
+    }
+    if (child !== null) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* already gone */
+      }
+      await new Promise((r) => setTimeout(r, 1_500));
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+    reapLeakedProfileHolder(params.profileDir);
+  };
+
+  return { context: ctx, teardown };
+}
+
+export interface PlainLoginBrowser {
+  // Idempotent: kills the spawned Chrome child and reaps the profile lock.
+  teardown: () => Promise<void>;
+}
+
+// Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
+// `--remote-debugging-port`, NO `connectOverCDP`, NO Playwright attach at all.
+//
+// WHY (2026-07-20, fully bisected on chad; see STATE.md "connect Google-login").
+// Google's OAUTH authorization flow (Trusty Squire's "Sign in with Google",
+// Gmail restricted scope) runs a "secure browser" integrity check that a plain
+// `google-chrome` PASSES but a CDP-attached Chrome FAILS with
+// `/v3/signin/rejected` — even a self-launched one, even with patchright, even
+// though the same CDP browser passes a DIRECT accounts.google.com sign-in. The
+// tell is the CDP attachment itself (NOT the launcher, NOT the flags, NOT
+// `navigator.webdriver` — all separately ruled out). The connect claim doesn't
+// need to drive the browser: the USER signs in over noVNC, completion is read
+// from the API (`installPoll`), and provider seeding is read from the profile's
+// on-disk cookie store (`profileHasProviderCookies`). So we spawn Chrome and
+// only ever kill it — never attach.
+//
+// Persistent profile is preserved (--user-data-dir=profileDir) so the Google/
+// GitHub session still lands in the bot's profile for later signups.
+export async function launchPlainLoginBrowser(params: {
+  binary: string;
+  profileDir: string;
+  // App mode (--app=URL) opens a chromeless window so the install page fills the
+  // phone-shaped noVNC framebuffer.
+  url: string;
+  window: { width: number; height: number };
+  env: NodeJS.ProcessEnv;
+  proxyServer: string | null;
+  extraArgs?: readonly string[];
+}): Promise<PlainLoginBrowser> {
+  let child: ChildProcess | null = null;
+  await withChromeStartupLock(async () => {
+    clearStaleSingletonLock(params.profileDir);
+    const argv = [
+      `--user-data-dir=${params.profileDir}`,
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--password-store=basic",
+      "--window-position=0,0",
+      `--window-size=${params.window.width},${params.window.height}`,
+      "--lang=en-US",
+      ...(params.extraArgs ?? []),
+      ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+      `--app=${params.url}`,
+    ];
+    const spawned = spawn(params.binary, argv, {
+      env: params.env,
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    child = spawned;
+    registerSelfManagedChrome(spawned);
+    let chromeStderr = "";
+    spawned.stderr?.on("data", (chunk: Buffer) => {
+      chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+    });
+    // Give Chrome a moment to actually come up (or die). Unlike the CDP path
+    // there is no devtools endpoint to poll — but a crash-on-launch (bad
+    // profile, missing lib) should surface here, not 15min later as a blank
+    // noVNC. If the process is already dead, throw with its stderr.
+    await new Promise((r) => setTimeout(r, 1_200));
+    if (spawned.exitCode !== null) {
+      reapLeakedProfileHolder(params.profileDir);
+      const detail = chromeStderr.trim();
+      throw new Error(
+        `plain login Chrome exited immediately (code ${spawned.exitCode})` +
+          `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+      );
+    }
+  });
+
+  let torn = false;
+  const teardown = async (): Promise<void> => {
+    if (torn) return;
+    torn = true;
+    if (child !== null) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* already gone */
+      }
+      await new Promise((r) => setTimeout(r, 1_500));
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+    }
+    reapLeakedProfileHolder(params.profileDir);
+  };
+  return { teardown };
+}
+
 export class BrowserController {
   // The persistent browser context. Persistent (launchPersistentContext)
   // rather than an ephemeral context so the profile carries the user's
