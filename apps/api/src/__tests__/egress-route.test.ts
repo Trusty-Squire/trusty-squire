@@ -332,6 +332,40 @@ describe("Egress Grants — /v1/egress", () => {
     expect(last.auth).toBeUndefined();
   });
 
+  it("honors a client-placed ${SECRET} and does NOT also stamp the stored shape", async () => {
+    const account = await h.deps.accountStore.createAccount("place@example.test", "P");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    // Stored with the DEFAULT (bearer) shape. Without the client-placement path
+    // the proxy would stamp `Authorization: Bearer <secret>`, which an xi-api-key
+    // provider (ElevenLabs) rejects — the real bug this fixes.
+    const store = await h.server.inject({
+      method: "POST", url: "/v1/vault/credentials/manual",
+      headers: { cookie, "content-type": "application/json" },
+      payload: {
+        service: "elevenlabs",
+        value: "sk-the-real-secret",
+        type: "api_key",
+        observed_hosts: ["api.elevenlabs.io"],
+      },
+    });
+    expect(store.statusCode).toBe(201);
+
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "elevenlabs" });
+    // The app places the marker itself — it knows ElevenLabs wants xi-api-key.
+    const res = await h.server.inject({
+      method: "GET",
+      url: `/v1/egress/${grant_id}/v2/voices?page_size=3`,
+      headers: { authorization: `Bearer ${egressToken}`, "xi-api-key": "${SECRET}" },
+    });
+    expect(res.statusCode).toBe(200);
+    const last = seen.at(-1)!;
+    // Placement honored + substituted…
+    expect(last.headers["xi-api-key"]).toBe("sk-the-real-secret");
+    // …and the bearer-default shape was NOT stamped on top (no collision).
+    expect(last.auth).toBeUndefined();
+  });
+
   it("rejects an invalid auth_shape at store time (400)", async () => {
     const account = await h.deps.accountStore.createAccount("bad@example.test", "B");
     const cookie = await webCookie(h.deps, account.id);
