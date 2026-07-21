@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.0.49 (2026-07-21)
+
+- fix(mcp): fence the operator browser off Squire's own control plane (confused-deputy) (#380)
+
 ## 1.0.48-rc.3 (2026-07-21)
 
 - **Security: fence the operator browser off Squire's own control plane.** The
