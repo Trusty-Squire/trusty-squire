@@ -539,6 +539,40 @@ export const registerVaultRoute: FastifyPluginAsync<{
     },
   );
 
+  // ── edit sign-in (login) hosts (web) ─────────────────────────
+  // The username/password twin of allowed-hosts: sets metadata.login_hosts —
+  // the sign-in pages where a browser-fill login may be sealed — and stamps
+  // auth_strategy, so setting hosts on a plain multi-field entry converts it
+  // into a proper login credential.
+  fastify.patch<{ Params: { id: string } }>(
+    "/v1/vault/credentials/:id/login-hosts",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = allowedHostsBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const normalised = normaliseLoginHosts(parsed.data.hosts);
+      if (normalised === null) {
+        reply.code(400).send({ error: "invalid_login_hosts" });
+        return;
+      }
+      const target = await opts.deps.credentialStore.findByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (target === null) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      await opts.deps.credentialStore.setLoginHosts(target.reference, normalised ?? []);
+      return reply.code(200).send({ login_hosts: normalised ?? [] });
+    },
+  );
+
   // ── rename entry (web) ───────────────────────────────────────
   // Changes the entry's label only — non-secret metadata, no re-encrypt.
   fastify.patch<{ Params: { id: string } }>(

@@ -182,6 +182,21 @@ export class PrismaCredentialStore implements CredentialStore {
     });
   }
 
+  async setLoginHosts(reference: string, hosts: string[]): Promise<void> {
+    // login_hosts lives in the metadata JSON, so read-modify-write to preserve
+    // the rest of it. Stamp auth_strategy so a plain entry becomes a login cred.
+    const row = await this.prisma.credential.findFirst({ where: { reference } });
+    if (row === null) return;
+    const current =
+      row.metadata !== null && typeof row.metadata === "object"
+        ? (row.metadata as Record<string, unknown>)
+        : {};
+    await this.prisma.credential.updateMany({
+      where: { reference },
+      data: { metadata: { ...current, login_hosts: hosts, auth_strategy: "username_password" } },
+    });
+  }
+
   async setLabel(reference: string, label: string): Promise<void> {
     await this.prisma.credential.updateMany({
       where: { reference },
