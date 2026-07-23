@@ -74,11 +74,21 @@ export async function decryptCard(
 ): Promise<Record<string, unknown>> {
   const salt = fromBase64(blob.salt);
   const iv = fromBase64(blob.iv);
-  const key = await deriveKey(passphrase, salt, blob.iter);
+  const ciphertext = fromBase64(blob.ct);
+  if (
+    blob.v !== 1
+    || blob.kdf !== "pbkdf2-sha256"
+    || salt.length !== 16
+    || iv.length !== 12
+    || ciphertext.length < 16
+  ) {
+    throw new Error("Invalid encrypted card");
+  }
+  const key = await deriveKey(passphrase, salt, ITERATIONS);
   const plaintext = await globalThis.crypto.subtle.decrypt(
     { name: "AES-GCM", iv, tagLength: 128 },
     key,
-    fromBase64(blob.ct),
+    ciphertext,
   );
   return JSON.parse(new TextDecoder().decode(plaintext)) as Record<string, unknown>;
 }

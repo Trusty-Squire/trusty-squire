@@ -47,6 +47,11 @@ export class InMemoryE2ECredentialStore implements E2ECredentialStore {
   async listByAccount(accountId: string): Promise<E2ECredentialSummary[]> {
     return [...this.records.values()]
       .filter((record) => record.accountId === accountId)
+      .sort((a, b) => {
+        const createdAtOrder = b.createdAt.getTime() - a.createdAt.getTime();
+        if (createdAtOrder !== 0) return createdAtOrder;
+        return a.id === b.id ? 0 : a.id < b.id ? 1 : -1;
+      })
       .map(({ id, label, createdAt }) => ({ id, label, createdAt }));
   }
 

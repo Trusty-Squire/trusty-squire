@@ -308,7 +308,7 @@ export interface ApiPrismaClient {
     }): Promise<{ id: string }>;
     findMany(args: {
       where: Record<string, unknown>;
-      orderBy: Record<string, unknown>;
+      orderBy: Record<string, unknown> | Array<Record<string, unknown>>;
       take: number;
     }): Promise<PaymentAuditEventRow[]>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;

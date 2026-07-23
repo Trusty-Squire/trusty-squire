@@ -9,16 +9,27 @@ const e2eBody = z.object({
 
 const paymentAuditBody = z.object({
   merchant: z.string().min(1).max(256),
-  amountCents: z.number().int(),
+  amountCents: z.number().int().min(0).max(2_147_483_647),
   currency: z.string().min(1).max(8),
   last4: z.string().regex(/^\d{4}$/),
   status: z.string().min(1).max(64),
   mandateId: z.string().max(128).optional(),
 });
 
+const paymentAuditCursor = z.string().transform((value, ctx) => {
+  const separator = value.lastIndexOf("|");
+  const createdAt = new Date(value.slice(0, separator));
+  const id = value.slice(separator + 1);
+  if (separator < 1 || Number.isNaN(createdAt.getTime()) || id.length === 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Invalid cursor" });
+    return z.NEVER;
+  }
+  return { createdAt, id };
+});
+
 const paymentAuditQuery = z.object({
   limit: z.coerce.number().int().min(1).max(200).optional(),
-  before: z.string().datetime().optional(),
+  before: paymentAuditCursor.optional(),
 });
 
 export const registerVaultE2ERoute: FastifyPluginAsync<{
@@ -131,7 +142,7 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         req.auth!.account_id,
         {
           ...(q.limit !== undefined ? { limit: q.limit } : {}),
-          ...(q.before !== undefined ? { before: new Date(q.before) } : {}),
+          ...(q.before !== undefined ? { before: q.before } : {}),
         },
       );
       const last = records.at(-1);
@@ -148,7 +159,7 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         })),
         next_before:
           records.length === (q.limit ?? 50) && last !== undefined
-            ? last.createdAt.toISOString()
+            ? `${last.createdAt.toISOString()}|${last.id}`
             : null,
       });
     },

@@ -36,4 +36,19 @@ describe("InMemoryE2ECredentialStore", () => {
     expect(await store.deleteForAccount(id, ACCOUNT)).toBe(true);
     expect(await store.getByIdForAccount(id, ACCOUNT)).toBeNull();
   });
+
+  it("lists newest credentials first with a stable ID tie-breaker", async () => {
+    let now = new Date("2026-07-23T12:00:00.000Z");
+    const store = new InMemoryE2ECredentialStore(() => now);
+    const firstId = await store.create(ACCOUNT, "First", "{}");
+    const tiedId = await store.create(ACCOUNT, "Tied", "{}");
+    now = new Date("2026-07-23T12:00:01.000Z");
+    const newestId = await store.create(ACCOUNT, "Newest", "{}");
+
+    const list = await store.listByAccount(ACCOUNT);
+    expect(list.map((record) => record.id)).toEqual([
+      newestId,
+      ...[firstId, tiedId].sort().reverse(),
+    ]);
+  });
 });

@@ -35,9 +35,16 @@ export class PrismaPaymentAuditStore implements PaymentAuditStore {
     const rows = await this.prisma.paymentAuditEvent.findMany({
       where: {
         account_id: accountId,
-        ...(opts.before !== undefined ? { created_at: { lt: opts.before } } : {}),
+        ...(opts.before !== undefined
+          ? {
+              OR: [
+                { created_at: { lt: opts.before.createdAt } },
+                { created_at: opts.before.createdAt, id: { lt: opts.before.id } },
+              ],
+            }
+          : {}),
       },
-      orderBy: { created_at: "desc" },
+      orderBy: [{ created_at: "desc" }, { id: "desc" }],
       take,
     });
     return rows.map((row) => ({

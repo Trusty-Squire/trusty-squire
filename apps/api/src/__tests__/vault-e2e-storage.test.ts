@@ -43,7 +43,7 @@ describe("E2E credential and payment audit routes", () => {
     nowMs = Date.parse("2026-07-23T12:00:00.000Z");
     deps = buildInMemoryDeps({
       sessionSecret: SESSION_SECRET,
-      now: () => new Date(nowMs++),
+      now: () => new Date(nowMs),
     });
     server = await buildServer({ deps });
     accountId = (await deps.accountStore.createAccount("one@example.test", "One")).id;
@@ -132,6 +132,24 @@ describe("E2E credential and payment audit routes", () => {
     expect(response.statusCode).toBe(400);
   });
 
+  it("rejects payment amounts outside the database integer range", async () => {
+    for (const amountCents of [-1, 2_147_483_648]) {
+      const response = await server.inject({
+        method: "POST",
+        url: "/v1/vault/payments/audit",
+        headers: { authorization: `Bearer ${agentToken}` },
+        payload: {
+          merchant: "Synthetic Books",
+          amountCents,
+          currency: "USD",
+          last4: "4242",
+          status: "approved",
+        },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+  });
+
   it("records last4-only payment audits and paginates newest first", async () => {
     const first = await server.inject({
       method: "POST",
@@ -149,6 +167,7 @@ describe("E2E credential and payment audit routes", () => {
       },
     });
     expect(first.statusCode).toBe(201);
+    const firstId = (first.json() as { id: string }).id;
 
     const second = await server.inject({
       method: "POST",
@@ -163,6 +182,7 @@ describe("E2E credential and payment audit routes", () => {
       },
     });
     expect(second.statusCode).toBe(201);
+    const secondId = (second.json() as { id: string }).id;
 
     const third = await server.inject({
       method: "POST",
@@ -177,6 +197,8 @@ describe("E2E credential and payment audit routes", () => {
       },
     });
     expect(third.statusCode).toBe(201);
+    const thirdId = (third.json() as { id: string }).id;
+    const expectedIds = [firstId, secondId, thirdId].sort().reverse();
 
     const list = await server.inject({
       method: "GET",
@@ -189,10 +211,7 @@ describe("E2E credential and payment audit routes", () => {
       next_before: string | null;
     };
     const events = firstPage.events;
-    expect(events.map((event) => event.merchant)).toEqual([
-      "Synthetic Market",
-      "Synthetic Cafe",
-    ]);
+    expect(events.map((event) => event.id)).toEqual(expectedIds.slice(0, 2));
     expect(firstPage.next_before).not.toBeNull();
 
     const next = await server.inject({
@@ -205,7 +224,8 @@ describe("E2E credential and payment audit routes", () => {
       next_before: string | null;
     };
     expect(secondPage.events).toHaveLength(1);
-    expect(secondPage.events[0]).toMatchObject({
+    expect([...events, ...secondPage.events].map((event) => event.id)).toEqual(expectedIds);
+    expect([...events, ...secondPage.events].find((event) => event.id === firstId)).toMatchObject({
       merchant: "Synthetic Books",
       amountCents: 1200,
       currency: "USD",

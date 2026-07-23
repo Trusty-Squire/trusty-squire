@@ -33,6 +33,24 @@ describe("encryptCard / decryptCard", () => {
     await expect(decryptCard("passphrase", tampered)).rejects.toThrow();
   });
 
+  it("validates the envelope before deriving with fixed parameters", async () => {
+    const blob = await encryptCard("passphrase", card);
+    await expect(decryptCard("passphrase", { ...blob, iter: 1 })).resolves.toEqual(card);
+
+    const invalid = [
+      { ...blob, v: 2 },
+      { ...blob, kdf: "unsupported" },
+      { ...blob, salt: btoa(String.fromCharCode(...new Uint8Array(15))) },
+      { ...blob, iv: btoa(String.fromCharCode(...new Uint8Array(11))) },
+      { ...blob, ct: btoa(String.fromCharCode(...new Uint8Array(15))) },
+    ];
+    for (const candidate of invalid) {
+      await expect(
+        decryptCard("passphrase", candidate as unknown as typeof blob),
+      ).rejects.toThrow("Invalid encrypted card");
+    }
+  });
+
   it("uses a new salt and IV for each encryption", async () => {
     const first = await encryptCard("passphrase", card);
     const second = await encryptCard("passphrase", card);

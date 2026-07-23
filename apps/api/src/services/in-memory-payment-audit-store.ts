@@ -16,9 +16,14 @@ export interface PaymentAuditRecord extends Omit<PaymentAuditInput, "mandateId">
   createdAt: Date;
 }
 
+export interface PaymentAuditCursor {
+  createdAt: Date;
+  id: string;
+}
+
 export interface PaymentAuditListOptions {
   limit?: number;
-  before?: Date;
+  before?: PaymentAuditCursor;
 }
 
 export interface PaymentAuditStore {
@@ -58,9 +63,16 @@ export class InMemoryPaymentAuditStore implements PaymentAuditStore {
       .filter(
         (record) =>
           record.accountId === accountId
-          && (opts.before === undefined || record.createdAt < opts.before),
+          && (opts.before === undefined
+            || record.createdAt < opts.before.createdAt
+            || (record.createdAt.getTime() === opts.before.createdAt.getTime()
+              && record.id < opts.before.id)),
       )
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .sort((a, b) => {
+        const createdAtOrder = b.createdAt.getTime() - a.createdAt.getTime();
+        if (createdAtOrder !== 0) return createdAtOrder;
+        return a.id === b.id ? 0 : a.id < b.id ? 1 : -1;
+      })
       .slice(0, take)
       .map((record) => ({ ...record }));
   }
