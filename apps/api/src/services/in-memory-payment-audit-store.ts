@@ -28,10 +28,7 @@ export interface PaymentAuditListOptions {
 
 export interface PaymentAuditStore {
   create(accountId: string, input: PaymentAuditInput): Promise<string>;
-  listByAccount(
-    accountId: string,
-    opts?: PaymentAuditListOptions,
-  ): Promise<PaymentAuditRecord[]>;
+  listByAccount(accountId: string, opts?: PaymentAuditListOptions): Promise<PaymentAuditRecord[]>;
 }
 
 export class InMemoryPaymentAuditStore implements PaymentAuditStore {
@@ -62,11 +59,11 @@ export class InMemoryPaymentAuditStore implements PaymentAuditStore {
     return this.records
       .filter(
         (record) =>
-          record.accountId === accountId
-          && (opts.before === undefined
-            || record.createdAt < opts.before.createdAt
-            || (record.createdAt.getTime() === opts.before.createdAt.getTime()
-              && record.id < opts.before.id)),
+          record.accountId === accountId &&
+          (opts.before === undefined ||
+            record.createdAt < opts.before.createdAt ||
+            (record.createdAt.getTime() === opts.before.createdAt.getTime() &&
+              record.id < opts.before.id)),
       )
       .sort((a, b) => {
         const createdAtOrder = b.createdAt.getTime() - a.createdAt.getTime();

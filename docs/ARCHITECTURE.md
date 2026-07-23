@@ -17,7 +17,7 @@ Trusty Squire has three jobs:
 1. Acquire credentials: sign up for services, complete onboarding, extract API
    keys, and learn repeatable service-specific flows.
 2. Store credentials: encrypt secrets in a vault that agents can write to but
-   cannot read from.
+   cannot read from, including opaque card blobs encrypted by a trusted client.
 3. Use credentials safely: inject secrets server-side for allowed calls or type
    sealed values inside a live browser session without returning them to chat.
 
@@ -37,6 +37,13 @@ credential such as an OAuth client ID and secret, or a username/password login.
 Agents may store credentials and request controlled use of credentials, but they
 cannot retrieve plaintext secret values. The vault records metadata and audit
 events, never exposing raw values back to the agent.
+
+**Client-encrypted card**
+
+A card record encrypted and decrypted by a trusted client with a client-held
+passphrase. The API stores and returns only the opaque ciphertext and records
+metadata-only payment audit events. The cryptographic and data-handling
+contract is owned by [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Operate session**
 
@@ -107,6 +114,8 @@ The important boundaries are:
 - Egress grants can inject secrets into provider calls only for allowed hosts
   and configured auth shapes.
 - Audit logs record operations and metadata, not secret values.
+- Client-encrypted card passphrases and derived keys remain outside the API;
+  the server stores only opaque ciphertext.
 
 This boundary applies even when the agent helped create the credential. A
 successful signup does not make the resulting API key visible to the model.

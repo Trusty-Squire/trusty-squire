@@ -42,14 +42,16 @@ export class RetentionCron {
 
   constructor(private readonly deps: RetentionCronDeps) {
     this.now = deps.now ?? (() => new Date());
-    this.pairingTokenRetentionHours = deps.pairingTokenRetentionHours
-      ?? Number.parseInt(process.env.PAIRING_TOKEN_RETENTION_HOURS ?? "1", 10);
+    this.pairingTokenRetentionHours =
+      deps.pairingTokenRetentionHours ??
+      Number.parseInt(process.env.PAIRING_TOKEN_RETENTION_HOURS ?? "1", 10);
     // Vault audit is the security event trail (who-touched-my-keys), so
     // it's kept far longer than ops telemetry — a year by default. Long
     // enough to be useful for an after-the-fact compromise investigation,
     // bounded so the table doesn't grow without limit.
-    this.vaultAuditRetentionDays = deps.vaultAuditRetentionDays
-      ?? Number.parseInt(process.env.VAULT_AUDIT_RETENTION_DAYS ?? "365", 10);
+    this.vaultAuditRetentionDays =
+      deps.vaultAuditRetentionDays ??
+      Number.parseInt(process.env.VAULT_AUDIT_RETENTION_DAYS ?? "365", 10);
   }
 
   // Starts the hourly schedule. Idempotent; calling start() while
@@ -122,12 +124,16 @@ export class RetentionCron {
       // doesn't grow unbounded (it never had a sweep before). Uses
       // emitted_at, which is indexed alongside (account_id, type).
       try {
-        const r = await (this.deps.authPrisma.vaultAuditEvent as unknown as {
-          deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
-        }).deleteMany({ where: { emitted_at: { lt: vaultAuditCutoff } } });
+        const r = await (
+          this.deps.authPrisma.vaultAuditEvent as unknown as {
+            deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+          }
+        ).deleteMany({ where: { emitted_at: { lt: vaultAuditCutoff } } });
         stats.vault_audit_deleted = r.count;
       } catch (err) {
-        stats.errors.push(`vault audit delete: ${err instanceof Error ? err.message : String(err)}`);
+        stats.errors.push(
+          `vault audit delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
 
       try {
@@ -136,7 +142,9 @@ export class RetentionCron {
         });
         stats.payment_audit_deleted = r.count;
       } catch (err) {
-        stats.errors.push(`payment audit delete: ${err instanceof Error ? err.message : String(err)}`);
+        stats.errors.push(
+          `payment audit delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
 

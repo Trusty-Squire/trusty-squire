@@ -10,8 +10,8 @@
 // database to exactly one schema and drops everything else.
 
 generator client {
-  provider = "prisma-client-js"
-  output   = "../node_modules/.prisma/api-client"
+  provider      = "prisma-client-js"
+  output        = "../node_modules/.prisma/api-client"
   // `native` for local dev; the openssl-3.0.x musl target for the
   // node:alpine deploy image (Alpine ships OpenSSL 3, not 1.1).
   binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
@@ -31,27 +31,27 @@ datasource db {
 // the lookup is best-effort — older tokens issued before the column
 // existed, and tokens issued during an ipinfo outage, both stay null.
 model MachineToken {
-  token              String    @id
-  created_at         DateTime  @default(now())
+  token             String    @id
+  created_at        DateTime  @default(now())
   // Vestigial: the free-signup quota was removed (provisioning is free
   // during beta), so nothing reads or increments this anymore. Kept in the
   // schema so `prisma db push` (the flag-less release_command) doesn't try
   // to DROP it — a destructive change that aborts the deploy. Remove via a
   // deliberate, flagged migration if/when quota stays gone for good.
-  signup_count       Int       @default(0)
-  last_used_at       DateTime?
+  signup_count      Int       @default(0)
+  last_used_at      DateTime?
   // The account this token is bound to. The PWA's
   // /v1/mcp/pair/:token/claim sets this.
-  paired_account_id  String?   @db.VarChar(26)
+  paired_account_id String?   @db.VarChar(26)
 
   // Install-time network classification. We don't refresh this over
   // time — if a user moves networks, future captcha events will tell
   // a different story than the install-time class, which is itself
   // useful signal.
-  asn_class          String?   // "residential" | "datacenter" | "unknown"
-  asn_number         String?   // e.g. "AS24940"
-  asn_org            String?   // e.g. "Hetzner Online GmbH"
-  asn_country        String?   // ISO 2-letter
+  asn_class   String? // "residential" | "datacenter" | "unknown"
+  asn_number  String? // e.g. "AS24940"
+  asn_org     String? // e.g. "Hetzner Online GmbH"
+  asn_country String? // ISO 2-letter
 
   @@index([paired_account_id])
   @@index([asn_class])
@@ -64,24 +64,24 @@ model MachineToken {
 //
 // Retention: short. These are operational telemetry, not user data.
 model CaptchaEvent {
-  id              String   @id @default(cuid())
-  occurred_at     DateTime @default(now())
-  machine_token   String?
-  service         String
+  id                 String   @id @default(cuid())
+  occurred_at        DateTime @default(now())
+  machine_token      String?
+  service            String
   // "turnstile" | "recaptcha" | "unknown"
-  captcha_kind    String
+  captcha_kind       String
   // Same shape as MachineToken.asn_class. Captured at event time, not
   // looked up retroactively — the machine might have moved networks
   // since install.
-  asn_class       String?
-  asn_org         String?
+  asn_class          String?
+  asn_org            String?
   // Did the bot escape the captcha or was the run abandoned?
-  blocked         Boolean
+  blocked            Boolean
   // Whether the bot's browser egress was routed through the
   // residential proxy on this run. null = pre-0.1.8 client that
   // didn't report it (distinct from false = ran direct). This is the
   // field that makes "did the proxy help?" answerable from data.
-  proxied         Boolean?
+  proxied            Boolean?
   // Spike telemetry (T3.2) — null on all three = pre-0.1.9 client.
   // captcha_variant: which captcha family the bot faced
   // ("recaptcha_v2" | "recaptcha_v3" | "turnstile" | "hcaptcha" |
@@ -110,21 +110,21 @@ model CaptchaEvent {
 // MCP pair-flow tokens. 10-minute TTL; single-use claim. Expiry is
 // enforced in code, not DB — a background cron can sweep expired rows.
 model PairingToken {
-  token                     String    @id
-  created_at                DateTime  @default(now())
-  expires_at                DateTime
-  status                    String    // "pending" | "claimed" | "expired" | "delivered"
-  agent_identity            String?
-  agent_session_raw_token   String?
-  account_id                String?   @db.VarChar(26)
+  token                      String   @id
+  created_at                 DateTime @default(now())
+  expires_at                 DateTime
+  status                     String // "pending" | "claimed" | "expired" | "delivered"
+  agent_identity             String?
+  agent_session_raw_token    String?
+  account_id                 String?  @db.VarChar(26)
   // Tier 0 → Tier 1 upgrade hook. When the CLI declared its machine
   // token at /initiate, the eventual /claim marks the machine token
   // paired so the quota counter stops.
-  machine_token             String?
+  machine_token              String?
   // Browser-side install choices returned to the CLI on first status poll.
-  registry_enabled          Boolean?
+  registry_enabled           Boolean?
   consent_operator_inbox_otp Boolean?
-  proxy_url                 String?
+  proxy_url                  String?
 
   @@index([machine_token])
   @@index([status, expires_at])
@@ -166,10 +166,10 @@ model Account {
   // so a cancellation is visibly registered while access continues to term.
   cancel_at           DateTime?
 
-  oauth_identities OAuthIdentity[]
-  web_sessions     WebSession[]
-  agent_sessions   AgentSession[]
-  e2e_credentials  E2ECredential[]
+  oauth_identities     OAuthIdentity[]
+  web_sessions         WebSession[]
+  agent_sessions       AgentSession[]
+  e2e_credentials      E2ECredential[]
   payment_audit_events PaymentAuditEvent[]
 
   @@index([stripe_customer_id])
@@ -180,7 +180,7 @@ model Account {
 model OAuthIdentity {
   id               String   @id @db.VarChar(26)
   account_id       String   @db.VarChar(26)
-  provider         String   // "google" | "github"
+  provider         String // "google" | "github"
   provider_user_id String
   email            String
   created_at       DateTime @default(now())
@@ -226,7 +226,7 @@ model AgentSession {
   use_count         Int       @default(0)
   revoked_at        DateTime?
   revocation_reason String?
-  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+  account           Account   @relation(fields: [account_id], references: [id], onDelete: Cascade)
 
   @@index([account_id])
 }
@@ -276,11 +276,11 @@ model Credential {
 // trail. Add a sweep later if the table grows past a few million
 // rows per account.
 model VaultAuditEvent {
-  id          String   @id @db.VarChar(26)
-  account_id  String   @db.VarChar(26)
-  type        String
-  payload     Json
-  emitted_at  DateTime @default(now())
+  id         String   @id @db.VarChar(26)
+  account_id String   @db.VarChar(26)
+  type       String
+  payload    Json
+  emitted_at DateTime @default(now())
 
   @@index([account_id, emitted_at])
   @@index([type, emitted_at])
@@ -290,12 +290,12 @@ model VaultAuditEvent {
 // Opaque client-encrypted credential blobs. The API stores the blob
 // verbatim and cannot decrypt or inspect it.
 model E2ECredential {
-  id          String   @id @db.VarChar(26)
-  account_id  String   @db.VarChar(26)
-  label       String
-  blob        String
-  created_at  DateTime @default(now())
-  updated_at  DateTime @updatedAt
+  id         String   @id @db.VarChar(26)
+  account_id String   @db.VarChar(26)
+  label      String
+  blob       String
+  created_at DateTime @default(now())
+  updated_at DateTime @updatedAt
 
   account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
 

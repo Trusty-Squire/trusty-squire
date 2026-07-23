@@ -6,9 +6,7 @@ const OTHER_ACCOUNT = "01HOTHERBBBBBBBBBBBBBBBBBB";
 
 describe("InMemoryE2ECredentialStore", () => {
   it("roundtrips an opaque blob while metadata lists omit it", async () => {
-    const store = new InMemoryE2ECredentialStore(
-      () => new Date("2026-07-23T12:00:00.000Z"),
-    );
+    const store = new InMemoryE2ECredentialStore(() => new Date("2026-07-23T12:00:00.000Z"));
     const blob = '{ "ciphertext": "synthetic", "iv": [1, 2, 3] }';
 
     const id = await store.create(ACCOUNT, "Test card", blob);

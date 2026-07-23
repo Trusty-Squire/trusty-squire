@@ -45,9 +45,9 @@ describe("encryptCard / decryptCard", () => {
       { ...blob, ct: btoa(String.fromCharCode(...new Uint8Array(15))) },
     ];
     for (const candidate of invalid) {
-      await expect(
-        decryptCard("passphrase", candidate as unknown as typeof blob),
-      ).rejects.toThrow("Invalid encrypted card");
+      await expect(decryptCard("passphrase", candidate as unknown as typeof blob)).rejects.toThrow(
+        "Invalid encrypted card",
+      );
     }
   });
 

@@ -32,7 +32,7 @@ just helped create** — a successful signup does not make the resulting API key
 visible to the model. The vault returns metadata, field names, masked values, and
 references; never the raw value.
 
-### Encryption at rest
+### Encryption at rest: server-managed credentials
 
 Credentials are protected with **AES-256-GCM envelope encryption**
 (`packages/vault/src/encryption.ts`):
@@ -53,6 +53,27 @@ master key (LocalKMS)  ──wraps──▶  per-credential KEK
   a rotation window and every wrapped key is re-wrapped onto the new master key).
   See [`docs/VAULT-OPERATIONS.md`](docs/VAULT-OPERATIONS.md).
 
+### Client-encrypted card data
+
+Card data uses a separate end-to-end encrypted path
+(`packages/vault/src/e2e.ts`). The client derives an AES-256-GCM key from a
+client-held passphrase with PBKDF2-SHA-256 (600,000 iterations and a fresh
+16-byte salt), then encrypts with a fresh 12-byte IV and a 128-bit
+authentication tag. The passphrase and derived key must remain on the client;
+the API receives and stores only the serialized encrypted blob and therefore
+cannot decrypt or inspect the card.
+
+The account-scoped API can return that opaque blob to an authenticated web or
+agent session so a trusted client can decrypt it. List responses expose only
+the record ID, label, and creation time. Losing the client passphrase makes the
+card unrecoverable; server master-key rotation does not affect these blobs.
+
+Payment audit events are deliberately metadata-only: merchant, amount,
+currency, card last four digits, status, and an optional mandate ID. The API
+validates `last4` as exactly four digits; the audit schema has no PAN or CVV
+fields, and stored events never include them. Payment audit events use the vault
+audit retention window, which defaults to 365 days.
+
 ### Trust boundaries
 
 - The **user** may paste or create a secret.
@@ -64,6 +85,8 @@ master key (LocalKMS)  ──wraps──▶  per-credential KEK
 - **Egress grants** inject a secret into an outbound provider request only for
   allowed hosts and configured auth shapes.
 - **Audit logs** record operations and metadata, not secret values.
+- For client-encrypted cards, the trusted client alone holds the passphrase and
+  decrypts the blob; the API stores opaque ciphertext it cannot decrypt.
 
 ### Using a credential without exposing the key: egress grants
 

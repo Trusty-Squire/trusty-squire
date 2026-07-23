@@ -62,7 +62,9 @@ describe("RetentionCron", () => {
     expect(stats.errors).toEqual([]);
 
     // Vault audit cutoff: now - 365 days
-    const vaultAuditDelete = calls.find((c) => c.table === "VaultAuditEvent" && c.op === "deleteMany");
+    const vaultAuditDelete = calls.find(
+      (c) => c.table === "VaultAuditEvent" && c.op === "deleteMany",
+    );
     expect(vaultAuditDelete).toBeDefined();
     const vaultWhere = vaultAuditDelete!.where["emitted_at"] as { lt: Date };
     expect(vaultWhere.lt).toEqual(new Date("2025-01-15T12:00:00Z"));

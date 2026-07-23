@@ -17,11 +17,7 @@ function fromBase64(value: string): Uint8Array {
   return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 }
 
-async function deriveKey(
-  passphrase: string,
-  salt: Uint8Array,
-  iterations: number,
-) {
+async function deriveKey(passphrase: string, salt: Uint8Array, iterations: number) {
   const keyMaterial = await globalThis.crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(passphrase),
@@ -45,6 +41,13 @@ async function deriveKey(
   ]);
 }
 
+/**
+ * Encrypts card fields entirely on the trusted client.
+ *
+ * The caller must keep the passphrase out of server requests, agent context,
+ * logs, and persistent storage. Only the returned opaque blob is safe to send
+ * to the E2E vault API.
+ */
 export async function encryptCard(
   passphrase: string,
   card: Record<string, unknown>,
@@ -68,6 +71,12 @@ export async function encryptCard(
   };
 }
 
+/**
+ * Decrypts an E2E card blob on the trusted client.
+ *
+ * Decryption always uses this implementation's fixed KDF work factor rather
+ * than trusting the untrusted serialized `iter` field.
+ */
 export async function decryptCard(
   passphrase: string,
   blob: E2EBlob,
@@ -76,11 +85,11 @@ export async function decryptCard(
   const iv = fromBase64(blob.iv);
   const ciphertext = fromBase64(blob.ct);
   if (
-    blob.v !== 1
-    || blob.kdf !== "pbkdf2-sha256"
-    || salt.length !== 16
-    || iv.length !== 12
-    || ciphertext.length < 16
+    blob.v !== 1 ||
+    blob.kdf !== "pbkdf2-sha256" ||
+    salt.length !== 16 ||
+    iv.length !== 12 ||
+    ciphertext.length < 16
   ) {
     throw new Error("Invalid encrypted card");
   }

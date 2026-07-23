@@ -24,18 +24,16 @@ import { registerVaultE2ERoute } from "./routes/vault-e2e.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
 import { registerEgressRoutes } from "./routes/egress.js";
 import type { EgressGrantStore } from "./services/egress-grant.js";
+import type { EmailForwarder } from "./services/email-forwarder.js";
 import type { HttpProxyExecutor } from "./services/http-proxy.js";
+import type { StripeClient } from "./services/stripe-client.js";
 import { registerMcpInstallRoute } from "./routes/mcp-install.js";
 import { registerMcpSessionsRoute } from "./routes/mcp-sessions.js";
 import { registerShortRoute } from "./routes/short.js";
 import { registerNotifyRoute } from "./routes/notify.js";
 import { registerOperatorOtpRoute } from "./routes/operator-otp.js";
 import { registerWorkspaceInboxRoute } from "./routes/workspace-inbox.js";
-import {
-  buildInMemoryDeps,
-  type ApiDeps,
-  type BuildInMemoryDepsOpts,
-} from "./services/deps.js";
+import { buildInMemoryDeps, type ApiDeps, type BuildInMemoryDepsOpts } from "./services/deps.js";
 
 export interface BuildServerOpts {
   deps?: ApiDeps;
@@ -50,11 +48,11 @@ export interface BuildServerOpts {
   // Test seam — injects a stub EmailForwarder into the notify
   // route. Production builds leave this undefined and the route
   // builds its own forwarder from GMAIL_USER / GMAIL_APP_PASSWORD.
-  emailForwarder?: import("./services/email-forwarder.js").EmailForwarder;
+  emailForwarder?: EmailForwarder;
   // Test seam — injects a fake StripeClient into the billing + webhook
   // routes (no live Stripe calls, no real signature). Production leaves
   // this undefined → built from STRIPE_SECRET_KEY env (null when unset).
-  stripeClient?: import("./services/stripe-client.js").StripeClient;
+  stripeClient?: StripeClient;
   // Test seam for asserting structured logs. Supplying a stream enables the
   // same redacted Pino logger production uses, at debug level.
   logStream?: Writable;
@@ -77,7 +75,9 @@ function resolveSessionSecret(): string {
   const secret = process.env.SESSION_JWT_SECRET;
   if (secret !== undefined && secret.length > 0) return secret;
   if (process.env.NODE_ENV === "production") {
-    throw new Error("SESSION_JWT_SECRET must be set in production (refusing to use a dev fallback)");
+    throw new Error(
+      "SESSION_JWT_SECRET must be set in production (refusing to use a dev fallback)",
+    );
   }
   return "dev-secret-do-not-use";
 }
@@ -164,16 +164,15 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
 
   await fastify.register(fastifyCookie);
 
-
   // Replace the default JSON parser with one that also stashes the raw
   // body string on req.rawBody. Webhook signature verification (Svix /
   // Resend) must HMAC the exact bytes received — a re-serialised object
   // would not byte-match the sender's signed payload.
   fastify.addContentTypeParser(
-    'application/json',
-    { parseAs: 'string' },
+    "application/json",
+    { parseAs: "string" },
     (req, body: string | Buffer, done) => {
-      const text = typeof body === 'string' ? body : body.toString('utf8');
+      const text = typeof body === "string" ? body : body.toString("utf8");
       req.rawBody = text;
       if (text.trim().length === 0) {
         // Mirror Fastify's default: empty JSON body parses to undefined.

@@ -27,6 +27,12 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/vault/use` | agent | Retrieve a vault credential for allowed egress |
 | `POST` | `/v1/vault/browser-fill` | agent | Seal login/password fields for allowed browser sign-in hosts |
 | `GET` | `/v1/vault/credentials` | web | List vault credentials |
+| `POST` | `/v1/vault/e2e` | web | Store an opaque, client-encrypted card blob |
+| `GET` | `/v1/vault/e2e` | web/agent | List client-encrypted card metadata without blobs |
+| `GET` | `/v1/vault/e2e/:id` | web/agent | Retrieve an account-owned encrypted card blob |
+| `DELETE` | `/v1/vault/e2e/:id` | web | Delete an account-owned encrypted card blob |
+| `POST` | `/v1/vault/payments/audit` | agent | Record a payment attempt without PAN or CVV |
+| `GET` | `/v1/vault/payments/audit` | web/agent | List payment attempts, newest first, with keyset pagination |
 | `GET` | `/health` | none | Liveness |
 
 ## Auth model

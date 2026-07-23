@@ -38,40 +38,32 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
   requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
 }> = async (fastify, opts) => {
-  fastify.post(
-    "/v1/vault/e2e",
-    { preHandler: opts.requireWeb },
-    async (req, reply) => {
-      const auth = req.auth!;
-      if (auth.kind !== "web") return;
-      const parsed = e2eBody.safeParse(req.body);
-      if (!parsed.success) {
-        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-        return;
-      }
-      const id = await opts.deps.e2eCredentialStore.create(
-        auth.account_id,
-        parsed.data.label,
-        parsed.data.blob,
-      );
-      return reply.code(201).send({ id });
-    },
-  );
+  fastify.post("/v1/vault/e2e", { preHandler: opts.requireWeb }, async (req, reply) => {
+    const auth = req.auth!;
+    if (auth.kind !== "web") return;
+    const parsed = e2eBody.safeParse(req.body);
+    if (!parsed.success) {
+      reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+      return;
+    }
+    const id = await opts.deps.e2eCredentialStore.create(
+      auth.account_id,
+      parsed.data.label,
+      parsed.data.blob,
+    );
+    return reply.code(201).send({ id });
+  });
 
-  fastify.get(
-    "/v1/vault/e2e",
-    { preHandler: opts.requireAny },
-    async (req, reply) => {
-      const records = await opts.deps.e2eCredentialStore.listByAccount(req.auth!.account_id);
-      return reply.code(200).send(
-        records.map((record) => ({
-          id: record.id,
-          label: record.label,
-          createdAt: record.createdAt.toISOString(),
-        })),
-      );
-    },
-  );
+  fastify.get("/v1/vault/e2e", { preHandler: opts.requireAny }, async (req, reply) => {
+    const records = await opts.deps.e2eCredentialStore.listByAccount(req.auth!.account_id);
+    return reply.code(200).send(
+      records.map((record) => ({
+        id: record.id,
+        label: record.label,
+        createdAt: record.createdAt.toISOString(),
+      })),
+    );
+  });
 
   fastify.get<{ Params: { id: string } }>(
     "/v1/vault/e2e/:id",
@@ -128,40 +120,33 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
     },
   );
 
-  fastify.get(
-    "/v1/vault/payments/audit",
-    { preHandler: opts.requireAny },
-    async (req, reply) => {
-      const parsed = paymentAuditQuery.safeParse(req.query);
-      if (!parsed.success) {
-        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-        return;
-      }
-      const q = parsed.data;
-      const records = await opts.deps.paymentAuditStore.listByAccount(
-        req.auth!.account_id,
-        {
-          ...(q.limit !== undefined ? { limit: q.limit } : {}),
-          ...(q.before !== undefined ? { before: q.before } : {}),
-        },
-      );
-      const last = records.at(-1);
-      return reply.code(200).send({
-        events: records.map((record) => ({
-          id: record.id,
-          merchant: record.merchant,
-          amountCents: record.amountCents,
-          currency: record.currency,
-          last4: record.last4,
-          status: record.status,
-          mandateId: record.mandateId,
-          createdAt: record.createdAt.toISOString(),
-        })),
-        next_before:
-          records.length === (q.limit ?? 50) && last !== undefined
-            ? `${last.createdAt.toISOString()}|${last.id}`
-            : null,
-      });
-    },
-  );
+  fastify.get("/v1/vault/payments/audit", { preHandler: opts.requireAny }, async (req, reply) => {
+    const parsed = paymentAuditQuery.safeParse(req.query);
+    if (!parsed.success) {
+      reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+      return;
+    }
+    const q = parsed.data;
+    const records = await opts.deps.paymentAuditStore.listByAccount(req.auth!.account_id, {
+      ...(q.limit !== undefined ? { limit: q.limit } : {}),
+      ...(q.before !== undefined ? { before: q.before } : {}),
+    });
+    const last = records.at(-1);
+    return reply.code(200).send({
+      events: records.map((record) => ({
+        id: record.id,
+        merchant: record.merchant,
+        amountCents: record.amountCents,
+        currency: record.currency,
+        last4: record.last4,
+        status: record.status,
+        mandateId: record.mandateId,
+        createdAt: record.createdAt.toISOString(),
+      })),
+      next_before:
+        records.length === (q.limit ?? 50) && last !== undefined
+          ? `${last.createdAt.toISOString()}|${last.id}`
+          : null,
+    });
+  });
 };

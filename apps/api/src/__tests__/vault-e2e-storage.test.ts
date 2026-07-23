@@ -74,9 +74,7 @@ describe("E2E credential and payment audit routes", () => {
       headers: { authorization: `Bearer ${agentToken}` },
     });
     expect(list.statusCode).toBe(200);
-    expect(list.json()).toEqual([
-      expect.objectContaining({ id, label: "Synthetic card" }),
-    ]);
+    expect(list.json()).toEqual([expect.objectContaining({ id, label: "Synthetic card" })]);
     expect(list.json()[0]).not.toHaveProperty("blob");
 
     const get = await server.inject({
