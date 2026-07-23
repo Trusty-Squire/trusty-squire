@@ -21,7 +21,7 @@ export class PrismaE2ECredentialStore implements E2ECredentialStore {
     const rows = await this.prisma.e2ECredential.findMany({
       where: { account_id: accountId },
       select: { id: true, label: true, created_at: true },
-      orderBy: { created_at: "desc" },
+      orderBy: [{ created_at: "desc" }, { id: "desc" }] as unknown as Record<string, unknown>,
     });
     return rows.map((row) => ({
       id: row.id,
