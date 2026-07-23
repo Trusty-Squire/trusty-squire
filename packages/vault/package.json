@@ -10,6 +10,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./e2e": {
+      "types": "./dist/e2e.d.ts",
+      "import": "./dist/e2e.js"
     }
   },
   "scripts": {
