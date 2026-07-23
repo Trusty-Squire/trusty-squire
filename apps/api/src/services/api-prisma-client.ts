@@ -112,6 +112,27 @@ interface VaultAuditEventRow {
   emitted_at: Date;
 }
 
+interface E2ECredentialRow {
+  id: string;
+  account_id: string;
+  label: string;
+  blob: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface PaymentAuditEventRow {
+  id: string;
+  account_id: string;
+  merchant: string;
+  amount_cents: number;
+  currency: string;
+  last4: string;
+  status: string;
+  mandate_id: string | null;
+  created_at: Date;
+}
+
 interface EgressGrantRow {
   id: string;
   account_id: string;
@@ -265,6 +286,30 @@ export interface ApiPrismaClient {
       orderBy?: Record<string, unknown>;
       take?: number;
     }): Promise<VaultAuditEventRow[]>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  e2ECredential: {
+    create(args: {
+      data: Record<string, unknown>;
+      select: { id: true };
+    }): Promise<{ id: string }>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      select: { id: true; label: true; created_at: true };
+      orderBy: Record<string, unknown>;
+    }): Promise<Array<Pick<E2ECredentialRow, "id" | "label" | "created_at">>>;
+    findFirst(args: { where: Record<string, unknown> }): Promise<E2ECredentialRow | null>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  paymentAuditEvent: {
+    create(args: {
+      data: Record<string, unknown>;
+      select: { id: true };
+    }): Promise<{ id: string }>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      orderBy: Record<string, unknown>;
+    }): Promise<PaymentAuditEventRow[]>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
   egressGrant: {

@@ -33,6 +33,12 @@ function makeFakes(): {
           return { count: 5 };
         },
       } as unknown as never,
+      paymentAuditEvent: {
+        deleteMany: async (args: { where: Record<string, unknown> }) => {
+          calls.push({ table: "PaymentAuditEvent", op: "deleteMany", where: args.where });
+          return { count: 3 };
+        },
+      } as unknown as never,
     } as never,
   };
 }
@@ -52,6 +58,7 @@ describe("RetentionCron", () => {
 
     expect(stats.pairing_tokens_deleted).toBe(2);
     expect(stats.vault_audit_deleted).toBe(5);
+    expect(stats.payment_audit_deleted).toBe(3);
     expect(stats.errors).toEqual([]);
 
     // Vault audit cutoff: now - 365 days
@@ -59,6 +66,11 @@ describe("RetentionCron", () => {
     expect(vaultAuditDelete).toBeDefined();
     const vaultWhere = vaultAuditDelete!.where["emitted_at"] as { lt: Date };
     expect(vaultWhere.lt).toEqual(new Date("2025-01-15T12:00:00Z"));
+
+    const paymentAuditDelete = calls.find((c) => c.table === "PaymentAuditEvent");
+    expect(paymentAuditDelete).toBeDefined();
+    const paymentWhere = paymentAuditDelete!.where["created_at"] as { lt: Date };
+    expect(paymentWhere.lt).toEqual(new Date("2025-01-15T12:00:00Z"));
 
     // Pairing token cutoff: now - 1 hour
     const pairingDelete = calls.find((c) => c.table === "PairingToken");
@@ -82,14 +94,20 @@ describe("RetentionCron", () => {
             throw new Error("vault boom");
           },
         } as unknown as never,
+        paymentAuditEvent: {
+          deleteMany: async () => {
+            throw new Error("payment boom");
+          },
+        } as unknown as never,
       } as never,
       now: () => now,
     });
 
     const stats = await cron.runOnce();
-    expect(stats.errors).toHaveLength(2);
+    expect(stats.errors).toHaveLength(3);
     expect(stats.errors[0]).toMatch(/pairing/);
     expect(stats.errors[1]).toMatch(/vault audit/);
+    expect(stats.errors[2]).toMatch(/payment audit/);
   });
 
   it("status() exposes last-run state", async () => {
@@ -111,6 +129,7 @@ describe("RetentionCron", () => {
     const stats = await cron.runOnce();
     expect(stats.pairing_tokens_deleted).toBe(0);
     expect(stats.vault_audit_deleted).toBe(0);
+    expect(stats.payment_audit_deleted).toBe(0);
     expect(stats.errors).toEqual([]);
   });
 });
