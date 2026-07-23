@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { encryptCard } from "@trusty-squire/vault/e2e";
 import { AppShell } from "../../components/AppShell";
 import { ApiError, apiGet, apiPost } from "../../lib/api";
+import { COUNTRIES } from "../../lib/countries";
 import { evaluatePrf } from "../../lib/passkey";
 
 interface SavedCard {
@@ -230,12 +231,11 @@ export default function CardPage() {
           />
         </div>
         <div className="field">
-          <label htmlFor="billing-state">State</label>
+          <label htmlFor="billing-state">State / Province / Region</label>
           <input
             id="billing-state"
             value={state}
             onChange={(event) => setState(event.target.value)}
-            required
           />
         </div>
         <div className="field">
@@ -250,12 +250,21 @@ export default function CardPage() {
         </div>
         <div className="field">
           <label htmlFor="billing-country">Country</label>
-          <input
+          <select
             id="billing-country"
             value={country}
             onChange={(event) => setCountry(event.target.value)}
             required
-          />
+          >
+            <option value="" disabled>
+              Select country
+            </option>
+            {COUNTRIES.map(({ code, name }) => (
+              <option key={code} value={code}>
+                {name}
+              </option>
+            ))}
+          </select>
         </div>
 
         {error !== null && <div className="form-err">{error}</div>}
