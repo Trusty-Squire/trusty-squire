@@ -61,3 +61,9 @@ export {
   InMemoryVaultAuditStore,
   type InMemoryAuditEvent,
 } from "./in-memory-stores.js";
+
+export {
+  decryptCard,
+  encryptCard,
+  type E2EBlob,
+} from "./e2e.js";
