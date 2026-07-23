@@ -2,6 +2,7 @@ import { ulid } from "ulid";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 import type {
   PaymentAuditInput,
+  PaymentAuditListOptions,
   PaymentAuditRecord,
   PaymentAuditStore,
 } from "./in-memory-payment-audit-store.js";
@@ -26,10 +27,18 @@ export class PrismaPaymentAuditStore implements PaymentAuditStore {
     return row.id;
   }
 
-  async listByAccount(accountId: string): Promise<PaymentAuditRecord[]> {
+  async listByAccount(
+    accountId: string,
+    opts: PaymentAuditListOptions = {},
+  ): Promise<PaymentAuditRecord[]> {
+    const take = Math.min(Math.max(opts.limit ?? 50, 1), 200);
     const rows = await this.prisma.paymentAuditEvent.findMany({
-      where: { account_id: accountId },
+      where: {
+        account_id: accountId,
+        ...(opts.before !== undefined ? { created_at: { lt: opts.before } } : {}),
+      },
       orderBy: { created_at: "desc" },
+      take,
     });
     return rows.map((row) => ({
       id: row.id,

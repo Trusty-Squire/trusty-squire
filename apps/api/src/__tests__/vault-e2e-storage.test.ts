@@ -116,7 +116,23 @@ describe("E2E credential and payment audit routes", () => {
     expect(missing.statusCode).toBe(404);
   });
 
-  it("records last4-only payment audits and lists them newest first", async () => {
+  it("rejects a full PAN in last4", async () => {
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/vault/payments/audit",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {
+        merchant: "Synthetic Books",
+        amountCents: 1200,
+        currency: "USD",
+        last4: "4242424242424242",
+        status: "approved",
+      },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("records last4-only payment audits and paginates newest first", async () => {
     const first = await server.inject({
       method: "POST",
       url: "/v1/vault/payments/audit",
@@ -148,25 +164,57 @@ describe("E2E credential and payment audit routes", () => {
     });
     expect(second.statusCode).toBe(201);
 
+    const third = await server.inject({
+      method: "POST",
+      url: "/v1/vault/payments/audit",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {
+        merchant: "Synthetic Market",
+        amountCents: 975,
+        currency: "USD",
+        last4: "1234",
+        status: "approved",
+      },
+    });
+    expect(third.statusCode).toBe(201);
+
     const list = await server.inject({
       method: "GET",
-      url: "/v1/vault/payments/audit",
+      url: "/v1/vault/payments/audit?limit=2",
       headers: { cookie: webCookie },
     });
     expect(list.statusCode).toBe(200);
-    const events = list.json() as Array<Record<string, unknown>>;
+    const firstPage = list.json() as {
+      events: Array<Record<string, unknown>>;
+      next_before: string | null;
+    };
+    const events = firstPage.events;
     expect(events.map((event) => event.merchant)).toEqual([
+      "Synthetic Market",
       "Synthetic Cafe",
-      "Synthetic Books",
     ]);
-    expect(events[1]).toMatchObject({
+    expect(firstPage.next_before).not.toBeNull();
+
+    const next = await server.inject({
+      method: "GET",
+      url: `/v1/vault/payments/audit?limit=2&before=${encodeURIComponent(firstPage.next_before!)}`,
+      headers: { cookie: webCookie },
+    });
+    const secondPage = next.json() as {
+      events: Array<Record<string, unknown>>;
+      next_before: string | null;
+    };
+    expect(secondPage.events).toHaveLength(1);
+    expect(secondPage.events[0]).toMatchObject({
+      merchant: "Synthetic Books",
       amountCents: 1200,
       currency: "USD",
       last4: "1111",
       status: "approved",
       mandateId: "mandate_synthetic",
     });
-    expect(JSON.stringify(events)).not.toContain("4111111111111111");
+    expect(secondPage.next_before).toBeNull();
+    expect(JSON.stringify([...events, ...secondPage.events])).not.toContain("4111111111111111");
     expect(events[0]).not.toHaveProperty("pan");
     expect(events[0]).not.toHaveProperty("cvv");
 
@@ -175,6 +223,6 @@ describe("E2E credential and payment audit routes", () => {
       url: "/v1/vault/payments/audit",
       headers: { cookie: otherWebCookie },
     });
-    expect(otherList.json()).toEqual([]);
+    expect(otherList.json()).toEqual({ events: [], next_before: null });
   });
 });

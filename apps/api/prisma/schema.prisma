@@ -169,6 +169,8 @@ model Account {
   oauth_identities OAuthIdentity[]
   web_sessions     WebSession[]
   agent_sessions   AgentSession[]
+  e2e_credentials  E2ECredential[]
+  payment_audit_events PaymentAuditEvent[]
 
   @@index([stripe_customer_id])
 }
@@ -295,6 +297,8 @@ model E2ECredential {
   created_at  DateTime @default(now())
   updated_at  DateTime @updatedAt
 
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
   @@index([account_id])
 }
 
@@ -309,6 +313,8 @@ model PaymentAuditEvent {
   status       String
   mandate_id   String?
   created_at   DateTime @default(now())
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
 
   @@index([account_id])
 }
