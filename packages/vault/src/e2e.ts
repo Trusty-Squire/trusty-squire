@@ -1,10 +1,6 @@
-const ITERATIONS = 600_000;
-
 export interface E2EBlob {
   v: 1;
-  kdf: "pbkdf2-sha256";
-  iter: number;
-  salt: string;
+  cipher: "aes-256-gcm";
   iv: string;
   ct: string;
 }
@@ -17,25 +13,8 @@ function fromBase64(value: string): Uint8Array {
   return Uint8Array.from(atob(value), (character) => character.charCodeAt(0));
 }
 
-async function deriveKey(passphrase: string, salt: Uint8Array, iterations: number) {
-  const keyMaterial = await globalThis.crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(passphrase),
-    "PBKDF2",
-    false,
-    ["deriveBits"],
-  );
-  const keyBytes = await globalThis.crypto.subtle.deriveBits(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt,
-      iterations,
-    },
-    keyMaterial,
-    256,
-  );
-  return globalThis.crypto.subtle.importKey("raw", keyBytes, "AES-GCM", false, [
+function importKey(key: Uint8Array) {
+  return globalThis.crypto.subtle.importKey("raw", key, "AES-GCM", false, [
     "encrypt",
     "decrypt",
   ]);
@@ -44,28 +23,25 @@ async function deriveKey(passphrase: string, salt: Uint8Array, iterations: numbe
 /**
  * Encrypts card fields entirely on the trusted client.
  *
- * The caller must keep the passphrase out of server requests, agent context,
- * logs, and persistent storage. Only the returned opaque blob is safe to send
- * to the E2E vault API.
+ * The caller must keep the key out of server requests, agent context, logs,
+ * and persistent storage. Only the returned opaque blob is safe to send to the
+ * E2E vault API.
  */
 export async function encryptCard(
-  passphrase: string,
+  key: Uint8Array,
   card: Record<string, unknown>,
 ): Promise<E2EBlob> {
-  const salt = globalThis.crypto.getRandomValues(new Uint8Array(16));
   const iv = globalThis.crypto.getRandomValues(new Uint8Array(12));
-  const key = await deriveKey(passphrase, salt, ITERATIONS);
+  const cryptoKey = await importKey(key);
   const ciphertext = await globalThis.crypto.subtle.encrypt(
     { name: "AES-GCM", iv, tagLength: 128 },
-    key,
+    cryptoKey,
     new TextEncoder().encode(JSON.stringify(card)),
   );
 
   return {
     v: 1,
-    kdf: "pbkdf2-sha256",
-    iter: ITERATIONS,
-    salt: toBase64(salt),
+    cipher: "aes-256-gcm",
     iv: toBase64(iv),
     ct: toBase64(new Uint8Array(ciphertext)),
   };
@@ -74,29 +50,26 @@ export async function encryptCard(
 /**
  * Decrypts an E2E card blob on the trusted client.
  *
- * Decryption always uses this implementation's fixed KDF work factor rather
- * than trusting the untrusted serialized `iter` field.
+ * The AES-GCM authentication tag rejects tampered ciphertext or the wrong key.
  */
 export async function decryptCard(
-  passphrase: string,
+  key: Uint8Array,
   blob: E2EBlob,
 ): Promise<Record<string, unknown>> {
-  const salt = fromBase64(blob.salt);
   const iv = fromBase64(blob.iv);
   const ciphertext = fromBase64(blob.ct);
   if (
     blob.v !== 1 ||
-    blob.kdf !== "pbkdf2-sha256" ||
-    salt.length !== 16 ||
+    blob.cipher !== "aes-256-gcm" ||
     iv.length !== 12 ||
     ciphertext.length < 16
   ) {
     throw new Error("Invalid encrypted card");
   }
-  const key = await deriveKey(passphrase, salt, ITERATIONS);
+  const cryptoKey = await importKey(key);
   const plaintext = await globalThis.crypto.subtle.decrypt(
     { name: "AES-GCM", iv, tagLength: 128 },
-    key,
+    cryptoKey,
     ciphertext,
   );
   return JSON.parse(new TextDecoder().decode(plaintext)) as Record<string, unknown>;

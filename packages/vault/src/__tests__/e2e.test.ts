@@ -12,17 +12,20 @@ const card = {
 
 describe("encryptCard / decryptCard", () => {
   it("round-trips card data", async () => {
-    const blob = await encryptCard("correct horse battery staple", card);
-    await expect(decryptCard("correct horse battery staple", blob)).resolves.toEqual(card);
+    const key = crypto.getRandomValues(new Uint8Array(32));
+    const blob = await encryptCard(key, card);
+    await expect(decryptCard(key, blob)).resolves.toEqual(card);
   });
 
-  it("throws for the wrong passphrase", async () => {
-    const blob = await encryptCard("correct passphrase", card);
-    await expect(decryptCard("wrong passphrase", blob)).rejects.toThrow();
+  it("throws for the wrong key", async () => {
+    const blob = await encryptCard(crypto.getRandomValues(new Uint8Array(32)), card);
+    const wrongKey = crypto.getRandomValues(new Uint8Array(32));
+    await expect(decryptCard(wrongKey, blob)).rejects.toThrow();
   });
 
   it("throws for tampered ciphertext", async () => {
-    const blob = await encryptCard("passphrase", card);
+    const key = crypto.getRandomValues(new Uint8Array(32));
+    const blob = await encryptCard(key, card);
     const ciphertext = Uint8Array.from(atob(blob.ct), (character) => character.charCodeAt(0));
     ciphertext[0] = ciphertext[0]! ^ 1;
     const tampered = {
@@ -30,31 +33,29 @@ describe("encryptCard / decryptCard", () => {
       ct: btoa(String.fromCharCode(...ciphertext)),
     };
 
-    await expect(decryptCard("passphrase", tampered)).rejects.toThrow();
+    await expect(decryptCard(key, tampered)).rejects.toThrow();
   });
 
-  it("validates the envelope before deriving with fixed parameters", async () => {
-    const blob = await encryptCard("passphrase", card);
-    await expect(decryptCard("passphrase", { ...blob, iter: 1 })).resolves.toEqual(card);
-
+  it("validates the envelope", async () => {
+    const key = crypto.getRandomValues(new Uint8Array(32));
+    const blob = await encryptCard(key, card);
     const invalid = [
       { ...blob, v: 2 },
-      { ...blob, kdf: "unsupported" },
-      { ...blob, salt: btoa(String.fromCharCode(...new Uint8Array(15))) },
+      { ...blob, cipher: "unsupported" },
       { ...blob, iv: btoa(String.fromCharCode(...new Uint8Array(11))) },
       { ...blob, ct: btoa(String.fromCharCode(...new Uint8Array(15))) },
     ];
     for (const candidate of invalid) {
-      await expect(decryptCard("passphrase", candidate as unknown as typeof blob)).rejects.toThrow(
+      await expect(decryptCard(key, candidate as unknown as typeof blob)).rejects.toThrow(
         "Invalid encrypted card",
       );
     }
   });
 
-  it("uses a new salt and IV for each encryption", async () => {
-    const first = await encryptCard("passphrase", card);
-    const second = await encryptCard("passphrase", card);
-    expect(first.salt).not.toBe(second.salt);
+  it("uses a new IV for each encryption", async () => {
+    const key = crypto.getRandomValues(new Uint8Array(32));
+    const first = await encryptCard(key, card);
+    const second = await encryptCard(key, card);
     expect(first.iv).not.toBe(second.iv);
   });
 });
