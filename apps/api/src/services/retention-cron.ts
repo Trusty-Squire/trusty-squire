@@ -4,6 +4,7 @@
 //   Hourly:
 //     - Delete PairingToken older than 1h
 //     - Delete VaultAuditEvent older than 365d
+//     - Delete PaymentAuditEvent older than 365d
 //
 // Running this in-process is fine for v1: one machine, one schedule.
 // When we shard the API, move this to a separate worker or use
@@ -26,6 +27,7 @@ export interface RetentionCronDeps {
 export interface RetentionCronStats {
   pairing_tokens_deleted: number;
   vault_audit_deleted: number;
+  payment_audit_deleted: number;
   duration_ms: number;
   errors: string[];
 }
@@ -97,6 +99,7 @@ export class RetentionCron {
     const stats: RetentionCronStats = {
       pairing_tokens_deleted: 0,
       vault_audit_deleted: 0,
+      payment_audit_deleted: 0,
       duration_ms: 0,
       errors: [],
     };
@@ -125,6 +128,15 @@ export class RetentionCron {
         stats.vault_audit_deleted = r.count;
       } catch (err) {
         stats.errors.push(`vault audit delete: ${err instanceof Error ? err.message : String(err)}`);
+      }
+
+      try {
+        const r = await this.deps.authPrisma.paymentAuditEvent.deleteMany({
+          where: { created_at: { lt: vaultAuditCutoff } },
+        });
+        stats.payment_audit_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(`payment audit delete: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 

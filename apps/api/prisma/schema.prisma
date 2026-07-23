@@ -169,6 +169,8 @@ model Account {
   oauth_identities OAuthIdentity[]
   web_sessions     WebSession[]
   agent_sessions   AgentSession[]
+  e2e_credentials  E2ECredential[]
+  payment_audit_events PaymentAuditEvent[]
 
   @@index([stripe_customer_id])
 }
@@ -283,6 +285,38 @@ model VaultAuditEvent {
   @@index([account_id, emitted_at])
   @@index([type, emitted_at])
   @@index([account_id, type, emitted_at])
+}
+
+// Opaque client-encrypted credential blobs. The API stores the blob
+// verbatim and cannot decrypt or inspect it.
+model E2ECredential {
+  id          String   @id @db.VarChar(26)
+  account_id  String   @db.VarChar(26)
+  label       String
+  blob        String
+  created_at  DateTime @default(now())
+  updated_at  DateTime @updatedAt
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id])
+}
+
+// Non-secret record of a card payment attempt. PAN/CVV are never stored.
+model PaymentAuditEvent {
+  id           String   @id @db.VarChar(26)
+  account_id   String   @db.VarChar(26)
+  merchant     String
+  amount_cents Int
+  currency     String
+  last4        String
+  status       String
+  mandate_id   String?
+  created_at   DateTime @default(now())
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id])
 }
 
 // Egress grant — a standing, revocable token a deployed workload holds to

@@ -74,6 +74,16 @@ import {
   InMemoryMachineTokenStore,
   type MachineTokenStore,
 } from "./machine-tokens.js";
+import {
+  InMemoryE2ECredentialStore,
+  type E2ECredentialStore,
+} from "./in-memory-e2e-credential-store.js";
+import { PrismaE2ECredentialStore } from "./prisma-e2e-credential-store.js";
+import {
+  InMemoryPaymentAuditStore,
+  type PaymentAuditStore,
+} from "./in-memory-payment-audit-store.js";
+import { PrismaPaymentAuditStore } from "./prisma-payment-audit-store.js";
 
 export interface ApiDeps {
   // Identity / auth
@@ -89,6 +99,8 @@ export interface ApiDeps {
   // Credentials + inbound mail
   credentialStore: CredentialStore;
   vault: CredentialVault;
+  e2eCredentialStore: E2ECredentialStore;
+  paymentAuditStore: PaymentAuditStore;
   egressGrantStore: EgressGrantStore;
   machineTokenStore: MachineTokenStore;
   captchaEventStore: CaptchaEventStore;
@@ -270,6 +282,14 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     authPrisma !== null
       ? new PrismaVaultAuditStore(authPrisma)
       : new InMemoryVaultAuditStore();
+  const e2eCredentialStore: E2ECredentialStore =
+    authPrisma !== null
+      ? new PrismaE2ECredentialStore(authPrisma)
+      : new InMemoryE2ECredentialStore(opts.now);
+  const paymentAuditStore: PaymentAuditStore =
+    authPrisma !== null
+      ? new PrismaPaymentAuditStore(authPrisma)
+      : new InMemoryPaymentAuditStore(opts.now);
   // Panel 1 funnel: Prisma-backed when the auth DB is wired, else a
   // zero store (the funnel is a prod operator feature).
   const funnelStatsStore: FunnelStatsStore =
@@ -372,6 +392,8 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     oauthIdentityStore,
     credentialStore,
     vault,
+    e2eCredentialStore,
+    paymentAuditStore,
     egressGrantStore,
     machineTokenStore,
     captchaEventStore,

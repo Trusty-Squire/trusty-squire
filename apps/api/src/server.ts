@@ -20,6 +20,7 @@ import { stripeClientFromEnv } from "./services/stripe-client.js";
 import { registerAuthRoute } from "./routes/auth.js";
 import { registerOAuthRoute } from "./routes/oauth.js";
 import { registerVaultRoute } from "./routes/vault.js";
+import { registerVaultE2ERoute } from "./routes/vault-e2e.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
 import { registerEgressRoutes } from "./routes/egress.js";
 import type { EgressGrantStore } from "./services/egress-grant.js";
@@ -270,6 +271,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     requireAgent: auth.requireAgent,
     requireAny: auth.requireAny,
     ...(opts.emailForwarder !== undefined ? { emailForwarder: opts.emailForwarder } : {}),
+  });
+  await fastify.register(registerVaultE2ERoute, {
+    deps,
+    requireWeb: auth.requireWeb,
+    requireAgent: auth.requireAgent,
+    requireAny: auth.requireAny,
   });
   await fastify.register(registerVaultAccessRoute, {
     deps,
