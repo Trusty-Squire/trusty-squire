@@ -402,8 +402,8 @@ export const registerVaultRoute: FastifyPluginAsync<{
 
   // ── GDPR export (web only): everything we hold ───────────────
   // The complete, machine-readable record of the account's vault: every
-  // credential's non-secret metadata (active + deleted) plus the full
-  // audit trail. No secret values. Served as a download.
+  // credential's non-secret metadata (active + deleted), opaque E2E card
+  // blobs, and the full vault + payment audit trails. Served as a download.
   fastify.get(
     "/v1/vault/export",
     { preHandler: opts.requireWeb },
@@ -411,10 +411,31 @@ export const registerVaultRoute: FastifyPluginAsync<{
       const auth = req.auth!;
       if (auth.kind !== "web") return;
       const data = await opts.deps.vault.exportAccount(auth.account_id);
+      const e2eCredentials = await opts.deps.e2eCredentialStore.exportAll(auth.account_id);
+      const paymentAuditEvents = await opts.deps.paymentAuditStore.exportAll(auth.account_id);
       return reply
         .code(200)
         .header("content-disposition", 'attachment; filename="trusty-squire-vault-export.json"')
-        .send({ exported_at: new Date().toISOString(), ...data });
+        .send({
+          exported_at: new Date().toISOString(),
+          ...data,
+          e2e_credentials: e2eCredentials.map((credential) => ({
+            id: credential.id,
+            label: credential.label,
+            blob: credential.blob,
+            created_at: credential.createdAt.toISOString(),
+          })),
+          payment_audit_events: paymentAuditEvents.map((event) => ({
+            id: event.id,
+            merchant: event.merchant,
+            amount_cents: event.amountCents,
+            currency: event.currency,
+            last4: event.last4,
+            status: event.status,
+            mandate_id: event.mandateId,
+            created_at: event.createdAt.toISOString(),
+          })),
+        });
     },
   );
 

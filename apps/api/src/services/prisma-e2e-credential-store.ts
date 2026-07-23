@@ -30,6 +30,21 @@ export class PrismaE2ECredentialStore implements E2ECredentialStore {
     }));
   }
 
+  async exportAll(accountId: string): Promise<E2ECredentialRecord[]> {
+    const rows = await this.prisma.e2ECredential.findMany({
+      where: { account_id: accountId },
+      orderBy: [{ created_at: "desc" }, { id: "desc" }],
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      accountId: row.account_id,
+      label: row.label,
+      blob: row.blob,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    }));
+  }
+
   async getByIdForAccount(id: string, accountId: string): Promise<E2ECredentialRecord | null> {
     const row = await this.prisma.e2ECredential.findFirst({
       where: { id, account_id: accountId },

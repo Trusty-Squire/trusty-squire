@@ -18,6 +18,7 @@ export interface E2ECredentialSummary {
 export interface E2ECredentialStore {
   create(accountId: string, label: string, blob: string): Promise<string>;
   listByAccount(accountId: string): Promise<E2ECredentialSummary[]>;
+  exportAll(accountId: string): Promise<E2ECredentialRecord[]>;
   getByIdForAccount(id: string, accountId: string): Promise<E2ECredentialRecord | null>;
   deleteForAccount(id: string, accountId: string): Promise<boolean>;
 }
@@ -53,6 +54,17 @@ export class InMemoryE2ECredentialStore implements E2ECredentialStore {
         return a.id === b.id ? 0 : a.id < b.id ? 1 : -1;
       })
       .map(({ id, label, createdAt }) => ({ id, label, createdAt }));
+  }
+
+  async exportAll(accountId: string): Promise<E2ECredentialRecord[]> {
+    return [...this.records.values()]
+      .filter((record) => record.accountId === accountId)
+      .sort((a, b) => {
+        const createdAtOrder = b.createdAt.getTime() - a.createdAt.getTime();
+        if (createdAtOrder !== 0) return createdAtOrder;
+        return a.id === b.id ? 0 : a.id < b.id ? 1 : -1;
+      })
+      .map((record) => ({ ...record }));
   }
 
   async getByIdForAccount(id: string, accountId: string): Promise<E2ECredentialRecord | null> {
