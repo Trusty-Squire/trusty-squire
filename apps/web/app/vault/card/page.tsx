@@ -6,6 +6,7 @@ import { encryptCard } from "@trusty-squire/vault/e2e";
 import { AppShell } from "../../components/AppShell";
 import { ApiError, apiGet, apiPost } from "../../lib/api";
 import { COUNTRIES } from "../../lib/countries";
+import { getPairingState, pairDevice } from "../../lib/pairing";
 import { evaluatePrf } from "../../lib/passkey";
 
 interface SavedCard {
@@ -32,11 +33,32 @@ export default function CardPage() {
   const [postalCode, setPostalCode] = useState("");
   const [country, setCountry] = useState("");
   const [cards, setCards] = useState<SavedCard[] | null>(null);
+  const [enrolled, setEnrolled] = useState<boolean | null>(null);
+  const [pairing, setPairing] = useState(false);
+  const [pairingError, setPairingError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setCards(await apiGet<SavedCard[]>("/v1/vault/e2e"));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getPairingState()
+      .then((state) => {
+        if (!cancelled) setEnrolled(state.enrolled);
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return;
+        setEnrolled(false);
+        setPairingError(
+          err instanceof Error ? err.message : "Failed to check passkey setup.",
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -53,6 +75,25 @@ export default function CardPage() {
       cancelled = true;
     };
   }, [load, router]);
+
+  const pair = useCallback(async (): Promise<void> => {
+    setPairing(true);
+    setPairingError(null);
+    try {
+      await pairDevice();
+      const state = await getPairingState();
+      setEnrolled(state.enrolled);
+      if (!state.enrolled) {
+        throw new Error("Passkey setup did not complete. Please try again.");
+      }
+    } catch (err) {
+      setPairingError(
+        err instanceof Error ? err.message : "Failed to set up payments.",
+      );
+    } finally {
+      setPairing(false);
+    }
+  }, []);
 
   const submit = useCallback(
     async (event: React.FormEvent) => {
@@ -135,6 +176,46 @@ export default function CardPage() {
       state,
     ],
   );
+
+  if (enrolled !== true) {
+    return (
+      <AppShell>
+        <div className="app-head">
+          <div>
+            <h1 className="app-title">Add card</h1>
+            <p className="app-sub">
+              Encrypted in this browser. The server cannot decrypt it.
+            </p>
+          </div>
+        </div>
+
+        {enrolled === null ? (
+          <div className="app-card" aria-live="polite">
+            Checking…
+          </div>
+        ) : (
+          <div className="app-card">
+            <h2>Set up payments on this device</h2>
+            <p className="app-sub">
+              A one-time Face ID / Touch ID setup lets this device encrypt and approve card
+              payments. Your card is never readable by our servers.
+            </p>
+            {pairingError !== null && (
+              <div className="form-err">{pairingError}</div>
+            )}
+            <button
+              className="btn-primary"
+              type="button"
+              disabled={pairing}
+              onClick={() => void pair()}
+            >
+              {pairing ? "Setting up…" : "Set up"}
+            </button>
+          </div>
+        )}
+      </AppShell>
+    );
+  }
 
   return (
     <AppShell>
