@@ -188,6 +188,8 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .foot-l{display:flex;gap:10px 22px;flex-wrap:wrap;justify-content:flex-end}
 .foot-l a:hover{color:var(--fg)}
 
+.mobile-nav-link{display:none}
+
 @media(max-width:780px){
   .wrap,.nav-in{padding:0 var(--s-6)}
   h1{font-size:clamp(2.2rem,8vw,3rem)}
@@ -197,6 +199,7 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
      pill stays, and items inside the account dropdown (nested, not direct
      children) stay reachable so Billing/Sign out work on phones. */
   .nav-r > a:not(.pill):not(.signin):not(.plan-cta){display:none}
+  .acct-dropdown a.mobile-nav-link{display:block}
 }
 
 /* ===================== motion ===================== */

@@ -54,7 +54,6 @@ interface OAuthIdentityRow {
   created_at: Date;
 }
 
-
 interface WebSessionRow {
   id: string;
   account_id: string;
@@ -112,6 +111,44 @@ interface VaultAuditEventRow {
   emitted_at: Date;
 }
 
+interface E2ECredentialRow {
+  id: string;
+  account_id: string;
+  label: string;
+  blob: string;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface PaymentAuditEventRow {
+  id: string;
+  account_id: string;
+  merchant: string;
+  amount_cents: number;
+  currency: string;
+  last4: string;
+  status: string;
+  mandate_id: string | null;
+  created_at: Date;
+}
+
+interface PendingPaymentApprovalRow {
+  id: string;
+  account_id: string;
+  merchant: string;
+  checkout_origin: string;
+  amount_cents: number;
+  currency: string;
+  nonce: string;
+  card_ref: string;
+  operator_pubkey: string;
+  status: string;
+  jws: string | null;
+  sealed_card: string | null;
+  created_at: Date;
+  expires_at: Date;
+}
+
 interface EgressGrantRow {
   id: string;
   account_id: string;
@@ -127,8 +164,14 @@ export interface ApiPrismaClient {
   machineToken: {
     create(args: { data: Record<string, unknown> }): Promise<MachineTokenRow>;
     findUnique(args: { where: { token: string } }): Promise<MachineTokenRow | null>;
-    update(args: { where: { token: string }; data: Record<string, unknown> }): Promise<MachineTokenRow>;
-    updateMany(args: { where: { token: string }; data: Record<string, unknown> }): Promise<{ count: number }>;
+    update(args: {
+      where: { token: string };
+      data: Record<string, unknown>;
+    }): Promise<MachineTokenRow>;
+    updateMany(args: {
+      where: { token: string };
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
     // Funnel: tokens issued in a window (Panel 1, GET /v1/admin/funnel).
     count(args: { where: Record<string, unknown> }): Promise<number>;
@@ -168,19 +211,23 @@ export interface ApiPrismaClient {
     // updateMany powers race-safe single-use claim: update only if
     // (status, expires_at) match. Returns { count: 0 } when guards
     // fire — surfaced to the caller as "claim failed", no throw.
-    updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
   receivedEmail?: {
-    updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
   };
 
   // ── account account layer ─────────────────────────────────────
   account: {
     create(args: { data: Record<string, unknown> }): Promise<AccountRow>;
-    findUnique(args: {
-      where: { id: string } | { email: string };
-    }): Promise<AccountRow | null>;
+    findUnique(args: { where: { id: string } | { email: string } }): Promise<AccountRow | null>;
     // Billing: map a Stripe customer back to its account. stripe_customer_id
     // is not a DB-unique column (see schema note), so this is findFirst, not
     // findUnique — uniqueness is guaranteed by the webhook write path.
@@ -202,12 +249,8 @@ export interface ApiPrismaClient {
   };
   oAuthIdentity: {
     create(args: { data: Record<string, unknown> }): Promise<OAuthIdentityRow>;
-    findUnique(args: {
-      where: Record<string, unknown>;
-    }): Promise<OAuthIdentityRow | null>;
-    findMany(args: {
-      where: Record<string, unknown>;
-    }): Promise<OAuthIdentityRow[]>;
+    findUnique(args: { where: Record<string, unknown> }): Promise<OAuthIdentityRow | null>;
+    findMany(args: { where: Record<string, unknown> }): Promise<OAuthIdentityRow[]>;
   };
   webSession: {
     create(args: { data: Record<string, unknown> }): Promise<WebSessionRow>;
@@ -219,9 +262,7 @@ export interface ApiPrismaClient {
   };
   agentSession: {
     create(args: { data: Record<string, unknown> }): Promise<AgentSessionRow>;
-    findUnique(args: {
-      where: { token_hash: string };
-    }): Promise<AgentSessionRow | null>;
+    findUnique(args: { where: { token_hash: string } }): Promise<AgentSessionRow | null>;
     findMany(args: {
       where: Record<string, unknown>;
       orderBy?: Record<string, unknown>;
@@ -235,9 +276,7 @@ export interface ApiPrismaClient {
     create(args: { data: Record<string, unknown> }): Promise<CredentialRow>;
     // Metrics exporter: total stored credentials.
     count(args?: { where?: Record<string, unknown> }): Promise<number>;
-    findFirst(args: {
-      where: Record<string, unknown>;
-    }): Promise<CredentialRow | null>;
+    findFirst(args: { where: Record<string, unknown> }): Promise<CredentialRow | null>;
     findMany(args: {
       where: Record<string, unknown>;
       orderBy?: Record<string, unknown>;
@@ -265,6 +304,34 @@ export interface ApiPrismaClient {
       orderBy?: Record<string, unknown>;
       take?: number;
     }): Promise<VaultAuditEventRow[]>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  e2ECredential: {
+    create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      select?: { id: true; label: true; created_at: true };
+      orderBy: Record<string, unknown> | Array<Record<string, unknown>>;
+    }): Promise<E2ECredentialRow[]>;
+    findFirst(args: { where: Record<string, unknown> }): Promise<E2ECredentialRow | null>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  paymentAuditEvent: {
+    create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
+    findMany(args: {
+      where: Record<string, unknown>;
+      orderBy: Record<string, unknown> | Array<Record<string, unknown>>;
+      take?: number;
+    }): Promise<PaymentAuditEventRow[]>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  pendingPaymentApproval: {
+    create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
+    findFirst(args: { where: Record<string, unknown> }): Promise<PendingPaymentApprovalRow | null>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
   egressGrant: {

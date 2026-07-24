@@ -119,7 +119,8 @@ The page should include:
 - The one-command installation: `npx @trusty-squire/mcp connect --target=opencode`.
 - The exact prompt: "Use Trusty Squire to sign up for Resend and wire the API key into my app."
 - A factual explanation that OpenCode remains the planner while Trusty Squire operates the website and stores generated credentials in its encrypted, write-only vault.
-- The honest limits: phone verification, hard captcha, payment, and human decisions stop the run.
+- The honest limits: phone verification, hard captcha, unsupported payments,
+  3-D Secure, and human decisions stop the run.
 - Internal links to relevant integrations and security guides.
 - Canonical, Open Graph, breadcrumb, and structured metadata matching existing site conventions.
 - A short explanation of enabling or disabling the MCP server and OpenCode's `squire_*` permission wildcard, without silently changing the user's permissions.

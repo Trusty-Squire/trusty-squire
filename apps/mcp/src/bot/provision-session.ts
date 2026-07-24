@@ -18,17 +18,11 @@
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import { BrowserController, type InteractiveElement } from "./browser.js";
-import {
-  TwoCaptchaSolver,
-  type TwoCaptchaVaultProxy,
-} from "./captcha-solver-2captcha.js";
+import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
-import {
-  detectActiveProviderSessions,
-  ensureOAuthSession,
-} from "./google-login.js";
+import { detectActiveProviderSessions, ensureOAuthSession } from "./google-login.js";
 import { loggedInEmail } from "./login-state.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import {
@@ -287,9 +281,7 @@ function hostStrings(session: Session): string[] {
 // scope must not silently over-grant a key's egress allow-list (Codex). The
 // vault unions these with the service-default + any agent-declared egress_hosts.
 function egressSeedHosts(session: Session): string[] {
-  return session.allowedHosts
-    .filter((e) => e.source !== "mid_session")
-    .map((e) => e.host);
+  return session.allowedHosts.filter((e) => e.source !== "mid_session").map((e) => e.host);
 }
 
 const sessions = new Map<string, Session>();
@@ -570,10 +562,27 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
 // adding "co.uk" would green-light every *.co.uk. Small curated set (the ones
 // the operator surface realistically touches); not a full PSL.
 const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
-  "co.uk", "org.uk", "gov.uk", "ac.uk", "com.au", "net.au", "org.au",
-  "co.jp", "co.nz", "co.in", "com.br", "co.za", "com.cn",
-  "github.io", "web.app", "firebaseapp.com", "pages.dev", "workers.dev",
-  "vercel.app", "netlify.app", "herokuapp.com",
+  "co.uk",
+  "org.uk",
+  "gov.uk",
+  "ac.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "co.jp",
+  "co.nz",
+  "co.in",
+  "com.br",
+  "co.za",
+  "com.cn",
+  "github.io",
+  "web.app",
+  "firebaseapp.com",
+  "pages.dev",
+  "workers.dev",
+  "vercel.app",
+  "netlify.app",
+  "herokuapp.com",
 ]);
 
 // Validate an agent-declared allow_host host. Returns the normalized bare
@@ -584,21 +593,36 @@ const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
 export function validateAllowHost(raw: string): { host: string } | { error: string } {
   const v = raw.trim().toLowerCase();
   if (v.length === 0 || v.length > 253) return { error: "host empty or too long" };
-  if (/[/:@?#*\s]/.test(v)) return { error: "host must be a bare hostname (no scheme, port, path, wildcard, or whitespace)" };
-  if (/[^a-z0-9.-]/.test(v)) return { error: "host has non-ASCII or invalid characters (punycode/unicode spoofing rejected)" };
+  if (/[/:@?#*\s]/.test(v))
+    return {
+      error: "host must be a bare hostname (no scheme, port, path, wildcard, or whitespace)",
+    };
+  if (/[^a-z0-9.-]/.test(v))
+    return {
+      error: "host has non-ASCII or invalid characters (punycode/unicode spoofing rejected)",
+    };
   if (v.includes("xn--")) return { error: "punycode (xn--) hosts rejected — homograph-spoof risk" };
-  if (v.startsWith(".") || v.endsWith(".") || v.includes("..")) return { error: "malformed host (leading/trailing/double dot)" };
-  if (v === "localhost" || v.endsWith(".localhost")) return { error: "localhost is not an allowable cross-host" };
+  if (v.startsWith(".") || v.endsWith(".") || v.includes(".."))
+    return { error: "malformed host (leading/trailing/double dot)" };
+  if (v === "localhost" || v.endsWith(".localhost"))
+    return { error: "localhost is not an allowable cross-host" };
   // IPv4 literal / dotted-quad — reject (egress + transfer must be by name).
-  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v)) return { error: "IP-address hosts are not allowed (declare a hostname)" };
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(v))
+    return { error: "IP-address hosts are not allowed (declare a hostname)" };
   // IPv6 would contain ':' — already rejected by the ':' check above.
   const labels = v.split(".");
   if (labels.length < 2) return { error: "bare TLD / single-label host not allowed" };
-  if (labels.some((l) => l.length === 0 || l.length > 63)) return { error: "invalid host label length" };
-  if (TWO_LABEL_PUBLIC_SUFFIXES.has(v)) return { error: `"${v}" is a public suffix — widening to it would allow every subdomain` };
+  if (labels.some((l) => l.length === 0 || l.length > 63))
+    return { error: "invalid host label length" };
+  if (TWO_LABEL_PUBLIC_SUFFIXES.has(v))
+    return { error: `"${v}" is a public suffix — widening to it would allow every subdomain` };
   // Squire's own control plane is never a legitimate cross-host — refuse to
   // widen the operator browser into the vault UI / API (confused-deputy guard).
-  if (isSquireControlPlaneHost(v)) return { error: "Squire's own control plane (the vault UI / API) is off-limits to the operator browser" };
+  if (isSquireControlPlaneHost(v))
+    return {
+      error:
+        "Squire's own control plane (the vault UI / API) is off-limits to the operator browser",
+    };
   return { host: v };
 }
 
@@ -688,8 +712,12 @@ export function isOnboardingOrOrgForm(pageText: string): boolean {
   const text = pageText.replace(/\s+/g, " ").trim();
   if (hasAccountSetupOverlay(text)) return true;
   return (
-    /\byou\s+(?:aren'?t|are not|do not|don'?t)\s+(?:part of|belong to|have)\b.*\borgani[sz]ation\b/i.test(text) ||
-    /\bcreate\s+(?:a\s+|your\s+|an\s+|new\s+)?(?:organi[sz]ation|org|workspace|team|project|company)\b/i.test(text) ||
+    /\byou\s+(?:aren'?t|are not|do not|don'?t)\s+(?:part of|belong to|have)\b.*\borgani[sz]ation\b/i.test(
+      text,
+    ) ||
+    /\bcreate\s+(?:a\s+|your\s+|an\s+|new\s+)?(?:organi[sz]ation|org|workspace|team|project|company)\b/i.test(
+      text,
+    ) ||
     /\bname\s+(?:your\s+)?(?:organi[sz]ation|workspace|team|project|company)\b/i.test(text) ||
     /\b(?:what'?s|what is)\s+your\s+name\b/i.test(text) ||
     /\bget\s+started\b.*\b(?:name|organi[sz]ation|workspace|team)\b/i.test(text)
@@ -703,9 +731,13 @@ export function isOnboardingOrOrgForm(pageText: string): boolean {
 export function hasOneTimeSecretModal(pageText: string): boolean {
   const text = pageText.replace(/\s+/g, " ").trim();
   return (
-    /\b(?:won'?t|will not|can'?t|cannot|never)\b[\s\w]{0,30}?\b(?:shown|displayed|see|view|retriev\w*|access\w*)\b[\s\w]{0,20}?\bagain\b/i.test(text) ||
+    /\b(?:won'?t|will not|can'?t|cannot|never)\b[\s\w]{0,30}?\b(?:shown|displayed|see|view|retriev\w*|access\w*)\b[\s\w]{0,20}?\bagain\b/i.test(
+      text,
+    ) ||
     /\b(?:only|last)\s+time\b.*\b(?:see|view|copy|shown)\b/i.test(text) ||
-    /\b(?:copy|save|store)\s+(?:and\s+save\s+)?(?:your\s+|this\s+|the\s+)?(?:secret|api\s*key|key|token|credential)\b.*\b(?:now|securely|somewhere|before)\b/i.test(text) ||
+    /\b(?:copy|save|store)\s+(?:and\s+save\s+)?(?:your\s+|this\s+|the\s+)?(?:secret|api\s*key|key|token|credential)\b.*\b(?:now|securely|somewhere|before)\b/i.test(
+      text,
+    ) ||
     /\bmake\s+sure\s+to\s+(?:copy|save|store)\b/i.test(text)
   );
 }
@@ -719,7 +751,9 @@ export function hasExistingAccountSignal(pageText: string): boolean {
   const text = pageText.replace(/\s+/g, " ").trim();
   return (
     /\binvalid\s+(?:credentials|password|email\s+or\s+password|login)\b/i.test(text) ||
-    /\b(?:account|email|user(?:name)?)\s+(?:already\s+)?(?:exists|is\s+already\s+(?:registered|in\s+use|taken))\b/i.test(text) ||
+    /\b(?:account|email|user(?:name)?)\s+(?:already\s+)?(?:exists|is\s+already\s+(?:registered|in\s+use|taken))\b/i.test(
+      text,
+    ) ||
     /\b(?:email|account)\s+is\s+already\s+(?:registered|in\s+use|associated|taken)\b/i.test(text) ||
     /\bthis\s+(?:email|account)\s+is\s+already\b/i.test(text) ||
     /\ban?\s+account\s+(?:with\s+this\s+email\s+)?already\s+exists\b/i.test(text)
@@ -734,8 +768,12 @@ export function hasUnlinkedOAuthAccountSignal(pageText: string): boolean {
   const text = pageText.replace(/\s+/g, " ").trim();
   return (
     /\bexternal\s+account\s+(?:was\s+)?not\s+found\b/i.test(text) ||
-    /\bno\s+(?:account|user)\s+(?:was\s+)?found\s+(?:for|with)\s+this\s+(?:google|github|oauth|external|account)\b/i.test(text) ||
-    /\b(?:couldn'?t|could\s+not|unable\s+to)\s+find\s+(?:an?\s+)?(?:account|user)\b[\s\w]{0,30}?\b(?:google|github|oauth|external)\b/i.test(text)
+    /\bno\s+(?:account|user)\s+(?:was\s+)?found\s+(?:for|with)\s+this\s+(?:google|github|oauth|external|account)\b/i.test(
+      text,
+    ) ||
+    /\b(?:couldn'?t|could\s+not|unable\s+to)\s+find\s+(?:an?\s+)?(?:account|user)\b[\s\w]{0,30}?\b(?:google|github|oauth|external)\b/i.test(
+      text,
+    )
   );
 }
 
@@ -954,17 +992,12 @@ function roleForAccessibility(el: InteractiveElement): string {
 // unaffected. A field is sealed if it's a password input or a target a secret
 // slot was typed into (tracked per-session in sealedFieldKeys).
 const SEALED_FIELD_PLACEHOLDER = "[sealed]";
-function isSealedFieldValue(
-  el: InteractiveElement,
-  sealed: ReadonlySet<string>,
-): boolean {
+function isSealedFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): boolean {
+  if (el.sealed === true) return true;
   if ((el.type ?? "").toLowerCase() === "password") return true;
   return elementTargetKeys(el).some((k) => sealed.has(k));
 }
-function presentFieldValue(
-  el: InteractiveElement,
-  sealed: ReadonlySet<string>,
-): string | null {
+function presentFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): string | null {
   const v = el.value ?? null;
   if (v === null || v.length === 0) return v;
   return isSealedFieldValue(el, sealed) ? SEALED_FIELD_PLACEHOLDER : v;
@@ -1006,7 +1039,9 @@ export function buildAccessibilitySnapshot(
       const role = roleForAccessibility(el);
       const shownValue = presentFieldValue(el, sealedFieldKeys);
       const flags = [
-        el.value !== undefined && el.value !== null ? `value="${(shownValue ?? "").slice(0, 60)}"` : null,
+        el.value !== undefined && el.value !== null
+          ? `value="${(shownValue ?? "").slice(0, 60)}"`
+          : null,
         el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
         el.href !== undefined && el.href !== null ? `href="${el.href.slice(0, 120)}"` : null,
         el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
@@ -1086,12 +1121,14 @@ function widenAllowedHostsFromCurrentUrl(session: Session): void {
   // off mid_session or prior auto_widen hosts — that would let a single
   // agent-declared host silently pull in a whole sibling tree (scope creep).
   if (
-    session.allowedHosts.some(
-      (e) => e.source === "start" && baseDomain(e.host) === currentBase,
-    )
+    session.allowedHosts.some((e) => e.source === "start" && baseDomain(e.host) === currentBase)
   ) {
     session.allowedHosts.push({ host, source: "auto_widen" });
-    audit(session.id, "scope_widen", { host, source: "auto_widen", allowed_hosts: hostStrings(session) });
+    audit(session.id, "scope_widen", {
+      host,
+      source: "auto_widen",
+      allowed_hosts: hostStrings(session),
+    });
   }
 }
 
@@ -1171,9 +1208,7 @@ async function ensureProvisionPrimaryProviderSession(
     return initial;
   }
 
-  const after = await detectActiveProviderSessions(profileDir).catch(
-    () => [] as OAuthProviderId[],
-  );
+  const after = await detectActiveProviderSessions(profileDir).catch(() => [] as OAuthProviderId[]);
   return after.includes("google") ? after : ["google", ...after];
 }
 
@@ -1326,6 +1361,20 @@ export function currentProvisionUrl(sessionId: string): string {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return session.browser.currentUrl();
+}
+
+// operate_pay has a deliberately small input contract with no session id: it
+// acts on the one live operator checkout. Fail closed rather than guessing if
+// zero or multiple browser sessions exist.
+export function activeProvisionBrowser(): BrowserController {
+  if (sessions.size !== 1) {
+    throw new Error(
+      sessions.size === 0
+        ? "operate_pay requires one active operate_start browser session"
+        : "operate_pay refused: multiple active browser sessions",
+    );
+  }
+  return sessions.values().next().value!.browser;
 }
 
 // PR3c — the user's own email captured at login (the authoritative signup
@@ -1565,7 +1614,11 @@ export async function act(
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
       await browser.type(el.selector, value);
-      audit(sessionId, "type_secret", { slot: action.slot, target: action.target, host: registrableHost(browser.currentUrl()) });
+      audit(sessionId, "type_secret", {
+        slot: action.slot,
+        target: action.target,
+        host: registrableHost(browser.currentUrl()),
+      });
       break;
     }
     case "click":
@@ -1618,7 +1671,13 @@ export async function act(
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
   if (detail === "none") {
-    return { session_id: session.id, url: browser.currentUrl(), text: "", elements: [], observed: "none" };
+    return {
+      session_id: session.id,
+      url: browser.currentUrl(),
+      text: "",
+      elements: [],
+      observed: "none",
+    };
   }
   return await observeSession(session, detail);
 }
@@ -1675,7 +1734,11 @@ function recordTrace(
   if (action.kind === "goto" && isSingleUseUrl(action.url)) {
     // Log only the host — never the token-bearing URL.
     let host = "?";
-    try { host = new URL(action.url).host; } catch { /* keep "?" */ }
+    try {
+      host = new URL(action.url).host;
+    } catch {
+      /* keep "?" */
+    }
     audit(session.id, "trace_skip_single_use_goto", { url_host: host });
     return;
   }
@@ -1687,16 +1750,43 @@ function recordTrace(
   const withText = text !== undefined ? { text_match: text } : {};
   let a: TraceAction;
   switch (action.kind) {
-    case "goto": a = { kind: "goto", url_template: action.url }; break;
-    case "allow_host": a = { kind: "allow_host", host: action.host }; break;
-    case "press": a = { kind: "press", key: action.key }; break;
-    case "oauth_settle": a = { kind: "oauth_settle" }; break;
-    case "scroll": a = { kind: "scroll", ...(action.direction !== undefined ? { direction: action.direction } : {}) }; break;
-    case "type": a = { kind: "type", ...withText, value: scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail) }; break;
-    case "type_secret": a = { kind: "type_secret", slot: action.slot, ...withText }; break;
-    case "click": a = { kind: "click", ...withText }; break;
-    case "js_click": a = { kind: "js_click", ...withText }; break;
-    case "oauth_click": a = { kind: "oauth_click", ...withText }; break;
+    case "goto":
+      a = { kind: "goto", url_template: action.url };
+      break;
+    case "allow_host":
+      a = { kind: "allow_host", host: action.host };
+      break;
+    case "press":
+      a = { kind: "press", key: action.key };
+      break;
+    case "oauth_settle":
+      a = { kind: "oauth_settle" };
+      break;
+    case "scroll":
+      a = {
+        kind: "scroll",
+        ...(action.direction !== undefined ? { direction: action.direction } : {}),
+      };
+      break;
+    case "type":
+      a = {
+        kind: "type",
+        ...withText,
+        value: scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail),
+      };
+      break;
+    case "type_secret":
+      a = { kind: "type_secret", slot: action.slot, ...withText };
+      break;
+    case "click":
+      a = { kind: "click", ...withText };
+      break;
+    case "js_click":
+      a = { kind: "js_click", ...withText };
+      break;
+    case "oauth_click":
+      a = { kind: "oauth_click", ...withText };
+      break;
   }
   session.actionTrace.push({ action: a });
 }
@@ -1742,7 +1832,12 @@ export function captureObserved(
       // scrub. type_secret is a different kind and is skipped above.
       return el === null
         ? null
-        : { kind: "fill", selector: el.selector, value: action.text, reason: traceTextFor(el) ?? "fill" };
+        : {
+            kind: "fill",
+            selector: el.selector,
+            value: action.text,
+            reason: traceTextFor(el) ?? "fill",
+          };
     case "goto":
       return { kind: "navigate", url: action.url, reason: "navigate" };
     default:
@@ -1909,7 +2004,10 @@ export async function rememberRecipe(
   };
   const file = await writeRecipe(recipe);
   audit(sessionId, "remember_recipe", {
-    name: opts.name, steps: recipe.trace.length, secrets: secrets.length, file,
+    name: opts.name,
+    steps: recipe.trace.length,
+    secrets: secrets.length,
+    file,
   });
   return { file, name: opts.name, steps: recipe.trace.length, secrets: secrets.map((s) => s.slot) };
 }
@@ -1948,7 +2046,9 @@ export async function verifyPostcondition(
   const snap = await snapshotForPostcondition(session);
   const result = checkSuccessSignal(postcondition.success_signal, snap);
   audit(sessionId, "verify_postcondition", {
-    kind: postcondition.kind, confirmed: result.confirmed, reason: result.reason,
+    kind: postcondition.kind,
+    confirmed: result.confirmed,
+    reason: result.reason,
   });
   return result;
 }
@@ -2283,9 +2383,7 @@ async function buildTwoCaptchaSolver(session: Session): Promise<TwoCaptchaSolver
   if (session.api !== undefined) {
     try {
       const { credentials } = await session.api.listCredentials();
-      const hasVaulted = credentials.some(
-        (c) => (c.service ?? "").toLowerCase() === "2captcha",
-      );
+      const hasVaulted = credentials.some((c) => (c.service ?? "").toLowerCase() === "2captcha");
       if (hasVaulted) {
         return new TwoCaptchaSolver({ vaultProxy: makeTwoCaptchaVaultProxy(session.api) });
       }
@@ -2387,7 +2485,10 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
       tokenSolverOutcome = tokenSolved.outcome;
       token = tokenSolved.solved;
     }
-  } else if (!token && (det.variant === "recaptcha_v2" || det.variant === "hcaptcha" || det.variant === "turnstile")) {
+  } else if (
+    !token &&
+    (det.variant === "recaptcha_v2" || det.variant === "hcaptcha" || det.variant === "turnstile")
+  ) {
     // #279: route a configured token solver FIRST for the checkbox-family
     // captchas; solveCaptchaWithTokenSolver returns outcome "no_key" when none
     // is configured, so we fall through to the visible-captcha click below.
@@ -2404,9 +2505,7 @@ export async function captchaGate(sessionId: string): Promise<CaptchaGateResult>
 
   const clear = await session.browser.waitForCaptchaChallengeToSettle(token ? 5_000 : 15_000);
   const settled =
-    det.variant === "unknown"
-      ? clear
-      : token && (clear || tokenSolverOutcome === "ok");
+    det.variant === "unknown" ? clear : token && (clear || tokenSolverOutcome === "ok");
 
   // Fail-fast: if we couldn't clear it, hand the host a specific, actionable
   // reason so it stops driving immediately. `no_key` means a 2Captcha solver

@@ -105,6 +105,9 @@ importers:
       '@clack/prompts':
         specifier: ^0.11.0
         version: 0.11.0
+      '@hpke/core':
+        specifier: ^1.9.0
+        version: 1.9.0
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
@@ -120,6 +123,9 @@ importers:
       chalk:
         specifier: ^5.3.0
         version: 5.6.2
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
       jsonc-parser:
         specifier: ^3.3.1
         version: 3.3.1
@@ -222,6 +228,12 @@ importers:
 
   apps/web:
     dependencies:
+      '@trusty-squire/vault':
+        specifier: workspace:*
+        version: link:../../packages/vault
+      '@vouchflow/web':
+        specifier: 0.3.0
+        version: 0.3.0(react@19.2.4)
       next:
         specifier: 16.2.6
         version: 16.2.6(@babel/core@7.29.0)(react-dom@19.2.4)(react@19.2.4)
@@ -275,6 +287,9 @@ importers:
 
   packages/vault:
     dependencies:
+      '@hpke/core':
+        specifier: ^1.9.0
+        version: 1.9.0
       '@prisma/client':
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
@@ -1064,6 +1079,18 @@ packages:
       hono: ^4
     dependencies:
       hono: 4.12.18
+    dev: false
+
+  /@hpke/common@1.10.1:
+    resolution: {integrity: sha512-moJwhmtLtuxiUzzNp1jpfBfx8yefKoO9D/RCR9dmwrnc7qjJqId1rEtQz+lSlU5cabX8daToMSx/7HayXOiaFw==}
+    engines: {node: '>=16.0.0'}
+    dev: false
+
+  /@hpke/core@1.9.0:
+    resolution: {integrity: sha512-pFxWl1nNJeQCSUFs7+GAblHvXBCjn9EPN65vdKlYQil2aURaRxfGMO6vBKGqm1YHTKwiAxJQNEI70PbSowMP9Q==}
+    engines: {node: '>=16.0.0'}
+    dependencies:
+      '@hpke/common': 1.10.1
     dev: false
 
   /@humanfs/core@0.19.2:
@@ -2558,6 +2585,18 @@ packages:
       loupe: 3.2.1
       tinyrainbow: 1.2.0
     dev: true
+
+  /@vouchflow/web@0.3.0(react@19.2.4):
+    resolution: {integrity: sha512-E0KRmtmjR2X32Ad4KqzNIfzhOENemi1Lx2Z5wdrtNE/rD8NoczcBek8LH+66l9mlBnQZv0o0jHX2zDNuy+bSHQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: '>=18'
+    peerDependenciesMeta:
+      react:
+        optional: true
+    dependencies:
+      react: 19.2.4
+    dev: false
 
   /@zone-eu/mailsplit@5.4.9:
     resolution: {integrity: sha512-Qq7k6FzA5SmGf5HFPcr17gE7M+O1gttlmWn7tlGUlhGsbbjUaBL/4cEWIwExeCzqu5+kyZJ91mcBZbQ9zEwwYA==}

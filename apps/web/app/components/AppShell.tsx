@@ -122,6 +122,30 @@ export function AppShell({ children }: { children: ReactNode }) {
               <>
                 <div className="acct-backdrop" onClick={() => setMenuOpen(false)} aria-hidden />
                 <div className="acct-dropdown" role="menu">
+                  <Link
+                    className={`mobile-nav-link${pathname === "/vault" ? " on" : ""}`}
+                    role="menuitem"
+                    href="/vault"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Vault
+                  </Link>
+                  <Link
+                    className={`mobile-nav-link${pathname === "/vault/activity" ? " on" : ""}`}
+                    role="menuitem"
+                    href="/vault/activity"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Activity
+                  </Link>
+                  <Link
+                    className={`mobile-nav-link${pathname === "/agents" ? " on" : ""}`}
+                    role="menuitem"
+                    href="/agents"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Agents
+                  </Link>
                   {billingEnabled && (
                     <Link role="menuitem" href="/billing" onClick={() => setMenuOpen(false)}>
                       Billing

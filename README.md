@@ -18,7 +18,7 @@
 
 Trusty Squire is an **MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically** — then saves each key in an encrypted, write-only vault instead of your chat, your code, or your `.env`. The raw provider secret never needs to enter the agent's context, so it can't be pasted into a commit or leaked in a log.
 
-It is not a secrets manager for keys you already have, and not a browser-automation framework you script per site. Point your agent at a service — “set up Clerk and wire in the key” — and Trusty Squire opens a real browser, works through signup or sign-in one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and captures the generated key. When a real person is required (phone, hard CAPTCHA, payment), it stops and says so rather than pretending the signup completed.
+It is not a secrets manager for keys you already have, and not a browser-automation framework you script per site. Point your agent at a service — “set up Clerk and wire in the key” — and Trusty Squire opens a real browser, works through signup or sign-in one step at a time, clears the bot-detection and email-verification steps that make operator tools stall, and captures the generated key. When a real person is required for phone verification, a hard CAPTCHA, 3-D Secure, an unsupported payment, or another decision, it stops and says so rather than pretending the signup completed.
 
 **Built to be handed the keys.** Provider secrets are write-only: the agent's credential tools return references and authenticated results, never stored plaintext. Backend access is a host-scoped, rate-limited, independently revocable grant, so a leaked token is killed without rotating the provider key — and you connect Google or GitHub yourself in a real browser, so the agent never types your password. Full [threat model below](#security-and-threat-model).
 
@@ -34,7 +34,15 @@ Other useful asks:
 
 - “Create a Render API key for deployment automation and keep it out of this conversation.”
 - “Set up OpenRouter without returning its API key to this conversation.”
+- “Pay this checkout with my saved work card and ask me to approve it on my phone.”
 - “That app grant leaked. Revoke it without rotating the provider key.”
+
+For supported card checkouts, add a card in the Vault once from a passkey-capable
+device. Trusty Squire encrypts it in that browser with a passkey-derived key.
+`operate_pay` reads the checkout total, sends you a short-lived approval link,
+and submits only after you approve the exact purchase. If the issuer requires
+3-D Secure, Trusty Squire hands the challenge back to you instead of automating
+it.
 
 ## Install
 
@@ -60,7 +68,9 @@ Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline
 4. The agent can make an authenticated request through Trusty Squire or create a host-scoped, rate-limited app grant.
 5. Successful flows can become signed registry skills, so later runs can replay verified steps instead of rediscovering every click.
 
-If a site requires a phone, hard CAPTCHA, payment, or a human decision, the run stops and tells you. It does not guess or pretend the signup completed.
+If a site requires phone verification, a hard CAPTCHA, an unsupported payment,
+3-D Secure, or another human decision, the run stops and tells you. It does not
+guess or pretend the signup completed.
 
 ## Supported services
 
@@ -101,16 +111,29 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - The raw provider key is injected only into the outbound provider request. It does not need to land in chat, generated code, the consuming app, or the project's `.env` file.
 - App grants are host-scoped, auditable, rate-limitable, and independently revocable. A leaked grant can be revoked without rotating the provider key.
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
+- Saved cards are encrypted in your browser with a passkey-derived key. For a
+  payment, your phone releases the card only to that checkout operator after
+  you approve the merchant, origin, amount, currency, and one-time request.
+  Trusty Squire's API and the coding-agent model never receive plaintext card
+  data.
 - Browser screenshots and diagnostics can contain whatever a website visibly rendered. Treat diagnostic artifacts as sensitive and do not ask an agent to re-observe a page after a secret is shown.
-- Trusty Squire does not bypass phone verification, hard CAPTCHAs, payment authorization, or decisions that belong to a person. It stops for human input.
+- Trusty Squire does not bypass phone verification, hard CAPTCHAs, 3-D Secure,
+  payment authorization, or decisions that belong to a person. It stops for
+  human input.
 
-See [Architecture and security](https://github.com/trusty-squire/trusty-squire/blob/main/docs/ARCHITECTURE.md) for the system boundaries and data flow.
+See the [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md)
+for the card and credential trust boundaries, and
+[architecture](https://github.com/trusty-squire/trusty-squire/blob/main/docs/ARCHITECTURE.md)
+for the system and data flows.
 
 ## MCP tools
 
 - `operate_start`, `operate_observe`, and `operate_act` open a website, inspect the current state, and perform one browser action at a time.
 - `operate_extract` captures a generated credential into a sealed slot or the vault.
 - `operate_remember` and `operate_use` save and replay successful website flows.
+- `list_payment_cards` returns saved-card labels and opaque references;
+  `operate_pay` requests phone approval, fills a checkout, and hands off 3-D
+  Secure.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.

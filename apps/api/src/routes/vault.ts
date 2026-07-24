@@ -86,18 +86,24 @@ const storeBody = z
       )
       .optional(),
   })
-  .refine((b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0), {
-    message: "one of value or fields is required",
-  });
+  .refine(
+    (b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0),
+    {
+      message: "one of value or fields is required",
+    },
+  );
 
 const patchBody = z
   .object({
     value: z.string().min(1).max(8192).optional(),
     fields: z.record(z.string().min(1).max(8192)).optional(),
   })
-  .refine((b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0), {
-    message: "one of value or fields is required",
-  });
+  .refine(
+    (b) => b.value !== undefined || (b.fields !== undefined && Object.keys(b.fields).length > 0),
+    {
+      message: "one of value or fields is required",
+    },
+  );
 
 const allowedHostsBody = z.object({
   hosts: z.array(z.string().min(1).max(253)).max(50),
@@ -141,7 +147,10 @@ function rotationAge(
   };
 }
 
-function fieldsFrom(b: { value?: string | undefined; fields?: Record<string, string> | undefined }): Record<string, string> {
+function fieldsFrom(b: {
+  value?: string | undefined;
+  fields?: Record<string, string> | undefined;
+}): Record<string, string> {
   if (b.fields !== undefined && Object.keys(b.fields).length > 0) return b.fields;
   return { value: b.value! };
 }
@@ -158,10 +167,27 @@ function normaliseHost(raw: string): string | null {
 }
 
 const TWO_LABEL_PUBLIC_SUFFIXES: ReadonlySet<string> = new Set([
-  "co.uk", "org.uk", "gov.uk", "ac.uk", "com.au", "net.au", "org.au",
-  "co.jp", "co.nz", "co.in", "com.br", "co.za", "com.cn",
-  "github.io", "web.app", "firebaseapp.com", "pages.dev", "workers.dev",
-  "vercel.app", "netlify.app", "herokuapp.com",
+  "co.uk",
+  "org.uk",
+  "gov.uk",
+  "ac.uk",
+  "com.au",
+  "net.au",
+  "org.au",
+  "co.jp",
+  "co.nz",
+  "co.in",
+  "com.br",
+  "co.za",
+  "com.cn",
+  "github.io",
+  "web.app",
+  "firebaseapp.com",
+  "pages.dev",
+  "workers.dev",
+  "vercel.app",
+  "netlify.app",
+  "herokuapp.com",
 ]);
 
 function validLoginHost(host: string): boolean {
@@ -208,42 +234,39 @@ export const registerVaultRoute: FastifyPluginAsync<{
   // unset); tests inject a stub. Powers the "new key added" notification.
   const forwarder = buildEmailForwarder(opts.emailForwarder);
   // ── list (web + agent): metadata only, no secret values ──────
-  fastify.get(
-    "/v1/vault/credentials",
-    { preHandler: opts.requireAny },
-    async (req, reply) => {
-      const auth = req.auth!;
-      const now = opts.deps.now?.() ?? new Date();
-      const creds = await opts.deps.credentialStore.listByAccount(auth.account_id);
-      return reply.code(200).send({
-        credentials: creds.map((c) => {
-          const service = typeof c.metadata.service === "string" ? c.metadata.service : null;
-          return {
-            id: c.id,
-            reference: c.reference,
-            service,
-            label: c.label,
-            field_names: c.field_names,
-            key_name: c.env_var_suggestion,
-            type: c.type,
-            allowed_hosts: c.allowed_hosts,
-            auth_strategy: typeof c.metadata.auth_strategy === "string" ? c.metadata.auth_strategy : null,
-            signin_url: typeof c.metadata.signin_url === "string" ? c.metadata.signin_url : null,
-            login_hosts: Array.isArray(c.metadata.login_hosts)
-              ? c.metadata.login_hosts.filter((h): h is string => typeof h === "string")
-              : [],
-            favicon_domain: faviconDomain(service, c.allowed_hosts),
-            created_at: c.created_at.toISOString(),
-            rotated_at: c.rotated_at?.toISOString() ?? null,
-            last_retrieved_at: c.last_retrieved_at?.toISOString() ?? null,
-            retrieval_count: c.retrieval_count,
-            // Rotation-age nudge: age since last change + a stale flag.
-            ...rotationAge(c.rotated_at, c.created_at, now),
-          };
-        }),
-      });
-    },
-  );
+  fastify.get("/v1/vault/credentials", { preHandler: opts.requireAny }, async (req, reply) => {
+    const auth = req.auth!;
+    const now = opts.deps.now?.() ?? new Date();
+    const creds = await opts.deps.credentialStore.listByAccount(auth.account_id);
+    return reply.code(200).send({
+      credentials: creds.map((c) => {
+        const service = typeof c.metadata.service === "string" ? c.metadata.service : null;
+        return {
+          id: c.id,
+          reference: c.reference,
+          service,
+          label: c.label,
+          field_names: c.field_names,
+          key_name: c.env_var_suggestion,
+          type: c.type,
+          allowed_hosts: c.allowed_hosts,
+          auth_strategy:
+            typeof c.metadata.auth_strategy === "string" ? c.metadata.auth_strategy : null,
+          signin_url: typeof c.metadata.signin_url === "string" ? c.metadata.signin_url : null,
+          login_hosts: Array.isArray(c.metadata.login_hosts)
+            ? c.metadata.login_hosts.filter((h): h is string => typeof h === "string")
+            : [],
+          favicon_domain: faviconDomain(service, c.allowed_hosts),
+          created_at: c.created_at.toISOString(),
+          rotated_at: c.rotated_at?.toISOString() ?? null,
+          last_retrieved_at: c.last_retrieved_at?.toISOString() ?? null,
+          retrieval_count: c.retrieval_count,
+          // Rotation-age nudge: age since last change + a stale flag.
+          ...rotationAge(c.rotated_at, c.created_at, now),
+        };
+      }),
+    });
+  });
 
   // ── audit timeline (web only): who-touched-my-keys ───────────
   // The full event trail for the account — stored/retrieved/rotated/
@@ -254,40 +277,37 @@ export const registerVaultRoute: FastifyPluginAsync<{
   // account's own agent ("show me everything that touched my keys"), since
   // both are bound to the same account and the agent already lists creds +
   // mints grants on it — the audit trail exposes strictly less.
-  fastify.get(
-    "/v1/vault/audit",
-    { preHandler: opts.requireAny },
-    async (req, reply) => {
-      const auth = req.auth!;
-      const parsed = auditQuery.safeParse(req.query);
-      if (!parsed.success) {
-        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-        return;
-      }
-      const q = parsed.data;
-      const events = await opts.deps.vault.listAudit(auth.account_id, {
-        ...(q.limit !== undefined ? { limit: q.limit } : {}),
-        ...(q.before !== undefined ? { before: new Date(q.before) } : {}),
-        ...(q.type !== undefined ? { type: q.type } : {}),
-        ...(q.reference !== undefined ? { reference: q.reference } : {}),
-      });
-      const last = events.at(-1);
-      return reply.code(200).send({
-        events: events.map((e) => ({
-          id: e.id,
-          type: e.type,
-          emitted_at: e.emitted_at.toISOString(),
-          // Whole payload is non-secret by construction (references,
-          // requesters, outcomes, proxy forensics — never a key value).
-          ...e.payload,
-        })),
-        // Keyset cursor for the next page; null when this page wasn't full.
-        next_before: events.length === (q.limit ?? 50) && last !== undefined
+  fastify.get("/v1/vault/audit", { preHandler: opts.requireAny }, async (req, reply) => {
+    const auth = req.auth!;
+    const parsed = auditQuery.safeParse(req.query);
+    if (!parsed.success) {
+      reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+      return;
+    }
+    const q = parsed.data;
+    const events = await opts.deps.vault.listAudit(auth.account_id, {
+      ...(q.limit !== undefined ? { limit: q.limit } : {}),
+      ...(q.before !== undefined ? { before: new Date(q.before) } : {}),
+      ...(q.type !== undefined ? { type: q.type } : {}),
+      ...(q.reference !== undefined ? { reference: q.reference } : {}),
+    });
+    const last = events.at(-1);
+    return reply.code(200).send({
+      events: events.map((e) => ({
+        id: e.id,
+        type: e.type,
+        emitted_at: e.emitted_at.toISOString(),
+        // Whole payload is non-secret by construction (references,
+        // requesters, outcomes, proxy forensics — never a key value).
+        ...e.payload,
+      })),
+      // Keyset cursor for the next page; null when this page wasn't full.
+      next_before:
+        events.length === (q.limit ?? 50) && last !== undefined
           ? last.emitted_at.toISOString()
           : null,
-      });
-    },
-  );
+    });
+  });
 
   // ── reveal (web only): decrypt fields for the human ──────────
   fastify.post<{ Params: { id: string } }>(
@@ -306,7 +326,9 @@ export const registerVaultRoute: FastifyPluginAsync<{
       }
       try {
         const fields = await opts.deps.vault.reveal(target.reference, auth.account_id);
-        return reply.code(200).send({ id: target.id, fields, revealed_at: new Date().toISOString() });
+        return reply
+          .code(200)
+          .send({ id: target.id, fields, revealed_at: new Date().toISOString() });
       } catch (err) {
         reply.code(500).send({
           error: "reveal_failed",
@@ -318,18 +340,14 @@ export const registerVaultRoute: FastifyPluginAsync<{
   );
 
   // ── store (agent): upsert ────────────────────────────────────
-  fastify.post(
-    "/v1/vault/credentials",
-    { preHandler: opts.requireAgent },
-    async (req, reply) => {
-      const auth = req.auth!;
-      if (auth.kind !== "agent") return;
-      // Bot stores happen with no human watching, so a new key gets a
-      // "key added" notification. Re-stores (rotation) don't — they're
-      // expected churn, not a surprise the user needs flagged.
-      return storeUpsert(opts, auth.account_id, req, reply, "squire", forwarder, true);
-    },
-  );
+  fastify.post("/v1/vault/credentials", { preHandler: opts.requireAgent }, async (req, reply) => {
+    const auth = req.auth!;
+    if (auth.kind !== "agent") return;
+    // Bot stores happen with no human watching, so a new key gets a
+    // "key added" notification. Re-stores (rotation) don't — they're
+    // expected churn, not a surprise the user needs flagged.
+    return storeUpsert(opts, auth.account_id, req, reply, "squire", forwarder, true);
+  });
 
   // ── store (web manual paste): upsert ─────────────────────────
   fastify.post(
@@ -402,21 +420,38 @@ export const registerVaultRoute: FastifyPluginAsync<{
 
   // ── GDPR export (web only): everything we hold ───────────────
   // The complete, machine-readable record of the account's vault: every
-  // credential's non-secret metadata (active + deleted) plus the full
-  // audit trail. No secret values. Served as a download.
-  fastify.get(
-    "/v1/vault/export",
-    { preHandler: opts.requireWeb },
-    async (req, reply) => {
-      const auth = req.auth!;
-      if (auth.kind !== "web") return;
-      const data = await opts.deps.vault.exportAccount(auth.account_id);
-      return reply
-        .code(200)
-        .header("content-disposition", 'attachment; filename="trusty-squire-vault-export.json"')
-        .send({ exported_at: new Date().toISOString(), ...data });
-    },
-  );
+  // credential's non-secret metadata (active + deleted), opaque E2E card
+  // blobs, and the full vault + payment audit trails. Served as a download.
+  fastify.get("/v1/vault/export", { preHandler: opts.requireWeb }, async (req, reply) => {
+    const auth = req.auth!;
+    if (auth.kind !== "web") return;
+    const data = await opts.deps.vault.exportAccount(auth.account_id);
+    const e2eCredentials = await opts.deps.e2eCredentialStore.exportAll(auth.account_id);
+    const paymentAuditEvents = await opts.deps.paymentAuditStore.exportAll(auth.account_id);
+    return reply
+      .code(200)
+      .header("content-disposition", 'attachment; filename="trusty-squire-vault-export.json"')
+      .send({
+        exported_at: new Date().toISOString(),
+        ...data,
+        e2e_credentials: e2eCredentials.map((credential) => ({
+          id: credential.id,
+          label: credential.label,
+          blob: credential.blob,
+          created_at: credential.createdAt.toISOString(),
+        })),
+        payment_audit_events: paymentAuditEvents.map((event) => ({
+          id: event.id,
+          merchant: event.merchant,
+          amount_cents: event.amountCents,
+          currency: event.currency,
+          last4: event.last4,
+          status: event.status,
+          mandate_id: event.mandateId,
+          created_at: event.createdAt.toISOString(),
+        })),
+      });
+  });
 
   // ── account deletion (web only): GDPR hard delete ────────────
   // Right-to-be-forgotten: irreversibly delete the whole account.
@@ -426,28 +461,29 @@ export const registerVaultRoute: FastifyPluginAsync<{
   //      devices, mandate, and web/agent sessions (FK onDelete: Cascade)
   //   4. clear the session cookie so the caller is signed out
   // Leaves nothing. Requires explicit confirm.
-  fastify.delete(
-    "/v1/vault/account",
-    { preHandler: opts.requireWeb },
-    async (req, reply) => {
-      const auth = req.auth!;
-      if (auth.kind !== "web") return;
-      const parsed = confirmDeleteBody.safeParse(req.body);
-      if (!parsed.success || parsed.data.confirm !== true) {
-        reply.code(400).send({ error: "confirmation_required", message: "pass { confirm: true } to permanently delete your account" });
-        return;
-      }
-      const purged = await opts.deps.vault.purgeAccount(auth.account_id);
-      const machine_tokens_deleted = await opts.deps.machineTokenStore.deleteByAccount(auth.account_id);
-      // Revoke the acting session explicitly so the kill is immediate in any
-      // store; deleting the account row then cascade-removes all remaining
-      // web/agent sessions (FK onDelete: Cascade) in Postgres.
-      await opts.deps.sessionStore.revoke(auth.jwt_id, "account_deleted");
-      await opts.deps.accountStore.deleteAccount(auth.account_id);
-      clearSessionCookie(reply);
-      return reply.code(200).send({ ...purged, machine_tokens_deleted, account_deleted: true });
-    },
-  );
+  fastify.delete("/v1/vault/account", { preHandler: opts.requireWeb }, async (req, reply) => {
+    const auth = req.auth!;
+    if (auth.kind !== "web") return;
+    const parsed = confirmDeleteBody.safeParse(req.body);
+    if (!parsed.success || parsed.data.confirm !== true) {
+      reply.code(400).send({
+        error: "confirmation_required",
+        message: "pass { confirm: true } to permanently delete your account",
+      });
+      return;
+    }
+    const purged = await opts.deps.vault.purgeAccount(auth.account_id);
+    const machine_tokens_deleted = await opts.deps.machineTokenStore.deleteByAccount(
+      auth.account_id,
+    );
+    // Revoke the acting session explicitly so the kill is immediate in any
+    // store; deleting the account row then cascade-removes all remaining
+    // web/agent sessions (FK onDelete: Cascade) in Postgres.
+    await opts.deps.sessionStore.revoke(auth.jwt_id, "account_deleted");
+    await opts.deps.accountStore.deleteAccount(auth.account_id);
+    clearSessionCookie(reply);
+    return reply.code(200).send({ ...purged, machine_tokens_deleted, account_deleted: true });
+  });
 
   // ── health (web only): envelope integrity probe ─────────────
   // Confirms the credential still decrypts under the current KMS keyring
@@ -470,7 +506,9 @@ export const registerVaultRoute: FastifyPluginAsync<{
       const result = await opts.deps.vault.checkHealth(target.reference, auth.account_id);
       // 200 with healthy:false — the probe ran successfully and found the
       // envelope unhealthy; that's a valid result, not a request error.
-      return reply.code(200).send({ id: target.id, ...result, checked_at: new Date().toISOString() });
+      return reply
+        .code(200)
+        .send({ id: target.id, ...result, checked_at: new Date().toISOString() });
     },
   );
 
@@ -684,8 +722,12 @@ async function storeUpsert(
     reply.code(400).send({ error: "invalid_login_hosts" });
     return;
   }
-  const authStrategy = data.auth_strategy ?? (data.type === "username_password" ? "username_password" : undefined);
-  if ((data.type === "username_password" || authStrategy === "username_password") && (loginHosts === undefined || loginHosts.length === 0)) {
+  const authStrategy =
+    data.auth_strategy ?? (data.type === "username_password" ? "username_password" : undefined);
+  if (
+    (data.type === "username_password" || authStrategy === "username_password") &&
+    (loginHosts === undefined || loginHosts.length === 0)
+  ) {
     reply.code(400).send({ error: "login_hosts_required" });
     return;
   }
@@ -696,7 +738,9 @@ async function storeUpsert(
     ...(data.label !== undefined ? { label: data.label } : {}),
     fields: fieldsFrom(data),
     ...(data.type !== undefined ? { type: data.type } : {}),
-    ...(data.env_var_suggestion !== undefined ? { env_var_suggestion: data.env_var_suggestion } : {}),
+    ...(data.env_var_suggestion !== undefined
+      ? { env_var_suggestion: data.env_var_suggestion }
+      : {}),
     ...(data.observed_hosts !== undefined ? { observed_hosts: data.observed_hosts } : {}),
     metadata: {
       source,

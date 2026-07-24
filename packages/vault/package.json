@@ -10,6 +10,14 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./e2e": {
+      "types": "./dist/e2e.d.ts",
+      "import": "./dist/e2e.js"
+    },
+    "./hpke": {
+      "types": "./dist/hpke.d.ts",
+      "import": "./dist/hpke.js"
     }
   },
   "scripts": {
@@ -19,6 +27,7 @@
     "test:cov": "vitest run --coverage"
   },
   "dependencies": {
+    "@hpke/core": "^1.9.0",
     "@prisma/client": "^5.22.0",
     "ulid": "^2.3.0"
   },

@@ -7,8 +7,8 @@ and provider APIs, stores generated credentials in a write-only vault, and lets
 code use them through scoped grants without exposing raw secret values to the
 agent.
 
-This document is the canonical project overview. If another document disagrees
-with it, this document wins.
+This document is the canonical project overview and data-flow map.
+[`SECURITY.md`](../SECURITY.md) owns security and cryptographic contracts.
 
 ## Product Model
 
@@ -17,9 +17,10 @@ Trusty Squire has three jobs:
 1. Acquire credentials: sign up for services, complete onboarding, extract API
    keys, and learn repeatable service-specific flows.
 2. Store credentials: encrypt secrets in a vault that agents can write to but
-   cannot read from.
+   cannot read from, including opaque card blobs encrypted by a trusted client.
 3. Use credentials safely: inject secrets server-side for allowed calls or type
-   sealed values inside a live browser session without returning them to chat.
+   sealed values inside a live browser session without returning them to chat,
+   including user-approved card payments.
 
 The main user is a developer working through an AI coding agent. The developer
 wants infrastructure credentials and SaaS setup completed without copying keys
@@ -38,11 +39,26 @@ Agents may store credentials and request controlled use of credentials, but they
 cannot retrieve plaintext secret values. The vault records metadata and audit
 events, never exposing raw values back to the agent.
 
+**Client-encrypted card**
+
+A card record encrypted and decrypted by a trusted client with a key produced
+by the enrolled passkey's WebAuthn PRF. The API stores and returns only the
+opaque ciphertext and records metadata-only payment audit events. The
+cryptographic and data-handling contract is owned by
+[`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
+
 **Operate session**
 
 A live browser session held by the MCP server. The host agent observes pages and
 chooses actions, while the MCP process owns the browser, sealed secret slots,
 captcha handling, and extraction.
+
+**Payment approval**
+
+A short-lived handoff from an active operate session to the user's phone. The
+phone approves the exact purchase and seals the selected card to an ephemeral
+operator key; the API is only an opaque relay. The security contract is owned
+by [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Sealed slot**
 
@@ -107,6 +123,10 @@ The important boundaries are:
 - Egress grants can inject secrets into provider calls only for allowed hosts
   and configured auth shapes.
 - Audit logs record operations and metadata, not secret values.
+- Client-encrypted card WebAuthn PRF outputs and derived keys remain outside the
+  API; the server stores only opaque ciphertext.
+- Payment card plaintext exists only in the approving browser and the local
+  operator process, never in the API or coding-agent model.
 
 This boundary applies even when the agent helped create the credential. A
 successful signup does not make the resulting API key visible to the model.
@@ -130,6 +150,23 @@ user asks agent
 The agent drives the high-level plan, but the sensitive operations stay inside
 the MCP process and vault service. Raw login values, API keys, captcha tokens,
 and transferred secrets are not returned to the agent.
+
+## Payment Flow
+
+```text
+agent starts operate_pay in the active checkout
+  -> operator reads merchant, origin, and total
+  -> API creates a short-lived approval relay with an ephemeral operator key
+  -> user reviews and approves the purchase on a paired phone
+  -> phone decrypts the selected card and seals it to that operator key
+  -> operator verifies the signed mandate, opens the card, and fills checkout
+  -> 3-D Secure, when required, is handed back to the user
+  -> metadata-only payment outcome is audited
+```
+
+The detailed cryptographic checks and card-data boundary live in
+[`SECURITY.md`](../SECURITY.md#client-encrypted-card-data); the API route
+reference lives in [`apps/api/README.md`](../apps/api/README.md#endpoints).
 
 ## Skill Lifecycle
 
@@ -211,7 +248,8 @@ canonical product surfaces.
 The public docs set is intentionally small:
 
 - `README.md`: product pitch, install, and development entry point.
-- `docs/ARCHITECTURE.md`: canonical system overview and security model.
+- `SECURITY.md`: canonical security and cryptographic contracts.
+- `docs/ARCHITECTURE.md`: canonical system overview and data flows.
 - `docs/VAULT-OPERATIONS.md`: vault operator runbook.
 - `docs/DEPLOY-registry.md`: registry deployment notes.
 - `docs/BUSINESS-MODEL.md`: pricing and positioning model.

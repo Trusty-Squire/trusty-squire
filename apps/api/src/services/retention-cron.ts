@@ -4,6 +4,8 @@
 //   Hourly:
 //     - Delete PairingToken older than 1h
 //     - Delete VaultAuditEvent older than 365d
+//     - Delete PaymentAuditEvent older than 365d
+//     - Delete PendingPaymentApproval rows past expires_at
 //
 // Running this in-process is fine for v1: one machine, one schedule.
 // When we shard the API, move this to a separate worker or use
@@ -26,6 +28,8 @@ export interface RetentionCronDeps {
 export interface RetentionCronStats {
   pairing_tokens_deleted: number;
   vault_audit_deleted: number;
+  payment_audit_deleted: number;
+  payment_approvals_deleted: number;
   duration_ms: number;
   errors: string[];
 }
@@ -40,14 +44,16 @@ export class RetentionCron {
 
   constructor(private readonly deps: RetentionCronDeps) {
     this.now = deps.now ?? (() => new Date());
-    this.pairingTokenRetentionHours = deps.pairingTokenRetentionHours
-      ?? Number.parseInt(process.env.PAIRING_TOKEN_RETENTION_HOURS ?? "1", 10);
+    this.pairingTokenRetentionHours =
+      deps.pairingTokenRetentionHours ??
+      Number.parseInt(process.env.PAIRING_TOKEN_RETENTION_HOURS ?? "1", 10);
     // Vault audit is the security event trail (who-touched-my-keys), so
     // it's kept far longer than ops telemetry — a year by default. Long
     // enough to be useful for an after-the-fact compromise investigation,
     // bounded so the table doesn't grow without limit.
-    this.vaultAuditRetentionDays = deps.vaultAuditRetentionDays
-      ?? Number.parseInt(process.env.VAULT_AUDIT_RETENTION_DAYS ?? "365", 10);
+    this.vaultAuditRetentionDays =
+      deps.vaultAuditRetentionDays ??
+      Number.parseInt(process.env.VAULT_AUDIT_RETENTION_DAYS ?? "365", 10);
   }
 
   // Starts the hourly schedule. Idempotent; calling start() while
@@ -97,6 +103,8 @@ export class RetentionCron {
     const stats: RetentionCronStats = {
       pairing_tokens_deleted: 0,
       vault_audit_deleted: 0,
+      payment_audit_deleted: 0,
+      payment_approvals_deleted: 0,
       duration_ms: 0,
       errors: [],
     };
@@ -119,12 +127,38 @@ export class RetentionCron {
       // doesn't grow unbounded (it never had a sweep before). Uses
       // emitted_at, which is indexed alongside (account_id, type).
       try {
-        const r = await (this.deps.authPrisma.vaultAuditEvent as unknown as {
-          deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
-        }).deleteMany({ where: { emitted_at: { lt: vaultAuditCutoff } } });
+        const r = await (
+          this.deps.authPrisma.vaultAuditEvent as unknown as {
+            deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+          }
+        ).deleteMany({ where: { emitted_at: { lt: vaultAuditCutoff } } });
         stats.vault_audit_deleted = r.count;
       } catch (err) {
-        stats.errors.push(`vault audit delete: ${err instanceof Error ? err.message : String(err)}`);
+        stats.errors.push(
+          `vault audit delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      try {
+        const r = await this.deps.authPrisma.paymentAuditEvent.deleteMany({
+          where: { created_at: { lt: vaultAuditCutoff } },
+        });
+        stats.payment_audit_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(
+          `payment audit delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      try {
+        const r = await this.deps.authPrisma.pendingPaymentApproval.deleteMany({
+          where: { expires_at: { lt: startedAt } },
+        });
+        stats.payment_approvals_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(
+          `payment approval delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
 

@@ -36,16 +36,9 @@ export {
   type ProxyExecutor,
 } from "./credential-vault.js";
 
-export {
-  KNOWN_SERVICE_HOSTS,
-  deriveAllowedHosts,
-} from "./service-hosts.js";
+export { KNOWN_SERVICE_HOSTS, deriveAllowedHosts } from "./service-hosts.js";
 
-export {
-  type KMSClient,
-  LocalKMS,
-  LocalKMSConfigError,
-} from "./kms-client.js";
+export { type KMSClient, LocalKMS, LocalKMSConfigError } from "./kms-client.js";
 
 export {
   EncryptionError,
@@ -61,3 +54,5 @@ export {
   InMemoryVaultAuditStore,
   type InMemoryAuditEvent,
 } from "./in-memory-stores.js";
+
+export { decryptCard, encryptCard, type E2EBlob } from "./e2e.js";

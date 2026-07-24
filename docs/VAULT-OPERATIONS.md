@@ -8,7 +8,7 @@ the runbook, not the design history.
 Landed in the 2026-05-30 vault-hardening sweep. Everything below is
 account-scoped and, for the human paths, web-session only.
 
-## Encryption model (what's actually at rest)
+## Server-managed encryption model (what's actually at rest)
 
 Envelope, per credential:
 
@@ -24,6 +24,13 @@ master key (LocalKMS)  ──wraps──▶  account_kek_blob   (the only thing 
   to an agent and never written to logs or audit payloads.
 - AAD binds each layer to `(reference, account_id)`, so a row can't be
   decrypted under a different identity even with the right keys.
+
+Client-encrypted card records use a separate cryptographic boundary. The API
+stores their blobs verbatim and never receives the WebAuthn PRF output or
+derived key; see the authoritative
+[`SECURITY.md` contract](../SECURITY.md#client-encrypted-card-data). These blobs
+are not re-encrypted during `LocalKMS` rotation and cannot be recovered if the
+enrolled passkey is lost.
 
 ## Master-key custody + rotation
 
@@ -67,12 +74,15 @@ live under the DEK/KEK and are untouched by a master-key rotation.
 | `POST /v1/vault/credentials/:id/health` | web | Envelope integrity probe — confirms the row still decrypts under the current keyring. No secret returned, no retrieval counted. `healthy:false` ≠ HTTP error. |
 | `POST /v1/vault/credentials/:id/restore` | web | Undelete a soft-deleted credential. `409` if a live `(service,label)` twin holds the slot. |
 | `POST /v1/vault/credentials/revoke-all` | web | Kill-switch: soft-delete every active credential. Requires `{ confirm: true }`. Recoverable via restore until retention sweeps. |
-| `GET /v1/vault/export` | web | GDPR export — all credential metadata (active + deleted) + full audit trail, as a download. No secret values. |
+| `GET /v1/vault/export` | web | GDPR export — credential metadata, opaque encrypted-card blobs, and vault + payment audit trails. No plaintext secret values. |
 | `DELETE /v1/vault/account` | web | GDPR erasure — irreversibly hard-purge all credential rows AND the audit trail. Requires `{ confirm: true }`. |
 
 `revoke-all` (soft, recoverable) vs `DELETE /v1/vault/account` (hard,
 irreversible) are deliberately distinct: the first is the panic button,
 the second is right-to-be-forgotten.
+
+The complete vault, payment-audit, and short-lived approval route/auth
+reference is owned by [`apps/api/README.md`](../apps/api/README.md#endpoints).
 
 **Rate limiting:** every decrypt path — agent retrieve, runtime
 retrieve, AND web `reveal` — counts against one per-account ceiling
@@ -97,11 +107,13 @@ The hourly in-process retention cron (`retention-cron.ts`) sweeps:
 | Pairing tokens → delete | 1h | `PAIRING_TOKEN_RETENTION_HOURS` |
 | LLM usage events → delete | 30d | `LLM_EVENT_RETENTION_DAYS` |
 | **Vault audit events → delete** | **365d** | **`VAULT_AUDIT_RETENTION_DAYS`** |
+| **Payment audit events → delete** | **365d** | **`VAULT_AUDIT_RETENTION_DAYS`** |
+| Expired payment approvals → delete | After `expires_at` | none |
 
-Vault audit is kept a year — long enough for a post-hoc compromise
-investigation, bounded so the table doesn't grow unbounded (it had no
-sweep before this sweep). Soft-deleted *credentials* are NOT swept by
-the cron; they persist (recoverable) until a GDPR `DELETE /v1/vault/account`.
+Vault and payment audit events share the one-year window — long enough for a
+post-hoc investigation, bounded so the tables do not grow without limit.
+Soft-deleted *credentials* are NOT swept by the cron; they persist
+(recoverable) until a GDPR `DELETE /v1/vault/account`.
 
 `VAULT_ROTATION_STALE_DAYS` (default 90) drives the `stale` flag on the
 list response — advisory only, not enforced.
@@ -110,12 +122,15 @@ list response — advisory only, not enforced.
 
 - **Storage:** Fly Postgres cluster `trusty-squire-db`, database
   `trustysquire` (the API auth schema owns the `Credential` +
-  `VaultAuditEvent` tables). Backed by Fly's volume snapshots.
+  `VaultAuditEvent`, `E2ECredential`, `PaymentAuditEvent`, and
+  `PendingPaymentApproval` tables). Backed by Fly's volume snapshots.
 - **What a backup contains:** the encrypted envelope only. A restored
   DB is useless without the matching `LOCAL_KMS_KEY` — so **the master
   key must be backed up independently of the database** (it lives as a
   Fly secret; export it to your password manager / KMS out-of-band).
   Losing `LOCAL_KMS_KEY` = losing every credential, restore or not.
+  `E2ECredential` rows contain opaque client ciphertext instead; restoring them
+  still requires the matching enrolled passkey.
 - **Restore procedure:** restore the Fly volume snapshot, confirm
   `LOCAL_KMS_KEY` (and any `LOCAL_KMS_LEGACY_KEYS`) match the snapshot's
   era, then run `vault-decrypt-check` to confirm decryptability before

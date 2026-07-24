@@ -105,6 +105,21 @@ export interface UsageResponse {
   mandate_id: string;
 }
 
+export interface PaymentApproval {
+  id: string;
+  status: "pending" | "approved" | "expired";
+  merchant: string;
+  checkout_origin: string;
+  amount_cents: number;
+  currency: string;
+  nonce: string;
+  card_ref: string;
+  operator_pubkey: string;
+  jws: string | null;
+  sealed_card: string | null;
+  expires_at: string;
+}
+
 export class ApiClient {
   private readonly fetchImpl: typeof fetch;
 
@@ -122,12 +137,52 @@ export class ApiClient {
     return this.get<RunSummary>(`/v1/runs/${encodeURIComponent(runId)}`);
   }
 
+  async createPaymentApproval(input: {
+    merchant: string;
+    checkout_origin: string;
+    amount_cents: number;
+    currency: string;
+    card_ref: string;
+    operator_pubkey: string;
+  }): Promise<{ id: string; nonce: string; expires_at: string }> {
+    return this.post("/v1/pay/approvals", input);
+  }
+
+  async getPaymentApproval(id: string): Promise<PaymentApproval> {
+    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}`);
+  }
+
+  async getPaymentConfig(): Promise<{ vouchflow_audience?: string }> {
+    return this.get("/v1/pay/config");
+  }
+
+  async listPaymentCards(): Promise<Array<{ id: string; label: string }>> {
+    const records = await this.get<Array<{ id: string; label: string }>>("/v1/vault/e2e");
+    return records.map(({ id, label }) => ({ id, label }));
+  }
+
+  async auditPayment(input: {
+    merchant: string;
+    amount_cents: number;
+    currency: string;
+    last4: string;
+    status: string;
+    mandate_id?: string;
+  }): Promise<{ id: string }> {
+    return this.post("/v1/vault/payments/audit", {
+      merchant: input.merchant,
+      amountCents: input.amount_cents,
+      currency: input.currency,
+      last4: input.last4,
+      status: input.status,
+      ...(input.mandate_id !== undefined ? { mandateId: input.mandate_id } : {}),
+    });
+  }
+
   // Metadata list of every credential in the account's vault — no
   // secret values. The discovery half of the credential loop.
   async listCredentials(): Promise<{ credentials: VaultCredentialSummary[] }> {
-    return this.get<{ credentials: VaultCredentialSummary[] }>(
-      "/v1/vault/credentials",
-    );
+    return this.get<{ credentials: VaultCredentialSummary[] }>("/v1/vault/credentials");
   }
 
   // ── store: upsert (create or overwrite by service+label) ──
@@ -164,8 +219,16 @@ export class ApiClient {
   async useCredential(input: {
     reference?: string;
     service?: string;
-    http: { method: string; url: string; headers?: Record<string, string>; body?: string; query?: Record<string, string> };
-  }): Promise<{ response: { status: number; headers: Record<string, string>; body: string; truncated: boolean } }> {
+    http: {
+      method: string;
+      url: string;
+      headers?: Record<string, string>;
+      body?: string;
+      query?: Record<string, string>;
+    };
+  }): Promise<{
+    response: { status: number; headers: Record<string, string>; body: string; truncated: boolean };
+  }> {
     return this.post("/v1/vault/use", input);
   }
 
@@ -418,20 +481,11 @@ export class ApiClient {
     return (await this.handleResponse(res, "POST", path)) as T;
   }
 
-  private async handleResponse(
-    res: Response,
-    method: string,
-    path: string,
-  ): Promise<unknown> {
+  private async handleResponse(res: Response, method: string, path: string): Promise<unknown> {
     const body = await safeJson(res);
     if (!res.ok) {
       const code = isErrorBody(body) ? body.error : `http_${res.status}`;
-      throw new ApiCallError(
-        res.status,
-        code,
-        `${method} ${path} → ${res.status} ${code}`,
-        body,
-      );
+      throw new ApiCallError(res.status, code, `${method} ${path} → ${res.status} ${code}`, body);
     }
     return body;
   }
@@ -480,7 +534,8 @@ export async function installInitiate(
       ...(machineToken !== null ? { machine_token: machineToken } : {}),
     }),
   });
-  if (!res.ok) throw new ApiCallError(res.status, "install_initiate_failed", "install handshake failed");
+  if (!res.ok)
+    throw new ApiCallError(res.status, "install_initiate_failed", "install handshake failed");
   return (await res.json()) as InstallInitiateResponse;
 }
 

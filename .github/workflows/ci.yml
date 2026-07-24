@@ -116,6 +116,8 @@ jobs:
           node-version: 20.11.0
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Install Chromium for browser-backed MCP tests
+        run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
       # Registry's Prisma client must be generated before its tests. NOT vault
       # (apps/api owns an isolated client; vault's src/tests don't import one)
       # and NOT api (its tests use the in-memory store fallback).

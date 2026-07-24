@@ -7,7 +7,8 @@ description: >-
   browser through signup, sign-in, email verification, and bot gates, then vaults
   the captured key write-only. Triggers: "sign me up for X", "get an API key for
   X", "create an account on X", "set up X and save the key", "provision X",
-  "let my app call X without the key", "AI agent API key management".
+  "let my app call X without the key", "pay this checkout with my saved card",
+  "AI agent API key management".
 license: MIT
 metadata:
   homepage: https://trustysquire.ai
@@ -35,6 +36,8 @@ especially when the secret must stay out of the conversation, the repo, and
 - Finishing authenticated setup — OAuth apps, webhooks, project/region config.
 - Using an already-vaulted key to call a provider **without** the raw value
   returning to the agent's context.
+- Paying a supported checkout with a saved card after the user approves the
+  exact purchase on their phone.
 
 Do **not** reach for it when:
 
@@ -80,6 +83,10 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   rate-limited egress grant so a deployed app can call the provider while holding
   a revocable token, not the raw key.
 - `audit_log` — review what touched a credential; never exposes secret values.
+- `list_payment_cards`, `operate_pay` — select a saved card by label or opaque
+  reference, request phone approval for the exact purchase, fill the checkout,
+  and hand any 3-D Secure challenge back to the user. Card fields never return
+  through MCP.
 
 **Safety rules the agent must follow:**
 
@@ -87,9 +94,10 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   never echo a captured key into chat, code, or `.env`. To use a key, call
   `use_credential` or mint an egress grant — the value goes to the provider, not
   to you.
-- **Stop for the user** at phone verification, a hard image CAPTCHA, payment, or
-  any decision that belongs to a person. Do not guess, and do not claim a signup
-  finished when it did not.
+- **Stop for the user** at phone verification, a hard image CAPTCHA, an
+  unsupported payment, 3-D Secure, or any decision that belongs to a person.
+  `operate_pay` may proceed only after its explicit phone approval succeeds. Do
+  not guess, and do not claim a signup finished when it did not.
 - The user connects Google/GitHub themselves in the real browser during
   `connect`. Never ask for or type the user's password in chat.
 
