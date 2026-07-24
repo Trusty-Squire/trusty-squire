@@ -225,6 +225,9 @@ importers:
       '@trusty-squire/vault':
         specifier: workspace:*
         version: link:../../packages/vault
+      '@vouchflow/web':
+        specifier: 0.3.0
+        version: 0.3.0(react@19.2.4)
       next:
         specifier: 16.2.6
         version: 16.2.6(@babel/core@7.29.0)(react-dom@19.2.4)(react@19.2.4)
@@ -2561,6 +2564,18 @@ packages:
       loupe: 3.2.1
       tinyrainbow: 1.2.0
     dev: true
+
+  /@vouchflow/web@0.3.0(react@19.2.4):
+    resolution: {integrity: sha512-E0KRmtmjR2X32Ad4KqzNIfzhOENemi1Lx2Z5wdrtNE/rD8NoczcBek8LH+66l9mlBnQZv0o0jHX2zDNuy+bSHQ==}
+    engines: {node: '>=18'}
+    peerDependencies:
+      react: '>=18'
+    peerDependenciesMeta:
+      react:
+        optional: true
+    dependencies:
+      react: 19.2.4
+    dev: false
 
   /@zone-eu/mailsplit@5.4.9:
     resolution: {integrity: sha512-Qq7k6FzA5SmGf5HFPcr17gE7M+O1gttlmWn7tlGUlhGsbbjUaBL/4cEWIwExeCzqu5+kyZJ91mcBZbQ9zEwwYA==}
