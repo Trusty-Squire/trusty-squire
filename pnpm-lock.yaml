@@ -281,6 +281,9 @@ importers:
 
   packages/vault:
     dependencies:
+      '@hpke/core':
+        specifier: ^1.9.0
+        version: 1.9.0
       '@prisma/client':
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
@@ -1070,6 +1073,18 @@ packages:
       hono: ^4
     dependencies:
       hono: 4.12.18
+    dev: false
+
+  /@hpke/common@1.10.1:
+    resolution: {integrity: sha512-moJwhmtLtuxiUzzNp1jpfBfx8yefKoO9D/RCR9dmwrnc7qjJqId1rEtQz+lSlU5cabX8daToMSx/7HayXOiaFw==}
+    engines: {node: '>=16.0.0'}
+    dev: false
+
+  /@hpke/core@1.9.0:
+    resolution: {integrity: sha512-pFxWl1nNJeQCSUFs7+GAblHvXBCjn9EPN65vdKlYQil2aURaRxfGMO6vBKGqm1YHTKwiAxJQNEI70PbSowMP9Q==}
+    engines: {node: '>=16.0.0'}
+    dependencies:
+      '@hpke/common': 1.10.1
     dev: false
 
   /@humanfs/core@0.19.2:
