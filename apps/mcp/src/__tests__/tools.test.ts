@@ -52,17 +52,13 @@ describe("list_credentials", () => {
   });
 
   it("requires an active session", async () => {
-    await expect(listCredentialsTool.handler({}, null)).rejects.toThrow(
-      /Trusty Squire session/,
-    );
+    await expect(listCredentialsTool.handler({}, null)).rejects.toThrow(/Trusty Squire session/);
   });
 });
 
 describe("list_payment_cards", () => {
   it("returns only saved card IDs and labels", async () => {
-    const listPaymentCards = vi
-      .fn()
-      .mockResolvedValue([{ id: "card_1", label: "Personal" }]);
+    const listPaymentCards = vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]);
     const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
 
     await expect(listPaymentCardsTool.handler({}, api)).resolves.toEqual({
@@ -87,9 +83,7 @@ describe("operate_pay card selection", () => {
     const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
     const args = operatePayTool.inputSchema.parse({ card_label: "Personal" });
 
-    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
-      /Multiple saved payment cards/,
-    );
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(/Multiple saved payment cards/);
   });
 });
 
@@ -211,7 +205,6 @@ describe("TOOLS registry", () => {
       expect(t.description.length).toBeGreaterThan(40);
     }
   });
-
 });
 
 describe("ApiCallError surface", () => {

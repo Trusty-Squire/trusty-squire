@@ -182,9 +182,7 @@ export class ApiClient {
   // Metadata list of every credential in the account's vault — no
   // secret values. The discovery half of the credential loop.
   async listCredentials(): Promise<{ credentials: VaultCredentialSummary[] }> {
-    return this.get<{ credentials: VaultCredentialSummary[] }>(
-      "/v1/vault/credentials",
-    );
+    return this.get<{ credentials: VaultCredentialSummary[] }>("/v1/vault/credentials");
   }
 
   // ── store: upsert (create or overwrite by service+label) ──
@@ -221,8 +219,16 @@ export class ApiClient {
   async useCredential(input: {
     reference?: string;
     service?: string;
-    http: { method: string; url: string; headers?: Record<string, string>; body?: string; query?: Record<string, string> };
-  }): Promise<{ response: { status: number; headers: Record<string, string>; body: string; truncated: boolean } }> {
+    http: {
+      method: string;
+      url: string;
+      headers?: Record<string, string>;
+      body?: string;
+      query?: Record<string, string>;
+    };
+  }): Promise<{
+    response: { status: number; headers: Record<string, string>; body: string; truncated: boolean };
+  }> {
     return this.post("/v1/vault/use", input);
   }
 
@@ -475,20 +481,11 @@ export class ApiClient {
     return (await this.handleResponse(res, "POST", path)) as T;
   }
 
-  private async handleResponse(
-    res: Response,
-    method: string,
-    path: string,
-  ): Promise<unknown> {
+  private async handleResponse(res: Response, method: string, path: string): Promise<unknown> {
     const body = await safeJson(res);
     if (!res.ok) {
       const code = isErrorBody(body) ? body.error : `http_${res.status}`;
-      throw new ApiCallError(
-        res.status,
-        code,
-        `${method} ${path} → ${res.status} ${code}`,
-        body,
-      );
+      throw new ApiCallError(res.status, code, `${method} ${path} → ${res.status} ${code}`, body);
     }
     return body;
   }
@@ -537,7 +534,8 @@ export async function installInitiate(
       ...(machineToken !== null ? { machine_token: machineToken } : {}),
     }),
   });
-  if (!res.ok) throw new ApiCallError(res.status, "install_initiate_failed", "install handshake failed");
+  if (!res.ok)
+    throw new ApiCallError(res.status, "install_initiate_failed", "install handshake failed");
   return (await res.json()) as InstallInitiateResponse;
 }
 

@@ -14,10 +14,7 @@ function fromBase64(value: string): Uint8Array {
 }
 
 function importKey(key: Uint8Array) {
-  return globalThis.crypto.subtle.importKey("raw", key, "AES-GCM", false, [
-    "encrypt",
-    "decrypt",
-  ]);
+  return globalThis.crypto.subtle.importKey("raw", key, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
 /**
@@ -58,12 +55,7 @@ export async function decryptCard(
 ): Promise<Record<string, unknown>> {
   const iv = fromBase64(blob.iv);
   const ciphertext = fromBase64(blob.ct);
-  if (
-    blob.v !== 1 ||
-    blob.cipher !== "aes-256-gcm" ||
-    iv.length !== 12 ||
-    ciphertext.length < 16
-  ) {
+  if (blob.v !== 1 || blob.cipher !== "aes-256-gcm" || iv.length !== 12 || ciphertext.length < 16) {
     throw new Error("Invalid encrypted card");
   }
   const cryptoKey = await importKey(key);

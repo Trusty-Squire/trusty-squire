@@ -3,18 +3,20 @@ import { activeProvisionBrowser } from "../bot/provision-session.js";
 import { executeOperatePay } from "../bot/pay-operator.js";
 import { assertApi, type Tool } from "./index.js";
 
-const inputSchema = z.object({
-  merchant: z.string().min(1).max(256).optional(),
-  amount_cents: z.number().int().min(0).max(2_147_483_647).optional(),
-  currency: z
-    .string()
-    .regex(/^[A-Za-z]{3}$/)
-    .optional(),
-  card_ref: z.string().min(1).max(64).optional(),
-  card_label: z.string().min(1).max(256).optional(),
-}).refine((value) => (value.card_ref === undefined) !== (value.card_label === undefined), {
-  message: "Provide exactly one of card_ref or card_label",
-});
+const inputSchema = z
+  .object({
+    merchant: z.string().min(1).max(256).optional(),
+    amount_cents: z.number().int().min(0).max(2_147_483_647).optional(),
+    currency: z
+      .string()
+      .regex(/^[A-Za-z]{3}$/)
+      .optional(),
+    card_ref: z.string().min(1).max(64).optional(),
+    card_label: z.string().min(1).max(256).optional(),
+  })
+  .refine((value) => (value.card_ref === undefined) !== (value.card_label === undefined), {
+    message: "Provide exactly one of card_ref or card_label",
+  });
 
 export const listPaymentCardsTool: Tool = {
   name: "list_payment_cards",

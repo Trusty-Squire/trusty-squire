@@ -69,7 +69,9 @@ describe("checkout payment parsing", () => {
       expect(result.three_ds_required).toBe(true);
       expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
       expect(
-        await page.locator("input").evaluateAll((inputs) => inputs.map((input) => input.value)),
+        await page
+          .locator("input")
+          .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
       ).toEqual(["", "", "", ""]);
     } finally {
       await browser.close();

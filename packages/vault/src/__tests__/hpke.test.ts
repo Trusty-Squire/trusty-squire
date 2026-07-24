@@ -1,9 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  generateOperatorKeypair,
-  openSealed,
-  sealToRecipient,
-} from "../hpke.js";
+import { generateOperatorKeypair, openSealed, sealToRecipient } from "../hpke.js";
 
 const message = new TextEncoder().encode("synthetic card payload");
 const aad = new TextEncoder().encode("synthetic mandate");
@@ -27,8 +23,7 @@ describe("HPKE seal / open", () => {
     const bundle = await sealToRecipient(keypair.publicKey, message, aad);
     const index = Math.floor(bundle.length / 2);
     const tampered =
-      `${bundle.slice(0, index)}${bundle[index] === "A" ? "B" : "A"}` +
-      bundle.slice(index + 1);
+      `${bundle.slice(0, index)}${bundle[index] === "A" ? "B" : "A"}` + bundle.slice(index + 1);
     await expect(openSealed(keypair.privateKey, tampered, aad)).rejects.toThrow();
   });
 

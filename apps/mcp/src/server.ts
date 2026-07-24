@@ -13,10 +13,7 @@
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
 import { TOOLS, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
@@ -24,7 +21,8 @@ import { VERSION } from "./version.js";
 
 const SERVER_NAME = "trusty-squire";
 
-const DEFAULT_REGISTRY_BASE = process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai";
+const DEFAULT_REGISTRY_BASE =
+  process.env.ADAPTER_REGISTRY_URL ?? "https://registry.trustysquire.ai";
 
 // Injected into the model's system prompt every turn (≤2KB). Teaches
 // the routing between store / use / request so the agent reaches for
@@ -82,7 +80,9 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
     }
     const parsed = tool.inputSchema.safeParse(req.params.arguments ?? {});
     if (!parsed.success) {
-      return errorContent(`invalid arguments: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
+      return errorContent(
+        `invalid arguments: ${parsed.error.issues.map((i) => i.message).join("; ")}`,
+      );
     }
     try {
       const result = await tool.handler(parsed.data, api, {

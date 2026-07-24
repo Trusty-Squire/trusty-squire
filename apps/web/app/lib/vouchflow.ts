@@ -10,9 +10,7 @@ export function getVouchflow() {
   // Read at call time so builds and previews can load this module unconfigured.
   const apiKey = process.env.NEXT_PUBLIC_VOUCHFLOW_API_KEY?.trim();
   if (!apiKey) {
-    throw new Error(
-      "Vouchflow is not configured (NEXT_PUBLIC_VOUCHFLOW_API_KEY unset)",
-    );
+    throw new Error("Vouchflow is not configured (NEXT_PUBLIC_VOUCHFLOW_API_KEY unset)");
   }
 
   client = Vouchflow.configure({
@@ -20,9 +18,7 @@ export function getVouchflow() {
     // NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT is "sandbox" | "production" (the SDK's
     // Environment values). Anything other than "production" stays on sandbox.
     environment:
-      process.env.NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT === "production"
-        ? "production"
-        : "sandbox",
+      process.env.NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT === "production" ? "production" : "sandbox",
     rpId: window.location.hostname,
     rpName: "Trusty Squire",
   });

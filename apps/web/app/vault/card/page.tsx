@@ -52,9 +52,7 @@ export default function CardPage() {
       .catch((err: unknown) => {
         if (cancelled) return;
         setEnrolled(false);
-        setPairingError(
-          err instanceof Error ? err.message : "Failed to check passkey setup.",
-        );
+        setPairingError(err instanceof Error ? err.message : "Failed to check passkey setup.");
       });
     return () => {
       cancelled = true;
@@ -87,9 +85,7 @@ export default function CardPage() {
         throw new Error("Passkey setup did not complete. Please try again.");
       }
     } catch (err) {
-      setPairingError(
-        err instanceof Error ? err.message : "Failed to set up payments.",
-      );
+      setPairingError(err instanceof Error ? err.message : "Failed to set up payments.");
     } finally {
       setPairing(false);
     }
@@ -161,21 +157,7 @@ export default function CardPage() {
         setBusy(false);
       }
     },
-    [
-      city,
-      country,
-      cvv,
-      expiry,
-      label,
-      line1,
-      line2,
-      load,
-      name,
-      pan,
-      postalCode,
-      router,
-      state,
-    ],
+    [city, country, cvv, expiry, label, line1, line2, load, name, pan, postalCode, router, state],
   );
 
   if (enrolled !== true) {
@@ -184,9 +166,7 @@ export default function CardPage() {
         <div className="app-head">
           <div>
             <h1 className="app-title">Add card</h1>
-            <p className="app-sub">
-              Encrypted in this browser. The server cannot decrypt it.
-            </p>
+            <p className="app-sub">Encrypted in this browser. The server cannot decrypt it.</p>
           </div>
         </div>
 
@@ -201,9 +181,7 @@ export default function CardPage() {
               A one-time Face ID / Touch ID setup lets this device encrypt and approve card
               payments. Your card is never readable by our servers.
             </p>
-            {pairingError !== null && (
-              <div className="form-err">{pairingError}</div>
-            )}
+            {pairingError !== null && <div className="form-err">{pairingError}</div>}
             <button
               className="btn-primary"
               type="button"
@@ -223,9 +201,7 @@ export default function CardPage() {
       <div className="app-head">
         <div>
           <h1 className="app-title">Add card</h1>
-          <p className="app-sub">
-            Encrypted in this browser. The server cannot decrypt it.
-          </p>
+          <p className="app-sub">Encrypted in this browser. The server cannot decrypt it.</p>
         </div>
       </div>
 

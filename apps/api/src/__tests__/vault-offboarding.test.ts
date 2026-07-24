@@ -1,4 +1,4 @@
-// Vault GDPR surfaces — export (everything we hold, no secrets) and the
+// Vault GDPR surfaces — export (everything we hold, no plaintext secrets) and the
 // irreversible account deletion (purge credentials + audit trail, delete
 // the account identity, revoke the session).
 
@@ -9,23 +9,34 @@ import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
-const CUSTOMER_ID = "ts-test";
 
-interface Harness { server: FastifyInstance; deps: ApiDeps; }
+interface Harness {
+  server: FastifyInstance;
+  deps: ApiDeps;
+}
 
 async function setup(): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
   const server = await buildServer({ deps });
   return { server, deps };
 }
 
 async function makeWebSession(deps: ApiDeps, accountId: string): Promise<string> {
-  const { record, jwt } = issueSession({ account_id: accountId, ip: null, user_agent: null, now: new Date() });
+  const { record, jwt } = issueSession({
+    account_id: accountId,
+    ip: null,
+    user_agent: null,
+    now: new Date(),
+  });
   await deps.sessionStore.insert(record);
   return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
 }
 
-async function createCred(server: FastifyInstance, cookie: string, service: string): Promise<string> {
+async function createCred(
+  server: FastifyInstance,
+  cookie: string,
+  service: string,
+): Promise<string> {
   const res = await server.inject({
     method: "POST",
     url: "/v1/vault/credentials/manual",
@@ -33,7 +44,11 @@ async function createCred(server: FastifyInstance, cookie: string, service: stri
     payload: { service, value: `sk-${service}-secret` },
   });
   expect(res.statusCode).toBe(201);
-  const list = await server.inject({ method: "GET", url: "/v1/vault/credentials", headers: { cookie } });
+  const list = await server.inject({
+    method: "GET",
+    url: "/v1/vault/credentials",
+    headers: { cookie },
+  });
   const creds = (list.json() as { credentials: { id: string; service: string }[] }).credentials;
   return creds.find((c) => c.service === service)!.id;
 }
@@ -58,19 +73,35 @@ interface Export {
 
 describe("GDPR export + erasure", () => {
   let h: Harness;
-  beforeEach(async () => { h = await setup(); });
-  afterEach(async () => { await h.server.close(); });
+  beforeEach(async () => {
+    h = await setup();
+  });
+  afterEach(async () => {
+    await h.server.close();
+  });
 
   it("export returns all credentials + audit trail, no secret values", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const cookie = await makeWebSession(h.deps, account.id);
     const id = await createCred(h.server, cookie, "OpenAI");
     await createCred(h.server, cookie, "Stripe");
-    await h.server.inject({ method: "POST", url: `/v1/vault/credentials/${id}/reveal`, headers: { cookie } });
+    await h.server.inject({
+      method: "POST",
+      url: `/v1/vault/credentials/${id}/reveal`,
+      headers: { cookie },
+    });
     // soft-delete one so export must include deleted rows
-    await h.server.inject({ method: "DELETE", url: `/v1/vault/credentials/${id}`, headers: { cookie } });
+    await h.server.inject({
+      method: "DELETE",
+      url: `/v1/vault/credentials/${id}`,
+      headers: { cookie },
+    });
 
-    const res = await h.server.inject({ method: "GET", url: "/v1/vault/export", headers: { cookie } });
+    const res = await h.server.inject({
+      method: "GET",
+      url: "/v1/vault/export",
+      headers: { cookie },
+    });
     expect(res.statusCode).toBe(200);
     expect(res.headers["content-disposition"]).toContain("attachment");
     const data = res.json() as Export;
@@ -84,7 +115,11 @@ describe("GDPR export + erasure", () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
     const other = await h.deps.accountStore.createAccount("other@example.test", "Other");
     const cookie = await makeWebSession(h.deps, account.id);
-    const e2eId = await h.deps.e2eCredentialStore.create(account.id, "Primary card", "opaque-card-blob");
+    const e2eId = await h.deps.e2eCredentialStore.create(
+      account.id,
+      "Primary card",
+      "opaque-card-blob",
+    );
     const paymentId = await h.deps.paymentAuditStore.create(account.id, {
       merchant: "Example Store",
       amountCents: 2599,
@@ -102,7 +137,11 @@ describe("GDPR export + erasure", () => {
       status: "declined",
     });
 
-    const res = await h.server.inject({ method: "GET", url: "/v1/vault/export", headers: { cookie } });
+    const res = await h.server.inject({
+      method: "GET",
+      url: "/v1/vault/export",
+      headers: { cookie },
+    });
 
     expect(res.statusCode).toBe(200);
     const data = res.json() as Export;
@@ -133,12 +172,26 @@ describe("GDPR export + erasure", () => {
     const cookie = await makeWebSession(h.deps, account.id);
     await createCred(h.server, cookie, "OpenAI");
 
-    const noConfirm = await h.server.inject({ method: "DELETE", url: "/v1/vault/account", headers: { cookie, "content-type": "application/json" }, payload: {} });
+    const noConfirm = await h.server.inject({
+      method: "DELETE",
+      url: "/v1/vault/account",
+      headers: { cookie, "content-type": "application/json" },
+      payload: {},
+    });
     expect(noConfirm.statusCode).toBe(400);
 
-    const purge = await h.server.inject({ method: "DELETE", url: "/v1/vault/account", headers: { cookie, "content-type": "application/json" }, payload: { confirm: true } });
+    const purge = await h.server.inject({
+      method: "DELETE",
+      url: "/v1/vault/account",
+      headers: { cookie, "content-type": "application/json" },
+      payload: { confirm: true },
+    });
     expect(purge.statusCode).toBe(200);
-    const body = purge.json() as { credentials_purged: number; audit_purged: number; account_deleted: boolean };
+    const body = purge.json() as {
+      credentials_purged: number;
+      audit_purged: number;
+      account_deleted: boolean;
+    };
     expect(body.credentials_purged).toBe(1);
     expect(body.audit_purged).toBeGreaterThan(0);
     expect(body.account_deleted).toBe(true);
@@ -147,7 +200,11 @@ describe("GDPR export + erasure", () => {
     expect(await h.deps.accountStore.findAccountById(account.id)).toBeNull();
 
     // session is dead — the cookie no longer authenticates
-    const exp = await h.server.inject({ method: "GET", url: "/v1/vault/export", headers: { cookie } });
+    const exp = await h.server.inject({
+      method: "GET",
+      url: "/v1/vault/export",
+      headers: { cookie },
+    });
     expect(exp.statusCode).toBe(401);
   });
 
@@ -159,9 +216,18 @@ describe("GDPR export + erasure", () => {
     await createCred(h.server, cookieA, "OpenAI");
     await createCred(h.server, cookieB, "Stripe");
 
-    await h.server.inject({ method: "DELETE", url: "/v1/vault/account", headers: { cookie: cookieA, "content-type": "application/json" }, payload: { confirm: true } });
+    await h.server.inject({
+      method: "DELETE",
+      url: "/v1/vault/account",
+      headers: { cookie: cookieA, "content-type": "application/json" },
+      payload: { confirm: true },
+    });
 
-    const expB = await h.server.inject({ method: "GET", url: "/v1/vault/export", headers: { cookie: cookieB } });
+    const expB = await h.server.inject({
+      method: "GET",
+      url: "/v1/vault/export",
+      headers: { cookie: cookieB },
+    });
     expect((expB.json() as Export).credentials).toHaveLength(1);
   });
 });

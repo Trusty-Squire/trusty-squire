@@ -5,13 +5,16 @@ import type { ApiDeps } from "../services/deps.js";
 
 const createBody = z.object({
   merchant: z.string().min(1).max(256),
-  checkout_origin: z.string().url().refine((value) => {
-    try {
-      return new URL(value).origin === value;
-    } catch {
-      return false;
-    }
-  }),
+  checkout_origin: z
+    .string()
+    .url()
+    .refine((value) => {
+      try {
+        return new URL(value).origin === value;
+      } catch {
+        return false;
+      }
+    }),
   amount_cents: z.number().int().min(0).max(2_147_483_647),
   currency: z.string().min(1).max(8),
   card_ref: z.string().min(1).max(64),
@@ -33,9 +36,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     if (req.auth!.kind !== "agent") return;
     const audience = process.env.VOUCHFLOW_CUSTOMER_ID?.trim();
     return reply.code(200).send({
-      ...(audience !== undefined && audience.length > 0
-        ? { vouchflow_audience: audience }
-        : {}),
+      ...(audience !== undefined && audience.length > 0 ? { vouchflow_audience: audience } : {}),
     });
   });
 

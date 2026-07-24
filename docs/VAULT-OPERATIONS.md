@@ -74,18 +74,15 @@ live under the DEK/KEK and are untouched by a master-key rotation.
 | `POST /v1/vault/credentials/:id/health` | web | Envelope integrity probe — confirms the row still decrypts under the current keyring. No secret returned, no retrieval counted. `healthy:false` ≠ HTTP error. |
 | `POST /v1/vault/credentials/:id/restore` | web | Undelete a soft-deleted credential. `409` if a live `(service,label)` twin holds the slot. |
 | `POST /v1/vault/credentials/revoke-all` | web | Kill-switch: soft-delete every active credential. Requires `{ confirm: true }`. Recoverable via restore until retention sweeps. |
-| `GET /v1/vault/export` | web | GDPR export — all credential metadata (active + deleted) + full audit trail, as a download. No secret values. |
+| `GET /v1/vault/export` | web | GDPR export — credential metadata, opaque encrypted-card blobs, and vault + payment audit trails. No plaintext secret values. |
 | `DELETE /v1/vault/account` | web | GDPR erasure — irreversibly hard-purge all credential rows AND the audit trail. Requires `{ confirm: true }`. |
-| `POST /v1/vault/e2e` | web | Store an opaque client-encrypted card blob. The API does not validate or decrypt its contents. |
-| `GET /v1/vault/e2e` | web+agent | List encrypted-card metadata without returning blobs. |
-| `GET /v1/vault/e2e/:id` | web+agent | Return an account-owned opaque blob for client-side decryption. |
-| `DELETE /v1/vault/e2e/:id` | web | Permanently delete an account-owned encrypted-card record. |
-| `POST /v1/vault/payments/audit` | agent | Append merchant, amount, currency, last four, status, and optional mandate metadata. Never PAN or CVV. |
-| `GET /v1/vault/payments/audit` | web+agent | List account payment events newest-first with keyset pagination. |
 
 `revoke-all` (soft, recoverable) vs `DELETE /v1/vault/account` (hard,
 irreversible) are deliberately distinct: the first is the panic button,
 the second is right-to-be-forgotten.
+
+The complete vault, payment-audit, and short-lived approval route/auth
+reference is owned by [`apps/api/README.md`](../apps/api/README.md#endpoints).
 
 **Rate limiting:** every decrypt path — agent retrieve, runtime
 retrieve, AND web `reveal` — counts against one per-account ceiling
@@ -111,6 +108,7 @@ The hourly in-process retention cron (`retention-cron.ts`) sweeps:
 | LLM usage events → delete | 30d | `LLM_EVENT_RETENTION_DAYS` |
 | **Vault audit events → delete** | **365d** | **`VAULT_AUDIT_RETENTION_DAYS`** |
 | **Payment audit events → delete** | **365d** | **`VAULT_AUDIT_RETENTION_DAYS`** |
+| Expired payment approvals → delete | After `expires_at` | none |
 
 Vault and payment audit events share the one-year window — long enough for a
 post-hoc investigation, bounded so the tables do not grow without limit.
@@ -124,8 +122,8 @@ list response — advisory only, not enforced.
 
 - **Storage:** Fly Postgres cluster `trusty-squire-db`, database
   `trustysquire` (the API auth schema owns the `Credential` +
-  `VaultAuditEvent`, `E2ECredential`, and `PaymentAuditEvent` tables). Backed by
-  Fly's volume snapshots.
+  `VaultAuditEvent`, `E2ECredential`, `PaymentAuditEvent`, and
+  `PendingPaymentApproval` tables). Backed by Fly's volume snapshots.
 - **What a backup contains:** the encrypted envelope only. A restored
   DB is useless without the matching `LOCAL_KMS_KEY` — so **the master
   key must be backed up independently of the database** (it lives as a

@@ -32,11 +32,7 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
   // credential tools so Claude Code keeps their schemas resident
   // instead of deferring them behind Tool Search.
   meta?: Record<string, unknown>;
-  handler: (
-    args: TArgs,
-    api: ApiClient | null,
-    context?: ToolContext,
-  ) => Promise<unknown>;
+  handler: (args: TArgs, api: ApiClient | null, context?: ToolContext) => Promise<unknown>;
 }
 
 export interface ToolContext {

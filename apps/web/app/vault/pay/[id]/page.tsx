@@ -130,11 +130,7 @@ export default function PaymentApprovalPage() {
       key = await evaluatePrf(fromBase64(storedCard.prf_salt));
       card = await decryptCard(key, storedCard);
       cardBytes = new TextEncoder().encode(JSON.stringify(card));
-      const sealedCard = await sealToRecipient(
-        approval.operator_pubkey,
-        cardBytes,
-        aad,
-      );
+      const sealedCard = await sealToRecipient(approval.operator_pubkey, cardBytes, aad);
 
       await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/approve`, {
         jws: sign.assertion,

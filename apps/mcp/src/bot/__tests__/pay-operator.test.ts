@@ -59,9 +59,7 @@ async function harness(
       return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
     }
     if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
-      return Response.json(
-        apiAudience === undefined ? {} : { vouchflow_audience: apiAudience },
-      );
+      return Response.json(apiAudience === undefined ? {} : { vouchflow_audience: apiAudience });
     }
     if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;

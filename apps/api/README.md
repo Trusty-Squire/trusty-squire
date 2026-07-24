@@ -33,6 +33,10 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `DELETE` | `/v1/vault/e2e/:id` | web | Delete an account-owned encrypted card blob |
 | `POST` | `/v1/vault/payments/audit` | agent | Record a payment attempt without PAN or CVV |
 | `GET` | `/v1/vault/payments/audit` | web/agent | List payment attempts, newest first, with keyset pagination |
+| `GET` | `/v1/pay/config` | agent | Return the configured Vouchflow mandate audience |
+| `POST` | `/v1/pay/approvals` | agent | Create a ten-minute account-scoped payment approval |
+| `GET` | `/v1/pay/approvals/:id` | web/agent | Poll an account-owned payment approval |
+| `POST` | `/v1/pay/approvals/:id/approve` | web | Relay a signed mandate and HPKE-sealed card to the operator |
 | `GET` | `/health` | none | Liveness |
 
 ## Auth model

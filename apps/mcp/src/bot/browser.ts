@@ -174,7 +174,7 @@ export interface CheckoutSubmitResult {
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
-  "$": "USD",
+  $: "USD",
   "€": "EUR",
   "£": "GBP",
   "¥": "JPY",
@@ -184,7 +184,7 @@ function currencyMinorDigits(currency: string): number {
   return new Intl.NumberFormat(undefined, {
     style: "currency",
     currency,
-  }).resolvedOptions().maximumFractionDigits;
+  }).resolvedOptions().maximumFractionDigits!;
 }
 
 function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
@@ -205,10 +205,7 @@ function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
     const commaCount = (value.match(/,/g) ?? []).length;
     const fractionLength = value.length - comma - 1;
     normalized =
-      commaCount === 1 &&
-      minorDigits > 0 &&
-      fractionLength > 0 &&
-      fractionLength <= minorDigits
+      commaCount === 1 && minorDigits > 0 && fractionLength > 0 && fractionLength <= minorDigits
         ? value.replace(",", ".")
         : value.replaceAll(",", "");
   } else if ((value.match(/\./g) ?? []).length > 1) {
@@ -233,8 +230,12 @@ export function parseCheckoutAmount(
   for (const text of texts) {
     totalPattern.lastIndex = 0;
     for (const match of text.matchAll(totalPattern)) {
-      const currency = (match[1] ?? match[4] ?? CURRENCY_SYMBOLS[match[2] ?? ""] ?? fallbackCurrency)
-        ?.toUpperCase();
+      const currency = (
+        match[1] ??
+        match[4] ??
+        CURRENCY_SYMBOLS[match[2] ?? ""] ??
+        fallbackCurrency
+      )?.toUpperCase();
       if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) continue;
       const minorDigits = currencyMinorDigits(currency);
       const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
@@ -259,8 +260,7 @@ function merchantFromPage(title: string, siteName: string, url: string): string 
   return new URL(url).hostname.replace(/^www\./, "").slice(0, 256);
 }
 
-const HCAPTCHA_UUID_RE =
-  "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+const HCAPTCHA_UUID_RE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
 export function extractHcaptchaSitekeyFromHtml(html: string): string | null {
   if (!/hcaptcha\.com|h-captcha|hcaptcha/i.test(html)) return null;
@@ -309,10 +309,9 @@ export function extractHcaptchaResponseKeyFromToken(token: string): string | nul
   const payload = parts[1];
   if (payload === undefined || payload.length === 0) return null;
   try {
-    const json = Buffer.from(
-      payload.replace(/-/g, "+").replace(/_/g, "/"),
-      "base64",
-    ).toString("utf8");
+    const json = Buffer.from(payload.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString(
+      "utf8",
+    );
     const parsed = JSON.parse(json) as Record<string, unknown>;
     for (const key of ["ekey", "eKey", "respKey", "responseKey", "key", "kr"]) {
       const value = parsed[key];
@@ -385,12 +384,7 @@ export function sessionProvidersFromCookies(
 // not split here — reliable pre-solve classification needs the grid
 // inspection that T3.4 (Module A) builds; the spike's question is
 // answered by family + challenge_rendered.
-export type CaptchaVariant =
-  | "turnstile"
-  | "recaptcha_v2"
-  | "recaptcha_v3"
-  | "hcaptcha"
-  | "unknown";
+export type CaptchaVariant = "turnstile" | "recaptcha_v2" | "recaptcha_v3" | "hcaptcha" | "unknown";
 
 function isCaptchaVariant(v: string): v is CaptchaVariant {
   return (
@@ -422,12 +416,7 @@ export type HcaptchaCoordinateSolveResult =
 
 function pngDimensions(buf: Buffer): { width: number; height: number } | null {
   if (buf.length < 24) return null;
-  if (
-    buf[0] !== 0x89 ||
-    buf[1] !== 0x50 ||
-    buf[2] !== 0x4e ||
-    buf[3] !== 0x47
-  ) {
+  if (buf[0] !== 0x89 || buf[1] !== 0x50 || buf[2] !== 0x4e || buf[3] !== 0x47) {
     return null;
   }
   return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
@@ -444,12 +433,7 @@ function pngDimensions(buf: Buffer): { width: number; height: number } | null {
 // hardest to fingerprint as automation. Stable Chrome > Edge >
 // Beta/Canary > Brave. Brave isn't a Playwright channel but its
 // binary path is well-known; we resolve it explicitly below.
-const PREFERRED_CHANNELS: readonly string[] = [
-  "chrome",
-  "msedge",
-  "chrome-beta",
-  "chrome-canary",
-];
+const PREFERRED_CHANNELS: readonly string[] = ["chrome", "msedge", "chrome-beta", "chrome-canary"];
 
 // Per-channel binary search paths. Playwright's `executablePath()` is
 // argumentless (returns the bundled Chromium path), so we can't ask it
@@ -1043,8 +1027,7 @@ export class BrowserController {
   // F13 — which launch path start() took. Surfaced via .launchMode so
   // the agent can push it into the run's step trail and we can see
   // (from outside the box) whether the bot ran headed.
-  private launchedMode: "display" | "xvfb" | "headless" | "remote" | "unknown" =
-    "unknown";
+  private launchedMode: "display" | "xvfb" | "headless" | "remote" | "unknown" = "unknown";
 
   get launchMode(): "display" | "xvfb" | "headless" | "remote" | "unknown" {
     return this.launchedMode;
@@ -1054,9 +1037,7 @@ export class BrowserController {
     this.humanize = opts.humanize ?? true;
     this.profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
     this.proxyOverride =
-      opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0
-        ? opts.proxyUrl.trim()
-        : null;
+      opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
   }
 
   // Per-launch egress override (verify-fleet identities each get their own IP).
@@ -1154,7 +1135,10 @@ export class BrowserController {
         ...(params.headless ? ["--headless=new"] : []),
         "about:blank",
       ];
-      const child = spawn(params.binary, argv, { env: params.env, stdio: ["ignore", "ignore", "pipe"] });
+      const child = spawn(params.binary, argv, {
+        env: params.env,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
       this.childChrome = child;
       registerSelfManagedChrome(child);
       let chromeStderr = "";
@@ -1189,10 +1173,8 @@ export class BrowserController {
         const detail = chromeStderr.trim();
         throw new Error(
           `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
-            `${chromeExit}${
-          detail.length > 0 ? `; Chrome stderr: ${detail}` : ""
-        }`,
-      );
+            `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+        );
       }
     });
     // Use the patchright launcher's connectOverCDP — it's the exact path the
@@ -1228,17 +1210,35 @@ export class BrowserController {
     if (!/^(1|true|on)$/i.test(process.env.BOT_BLOCK_RESOURCES ?? "")) return;
     const BLOCK_TYPES = new Set(["image", "media", "font"]);
     const BLOCK_HOSTS = [
-      "google-analytics.com", "googletagmanager.com", "analytics.google.com",
-      "doubleclick.net", "static.hotjar.com", "script.hotjar.com",
-      "segment.com", "segment.io", "cdn.segment.com", "fullstory.com",
-      "mixpanel.com", "bugsnag.com", "intercom.io", "intercomcdn.com",
-      "widget.intercom.io", "connect.facebook.net", "analytics.tiktok.com",
-      "clarity.ms", "cdn.heapanalytics.com", "wistia.com",
+      "google-analytics.com",
+      "googletagmanager.com",
+      "analytics.google.com",
+      "doubleclick.net",
+      "static.hotjar.com",
+      "script.hotjar.com",
+      "segment.com",
+      "segment.io",
+      "cdn.segment.com",
+      "fullstory.com",
+      "mixpanel.com",
+      "bugsnag.com",
+      "intercom.io",
+      "intercomcdn.com",
+      "widget.intercom.io",
+      "connect.facebook.net",
+      "analytics.tiktok.com",
+      "clarity.ms",
+      "cdn.heapanalytics.com",
+      "wistia.com",
     ];
     // NEVER block — these break signup (captcha/challenge widgets + payment SDK).
     const ALWAYS_ALLOW = [
-      "challenges.cloudflare.com", "turnstile", "hcaptcha.com",
-      "newassets.hcaptcha.com", "recaptcha", "gstatic.com/recaptcha",
+      "challenges.cloudflare.com",
+      "turnstile",
+      "hcaptcha.com",
+      "newassets.hcaptcha.com",
+      "recaptcha",
+      "gstatic.com/recaptcha",
       "js.stripe.com",
     ];
     await ctx.route("**/*", async (route) => {
@@ -1705,7 +1705,6 @@ export class BrowserController {
       void (async () => {
         if (trace) {
           const before = await frame.evaluate(RENDERER_PROBE).catch(() => "eval-fail");
-          // eslint-disable-next-line no-console
           console.error(`[captcha-fp] ${cfHost} renderer BEFORE spoof: ${before}`);
         }
         // Retry until the spoof STICKS. The first framenavigated commonly
@@ -1722,7 +1721,6 @@ export class BrowserController {
           else await new Promise((res) => setTimeout(res, 150));
         }
         if (trace) {
-          // eslint-disable-next-line no-console
           console.error(
             `[captcha-fp] ${cfHost} renderer AFTER spoof:  ${landed ? "Intel (landed)" : "FAILED to land in budget"}`,
           );
@@ -1758,8 +1756,7 @@ export class BrowserController {
         ) {
           try {
             const body = await resp.text();
-            bodyPreview =
-              body.length > 400 ? body.slice(0, 400) + "…" : body;
+            bodyPreview = body.length > 400 ? body.slice(0, 400) + "…" : body;
           } catch {
             // body may be evicted; ignore
           }
@@ -1925,8 +1922,7 @@ export class BrowserController {
     const els = await this.extractInteractiveElements();
     const row = els.find(
       (e) =>
-        e.role === "link" &&
-        (e.visibleText ?? e.ariaLabel ?? e.labelText ?? "").trim().length > 25,
+        e.role === "link" && (e.visibleText ?? e.ariaLabel ?? e.labelText ?? "").trim().length > 25,
     );
     if (row === undefined) return false;
     await this.click(row.selector).catch(() => {});
@@ -1961,7 +1957,11 @@ export class BrowserController {
       try {
         const left = new URL(a);
         const right = new URL(b);
-        return left.origin === right.origin && left.pathname === right.pathname && left.search === right.search;
+        return (
+          left.origin === right.origin &&
+          left.pathname === right.pathname &&
+          left.search === right.search
+        );
       } catch {
         return false;
       }
@@ -2009,7 +2009,9 @@ export class BrowserController {
           if (sameOriginPathAndSearch(this.page.url(), url)) break;
           if (landedAuthGateForTarget(this.page.url(), url)) break;
           await this.page
-            .waitForURL((landed) => sameOriginPathAndSearch(landed.toString(), url), { timeout: 5000 })
+            .waitForURL((landed) => sameOriginPathAndSearch(landed.toString(), url), {
+              timeout: 5000,
+            })
             .then(() => undefined)
             .catch(() => undefined);
           if (sameOriginPathAndSearch(this.page.url(), url)) break;
@@ -2047,10 +2049,7 @@ export class BrowserController {
   //     browsing-history signal that v3 weighs heavily. Use this on
   //     first-attempt against strict services and after a captcha
   //     failure.
-  async prewarm(
-    url: string,
-    mode: "fast" | "referrer-chain" = "fast",
-  ): Promise<void> {
+  async prewarm(url: string, mode: "fast" | "referrer-chain" = "fast"): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     if (mode === "referrer-chain") {
       await this.prewarmViaReferrerChain(url);
@@ -2206,7 +2205,8 @@ export class BrowserController {
           if (id) {
             const esc = window.CSS && CSS.escape ? CSS.escape(id) : id;
             const lab = document.querySelector(`label[for="${esc}"]`);
-            if (lab && lab.textContent && lab.textContent.trim()) return lab.textContent.trim().slice(0, 40);
+            if (lab && lab.textContent && lab.textContent.trim())
+              return lab.textContent.trim().slice(0, 40);
           }
           const ph = el.getAttribute("placeholder");
           if (ph && ph.trim()) return ph.trim().slice(0, 40);
@@ -2228,10 +2228,13 @@ export class BrowserController {
         for (const el of Array.from(document.querySelectorAll("select"))) {
           if (vis(el) && !(el as HTMLSelectElement).value) out.push(`unselected: ${label(el)}`);
         }
-        for (const el of Array.from(document.querySelectorAll("[role='combobox'],[role='listbox']"))) {
+        for (const el of Array.from(
+          document.querySelectorAll("[role='combobox'],[role='listbox']"),
+        )) {
           if (!vis(el)) continue;
           const txt = (el.textContent ?? "").trim();
-          if (txt.length === 0 || /^(select|choose|please|pick)\b/i.test(txt)) out.push(`unselected: ${label(el)}`);
+          if (txt.length === 0 || /^(select|choose|please|pick)\b/i.test(txt))
+            out.push(`unselected: ${label(el)}`);
         }
         for (const grp of Array.from(document.querySelectorAll("[role='radiogroup']"))) {
           if (!vis(grp)) continue;
@@ -2379,7 +2382,7 @@ export class BrowserController {
           const optEl = el.closest(
             '[role="option"],[role="menuitem"],[role="menuitemradio"],[cmdk-item]',
           );
-          const optRole = optEl !== null ? optEl.getAttribute("role") ?? "option" : "";
+          const optRole = optEl !== null ? (optEl.getAttribute("role") ?? "option") : "";
           const optText = optEl !== null ? (optEl.textContent ?? "").trim().slice(0, 80) : "";
           return {
             inputKind,
@@ -2404,7 +2407,9 @@ export class BrowserController {
       const optRole =
         probe.role === "option" || probe.role === "menuitem" || probe.role === "menuitemradio"
           ? probe.role
-          : probe.optRole === "option" || probe.optRole === "menuitem" || probe.optRole === "menuitemradio"
+          : probe.optRole === "option" ||
+              probe.optRole === "menuitem" ||
+              probe.optRole === "menuitemradio"
             ? probe.optRole
             : "";
       const optName = probe.role !== "" ? probe.text : probe.optText;
@@ -2526,9 +2531,7 @@ export class BrowserController {
       // Escape regex metacharacters in the user-supplied label text so
       // a literal "(2FA)" or "." doesn't get interpreted as a pattern.
       const escaped = text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      const locator = this.page
-        .getByText(new RegExp(escaped, "i"))
-        .first();
+      const locator = this.page.getByText(new RegExp(escaped, "i")).first();
       await locator.waitFor({ state: "visible", timeout: timeoutMs });
       if (this.humanize) {
         await this.humanClickLocator(locator);
@@ -2649,10 +2652,22 @@ export class BrowserController {
 
   private async ensureChecked(selector: string): Promise<boolean> {
     if (!this.page) return false;
-    if (await this.page.locator(selector).isChecked().catch(() => false)) return true;
+    if (
+      await this.page
+        .locator(selector)
+        .isChecked()
+        .catch(() => false)
+    )
+      return true;
 
     await this.clickAssociatedLabel(selector).catch(() => false);
-    if (await this.page.locator(selector).isChecked().catch(() => false)) return true;
+    if (
+      await this.page
+        .locator(selector)
+        .isChecked()
+        .catch(() => false)
+    )
+      return true;
 
     const domChecked = await this.page
       .locator(selector)
@@ -2674,7 +2689,10 @@ export class BrowserController {
       })
       .catch(() => false);
     if (!domChecked) return false;
-    return await this.page.locator(selector).isChecked().catch(() => false);
+    return await this.page
+      .locator(selector)
+      .isChecked()
+      .catch(() => false);
   }
 
   // Click the <label> associated with a checkbox/radio input — either a
@@ -2713,16 +2731,13 @@ export class BrowserController {
         .locator(selector)
         .first()
         .evaluate((el) => {
-          const agreementRe =
-            /terms|tos\b|privacy|policy|i accept|i agree|agree to/i;
+          const agreementRe = /terms|tos\b|privacy|policy|i accept|i agree|agree to/i;
           const form = el.closest("form");
           const labels = [
             ...(form ? Array.from(form.querySelectorAll("label")) : []),
             ...Array.from(document.querySelectorAll("label")),
           ];
-          const label = labels.find((candidate) =>
-            agreementRe.test(candidate.textContent ?? ""),
-          );
+          const label = labels.find((candidate) => agreementRe.test(candidate.textContent ?? ""));
           if (!(label instanceof HTMLElement)) return false;
           label.click();
           return true;
@@ -2767,9 +2782,7 @@ export class BrowserController {
 
         const checked: string[] = [];
         const boxes = Array.from(
-          document.querySelectorAll<HTMLInputElement>(
-            'input[type="checkbox"]',
-          ),
+          document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
         );
         for (const box of boxes) {
           if (box.checked || box.disabled) continue;
@@ -2790,9 +2803,7 @@ export class BrowserController {
             box.getAttribute("aria-label") ?? "",
           ];
           if (box.id) {
-            const forLabel = document.querySelector(
-              `label[for="${CSS.escape(box.id)}"]`,
-            );
+            const forLabel = document.querySelector(`label[for="${CSS.escape(box.id)}"]`);
             if (forLabel) parts.push(forLabel.textContent ?? "");
           }
           if (ancestorLabel) parts.push(ancestorLabel.textContent ?? "");
@@ -2851,8 +2862,7 @@ export class BrowserController {
           /digital products?|saas|software|developer tools?|apis?|mobile apps?|data|analytics/i;
         const riskyChoiceRe =
           /gambling|financial services?|physical products?|marketplace|human services?|adult|weapons?|medical|restricted|crypto|payments?|banking/i;
-        const agreementRe =
-          /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
+        const agreementRe = /terms|tos\b|privacy|consent|policy|i agree|agree to|acknowledge|gdpr/i;
         const marketingRe =
           /newsletter|updates|offers|product tips|marketing|promotional|receive emails|opt[- ]?in to|subscribe/i;
 
@@ -2867,9 +2877,7 @@ export class BrowserController {
             box.getAttribute("aria-label") ?? "",
           ];
           if (box.id) {
-            const forLabel = document.querySelector(
-              `label[for="${CSS.escape(box.id)}"]`,
-            );
+            const forLabel = document.querySelector(`label[for="${CSS.escape(box.id)}"]`);
             if (forLabel) parts.push(forLabel.textContent ?? "");
           }
           const ancestorLabel = box.closest("label");
@@ -2894,11 +2902,7 @@ export class BrowserController {
         const alreadyChoseCategory = visibleBoxes.some((box) => {
           if (!box.checked) return false;
           const text = associatedText(box);
-          return (
-            !agreementRe.test(text) &&
-            !marketingRe.test(text) &&
-            !riskyChoiceRe.test(text)
-          );
+          return !agreementRe.test(text) && !marketingRe.test(text) && !riskyChoiceRe.test(text);
         });
         if (alreadyChoseCategory) return [];
 
@@ -2981,9 +2985,7 @@ export class BrowserController {
     await this.page.waitForTimeout(350);
   }
 
-  async scrollToEndOfTOS(
-    selector?: string,
-  ): Promise<{
+  async scrollToEndOfTOS(selector?: string): Promise<{
     scrolled: boolean;
     container: string | null;
     reason: "ok" | "no_container" | "already_at_bottom";
@@ -3006,7 +3008,9 @@ export class BrowserController {
         const h = Math.max(0, Math.min(r.bottom, vh) - Math.max(r.top, 0));
         return w * h;
       };
-      const describe = (el: Element): { rect: DOMRect; scrollTop: number; scrollHeight: number; clientHeight: number } => ({
+      const describe = (
+        el: Element,
+      ): { rect: DOMRect; scrollTop: number; scrollHeight: number; clientHeight: number } => ({
         rect: el.getBoundingClientRect(),
         scrollTop: el.scrollTop,
         scrollHeight: el.scrollHeight,
@@ -3038,10 +3042,7 @@ export class BrowserController {
     // the disabled button is NOT scroll position (Railway iter ≥2 on
     // the second ToS modal: planner kept asking for scroll when the
     // form was actually waiting on something else).
-    if (
-      target.scrollTop + target.clientHeight >=
-      target.scrollHeight - 4
-    ) {
+    if (target.scrollTop + target.clientHeight >= target.scrollHeight - 4) {
       return {
         scrolled: false,
         container: selector ?? "auto-detected",
@@ -3236,9 +3237,7 @@ export class BrowserController {
       // text-based pick is honored verbatim — including empty values.
       const allValues = await this.page
         .locator(`${activeSelector} option`)
-        .evaluateAll((opts) =>
-          opts.map((o) => (o instanceof HTMLOptionElement ? o.value : "")),
-        );
+        .evaluateAll((opts) => opts.map((o) => (o instanceof HTMLOptionElement ? o.value : "")));
       if (allValues.length === 0) {
         throw new Error(`<select> ${activeSelector} has no selectable option`);
       }
@@ -3246,8 +3245,7 @@ export class BrowserController {
       // hint — historic behavior, kept because "Select…" placeholder
       // options are almost always the wrong default pick.
       const firstReal = allValues.find((v) => v.length > 0);
-      let chosenValue: string | undefined =
-        firstReal !== undefined ? firstReal : allValues[0];
+      let chosenValue: string | undefined = firstReal !== undefined ? firstReal : allValues[0];
       if (optionMatcher !== undefined) {
         const matcherLower = optionMatcher.toLowerCase();
         // Returns either a matched value (may be "") or null when no
@@ -3255,15 +3253,12 @@ export class BrowserController {
         // distinguish "matched to empty value" from "no match".
         const matched = await this.page
           .locator(`${activeSelector} option`)
-          .evaluateAll(
-            (opts, needle) => {
-              const hit = opts
-                .filter((o): o is HTMLOptionElement => o instanceof HTMLOptionElement)
-                .find((o) => o.textContent?.toLowerCase().includes(needle));
-              return hit !== undefined ? { value: hit.value } : null;
-            },
-            matcherLower,
-          );
+          .evaluateAll((opts, needle) => {
+            const hit = opts
+              .filter((o): o is HTMLOptionElement => o instanceof HTMLOptionElement)
+              .find((o) => o.textContent?.toLowerCase().includes(needle));
+            return hit !== undefined ? { value: hit.value } : null;
+          }, matcherLower);
         if (matched !== null) {
           chosenValue = matched.value;
         }
@@ -3327,10 +3322,7 @@ export class BrowserController {
   //                                 since "first text on the page"
   //                                 with no matcher would catch
   //                                 unrelated UI text.
-  private async selectFromCombobox(
-    triggerSelector: string,
-    optionMatcher?: string,
-  ): Promise<void> {
+  private async selectFromCombobox(triggerSelector: string, optionMatcher?: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // 0.8.2-rc.11 — selector normalization. The planner sometimes
     // emits a selector pointing at a `<label for="X">` instead of the
@@ -3342,17 +3334,15 @@ export class BrowserController {
     // react-select control, so the menu never opens. Resolve the
     // label to its associated input here so downstream tiers (the
     // keyboard fallback in particular) actually see an input target.
-    const normalizedSelector = await this.resolveLabelToInput(
-      triggerSelector,
-    );
+    const normalizedSelector = await this.resolveLabelToInput(triggerSelector);
     await this.humanClick(normalizedSelector);
 
     const patternSelectors: readonly string[] = [
       '[role="option"]:visible',
       '[role="menuitem"]:visible',
       '[role="menuitemradio"]:visible',
-      'mat-option:visible',
-      '.mat-mdc-option:visible',
+      "mat-option:visible",
+      ".mat-mdc-option:visible",
       '[id^="react-select-"][role*="menu"]:visible',
       '[role="listbox"]:visible li:visible',
     ];
@@ -3446,12 +3436,11 @@ export class BrowserController {
       // CSS-escape the id so unusual characters (Sentry's `--` separator
       // is fine, but the helper is defensive against future ids that
       // include `.`, spaces, …) don't break the locator.
-      const escaped = (
+      const escaped =
         typeof (globalThis as { CSS?: { escape?: (s: string) => string } }).CSS?.escape ===
         "function"
           ? (globalThis as { CSS: { escape: (s: string) => string } }).CSS.escape(resolvedId)
-          : resolvedId.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1")
-      );
+          : resolvedId.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, "\\$1");
       return `#${escaped}`;
     } catch {
       return selector;
@@ -3482,9 +3471,7 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const triggerLocator = this.page.locator(triggerSelector);
     try {
-      const tagName = await triggerLocator
-        .first()
-        .evaluate((node) => node.tagName.toLowerCase());
+      const tagName = await triggerLocator.first().evaluate((node) => node.tagName.toLowerCase());
       // Limit this path to input-typed triggers; native <select> and
       // <button role="combobox"> are handled by other tiers. The
       // selectFromCombobox caller has already returned for matching
@@ -3509,8 +3496,7 @@ export class BrowserController {
         // react-select 5 mirrors the selected value into the closest
         // .css-{hash}-singleValue node; grab the trigger's surrounding
         // text so a successful pick produces an observable change.
-        surroundingText:
-          node.parentElement?.parentElement?.parentElement?.textContent ?? "",
+        surroundingText: node.parentElement?.parentElement?.parentElement?.textContent ?? "",
       }))
       .catch(() => ({ activedescendant: "", value: "", surroundingText: "" }));
 
@@ -3548,8 +3534,7 @@ export class BrowserController {
       .evaluate((node) => ({
         activedescendant: node.getAttribute("aria-activedescendant") ?? "",
         value: node instanceof HTMLInputElement ? node.value : "",
-        surroundingText:
-          node.parentElement?.parentElement?.parentElement?.textContent ?? "",
+        surroundingText: node.parentElement?.parentElement?.parentElement?.textContent ?? "",
       }))
       .catch(() => ({ activedescendant: "", value: "", surroundingText: "" }));
     // A successful pick produces at least one observable change.
@@ -3565,10 +3550,7 @@ export class BrowserController {
   // F11: pick an option from a Playwright Locator already-narrowed to
   // candidates. Matcher → filter by hasText (case-insensitive by
   // default in Playwright). No matcher → first.
-  private async pickComboboxOption(
-    options: Locator,
-    matcher?: string,
-  ): Promise<void> {
+  private async pickComboboxOption(options: Locator, matcher?: string): Promise<void> {
     let target = options.first();
     if (matcher !== undefined) {
       const filtered = options.filter({ hasText: matcher });
@@ -3830,21 +3812,13 @@ export class BrowserController {
               out.webglVendor = gl.getParameter(gl.VENDOR);
               out.webglRenderer = gl.getParameter(gl.RENDERER);
               out.webglVersion = gl.getParameter(gl.VERSION);
-              out.webglShadingLanguageVersion = gl.getParameter(
-                gl.SHADING_LANGUAGE_VERSION,
-              );
+              out.webglShadingLanguageVersion = gl.getParameter(gl.SHADING_LANGUAGE_VERSION);
               const dbg = gl.getExtension("WEBGL_debug_renderer_info");
               if (dbg !== null) {
-                out.webglUnmaskedVendor = gl.getParameter(
-                  dbg.UNMASKED_VENDOR_WEBGL,
-                );
-                out.webglUnmaskedRenderer = gl.getParameter(
-                  dbg.UNMASKED_RENDERER_WEBGL,
-                );
+                out.webglUnmaskedVendor = gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);
+                out.webglUnmaskedRenderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
               }
-              out.webglExtensions = (gl.getSupportedExtensions() ?? [])
-                .slice(0, 6)
-                .join(",");
+              out.webglExtensions = (gl.getSupportedExtensions() ?? []).slice(0, 6).join(",");
             } else {
               out.webglVendor = null;
             }
@@ -3869,9 +3843,7 @@ export class BrowserController {
             out.canvas2dError = String(e);
           }
           out.hardwareConcurrency = navigator.hardwareConcurrency;
-          out.deviceMemory = (
-            navigator as Navigator & { deviceMemory?: number }
-          ).deviceMemory;
+          out.deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
           out.platform = navigator.platform;
           out.languages = navigator.languages.join(",");
           out.userAgent = navigator.userAgent;
@@ -3890,8 +3862,7 @@ export class BrowserController {
         console.error("[fingerprint] " + JSON.stringify(fp));
       } catch (err) {
         console.error(
-          "[fingerprint] probe failed: " +
-            (err instanceof Error ? err.message : String(err)),
+          "[fingerprint] probe failed: " + (err instanceof Error ? err.message : String(err)),
         );
       }
     }
@@ -4042,7 +4013,10 @@ export class BrowserController {
       { kind: "turnstile", selector: 'iframe[src*="challenges.cloudflare.com"]' },
       // Visible reCAPTCHA only — the size=invisible anchor (score-mode badge)
       // is handled by the recaptchaInvisibleOnly skip above.
-      { kind: "recaptcha", selector: 'iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])' },
+      {
+        kind: "recaptcha",
+        selector: 'iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])',
+      },
       // hCaptcha's checkbox iframe (the anchor frame). Plausible and other
       // hCaptcha sites render this; clicking it ticks the box the same way
       // Turnstile/reCAPTCHA do.
@@ -4145,8 +4119,7 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     try {
       const raw = await this.page.evaluate(() => {
-        const present = (sel: string): boolean =>
-          document.querySelector(sel) !== null;
+        const present = (sel: string): boolean => document.querySelector(sel) !== null;
         const visible = (sel: string): boolean => {
           const el = document.querySelector(sel);
           if (el === null) return false;
@@ -4174,11 +4147,7 @@ export class BrowserController {
           variant = "turnstile";
         } else if (present('iframe[src*="hcaptcha.com"]')) {
           variant = "hcaptcha";
-        } else if (
-          present(
-            'iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])',
-          )
-        ) {
+        } else if (present('iframe[src*="recaptcha/api2/anchor"]:not([src*="size=invisible"])')) {
           // VISIBLE checkbox anchor (size=normal) → clickable v2.
           variant = "recaptcha_v2";
         } else if (
@@ -4226,9 +4195,7 @@ export class BrowserController {
           k !== null && /^6L/.test(k) && k.length > 30;
         // 1. data-sitekey, but NOT on an hCaptcha/Turnstile widget (or
         //    nested inside one). Those publish data-sitekey too.
-        const anchors = Array.from(
-          document.querySelectorAll<HTMLElement>("[data-sitekey]"),
-        ).filter(
+        const anchors = Array.from(document.querySelectorAll<HTMLElement>("[data-sitekey]")).filter(
           (el) => el.closest(".h-captcha, .cf-turnstile") === null,
         );
         for (const el of anchors) {
@@ -4293,15 +4260,20 @@ export class BrowserController {
         //    exact tree is undocumented and shifts across versions
         //    so a defensive walk is the only reliable way.
         try {
-          const cfg = (window as unknown as {
-            ___grecaptcha_cfg?: { clients?: Record<string, unknown> };
-          }).___grecaptcha_cfg;
+          const cfg = (
+            window as unknown as {
+              ___grecaptcha_cfg?: { clients?: Record<string, unknown> };
+            }
+          ).___grecaptcha_cfg;
           if (cfg !== undefined && cfg.clients !== undefined) {
             const fire = (obj: unknown): void => {
               if (obj === null || typeof obj !== "object") return;
               for (const [, v] of Object.entries(obj as Record<string, unknown>)) {
                 if (v === null || typeof v !== "object") continue;
-                if ("callback" in v && typeof (v as { callback: unknown }).callback === "function") {
+                if (
+                  "callback" in v &&
+                  typeof (v as { callback: unknown }).callback === "function"
+                ) {
                   try {
                     (v as { callback: (t: string) => void }).callback(tok);
                   } catch {
@@ -4525,16 +4497,14 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     try {
       const fromDom = await this.page.evaluate(() => {
-        const div = document.querySelector<HTMLElement>(".h-captcha[data-sitekey], [data-hcaptcha-sitekey]");
+        const div = document.querySelector<HTMLElement>(
+          ".h-captcha[data-sitekey], [data-hcaptcha-sitekey]",
+        );
         if (div !== null) {
-          const k =
-            div.getAttribute("data-sitekey") ??
-            div.getAttribute("data-hcaptcha-sitekey");
+          const k = div.getAttribute("data-sitekey") ?? div.getAttribute("data-hcaptcha-sitekey");
           if (k !== null && k.length > 10) return k;
         }
-        const iframe = document.querySelector<HTMLIFrameElement>(
-          'iframe[src*="hcaptcha.com"]',
-        );
+        const iframe = document.querySelector<HTMLIFrameElement>('iframe[src*="hcaptcha.com"]');
         if (iframe !== null) {
           const url = new URL(iframe.src);
           const k =
@@ -4600,7 +4570,8 @@ export class BrowserController {
             const size = url.searchParams.get("size") ?? hashParams.get("size");
             const frame = url.searchParams.get("frame") ?? hashParams.get("frame");
             useRqdata(url.searchParams.get("rqdata") ?? hashParams.get("rqdata"));
-            const clientOptions = url.searchParams.get("clientOptions") ?? hashParams.get("clientOptions");
+            const clientOptions =
+              url.searchParams.get("clientOptions") ?? hashParams.get("clientOptions");
             if (clientOptions !== null) {
               try {
                 const parsed = JSON.parse(clientOptions) as { rqdata?: unknown };
@@ -4639,125 +4610,129 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     try {
       const responseKey = extractHcaptchaResponseKeyFromToken(token);
-      const diag = await this.page.evaluate(({ tok, key }: { tok: string; key: string | null }) => {
-        const widgetIds = new Set<string>();
-        const inputs = Array.from(
-          document.querySelectorAll<HTMLTextAreaElement>(
-            'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
-          ),
-        );
-        for (const input of inputs) {
-          input.value = tok;
-          input.dispatchEvent(new Event("input", { bubbles: true }));
-          input.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-        for (const host of Array.from(
-          document.querySelectorAll<HTMLElement>(
-            ".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]",
-          ),
-        )) {
-          host.setAttribute("data-hcaptcha-response", tok);
-          const id =
-            host.getAttribute("data-hcaptcha-widget-id") ??
-            host.getAttribute("data-hcaptcha-widget-id".toLowerCase());
-          if (id !== null && id.length > 0) widgetIds.add(id);
-          host.dispatchEvent(new Event("input", { bubbles: true }));
-          host.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-        for (const iframe of Array.from(
-          document.querySelectorAll<HTMLIFrameElement>('iframe[src*="hcaptcha.com"]'),
-        )) {
-          try {
-            const url = new URL(iframe.src);
-            const params = new URLSearchParams(
-              url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
-            );
-            const id = params.get("id");
-            if (id !== null && id.length > 0) widgetIds.add(id);
-          } catch {
-            // ignore malformed extension/proxy iframe URLs
+      const diag = await this.page.evaluate(
+        ({ tok, key }: { tok: string; key: string | null }) => {
+          const widgetIds = new Set<string>();
+          const inputs = Array.from(
+            document.querySelectorAll<HTMLTextAreaElement>(
+              'textarea[name="h-captcha-response"], textarea[id^="h-captcha-response"], textarea[name="g-recaptcha-response"]',
+            ),
+          );
+          for (const input of inputs) {
+            input.value = tok;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            input.dispatchEvent(new Event("change", { bubbles: true }));
           }
-        }
-
-        const win = window as unknown as Record<string, unknown>;
-        const hcaptcha = win.hcaptcha as
-          | {
-              getResponse?: (id?: string) => string;
-              getRespKey?: (id?: string) => string;
-            }
-          | undefined;
-        if (hcaptcha !== undefined) {
-          const originalGetResponse = hcaptcha.getResponse?.bind(hcaptcha);
-          const originalGetRespKey = hcaptcha.getRespKey?.bind(hcaptcha);
-          hcaptcha.getResponse = (id?: string) => {
-            if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return tok;
-            return originalGetResponse?.(id) ?? tok;
-          };
-          hcaptcha.getRespKey = (id?: string) => {
-            if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return key ?? "";
-            return originalGetRespKey?.(id) ?? key ?? "";
-          };
-        }
-
-        let callbackFired = false;
-        const fire = (fn: unknown): void => {
-          if (typeof fn !== "function") return;
-          callbackFired = true;
-          try {
-            (fn as (t: string, k?: string) => void)(tok, key ?? undefined);
-          } catch {
-            // A page callback can be stale after React remounts a widget.
-          }
-        };
-
-        // Fire callbacks registered by markup, e.g. data-callback="onSubmit".
-        try {
           for (const host of Array.from(
-            document.querySelectorAll<HTMLElement>(".h-captcha[data-callback]"),
+            document.querySelectorAll<HTMLElement>(
+              ".h-captcha, [data-hcaptcha-widget-id], [data-hcaptcha-response]",
+            ),
           )) {
-            const name = host.getAttribute("data-callback");
-            if (name !== null && name !== undefined) fire(win[name]);
+            host.setAttribute("data-hcaptcha-response", tok);
+            const id =
+              host.getAttribute("data-hcaptcha-widget-id") ??
+              host.getAttribute("data-hcaptcha-widget-id".toLowerCase());
+            if (id !== null && id.length > 0) widgetIds.add(id);
+            host.dispatchEvent(new Event("input", { bubbles: true }));
+            host.dispatchEvent(new Event("change", { bubbles: true }));
           }
-        } catch {
-          // no named callback, continue to runtime config scan.
-        }
-
-        // Programmatic hCaptcha integrations pass function callbacks to
-        // hcaptcha.render(). The SDK keeps them in ___hcaptcha_cfg; crawl it
-        // generically so React/Vue wrappers are handled like plain forms.
-        const seen = new Set<unknown>();
-        const scan = (value: unknown, depth: number): void => {
-          if (value === null || value === undefined || depth > 7 || seen.has(value)) return;
-          seen.add(value);
-          if (typeof value === "function") return;
-          if (typeof value !== "object") return;
-          for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-            const normalized = key.toLowerCase();
-            if (
-              typeof child === "function" &&
-              (normalized === "callback" ||
-                normalized === "success-callback" ||
-                normalized === "verify-callback" ||
-                normalized === "onverify" ||
-                normalized === "onsuccess")
-            ) {
-              fire(child);
-              continue;
+          for (const iframe of Array.from(
+            document.querySelectorAll<HTMLIFrameElement>('iframe[src*="hcaptcha.com"]'),
+          )) {
+            try {
+              const url = new URL(iframe.src);
+              const params = new URLSearchParams(
+                url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
+              );
+              const id = params.get("id");
+              if (id !== null && id.length > 0) widgetIds.add(id);
+            } catch {
+              // ignore malformed extension/proxy iframe URLs
             }
-            if (typeof child === "object" && child !== null) scan(child, depth + 1);
           }
-        };
-        scan(win.___hcaptcha_cfg, 0);
-        scan(win.hcaptcha, 0);
 
-        return {
-          ok: inputs.length > 0 || widgetIds.size > 0 || callbackFired,
-          textareas: inputs.length,
-          widgets: widgetIds.size,
-          callbackFired,
-          hasHcaptchaGlobal: win.hcaptcha !== undefined,
-        };
-      }, { tok: token, key: responseKey });
+          const win = window as unknown as Record<string, unknown>;
+          const hcaptcha = win.hcaptcha as
+            | {
+                getResponse?: (id?: string) => string;
+                getRespKey?: (id?: string) => string;
+              }
+            | undefined;
+          if (hcaptcha !== undefined) {
+            const originalGetResponse = hcaptcha.getResponse?.bind(hcaptcha);
+            const originalGetRespKey = hcaptcha.getRespKey?.bind(hcaptcha);
+            hcaptcha.getResponse = (id?: string) => {
+              if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id))) return tok;
+              return originalGetResponse?.(id) ?? tok;
+            };
+            hcaptcha.getRespKey = (id?: string) => {
+              if (id === undefined || widgetIds.size === 0 || widgetIds.has(String(id)))
+                return key ?? "";
+              return originalGetRespKey?.(id) ?? key ?? "";
+            };
+          }
+
+          let callbackFired = false;
+          const fire = (fn: unknown): void => {
+            if (typeof fn !== "function") return;
+            callbackFired = true;
+            try {
+              (fn as (t: string, k?: string) => void)(tok, key ?? undefined);
+            } catch {
+              // A page callback can be stale after React remounts a widget.
+            }
+          };
+
+          // Fire callbacks registered by markup, e.g. data-callback="onSubmit".
+          try {
+            for (const host of Array.from(
+              document.querySelectorAll<HTMLElement>(".h-captcha[data-callback]"),
+            )) {
+              const name = host.getAttribute("data-callback");
+              if (name !== null && name !== undefined) fire(win[name]);
+            }
+          } catch {
+            // no named callback, continue to runtime config scan.
+          }
+
+          // Programmatic hCaptcha integrations pass function callbacks to
+          // hcaptcha.render(). The SDK keeps them in ___hcaptcha_cfg; crawl it
+          // generically so React/Vue wrappers are handled like plain forms.
+          const seen = new Set<unknown>();
+          const scan = (value: unknown, depth: number): void => {
+            if (value === null || value === undefined || depth > 7 || seen.has(value)) return;
+            seen.add(value);
+            if (typeof value === "function") return;
+            if (typeof value !== "object") return;
+            for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+              const normalized = key.toLowerCase();
+              if (
+                typeof child === "function" &&
+                (normalized === "callback" ||
+                  normalized === "success-callback" ||
+                  normalized === "verify-callback" ||
+                  normalized === "onverify" ||
+                  normalized === "onsuccess")
+              ) {
+                fire(child);
+                continue;
+              }
+              if (typeof child === "object" && child !== null) scan(child, depth + 1);
+            }
+          };
+          scan(win.___hcaptcha_cfg, 0);
+          scan(win.hcaptcha, 0);
+
+          return {
+            ok: inputs.length > 0 || widgetIds.size > 0 || callbackFired,
+            textareas: inputs.length,
+            widgets: widgetIds.size,
+            callbackFired,
+            hasHcaptchaGlobal: win.hcaptcha !== undefined,
+          };
+        },
+        { tok: token, key: responseKey },
+      );
       if (process.env.UNIVERSAL_BOT_OAUTH_DEBUG) {
         console.error(
           `[captcha] hCaptcha inject diag: ok=${diag.ok} textareas=${diag.textareas} ` +
@@ -4818,9 +4793,7 @@ export class BrowserController {
       return {
         found: true,
         solved: false,
-        reason:
-          `2captcha_${solveRes.kind}` +
-          ("reason" in solveRes ? `:${solveRes.reason}` : ""),
+        reason: `2captcha_${solveRes.kind}` + ("reason" in solveRes ? `:${solveRes.reason}` : ""),
         clicks: 0,
         ...("durationMs" in solveRes ? { durationMs: solveRes.durationMs } : {}),
       };
@@ -5008,7 +4981,7 @@ export class BrowserController {
 
   async extractText(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
-    return await this.page.textContent("body") || "";
+    return (await this.page.textContent("body")) || "";
   }
 
   // RENDERED, visibility-respecting body text. extractText() reads
@@ -5037,9 +5010,12 @@ export class BrowserController {
         "",
     }));
     const texts = await Promise.all(
-      page.frames().map(async (frame) =>
-        await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-      ),
+      page
+        .frames()
+        .map(
+          async (frame) =>
+            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+        ),
     );
     const amount = parseCheckoutAmount(texts, fallbackCurrency);
     if (amount === null) throw new Error("payment_checkout_total_not_found");
@@ -5073,8 +5049,14 @@ export class BrowserController {
           await input.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
           if (tag === "select") {
             const selected =
-              (await input.selectOption({ value }).then(() => true).catch(() => false)) ||
-              (await input.selectOption({ label: value }).then(() => true).catch(() => false));
+              (await input
+                .selectOption({ value })
+                .then(() => true)
+                .catch(() => false)) ||
+              (await input
+                .selectOption({ label: value })
+                .then(() => true)
+                .catch(() => false));
             if (!selected) continue;
           } else {
             await input.fill(value);
@@ -5087,111 +5069,109 @@ export class BrowserController {
     };
 
     try {
-    await fillFirst(
-      "pan",
-      card.pan,
-      'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]',
-    );
-    const combinedExpiry = `${card.exp_month.padStart(2, "0")}/${card.exp_year.slice(-2)}`;
-    const combined = await fillFirst(
-      "expiry",
-      combinedExpiry,
-      'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i]',
-    );
-    if (!combined) {
       await fillFirst(
-        "exp_month",
-        card.exp_month.padStart(2, "0"),
-        '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i]',
+        "pan",
+        card.pan,
+        'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]',
       );
-      await fillFirst(
-        "exp_year",
-        card.exp_year,
-        '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i]',
+      const combinedExpiry = `${card.exp_month.padStart(2, "0")}/${card.exp_year.slice(-2)}`;
+      const combined = await fillFirst(
+        "expiry",
+        combinedExpiry,
+        'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i]',
       );
-    }
-    const fields: Array<[string, string | undefined, string]> = [
-      [
-        "cvv",
-        card.cvv,
-        'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]',
-      ],
-      [
-        "name",
-        card.name,
-        'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
-      ],
-      [
-        "line1",
-        card.billing.line1,
-        '[autocomplete~="address-line1"],[name*="address_line1" i],[name*="address1" i],[name="line1" i]',
-      ],
-      [
-        "line2",
-        card.billing.line2,
-        '[autocomplete~="address-line2"],[name*="address_line2" i],[name*="address2" i],[name="line2" i]',
-      ],
-      [
-        "city",
-        card.billing.city,
-        '[autocomplete~="address-level2"],[name*="city" i],[name*="locality" i]',
-      ],
-      [
-        "state",
-        card.billing.state,
-        '[autocomplete~="address-level1"],[name*="state" i],[name*="region" i]',
-      ],
-      [
-        "postal_code",
-        card.billing.postal_code,
-        '[autocomplete~="postal-code"],[name*="postal" i],[name*="zip" i]',
-      ],
-      [
-        "country",
-        card.billing.country,
-        '[autocomplete~="country"],[name*="country" i]',
-      ],
-    ];
-    for (const [field, value, selectors] of fields) {
-      await fillFirst(field, value, selectors);
-    }
-    for (const required of ["pan", "expiry", "cvv", "name"]) {
-      if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
-      if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
-    }
-
-    const submitName =
-      /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i;
-    let submitted = false;
-    for (const frame of frames) {
-      const matches = frame.locator('button,input[type="submit"],[role="button"]');
-      const count = Math.min(await matches.count().catch(() => 0), 100);
-      for (let i = 0; i < count; i += 1) {
-        const candidate = matches.nth(i);
-        if (!(await candidate.isVisible().catch(() => false))) continue;
-        if (!(await candidate.isEnabled().catch(() => false))) continue;
-        const label = await candidate.evaluate((el) =>
-          (
-            el.getAttribute("aria-label") ||
-            (el instanceof HTMLInputElement ? el.value : el.textContent) ||
-            ""
-          ).trim(),
-        ).catch(() => "");
-        if (!submitName.test(label)) continue;
-        await candidate.click();
-        submitted = true;
-        break;
+      if (!combined) {
+        await fillFirst(
+          "exp_month",
+          card.exp_month.padStart(2, "0"),
+          '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i]',
+        );
+        await fillFirst(
+          "exp_year",
+          card.exp_year,
+          '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i]',
+        );
       }
-      if (submitted) break;
-    }
-    if (!submitted) throw new Error("payment_submit_not_found");
-    const challengeDeadline = Date.now() + 15_000;
-    while (Date.now() < challengeDeadline) {
-      const challenge = await this.detectThreeDsChallenge();
-      if (challenge.three_ds_required) return challenge;
-      await this.page.waitForTimeout(250).catch(() => undefined);
-    }
-    return { three_ds_required: false };
+      const fields: Array<[string, string | undefined, string]> = [
+        [
+          "cvv",
+          card.cvv,
+          'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]',
+        ],
+        [
+          "name",
+          card.name,
+          'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
+        ],
+        [
+          "line1",
+          card.billing.line1,
+          '[autocomplete~="address-line1"],[name*="address_line1" i],[name*="address1" i],[name="line1" i]',
+        ],
+        [
+          "line2",
+          card.billing.line2,
+          '[autocomplete~="address-line2"],[name*="address_line2" i],[name*="address2" i],[name="line2" i]',
+        ],
+        [
+          "city",
+          card.billing.city,
+          '[autocomplete~="address-level2"],[name*="city" i],[name*="locality" i]',
+        ],
+        [
+          "state",
+          card.billing.state,
+          '[autocomplete~="address-level1"],[name*="state" i],[name*="region" i]',
+        ],
+        [
+          "postal_code",
+          card.billing.postal_code,
+          '[autocomplete~="postal-code"],[name*="postal" i],[name*="zip" i]',
+        ],
+        ["country", card.billing.country, '[autocomplete~="country"],[name*="country" i]'],
+      ];
+      for (const [field, value, selectors] of fields) {
+        await fillFirst(field, value, selectors);
+      }
+      for (const required of ["pan", "expiry", "cvv", "name"]) {
+        if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
+        if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
+      }
+
+      const submitName =
+        /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i;
+      let submitted = false;
+      for (const frame of frames) {
+        const matches = frame.locator('button,input[type="submit"],[role="button"]');
+        const count = Math.min(await matches.count().catch(() => 0), 100);
+        for (let i = 0; i < count; i += 1) {
+          const candidate = matches.nth(i);
+          if (!(await candidate.isVisible().catch(() => false))) continue;
+          if (!(await candidate.isEnabled().catch(() => false))) continue;
+          const label = await candidate
+            .evaluate((el) =>
+              (
+                el.getAttribute("aria-label") ||
+                (el instanceof HTMLInputElement ? el.value : el.textContent) ||
+                ""
+              ).trim(),
+            )
+            .catch(() => "");
+          if (!submitName.test(label)) continue;
+          await candidate.click();
+          submitted = true;
+          break;
+        }
+        if (submitted) break;
+      }
+      if (!submitted) throw new Error("payment_submit_not_found");
+      const challengeDeadline = Date.now() + 15_000;
+      while (Date.now() < challengeDeadline) {
+        const challenge = await this.detectThreeDsChallenge();
+        if (challenge.three_ds_required) return challenge;
+        await this.page.waitForTimeout(250).catch(() => undefined);
+      }
+      return { three_ds_required: false };
     } finally {
       for (const frame of this.page.frames()) {
         await frame
@@ -5220,15 +5200,19 @@ export class BrowserController {
     for (const frame of this.page.frames()) {
       const detected =
         urlPattern.test(frame.url()) ||
-        (await frame.evaluate(() => {
-          if (
-            document.querySelector(
-              'iframe[name*="challenge" i],iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
-            ) !== null
-          ) return true;
-          return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i
-            .test(document.body?.innerText ?? "");
-        }).catch(() => false));
+        (await frame
+          .evaluate(() => {
+            if (
+              document.querySelector(
+                'iframe[name*="challenge" i],iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
+              ) !== null
+            )
+              return true;
+            return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
+              document.body?.innerText ?? "",
+            );
+          })
+          .catch(() => false));
       if (detected) {
         return {
           three_ds_required: true,
@@ -5258,29 +5242,29 @@ export class BrowserController {
     for (let i = 0; i < 12; i++) {
       await this.wait(2.5);
       const ready = await this.page
-        .evaluate(() => /Browser key|API Keys|Create credentials/i.test(document.body?.innerText ?? ""))
+        .evaluate(() =>
+          /Browser key|API Keys|Create credentials/i.test(document.body?.innerText ?? ""),
+        )
         .catch(() => false);
       if (ready) break;
     }
     // Locate the Firebase Browser-key row; return its AIzaSy if already shown,
     // else click the row's "Show key" button to reveal it.
     const readRowKey = (): Promise<string | null> =>
-      this.page!
-        .evaluate(() => {
-          const rows = Array.from(document.querySelectorAll("tr"));
-          const row =
-            rows.find((r) => /browser key \(auto created by firebase\)/i.test(r.textContent ?? "")) ??
-            rows.find((r) => /browser key/i.test(r.textContent ?? ""));
-          if (row === undefined) return null;
-          const m = (row.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
-          if (m !== null) return m[0];
-          const btn = Array.from(row.querySelectorAll("button,a")).find((b) =>
-            /show key/i.test(b.textContent ?? ""),
-          );
-          if (btn !== undefined) (btn as HTMLElement).click();
-          return null;
-        })
-        .catch(() => null);
+      this.page!.evaluate(() => {
+        const rows = Array.from(document.querySelectorAll("tr"));
+        const row =
+          rows.find((r) => /browser key \(auto created by firebase\)/i.test(r.textContent ?? "")) ??
+          rows.find((r) => /browser key/i.test(r.textContent ?? ""));
+        if (row === undefined) return null;
+        const m = (row.textContent ?? "").match(/AIzaSy[0-9A-Za-z_-]{33}/);
+        if (m !== null) return m[0];
+        const btn = Array.from(row.querySelectorAll("button,a")).find((b) =>
+          /show key/i.test(b.textContent ?? ""),
+        );
+        if (btn !== undefined) (btn as HTMLElement).click();
+        return null;
+      }).catch(() => null);
     const first = await readRowKey();
     if (first !== null && KEY_RE.test(first)) return first;
     // After the Show-key click, poll the row (reveal is async) and any dialog
@@ -5359,8 +5343,7 @@ export class BrowserController {
           // text; (3) a clear "Select…/Choose…/Pick…" placeholder. NOT
           // "search"/"add"/"type" — those are filter inputs we must not auto-pick.
           const hasPlaceholderAttr =
-            el.hasAttribute("data-placeholder") ||
-            el.querySelector("[data-placeholder]") !== null;
+            el.hasAttribute("data-placeholder") || el.querySelector("[data-placeholder]") !== null;
           const placeholderish =
             hasPlaceholderAttr ||
             txt.length === 0 ||
@@ -5368,8 +5351,7 @@ export class BrowserController {
           if (!placeholderish) continue;
           // Resolve a stable data-cy selector — own, or nearest ancestor — so
           // the locator click can't drift after the portal re-renders.
-          const dcEl =
-            el.getAttribute("data-cy") !== null ? el : el.closest("[data-cy]");
+          const dcEl = el.getAttribute("data-cy") !== null ? el : el.closest("[data-cy]");
           const dc = dcEl !== null ? dcEl.getAttribute("data-cy") : null;
           const sel = dc !== null && dc.length > 0 ? `[data-cy="${dc}"]` : null;
           if (sel === null || seen.has(sel)) continue;
@@ -5382,9 +5364,7 @@ export class BrowserController {
         // Address each by its index among lg-buttons (Playwright `>> nth=`),
         // since there's no stable per-trigger attribute. MEASURED 2026-06-23
         // (mongodb-atlas /atlas onboarding personalization wizard).
-        const lgButtons = Array.from(
-          document.querySelectorAll("button[data-lgid='lg-button']"),
-        );
+        const lgButtons = Array.from(document.querySelectorAll("button[data-lgid='lg-button']"));
         for (let i = 0; i < lgButtons.length; i++) {
           const el = lgButtons[i];
           if (el === undefined || !isVisible(el)) continue;
@@ -5475,17 +5455,15 @@ export class BrowserController {
     const page = this.page;
     const done: string[] = [];
     const dialog = page.locator('[role="dialog"]').first();
-    const root =
-      (await dialog.count().catch(() => 0)) > 0 ? dialog : page.locator("body");
+    const root = (await dialog.count().catch(() => 0)) > 0 ? dialog : page.locator("body");
 
     // (1) Segmented access-scope buttons that start unselected. Exclude select
     // triggers (aria-haspopup) — those are handled in (2); a selected preset
     // trigger can also read "All access" and we must not re-open it here.
     try {
-      const allAccess = root.locator(
-        'button:not([aria-haspopup="true"])',
-        { hasText: /^(?:all access|full access|all scopes)$/i },
-      );
+      const allAccess = root.locator('button:not([aria-haspopup="true"])', {
+        hasText: /^(?:all access|full access|all scopes)$/i,
+      });
       const n = Math.min(await allAccess.count().catch(() => 0), 3);
       for (let i = 0; i < n; i += 1) {
         const b = allAccess.nth(i);
@@ -5505,9 +5483,7 @@ export class BrowserController {
       for (let i = 0; i < n; i += 1) {
         const t = triggers.nth(i);
         if (!(await t.isVisible().catch(() => false))) continue;
-        const txt = ((await t.textContent().catch(() => "")) ?? "")
-          .replace(/\s+/g, " ")
-          .trim();
+        const txt = ((await t.textContent().catch(() => "")) ?? "").replace(/\s+/g, " ").trim();
         // Only act on an UNSELECTED select (a "Select…/Choose…/Pick…"
         // placeholder) — never re-pick one that already holds a value.
         if (!/^(?:please\s+)?(?:select|choose|pick)\b/i.test(txt)) continue;
@@ -5518,8 +5494,7 @@ export class BrowserController {
             '[role="listbox"] [role="option"], .LemonDropdown [role="menuitem"]',
         );
         const broad = options.filter({ hasText: /all access|full access/i }).first();
-        const pick =
-          (await broad.count().catch(() => 0)) > 0 ? broad : options.first();
+        const pick = (await broad.count().catch(() => 0)) > 0 ? broad : options.first();
         if ((await pick.count().catch(() => 0)) > 0) {
           const name = ((await pick.textContent().catch(() => "")) ?? "")
             .replace(/\s+/g, " ")
@@ -5546,7 +5521,8 @@ export class BrowserController {
     if (!this.page) return false;
     try {
       return await this.page.evaluate(() => {
-        const re = /\b(?:next|continue|register|submit|get started|finish|complete|done|create account|sign up|create key|create token|create personal)\b/i;
+        const re =
+          /\b(?:next|continue|register|submit|get started|finish|complete|done|create account|sign up|create key|create token|create personal)\b/i;
         for (const el of Array.from(document.querySelectorAll("button,[role='button']"))) {
           const r = (el as HTMLElement).getBoundingClientRect();
           if (r.width <= 0 || r.height <= 0) continue;
@@ -5573,7 +5549,9 @@ export class BrowserController {
   async extractScopedRouteCandidates(prefix: string): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(async (rawPrefix) => {
-      const prefix = String(rawPrefix ?? "").replace(/^\/+|\/+$/g, "").toLowerCase();
+      const prefix = String(rawPrefix ?? "")
+        .replace(/^\/+|\/+$/g, "")
+        .toLowerCase();
       const candidates: string[] = [];
       const seen = new Set<string>();
       const add = (value: unknown) => {
@@ -5639,9 +5617,14 @@ export class BrowserController {
       const likelyListApi = (url: string): boolean => {
         const lower = url.toLowerCase();
         if (!lower.includes("api")) return false;
-        if (prefix === "p" || prefix.startsWith("project")) return /projects?[\w.-]*list|list[\w.-]*projects?/.test(lower);
-        if (prefix.startsWith("org") || prefix.startsWith("organization")) return /organi[sz]ations?[\w.-]*list|orgs?[\w.-]*list|list[\w.-]*(orgs?|organi[sz]ations?)/.test(lower);
-        if (prefix.startsWith("workspace")) return /workspaces?[\w.-]*list|list[\w.-]*workspaces?/.test(lower);
+        if (prefix === "p" || prefix.startsWith("project"))
+          return /projects?[\w.-]*list|list[\w.-]*projects?/.test(lower);
+        if (prefix.startsWith("org") || prefix.startsWith("organization"))
+          return /organi[sz]ations?[\w.-]*list|orgs?[\w.-]*list|list[\w.-]*(orgs?|organi[sz]ations?)/.test(
+            lower,
+          );
+        if (prefix.startsWith("workspace"))
+          return /workspaces?[\w.-]*list|list[\w.-]*workspaces?/.test(lower);
         return /list/.test(lower);
       };
       const urls = Array.from(
@@ -5756,9 +5739,7 @@ export class BrowserController {
       // key/token/secret/visibility context so a generic "Show more" doesn't
       // anchor a harvest.
       const copyButtons = Array.from(
-        document.querySelectorAll<HTMLElement>(
-          'button, [role="button"], a, [aria-label]',
-        ),
+        document.querySelectorAll<HTMLElement>('button, [role="button"], a, [aria-label]'),
       ).filter((el) => {
         if (!isVisible(el)) return false;
         const name =
@@ -5789,7 +5770,9 @@ export class BrowserController {
         // ("Copy to clipboard: GOCSPX-…", "Copy api key sk-…") rather than in
         // any visible text node — GCP's new client-secret reveal does exactly
         // this, so the innerText-only walk below would miss it entirely.
-        harvest(`${btn.getAttribute("aria-label") ?? ""} ${btn.getAttribute("title") ?? ""}`.trim());
+        harvest(
+          `${btn.getAttribute("aria-label") ?? ""} ${btn.getAttribute("title") ?? ""}`.trim(),
+        );
         // Then walk up a few ancestors and dump the subtree's innerText.
         let anc: HTMLElement | null = btn;
         for (let i = 0; i < 6 && anc !== null; i++) {
@@ -5834,29 +5817,54 @@ export class BrowserController {
     return await this.page.evaluate(() => {
       const LABEL_PHRASES = [
         // Generic
-        "api key", "api token", "api secret", "secret key", "access key",
-        "access token", "auth token", "bearer token", "personal access token",
-        "client id", "client secret", "client key",
+        "api key",
+        "api token",
+        "api secret",
+        "secret key",
+        "access key",
+        "access token",
+        "auth token",
+        "bearer token",
+        "personal access token",
+        "client id",
+        "client secret",
+        "client key",
         // Cloudinary
-        "cloud name", "cloudname",
+        "cloud name",
+        "cloudname",
         // Algolia
-        "application id", "app id", "admin api key", "search api key",
-        "monitoring api key", "search-only api key",
+        "application id",
+        "app id",
+        "admin api key",
+        "search api key",
+        "monitoring api key",
+        "search-only api key",
         // Twilio
-        "account sid", "auth token",
+        "account sid",
+        "auth token",
         // Stripe
-        "publishable key", "secret key",
+        "publishable key",
+        "secret key",
         // AWS
-        "access key id", "secret access key",
+        "access key id",
+        "secret access key",
         // OAuth1
-        "consumer key", "consumer secret", "access token secret",
+        "consumer key",
+        "consumer secret",
+        "access token secret",
         // Misc
-        "project api key", "personal api key", "organization id", "org id",
-        "app key", "app secret",
+        "project api key",
+        "personal api key",
+        "organization id",
+        "org id",
+        "app key",
+        "app secret",
         // Pusher (and other keys tables) label fields bare: key / secret /
         // cluster. Without these the value inherits the nearest recognized
         // label (the app_id field), mislabeling key + secret as "app id".
-        "cluster", "key", "secret",
+        "cluster",
+        "key",
+        "secret",
       ];
 
       const isVisible = (el: Element): boolean => {
@@ -5935,13 +5943,10 @@ export class BrowserController {
       const REVEAL_PATTERN = /\b(?:reveal|show|unmask|view|toggle|copy)\b/i;
       const revealButtons: Array<{ x: number; y: number; el: Element }> = [];
       document
-        .querySelectorAll<HTMLElement>(
-          'button, [role="button"], a, [aria-label], [title]',
-        )
+        .querySelectorAll<HTMLElement>('button, [role="button"], a, [aria-label], [title]')
         .forEach((el) => {
           if (!isVisible(el)) return;
-          const hay =
-            `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`;
+          const hay = `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`;
           if (!REVEAL_PATTERN.test(hay)) return;
           const c = centerOf(el);
           revealButtons.push({ x: c.x, y: c.y, el });
@@ -5994,10 +5999,9 @@ export class BrowserController {
           // and re-evaluate each side. The token side gets the
           // candidate slot; the label side already lives on its own
           // (we don't need to push it). First-wins on duplicates.
-          const split =
-            /^([A-Za-z][A-Za-z _-]{1,40}?)\s*[:=]\s*([A-Za-z0-9._\-]{4,256})$/.exec(
-              trimmed,
-            );
+          const split = /^([A-Za-z][A-Za-z _-]{1,40}?)\s*[:=]\s*([A-Za-z0-9._\-]{4,256})$/.exec(
+            trimmed,
+          );
           if (split === null) return;
           const valueToken = split[2];
           if (valueToken === undefined) return;
@@ -6050,15 +6054,11 @@ export class BrowserController {
 
       // 1. <input> / <textarea> values (visible only).
       document.querySelectorAll("input, textarea").forEach((el) => {
-        if (
-          el instanceof HTMLInputElement &&
-          (el.type === "hidden" || el.type === "password")
-        ) return;
+        if (el instanceof HTMLInputElement && (el.type === "hidden" || el.type === "password"))
+          return;
         if (!isVisible(el)) return;
         const value =
-          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-            ? el.value
-            : "";
+          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : "";
         if (value.length > 0) pushCandidate(value, el);
       });
 
@@ -6077,14 +6077,12 @@ export class BrowserController {
 
       // 3. Structural containers (code/pre/kbd) where the credential
       //    is interpolated through nested spans.
-      document
-        .querySelectorAll('code, pre, kbd, samp, [role="textbox"]')
-        .forEach((el) => {
-          if (!isVisible(el)) return;
-          const full = (el.textContent ?? "").trim();
-          if (full.length === 0 || full.length > 256) return;
-          pushCandidate(full, el);
-        });
+      document.querySelectorAll('code, pre, kbd, samp, [role="textbox"]').forEach((el) => {
+        if (!isVisible(el)) return;
+        const full = (el.textContent ?? "").trim();
+        if (full.length === 0 || full.length > 256) return;
+        pushCandidate(full, el);
+      });
 
       return out;
     });
@@ -6137,12 +6135,10 @@ export class BrowserController {
         if (!/[•●⬤*]{3,}/.test(t) && !/^[•*]+$/.test(t)) return;
         masked.push({ el, row: rowAncestor(el) });
       });
-      document
-        .querySelectorAll<HTMLInputElement>('input[type="password"]')
-        .forEach((el) => {
-          if (!isVisible(el)) return;
-          masked.push({ el, row: rowAncestor(el) });
-        });
+      document.querySelectorAll<HTMLInputElement>('input[type="password"]').forEach((el) => {
+        if (!isVisible(el)) return;
+        masked.push({ el, row: rowAncestor(el) });
+      });
       const selectorFor = (el: Element): string => {
         const tag = el.tagName.toLowerCase();
         const all = Array.from(document.querySelectorAll(tag));
@@ -6160,9 +6156,11 @@ export class BrowserController {
       // regenerate/delete/revoke/rotate would mint or destroy a key, not
       // reveal the existing one).
       if (masked.length === 0) {
-        const KEY_NOUN = /\b(?:api\s*key|secret|token|credential|personal\s+key|access\s+key|key)\b/i;
+        const KEY_NOUN =
+          /\b(?:api\s*key|secret|token|credential|personal\s+key|access\s+key|key)\b/i;
         const SAFE_REVEAL = /\b(?:view|show|reveal|display|see)\b/i;
-        const DESTRUCTIVE = /\b(?:reset|regenerat\w*|delete|revoke|rotate|create|new|remove|add|download)\b/i;
+        const DESTRUCTIVE =
+          /\b(?:reset|regenerat\w*|delete|revoke|rotate|create|new|remove|add|download)\b/i;
         const out: string[] = [];
         const diag: string[] = [];
         document
@@ -6204,8 +6202,7 @@ export class BrowserController {
           )
           .forEach((el) => {
             if (!isVisible(el)) return;
-            const hay =
-              `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""} ${el.className ?? ""}`;
+            const hay = `${el.textContent ?? ""} ${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""} ${el.className ?? ""}`;
             if (SHOW_PATTERN.test(hay)) showBtns.push(el);
             else if (COPY_PATTERN.test(hay)) copyBtns.push(el);
           });
@@ -6224,7 +6221,14 @@ export class BrowserController {
           const btn = showBtns[0]!;
           const sel = selectorFor(btn);
           selectors.push(sel);
-          const label = (btn.textContent ?? btn.getAttribute("aria-label") ?? btn.getAttribute("title") ?? "").trim().slice(0, 40);
+          const label = (
+            btn.textContent ??
+            btn.getAttribute("aria-label") ??
+            btn.getAttribute("title") ??
+            ""
+          )
+            .trim()
+            .slice(0, 40);
           diagnostic.push(`row→show:"${label}"→${sel}`);
         } else if (copyBtns.length > 0) {
           diagnostic.push(
@@ -6275,9 +6279,7 @@ export class BrowserController {
           return;
         }
         const value =
-          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-            ? el.value
-            : "";
+          el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement ? el.value : "";
         if (value.trim().length > 0 && isVisible(el)) out.push(value.trim());
       });
       document.querySelectorAll("body *").forEach((el) => {
@@ -6296,13 +6298,11 @@ export class BrowserController {
       // <span>s — the loop above sees an empty direct-text and skips
       // them. Push the full textContent so a UUID built as
       // <code><span>7</span><span>5</span>…</code> is still scannable.
-      document
-        .querySelectorAll('code, pre, kbd, samp, [role="textbox"]')
-        .forEach((el) => {
-          if (!isVisible(el)) return;
-          const full = (el.textContent ?? "").trim();
-          if (full.length > 0 && full.length <= 256) out.push(full);
-        });
+      document.querySelectorAll('code, pre, kbd, samp, [role="textbox"]').forEach((el) => {
+        if (!isVisible(el)) return;
+        const full = (el.textContent ?? "").trim();
+        if (full.length > 0 && full.length <= 256) out.push(full);
+      });
       return out;
     });
   }
@@ -6431,10 +6431,7 @@ export class BrowserController {
   // after navigate() in the post-verify loop so the planner doesn't
   // see a 0-button page that's still rendering. Best-effort —
   // returns whenever the count is reached OR the timeout elapses.
-  async waitForInteractiveDom(
-    minElements = 5,
-    timeoutMs = 20_000,
-  ): Promise<void> {
+  async waitForInteractiveDom(minElements = 5, timeoutMs = 20_000): Promise<void> {
     if (!this.page) return;
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -6509,9 +6506,7 @@ export class BrowserController {
           };
           for (const reStr of patterns) {
             const re = new RegExp(reStr, "i");
-            const hit = candidates.find(
-              (c) => visible(c) && re.test((c.textContent || "").trim()),
-            );
+            const hit = candidates.find((c) => visible(c) && re.test((c.textContent || "").trim()));
             if (hit !== undefined) {
               const r = hit.getBoundingClientRect();
               return {
@@ -6535,9 +6530,7 @@ export class BrowserController {
       // (e.g. lazy-rendering the previously-blocked OAuth chooser).
       // Try networkidle first for SPA re-renders, fall back to a
       // fixed dwell.
-      await this.page
-        .waitForLoadState("networkidle", { timeout: 3000 })
-        .catch(() => undefined);
+      await this.page.waitForLoadState("networkidle", { timeout: 3000 }).catch(() => undefined);
       await this.page.waitForTimeout(800);
       return target.text;
     } catch {
@@ -6658,9 +6651,7 @@ export class BrowserController {
       let bodyText = "";
       try {
         title = await this.page.title();
-        bodyText = await this.page.evaluate(() =>
-          (document.body?.innerText ?? "").slice(0, 500),
-        );
+        bodyText = await this.page.evaluate(() => (document.body?.innerText ?? "").slice(0, 500));
       } catch {
         await new Promise((r) => setTimeout(r, 500));
         continue;
@@ -6757,9 +6748,7 @@ export class BrowserController {
         if (r.width < 2 || r.height < 2) return false;
         const s = window.getComputedStyle(el);
         return (
-          s.display !== "none" &&
-          s.visibility !== "hidden" &&
-          parseFloat(s.opacity || "1") > 0.01
+          s.display !== "none" && s.visibility !== "hidden" && parseFloat(s.opacity || "1") > 0.01
         );
       };
 
@@ -6892,12 +6881,15 @@ export class BrowserController {
         const id = el.getAttribute("id");
         const name = el.getAttribute("name");
         if (testId !== null && testId.length > 0) {
-          const attr =
-            el.hasAttribute("data-testid") ? "data-testid" :
-            el.hasAttribute("data-test-id") ? "data-test-id" :
-            el.hasAttribute("data-test") ? "data-test" :
-            el.hasAttribute("data-cy") ? "data-cy" :
-            "data-qa";
+          const attr = el.hasAttribute("data-testid")
+            ? "data-testid"
+            : el.hasAttribute("data-test-id")
+              ? "data-test-id"
+              : el.hasAttribute("data-test")
+                ? "data-test"
+                : el.hasAttribute("data-cy")
+                  ? "data-cy"
+                  : "data-qa";
           base = `[${attr}="${CSS.escape(testId)}"]`;
         } else if (id !== null && /^[A-Za-z][\w-]*$/.test(id)) {
           base = `#${id}`;
@@ -6915,9 +6907,7 @@ export class BrowserController {
               parts.unshift(t);
               break;
             }
-            const sibs = Array.from(parent.children).filter(
-              (c) => c.tagName === cur.tagName,
-            );
+            const sibs = Array.from(parent.children).filter((c) => c.tagName === cur.tagName);
             const idx = sibs.indexOf(cur) + 1;
             parts.unshift(sibs.length > 1 ? `${t}:nth-of-type(${idx})` : t);
             node = parent;
@@ -7042,8 +7032,12 @@ export class BrowserController {
         // wrapper, so the SELECTOR walk AND the old div-only scan both missed
         // it, leaving the planner no clickable target.
         const isCardTag = (t: string): boolean =>
-          t === "div" || t === "li" || t === "article" ||
-          t === "section" || t === "label" || t.includes("-");
+          t === "div" ||
+          t === "li" ||
+          t === "article" ||
+          t === "section" ||
+          t === "label" ||
+          t.includes("-");
         // Walk the light DOM AND every open shadow root — a UI-kit chip can
         // live inside a web component's shadow tree.
         const scanRoot = (root: Document | ShadowRoot): void => {
@@ -7087,7 +7081,10 @@ export class BrowserController {
           let p = el.parentElement;
           let nested = false;
           while (p !== null) {
-            if (rawSet.has(p)) { nested = true; break; }
+            if (rawSet.has(p)) {
+              nested = true;
+              break;
+            }
             p = p.parentElement;
           }
           if (!nested) collected.push(el);
@@ -7184,26 +7181,21 @@ export class BrowserController {
           (el.getAttribute("src") ?? "").includes("accounts.google.com/gsi/button");
         const container = regionName(regionFor(el));
         const status = topmostStatus(el);
-        const pathLabel =
-          isGoogleGSIIframe
-            ? "Continue with Google"
-            : isFormControlElement(el)
-              ? labelFor(el) ?? directLabel(el) ?? iconLabelFor(el)
-              : directLabel(el) ?? labelFor(el) ?? iconLabelFor(el);
+        const pathLabel = isGoogleGSIIframe
+          ? "Continue with Google"
+          : isFormControlElement(el)
+            ? (labelFor(el) ?? directLabel(el) ?? iconLabelFor(el))
+            : (directLabel(el) ?? labelFor(el) ?? iconLabelFor(el));
         out.push({
           tag: isGoogleGSIIframe ? "button" : el.tagName.toLowerCase(),
           type: el.getAttribute("type"),
           id: el.getAttribute("id"),
           name: el.getAttribute("name"),
           placeholder: el.getAttribute("placeholder"),
-          ariaLabel: isGoogleGSIIframe
-            ? "Continue with Google"
-            : el.getAttribute("aria-label"),
+          ariaLabel: isGoogleGSIIframe ? "Continue with Google" : el.getAttribute("aria-label"),
           role: isGoogleGSIIframe ? "button" : el.getAttribute("role"),
           labelText: labelFor(el),
-          visibleText: isGoogleGSIIframe
-            ? "Continue with Google"
-            : clean(el.textContent),
+          visibleText: isGoogleGSIIframe ? "Continue with Google" : clean(el.textContent),
           selector: selectorFor(el),
           visible: true,
           inViewport:
@@ -7249,8 +7241,7 @@ export class BrowserController {
           // explicitly. The submit-disabled re-plan hint uses this to
           // surface concrete unticked candidates to the planner.
           checked:
-            el instanceof HTMLInputElement &&
-            (el.type === "checkbox" || el.type === "radio")
+            el instanceof HTMLInputElement && (el.type === "checkbox" || el.type === "radio")
               ? el.checked
               : null,
           // For <select>: the currently-selected option's visible text
@@ -7334,14 +7325,14 @@ export class BrowserController {
   async startOAuth(selector: string): Promise<void> {
     if (!this.page || !this.context) throw new Error("Browser not started");
     this.maybeAttachOAuthNetListener();
-    if (!/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(this.page.url())) {
+    if (
+      !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(this.page.url())
+    ) {
       this.oauthProductPage = this.page;
     }
     // Race a popup `page` event against the click. context-level
     // "page" fires for both window.open popups and target=_blank.
-    const popupPromise = this.context
-      .waitForEvent("page", { timeout: 8000 })
-      .catch(() => null);
+    const popupPromise = this.context.waitForEvent("page", { timeout: 8000 }).catch(() => null);
     await this.click(selector);
     const popup = await popupPromise;
     if (popup !== null && popup !== this.page && !popup.isClosed()) {
@@ -7365,7 +7356,8 @@ export class BrowserController {
     if (!/^(1|true|on)$/i.test(process.env.UNIVERSAL_BOT_OAUTH_DEBUG ?? "")) return;
     if (!this.context) return;
     this.oauthNetListenerAttached = true;
-    const RELEVANT = /clerk|stytch|workos|accounts\.|\/sso|\/oauth|\/session|\/sign|callback|\/v1\/client/i;
+    const RELEVANT =
+      /clerk|stytch|workos|accounts\.|\/sso|\/oauth|\/session|\/sign|callback|\/v1\/client/i;
     this.context.on("response", (res) => {
       void (async () => {
         try {
@@ -7373,7 +7365,13 @@ export class BrowserController {
           if (!RELEVANT.test(url)) return;
           const headers = res.headers();
           if (this.oauthNetLog.length >= 200) return;
-          const entry: { url: string; status: number; setCookie: boolean; ct: string; body?: string } = {
+          const entry: {
+            url: string;
+            status: number;
+            setCookie: boolean;
+            ct: string;
+            body?: string;
+          } = {
             url: url.slice(0, 200),
             status: res.status(),
             setCookie: "set-cookie" in headers || "Set-Cookie" in headers,
@@ -7382,7 +7380,10 @@ export class BrowserController {
           // Capture the body of a Clerk/Stytch/WorkOS sign-in/up/callback error
           // (>=400) — its error code is the definitive tell (captcha_invalid vs
           // transfer vs identifier_*). JSON only, bounded.
-          if (res.status() >= 400 && /\/v1\/client\/(sign_ins|sign_ups)|oauth_callback|\/session/i.test(url)) {
+          if (
+            res.status() >= 400 &&
+            /\/v1\/client\/(sign_ins|sign_ups)|oauth_callback|\/session/i.test(url)
+          ) {
             entry.body = (await res.text().catch(() => "")).slice(0, 800);
           }
           this.oauthNetLog.push(entry);
@@ -7446,14 +7447,26 @@ export class BrowserController {
       writeFileSync(
         path,
         JSON.stringify(
-          { service, label, finalUrl: url, clerkState, cookies: cookieSummary, netLog: this.oauthNetLog, pageText: consoleText.slice(0, 600) },
+          {
+            service,
+            label,
+            finalUrl: url,
+            clerkState,
+            cookies: cookieSummary,
+            netLog: this.oauthNetLog,
+            pageText: consoleText.slice(0, 600),
+          },
           null,
           2,
         ),
       );
-      console.error(`[oauth-debug] wrote ${path} (${cookieSummary.length} cookies, ${this.oauthNetLog.length} net entries)`);
+      console.error(
+        `[oauth-debug] wrote ${path} (${cookieSummary.length} cookies, ${this.oauthNetLog.length} net entries)`,
+      );
     } catch (err) {
-      console.error(`[oauth-debug] dump failed: ${err instanceof Error ? err.message : String(err)}`);
+      console.error(
+        `[oauth-debug] dump failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -7464,9 +7477,7 @@ export class BrowserController {
     if (!this.page) return null;
     try {
       return await this.page.evaluate(() => {
-        const c = document
-          .querySelector('meta[name="csrf-token"]')
-          ?.getAttribute("content");
+        const c = document.querySelector('meta[name="csrf-token"]')?.getAttribute("content");
         return c !== null && c !== undefined && c.length > 0 ? c : null;
       });
     } catch {
@@ -7489,10 +7500,7 @@ export class BrowserController {
   // from the CURRENT page — so the current-origin session cookies ride along.
   // Recovers OmniAuth 2.0 POST-only OAuth (the GET-click hit "Authentication
   // passthru"): POST /…/auth/<provider> + authenticity_token → 302 to provider.
-  async submitPostForm(
-    action: string,
-    fields: Record<string, string>,
-  ): Promise<void> {
+  async submitPostForm(action: string, fields: Record<string, string>): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     await this.page.evaluate(
       ({ action, fields }) => {
@@ -7530,9 +7538,7 @@ export class BrowserController {
     if (!this.page) return false;
     try {
       return await this.page.evaluate(() => {
-        if (
-          document.querySelector('iframe[src*="accounts.google.com/gsi/"]') !== null
-        ) {
+        if (document.querySelector('iframe[src*="accounts.google.com/gsi/"]') !== null) {
           return true;
         }
         // On-demand One-Tap: the page loads the GSI client script but renders
@@ -7542,16 +7548,14 @@ export class BrowserController {
         // conclude "signed in" and bounce to login. Treat the loaded client
         // script as a GSI affordance so the agent routes through
         // tryGoogleGsiLogin, which now raises One-Tap programmatically.
-        if (
-          document.querySelector(
-            'script[src*="accounts.google.com/gsi/client"]',
-          ) !== null
-        ) {
+        if (document.querySelector('script[src*="accounts.google.com/gsi/client"]') !== null) {
           return true;
         }
-        const g = (window as unknown as {
-          google?: { accounts?: { id?: unknown } };
-        }).google;
+        const g = (
+          window as unknown as {
+            google?: { accounts?: { id?: unknown } };
+          }
+        ).google;
         return typeof g?.accounts?.id !== "undefined";
       });
     } catch {
@@ -7657,19 +7661,17 @@ export class BrowserController {
     // undefined (no-op) and any failure must degrade to the popup/none path.
     if (cdp !== null) {
       const promptDeadline = Date.now() + Math.min(4_000, timeoutMs);
-      while (
-        Date.now() < promptDeadline &&
-        !fedcmResolved &&
-        this.context.pages().length <= 1
-      ) {
+      while (Date.now() < promptDeadline && !fedcmResolved && this.context.pages().length <= 1) {
         await this.sleep(250);
       }
       if (!fedcmResolved && this.context.pages().length <= 1) {
         try {
           await this.page.evaluate(() => {
-            const g = (window as unknown as {
-              google?: { accounts?: { id?: { prompt?: () => void } } };
-            }).google;
+            const g = (
+              window as unknown as {
+                google?: { accounts?: { id?: { prompt?: () => void } } };
+              }
+            ).google;
             const id = g?.accounts?.id;
             if (id !== undefined && typeof id.prompt === "function") {
               id.prompt();
@@ -7746,7 +7748,10 @@ export class BrowserController {
         : null;
     const nonAuth = [...pages]
       .reverse()
-      .find((p) => !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(p.url()));
+      .find(
+        (p) =>
+          !/accounts\.google\.com|github\.com\/login|login\.microsoftonline\.com/i.test(p.url()),
+      );
     this.page = nonAuth ?? product ?? pages[pages.length - 1] ?? null;
     return this.page !== null;
   }
@@ -7959,10 +7964,13 @@ export class BrowserController {
             };
             const bad = /\b(settings|marketplace|learn more|cancel|skip|back|terms|privacy)\b/i;
             const candidates = Array.from(
-              document.querySelectorAll<HTMLElement>('a[href], button, [role="button"], [role="link"]'),
+              document.querySelectorAll<HTMLElement>(
+                'a[href], button, [role="button"], [role="link"]',
+              ),
             ).filter((el) => visible(el));
             const byHref = candidates.find((el) => {
-              const href = el instanceof HTMLAnchorElement ? el.href : el.getAttribute("href") ?? "";
+              const href =
+                el instanceof HTMLAnchorElement ? el.href : (el.getAttribute("href") ?? "");
               return /\/installations\/(?:new|permissions)\b/.test(href);
             });
             const target =
@@ -8037,11 +8045,7 @@ export class BrowserController {
         // click silently failed (wrong element, or button disabled
         // behind a hidden iframe). Return false so the caller knows.
         const advanced = await this.page
-          .waitForFunction(
-            (s) => window.location.href !== s,
-            startUrl,
-            { timeout: 4000 },
-          )
+          .waitForFunction((s) => window.location.href !== s, startUrl, { timeout: 4000 })
           .then(() => true)
           .catch(() => false);
         if (advanced) return true;
@@ -8119,9 +8123,7 @@ export class BrowserController {
         const APPROVE = /^(?:continue|allow|accept|agree)\b/i;
         const DENY = /\b(?:cancel|deny|back|no\b|not now|reject)\b/i;
         const els = Array.from(
-          document.querySelectorAll(
-            'button, input[type="submit"], [role="button"], a[href]',
-          ),
+          document.querySelectorAll('button, input[type="submit"], [role="button"], a[href]'),
         ) as HTMLElement[];
         for (const el of els) {
           const r = el.getBoundingClientRect();
@@ -8271,7 +8273,11 @@ export class BrowserController {
     // matters: kill Chrome (context.close) first so it has its
     // display until it exits, THEN kill Xvfb.
     if (this.xvfb !== null) {
-      try { this.xvfb.stop(); } catch { /* best-effort */ }
+      try {
+        this.xvfb.stop();
+      } catch {
+        /* best-effort */
+      }
       this.xvfb = null;
     }
   }
@@ -8452,10 +8458,7 @@ export interface ProxySettings {
 // A SOCKS5 proxy listens on TCP; if a connect succeeds within the timeout the
 // proxy is up. Resolves false on connect error / timeout / a malformed server.
 // Pure (no class state) so resolveProxy can call it before launching Chrome.
-export async function isProxyReachable(
-  server: string,
-  timeoutMs = 4000,
-): Promise<boolean> {
+export async function isProxyReachable(server: string, timeoutMs = 4000): Promise<boolean> {
   let host: string;
   let port: number;
   try {
@@ -8490,9 +8493,7 @@ export async function isProxyReachable(
 export function parseProxyUrl(raw: string): ProxySettings {
   const u = new URL(raw.trim());
   if (u.hostname.length === 0) {
-    throw new Error(
-      `proxy URL has no host: "${raw}" (expected e.g. http://host:port)`,
-    );
+    throw new Error(`proxy URL has no host: "${raw}" (expected e.g. http://host:port)`);
   }
   // `host` includes the port; `protocol` keeps its trailing ":".
   const settings: ProxySettings = { server: `${u.protocol}//${u.host}` };
@@ -8507,10 +8508,7 @@ export function parseProxyUrl(raw: string): ProxySettings {
 // override stay direct — the ~80% who don't need it pay nothing.
 //
 // Exported for unit testing.
-export function shouldRouteThroughProxy(
-  asnClass: AsnClass,
-  forceAlways: boolean,
-): boolean {
+export function shouldRouteThroughProxy(asnClass: AsnClass, forceAlways: boolean): boolean {
   return forceAlways || asnClass === "datacenter";
 }
 
@@ -8695,8 +8693,9 @@ export function assignCardRadioGroups(
     clickable: boolean;
   }>,
 ): Array<{ id: number; position: number; total: number } | null> {
-  const result: Array<{ id: number; position: number; total: number } | null> =
-    new Array(candidates.length).fill(null);
+  const result: Array<{ id: number; position: number; total: number } | null> = new Array(
+    candidates.length,
+  ).fill(null);
   // Bucket by parent.
   const byParent = new Map<number, number[]>();
   for (let i = 0; i < candidates.length; i++) {
@@ -8761,9 +8760,7 @@ export function scoreSignupButton(
   // generic nav anchors that score 0. The compensating auth-verb
   // penalty below is also suppressed when email is present.
   const hasEmail =
-    t.includes("continue with email") ||
-    t.includes("sign up with email") ||
-    t.includes("email");
+    t.includes("continue with email") || t.includes("sign up with email") || t.includes("email");
   if (hasEmail) {
     score += 12;
   }
@@ -8783,7 +8780,9 @@ export function scoreSignupButton(
   // caps them out: the OpenRouter "Get API Key" + fal.ai "Add key"
   // suppression. Score them as a primary target so they survive ranking.
   if (
-    /\b(?:add|create|generate|new|get|reveal|copy)\b[\s\w]{0,20}\b(?:api[\s-]?key|key|token|secret|credential)s?\b/.test(t)
+    /\b(?:add|create|generate|new|get|reveal|copy)\b[\s\w]{0,20}\b(?:api[\s-]?key|key|token|secret|credential)s?\b/.test(
+      t,
+    )
   ) {
     score += 14;
   }
@@ -8805,8 +8804,7 @@ export function scoreSignupButton(
   // for first-time visitors. Penalizing them drops the actual signup
   // route from the inventory (the Railway regression diagnosed via
   // screenshots after rc.29).
-  const hasAuthVerb =
-    t.includes("sign in") || t.includes("log in") || t.includes("login");
+  const hasAuthVerb = t.includes("sign in") || t.includes("log in") || t.includes("login");
   if (hasAuthVerb && !hasEmail) score -= 12;
   return score;
 }
