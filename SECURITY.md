@@ -73,9 +73,9 @@ WebAuthn PRF extension. A payment approval is short-lived and account-scoped.
 The phone signs a canonical purchase payload that binds the merchant, checkout
 origin, amount, currency, single-use nonce, card reference, the SHA-256 hash of
 the operator's ephemeral public key, item description, purchase reason, and
-authenticated requesting-agent identity. The API derives that identity
-server-side from the install's authenticated identity; the client cannot supply
-it.
+server-derived requesting-agent label. The API uses the install's authenticated
+agent identity when present and otherwise signs `unknown-agent`; the client
+cannot supply the label.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. The signed payload hash

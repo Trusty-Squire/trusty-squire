@@ -40,9 +40,11 @@ Other useful asks:
 For supported card checkouts, add a card in the Vault once from a passkey-capable
 device. Trusty Squire encrypts it in that browser with a passkey-derived key.
 `operate_pay` reads the checkout total, sends you a short-lived approval link,
-and submits only after you approve the exact purchase. If the issuer requires
-3-D Secure, Trusty Squire hands the challenge back to you instead of automating
-it.
+and submits only after you approve the exact purchase. The approval page shows
+the venue, item, amount, requesting agent, and reason; one passkey prompt both
+signs that approval and releases the card to the checkout operator. If the
+issuer requires 3-D Secure, Trusty Squire hands the challenge back to you
+instead of automating it.
 
 ## Install
 
@@ -113,9 +115,10 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
   payment, your phone releases the card only to that checkout operator after
-  you approve the merchant, origin, amount, currency, and one-time request.
-  Trusty Squire's API and the coding-agent model never receive plaintext card
-  data.
+  you approve the exact details shown on the approval page. Trusty Squire's API
+  and the coding-agent model never receive plaintext card data. See the
+  [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)
+  for the signed mandate's binding contract.
 - Browser screenshots and diagnostics can contain whatever a website visibly rendered. Treat diagnostic artifacts as sensitive and do not ask an agent to re-observe a page after a secret is shown.
 - Trusty Squire does not bypass phone verification, hard CAPTCHAs, 3-D Secure,
   payment authorization, or decisions that belong to a person. It stops for
