@@ -43,6 +43,14 @@ interface AccountRow {
   subscription_id: string | null;
   current_period_end: Date | null;
   cancel_at: Date | null;
+  telegram_chat_id: string | null;
+}
+
+interface TelegramLinkTokenRow {
+  token: string;
+  account_id: string;
+  created_at: Date;
+  expires_at: Date;
 }
 
 interface OAuthIdentityRow {
@@ -332,6 +340,11 @@ export interface ApiPrismaClient {
       where: Record<string, unknown>;
       data: Record<string, unknown>;
     }): Promise<{ count: number }>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  telegramLinkToken: {
+    create(args: { data: Record<string, unknown> }): Promise<TelegramLinkTokenRow>;
+    findUnique(args: { where: { token: string } }): Promise<TelegramLinkTokenRow | null>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
   egressGrant: {

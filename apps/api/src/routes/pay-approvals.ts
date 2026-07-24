@@ -2,6 +2,16 @@ import { randomBytes } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
+import { sendTelegramMessage } from "../services/telegram.js";
+
+// Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
+// (the same override server.ts's defaultPwaBaseUrl() reads) if set, else
+// the Telegram-specific override, else the production default.
+function webBaseUrl(): string {
+  return (
+    process.env.PWA_BASE_URL ?? process.env.TRUSTY_SQUIRE_WEB_BASE ?? "https://trustysquire.ai"
+  );
+}
 
 const createBody = z.object({
   merchant: z.string().min(1).max(256),
@@ -62,6 +72,18 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       operatorPubkey: parsed.data.operator_pubkey,
       expiresAt,
     });
+
+    // Push to the user's linked Telegram, if any. Fire-and-forget — a
+    // Telegram error must never delay or fail the approval response.
+    const account = await opts.deps.accountStore.findAccountById(auth.account_id);
+    if (account?.telegram_chat_id != null) {
+      const amount = (parsed.data.amount_cents / 100).toFixed(2);
+      const text =
+        `Trusty Squire — approve ${parsed.data.currency} ${amount} to ${parsed.data.merchant}\n` +
+        `${webBaseUrl()}/vault/pay/${id}`;
+      void sendTelegramMessage(account.telegram_chat_id, text).catch(() => {});
+    }
+
     return reply.code(201).send({ id, nonce, expires_at: expiresAt.toISOString() });
   });
 
