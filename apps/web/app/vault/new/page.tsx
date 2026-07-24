@@ -3,11 +3,12 @@
 import { useCallback, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../../components/AppShell";
+import { CardEntry } from "../../components/CardEntry";
 import { CredentialFields, type FieldsResult } from "../../components/CredentialFields";
 import { deriveLoginTarget, parseHostList } from "../../lib/hosts";
 import { ApiError, apiPost } from "../../lib/api";
 
-type Kind = "api_key" | "login";
+type Kind = "api_key" | "login" | "card";
 
 export default function NewCredentialPage() {
   const router = useRouter();
@@ -102,137 +103,148 @@ export default function NewCredentialPage() {
           <p className="app-sub">
             {kind === "login"
               ? "Encrypted; filled into sign-in pages for you, never shown to an agent."
-              : "Encrypted, used only via the proxy, never shown to an agent."}
+              : kind === "card"
+                ? "Encrypted in this browser. The server cannot decrypt it."
+                : "Encrypted, used only via the proxy, never shown to an agent."}
           </p>
         </div>
       </div>
 
-      <form className="form cred-form" onSubmit={submit}>
-        <div className="seg" role="group" aria-label="Credential kind">
-          <button type="button" aria-pressed={kind === "api_key"} onClick={() => setKind("api_key")}>
-            API key
-          </button>
-          <button type="button" aria-pressed={kind === "login"} onClick={() => setKind("login")}>
-            Website login
-          </button>
-        </div>
-
-        {kind === "login" ? (
-          <>
-            <div className="field">
-              <label htmlFor="login-website">Website</label>
-              <input
-                id="login-website"
-                className="mono"
-                value={website}
-                onChange={(e) => setWebsite(e.target.value)}
-                placeholder="clubgg.com"
-                autoComplete="off"
-                required
-              />
-              <span className="field-hint">
-                The site this login is for — its name in your vault and the only
-                place Trusty Squire fills it. Paste the full sign-in URL
-                (https://…/login) to also pin the exact page.
-              </span>
-            </div>
-            <div className="field">
-              <label htmlFor="login-username">Email or username</label>
-              <input
-                id="login-username"
-                className="mono"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="me@example.com"
-                autoComplete="off"
-                required
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="login-password">Password</label>
-              <input
-                id="login-password"
-                className="mono"
-                type={reveal ? "text" : "password"}
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                autoComplete="off"
-                required
-              />
-              <div className="field-row-actions">
-                <button type="button" className="linkbtn" onClick={() => setReveal((r) => !r)}>
-                  {reveal ? "hide" : "show"}
-                </button>
-              </div>
-            </div>
-          </>
-        ) : (
-          <>
-            <div className="field">
-              <label htmlFor="service">Service</label>
-              <input
-                id="service"
-                value={service}
-                onChange={(e) => setService(e.target.value)}
-                placeholder="OpenAI"
-                autoComplete="off"
-                required
-              />
-            </div>
-            <CredentialFields idPrefix="new" onChange={setFields} />
-          </>
-        )}
-
-        <button type="button" className="disclose" onClick={() => setAdvanced((a) => !a)}>
-          {advanced ? "▾" : "▸"} Advanced
+      <div className="seg" role="group" aria-label="Credential kind">
+        <button type="button" aria-pressed={kind === "api_key"} onClick={() => setKind("api_key")}>
+          API key
         </button>
-        {advanced && (
-          <>
-            <div className="field">
-              <label htmlFor="label">Label</label>
-              <input
-                id="label"
-                className="mono"
-                value={label}
-                onChange={(e) => setLabel(e.target.value)}
-                placeholder="default"
-                autoComplete="off"
-              />
-              <span className="field-hint">Keeps prod/dev entries for the same service apart.</span>
-            </div>
-            {kind === "api_key" && (
+        <button type="button" aria-pressed={kind === "login"} onClick={() => setKind("login")}>
+          Website login
+        </button>
+        <button type="button" aria-pressed={kind === "card"} onClick={() => setKind("card")}>
+          Card
+        </button>
+      </div>
+
+      {kind === "card" ? (
+        <CardEntry onSaved={() => router.push("/vault/card")} />
+      ) : (
+        <form className="form cred-form" onSubmit={submit}>
+          {kind === "login" ? (
+            <>
               <div className="field">
-                <label htmlFor="allowed-hosts">Allowed hosts</label>
-                <textarea
-                  id="allowed-hosts"
+                <label htmlFor="login-website">Website</label>
+                <input
+                  id="login-website"
                   className="mono"
-                  value={allowedHosts}
-                  onChange={(e) => setAllowedHosts(e.target.value)}
-                  placeholder="api.example.com"
-                  rows={3}
+                  value={website}
+                  onChange={(e) => setWebsite(e.target.value)}
+                  placeholder="clubgg.com"
+                  autoComplete="off"
+                  required
+                />
+                <span className="field-hint">
+                  The site this login is for — its name in your vault and the only place Trusty
+                  Squire fills it. Paste the full sign-in URL (https://…/login) to also pin the
+                  exact page.
+                </span>
+              </div>
+              <div className="field">
+                <label htmlFor="login-username">Email or username</label>
+                <input
+                  id="login-username"
+                  className="mono"
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                  placeholder="me@example.com"
+                  autoComplete="off"
+                  required
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="login-password">Password</label>
+                <input
+                  id="login-password"
+                  className="mono"
+                  type={reveal ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••"
+                  autoComplete="off"
+                  required
+                />
+                <div className="field-row-actions">
+                  <button type="button" className="linkbtn" onClick={() => setReveal((r) => !r)}>
+                    {reveal ? "hide" : "show"}
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="field">
+                <label htmlFor="service">Service</label>
+                <input
+                  id="service"
+                  value={service}
+                  onChange={(e) => setService(e.target.value)}
+                  placeholder="OpenAI"
+                  autoComplete="off"
+                  required
+                />
+              </div>
+              <CredentialFields idPrefix="new" onChange={setFields} />
+            </>
+          )}
+
+          <button type="button" className="disclose" onClick={() => setAdvanced((a) => !a)}>
+            {advanced ? "▾" : "▸"} Advanced
+          </button>
+          {advanced && (
+            <>
+              <div className="field">
+                <label htmlFor="label">Label</label>
+                <input
+                  id="label"
+                  className="mono"
+                  value={label}
+                  onChange={(e) => setLabel(e.target.value)}
+                  placeholder="default"
                   autoComplete="off"
                 />
                 <span className="field-hint">
-                  Hosts use_credential may call. One per line. Leave blank for known
-                  services (their API hosts are filled in automatically).
+                  Keeps prod/dev entries for the same service apart.
                 </span>
               </div>
-            )}
-          </>
-        )}
+              {kind === "api_key" && (
+                <div className="field">
+                  <label htmlFor="allowed-hosts">Allowed hosts</label>
+                  <textarea
+                    id="allowed-hosts"
+                    className="mono"
+                    value={allowedHosts}
+                    onChange={(e) => setAllowedHosts(e.target.value)}
+                    placeholder="api.example.com"
+                    rows={3}
+                    autoComplete="off"
+                  />
+                  <span className="field-hint">
+                    Hosts use_credential may call. One per line. Leave blank for known services
+                    (their API hosts are filled in automatically).
+                  </span>
+                </div>
+              )}
+            </>
+          )}
 
-        {error !== null && <div className="form-err">{error}</div>}
+          {error !== null && <div className="form-err">{error}</div>}
 
-        <div className="form-actions">
-          <button className="btn-primary" type="submit" disabled={busy}>
-            {busy ? "Saving…" : "Save"}
-          </button>
-          <button className="btn-secondary" type="button" onClick={() => router.push("/vault")}>
-            Cancel
-          </button>
-        </div>
-      </form>
+          <div className="form-actions">
+            <button className="btn-primary" type="submit" disabled={busy}>
+              {busy ? "Saving…" : "Save"}
+            </button>
+            <button className="btn-secondary" type="button" onClick={() => router.push("/vault")}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
     </AppShell>
   );
 }
