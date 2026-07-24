@@ -1,6 +1,18 @@
+import { existsSync } from "node:fs";
 import { chromium, type Page } from "playwright";
 import { describe, expect, it } from "vitest";
 import { BrowserController, parseCheckoutAmount } from "../browser.js";
+
+// The real-browser checkout-fill test needs a Playwright Chromium binary. The
+// main CI install downloads it, but the lean mcp-only publish-verify install
+// does not — skip there rather than fail the release. The pure parsing tests
+// below always run.
+let chromiumAvailable = false;
+try {
+  chromiumAvailable = existsSync(chromium.executablePath());
+} catch {
+  chromiumAvailable = false;
+}
 
 describe("checkout payment parsing", () => {
   it("uses the selected currency precision for a comma decimal", () => {
@@ -24,7 +36,7 @@ describe("checkout payment parsing", () => {
     });
   });
 
-  it("submits a visible button using its text when its value is empty", async () => {
+  it.skipIf(!chromiumAvailable)("submits a visible button using its text when its value is empty", async () => {
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage();
