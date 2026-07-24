@@ -36,11 +36,13 @@ describe("checkout payment parsing", () => {
     });
   });
 
-  it.skipIf(!chromiumAvailable)("submits a visible button using its text when its value is empty", async () => {
-    const browser = await chromium.launch({ headless: true });
-    try {
-      const page = await browser.newPage();
-      await page.setContent(`
+  it.skipIf(!chromiumAvailable)(
+    "submits a visible button using its text when its value is empty",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
         <form id="checkout">
           <input autocomplete="cc-number">
           <input autocomplete="cc-exp">
@@ -60,35 +62,36 @@ describe("checkout payment parsing", () => {
           });
         </script>
       `);
-      const controller = new BrowserController({ humanize: false });
-      (controller as unknown as { page: Page }).page = page;
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
 
-      const result = await controller.fillAndSubmitCheckout({
-        pan: "4242424242424242",
-        exp_month: "12",
-        exp_year: "30",
-        cvv: "123",
-        name: "Synthetic Cardholder",
-        billing: {
-          line1: "123 Synthetic Street",
-          city: "Testville",
-          postal_code: "10001",
-          country: "US",
-        },
-      });
+        const result = await controller.fillAndSubmitCheckout({
+          pan: "4242424242424242",
+          exp_month: "12",
+          exp_year: "30",
+          cvv: "123",
+          name: "Synthetic Cardholder",
+          billing: {
+            line1: "123 Synthetic Street",
+            city: "Testville",
+            postal_code: "10001",
+            country: "US",
+          },
+        });
 
-      expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
-      expect(result.three_ds_required).toBe(true);
-      expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
-      expect(
-        await page
-          .locator("input")
-          .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
-      ).toEqual(["", "", "", ""]);
-    } finally {
-      await browser.close();
-    }
-  });
+        expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+        expect(result.three_ds_required).toBe(true);
+        expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
+        expect(
+          await page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+        ).toEqual(["", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 });
 
 function controllerWithResolutionPage(options: {

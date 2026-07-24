@@ -335,12 +335,10 @@ describe("operate_pay", () => {
   });
 
   it("does not wait for notification delivery before resolving 3DS", async () => {
-    const { result, notifyCalls, browser } = await harness(
-      "happy",
-      "customer_test",
-      undefined,
-      { resolution: "succeeded", notifyNeverResolves: true },
-    );
+    const { result, notifyCalls, browser } = await harness("happy", "customer_test", undefined, {
+      resolution: "succeeded",
+      notifyNeverResolves: true,
+    });
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);

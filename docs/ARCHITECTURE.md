@@ -161,8 +161,10 @@ agent starts operate_pay in the active checkout
   -> user reviews and approves the purchase on a paired phone
   -> phone decrypts the selected card and seals it to that operator key
   -> operator verifies the signed mandate, opens the card, and fills checkout
-  -> 3-D Secure, when required, is handed back to the user
-  -> metadata-only payment outcome is audited
+  -> when 3-D Secure is required, the API nudges a linked Telegram chat and
+     the operator waits for success or failure when waiting is enabled
+  -> timeout, or a disabled wait, hands the unresolved challenge to the user
+  -> the post-wait metadata-only payment status is audited
 ```
 
 The detailed cryptographic checks and card-data boundary live in
