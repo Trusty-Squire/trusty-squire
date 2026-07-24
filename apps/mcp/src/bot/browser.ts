@@ -180,15 +180,11 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
   "¥": "JPY",
 };
 
-const ZERO_DECIMAL_CURRENCIES = new Set([
-  "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF",
-  "UGX", "VND", "VUV", "XAF", "XOF", "XPF",
-]);
-
 function currencyMinorDigits(currency: string): number {
-  if (ZERO_DECIMAL_CURRENCIES.has(currency)) return 0;
-  if (["BHD", "JOD", "KWD", "OMR", "TND"].includes(currency)) return 3;
-  return 2;
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+  }).resolvedOptions().maximumFractionDigits;
 }
 
 function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
@@ -5189,8 +5185,13 @@ export class BrowserController {
       if (submitted) break;
     }
     if (!submitted) throw new Error("payment_submit_not_found");
-    await this.page.waitForTimeout(1_500).catch(() => undefined);
-    return await this.detectThreeDsChallenge();
+    const challengeDeadline = Date.now() + 15_000;
+    while (Date.now() < challengeDeadline) {
+      const challenge = await this.detectThreeDsChallenge();
+      if (challenge.three_ds_required) return challenge;
+      await this.page.waitForTimeout(250).catch(() => undefined);
+    }
+    return { three_ds_required: false };
     } finally {
       for (const frame of this.page.frames()) {
         await frame

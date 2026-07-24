@@ -17,6 +17,13 @@ describe("checkout payment parsing", () => {
     });
   });
 
+  it("uses Intl minor-unit precision for zero-decimal currencies", () => {
+    expect(parseCheckoutAmount(["Total JPY 1,000"])).toEqual({
+      amount_cents: 1_000,
+      currency: "JPY",
+    });
+  });
+
   it("submits a visible button using its text when its value is empty", async () => {
     const browser = await chromium.launch({ headless: true });
     try {
@@ -33,13 +40,18 @@ describe("checkout payment parsing", () => {
           document.querySelector("#checkout").addEventListener("submit", (event) => {
             event.preventDefault();
             document.body.dataset.submitted = "true";
+            setTimeout(() => {
+              const challenge = document.createElement("iframe");
+              challenge.title = "3D Secure";
+              document.body.append(challenge);
+            }, 200);
           });
         </script>
       `);
       const controller = new BrowserController({ humanize: false });
       (controller as unknown as { page: Page }).page = page;
 
-      await controller.fillAndSubmitCheckout({
+      const result = await controller.fillAndSubmitCheckout({
         pan: "4242424242424242",
         exp_month: "12",
         exp_year: "30",
@@ -54,11 +66,11 @@ describe("checkout payment parsing", () => {
       });
 
       expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+      expect(result.three_ds_required).toBe(true);
+      expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
       expect(
-        await page.locator('input[data-ts-sealed-payment="1"]').count(),
-      ).toBe(0);
-      expect(await page.locator("input").evaluateAll((inputs) => inputs.map((input) => input.value)))
-        .toEqual(["", "", "", ""]);
+        await page.locator("input").evaluateAll((inputs) => inputs.map((input) => input.value)),
+      ).toEqual(["", "", "", ""]);
     } finally {
       await browser.close();
     }

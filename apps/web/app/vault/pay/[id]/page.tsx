@@ -48,12 +48,14 @@ function toBase64Url(bytes: Uint8Array): string {
 
 function formatAmount(amountCents: number, currency: string): string {
   try {
-    return new Intl.NumberFormat(undefined, {
+    const formatter = new Intl.NumberFormat(undefined, {
       style: "currency",
       currency,
-    }).format(amountCents / 100);
+    });
+    const minorDigits = formatter.resolvedOptions().maximumFractionDigits;
+    return formatter.format(amountCents / 10 ** minorDigits);
   } catch {
-    return `${(amountCents / 100).toFixed(2)} ${currency}`;
+    return `${amountCents} ${currency} minor units`;
   }
 }
 

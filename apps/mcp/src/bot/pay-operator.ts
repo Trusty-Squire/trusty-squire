@@ -25,6 +25,7 @@ interface PayDependencies {
   now: () => number;
   webBase: string;
   vouchflowApiBase: string;
+  vouchflowExpectedAudience: string | undefined;
   approvalTimeoutMs: number;
   pollIntervalMs: number;
   surfaceApprovalUrl: (url: string) => void | Promise<void>;
@@ -104,8 +105,12 @@ async function verifyMandate(
   jws: string,
   expectedHash: Uint8Array,
   vouchflowApiBase: string,
+  expectedAudience: string | undefined,
   fetchImpl: typeof fetch,
 ): Promise<JWTPayload> {
+  if (expectedAudience === undefined || expectedAudience.length === 0) {
+    throw new Error("vouchflow_expected_audience_unset");
+  }
   const jwksUrl = `${vouchflowApiBase.replace(/\/+$/, "")}/.well-known/jwks.json`;
   const signal = AbortSignal.timeout(5_000);
   let response: Response;
@@ -128,7 +133,10 @@ async function verifyMandate(
   ) {
     throw new Error("invalid_jwks");
   }
-  const { payload } = await jwtVerify(jws, createLocalJWKSet(body as JSONWebKeySet));
+  const { payload } = await jwtVerify(jws, createLocalJWKSet(body as JSONWebKeySet), {
+    issuer: "https://vouchflow.dev",
+    audience: expectedAudience,
+  });
   const signedHash = decodePayloadHash(payload.payload_sha256);
   if (!timingSafeEqual(Buffer.from(expectedHash), Buffer.from(signedHash))) {
     throw new Error("payload_hash_mismatch");
@@ -145,6 +153,7 @@ function safeFailureReason(error: unknown): string {
   const known = [
     "jwks_fetch_failed",
     "jwks_fetch_timeout",
+    "vouchflow_expected_audience_unset",
     "invalid_jwks",
     "missing_payload_sha256",
     "invalid_payload_sha256",
@@ -164,6 +173,7 @@ function defaultDependencies(): PayDependencies {
     now: Date.now,
     webBase: process.env.TRUSTY_SQUIRE_WEB_BASE ?? "https://trustysquire.ai",
     vouchflowApiBase: process.env.VOUCHFLOW_API_BASE ?? "https://api.vouchflow.dev",
+    vouchflowExpectedAudience: process.env.VOUCHFLOW_EXPECTED_AUDIENCE?.trim(),
     approvalTimeoutMs: 5 * 60 * 1000,
     pollIntervalMs: 3_000,
     surfaceApprovalUrl: (url) => {
@@ -281,7 +291,13 @@ export async function executeOperatePay(
 
     let claims: JWTPayload;
     try {
-      claims = await verifyMandate(approved.jws, aad, deps.vouchflowApiBase, deps.fetch);
+      claims = await verifyMandate(
+        approved.jws,
+        aad,
+        deps.vouchflowApiBase,
+        deps.vouchflowExpectedAudience,
+        deps.fetch,
+      );
     } catch (error) {
       return {
         status: "payment_mandate_rejected",

@@ -30,9 +30,16 @@ const SYNTHETIC_CARD = {
   },
 };
 
-type Mode = "happy" | "tampered_amount" | "tampered_origin" | "wrong_recipient" | "audit_failure";
+type Mode =
+  | "happy"
+  | "tampered_amount"
+  | "tampered_origin"
+  | "wrong_recipient"
+  | "wrong_issuer"
+  | "wrong_audience"
+  | "audit_failure";
 
-async function harness(mode: Mode) {
+async function harness(mode: Mode, expectedAudience: string | null = "customer_test") {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
   });
@@ -85,6 +92,10 @@ async function harness(mode: Mode) {
         mandate_id: "mandate_test",
       })
         .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+        .setIssuer(
+          mode === "wrong_issuer" ? "https://other-issuer.example" : "https://vouchflow.dev",
+        )
+        .setAudience(mode === "wrong_audience" ? "other-customer" : "customer_test")
         .sign(privateKey);
       const recipient =
         mode === "wrong_recipient"
@@ -144,6 +155,7 @@ async function harness(mode: Mode) {
       fetch: fetchMock,
       sleep: async () => undefined,
       vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: expectedAudience ?? undefined,
       webBase: "https://web.test",
       surfaceApprovalUrl: vi.fn(),
     },
@@ -218,6 +230,39 @@ describe("operate_pay", () => {
     const { result, auditBodies, filledCards } = await harness("wrong_recipient");
 
     expect(result).toMatchObject({ status: "payment_card_open_failed" });
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("rejects a mandate issued for another Vouchflow customer", async () => {
+    const { result, auditBodies, filledCards } = await harness("wrong_audience");
+
+    expect(result).toMatchObject({
+      status: "payment_mandate_rejected",
+      reason: "mandate_verification_failed",
+    });
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("rejects a mandate from another issuer", async () => {
+    const { result, auditBodies, filledCards } = await harness("wrong_issuer");
+
+    expect(result).toMatchObject({
+      status: "payment_mandate_rejected",
+      reason: "mandate_verification_failed",
+    });
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("fails closed when the expected Vouchflow audience is not configured", async () => {
+    const { result, auditBodies, filledCards } = await harness("happy", null);
+
+    expect(result).toMatchObject({
+      status: "payment_mandate_rejected",
+      reason: "vouchflow_expected_audience_unset",
+    });
     expect(filledCards).toHaveLength(0);
     expect(auditBodies).toHaveLength(0);
   });
