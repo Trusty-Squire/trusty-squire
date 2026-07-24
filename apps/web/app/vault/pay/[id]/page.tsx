@@ -53,6 +53,9 @@ function formatAmount(amountCents: number, currency: string): string {
       currency,
     });
     const minorDigits = formatter.resolvedOptions().maximumFractionDigits;
+    if (minorDigits === undefined) {
+      return `${amountCents} ${currency} minor units`;
+    }
     return formatter.format(amountCents / 10 ** minorDigits);
   } catch {
     return `${amountCents} ${currency} minor units`;
