@@ -71,8 +71,11 @@ Before card entry or payment approval, the browser requires a one-time Vouchflow
 passkey enrollment and confirms that the platform authenticator supports the
 WebAuthn PRF extension. A payment approval is short-lived and account-scoped.
 The phone signs a canonical purchase payload that binds the merchant, checkout
-origin, amount, currency, nonce, card reference, and the SHA-256 hash of the
-operator's ephemeral public key.
+origin, amount, currency, single-use nonce, card reference, the SHA-256 hash of
+the operator's ephemeral public key, item description, purchase reason, and
+authenticated requesting-agent identity. The API derives that identity
+server-side from the install's authenticated identity; the client cannot supply
+it.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. The signed payload hash
@@ -81,12 +84,15 @@ different purchase or operator. The API relays only the signed mandate and
 sealed card.
 
 The MCP operator fetches Vouchflow's JWKS and fails closed unless signature,
-issuer, audience, purchase context, high-or-better confidence, and payload hash
-all verify. Only then does that local operator process open the envelope and
-fill the checkout. Plaintext card fields are not returned through MCP to the
-coding-agent model, sent to the Trusty Squire API, logged, or stored in payment
-audit events. Issuer 3-D Secure is handed back to the user rather than
-automated.
+issuer, audience, purchase context, and payload hash all verify and user
+presence is established. Browser passkeys are capped at low confidence in
+Vouchflow regardless of biometric, so mandate assurance rests on user presence,
+the single-use nonce, and amount, recipient, origin, and item binding rather
+than a high confidence tier. Only then does that local operator process open
+the envelope and fill the checkout. Plaintext card fields are not returned
+through MCP to the coding-agent model, sent to the Trusty Squire API, logged,
+or stored in payment audit events. Issuer 3-D Secure is handed back to the user
+rather than automated.
 
 Payment audit events are deliberately metadata-only: merchant, amount,
 currency, card last four digits, status, and an optional mandate ID. The API
