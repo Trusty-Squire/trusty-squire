@@ -170,7 +170,7 @@ function defaultDependencies(): PayDependencies {
     now: Date.now,
     webBase: process.env.TRUSTY_SQUIRE_WEB_BASE ?? "https://trustysquire.ai",
     vouchflowApiBase: process.env.VOUCHFLOW_API_BASE ?? "https://api.vouchflow.dev",
-    vouchflowExpectedAudience: process.env.VOUCHFLOW_EXPECTED_AUDIENCE?.trim(),
+    vouchflowExpectedAudience: process.env.VOUCHFLOW_EXPECTED_AUDIENCE?.trim() || undefined,
     approvalTimeoutMs: 5 * 60 * 1000,
     pollIntervalMs: 3_000,
     surfaceApprovalUrl: (url) => {
