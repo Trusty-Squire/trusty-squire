@@ -1,5 +1,18 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.2 (2026-07-24)
+
+- **Payment approval now needs one passkey tap.** `@vouchflow/web` 0.3.1 signs
+  the mandate and derives the card-decryption key in the same WebAuthn ceremony
+  with `signPayload({ prfSalt })`.
+- **Browser passkeys can approve payments at low confidence.** Vouchflow caps
+  web passkeys at low confidence, so assurance instead rests on user presence,
+  a single-use nonce, and the amount, recipient, origin, and item bindings.
+- **Approvals bind and display the complete purchase context.** The signed
+  mandate and approval page carry the item, reason, and requesting agent. The
+  API derives that agent from the authenticated install identity so clients
+  cannot spoof “Requested by.”
+
 ## 1.0.49 (2026-07-21)
 
 - **Security: fence the operator browser off Squire's own control plane.** The
