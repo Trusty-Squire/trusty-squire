@@ -118,7 +118,7 @@ export default function PaymentApprovalPage() {
       const sign = await getVouchflow().signPayload({
         context: "purchase",
         payload,
-        minConfidence: "high",
+        minConfidence: "medium",
       });
       const aad = new Uint8Array(
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sign.payload)),
