@@ -67,6 +67,11 @@ import {
   type PendingPaymentApprovalStore,
 } from "./in-memory-payment-approval-store.js";
 import { PrismaPendingPaymentApprovalStore } from "./prisma-payment-approval-store.js";
+import {
+  InMemoryTelegramLinkTokenStore,
+  type TelegramLinkTokenStore,
+} from "./in-memory-telegram-link-token-store.js";
+import { PrismaTelegramLinkTokenStore } from "./prisma-telegram-link-token-store.js";
 
 export interface ApiDeps {
   // Identity / auth
@@ -85,6 +90,7 @@ export interface ApiDeps {
   e2eCredentialStore: E2ECredentialStore;
   paymentAuditStore: PaymentAuditStore;
   pendingPaymentApprovalStore: PendingPaymentApprovalStore;
+  telegramLinkTokenStore: TelegramLinkTokenStore;
   egressGrantStore: EgressGrantStore;
   machineTokenStore: MachineTokenStore;
   captchaEventStore: CaptchaEventStore;
@@ -266,6 +272,10 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     authPrisma !== null
       ? new PrismaPendingPaymentApprovalStore(authPrisma)
       : new InMemoryPendingPaymentApprovalStore(opts.now);
+  const telegramLinkTokenStore: TelegramLinkTokenStore =
+    authPrisma !== null
+      ? new PrismaTelegramLinkTokenStore(authPrisma)
+      : new InMemoryTelegramLinkTokenStore(opts.now);
   // Panel 1 funnel: Prisma-backed when the auth DB is wired, else a
   // zero store (the funnel is a prod operator feature).
   const funnelStatsStore: FunnelStatsStore =
@@ -363,6 +373,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     e2eCredentialStore,
     paymentAuditStore,
     pendingPaymentApprovalStore,
+    telegramLinkTokenStore,
     egressGrantStore,
     machineTokenStore,
     captchaEventStore,

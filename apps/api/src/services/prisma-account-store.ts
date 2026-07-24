@@ -74,6 +74,13 @@ export class PrismaAccountStore implements AccountStore {
     });
   }
 
+  async setTelegramChatId(accountId: string, chatId: string): Promise<void> {
+    await this.prisma.account.update({
+      where: { id: accountId },
+      data: { telegram_chat_id: chatId },
+    });
+  }
+
   async deleteAccount(accountId: string): Promise<void> {
     // The schema declares onDelete: Cascade from Account on OAuthIdentity,
     // WebSession, and AgentSession — deleting the row tears those down with
@@ -101,6 +108,7 @@ export class PrismaAccountStore implements AccountStore {
     subscription_id: string | null;
     current_period_end: Date | null;
     cancel_at: Date | null;
+    telegram_chat_id: string | null;
   }): AccountRecord {
     return {
       id: row.id,
@@ -113,6 +121,7 @@ export class PrismaAccountStore implements AccountStore {
       subscription_id: row.subscription_id,
       current_period_end: row.current_period_end,
       cancel_at: row.cancel_at,
+      telegram_chat_id: row.telegram_chat_id,
     };
   }
 }
