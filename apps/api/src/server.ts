@@ -21,6 +21,7 @@ import { registerAuthRoute } from "./routes/auth.js";
 import { registerOAuthRoute } from "./routes/oauth.js";
 import { registerVaultRoute } from "./routes/vault.js";
 import { registerVaultE2ERoute } from "./routes/vault-e2e.js";
+import { registerPayApprovalsRoute } from "./routes/pay-approvals.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
 import { registerEgressRoutes } from "./routes/egress.js";
 import type { EgressGrantStore } from "./services/egress-grant.js";
@@ -272,6 +273,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     ...(opts.emailForwarder !== undefined ? { emailForwarder: opts.emailForwarder } : {}),
   });
   await fastify.register(registerVaultE2ERoute, {
+    deps,
+    requireWeb: auth.requireWeb,
+    requireAgent: auth.requireAgent,
+    requireAny: auth.requireAny,
+  });
+  await fastify.register(registerPayApprovalsRoute, {
     deps,
     requireWeb: auth.requireWeb,
     requireAgent: auth.requireAgent,

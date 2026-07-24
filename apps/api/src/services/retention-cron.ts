@@ -5,6 +5,7 @@
 //     - Delete PairingToken older than 1h
 //     - Delete VaultAuditEvent older than 365d
 //     - Delete PaymentAuditEvent older than 365d
+//     - Delete PendingPaymentApproval rows past expires_at
 //
 // Running this in-process is fine for v1: one machine, one schedule.
 // When we shard the API, move this to a separate worker or use
@@ -28,6 +29,7 @@ export interface RetentionCronStats {
   pairing_tokens_deleted: number;
   vault_audit_deleted: number;
   payment_audit_deleted: number;
+  payment_approvals_deleted: number;
   duration_ms: number;
   errors: string[];
 }
@@ -102,6 +104,7 @@ export class RetentionCron {
       pairing_tokens_deleted: 0,
       vault_audit_deleted: 0,
       payment_audit_deleted: 0,
+      payment_approvals_deleted: 0,
       duration_ms: 0,
       errors: [],
     };
@@ -144,6 +147,17 @@ export class RetentionCron {
       } catch (err) {
         stats.errors.push(
           `payment audit delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      try {
+        const r = await this.deps.authPrisma.pendingPaymentApproval.deleteMany({
+          where: { expires_at: { lt: startedAt } },
+        });
+        stats.payment_approvals_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(
+          `payment approval delete: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
