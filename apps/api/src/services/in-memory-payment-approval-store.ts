@@ -8,6 +8,9 @@ export interface PendingPaymentApprovalInput {
   nonce: string;
   cardRef: string;
   operatorPubkey: string;
+  item: string;
+  reason: string;
+  agent: string;
   expiresAt: Date;
 }
 

@@ -336,6 +336,9 @@ model PendingPaymentApproval {
   nonce           String
   card_ref        String
   operator_pubkey String
+  item            String   @default("")
+  reason          String   @default("")
+  agent           String   @default("")
   status          String
   jws             String?
   sealed_card     String?
