@@ -5233,7 +5233,7 @@ export class BrowserController {
       /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
-    while (Date.now() <= deadline) {
+    do {
       const texts = await Promise.all(
         this.page
           .frames()
@@ -5253,7 +5253,7 @@ export class BrowserController {
         return "succeeded";
       }
       await this.page.waitForTimeout(1_000).catch(() => undefined);
-    }
+    } while (Date.now() <= deadline);
     return "timeout";
   }
 

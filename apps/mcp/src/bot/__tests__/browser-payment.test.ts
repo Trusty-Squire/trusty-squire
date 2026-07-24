@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { chromium, type Page } from "playwright";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BrowserController, parseCheckoutAmount } from "../browser.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
@@ -132,8 +132,13 @@ describe("3-D Secure resolution", () => {
       startUrl: "https://merchant.test/checkout",
       text: "Your payment was successful",
     });
+    const now = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(1);
 
-    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
+    try {
+      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
+    } finally {
+      now.mockRestore();
+    }
   });
 
   it("accepts a transitioned terminal success URL", async () => {
