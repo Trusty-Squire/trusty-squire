@@ -17,9 +17,10 @@ export function getVouchflow() {
 
   client = Vouchflow.configure({
     apiKey,
-    // NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT is "sandbox" | "live".
+    // NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT is "sandbox" | "production" (the SDK's
+    // Environment values). Anything other than "production" stays on sandbox.
     environment:
-      process.env.NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT === "live"
+      process.env.NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT === "production"
         ? "production"
         : "sandbox",
     rpId: window.location.hostname,
