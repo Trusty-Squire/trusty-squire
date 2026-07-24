@@ -1,3 +1,9 @@
+// MUST stay wire-compatible with packages/vault/src/hpke.ts (the browser SEALs with
+// that module; this operator OPENs here). Same pinned suite + same enc‖ct bundle layout
+// (32-byte X25519 enc prefix). Deliberately a local copy, NOT an import of
+// @trusty-squire/vault/hpke: the mcp package is bundled + published to npm, and importing
+// the vault package would drag @prisma/client (its root export) into the tarball. If you
+// change the suite or bundle format in one file, change the other.
 import { Aes256Gcm, CipherSuite, DhkemX25519HkdfSha256, HkdfSha256 } from "@hpke/core";
 
 export interface OperatorKeypair {
