@@ -56,8 +56,13 @@ jobs:
 
       # Install only the web app's dep tree, not the whole monorepo — same
       # inode-quota reason as the api/registry/mcp release workflows.
-      - name: Install (web dep tree only)
-        run: pnpm install --frozen-lockfile --filter '@trusty-squire/web...'
+      - name: Install (web + vault dep trees)
+        run: pnpm install --frozen-lockfile --filter '@trusty-squire/web...' --filter '@trusty-squire/vault...'
+
+      # apps/web imports @trusty-squire/vault/e2e + /hpke — build vault's dist
+      # so the subpath types resolve before typecheck/build.
+      - name: Build vault dist
+        run: pnpm --filter '@trusty-squire/vault' build
 
       - name: Typecheck
         run: pnpm --filter '@trusty-squire/web' typecheck
