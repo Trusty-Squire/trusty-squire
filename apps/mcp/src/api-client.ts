@@ -152,6 +152,10 @@ export class ApiClient {
     return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}`);
   }
 
+  async getPaymentConfig(): Promise<{ vouchflow_audience?: string }> {
+    return this.get("/v1/pay/config");
+  }
+
   async listPaymentCards(): Promise<Array<{ id: string; label: string }>> {
     const records = await this.get<Array<{ id: string; label: string }>>("/v1/vault/e2e");
     return records.map(({ id, label }) => ({ id, label }));

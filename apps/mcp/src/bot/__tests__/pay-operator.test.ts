@@ -39,7 +39,11 @@ type Mode =
   | "wrong_audience"
   | "audit_failure";
 
-async function harness(mode: Mode, expectedAudience: string | null = "customer_test") {
+async function harness(
+  mode: Mode,
+  expectedAudience: string | null = "customer_test",
+  apiAudience?: string,
+) {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
   });
@@ -53,6 +57,11 @@ async function harness(mode: Mode, expectedAudience: string | null = "customer_t
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url === "https://vouchflow.test/.well-known/jwks.json") {
       return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
+    }
+    if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
+      return Response.json(
+        apiAudience === undefined ? {} : { vouchflow_audience: apiAudience },
+      );
     }
     if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
@@ -260,10 +269,18 @@ describe("operate_pay", () => {
     const { result, auditBodies, filledCards } = await harness("happy", null);
 
     expect(result).toMatchObject({
-      status: "payment_mandate_rejected",
+      status: "payment_configuration_error",
       reason: "vouchflow_expected_audience_unset",
+      configuration: "Set VOUCHFLOW_CUSTOMER_ID on the Trusty Squire API.",
     });
     expect(filledCards).toHaveLength(0);
     expect(auditBodies).toHaveLength(0);
+  });
+
+  it("uses the authenticated API audience when the environment override is absent", async () => {
+    const { result, filledCards } = await harness("happy", null, "customer_test");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
   });
 });

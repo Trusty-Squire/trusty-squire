@@ -29,6 +29,16 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
   requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
 }> = async (fastify, opts) => {
+  fastify.get("/v1/pay/config", { preHandler: opts.requireAgent }, async (req, reply) => {
+    if (req.auth!.kind !== "agent") return;
+    const audience = process.env.VOUCHFLOW_CUSTOMER_ID?.trim();
+    return reply.code(200).send({
+      ...(audience !== undefined && audience.length > 0
+        ? { vouchflow_audience: audience }
+        : {}),
+    });
+  });
+
   fastify.post("/v1/pay/approvals", { preHandler: opts.requireAgent }, async (req, reply) => {
     const auth = req.auth!;
     if (auth.kind !== "agent") return;

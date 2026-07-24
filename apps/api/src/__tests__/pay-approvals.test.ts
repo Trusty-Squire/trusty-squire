@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { issueAgentSession } from "../auth/agent.js";
 import { issueSession, SESSION_COOKIE_NAME, signSessionJwt } from "../auth/session.js";
@@ -54,6 +54,7 @@ describe("payment approval relay", () => {
   });
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await server.close();
   });
 
@@ -100,6 +101,30 @@ describe("payment approval relay", () => {
       sealed_card: null,
       expires_at: created.expires_at,
     });
+  });
+
+  it("returns the configured Vouchflow audience to an authenticated operator", async () => {
+    vi.stubEnv("VOUCHFLOW_CUSTOMER_ID", "customer_test");
+    const response = await server.inject({
+      method: "GET",
+      url: "/v1/pay/config",
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ vouchflow_audience: "customer_test" });
+  });
+
+  it("omits the Vouchflow audience when the server is not configured", async () => {
+    vi.stubEnv("VOUCHFLOW_CUSTOMER_ID", "");
+    const response = await server.inject({
+      method: "GET",
+      url: "/v1/pay/config",
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({});
   });
 
   it("approves once and stores the opaque payloads verbatim", async () => {

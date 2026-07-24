@@ -105,12 +105,9 @@ async function verifyMandate(
   jws: string,
   expectedHash: Uint8Array,
   vouchflowApiBase: string,
-  expectedAudience: string | undefined,
+  expectedAudience: string,
   fetchImpl: typeof fetch,
 ): Promise<JWTPayload> {
-  if (expectedAudience === undefined || expectedAudience.length === 0) {
-    throw new Error("vouchflow_expected_audience_unset");
-  }
   const jwksUrl = `${vouchflowApiBase.replace(/\/+$/, "")}/.well-known/jwks.json`;
   const signal = AbortSignal.timeout(5_000);
   let response: Response;
@@ -196,6 +193,19 @@ export async function executeOperatePay(
   let card: CheckoutCard | undefined;
 
   try {
+    const apiAudience =
+      deps.vouchflowExpectedAudience === undefined
+        ? (await api.getPaymentConfig()).vouchflow_audience?.trim()
+        : undefined;
+    const expectedAudience = deps.vouchflowExpectedAudience ?? apiAudience;
+    if (expectedAudience === undefined || expectedAudience.length === 0) {
+      return {
+        status: "payment_configuration_error",
+        reason: "vouchflow_expected_audience_unset",
+        configuration: "Set VOUCHFLOW_CUSTOMER_ID on the Trusty Squire API.",
+      };
+    }
+
     let checkout: CheckoutSummary;
     try {
       checkout = await browser.readCheckoutSummary(args.currency);
@@ -295,7 +305,7 @@ export async function executeOperatePay(
         approved.jws,
         aad,
         deps.vouchflowApiBase,
-        deps.vouchflowExpectedAudience,
+        expectedAudience,
         deps.fetch,
       );
     } catch (error) {
