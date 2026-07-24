@@ -388,7 +388,7 @@ export async function executeOperatePay(
     }
 
     if (submitResult.three_ds_required && threeDsWaitMs > 0) {
-      await api.notifyThreeDs(created.id).catch(() => undefined);
+      void api.notifyThreeDs(created.id).catch(() => undefined);
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
       if (resolution === "succeeded") paymentStatus = "payment_submitted";
       if (resolution === "failed") paymentStatus = "payment_declined";

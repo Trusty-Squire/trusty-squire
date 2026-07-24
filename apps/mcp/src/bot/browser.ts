@@ -5225,8 +5225,10 @@ export class BrowserController {
 
   async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
     if (!this.page) throw new Error("Browser not started");
+    const startUrl = this.page.url();
     const deadline = Date.now() + timeoutMs;
-    const successUrl = /success|complete|receipt|thank|paid|confirm/i;
+    const successUrl =
+      /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|\/paid\b|payment_intent=.*succe/i;
     const successText =
       /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
     const failureText =
@@ -5242,9 +5244,11 @@ export class BrowserController {
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
       const challenge = await this.detectThreeDsChallenge();
+      const currentUrl = this.page.url();
       if (
         !challenge.three_ds_required &&
-        (successUrl.test(this.page.url()) || texts.some((text) => successText.test(text)))
+        (texts.some((text) => successText.test(text)) ||
+          (currentUrl !== startUrl && successUrl.test(currentUrl)))
       ) {
         return "succeeded";
       }

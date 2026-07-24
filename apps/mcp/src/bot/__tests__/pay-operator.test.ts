@@ -47,6 +47,7 @@ async function harness(
   threeDs?: {
     resolution: "succeeded" | "failed" | "timeout";
     waitSeconds?: number;
+    notifyNeverResolves?: boolean;
   },
 ) {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
@@ -138,6 +139,9 @@ async function harness(
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/notify-3ds") && init?.method === "POST") {
       notifyCalls.push(url);
+      if (threeDs?.notifyNeverResolves === true) {
+        return new Promise<Response>(() => undefined);
+      }
       return Response.json({ sent: true });
     }
     if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
@@ -328,6 +332,19 @@ describe("operate_pay", () => {
     expect(notifyCalls).toHaveLength(1);
     expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_submitted" })]);
+  });
+
+  it("does not wait for notification delivery before resolving 3DS", async () => {
+    const { result, notifyCalls, browser } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "succeeded", notifyNeverResolves: true },
+    );
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(notifyCalls).toHaveLength(1);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
   });
 
   it("notifies and hands back when the 3DS challenge times out", async () => {

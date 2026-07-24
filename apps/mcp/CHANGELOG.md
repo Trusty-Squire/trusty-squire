@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.3 (2026-07-24)
+
+- **3-D Secure challenges now wait for the user before handing back.**
+  `operate_pay` sends a Telegram nudge and waits for the challenge to resolve
+  to submitted or declined, falling back to the existing `needs_user` handback
+  on timeout. The new `three_ds_wait_seconds` argument defaults to 180 seconds;
+  set it to `0` to skip notification and waiting.
+
 ## 1.1.2 (2026-07-24)
 
 - **Payment approval now needs one passkey tap.** `@vouchflow/web` 0.3.1 signs

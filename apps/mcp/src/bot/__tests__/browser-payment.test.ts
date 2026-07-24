@@ -90,3 +90,65 @@ describe("checkout payment parsing", () => {
     }
   });
 });
+
+function controllerWithResolutionPage(options: {
+  startUrl: string;
+  nextUrl?: string;
+  text?: string;
+}): BrowserController {
+  let currentUrl = options.startUrl;
+  const frame = {
+    url: () => "https://issuer.synthetic.test/",
+    evaluate: async (fn: () => unknown) => {
+      if (String(fn).includes("querySelector")) return false;
+      if (options.nextUrl !== undefined) currentUrl = options.nextUrl;
+      return options.text ?? "";
+    },
+  };
+  const page = {
+    url: () => currentUrl,
+    frames: () => [frame],
+    waitForTimeout: async () => undefined,
+  };
+  const controller = new BrowserController({ humanize: false });
+  (controller as unknown as { page: Page }).page = page as unknown as Page;
+  return controller;
+}
+
+describe("3-D Secure resolution", () => {
+  it("does not treat an unchanged checkout confirmation URL as success", async () => {
+    const controller = controllerWithResolutionPage({
+      startUrl: "https://merchant.test/checkout/confirm?success_url=/done",
+    });
+
+    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("timeout");
+  });
+
+  it("accepts explicit success text without a URL transition", async () => {
+    const controller = controllerWithResolutionPage({
+      startUrl: "https://merchant.test/checkout",
+      text: "Your payment was successful",
+    });
+
+    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
+  });
+
+  it("accepts a transitioned terminal success URL", async () => {
+    const controller = controllerWithResolutionPage({
+      startUrl: "https://merchant.test/checkout",
+      nextUrl: "https://merchant.test/receipt/123",
+    });
+
+    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
+  });
+
+  it("prioritizes failure text over success signals", async () => {
+    const controller = controllerWithResolutionPage({
+      startUrl: "https://merchant.test/checkout",
+      nextUrl: "https://merchant.test/success",
+      text: "Payment declined. Your payment was successful",
+    });
+
+    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
+  });
+});
