@@ -289,6 +289,59 @@ describe("payment approval relay", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it("notifies Telegram when 3-D Secure is required", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+    const created = await createApproval();
+    fetchMock.mockClear();
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/notify-3ds`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ sent: true });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.text).toContain("Synthetic Books");
+    expect(body.text).toContain("USD 25.99");
+  });
+
+  it("does not notify Telegram about 3-D Secure without a linked chat", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const created = await createApproval();
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/notify-3ds`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ sent: false });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns not found when notifying for another account's approval", async () => {
+    const created = await createApproval();
+    const response = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/notify-3ds`,
+      headers: { authorization: `Bearer ${otherAgentToken}` },
+    });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "not_found" });
+  });
+
   it("denies cross-account reads and approvals", async () => {
     const created = await createApproval();
     const get = await server.inject({
