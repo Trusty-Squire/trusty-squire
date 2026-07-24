@@ -232,8 +232,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/vault
       '@vouchflow/web':
-        specifier: 0.3.0
-        version: 0.3.0(react@19.2.4)
+        specifier: 0.3.1
+        version: 0.3.1(react@19.2.4)
       next:
         specifier: 16.2.6
         version: 16.2.6(@babel/core@7.29.0)(react-dom@19.2.4)(react@19.2.4)
@@ -2586,8 +2586,8 @@ packages:
       tinyrainbow: 1.2.0
     dev: true
 
-  /@vouchflow/web@0.3.0(react@19.2.4):
-    resolution: {integrity: sha512-E0KRmtmjR2X32Ad4KqzNIfzhOENemi1Lx2Z5wdrtNE/rD8NoczcBek8LH+66l9mlBnQZv0o0jHX2zDNuy+bSHQ==}
+  /@vouchflow/web@0.3.1(react@19.2.4):
+    resolution: {integrity: sha512-iBuaqQqkkQqK/8rmf46Qn462c0RLrlIDfhM4uQlSgm+0HqlEgMYifwMsLIeaiH0rvSAJB6dBKfhTRQwb3ylhbg==}
     engines: {node: '>=18'}
     peerDependencies:
       react: '>=18'

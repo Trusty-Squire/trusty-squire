@@ -37,7 +37,8 @@ type Mode =
   | "wrong_recipient"
   | "wrong_issuer"
   | "wrong_audience"
-  | "audit_failure";
+  | "audit_failure"
+  | "low_confidence";
 
 async function harness(
   mode: Mode,
@@ -52,6 +53,7 @@ async function harness(
   const approvalBodies: Array<Record<string, unknown>> = [];
   const filledCards: CheckoutCard[] = [];
   const nonce = "synthetic-nonce";
+  const agent = "synthetic-payment-test-agent";
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -68,6 +70,7 @@ async function harness(
         {
           id: "approval_test",
           nonce,
+          agent,
           expires_at: new Date(Date.now() + 60_000).toISOString(),
         },
         { status: 201 },
@@ -89,13 +92,16 @@ async function harness(
         nonce,
         card_ref: "card_test",
         recipient_pubkey_hash: recipientHash,
+        item: approval.item,
+        reason: approval.reason,
+        agent,
       };
       const canonical = canonicalize(payload)!;
       const aad = createHash("sha256").update(canonical, "utf8").digest();
       const assertion = await new SignJWT({
         payload_sha256: aad.toString("base64url"),
         context: "purchase",
-        confidence: "high",
+        confidence: mode === "low_confidence" ? "low" : "high",
         mandate_id: "mandate_test",
       })
         .setProtectedHeader({ alg: "RS256", kid: "test-key" })
@@ -155,6 +161,8 @@ async function harness(
       merchant: "Agent Supplied Merchant",
       amount_cents: 1,
       currency: "EUR",
+      item: "Wireless Mouse",
+      reason: "office restock",
     },
     api,
     browser,
@@ -184,7 +192,10 @@ describe("operate_pay", () => {
     expect(approvalBodies[0]).toMatchObject({
       ...CHECKOUT,
       card_ref: "card_test",
+      item: "Wireless Mouse",
+      reason: "office restock",
     });
+    expect(approvalBodies[0]).not.toHaveProperty("agent");
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
     expect(auditBodies).toEqual([
       {
@@ -277,6 +288,13 @@ describe("operate_pay", () => {
 
   it("uses the authenticated API audience when the environment override is absent", async () => {
     const { result, filledCards } = await harness("happy", null, "customer_test");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+  });
+
+  it("accepts a low-confidence mandate (web passkeys are capped low)", async () => {
+    const { result, filledCards } = await harness("low_confidence");
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(filledCards).toEqual([SYNTHETIC_CARD]);

@@ -11,6 +11,8 @@ export interface OperatePayArgs {
   amount_cents?: number;
   currency?: string;
   card_ref: string;
+  item?: string;
+  reason?: string;
 }
 
 export interface PaymentBrowser {
@@ -97,12 +99,14 @@ function normalizeCard(value: unknown): CheckoutCard {
   };
 }
 
-// Payment mandates require at least MEDIUM confidence. High demands a
-// biometric/hardware-attested passkey; medium admits numeric/PIN passkeys, which
-// is the realistic floor for many devices. Must match the phone's signPayload
-// minConfidence (apps/web/app/vault/pay/[id]/page.tsx).
-function confidenceAtLeastMedium(value: unknown): boolean {
-  return value === "medium" || value === "high" || value === "very_high";
+// Web passkeys are inherently rated "low" in Vouchflow (platform:"web" is
+// capped low regardless of biometric), so a web-based approval can never
+// reach medium. The mandate's assurance therefore rests on user-presence +
+// single-use nonce + amount/recipient/origin/item binding, not the confidence
+// tier — so the floor accepts any of the three tiers. Must match the phone's
+// signPayload minConfidence (apps/web/app/vault/pay/[id]/page.tsx).
+function confidenceAtLeastLow(value: unknown): boolean {
+  return value === "low" || value === "medium" || value === "high";
 }
 
 async function verifyMandate(
@@ -143,7 +147,7 @@ async function verifyMandate(
     throw new Error("payload_hash_mismatch");
   }
   if (payload.context !== "purchase") throw new Error("invalid_mandate_context");
-  if (!confidenceAtLeastMedium(payload.confidence)) {
+  if (!confidenceAtLeastLow(payload.confidence)) {
     throw new Error("insufficient_mandate_confidence");
   }
   return payload;
@@ -230,10 +234,15 @@ export async function executeOperatePay(
       };
     }
 
+    const item = args.item ?? "";
+    const reason = args.reason ?? "";
+
     const created = await api.createPaymentApproval({
       ...checkout,
       card_ref: args.card_ref,
       operator_pubkey: keypair.publicKey,
+      item,
+      reason,
     });
     const approvalUrl = `${deps.webBase.replace(/\/+$/, "")}/vault/pay/${encodeURIComponent(created.id)}`;
     await deps.surfaceApprovalUrl(approvalUrl);
@@ -293,6 +302,9 @@ export async function executeOperatePay(
       nonce: created.nonce,
       card_ref: args.card_ref,
       recipient_pubkey_hash: toBase64Url(recipientHash),
+      item,
+      reason,
+      agent: created.agent,
     });
     if (canonical === undefined) {
       return {

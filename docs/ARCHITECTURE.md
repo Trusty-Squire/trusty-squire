@@ -155,8 +155,9 @@ and transferred secrets are not returned to the agent.
 
 ```text
 agent starts operate_pay in the active checkout
-  -> operator reads merchant, origin, and total
-  -> API creates a short-lived approval relay with an ephemeral operator key
+  -> operator reads merchant, origin, and total and adds optional item/reason
+  -> operator creates an ephemeral key; API creates a short-lived approval relay
+     and attaches the server-derived requesting-agent label
   -> user reviews and approves the purchase on a paired phone
   -> phone decrypts the selected card and seals it to that operator key
   -> operator verifies the signed mandate, opens the card, and fills checkout

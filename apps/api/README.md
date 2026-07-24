@@ -39,6 +39,12 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/pay/approvals/:id/approve` | web | Relay a signed mandate and HPKE-sealed card to the operator |
 | `GET` | `/health` | none | Liveness |
 
+Payment approval creation accepts optional `item` and `reason` strings, storing
+an empty string when either is omitted. The API derives `agent` from the
+authenticated install identity and falls back to `unknown-agent`; clients
+cannot set it. The create response returns `agent`, and polling returns all
+three values for the approval page and signed mandate.
+
 ## Auth model
 
 Two paths:

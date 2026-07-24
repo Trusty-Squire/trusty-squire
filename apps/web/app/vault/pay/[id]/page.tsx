@@ -6,7 +6,6 @@ import { decryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { sealToRecipient } from "@trusty-squire/vault/hpke";
 import { AppShell } from "../../../components/AppShell";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
-import { evaluatePrf } from "../../../lib/passkey";
 import { getVouchflow } from "../../../lib/vouchflow";
 
 interface Approval {
@@ -19,6 +18,9 @@ interface Approval {
   card_ref: string;
   operator_pubkey: string;
   expires_at: string;
+  item: string;
+  reason: string;
+  agent: string;
 }
 
 interface StoredCard extends E2EBlob {
@@ -114,20 +116,27 @@ export default function PaymentApprovalPage() {
         nonce: approval.nonce,
         card_ref: approval.card_ref,
         recipient_pubkey_hash: toBase64Url(new Uint8Array(publicKeyHash)),
+        item: approval.item,
+        reason: approval.reason,
+        agent: approval.agent,
       };
-      const sign = await getVouchflow().signPayload({
-        context: "purchase",
-        payload,
-        minConfidence: "medium",
-      });
-      const aad = new Uint8Array(
-        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sign.payload)),
-      );
       const { blob } = await apiGet<{ blob: string }>(
         `/v1/vault/e2e/${encodeURIComponent(approval.card_ref)}`,
       );
       const storedCard = JSON.parse(blob) as StoredCard;
-      key = await evaluatePrf(fromBase64(storedCard.prf_salt));
+      const sign = await getVouchflow().signPayload({
+        context: "purchase",
+        payload,
+        minConfidence: "low",
+        prfSalt: fromBase64(storedCard.prf_salt),
+      });
+      key = sign.prfResult;
+      if (key === undefined) {
+        throw new Error("Passkey did not return a PRF result");
+      }
+      const aad = new Uint8Array(
+        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sign.payload)),
+      );
       card = await decryptCard(key, storedCard);
       cardBytes = new TextEncoder().encode(JSON.stringify(card));
       const sealedCard = await sealToRecipient(approval.operator_pubkey, cardBytes, aad);
@@ -186,8 +195,33 @@ export default function PaymentApprovalPage() {
             {formatAmount(approval.amount_cents, approval.currency)}
           </p>
           <p className="app-sub" style={{ marginTop: "12px" }}>
-            Paying at <span className="mono">{approval.checkout_origin}</span>
+            Paying at{" "}
+            <span className="mono" style={{ overflowWrap: "anywhere" }}>
+              {approval.checkout_origin}
+            </span>
           </p>
+          <dl className="app-sub" style={{ margin: "16px 0 0" }}>
+            {[
+              ["Item", approval.item || "—"],
+              ["Requested by", approval.agent],
+              ["Reason", approval.reason || "—"],
+            ].map(([label, value]) => (
+              <div
+                key={label}
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "max-content minmax(0, 1fr)",
+                  gap: "8px",
+                  marginTop: "8px",
+                }}
+              >
+                <dt>{label}</dt>
+                <dd className="mono" style={{ margin: 0, overflowWrap: "anywhere" }}>
+                  {value}
+                </dd>
+              </div>
+            ))}
+          </dl>
           <button
             className="btn-primary"
             type="button"

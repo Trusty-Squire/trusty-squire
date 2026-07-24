@@ -150,6 +150,9 @@ interface PendingPaymentApprovalRow {
   nonce: string;
   card_ref: string;
   operator_pubkey: string;
+  item: string;
+  reason: string;
+  agent: string;
   status: string;
   jws: string | null;
   sealed_card: string | null;

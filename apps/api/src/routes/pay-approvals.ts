@@ -29,6 +29,8 @@ const createBody = z.object({
   currency: z.string().min(1).max(8),
   card_ref: z.string().min(1).max(64),
   operator_pubkey: z.string().min(1).max(512),
+  item: z.string().max(500).optional(),
+  reason: z.string().max(500).optional(),
 });
 
 const approveBody = z.object({
@@ -62,6 +64,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     const now = opts.deps.now?.() ?? new Date();
     const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
     const nonce = randomBytes(16).toString("base64url");
+    const agent = auth.agent_identity ?? "unknown-agent";
     const id = await opts.deps.pendingPaymentApprovalStore.create(auth.account_id, {
       merchant: parsed.data.merchant,
       checkoutOrigin: parsed.data.checkout_origin,
@@ -70,6 +73,9 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       nonce,
       cardRef: parsed.data.card_ref,
       operatorPubkey: parsed.data.operator_pubkey,
+      item: parsed.data.item ?? "",
+      reason: parsed.data.reason ?? "",
+      agent,
       expiresAt,
     });
 
@@ -84,7 +90,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       void sendTelegramMessage(account.telegram_chat_id, text).catch(() => {});
     }
 
-    return reply.code(201).send({ id, nonce, expires_at: expiresAt.toISOString() });
+    return reply.code(201).send({ id, nonce, agent, expires_at: expiresAt.toISOString() });
   });
 
   fastify.get<{ Params: { id: string } }>(
@@ -112,6 +118,9 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         nonce: record.nonce,
         card_ref: record.cardRef,
         operator_pubkey: record.operatorPubkey,
+        item: record.item,
+        reason: record.reason,
+        agent: record.agent,
         jws: record.jws,
         sealed_card: record.sealedCard,
         expires_at: record.expiresAt.toISOString(),
