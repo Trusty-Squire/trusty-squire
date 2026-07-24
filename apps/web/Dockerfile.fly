@@ -2,8 +2,9 @@
 # surface (login, /pair, /vault, /agents).
 #
 # Built from the monorepo root: the build context must be the repo
-# root so pnpm can resolve the workspace. apps/web has no workspace
-# dependencies, so only its own packages are pulled.
+# root so pnpm can resolve the workspace. apps/web imports the
+# @trusty-squire/vault subpath exports (/e2e, /hpke) for E2E card
+# encryption, so vault's dist must be built before the web build.
 #
 #   flyctl deploy --config apps/web/fly.toml --dockerfile apps/web/Dockerfile.fly
 #   (run from the repo root)
@@ -16,6 +17,8 @@ WORKDIR /app
 FROM base AS build
 COPY . .
 RUN pnpm install --frozen-lockfile
+# Build vault's dist so the web build can resolve @trusty-squire/vault/e2e + /hpke.
+RUN pnpm --filter @trusty-squire/vault build
 RUN pnpm --filter @trusty-squire/web build
 
 # Next standalone output. With outputFileTracingRoot at the repo root,
