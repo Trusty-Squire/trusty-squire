@@ -93,6 +93,37 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     return reply.code(201).send({ id, nonce, agent, expires_at: expiresAt.toISOString() });
   });
 
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/pay/approvals/:id/notify-3ds",
+    { preHandler: opts.requireAgent },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "agent") return;
+      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (record === null) {
+        reply.code(404).send({ error: "not_found" });
+        return;
+      }
+      const account = await opts.deps.accountStore.findAccountById(auth.account_id);
+      let sent = false;
+      if (account?.telegram_chat_id != null) {
+        const text =
+          "🔐 3-D Secure required — complete the challenge in the open checkout browser to finish your " +
+          record.currency +
+          " " +
+          (record.amountCents / 100).toFixed(2) +
+          " payment to " +
+          record.merchant +
+          ".";
+        sent = await sendTelegramMessage(account.telegram_chat_id, text);
+      }
+      return reply.code(200).send({ sent });
+    },
+  );
+
   fastify.get<{ Params: { id: string } }>(
     "/v1/pay/approvals/:id",
     { preHandler: opts.requireAny },

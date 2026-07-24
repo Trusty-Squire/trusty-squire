@@ -13,11 +13,13 @@ export interface OperatePayArgs {
   card_ref: string;
   item?: string;
   reason?: string;
+  three_ds_wait_seconds?: number;
 }
 
 export interface PaymentBrowser {
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
+  waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout">;
   currentUrl(): string;
 }
 
@@ -196,6 +198,7 @@ export async function executeOperatePay(
   overrides: Partial<PayDependencies> = {},
 ): Promise<Record<string, unknown>> {
   const deps = { ...defaultDependencies(), ...overrides };
+  const threeDsWaitMs = Math.min(Math.max(args.three_ds_wait_seconds ?? 180, 0), 600) * 1000;
   let keypair = await generateOperatorKeypair();
   let cardBytes: Uint8Array | undefined;
   let card: CheckoutCard | undefined;
@@ -384,6 +387,13 @@ export async function executeOperatePay(
       card = undefined;
     }
 
+    if (submitResult.three_ds_required && threeDsWaitMs > 0) {
+      void api.notifyThreeDs(created.id).catch(() => undefined);
+      const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
+      if (resolution === "succeeded") paymentStatus = "payment_submitted";
+      if (resolution === "failed") paymentStatus = "payment_declined";
+    }
+
     let auditRecorded = true;
     try {
       await api.auditPayment({
@@ -410,6 +420,13 @@ export async function executeOperatePay(
           resume: "checkout",
           ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
         },
+      };
+    }
+    if (paymentStatus === "payment_declined") {
+      return {
+        status: paymentStatus,
+        audit_recorded: auditRecorded,
+        approval_url: approvalUrl,
       };
     }
     return {

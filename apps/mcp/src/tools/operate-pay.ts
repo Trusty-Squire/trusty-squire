@@ -15,6 +15,15 @@ const inputSchema = z
     card_label: z.string().min(1).max(256).optional(),
     item: z.string().max(500).optional(),
     reason: z.string().max(500).optional(),
+    three_ds_wait_seconds: z
+      .number()
+      .int()
+      .min(0)
+      .max(600)
+      .optional()
+      .describe(
+        "How long to wait for the user to complete a 3-D Secure challenge before handing back (default 180s, 0 = don't wait).",
+      ),
   })
   .refine((value) => (value.card_ref === undefined) !== (value.card_label === undefined), {
     message: "Provide exactly one of card_ref or card_label",
@@ -40,7 +49,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "merchant and total when present, creates a phone approval link, waits for approval, " +
     "verifies the passkey-signed purchase mandate, opens the card only in this process, " +
     "fills common checkout fields, submits, and audits only the last four digits. Never " +
-    "solves 3-D Secure; returns a needs_user handoff when issuer authentication appears.",
+    "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -53,6 +62,13 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       card_label: { type: "string" },
       item: { type: "string" },
       reason: { type: "string" },
+      three_ds_wait_seconds: {
+        type: "integer",
+        minimum: 0,
+        maximum: 600,
+        description:
+          "How long to wait for the user to complete a 3-D Secure challenge before handing back (default 180s, 0 = don't wait).",
+      },
     },
   },
   annotations: {
@@ -85,6 +101,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         ...(args.currency !== undefined ? { currency: args.currency } : {}),
         ...(args.item !== undefined ? { item: args.item } : {}),
         ...(args.reason !== undefined ? { reason: args.reason } : {}),
+        ...(args.three_ds_wait_seconds !== undefined
+          ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
+          : {}),
       },
       api,
       activeProvisionBrowser(),

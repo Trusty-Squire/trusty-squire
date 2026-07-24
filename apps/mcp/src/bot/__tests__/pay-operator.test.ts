@@ -44,6 +44,11 @@ async function harness(
   mode: Mode,
   expectedAudience: string | null = "customer_test",
   apiAudience?: string,
+  threeDs?: {
+    resolution: "succeeded" | "failed" | "timeout";
+    waitSeconds?: number;
+    notifyNeverResolves?: boolean;
+  },
 ) {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
@@ -52,6 +57,7 @@ async function harness(
   const auditBodies: unknown[] = [];
   const approvalBodies: Array<Record<string, unknown>> = [];
   const filledCards: CheckoutCard[] = [];
+  const notifyCalls: string[] = [];
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
 
@@ -131,6 +137,13 @@ async function harness(
         expires_at: new Date(Date.now() + 60_000).toISOString(),
       });
     }
+    if (url.endsWith("/v1/pay/approvals/approval_test/notify-3ds") && init?.method === "POST") {
+      notifyCalls.push(url);
+      if (threeDs?.notifyNeverResolves === true) {
+        return new Promise<Response>(() => undefined);
+      }
+      return Response.json({ sent: true });
+    }
     if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
       auditBodies.push(JSON.parse(String(init.body)) as unknown);
       if (mode === "audit_failure") {
@@ -146,8 +159,14 @@ async function harness(
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
-      return { three_ds_required: false };
+      return threeDs === undefined
+        ? { three_ds_required: false }
+        : {
+            three_ds_required: true,
+            challenge_url: "https://issuer.synthetic.test/challenge",
+          };
     }),
+    waitForThreeDsResolution: vi.fn().mockResolvedValue(threeDs?.resolution ?? "timeout"),
   };
   const api = new ApiClient({
     apiBaseUrl: "https://api.test",
@@ -163,6 +182,7 @@ async function harness(
       currency: "EUR",
       item: "Wireless Mouse",
       reason: "office restock",
+      ...(threeDs?.waitSeconds !== undefined ? { three_ds_wait_seconds: threeDs.waitSeconds } : {}),
     },
     api,
     browser,
@@ -176,7 +196,7 @@ async function harness(
     },
   );
 
-  return { result, approvalBodies, auditBodies, filledCards };
+  return { result, approvalBodies, auditBodies, filledCards, notifyCalls, browser };
 }
 
 describe("operate_pay", () => {
@@ -298,5 +318,70 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
+  });
+
+  it("notifies and records submitted when the 3DS challenge succeeds", async () => {
+    const { result, auditBodies, notifyCalls, browser } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "succeeded" },
+    );
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(notifyCalls).toHaveLength(1);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_submitted" })]);
+  });
+
+  it("does not wait for notification delivery before resolving 3DS", async () => {
+    const { result, notifyCalls, browser } = await harness("happy", "customer_test", undefined, {
+      resolution: "succeeded",
+      notifyNeverResolves: true,
+    });
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(notifyCalls).toHaveLength(1);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+  });
+
+  it("notifies and hands back when the 3DS challenge times out", async () => {
+    const { result, notifyCalls } = await harness("happy", "customer_test", undefined, {
+      resolution: "timeout",
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_required",
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("records declined when the 3DS challenge fails", async () => {
+    const { result, auditBodies, notifyCalls } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "failed" },
+    );
+
+    expect(result).toMatchObject({ status: "payment_declined" });
+    expect(result).not.toHaveProperty("merchant");
+    expect(notifyCalls).toHaveLength(1);
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
+  });
+
+  it("hands back immediately without notifying when the 3DS wait is disabled", async () => {
+    const { result, notifyCalls, browser } = await harness("happy", "customer_test", undefined, {
+      resolution: "timeout",
+      waitSeconds: 0,
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_required",
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(notifyCalls).toHaveLength(0);
+    expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
   });
 });

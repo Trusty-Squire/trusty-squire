@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { chromium, type Page } from "playwright";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BrowserController, parseCheckoutAmount } from "../browser.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
@@ -36,11 +36,13 @@ describe("checkout payment parsing", () => {
     });
   });
 
-  it.skipIf(!chromiumAvailable)("submits a visible button using its text when its value is empty", async () => {
-    const browser = await chromium.launch({ headless: true });
-    try {
-      const page = await browser.newPage();
-      await page.setContent(`
+  it.skipIf(!chromiumAvailable)(
+    "submits a visible button using its text when its value is empty",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
         <form id="checkout">
           <input autocomplete="cc-number">
           <input autocomplete="cc-exp">
@@ -60,33 +62,101 @@ describe("checkout payment parsing", () => {
           });
         </script>
       `);
-      const controller = new BrowserController({ humanize: false });
-      (controller as unknown as { page: Page }).page = page;
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
 
-      const result = await controller.fillAndSubmitCheckout({
-        pan: "4242424242424242",
-        exp_month: "12",
-        exp_year: "30",
-        cvv: "123",
-        name: "Synthetic Cardholder",
-        billing: {
-          line1: "123 Synthetic Street",
-          city: "Testville",
-          postal_code: "10001",
-          country: "US",
-        },
-      });
+        const result = await controller.fillAndSubmitCheckout({
+          pan: "4242424242424242",
+          exp_month: "12",
+          exp_year: "30",
+          cvv: "123",
+          name: "Synthetic Cardholder",
+          billing: {
+            line1: "123 Synthetic Street",
+            city: "Testville",
+            postal_code: "10001",
+            country: "US",
+          },
+        });
 
-      expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
-      expect(result.three_ds_required).toBe(true);
-      expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
-      expect(
-        await page
-          .locator("input")
-          .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
-      ).toEqual(["", "", "", ""]);
+        expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+        expect(result.three_ds_required).toBe(true);
+        expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
+        expect(
+          await page
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+        ).toEqual(["", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+});
+
+function controllerWithResolutionPage(options: {
+  startUrl: string;
+  nextUrl?: string;
+  text?: string;
+}): BrowserController {
+  let currentUrl = options.startUrl;
+  const frame = {
+    url: () => "https://issuer.synthetic.test/",
+    evaluate: async (fn: () => unknown) => {
+      if (String(fn).includes("querySelector")) return false;
+      if (options.nextUrl !== undefined) currentUrl = options.nextUrl;
+      return options.text ?? "";
+    },
+  };
+  const page = {
+    url: () => currentUrl,
+    frames: () => [frame],
+    waitForTimeout: async () => undefined,
+  };
+  const controller = new BrowserController({ humanize: false });
+  (controller as unknown as { page: Page }).page = page as unknown as Page;
+  return controller;
+}
+
+describe("3-D Secure resolution", () => {
+  it("does not treat an unchanged checkout confirmation URL as success", async () => {
+    const controller = controllerWithResolutionPage({
+      startUrl: "https://merchant.test/checkout/confirm?success_url=/done",
+    });
+
+    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("timeout");
+  });
+
+  it("accepts explicit success text without a URL transition", async () => {
+    const controller = controllerWithResolutionPage({
+      startUrl: "https://merchant.test/checkout",
+      text: "Your payment was successful",
+    });
+    const now = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(1);
+
+    try {
+      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
     } finally {
-      await browser.close();
+      now.mockRestore();
     }
+  });
+
+  it("accepts a transitioned terminal success URL", async () => {
+    const controller = controllerWithResolutionPage({
+      startUrl: "https://merchant.test/checkout",
+      nextUrl: "https://merchant.test/receipt/123",
+    });
+
+    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
+  });
+
+  it("prioritizes failure text over success signals", async () => {
+    const controller = controllerWithResolutionPage({
+      startUrl: "https://merchant.test/checkout",
+      nextUrl: "https://merchant.test/success",
+      text: "Payment declined. Your payment was successful",
+    });
+
+    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
   });
 });
