@@ -293,9 +293,9 @@ export interface ApiPrismaClient {
     create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
     findMany(args: {
       where: Record<string, unknown>;
-      select: { id: true; label: true; created_at: true };
-      orderBy: Record<string, unknown>;
-    }): Promise<Array<Pick<E2ECredentialRow, "id" | "label" | "created_at">>>;
+      select?: { id: true; label: true; created_at: true };
+      orderBy: Record<string, unknown> | Array<Record<string, unknown>>;
+    }): Promise<E2ECredentialRow[]>;
     findFirst(args: { where: Record<string, unknown> }): Promise<E2ECredentialRow | null>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
@@ -304,7 +304,7 @@ export interface ApiPrismaClient {
     findMany(args: {
       where: Record<string, unknown>;
       orderBy: Record<string, unknown> | Array<Record<string, unknown>>;
-      take: number;
+      take?: number;
     }): Promise<PaymentAuditEventRow[]>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };

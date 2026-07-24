@@ -43,6 +43,17 @@ interface Export {
   account_id: string;
   credentials: { service: string | null; deleted_at: string | null; field_names: string[] }[];
   audit_events: { type: string }[];
+  e2e_credentials: { id: string; label: string; blob: string; created_at: string }[];
+  payment_audit_events: {
+    id: string;
+    merchant: string;
+    amount_cents: number;
+    currency: string;
+    last4: string;
+    status: string;
+    mandate_id: string | null;
+    created_at: string;
+  }[];
 }
 
 describe("GDPR export + erasure", () => {
@@ -67,6 +78,54 @@ describe("GDPR export + erasure", () => {
     expect(data.credentials.some((c) => c.deleted_at !== null)).toBe(true);
     expect(data.audit_events.length).toBeGreaterThan(0);
     expect(JSON.stringify(data)).not.toContain("secret"); // no sk-*-secret values
+  });
+
+  it("export includes account-scoped E2E credentials and payment audit events", async () => {
+    const account = await h.deps.accountStore.createAccount("u@example.test", "U");
+    const other = await h.deps.accountStore.createAccount("other@example.test", "Other");
+    const cookie = await makeWebSession(h.deps, account.id);
+    const e2eId = await h.deps.e2eCredentialStore.create(account.id, "Primary card", "opaque-card-blob");
+    const paymentId = await h.deps.paymentAuditStore.create(account.id, {
+      merchant: "Example Store",
+      amountCents: 2599,
+      currency: "USD",
+      last4: "4242",
+      status: "approved",
+      mandateId: "mandate-1",
+    });
+    await h.deps.e2eCredentialStore.create(other.id, "Other card", "other-account-blob");
+    await h.deps.paymentAuditStore.create(other.id, {
+      merchant: "Other Store",
+      amountCents: 999,
+      currency: "USD",
+      last4: "1111",
+      status: "declined",
+    });
+
+    const res = await h.server.inject({ method: "GET", url: "/v1/vault/export", headers: { cookie } });
+
+    expect(res.statusCode).toBe(200);
+    const data = res.json() as Export;
+    expect(data.e2e_credentials).toEqual([
+      {
+        id: e2eId,
+        label: "Primary card",
+        blob: "opaque-card-blob",
+        created_at: expect.any(String),
+      },
+    ]);
+    expect(data.payment_audit_events).toEqual([
+      {
+        id: paymentId,
+        merchant: "Example Store",
+        amount_cents: 2599,
+        currency: "USD",
+        last4: "4242",
+        status: "approved",
+        mandate_id: "mandate-1",
+        created_at: expect.any(String),
+      },
+    ]);
   });
 
   it("deletion requires confirm, then purges data + removes the account + kills the session", async () => {

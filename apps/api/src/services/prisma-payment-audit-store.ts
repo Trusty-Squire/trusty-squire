@@ -59,4 +59,22 @@ export class PrismaPaymentAuditStore implements PaymentAuditStore {
       createdAt: row.created_at,
     }));
   }
+
+  async exportAll(accountId: string): Promise<PaymentAuditRecord[]> {
+    const rows = await this.prisma.paymentAuditEvent.findMany({
+      where: { account_id: accountId },
+      orderBy: [{ created_at: "desc" }, { id: "desc" }],
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      accountId: row.account_id,
+      merchant: row.merchant,
+      amountCents: row.amount_cents,
+      currency: row.currency,
+      last4: row.last4,
+      status: row.status,
+      mandateId: row.mandate_id,
+      createdAt: row.created_at,
+    }));
+  }
 }

@@ -29,6 +29,7 @@ export interface PaymentAuditListOptions {
 export interface PaymentAuditStore {
   create(accountId: string, input: PaymentAuditInput): Promise<string>;
   listByAccount(accountId: string, opts?: PaymentAuditListOptions): Promise<PaymentAuditRecord[]>;
+  exportAll(accountId: string): Promise<PaymentAuditRecord[]>;
 }
 
 export class InMemoryPaymentAuditStore implements PaymentAuditStore {
@@ -71,6 +72,17 @@ export class InMemoryPaymentAuditStore implements PaymentAuditStore {
         return a.id === b.id ? 0 : a.id < b.id ? 1 : -1;
       })
       .slice(0, take)
+      .map((record) => ({ ...record }));
+  }
+
+  async exportAll(accountId: string): Promise<PaymentAuditRecord[]> {
+    return this.records
+      .filter((record) => record.accountId === accountId)
+      .sort((a, b) => {
+        const createdAtOrder = b.createdAt.getTime() - a.createdAt.getTime();
+        if (createdAtOrder !== 0) return createdAtOrder;
+        return a.id === b.id ? 0 : a.id < b.id ? 1 : -1;
+      })
       .map((record) => ({ ...record }));
   }
 }
