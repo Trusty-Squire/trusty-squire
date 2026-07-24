@@ -98,9 +98,45 @@ describe("payment approval relay", () => {
       nonce: created.nonce,
       card_ref: "card_synthetic_1",
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+      item: "",
+      reason: "",
+      agent: "",
       jws: null,
       sealed_card: null,
       expires_at: created.expires_at,
+    });
+  });
+
+  it("stores and returns item/reason/agent when provided", async () => {
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {
+        merchant: "Synthetic Books",
+        checkout_origin: "https://checkout.synthetic.test",
+        amount_cents: 2599,
+        currency: "USD",
+        card_ref: "card_synthetic_1",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: "Synthetic Widget",
+        reason: "Restocking synthetic inventory",
+        agent: "synthetic-shopping-agent",
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    const created = response.json() as { id: string };
+
+    const get = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(get.statusCode).toBe(200);
+    expect(get.json()).toMatchObject({
+      item: "Synthetic Widget",
+      reason: "Restocking synthetic inventory",
+      agent: "synthetic-shopping-agent",
     });
   });
 

@@ -29,6 +29,9 @@ const createBody = z.object({
   currency: z.string().min(1).max(8),
   card_ref: z.string().min(1).max(64),
   operator_pubkey: z.string().min(1).max(512),
+  item: z.string().max(500).optional(),
+  reason: z.string().max(500).optional(),
+  agent: z.string().max(128).optional(),
 });
 
 const approveBody = z.object({
@@ -70,6 +73,9 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       nonce,
       cardRef: parsed.data.card_ref,
       operatorPubkey: parsed.data.operator_pubkey,
+      item: parsed.data.item ?? "",
+      reason: parsed.data.reason ?? "",
+      agent: parsed.data.agent ?? "",
       expiresAt,
     });
 
@@ -112,6 +118,9 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         nonce: record.nonce,
         card_ref: record.cardRef,
         operator_pubkey: record.operatorPubkey,
+        item: record.item,
+        reason: record.reason,
+        agent: record.agent,
         jws: record.jws,
         sealed_card: record.sealedCard,
         expires_at: record.expiresAt.toISOString(),
