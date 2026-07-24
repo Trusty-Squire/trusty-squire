@@ -171,6 +171,7 @@ model Account {
   agent_sessions       AgentSession[]
   e2e_credentials      E2ECredential[]
   payment_audit_events PaymentAuditEvent[]
+  payment_approvals    PendingPaymentApproval[]
 
   @@index([stripe_customer_id])
 }
@@ -317,6 +318,28 @@ model PaymentAuditEvent {
   account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
 
   @@index([account_id])
+}
+
+// Ephemeral relay for opaque payment approval payloads.
+model PendingPaymentApproval {
+  id              String   @id @db.VarChar(26)
+  account_id      String   @db.VarChar(26)
+  merchant        String
+  amount_cents    Int
+  currency        String
+  nonce           String
+  card_ref        String
+  operator_pubkey String
+  status          String
+  jws             String?
+  sealed_card     String?
+  created_at      DateTime @default(now())
+  expires_at      DateTime
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id])
+  @@map("pending_payment_approvals")
 }
 
 // Egress grant — a standing, revocable token a deployed workload holds to

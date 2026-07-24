@@ -132,6 +132,22 @@ interface PaymentAuditEventRow {
   created_at: Date;
 }
 
+interface PendingPaymentApprovalRow {
+  id: string;
+  account_id: string;
+  merchant: string;
+  amount_cents: number;
+  currency: string;
+  nonce: string;
+  card_ref: string;
+  operator_pubkey: string;
+  status: string;
+  jws: string | null;
+  sealed_card: string | null;
+  created_at: Date;
+  expires_at: Date;
+}
+
 interface EgressGrantRow {
   id: string;
   account_id: string;
@@ -306,6 +322,15 @@ export interface ApiPrismaClient {
       orderBy: Record<string, unknown> | Array<Record<string, unknown>>;
       take?: number;
     }): Promise<PaymentAuditEventRow[]>;
+    deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
+  };
+  pendingPaymentApproval: {
+    create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
+    findFirst(args: { where: Record<string, unknown> }): Promise<PendingPaymentApprovalRow | null>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
   egressGrant: {

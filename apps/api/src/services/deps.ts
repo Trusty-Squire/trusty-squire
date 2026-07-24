@@ -62,6 +62,11 @@ import {
   type PaymentAuditStore,
 } from "./in-memory-payment-audit-store.js";
 import { PrismaPaymentAuditStore } from "./prisma-payment-audit-store.js";
+import {
+  InMemoryPendingPaymentApprovalStore,
+  type PendingPaymentApprovalStore,
+} from "./in-memory-payment-approval-store.js";
+import { PrismaPendingPaymentApprovalStore } from "./prisma-payment-approval-store.js";
 
 export interface ApiDeps {
   // Identity / auth
@@ -79,6 +84,7 @@ export interface ApiDeps {
   vault: CredentialVault;
   e2eCredentialStore: E2ECredentialStore;
   paymentAuditStore: PaymentAuditStore;
+  pendingPaymentApprovalStore: PendingPaymentApprovalStore;
   egressGrantStore: EgressGrantStore;
   machineTokenStore: MachineTokenStore;
   captchaEventStore: CaptchaEventStore;
@@ -256,6 +262,10 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     authPrisma !== null
       ? new PrismaPaymentAuditStore(authPrisma)
       : new InMemoryPaymentAuditStore(opts.now);
+  const pendingPaymentApprovalStore: PendingPaymentApprovalStore =
+    authPrisma !== null
+      ? new PrismaPendingPaymentApprovalStore(authPrisma)
+      : new InMemoryPendingPaymentApprovalStore(opts.now);
   // Panel 1 funnel: Prisma-backed when the auth DB is wired, else a
   // zero store (the funnel is a prod operator feature).
   const funnelStatsStore: FunnelStatsStore =
@@ -352,6 +362,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     vault,
     e2eCredentialStore,
     paymentAuditStore,
+    pendingPaymentApprovalStore,
     egressGrantStore,
     machineTokenStore,
     captchaEventStore,
