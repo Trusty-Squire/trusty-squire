@@ -19,6 +19,12 @@ COPY . .
 RUN pnpm install --frozen-lockfile
 # Build vault's dist so the web build can resolve @trusty-squire/vault/e2e + /hpke.
 RUN pnpm --filter @trusty-squire/vault build
+# NEXT_PUBLIC_* are inlined into the browser bundle at build time, so the Vouchflow
+# publishable key + environment must be present as build args during the web build.
+ARG NEXT_PUBLIC_VOUCHFLOW_API_KEY
+ARG NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT=production
+ENV NEXT_PUBLIC_VOUCHFLOW_API_KEY=$NEXT_PUBLIC_VOUCHFLOW_API_KEY
+ENV NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT=$NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT
 RUN pnpm --filter @trusty-squire/web build
 
 # Next standalone output. With outputFileTracingRoot at the repo root,

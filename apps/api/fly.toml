@@ -21,7 +21,7 @@ primary_region = "iad"
   NODE_ENV = "production"
   LOG_LEVEL = "info"
   VOUCHFLOW_STUB_MODE = "true"
-  VOUCHFLOW_CUSTOMER_ID = "ts-local-dev"
+  VOUCHFLOW_CUSTOMER_ID = "cmnxvgivz0000s23u9lykxdi7"
   SESSION_JWT_SECRET = "temp-secret-will-replace-with-real"
 
 [http_service]

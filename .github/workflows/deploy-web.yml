@@ -85,10 +85,16 @@ jobs:
       - name: Deploy to Fly
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          NEXT_PUBLIC_VOUCHFLOW_API_KEY: ${{ secrets.NEXT_PUBLIC_VOUCHFLOW_API_KEY }}
         run: |
           set -euo pipefail
           if [[ -z "${FLY_API_TOKEN:-}" ]]; then
             echo "::error::FLY_API_TOKEN is not set. Add it as a repo secret before merging this workflow."
             exit 1
           fi
-          flyctl deploy --config apps/web/fly.toml --dockerfile apps/web/Dockerfile.fly --remote-only
+          # Pass the Vouchflow publishable key as a build arg so Next inlines it into
+          # the browser bundle (NEXT_PUBLIC_* are build-time). Unset → the vault card
+          # page shows a clear "not configured" error, so this is required for payments.
+          flyctl deploy --config apps/web/fly.toml --dockerfile apps/web/Dockerfile.fly --remote-only \
+            --build-arg NEXT_PUBLIC_VOUCHFLOW_API_KEY="${NEXT_PUBLIC_VOUCHFLOW_API_KEY:-}" \
+            --build-arg NEXT_PUBLIC_VOUCHFLOW_ENVIRONMENT=production
