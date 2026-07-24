@@ -1,0 +1,14 @@
+# Per-repo no-mistakes overrides.
+#
+# The default test step runs `pnpm -r test` directly, which fails on this
+# monorepo: apps/mcp and apps/api import the workspace libraries
+# @trusty-squire/skill-schema and @trusty-squire/vault, whose `dist/` must be
+# built first (a fresh gate clone has no dist). Mirror .github/workflows/ci.yml:
+# generate the registry Prisma client, build the packages/** dists, then run the
+# per-package test suites. Deterministic, matches CI exactly.
+commands:
+  test: |
+    set -euo pipefail
+    pnpm --filter '@trusty-squire/registry' prisma:generate
+    pnpm -r --filter "./packages/**" --if-present build
+    pnpm -r --if-present test
