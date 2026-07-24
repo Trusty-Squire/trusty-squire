@@ -85,7 +85,15 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
       return errorContent(`invalid arguments: ${parsed.error.issues.map((i) => i.message).join("; ")}`);
     }
     try {
-      const result = await tool.handler(parsed.data, api);
+      const result = await tool.handler(parsed.data, api, {
+        notifyUser: async (message, data) => {
+          await server.sendLoggingMessage({
+            level: "notice",
+            logger: "trusty-squire",
+            data: { message, ...data },
+          });
+        },
+      });
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };

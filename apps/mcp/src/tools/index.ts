@@ -18,6 +18,7 @@ import { grantAppAccessTool } from "./grant-app-access.js";
 import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
+import { operatePayTool } from "./operate-pay.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -31,7 +32,15 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
   // credential tools so Claude Code keeps their schemas resident
   // instead of deferring them behind Tool Search.
   meta?: Record<string, unknown>;
-  handler: (args: TArgs, api: ApiClient | null) => Promise<unknown>;
+  handler: (
+    args: TArgs,
+    api: ApiClient | null,
+    context?: ToolContext,
+  ) => Promise<unknown>;
+}
+
+export interface ToolContext {
+  notifyUser: (message: string, data?: Record<string, unknown>) => Promise<void>;
 }
 
 // Re-exported for convenience; defined in its own module to avoid a
@@ -68,6 +77,7 @@ export const TOOLS: Tool[] = [
   // can write a targeted fix without the user fetching by curl.
   listExtractFailuresTool,
   getExtractFailureTool,
+  operatePayTool,
   // Interactive host-driven provisioning (provision_start/observe/act/
   // captcha_gate/await_verification/extract/finish).
   ...OPERATE_TOOLS,
@@ -92,4 +102,5 @@ export {
   auditLogTool,
   listExtractFailuresTool,
   getExtractFailureTool,
+  operatePayTool,
 };

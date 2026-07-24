@@ -105,6 +105,9 @@ importers:
       '@clack/prompts':
         specifier: ^0.11.0
         version: 0.11.0
+      '@hpke/core':
+        specifier: ^1.9.0
+        version: 1.9.0
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
@@ -120,6 +123,9 @@ importers:
       chalk:
         specifier: ^5.3.0
         version: 5.6.2
+      jose:
+        specifier: ^5.9.6
+        version: 5.10.0
       jsonc-parser:
         specifier: ^3.3.1
         version: 3.3.1
