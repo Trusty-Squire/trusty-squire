@@ -97,8 +97,12 @@ function normalizeCard(value: unknown): CheckoutCard {
   };
 }
 
-function confidenceAtLeastHigh(value: unknown): boolean {
-  return value === "high" || value === "very_high";
+// Payment mandates require at least MEDIUM confidence. High demands a
+// biometric/hardware-attested passkey; medium admits numeric/PIN passkeys, which
+// is the realistic floor for many devices. Must match the phone's signPayload
+// minConfidence (apps/web/app/vault/pay/[id]/page.tsx).
+function confidenceAtLeastMedium(value: unknown): boolean {
+  return value === "medium" || value === "high" || value === "very_high";
 }
 
 async function verifyMandate(
@@ -139,7 +143,7 @@ async function verifyMandate(
     throw new Error("payload_hash_mismatch");
   }
   if (payload.context !== "purchase") throw new Error("invalid_mandate_context");
-  if (!confidenceAtLeastHigh(payload.confidence)) {
+  if (!confidenceAtLeastMedium(payload.confidence)) {
     throw new Error("insufficient_mandate_confidence");
   }
   return payload;
