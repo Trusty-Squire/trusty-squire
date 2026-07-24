@@ -123,7 +123,7 @@ export default function NewCredentialPage() {
       </div>
 
       {kind === "card" ? (
-        <CardEntry onSaved={() => router.push("/vault")} />
+        <CardEntry onSaved={() => router.push("/vault/card")} />
       ) : (
         <form className="form cred-form" onSubmit={submit}>
           {kind === "login" ? (
