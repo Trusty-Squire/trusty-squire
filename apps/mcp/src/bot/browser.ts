@@ -147,6 +147,7 @@ export interface BrowserState {
 
 export interface CheckoutSummary {
   merchant: string;
+  checkout_origin: string;
   amount_cents: number;
   currency: string;
 }
@@ -5048,6 +5049,7 @@ export class BrowserController {
     if (amount === null) throw new Error("payment_checkout_total_not_found");
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
+      checkout_origin: new URL(page.url()).origin,
       ...amount,
     };
   }
@@ -5072,6 +5074,7 @@ export class BrowserController {
           if (!(await input.isVisible().catch(() => false))) continue;
           if (!(await input.isEnabled().catch(() => false))) continue;
           const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "");
+          await input.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
           if (tag === "select") {
             const selected =
               (await input.selectOption({ value }).then(() => true).catch(() => false)) ||
@@ -5087,6 +5090,7 @@ export class BrowserController {
       return false;
     };
 
+    try {
     await fillFirst(
       "pan",
       card.pan,
@@ -5187,6 +5191,25 @@ export class BrowserController {
     if (!submitted) throw new Error("payment_submit_not_found");
     await this.page.waitForTimeout(1_500).catch(() => undefined);
     return await this.detectThreeDsChallenge();
+    } finally {
+      for (const frame of this.page.frames()) {
+        await frame
+          .locator('[data-ts-sealed-payment="1"]')
+          .evaluateAll((elements) => {
+            for (const element of elements) {
+              if (
+                element instanceof HTMLInputElement ||
+                element instanceof HTMLTextAreaElement ||
+                element instanceof HTMLSelectElement
+              ) {
+                element.value = "";
+              }
+              element.removeAttribute("data-ts-sealed-payment");
+            }
+          })
+          .catch(() => undefined);
+      }
+    }
   }
 
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
@@ -7107,6 +7130,7 @@ export class BrowserController {
         selectOptions: Array<{ value: string; text: string }> | null;
         selectedOptionText: string | null;
         interactedThisRun: boolean;
+        sealed: boolean;
         screenPath: string | null;
         container: string | null;
         topmost: boolean | null;
@@ -7253,6 +7277,7 @@ export class BrowserController {
               ? clean(el.options[el.selectedIndex]?.textContent ?? null)
               : null,
           interactedThisRun: el.getAttribute("data-ts-touched") === "1",
+          sealed: el.getAttribute("data-ts-sealed-payment") === "1",
           screenPath:
             `${container ?? "body:root"} > ${elementKind(el)}:` +
             slug(pathLabel, `${elementKind(el)}-${out.length}`),
@@ -8563,6 +8588,7 @@ export interface InteractiveElement {
   visible: boolean;
   inViewport: boolean;
   inConsentWidget: boolean;
+  sealed?: boolean;
   // T13 follow-up — OAuth-affordance signals. `href` is the link
   // target (an OAuth <a> points at e.g. /identity/login/google/);
   // `iconLabel` folds in a descendant <img alt> / <svg><title> /

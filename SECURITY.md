@@ -57,15 +57,14 @@ master key (LocalKMS)  ──wraps──▶  per-credential KEK
 
 Card data uses a separate end-to-end encrypted path
 (`packages/vault/src/e2e.ts`). The client derives an AES-256-GCM key from a
-client-held passphrase with PBKDF2-SHA-256 (600,000 iterations and a fresh
-16-byte salt), then encrypts with a fresh 12-byte IV and a 128-bit
-authentication tag. The passphrase and derived key must remain on the client;
-the API receives and stores only the serialized encrypted blob and therefore
-cannot decrypt or inspect the card.
+passkey through the WebAuthn PRF extension with a fresh 32-byte salt, then
+encrypts with a fresh 12-byte IV and a 128-bit authentication tag. The PRF
+output and derived key remain on the client; the API receives and stores only
+the serialized encrypted blob and therefore cannot decrypt or inspect the card.
 
 The account-scoped API can return that opaque blob to an authenticated web or
 agent session so a trusted client can decrypt it. List responses expose only
-the record ID, label, and creation time. Losing the client passphrase makes the
+the record ID, label, and creation time. Losing the enrolled passkey makes the
 card unrecoverable; server master-key rotation does not affect these blobs.
 
 Payment audit events are deliberately metadata-only: merchant, amount,
@@ -85,8 +84,8 @@ audit retention window, which defaults to 365 days.
 - **Egress grants** inject a secret into an outbound provider request only for
   allowed hosts and configured auth shapes.
 - **Audit logs** record operations and metadata, not secret values.
-- For client-encrypted cards, the trusted client alone holds the passphrase and
-  decrypts the blob; the API stores opaque ciphertext it cannot decrypt.
+- For client-encrypted cards, the trusted client alone evaluates the passkey PRF
+  and decrypts the blob; the API stores opaque ciphertext it cannot decrypt.
 
 ### Using a credential without exposing the key: egress grants
 

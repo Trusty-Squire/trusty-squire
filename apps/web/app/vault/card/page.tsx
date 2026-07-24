@@ -100,6 +100,7 @@ export default function CardPage() {
       event.preventDefault();
       setBusy(true);
       setError(null);
+      let key: Uint8Array | undefined;
       try {
         const expiryMatch = expiry.match(/^(\d{2})\s*\/\s*(\d{2})$/);
         if (expiryMatch === null) {
@@ -127,7 +128,6 @@ export default function CardPage() {
           billing: { line1, line2, city, state, postal_code: postalCode, country },
         };
         const prfSalt = crypto.getRandomValues(new Uint8Array(32));
-        let key: Uint8Array;
         try {
           key = await evaluatePrf(prfSalt);
         } catch {
@@ -157,6 +157,7 @@ export default function CardPage() {
         }
         setError(err instanceof Error ? err.message : "Failed to save card.");
       } finally {
+        key?.fill(0);
         setBusy(false);
       }
     },

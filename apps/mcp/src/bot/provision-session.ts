@@ -958,6 +958,7 @@ function isSealedFieldValue(
   el: InteractiveElement,
   sealed: ReadonlySet<string>,
 ): boolean {
+  if (el.sealed === true) return true;
   if ((el.type ?? "").toLowerCase() === "password") return true;
   return elementTargetKeys(el).some((k) => sealed.has(k));
 }

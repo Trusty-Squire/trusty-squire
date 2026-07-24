@@ -5,6 +5,13 @@ import type { ApiDeps } from "../services/deps.js";
 
 const createBody = z.object({
   merchant: z.string().min(1).max(256),
+  checkout_origin: z.string().url().refine((value) => {
+    try {
+      return new URL(value).origin === value;
+    } catch {
+      return false;
+    }
+  }),
   amount_cents: z.number().int().min(0).max(2_147_483_647),
   currency: z.string().min(1).max(8),
   card_ref: z.string().min(1).max(64),
@@ -36,6 +43,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     const nonce = randomBytes(16).toString("base64url");
     const id = await opts.deps.pendingPaymentApprovalStore.create(auth.account_id, {
       merchant: parsed.data.merchant,
+      checkoutOrigin: parsed.data.checkout_origin,
       amountCents: parsed.data.amount_cents,
       currency: parsed.data.currency,
       nonce,
@@ -65,6 +73,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         id: record.id,
         status,
         merchant: record.merchant,
+        checkout_origin: record.checkoutOrigin,
         amount_cents: record.amountCents,
         currency: record.currency,
         nonce: record.nonce,

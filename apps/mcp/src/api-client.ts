@@ -109,6 +109,7 @@ export interface PaymentApproval {
   id: string;
   status: "pending" | "approved" | "expired";
   merchant: string;
+  checkout_origin: string;
   amount_cents: number;
   currency: string;
   nonce: string;
@@ -138,6 +139,7 @@ export class ApiClient {
 
   async createPaymentApproval(input: {
     merchant: string;
+    checkout_origin: string;
     amount_cents: number;
     currency: string;
     card_ref: string;
@@ -148,6 +150,11 @@ export class ApiClient {
 
   async getPaymentApproval(id: string): Promise<PaymentApproval> {
     return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}`);
+  }
+
+  async listPaymentCards(): Promise<Array<{ id: string; label: string }>> {
+    const records = await this.get<Array<{ id: string; label: string }>>("/v1/vault/e2e");
+    return records.map(({ id, label }) => ({ id, label }));
   }
 
   async auditPayment(input: {

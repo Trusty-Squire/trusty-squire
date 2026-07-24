@@ -136,6 +136,7 @@ interface PendingPaymentApprovalRow {
   id: string;
   account_id: string;
   merchant: string;
+  checkout_origin: string;
   amount_cents: number;
   currency: string;
   nonce: string;

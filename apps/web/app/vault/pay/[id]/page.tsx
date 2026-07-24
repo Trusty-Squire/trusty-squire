@@ -12,6 +12,7 @@ import { getVouchflow } from "../../../lib/vouchflow";
 interface Approval {
   status: string;
   merchant: string;
+  checkout_origin: string;
   amount_cents: number;
   currency: string;
   nonce: string;
@@ -102,9 +103,11 @@ export default function PaymentApprovalPage() {
       );
       const payload = {
         merchant: approval.merchant,
+        checkout_origin: approval.checkout_origin,
         amount_cents: approval.amount_cents,
         currency: approval.currency,
         nonce: approval.nonce,
+        card_ref: approval.card_ref,
         recipient_pubkey_hash: toBase64Url(new Uint8Array(publicKeyHash)),
       };
       const sign = await getVouchflow().signPayload({
@@ -180,6 +183,9 @@ export default function PaymentApprovalPage() {
           </h2>
           <p className="app-title mono" style={{ marginTop: "12px" }}>
             {formatAmount(approval.amount_cents, approval.currency)}
+          </p>
+          <p className="app-sub" style={{ marginTop: "12px" }}>
+            Paying at <span className="mono">{approval.checkout_origin}</span>
           </p>
           <button
             className="btn-primary"

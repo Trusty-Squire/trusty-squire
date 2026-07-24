@@ -9,6 +9,7 @@ import type { CheckoutCard } from "../browser.js";
 
 const CHECKOUT = {
   merchant: "Synthetic Merchant",
+  checkout_origin: "https://checkout.synthetic.test",
   amount_cents: 2_599,
   currency: "USD",
 };
@@ -29,7 +30,7 @@ const SYNTHETIC_CARD = {
   },
 };
 
-type Mode = "happy" | "tampered_amount" | "wrong_recipient";
+type Mode = "happy" | "tampered_amount" | "tampered_origin" | "wrong_recipient" | "audit_failure";
 
 async function harness(mode: Mode) {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
@@ -66,10 +67,13 @@ async function harness(mode: Mode) {
         .digest("base64url");
       const payload = {
         merchant: CHECKOUT.merchant,
+        checkout_origin:
+          mode === "tampered_origin" ? "https://evil.synthetic.test" : CHECKOUT.checkout_origin,
         amount_cents:
           mode === "tampered_amount" ? CHECKOUT.amount_cents + 1 : CHECKOUT.amount_cents,
         currency: CHECKOUT.currency,
         nonce,
+        card_ref: "card_test",
         recipient_pubkey_hash: recipientHash,
       };
       const canonical = canonicalize(payload)!;
@@ -105,6 +109,9 @@ async function harness(mode: Mode) {
     }
     if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
       auditBodies.push(JSON.parse(String(init.body)) as unknown);
+      if (mode === "audit_failure") {
+        return Response.json({ error: "audit_unavailable" }, { status: 503 });
+      }
       return Response.json({ id: "audit_test" }, { status: 201 });
     }
     return Response.json({ error: "not_found" }, { status: 404 });
@@ -112,6 +119,7 @@ async function harness(mode: Mode) {
 
   const browser: PaymentBrowser = {
     readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
+    currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
       return { three_ds_required: false };
@@ -183,6 +191,27 @@ describe("operate_pay", () => {
     });
     expect(filledCards).toHaveLength(0);
     expect(auditBodies).toHaveLength(0);
+  });
+
+  it("rejects a mandate bound to a different checkout origin", async () => {
+    const { result, auditBodies, filledCards } = await harness("tampered_origin");
+
+    expect(result).toMatchObject({
+      status: "payment_mandate_rejected",
+      reason: "payload_hash_mismatch",
+    });
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("preserves the submitted outcome when audit recording fails", async () => {
+    const { result, filledCards } = await harness("audit_failure");
+
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      audit_recorded: false,
+    });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
   });
 
   it("fails closed when the card was sealed to a different operator key", async () => {

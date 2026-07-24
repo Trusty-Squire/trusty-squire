@@ -325,6 +325,7 @@ model PendingPaymentApproval {
   id              String   @id @db.VarChar(26)
   account_id      String   @db.VarChar(26)
   merchant        String
+  checkout_origin String
   amount_cents    Int
   currency        String
   nonce           String

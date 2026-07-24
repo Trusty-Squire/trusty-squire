@@ -16,6 +16,7 @@ export interface OperatePayArgs {
 export interface PaymentBrowser {
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
+  currentUrl(): string;
 }
 
 interface PayDependencies {
@@ -106,10 +107,17 @@ async function verifyMandate(
   fetchImpl: typeof fetch,
 ): Promise<JWTPayload> {
   const jwksUrl = `${vouchflowApiBase.replace(/\/+$/, "")}/.well-known/jwks.json`;
-  const response = await fetchImpl(jwksUrl, {
-    method: "GET",
-    headers: { accept: "application/json" },
-  });
+  const signal = AbortSignal.timeout(5_000);
+  let response: Response;
+  try {
+    response = await fetchImpl(jwksUrl, {
+      method: "GET",
+      headers: { accept: "application/json" },
+      signal,
+    });
+  } catch {
+    throw new Error(signal.aborted ? "jwks_fetch_timeout" : "jwks_fetch_failed");
+  }
   if (!response.ok) throw new Error("jwks_fetch_failed");
   const body = (await response.json()) as unknown;
   if (
@@ -136,6 +144,7 @@ function safeFailureReason(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   const known = [
     "jwks_fetch_failed",
+    "jwks_fetch_timeout",
     "invalid_jwks",
     "missing_payload_sha256",
     "invalid_payload_sha256",
@@ -191,6 +200,7 @@ export async function executeOperatePay(
       }
       checkout = {
         merchant: args.merchant,
+        checkout_origin: new URL(browser.currentUrl()).origin,
         amount_cents: args.amount_cents,
         currency: args.currency.toUpperCase(),
       };
@@ -253,9 +263,11 @@ export async function executeOperatePay(
     const recipientHash = createHash("sha256").update(publicKeyBytes).digest();
     const canonical = canonicalize({
       merchant: checkout.merchant,
+      checkout_origin: checkout.checkout_origin,
       amount_cents: checkout.amount_cents,
       currency: checkout.currency,
       nonce: created.nonce,
+      card_ref: args.card_ref,
       recipient_pubkey_hash: toBase64Url(recipientHash),
     });
     if (canonical === undefined) {
@@ -315,17 +327,9 @@ export async function executeOperatePay(
       } catch {
         audit_recorded = false;
       }
-      if (!audit_recorded) {
-        return {
-          status: "payment_audit_failed",
-          payment_status: paymentStatus,
-          reason: "payment_audit_failed",
-          approval_url: approvalUrl,
-        };
-      }
       return {
         status: paymentStatus,
-        audit_recorded: true,
+        audit_recorded,
         reason:
           error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
             ? error.message
@@ -349,18 +353,10 @@ export async function executeOperatePay(
     } catch {
       auditRecorded = false;
     }
-    if (!auditRecorded) {
-      return {
-        status: "payment_audit_failed",
-        payment_status: paymentStatus,
-        reason: "payment_audit_failed",
-        approval_url: approvalUrl,
-      };
-    }
     if (paymentStatus === "payment_3ds_required") {
       return {
         status: paymentStatus,
-        audit_recorded: true,
+        audit_recorded: auditRecorded,
         approval_url: approvalUrl,
         ...(submitResult.challenge_url !== undefined
           ? { challenge_url: submitResult.challenge_url }
@@ -376,7 +372,7 @@ export async function executeOperatePay(
     }
     return {
       status: paymentStatus,
-      audit_recorded: true,
+      audit_recorded: auditRecorded,
       approval_url: approvalUrl,
       merchant: checkout.merchant,
       amount_cents: checkout.amount_cents,

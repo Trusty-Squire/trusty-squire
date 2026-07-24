@@ -2,6 +2,7 @@ import { ulid } from "ulid";
 
 export interface PendingPaymentApprovalInput {
   merchant: string;
+  checkoutOrigin: string;
   amountCents: number;
   currency: string;
   nonce: string;

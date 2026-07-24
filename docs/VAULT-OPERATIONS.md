@@ -26,11 +26,11 @@ master key (LocalKMS)  ──wraps──▶  account_kek_blob   (the only thing 
   decrypted under a different identity even with the right keys.
 
 Client-encrypted card records use a separate cryptographic boundary. The API
-stores their blobs verbatim and never receives the client passphrase or derived
-key; see the authoritative
+stores their blobs verbatim and never receives the WebAuthn PRF output or
+derived key; see the authoritative
 [`SECURITY.md` contract](../SECURITY.md#client-encrypted-card-data). These blobs
 are not re-encrypted during `LocalKMS` rotation and cannot be recovered if the
-client passphrase is lost.
+enrolled passkey is lost.
 
 ## Master-key custody + rotation
 
@@ -132,7 +132,7 @@ list response — advisory only, not enforced.
   Fly secret; export it to your password manager / KMS out-of-band).
   Losing `LOCAL_KMS_KEY` = losing every credential, restore or not.
   `E2ECredential` rows contain opaque client ciphertext instead; restoring them
-  still requires the matching client-held passphrase.
+  still requires the matching enrolled passkey.
 - **Restore procedure:** restore the Fly volume snapshot, confirm
   `LOCAL_KMS_KEY` (and any `LOCAL_KMS_LEGACY_KEYS`) match the snapshot's
   era, then run `vault-decrypt-check` to confirm decryptability before

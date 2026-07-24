@@ -12,6 +12,8 @@ import {
   auditLogTool,
   listAppAccessTool,
   listCredentialsTool,
+  listPaymentCardsTool,
+  operatePayTool,
   revokeAppAccessTool,
   TOOLS,
 } from "../tools/index.js";
@@ -52,6 +54,41 @@ describe("list_credentials", () => {
   it("requires an active session", async () => {
     await expect(listCredentialsTool.handler({}, null)).rejects.toThrow(
       /Trusty Squire session/,
+    );
+  });
+});
+
+describe("list_payment_cards", () => {
+  it("returns only saved card IDs and labels", async () => {
+    const listPaymentCards = vi
+      .fn()
+      .mockResolvedValue([{ id: "card_1", label: "Personal" }]);
+    const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
+
+    await expect(listPaymentCardsTool.handler({}, api)).resolves.toEqual({
+      cards: [{ id: "card_1", label: "Personal" }],
+    });
+  });
+});
+
+describe("operate_pay card selection", () => {
+  it("rejects missing or conflicting card selectors", () => {
+    expect(() => operatePayTool.inputSchema.parse({})).toThrow();
+    expect(() =>
+      operatePayTool.inputSchema.parse({ card_ref: "card_1", card_label: "Personal" }),
+    ).toThrow();
+  });
+
+  it("reports ambiguous card labels before opening the checkout", async () => {
+    const listPaymentCards = vi.fn().mockResolvedValue([
+      { id: "card_1", label: "Personal" },
+      { id: "card_2", label: "Personal" },
+    ]);
+    const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse({ card_label: "Personal" });
+
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+      /Multiple saved payment cards/,
     );
   });
 });
@@ -131,7 +168,7 @@ describe("TOOLS registry", () => {
     // captcha_gate/await_verification/extract/remember/use/finish_task/finish —
     // remember+use are the operator-recipe capture/replay pair — plus the PR3c
     // login-credential tools: prepare/store plus seal_vault_credential for signin fill.
-    expect(TOOLS).toHaveLength(23);
+    expect(TOOLS).toHaveLength(24);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
       "get_extract_failure",
@@ -139,6 +176,7 @@ describe("TOOLS registry", () => {
       "list_app_access",
       "list_credentials",
       "list_extract_failures",
+      "list_payment_cards",
       "operate_act",
       "operate_await_verification",
       "operate_captcha_gate",

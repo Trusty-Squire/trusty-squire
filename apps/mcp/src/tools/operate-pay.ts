@@ -10,8 +10,24 @@ const inputSchema = z.object({
     .string()
     .regex(/^[A-Za-z]{3}$/)
     .optional(),
-  card_ref: z.string().min(1).max(64),
+  card_ref: z.string().min(1).max(64).optional(),
+  card_label: z.string().min(1).max(256).optional(),
+}).refine((value) => (value.card_ref === undefined) !== (value.card_label === undefined), {
+  message: "Provide exactly one of card_ref or card_label",
 });
+
+export const listPaymentCardsTool: Tool = {
+  name: "list_payment_cards",
+  description:
+    "List saved payment cards by opaque ID and user-visible label only. Never returns encrypted blobs or card data.",
+  inputSchema: z.object({}),
+  jsonInputSchema: { type: "object", properties: {} },
+  annotations: { readOnlyHint: true },
+  async handler(_args, api) {
+    assertApi(api);
+    return { cards: await api.listPaymentCards() };
+  },
+};
 
 export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   name: "operate_pay",
@@ -24,12 +40,13 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   inputSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["card_ref"],
+    oneOf: [{ required: ["card_ref"] }, { required: ["card_label"] }],
     properties: {
       merchant: { type: "string" },
       amount_cents: { type: "integer", minimum: 0 },
       currency: { type: "string", pattern: "^[A-Za-z]{3}$" },
       card_ref: { type: "string" },
+      card_label: { type: "string" },
     },
   },
   annotations: {
@@ -39,9 +56,24 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   },
   async handler(args, api, context) {
     assertApi(api);
+    let cardRef = args.card_ref;
+    if (cardRef === undefined) {
+      const matches = (await api.listPaymentCards()).filter(
+        (card) => card.label === args.card_label,
+      );
+      if (matches.length === 0) {
+        throw new Error(`No saved payment card has label "${args.card_label}".`);
+      }
+      if (matches.length > 1) {
+        throw new Error(
+          `Multiple saved payment cards have label "${args.card_label}"; use card_ref instead.`,
+        );
+      }
+      cardRef = matches[0]!.id;
+    }
     return await executeOperatePay(
       {
-        card_ref: args.card_ref,
+        card_ref: cardRef,
         ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
         ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
         ...(args.currency !== undefined ? { currency: args.currency } : {}),

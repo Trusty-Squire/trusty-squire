@@ -64,6 +64,7 @@ describe("payment approval relay", () => {
       headers: { authorization: `Bearer ${agentToken}` },
       payload: {
         merchant: "Synthetic Books",
+        checkout_origin: "https://checkout.synthetic.test",
         amount_cents: 2599,
         currency: "USD",
         card_ref: "card_synthetic_1",
@@ -89,6 +90,7 @@ describe("payment approval relay", () => {
       id: created.id,
       status: "pending",
       merchant: "Synthetic Books",
+      checkout_origin: "https://checkout.synthetic.test",
       amount_cents: 2599,
       currency: "USD",
       nonce: created.nonce,

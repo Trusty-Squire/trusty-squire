@@ -54,6 +54,11 @@ describe("checkout payment parsing", () => {
       });
 
       expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+      expect(
+        await page.locator('input[data-ts-sealed-payment="1"]').count(),
+      ).toBe(0);
+      expect(await page.locator("input").evaluateAll((inputs) => inputs.map((input) => input.value)))
+        .toEqual(["", "", "", ""]);
     } finally {
       await browser.close();
     }

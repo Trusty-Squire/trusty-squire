@@ -18,7 +18,7 @@ import { grantAppAccessTool } from "./grant-app-access.js";
 import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
-import { operatePayTool } from "./operate-pay.js";
+import { listPaymentCardsTool, operatePayTool } from "./operate-pay.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -77,6 +77,7 @@ export const TOOLS: Tool[] = [
   // can write a targeted fix without the user fetching by curl.
   listExtractFailuresTool,
   getExtractFailureTool,
+  listPaymentCardsTool,
   operatePayTool,
   // Interactive host-driven provisioning (provision_start/observe/act/
   // captcha_gate/await_verification/extract/finish).
@@ -102,5 +103,6 @@ export {
   auditLogTool,
   listExtractFailuresTool,
   getExtractFailureTool,
+  listPaymentCardsTool,
   operatePayTool,
 };
