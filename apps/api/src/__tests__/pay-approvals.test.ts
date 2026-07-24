@@ -55,6 +55,7 @@ describe("payment approval relay", () => {
 
   afterEach(async () => {
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     await server.close();
   });
 
@@ -176,6 +177,34 @@ describe("payment approval relay", () => {
     });
     expect(approve.statusCode).toBe(409);
     expect(approve.json()).toEqual({ error: "payment_approval_expired" });
+  });
+
+  it("pushes to Telegram on create when the account has a linked chat", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+
+    const created = await createApproval();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("https://api.telegram.org/botsynthetic-bot-token/sendMessage");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.chat_id).toBe("555000111");
+    expect(body.text).toContain("USD 25.99");
+    expect(body.text).toContain(`/vault/pay/${created.id}`);
+  });
+
+  it("does not push to Telegram when the account has no linked chat", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+
+    await createApproval();
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("denies cross-account reads and approvals", async () => {

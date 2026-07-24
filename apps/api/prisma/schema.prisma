@@ -166,12 +166,17 @@ model Account {
   // so a cancellation is visibly registered while access continues to term.
   cancel_at           DateTime?
 
+  // Telegram chat the account linked via /v1/telegram/link + the bot's
+  // /start deep link. null = not linked; payment-approval push is skipped.
+  telegram_chat_id String? @map("telegram_chat_id")
+
   oauth_identities     OAuthIdentity[]
   web_sessions         WebSession[]
   agent_sessions       AgentSession[]
   e2e_credentials      E2ECredential[]
   payment_audit_events PaymentAuditEvent[]
   payment_approvals    PendingPaymentApproval[]
+  telegram_link_tokens TelegramLinkToken[]
 
   @@index([stripe_customer_id])
 }
@@ -341,6 +346,20 @@ model PendingPaymentApproval {
 
   @@index([account_id])
   @@map("pending_payment_approvals")
+}
+
+// Telegram account-linking token. Minted by POST /v1/telegram/link,
+// consumed by the webhook when the user taps the bot's /start deep link.
+// 15-minute TTL, single-use. Mirrors PairingToken's shape.
+model TelegramLinkToken {
+  token      String   @id
+  account_id String   @db.VarChar(26)
+  created_at DateTime @default(now())
+  expires_at DateTime
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id])
 }
 
 // Egress grant — a standing, revocable token a deployed workload holds to
