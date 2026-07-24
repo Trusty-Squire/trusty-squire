@@ -105,6 +105,20 @@ export interface UsageResponse {
   mandate_id: string;
 }
 
+export interface PaymentApproval {
+  id: string;
+  status: "pending" | "approved" | "expired";
+  merchant: string;
+  amount_cents: number;
+  currency: string;
+  nonce: string;
+  card_ref: string;
+  operator_pubkey: string;
+  jws: string | null;
+  sealed_card: string | null;
+  expires_at: string;
+}
+
 export class ApiClient {
   private readonly fetchImpl: typeof fetch;
 
@@ -120,6 +134,38 @@ export class ApiClient {
 
   async getRun(runId: string): Promise<RunSummary> {
     return this.get<RunSummary>(`/v1/runs/${encodeURIComponent(runId)}`);
+  }
+
+  async createPaymentApproval(input: {
+    merchant: string;
+    amount_cents: number;
+    currency: string;
+    card_ref: string;
+    operator_pubkey: string;
+  }): Promise<{ id: string; nonce: string; expires_at: string }> {
+    return this.post("/v1/pay/approvals", input);
+  }
+
+  async getPaymentApproval(id: string): Promise<PaymentApproval> {
+    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}`);
+  }
+
+  async auditPayment(input: {
+    merchant: string;
+    amount_cents: number;
+    currency: string;
+    last4: string;
+    status: string;
+    mandate_id?: string;
+  }): Promise<{ id: string }> {
+    return this.post("/v1/vault/payments/audit", {
+      merchant: input.merchant,
+      amountCents: input.amount_cents,
+      currency: input.currency,
+      last4: input.last4,
+      status: input.status,
+      ...(input.mandate_id !== undefined ? { mandateId: input.mandate_id } : {}),
+    });
   }
 
   // Metadata list of every credential in the account's vault — no

@@ -1328,6 +1328,20 @@ export function currentProvisionUrl(sessionId: string): string {
   return session.browser.currentUrl();
 }
 
+// operate_pay has a deliberately small input contract with no session id: it
+// acts on the one live operator checkout. Fail closed rather than guessing if
+// zero or multiple browser sessions exist.
+export function activeProvisionBrowser(): BrowserController {
+  if (sessions.size !== 1) {
+    throw new Error(
+      sessions.size === 0
+        ? "operate_pay requires one active operate_start browser session"
+        : "operate_pay refused: multiple active browser sessions",
+    );
+  }
+  return sessions.values().next().value!.browser;
+}
+
 // PR3c — the user's own email captured at login (the authoritative signup
 // address), or null when none was captured. The tool layer reads this to fill
 // username/password signups so the account is user-owned.

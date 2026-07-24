@@ -145,6 +145,123 @@ export interface BrowserState {
   screenshot: string; // base64
 }
 
+export interface CheckoutSummary {
+  merchant: string;
+  amount_cents: number;
+  currency: string;
+}
+
+export interface CheckoutCard {
+  pan: string;
+  exp_month: string;
+  exp_year: string;
+  name: string;
+  cvv: string;
+  billing: {
+    line1: string;
+    line2?: string;
+    city: string;
+    state?: string;
+    postal_code: string;
+    country: string;
+  };
+}
+
+export interface CheckoutSubmitResult {
+  three_ds_required: boolean;
+  challenge_url?: string;
+}
+
+const CURRENCY_SYMBOLS: Record<string, string> = {
+  "$": "USD",
+  "€": "EUR",
+  "£": "GBP",
+  "¥": "JPY",
+};
+
+const ZERO_DECIMAL_CURRENCIES = new Set([
+  "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA", "PYG", "RWF",
+  "UGX", "VND", "VUV", "XAF", "XOF", "XPF",
+]);
+
+function currencyMinorDigits(currency: string): number {
+  if (ZERO_DECIMAL_CURRENCIES.has(currency)) return 0;
+  if (["BHD", "JOD", "KWD", "OMR", "TND"].includes(currency)) return 3;
+  return 2;
+}
+
+function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
+  const value = raw.replace(/\s/g, "");
+  const comma = value.lastIndexOf(",");
+  const dot = value.lastIndexOf(".");
+  let normalized = value;
+  if (comma >= 0 && dot >= 0) {
+    const decimalIndex = Math.max(comma, dot);
+    const fractionLength = value.length - decimalIndex - 1;
+    if (minorDigits > 0 && fractionLength > 0 && fractionLength <= minorDigits) {
+      const integer = value.slice(0, decimalIndex).replace(/[.,]/g, "");
+      normalized = `${integer}.${value.slice(decimalIndex + 1)}`;
+    } else {
+      normalized = value.replace(/[.,]/g, "");
+    }
+  } else if (comma >= 0) {
+    const commaCount = (value.match(/,/g) ?? []).length;
+    const fractionLength = value.length - comma - 1;
+    normalized =
+      commaCount === 1 &&
+      minorDigits > 0 &&
+      fractionLength > 0 &&
+      fractionLength <= minorDigits
+        ? value.replace(",", ".")
+        : value.replaceAll(",", "");
+  } else if ((value.match(/\./g) ?? []).length > 1) {
+    normalized = value.replaceAll(".", "");
+  } else if (dot >= 0) {
+    const fractionLength = value.length - dot - 1;
+    normalized =
+      minorDigits > 0 && fractionLength > 0 && fractionLength <= minorDigits
+        ? value
+        : value.replace(".", "");
+  }
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+export function parseCheckoutAmount(
+  texts: readonly string[],
+  fallbackCurrency?: string,
+): { amount_cents: number; currency: string } | null {
+  const totalPattern =
+    /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK)\s*)?([$€£¥])?\s*([0-9][0-9.,]*)(?:\s*(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK))?/gi;
+  for (const text of texts) {
+    totalPattern.lastIndex = 0;
+    for (const match of text.matchAll(totalPattern)) {
+      const currency = (match[1] ?? match[4] ?? CURRENCY_SYMBOLS[match[2] ?? ""] ?? fallbackCurrency)
+        ?.toUpperCase();
+      if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) continue;
+      const minorDigits = currencyMinorDigits(currency);
+      const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
+      if (amount === null) continue;
+      const scale = 10 ** minorDigits;
+      const minor = Math.round(amount * scale);
+      if (Math.abs(amount * scale - minor) > 1e-6) continue;
+      return { amount_cents: minor, currency };
+    }
+  }
+  return null;
+}
+
+function merchantFromPage(title: string, siteName: string, url: string): string {
+  if (siteName.trim().length > 0) return siteName.trim().slice(0, 256);
+  const titlePart = title
+    .split(/\s+[|—–-]\s+/)
+    .find((part) => !/\b(checkout|payment|cart|order)\b/i.test(part));
+  if (titlePart !== undefined && titlePart.trim().length > 0) {
+    return titlePart.trim().slice(0, 256);
+  }
+  return new URL(url).hostname.replace(/^www\./, "").slice(0, 256);
+}
+
 const HCAPTCHA_UUID_RE =
   "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 
@@ -4910,6 +5027,192 @@ export class BrowserController {
   async extractVisibleText(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
     return await this.page.evaluate(() => document.body?.innerText ?? "");
+  }
+
+  async readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const identity = await page.evaluate(() => ({
+      title: document.title,
+      siteName:
+        document.querySelector<HTMLMetaElement>('meta[property="og:site_name"]')?.content ??
+        document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
+        "",
+    }));
+    const texts = await Promise.all(
+      page.frames().map(async (frame) =>
+        await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+      ),
+    );
+    const amount = parseCheckoutAmount(texts, fallbackCurrency);
+    if (amount === null) throw new Error("payment_checkout_total_not_found");
+    return {
+      merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
+      ...amount,
+    };
+  }
+
+  // Common autocomplete/name selectors across all CDP-reachable frames,
+  // including cross-origin hosted fields. No PSP-specific adapters.
+  async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
+    if (!this.page) throw new Error("Browser not started");
+    const frames = this.page.frames();
+    const filled = new Set<string>();
+    const fillFirst = async (
+      field: string,
+      value: string | undefined,
+      selectors: string,
+    ): Promise<boolean> => {
+      if (value === undefined || value.length === 0) return false;
+      for (const frame of frames) {
+        const matches = frame.locator(selectors);
+        const count = Math.min(await matches.count().catch(() => 0), 10);
+        for (let i = 0; i < count; i += 1) {
+          const input = matches.nth(i);
+          if (!(await input.isVisible().catch(() => false))) continue;
+          if (!(await input.isEnabled().catch(() => false))) continue;
+          const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "");
+          if (tag === "select") {
+            const selected =
+              (await input.selectOption({ value }).then(() => true).catch(() => false)) ||
+              (await input.selectOption({ label: value }).then(() => true).catch(() => false));
+            if (!selected) continue;
+          } else {
+            await input.fill(value);
+          }
+          filled.add(field);
+          return true;
+        }
+      }
+      return false;
+    };
+
+    await fillFirst(
+      "pan",
+      card.pan,
+      'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]',
+    );
+    const combinedExpiry = `${card.exp_month.padStart(2, "0")}/${card.exp_year.slice(-2)}`;
+    const combined = await fillFirst(
+      "expiry",
+      combinedExpiry,
+      'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i]',
+    );
+    if (!combined) {
+      await fillFirst(
+        "exp_month",
+        card.exp_month.padStart(2, "0"),
+        '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i]',
+      );
+      await fillFirst(
+        "exp_year",
+        card.exp_year,
+        '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i]',
+      );
+    }
+    const fields: Array<[string, string | undefined, string]> = [
+      [
+        "cvv",
+        card.cvv,
+        'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]',
+      ],
+      [
+        "name",
+        card.name,
+        'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
+      ],
+      [
+        "line1",
+        card.billing.line1,
+        '[autocomplete~="address-line1"],[name*="address_line1" i],[name*="address1" i],[name="line1" i]',
+      ],
+      [
+        "line2",
+        card.billing.line2,
+        '[autocomplete~="address-line2"],[name*="address_line2" i],[name*="address2" i],[name="line2" i]',
+      ],
+      [
+        "city",
+        card.billing.city,
+        '[autocomplete~="address-level2"],[name*="city" i],[name*="locality" i]',
+      ],
+      [
+        "state",
+        card.billing.state,
+        '[autocomplete~="address-level1"],[name*="state" i],[name*="region" i]',
+      ],
+      [
+        "postal_code",
+        card.billing.postal_code,
+        '[autocomplete~="postal-code"],[name*="postal" i],[name*="zip" i]',
+      ],
+      [
+        "country",
+        card.billing.country,
+        '[autocomplete~="country"],[name*="country" i]',
+      ],
+    ];
+    for (const [field, value, selectors] of fields) {
+      await fillFirst(field, value, selectors);
+    }
+    for (const required of ["pan", "expiry", "cvv", "name"]) {
+      if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
+      if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
+    }
+
+    const submitName =
+      /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i;
+    let submitted = false;
+    for (const frame of frames) {
+      const matches = frame.locator('button,input[type="submit"],[role="button"]');
+      const count = Math.min(await matches.count().catch(() => 0), 100);
+      for (let i = 0; i < count; i += 1) {
+        const candidate = matches.nth(i);
+        if (!(await candidate.isVisible().catch(() => false))) continue;
+        if (!(await candidate.isEnabled().catch(() => false))) continue;
+        const label = await candidate.evaluate((el) =>
+          (
+            el.getAttribute("aria-label") ||
+            (el instanceof HTMLInputElement ? el.value : el.textContent) ||
+            ""
+          ).trim(),
+        ).catch(() => "");
+        if (!submitName.test(label)) continue;
+        await candidate.click();
+        submitted = true;
+        break;
+      }
+      if (submitted) break;
+    }
+    if (!submitted) throw new Error("payment_submit_not_found");
+    await this.page.waitForTimeout(1_500).catch(() => undefined);
+    return await this.detectThreeDsChallenge();
+  }
+
+  private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
+    if (!this.page) throw new Error("Browser not started");
+    const urlPattern =
+      /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/|challenge)/i;
+    for (const frame of this.page.frames()) {
+      const detected =
+        urlPattern.test(frame.url()) ||
+        (await frame.evaluate(() => {
+          if (
+            document.querySelector(
+              'iframe[name*="challenge" i],iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
+            ) !== null
+          ) return true;
+          return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i
+            .test(document.body?.innerText ?? "");
+        }).catch(() => false));
+      if (detected) {
+        return {
+          three_ds_required: true,
+          challenge_url: frame.url() || this.page.url(),
+        };
+      }
+    }
+    return { three_ds_required: false };
   }
 
   // Deterministic Firebase/GCP credential extraction. Every Firebase project
