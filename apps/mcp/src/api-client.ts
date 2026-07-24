@@ -146,8 +146,7 @@ export class ApiClient {
     operator_pubkey: string;
     item: string;
     reason: string;
-    agent: string;
-  }): Promise<{ id: string; nonce: string; expires_at: string }> {
+  }): Promise<{ id: string; nonce: string; agent: string; expires_at: string }> {
     return this.post("/v1/pay/approvals", input);
   }
 

@@ -18,10 +18,15 @@ async function makeWebSession(deps: ApiDeps, accountId: string, now: Date): Prom
   return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
 }
 
-async function makeAgentToken(deps: ApiDeps, accountId: string, now: Date): Promise<string> {
+async function makeAgentToken(
+  deps: ApiDeps,
+  accountId: string,
+  now: Date,
+  agentIdentity: string | null = "synthetic-payment-test-agent",
+): Promise<string> {
   const { raw_token, record } = issueAgentSession({
     account_id: accountId,
-    agent_identity: "synthetic-payment-test-agent",
+    agent_identity: agentIdentity,
     agent_version: "test",
     now,
   });
@@ -59,7 +64,12 @@ describe("payment approval relay", () => {
     await server.close();
   });
 
-  async function createApproval(): Promise<{ id: string; nonce: string; expires_at: string }> {
+  async function createApproval(): Promise<{
+    id: string;
+    nonce: string;
+    agent: string;
+    expires_at: string;
+  }> {
     const response = await server.inject({
       method: "POST",
       url: "/v1/pay/approvals",
@@ -74,12 +84,18 @@ describe("payment approval relay", () => {
       },
     });
     expect(response.statusCode).toBe(201);
-    return response.json() as { id: string; nonce: string; expires_at: string };
+    return response.json() as {
+      id: string;
+      nonce: string;
+      agent: string;
+      expires_at: string;
+    };
   }
 
   it("creates a pending approval and returns it", async () => {
     const created = await createApproval();
     expect(created.nonce).toMatch(/^[A-Za-z0-9_-]{22}$/);
+    expect(created.agent).toBe("synthetic-payment-test-agent");
     expect(created.expires_at).toBe("2026-07-23T12:10:00.000Z");
 
     const response = await server.inject({
@@ -100,14 +116,14 @@ describe("payment approval relay", () => {
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
       item: "",
       reason: "",
-      agent: "",
+      agent: "synthetic-payment-test-agent",
       jws: null,
       sealed_card: null,
       expires_at: created.expires_at,
     });
   });
 
-  it("stores and returns item/reason/agent when provided", async () => {
+  it("stores item/reason and ignores a body-supplied agent", async () => {
     const response = await server.inject({
       method: "POST",
       url: "/v1/pay/approvals",
@@ -125,7 +141,8 @@ describe("payment approval relay", () => {
       },
     });
     expect(response.statusCode).toBe(201);
-    const created = response.json() as { id: string };
+    const created = response.json() as { id: string; agent: string };
+    expect(created.agent).toBe("synthetic-payment-test-agent");
 
     const get = await server.inject({
       method: "GET",
@@ -136,8 +153,37 @@ describe("payment approval relay", () => {
     expect(get.json()).toMatchObject({
       item: "Synthetic Widget",
       reason: "Restocking synthetic inventory",
-      agent: "synthetic-shopping-agent",
+      agent: "synthetic-payment-test-agent",
     });
+  });
+
+  it("defaults an absent authenticated agent identity to unknown-agent", async () => {
+    const account = await deps.accountStore.createAccount("unknown-agent@example.test", "Unknown");
+    const token = await makeAgentToken(deps, account.id, new Date(nowMs), null);
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${token}` },
+      payload: {
+        merchant: "Synthetic Books",
+        checkout_origin: "https://checkout.synthetic.test",
+        amount_cents: 2599,
+        currency: "USD",
+        card_ref: "card_synthetic_1",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    const created = response.json() as { id: string; agent: string };
+    expect(created.agent).toBe("unknown-agent");
+
+    const get = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(get.statusCode).toBe(200);
+    expect(get.json()).toMatchObject({ agent: "unknown-agent" });
   });
 
   it("returns the configured Vouchflow audience to an authenticated operator", async () => {

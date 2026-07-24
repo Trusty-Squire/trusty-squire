@@ -38,7 +38,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   description:
     "Pay the checkout in the one active operate_start browser session. Reads the live " +
     "merchant and total when present, creates a phone approval link, waits for approval, " +
-    "verifies the high-confidence purchase mandate, opens the card only in this process, " +
+    "verifies the passkey-signed purchase mandate, opens the card only in this process, " +
     "fills common checkout fields, submits, and audits only the last four digits. Never " +
     "solves 3-D Secure; returns a needs_user handoff when issuer authentication appears.",
   inputSchema,

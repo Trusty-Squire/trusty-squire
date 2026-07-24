@@ -236,7 +236,6 @@ export async function executeOperatePay(
 
     const item = args.item ?? "";
     const reason = args.reason ?? "";
-    const agent = process.env.TRUSTY_SQUIRE_AGENT_IDENTITY ?? "unknown-agent";
 
     const created = await api.createPaymentApproval({
       ...checkout,
@@ -244,7 +243,6 @@ export async function executeOperatePay(
       operator_pubkey: keypair.publicKey,
       item,
       reason,
-      agent,
     });
     const approvalUrl = `${deps.webBase.replace(/\/+$/, "")}/vault/pay/${encodeURIComponent(created.id)}`;
     await deps.surfaceApprovalUrl(approvalUrl);
@@ -306,7 +304,7 @@ export async function executeOperatePay(
       recipient_pubkey_hash: toBase64Url(recipientHash),
       item,
       reason,
-      agent,
+      agent: created.agent,
     });
     if (canonical === undefined) {
       return {

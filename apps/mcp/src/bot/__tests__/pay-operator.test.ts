@@ -53,6 +53,7 @@ async function harness(
   const approvalBodies: Array<Record<string, unknown>> = [];
   const filledCards: CheckoutCard[] = [];
   const nonce = "synthetic-nonce";
+  const agent = "synthetic-payment-test-agent";
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -69,6 +70,7 @@ async function harness(
         {
           id: "approval_test",
           nonce,
+          agent,
           expires_at: new Date(Date.now() + 60_000).toISOString(),
         },
         { status: 201 },
@@ -92,7 +94,7 @@ async function harness(
         recipient_pubkey_hash: recipientHash,
         item: approval.item,
         reason: approval.reason,
-        agent: approval.agent,
+        agent,
       };
       const canonical = canonicalize(payload)!;
       const aad = createHash("sha256").update(canonical, "utf8").digest();
@@ -192,8 +194,8 @@ describe("operate_pay", () => {
       card_ref: "card_test",
       item: "Wireless Mouse",
       reason: "office restock",
-      agent: "unknown-agent",
     });
+    expect(approvalBodies[0]).not.toHaveProperty("agent");
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
     expect(auditBodies).toEqual([
       {
