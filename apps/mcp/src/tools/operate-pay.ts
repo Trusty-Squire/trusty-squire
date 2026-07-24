@@ -13,6 +13,8 @@ const inputSchema = z
       .optional(),
     card_ref: z.string().min(1).max(64).optional(),
     card_label: z.string().min(1).max(256).optional(),
+    item: z.string().max(500).optional(),
+    reason: z.string().max(500).optional(),
   })
   .refine((value) => (value.card_ref === undefined) !== (value.card_label === undefined), {
     message: "Provide exactly one of card_ref or card_label",
@@ -49,6 +51,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       currency: { type: "string", pattern: "^[A-Za-z]{3}$" },
       card_ref: { type: "string" },
       card_label: { type: "string" },
+      item: { type: "string" },
+      reason: { type: "string" },
     },
   },
   annotations: {
@@ -79,6 +83,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
         ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
         ...(args.currency !== undefined ? { currency: args.currency } : {}),
+        ...(args.item !== undefined ? { item: args.item } : {}),
+        ...(args.reason !== undefined ? { reason: args.reason } : {}),
       },
       api,
       activeProvisionBrowser(),
