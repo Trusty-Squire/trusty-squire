@@ -92,7 +92,8 @@ than a high confidence tier. Only then does that local operator process open
 the envelope and fill the checkout. Plaintext card fields are not returned
 through MCP to the coding-agent model, sent to the Trusty Squire API, logged,
 or stored in payment audit events. Issuer 3-D Secure is handed back to the user
-rather than automated.
+rather than automated; the operator may wait for the user to resolve the
+challenge, but it never completes the challenge itself.
 
 Payment audit events are deliberately metadata-only: merchant, amount,
 currency, card last four digits, status, and an optional mandate ID. The API

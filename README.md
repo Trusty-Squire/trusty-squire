@@ -43,8 +43,12 @@ device. Trusty Squire encrypts it in that browser with a passkey-derived key.
 and submits only after you approve the exact purchase. The approval page shows
 the venue, item, amount, requesting agent, and reason; one passkey prompt both
 signs that approval and releases the card to the checkout operator. If the
-issuer requires 3-D Secure, Trusty Squire hands the challenge back to you
-instead of automating it.
+issuer requires 3-D Secure, Trusty Squire notifies your linked Telegram chat
+and waits 180 seconds by default for you to complete the challenge in the open
+checkout instead of automating it. It reports a visible success or decline and
+hands an unresolved challenge back on timeout. `three_ds_wait_seconds` accepts
+whole seconds from 0 to 600; set it to `0` on `operate_pay` to skip the
+notification and waiting and receive the handoff immediately.
 
 ## Install
 
@@ -135,8 +139,8 @@ for the system and data flows.
 - `operate_extract` captures a generated credential into a sealed slot or the vault.
 - `operate_remember` and `operate_use` save and replay successful website flows.
 - `list_payment_cards` returns saved-card labels and opaque references;
-  `operate_pay` requests phone approval, fills a checkout, and hands off 3-D
-  Secure.
+  `operate_pay` requests phone approval, fills a checkout, and waits for the
+  user to resolve 3-D Secure before handing back unresolved challenges.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.

@@ -85,7 +85,10 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 - `audit_log` — review what touched a credential; never exposes secret values.
 - `list_payment_cards`, `operate_pay` — select a saved card by label or opaque
   reference, request phone approval for the exact purchase, fill the checkout,
-  and hand any 3-D Secure challenge back to the user. Card fields never return
+  nudge the user's linked Telegram chat when configured and 3-D Secure is
+  required, and wait for them to resolve it before handing back an unresolved
+  challenge. Set `three_ds_wait_seconds` to `0` only when the user wants the
+  immediate handoff without notification or waiting. Card fields never return
   through MCP.
 
 **Safety rules the agent must follow:**

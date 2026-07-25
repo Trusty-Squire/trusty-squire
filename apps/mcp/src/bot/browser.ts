@@ -5223,6 +5223,40 @@ export class BrowserController {
     return { three_ds_required: false };
   }
 
+  async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
+    if (!this.page) throw new Error("Browser not started");
+    const startUrl = this.page.url();
+    const deadline = Date.now() + timeoutMs;
+    const successUrl =
+      /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|\/paid\b|payment_intent=.*succe/i;
+    const successText =
+      /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
+    const failureText =
+      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
+    do {
+      const texts = await Promise.all(
+        this.page
+          .frames()
+          .map(
+            async (frame) =>
+              await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+          ),
+      );
+      if (texts.some((text) => failureText.test(text))) return "failed";
+      const challenge = await this.detectThreeDsChallenge();
+      const currentUrl = this.page.url();
+      if (
+        !challenge.three_ds_required &&
+        (texts.some((text) => successText.test(text)) ||
+          (currentUrl !== startUrl && successUrl.test(currentUrl)))
+      ) {
+        return "succeeded";
+      }
+      await this.page.waitForTimeout(1_000).catch(() => undefined);
+    } while (Date.now() <= deadline);
+    return "timeout";
+  }
+
   // Deterministic Firebase/GCP credential extraction. Every Firebase project
   // auto-creates a "Browser key (auto created by Firebase)" in its underlying
   // Google Cloud project — the SAME AIzaSy value as firebaseConfig.apiKey AND a

@@ -163,6 +163,13 @@ export class ApiClient {
     return records.map(({ id, label }) => ({ id, label }));
   }
 
+  async notifyThreeDs(approvalId: string): Promise<{ sent: boolean }> {
+    // Empty object, NOT undefined: post() always sends Content-Type: application/json,
+    // and an empty body with that header trips Fastify's FST_ERR_CTP_EMPTY_JSON_BODY (400).
+    // The route ignores the body, so {} satisfies the JSON parser harmlessly.
+    return this.post(`/v1/pay/approvals/${encodeURIComponent(approvalId)}/notify-3ds`, {});
+  }
+
   async auditPayment(input: {
     merchant: string;
     amount_cents: number;
