@@ -1,5 +1,15 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.4 (2026-07-25)
+
+- **Operator: surface-and-ask on a soft no-match instead of closing silently.**
+  `operate_finish_task` now guides the host agent, when a `kind='result'` task
+  ends because no exact/authentic item was found (e.g. a shopping search where the
+  genuine listing wasn't in stock), to first relay the closest candidates and why
+  they were rejected and let the user choose a substitute / broaden the search /
+  try another site — rather than quietly ending the session. Hard blockers
+  (anti-bot, CAPTCHA, 3-D Secure, unsupported payment) still hand off immediately.
+
 ## 1.1.3 (2026-07-24)
 
 - **3-D Secure challenges now wait for the user before handing back.**
