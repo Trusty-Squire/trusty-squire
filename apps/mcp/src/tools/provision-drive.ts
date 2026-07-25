@@ -203,7 +203,7 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
     "payload: {url, text, elements} where each element has a fresh `ref` (pass as " +
     "operate_act.target) plus label/role/href/path/value_len — empty fields and " +
     "the redundant screen/accessibility trees are omitted (~50% smaller). Pass " +
-    "detail:\"full\" for the legacy screen+accessibility+full-field payload on a " +
+    'detail:"full" for the legacy screen+accessibility+full-field payload on a ' +
     "genuinely ambiguous step. Refs are scoped to the latest observation; stale " +
     "refs fail loudly, so re-observe and retry with the new ref.",
   inputSchema: observeSchema,
@@ -223,8 +223,17 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
 const actSchema = z.object({
   session_id: z.string().min(1),
   kind: z.enum([
-    "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
-    "allow_host", "type_secret", "scroll", "upload",
+    "click",
+    "js_click",
+    "type",
+    "goto",
+    "press",
+    "oauth_click",
+    "oauth_settle",
+    "allow_host",
+    "type_secret",
+    "scroll",
+    "upload",
   ]),
   target: z.string().min(1).max(200).optional(),
   text: z.string().max(4096).optional(),
@@ -271,9 +280,16 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     case "allow_host":
       return { kind: "allow_host", host: need(args.host, "host") };
     case "type_secret":
-      return { kind: "type_secret", slot: need(args.slot, "slot"), target: need(args.target, "target") };
+      return {
+        kind: "type_secret",
+        slot: need(args.slot, "slot"),
+        target: need(args.target, "target"),
+      };
     case "scroll":
-      return { kind: "scroll", ...(args.direction !== undefined ? { direction: args.direction } : {}) };
+      return {
+        kind: "scroll",
+        ...(args.direction !== undefined ? { direction: args.direction } : {}),
+      };
     case "upload":
       return { kind: "upload", target: need(args.target, "target"), path: need(args.path, "path") };
   }
@@ -299,9 +315,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "is driven and no API credential is needed — it uses the session you're " +
     "already signed into). If a " +
     "target ref is stale, call operate_observe and retry with a fresh ref. " +
-    "detail (default \"compact\") controls the returned payload: \"none\" skips it " +
+    'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
-    "\"full\" returns the legacy screen+accessibility payload.",
+    '"full" returns the legacy screen+accessibility payload.',
   inputSchema: actSchema,
   jsonInputSchema: {
     type: "object",
@@ -311,8 +327,17 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       kind: {
         type: "string",
         enum: [
-          "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
-          "allow_host", "type_secret", "scroll", "upload",
+          "click",
+          "js_click",
+          "type",
+          "goto",
+          "press",
+          "oauth_click",
+          "oauth_settle",
+          "allow_host",
+          "type_secret",
+          "scroll",
+          "upload",
         ],
       },
       target: { type: "string" },
@@ -389,7 +414,9 @@ async function persistExtracted(
     service: store.service,
     ...(store.label !== undefined ? { label: store.label } : {}),
     ...storeInput,
-    ...(store.env_var_suggestion !== undefined ? { env_var_suggestion: store.env_var_suggestion } : {}),
+    ...(store.env_var_suggestion !== undefined
+      ? { env_var_suggestion: store.env_var_suggestion }
+      : {}),
     ...(store.type !== undefined ? { type: store.type } : { type: "api_key" }),
     ...(store.auth_shape !== undefined ? { auth_shape: store.auth_shape } : {}),
     ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
@@ -411,17 +438,12 @@ async function persistExtracted(
  * stored extraction must never spread that object back into the MCP response:
  * the host/model receives only non-secret extraction and vault metadata.
  */
-export function storedExtractResult(
-  extracted: ExtractResult,
-  stored: StoredCredentialMetadata,
-) {
+export function storedExtractResult(extracted: ExtractResult, stored: StoredCredentialMetadata) {
   return {
     session_id: extracted.session_id,
     url: extracted.url,
     candidate_count: extracted.candidate_count,
-    ...(extracted.blocked_reason !== undefined
-      ? { blocked_reason: extracted.blocked_reason }
-      : {}),
+    ...(extracted.blocked_reason !== undefined ? { blocked_reason: extracted.blocked_reason } : {}),
     stored_credential: stored,
   };
 }
@@ -454,7 +476,7 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     "(do not treat the empty result as a real key) — drive an interactive login " +
     "or hand back to the user. Call when you have navigated to the keys page. " +
     "With `into_slot`, a still-masked value is refused (reveal it first); pass " +
-    "`secret_label` (e.g. \"client secret\") to pick the right one when the page " +
+    '`secret_label` (e.g. "client secret") to pick the right one when the page ' +
     "shows several credentials.",
   inputSchema: extractSchema,
   jsonInputSchema: {
@@ -494,7 +516,10 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
       const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
       const candidates = Object.entries(values).filter(
         ([k, v]) =>
-          !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !isMaskedDisplay(v),
+          !k.endsWith("_truncated") &&
+          typeof v === "string" &&
+          v.length >= 8 &&
+          !isMaskedDisplay(v),
       );
       // When the page shows several credentials (Google's client ID + secret),
       // a secret_label picks the right one by field name; otherwise take the
@@ -523,7 +548,9 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
         candidate_count: extracted.candidate_count,
         sealed: true,
         slot: handle,
-        ...(extracted.blocked_reason !== undefined ? { blocked_reason: extracted.blocked_reason } : {}),
+        ...(extracted.blocked_reason !== undefined
+          ? { blocked_reason: extracted.blocked_reason }
+          : {}),
       };
     }
 
@@ -707,7 +734,10 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
     // anti-false-green gate) against the live session BEFORE closing, then close.
     const verified =
       args.verify_recipe !== undefined
-        ? await verifyPostcondition(args.session_id, (await readRecipe(args.verify_recipe)).postcondition)
+        ? await verifyPostcondition(
+            args.session_id,
+            (await readRecipe(args.verify_recipe)).postcondition,
+          )
         : undefined;
     emitProvisionMeasurement(
       args.session_id,
@@ -893,7 +923,11 @@ export const provisionPrepareLoginTool: Tool<z.infer<typeof prepareLoginSchema>>
       args.password_slot ?? "password",
       generatePassword(args.password_length ?? 24),
     );
-    return { session_id: args.session_id, slots: { login, password }, email_preview: login.preview };
+    return {
+      session_id: args.session_id,
+      slots: { login, password },
+      email_preview: login.preview,
+    };
   },
 };
 
