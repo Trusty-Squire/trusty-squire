@@ -4,7 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../../components/AppShell";
 import { CardEntry } from "../../components/CardEntry";
-import { ApiError, apiGet } from "../../lib/api";
+import { ApiError, apiDelete, apiGet } from "../../lib/api";
 
 interface SavedCard {
   id: string;
@@ -16,6 +16,7 @@ export default function CardPage() {
   const router = useRouter();
   const [cards, setCards] = useState<SavedCard[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setCards(await apiGet<SavedCard[]>("/v1/vault/e2e"));
@@ -35,6 +36,23 @@ export default function CardPage() {
       cancelled = true;
     };
   }, [load, router]);
+
+  const deleteCard = useCallback(
+    async (cardId: string): Promise<void> => {
+      try {
+        await apiDelete("/v1/vault/e2e/" + encodeURIComponent(cardId));
+        setPendingDeleteId(null);
+        await load();
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          router.replace("/login?next=/vault/card");
+          return;
+        }
+        setError(err instanceof Error ? err.message : "Failed to delete saved card.");
+      }
+    },
+    [load, router],
+  );
 
   return (
     <AppShell>
@@ -66,6 +84,32 @@ export default function CardPage() {
           <div className="dz-row" key={card.id}>
             <div className="dz-title">{card.label}</div>
             <div className="row-meta">{card.createdAt}</div>
+            {pendingDeleteId === card.id ? (
+              <div className="form-actions">
+                <button
+                  className="dz-btn danger"
+                  type="button"
+                  onClick={() => void deleteCard(card.id)}
+                >
+                  Confirm
+                </button>
+                <button
+                  className="dz-btn"
+                  type="button"
+                  onClick={() => setPendingDeleteId(null)}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
+              <button
+                className="dz-btn danger"
+                type="button"
+                onClick={() => setPendingDeleteId(card.id)}
+              >
+                Delete
+              </button>
+            )}
           </div>
         ))}
       </section>
