@@ -91,6 +91,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Link className={pathname === "/vault/activity" ? "on" : ""} href="/vault/activity">
             Activity
           </Link>
+          <Link className={pathname === "/services" ? "on" : ""} href="/services">
+            Services
+          </Link>
           <Link className={pathname === "/agents" ? "on" : ""} href="/agents">
             Agents
           </Link>
@@ -148,6 +151,14 @@ export function AppShell({ children }: { children: ReactNode }) {
                     onClick={() => setMenuOpen(false)}
                   >
                     Activity
+                  </Link>
+                  <Link
+                    className={`mobile-nav-link${pathname === "/services" ? " on" : ""}`}
+                    role="menuitem"
+                    href="/services"
+                    onClick={() => setMenuOpen(false)}
+                  >
+                    Services
                   </Link>
                   <Link
                     className={`mobile-nav-link${pathname === "/agents" ? " on" : ""}`}
