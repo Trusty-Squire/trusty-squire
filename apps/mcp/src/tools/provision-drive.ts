@@ -652,7 +652,7 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
     "stock), first relay the closest candidates and why they were rejected, then " +
     "let the user choose a substitute, broader search, or another site before " +
     "finishing. Hard blockers such as anti-bot, CAPTCHA, 3-D Secure, or unsupported " +
-    "payment should still finish or hand off immediately.",
+    "payment should still be surfaced to the user immediately rather than worked around.",
   inputSchema: finishTaskSchema,
   jsonInputSchema: {
     type: "object",

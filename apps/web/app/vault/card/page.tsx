@@ -17,6 +17,7 @@ export default function CardPage() {
   const [cards, setCards] = useState<SavedCard[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [deletingCardId, setDeletingCardId] = useState<string | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
     setCards(await apiGet<SavedCard[]>("/v1/vault/e2e"));
@@ -39,19 +40,24 @@ export default function CardPage() {
 
   const deleteCard = useCallback(
     async (cardId: string): Promise<void> => {
+      if (deletingCardId !== null) return;
+      setDeletingCardId(cardId);
       try {
         await apiDelete("/v1/vault/e2e/" + encodeURIComponent(cardId));
+        setCards((current) => current?.filter((card) => card.id !== cardId) ?? current);
+        setError(null);
         setPendingDeleteId(null);
-        await load();
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           router.replace("/login?next=/vault/card");
           return;
         }
         setError(err instanceof Error ? err.message : "Failed to delete saved card.");
+      } finally {
+        setDeletingCardId(null);
       }
     },
-    [load, router],
+    [deletingCardId, router],
   );
 
   return (
@@ -89,6 +95,7 @@ export default function CardPage() {
                 <button
                   className="dz-btn danger"
                   type="button"
+                  disabled={deletingCardId !== null}
                   onClick={() => void deleteCard(card.id)}
                 >
                   Confirm
@@ -96,6 +103,7 @@ export default function CardPage() {
                 <button
                   className="dz-btn"
                   type="button"
+                  disabled={deletingCardId !== null}
                   onClick={() => setPendingDeleteId(null)}
                 >
                   Cancel
@@ -105,6 +113,7 @@ export default function CardPage() {
               <button
                 className="dz-btn danger"
                 type="button"
+                disabled={deletingCardId !== null}
                 onClick={() => setPendingDeleteId(card.id)}
               >
                 Delete
