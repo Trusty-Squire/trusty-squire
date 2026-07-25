@@ -647,7 +647,12 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
     "operate_extract's store), for signups/key-provisioning. kind='result' " +
     "reports a `summary` (+ optional `data` map) for any other task — a design " +
     "review's findings, extracted data, or 'task done' (put confirmed:true in " +
-    "data). Use operate_finish instead to abort without an outcome.",
+    "data). Use operate_finish instead to abort without an outcome. For a soft " +
+    "no-match with kind='result' (for example, no exact or authentic item in " +
+    "stock), first relay the closest candidates and why they were rejected, then " +
+    "let the user choose a substitute, broader search, or another site before " +
+    "finishing. Hard blockers such as anti-bot, CAPTCHA, 3-D Secure, or unsupported " +
+    "payment should still finish or hand off immediately.",
   inputSchema: finishTaskSchema,
   jsonInputSchema: {
     type: "object",
