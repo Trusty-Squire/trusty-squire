@@ -283,6 +283,20 @@ describe("observe-delta harness", () => {
       expect(builds[i]!.observation.delta, `obs${i + 1} should be a delta`).toBe(true);
     }
 
+    // The reconstruction base is NOT a fiction: the persisted snapshot
+    // (fileElements) covers EXACTLY the complete set (fullByRef), and obs1's
+    // emitted wire payload is that set minus the collapsed chrome links — which
+    // are recoverable from the persisted file. So "base = complete persisted set"
+    // is proven, not assumed.
+    const obs1 = builds[0]!.observation;
+    const fileRefs = new Set(builds[0]!.fileElements.map((e) => e.ref));
+    expect(fileRefs).toEqual(new Set(builds[0]!.fullByRef.keys()));
+    const emittedRefs0 = new Set(obs1.elements.map((e) => e.ref));
+    const missingFromWire = [...fileRefs].filter((r) => !emittedRefs0.has(r));
+    expect(missingFromWire.length).toBe(obs1.chrome_links_collapsed);
+    // Every ref the wire dropped is retrievable from the persisted snapshot.
+    for (const r of missingFromWire) expect(fileRefs.has(r)).toBe(true);
+
     // Reconstruct the host's running view: base = the COMPLETE snapshot the host
     // holds after obs1 (the persisted file == fullByRef), then apply each emitted
     // delta's changed upserts + removed deletes. It must equal ground truth.
@@ -325,6 +339,58 @@ describe("observe-delta harness", () => {
     // Collapse actually fired (this is a chrome-heavy page) but only on links.
     expect(obs1.chrome_links_collapsed).toBe(collapsedLinks);
     expect(collapsedLinks).toBeGreaterThan(0);
+  });
+
+  it("INV-actionable-never-dropped: a dismiss control shipped as a bare <a> (no nav href) is NOT collapsed", () => {
+    // Codex-review hardening: the collapse must key on "is this a NAV link" (real
+    // href), not just tag===a. A "Manage cookies"/"Close" action-link has no href
+    // (or href="#") and must survive even in a chrome region.
+    const page: InteractiveElement[] = [
+      el({ tag: "a", role: "link", visibleText: "Manage cookies", href: null, screenPath: "navigation:footer > link:manage", container: "navigation:footer" }),
+      el({ tag: "a", role: "link", visibleText: "Close banner", href: "#", screenPath: "aside:cookie > link:close", container: "aside:cookie" }),
+      el({ tag: "a", role: "link", visibleText: "Careers", href: "/careers", screenPath: "navigation:footer > link:careers", container: "navigation:footer" }),
+    ];
+    expect(isPlainChromeLink(page[0]!)).toBe(false); // no href → kept
+    expect(isPlainChromeLink(page[1]!)).toBe(false); // href="#" → kept
+    expect(isPlainChromeLink(page[2]!)).toBe(true); // real nav link → collapsible
+
+    const built = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: page, prev: null });
+    const labels = new Set(built.observation.elements.map((e) => e.label));
+    expect(labels.has("Manage cookies")).toBe(true);
+    expect(labels.has("Close banner")).toBe(true);
+    expect(labels.has("Careers")).toBe(false); // the only true nav link collapsed
+    expect(built.observation.chrome_links_collapsed).toBe(1);
+  });
+
+  it("same-hash duplicates: removing one is lossless and the vanished ordinal resolves to null (never a cross-group mis-click to a distinct element)", () => {
+    // Two STRUCTURALLY IDENTICAL buttons (same stableElementId) → refs _1/_2.
+    const twin = (): InteractiveElement =>
+      el({ tag: "button", role: "button", visibleText: "Remove", screenPath: "list:cart > button:remove", container: "list:cart" });
+    const before = [twin(), twin()];
+    const refsBefore = provisionElementRefs(before);
+    const ref1 = refsBefore.get(before[0]!)!;
+    const ref2 = refsBefore.get(before[1]!)!;
+    expect(ref1).toMatch(/_1$/);
+    expect(ref2).toMatch(/_2$/);
+
+    // Observe once (full), then remove the FIRST twin and observe again (delta).
+    const b1 = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: before, prev: null });
+    const after = [twin()]; // one identical button remains
+    const b2 = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: after, prev: b1.nextState });
+
+    // Lossless: the delta reports one ref removed, one unchanged; reconstruction
+    // from base ⊕ delta equals the true (single-element) set.
+    expect(b2.observation.delta).toBe(true);
+    expect(b2.observation.removed).toEqual([ref2]); // the surplus ordinal is gone
+    const recon = new Map(b1.fullByRef);
+    for (const e of b2.observation.elements) recon.set(e.ref, e);
+    for (const r of b2.observation.removed ?? []) recon.delete(r);
+    expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
+
+    // The vanished ordinal resolves to null (graceful), NOT a distinct element.
+    expect(resolveTarget(after, ref2)).toBeNull();
+    // The surviving ordinal resolves to a same-hash element (interchangeable).
+    expect(resolveTarget(after, ref1)?.selector).toBe(after[0]!.selector);
   });
 
   it("INV-clickable-unchanged: an unchanged, not-re-emitted element still resolves by its stable ref", () => {
@@ -640,21 +706,28 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     // ...but a second full observe of the identical page is byte-identical.
     const full2 = await observe(sid, "full");
 
-    // No delta machinery ever leaks into the escape hatch.
+    // No delta machinery ever leaks into the escape hatch, and NO field is
+    // elided: full keeps every element (no collapse) with the complete legacy
+    // field set (path, container, value, checked, ...).
     for (const f of [full1, full2]) {
       expect(f.delta).toBeUndefined();
       expect(f.unchanged).toBeUndefined();
       expect(f.chrome_links_collapsed).toBeUndefined();
-      // Full keeps EVERY element (no collapse) and every field (incl. path).
+      expect(f.text_unchanged).toBeUndefined();
+      expect(f.snapshot_file).toBeUndefined(); // escape hatch is the legacy shape
       expect(f.elements.length).toBe(h.elements.length);
-      expect(f.elements.every((e) => "path" in e)).toBe(true);
+      for (const e of f.elements) {
+        const bag = e as unknown as Record<string, unknown>;
+        for (const field of ["ref", "label", "tag", "role", "type", "value", "checked", "href", "testId", "path", "container", "topmost", "occluded_by"]) {
+          expect(field in bag, `full element missing "${field}"`).toBe(true);
+        }
+      }
       expect(f.screen).toBeDefined();
       expect(f.accessibility).toBeDefined();
     }
-    // Byte-equivalent perception payload across the two calls (delta state in
-    // between did not perturb it). session_id/url are identical too.
-    expect(JSON.stringify(full1.elements)).toBe(JSON.stringify(full2.elements));
-    expect(JSON.stringify(full1.screen)).toBe(JSON.stringify(full2.screen));
-    expect(JSON.stringify(full1.accessibility)).toBe(JSON.stringify(full2.accessibility));
+    // The ENTIRE full payload is identical across the two calls — the compact
+    // observe that ran in between (mutating delta state) did not perturb ANY field
+    // (elements, screen, accessibility, text, guidance, url, session_id).
+    expect(full1).toEqual(full2);
   });
 });

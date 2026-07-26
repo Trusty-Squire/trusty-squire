@@ -493,6 +493,16 @@ export function resolveTarget(
     // Staleness guard: a ref whose element is gone matches nothing here and
     // returns null (the caller re-observes). No generation counter needed — the
     // stable hash IS the identity, so it can't mis-resolve to a recycled node.
+    //
+    // Ordinal caveat (same-hash duplicates): the `_<ordinal>` suffix positionally
+    // disambiguates elements that hash IDENTICALLY (same screenPath/testId/label/
+    // role/tag/href/type). Ordinals are assigned in DOM order, so if one member of
+    // a duplicate group is removed across observes, a reused old ordinal resolves
+    // to a SURVIVING member of the same group rather than null. That is safe by
+    // construction: same stableElementId means the elements are structurally
+    // interchangeable (indistinguishable to the host). An ordinal past the current
+    // group size still returns null, and the delta's `removed` list tells a
+    // well-behaved host the old ref is gone.
     const matches = elements.filter((el) => stableElementId(el) === parsedRef.id);
     if (parsedRef.ordinal !== null) {
       const match = matches[parsedRef.ordinal - 1];
@@ -1555,14 +1565,24 @@ export function isChromeRegionPath(el: InteractiveElement): boolean {
   return false;
 }
 
-// A PLAIN chrome-region link — the ONLY thing the collapse removes. Buttons,
-// inputs, and role-controls are never plain links (isActionableControl short-
-// circuits), so they are always kept regardless of region.
+// A PLAIN chrome-region NAVIGATION link — the ONLY thing the collapse removes.
+// Buttons, inputs, and role-controls are never plain links (isActionableControl
+// short-circuits), so they are always kept regardless of region. AND we require a
+// real navigational href: an <a> with no href (or href="#"/"javascript:") is an
+// ACTION control dressed as a link — a "Manage cookies" / "Close banner" / cookie
+// consent link — not a nav link, so it must NEVER be collapsed even in a chrome
+// region. This closes the "a dismiss control shipped as a bare <a> gets dropped"
+// gap: only links that actually navigate somewhere are collapsible.
 export function isPlainChromeLink(el: InteractiveElement): boolean {
   if (isActionableControl(el)) return false;
   const isLink = el.tag === "a" || (el.role ?? "").toLowerCase() === "link";
   if (!isLink) return false;
-  return isChromeRegionPath(el);
+  if (!isChromeRegionPath(el)) return false;
+  const href = (el.href ?? "").trim();
+  if (href.length === 0 || href === "#" || href.toLowerCase().startsWith("javascript:")) {
+    return false;
+  }
+  return true;
 }
 
 // Fraction of the previous element set that changed (added/changed + removed).
