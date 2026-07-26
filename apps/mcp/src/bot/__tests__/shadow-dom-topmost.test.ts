@@ -157,10 +157,7 @@ describe("extractInteractiveElements — open shadow root occlusion (real Chromi
       expect(resolved?.visibleText ?? resolved?.ariaLabel).toBe("Add To Cart");
       await ctrl.click(resolved?.selector ?? "");
       const flipped = await page.evaluate(
-        () =>
-          document
-            .querySelector("cart-widget")
-            ?.shadowRoot?.querySelector("#buy")?.textContent,
+        () => document.querySelector("cart-widget")?.shadowRoot?.querySelector("#buy")?.textContent,
       );
       expect(flipped).toBe("ADDED");
     } finally {
@@ -175,10 +172,7 @@ describe("extractInteractiveElements — open shadow root occlusion (real Chromi
         const button = document.querySelector("#plain");
         if (!(button instanceof HTMLElement)) return 0;
         const rect = button.getBoundingClientRect();
-        let hit = document.elementFromPoint(
-          rect.left + rect.width / 2,
-          rect.top + rect.height / 2,
-        );
+        let hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
         let depth = 0;
         while (hit !== null && hit !== button) {
           hit = hit.parentElement;
