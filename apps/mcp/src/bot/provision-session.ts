@@ -77,9 +77,9 @@ const DEFAULT_AUTH_HOSTS: readonly string[] = [
 ];
 
 export interface ObservedElement {
-  // Fresh action handle for this exact observation generation. Prefer this as
-  // operate_act.target; stale generations fail loudly instead of silently
-  // clicking a recycled DOM node.
+  // Stable action handle for this element identity. Prefer this as
+  // operate_act.target; it remains reusable across observations while the
+  // element exists, and a removed or changed identity fails to resolve.
   ref: string;
   // Human label for display/backcompat. operate_act still accepts labels, but
   // generated refs are safer on pages with repeated labels.
@@ -103,6 +103,7 @@ export interface ObservedElement {
   testId?: string | null;
   // DOM-derived screen context for non-vision host agents. `path` is a compact
   // targetable label such as "dialog:finish-account > button:create-account".
+  // Compact wire payloads omit it; the complete snapshot file retains it.
   path?: string | null;
   // `container` is redundant with `path` (path = "<container> > <kind>:<label>")
   // and is OMITTED in compact mode.
@@ -151,12 +152,12 @@ export interface Observation {
   // remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
   elements: ObservedElement[];
-  // Compact-mode bookkeeping so omission is never silent:
-  // the full element count (compact keeps all elements, just lighter), and
-  // whether the page text was capped at the 4000-char limit. Absent in full mode.
+  // Compact-mode bookkeeping so omission is never silent: the complete current
+  // element count (including delta/collapsed omissions), and whether page text
+  // was capped at 4000 characters. Absent in full mode.
   elements_total?: number;
   text_truncated?: boolean;
-  // Per-session observe delta (docs/DESIGN-observe-delta.md). On a DELTA emit,
+  // Per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA emit,
   // `elements` carries ONLY the elements whose compact form changed vs the
   // previous observation; `delta` is true and `unchanged` counts the elements
   // that were identical and therefore omitted (present in the persisted
@@ -1487,8 +1488,8 @@ export function toCompactElement(
   return out;
 }
 
-// Session-scoped observe-snapshot persistence (docs/DESIGN-observe-delta.md,
-// item 3). Reuses the best-effort writeFileSync pattern of the corpus dump-hook:
+// Session-scoped observe-snapshot persistence (docs/DESIGN-observe-compact.md).
+// Reuses the best-effort writeFileSync pattern of the corpus dump-hook:
 // a write failure must NEVER break an observe. Rolling one file per session (the
 // latest COMPLETE inventory) — that's what the host wants when it re-expands
 // after a context compaction or greps for an element the delta didn't re-show.
@@ -1515,7 +1516,14 @@ function persistObserveSnapshot(
     writeFileSync(
       temporaryFile,
       JSON.stringify(
-        { session_id: session.id, generation, url, elements_total: elements.length, text, elements },
+        {
+          session_id: session.id,
+          generation,
+          url,
+          elements_total: elements.length,
+          text,
+          elements,
+        },
         null,
         2,
       ),
@@ -1540,7 +1548,13 @@ function persistObserveSnapshot(
 // even when they live in a chrome region (aside/footer/dialog).
 export function isActionableControl(el: InteractiveElement): boolean {
   const role = (el.role ?? "").toLowerCase();
-  if (role === "button" || role === "tab" || role === "checkbox" || role === "radio" || role === "menuitem") {
+  if (
+    role === "button" ||
+    role === "tab" ||
+    role === "checkbox" ||
+    role === "radio" ||
+    role === "menuitem"
+  ) {
     return true;
   }
   if (el.tag === "button" || el.tag === "input") return true;
@@ -1548,7 +1562,7 @@ export function isActionableControl(el: InteractiveElement): boolean {
   return false;
 }
 
-// "Chrome region" per docs/DESIGN-observe-delta.md item 5: the element's path
+// "Chrome region" per docs/DESIGN-observe-compact.md: the element's path
 // root is a nav/footer/banner/aside-style landmark, OR a `section:` whose name is
 // a known boilerplate block (newsletter/copyright/social/…). Site-dependent
 // (measured 0% on flat DOMs, up to 57% on hoka) — a bonus, never the main win.

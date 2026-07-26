@@ -1,5 +1,5 @@
 // Regression-eval harness for the measured context-minimization on the operator
-// observe path (docs: fix/operator-observe-delta). The whole point of the change
+// observe path (docs/DESIGN-observe-compact.md). The whole point of the change
 // is a SMALLER host payload that is still LOSSLESS and never drops an actionable
 // control — so this file asserts those invariants directly, each as a named test:
 //
@@ -7,7 +7,7 @@
 //   INV-actionable-never-dropped — buttons/inputs/dismiss controls always survive
 //   INV-clickable-unchanged   — an unchanged (not re-emitted) element still
 //                               resolves by its stable ref through resolveTarget
-//   INV-token-budget          — the delta path is < 30% of the full baseline
+//   INV-token-budget          — the delta path preserves the measured savings
 //   INV-full-escape-hatch     — detail:"full" is byte-equivalent + un-deltified
 //
 // Fixtures are SYNTHETIC — realistic Casetify-style ~150-element pages with a
@@ -15,7 +15,15 @@
 // the design. NO real/captured credentials: every element's `value` is left
 // null (the harness never sets a secret), per the no-real-creds rule.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type * as GoogleLoginModule from "../google-login.js";
@@ -74,7 +82,6 @@ import {
   resolveTarget,
   isActionableControl,
   isPlainChromeLink,
-  toCompactElement,
   startProvisionSession,
   observe,
   verifyPostcondition,
@@ -127,37 +134,93 @@ function casetifyPage(opts: PageOpts = {}): InteractiveElement[] {
 
   // banner
   out.push(
-    el({ tag: "a", role: "link", visibleText: "Casetify", href: "/", screenPath: "banner:top > link:home", container: "banner:top" }),
+    el({
+      tag: "a",
+      role: "link",
+      visibleText: "Casetify",
+      href: "/",
+      screenPath: "banner:top > link:home",
+      container: "banner:top",
+    }),
   );
   for (const nav of ["Shop", "Tech", "Collabs", "About", "Support"]) {
     out.push(
-      el({ tag: "a", role: "link", visibleText: nav, href: `/${nav.toLowerCase()}`, screenPath: `navigation:main > link:${nav.toLowerCase()}`, container: "navigation:main" }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: nav,
+        href: `/${nav.toLowerCase()}`,
+        screenPath: `navigation:main > link:${nav.toLowerCase()}`,
+        container: "navigation:main",
+      }),
     );
   }
   out.push(
-    el({ tag: "input", type: "search", placeholder: "Search products", screenPath: "banner:top > input:search", container: "banner:top", selector: "#search" }),
+    el({
+      tag: "input",
+      type: "search",
+      placeholder: "Search products",
+      screenPath: "banner:top > input:search",
+      container: "banner:top",
+      selector: "#search",
+    }),
   );
   out.push(
-    el({ tag: "button", role: "button", visibleText: "Cart", screenPath: "banner:top > button:cart", container: "banner:top", selector: "#cart" }),
+    el({
+      tag: "button",
+      role: "button",
+      visibleText: "Cart",
+      screenPath: "banner:top > button:cart",
+      container: "banner:top",
+      selector: "#cart",
+    }),
   );
 
   // filters — a mix of buttons and a sort control whose label changes
   out.push(
-    el({ tag: "button", role: "button", visibleText: sortLabel, screenPath: "main:catalog > button:sort", container: "main:catalog", selector: "#sort" }),
+    el({
+      tag: "button",
+      role: "button",
+      visibleText: sortLabel,
+      screenPath: "main:catalog > button:sort",
+      container: "main:catalog",
+      selector: "#sort",
+    }),
   );
   for (const f of ["Phone", "Laptop", "Watch", "Audio"]) {
     out.push(
-      el({ tag: "button", role: "button", visibleText: f, screenPath: `main:catalog > button:filter-${f.toLowerCase()}`, container: "main:catalog", selector: `#f-${f}` }),
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: f,
+        screenPath: `main:catalog > button:filter-${f.toLowerCase()}`,
+        container: "main:catalog",
+        selector: `#f-${f}`,
+      }),
     );
   }
 
   // product grid — link + Add-to-cart button per product
   for (let i = 0; i < products; i++) {
     out.push(
-      el({ tag: "a", role: "link", visibleText: `Product ${i}`, href: `/p/${i}`, screenPath: `main:catalog > article:product-${i} > link:title`, container: `article:product-${i}` }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: `Product ${i}`,
+        href: `/p/${i}`,
+        screenPath: `main:catalog > article:product-${i} > link:title`,
+        container: `article:product-${i}`,
+      }),
     );
     out.push(
-      el({ tag: "button", role: "button", visibleText: "Add to cart", screenPath: `main:catalog > article:product-${i} > button:add`, container: `article:product-${i}`, selector: `#add-${i}` }),
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Add to cart",
+        screenPath: `main:catalog > article:product-${i} > button:add`,
+        container: `article:product-${i}`,
+        selector: `#add-${i}`,
+      }),
     );
   }
 
@@ -165,63 +228,186 @@ function casetifyPage(opts: PageOpts = {}): InteractiveElement[] {
   // two plain chrome links. The aside vanishes once dismissed.
   if (cookieAside) {
     out.push(
-      el({ tag: "button", role: "button", visibleText: "Close banner", screenPath: "aside:cookie-consent > button:close", container: "aside:cookie-consent", selector: "#cookie-close" }),
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Close banner",
+        screenPath: "aside:cookie-consent > button:close",
+        container: "aside:cookie-consent",
+        selector: "#cookie-close",
+      }),
     );
     out.push(
-      el({ tag: "button", role: "button", visibleText: "Accept all", screenPath: "aside:cookie-consent > button:accept", container: "aside:cookie-consent", selector: "#cookie-accept" }),
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Accept all",
+        screenPath: "aside:cookie-consent > button:accept",
+        container: "aside:cookie-consent",
+        selector: "#cookie-accept",
+      }),
     );
     out.push(
-      el({ tag: "button", role: "button", visibleText: "Reject all", screenPath: "aside:cookie-consent > button:reject", container: "aside:cookie-consent", selector: "#cookie-reject" }),
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Reject all",
+        screenPath: "aside:cookie-consent > button:reject",
+        container: "aside:cookie-consent",
+        selector: "#cookie-reject",
+      }),
     );
     out.push(
-      el({ tag: "a", role: "link", visibleText: "Cookie policy", href: "/cookies", screenPath: "aside:cookie-consent > link:policy", container: "aside:cookie-consent" }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: "Cookie policy",
+        href: "/cookies",
+        screenPath: "aside:cookie-consent > link:policy",
+        container: "aside:cookie-consent",
+      }),
     );
     out.push(
-      el({ tag: "a", role: "link", visibleText: "Privacy", href: "/privacy", screenPath: "aside:cookie-consent > link:privacy", container: "aside:cookie-consent" }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: "Privacy",
+        href: "/privacy",
+        screenPath: "aside:cookie-consent > link:privacy",
+        container: "aside:cookie-consent",
+      }),
     );
   }
 
   // sign-in promo dialog — a dismiss control inside a dialog
   out.push(
-    el({ tag: "button", role: "button", visibleText: "Dismiss sign-in", screenPath: "dialog:signin-promo > button:dismiss", container: "dialog:signin-promo", selector: "#signin-dismiss" }),
+    el({
+      tag: "button",
+      role: "button",
+      visibleText: "Dismiss sign-in",
+      screenPath: "dialog:signin-promo > button:dismiss",
+      container: "dialog:signin-promo",
+      selector: "#signin-dismiss",
+    }),
   );
   out.push(
-    el({ tag: "button", role: "button", visibleText: "Sign in", screenPath: "dialog:signin-promo > button:signin", container: "dialog:signin-promo", selector: "#signin" }),
+    el({
+      tag: "button",
+      role: "button",
+      visibleText: "Sign in",
+      screenPath: "dialog:signin-promo > button:signin",
+      container: "dialog:signin-promo",
+      selector: "#signin",
+    }),
   );
   out.push(
-    el({ tag: "input", type: "email", placeholder: "Email", screenPath: "dialog:signin-promo > input:email", container: "dialog:signin-promo", selector: "#signin-email" }),
+    el({
+      tag: "input",
+      type: "email",
+      placeholder: "Email",
+      screenPath: "dialog:signin-promo > input:email",
+      container: "dialog:signin-promo",
+      selector: "#signin-email",
+    }),
   );
 
   // footer — a "Manage cookies" dismiss control inside navigation:footer, plus
   // MANY plain chrome links across footer landmarks (the collapse target).
   out.push(
-    el({ tag: "button", role: "button", visibleText: "Manage cookies", screenPath: "navigation:footer > button:manage-cookies", container: "navigation:footer", selector: "#manage-cookies" }),
+    el({
+      tag: "button",
+      role: "button",
+      visibleText: "Manage cookies",
+      screenPath: "navigation:footer > button:manage-cookies",
+      container: "navigation:footer",
+      selector: "#manage-cookies",
+    }),
   );
-  for (const link of ["Careers", "Press", "Sustainability", "Wholesale", "Affiliates", "Returns", "Shipping", "Warranty", "Contact", "FAQ"]) {
+  for (const link of [
+    "Careers",
+    "Press",
+    "Sustainability",
+    "Wholesale",
+    "Affiliates",
+    "Returns",
+    "Shipping",
+    "Warranty",
+    "Contact",
+    "FAQ",
+  ]) {
     out.push(
-      el({ tag: "a", role: "link", visibleText: link, href: `/${link.toLowerCase()}`, screenPath: `navigation:footer > link:${link.toLowerCase()}`, container: "navigation:footer" }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: link,
+        href: `/${link.toLowerCase()}`,
+        screenPath: `navigation:footer > link:${link.toLowerCase()}`,
+        container: "navigation:footer",
+      }),
     );
   }
   for (const social of ["Instagram", "TikTok", "YouTube", "X", "Facebook"]) {
     out.push(
-      el({ tag: "a", role: "link", visibleText: social, href: `/${social.toLowerCase()}`, screenPath: `section:social-links > link:${social.toLowerCase()}`, container: "section:social-links" }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: social,
+        href: `/${social.toLowerCase()}`,
+        screenPath: `section:social-links > link:${social.toLowerCase()}`,
+        container: "section:social-links",
+      }),
     );
   }
   out.push(
-    el({ tag: "a", role: "link", visibleText: "Terms", href: "/terms", screenPath: "section:copyright > link:terms", container: "section:copyright" }),
+    el({
+      tag: "a",
+      role: "link",
+      visibleText: "Terms",
+      href: "/terms",
+      screenPath: "section:copyright > link:terms",
+      container: "section:copyright",
+    }),
   );
   out.push(
-    el({ tag: "a", role: "link", visibleText: "© 2026 Casetify", href: "/legal", screenPath: "section:copyright > link:legal", container: "section:copyright" }),
+    el({
+      tag: "a",
+      role: "link",
+      visibleText: "© 2026 Casetify",
+      href: "/legal",
+      screenPath: "section:copyright > link:legal",
+      container: "section:copyright",
+    }),
   );
   // newsletter block: a plain link (collapsed) + a real input + button (kept)
   out.push(
-    el({ tag: "a", role: "link", visibleText: "Unsubscribe", href: "/news", screenPath: "section:newsletter > link:unsub", container: "section:newsletter" }),
+    el({
+      tag: "a",
+      role: "link",
+      visibleText: "Unsubscribe",
+      href: "/news",
+      screenPath: "section:newsletter > link:unsub",
+      container: "section:newsletter",
+    }),
   );
   out.push(
-    el({ tag: "input", type: "email", placeholder: "Newsletter email", screenPath: "section:newsletter > input:email", container: "section:newsletter", selector: "#news-email" }),
+    el({
+      tag: "input",
+      type: "email",
+      placeholder: "Newsletter email",
+      screenPath: "section:newsletter > input:email",
+      container: "section:newsletter",
+      selector: "#news-email",
+    }),
   );
   out.push(
-    el({ tag: "button", role: "button", visibleText: "Subscribe", screenPath: "section:newsletter > button:subscribe", container: "section:newsletter", selector: "#news-sub" }),
+    el({
+      tag: "button",
+      role: "button",
+      visibleText: "Subscribe",
+      screenPath: "section:newsletter > button:subscribe",
+      container: "section:newsletter",
+      selector: "#news-sub",
+    }),
   );
 
   return out;
@@ -237,10 +423,24 @@ function sequence(): InteractiveElement[][] {
   const seq5 = casetifyPage({ cookieAside: false, sortLabel: "Sort: Price ↑", toast: false });
   // obs6: a toast dialog appears (additions)
   seq5.push(
-    el({ tag: "button", role: "button", visibleText: "View cart", screenPath: "dialog:toast > button:view", container: "dialog:toast", selector: "#toast-view" }),
+    el({
+      tag: "button",
+      role: "button",
+      visibleText: "View cart",
+      screenPath: "dialog:toast > button:view",
+      container: "dialog:toast",
+      selector: "#toast-view",
+    }),
   );
   seq5.push(
-    el({ tag: "button", role: "button", visibleText: "Dismiss toast", screenPath: "dialog:toast > button:dismiss", container: "dialog:toast", selector: "#toast-dismiss" }),
+    el({
+      tag: "button",
+      role: "button",
+      visibleText: "Dismiss toast",
+      screenPath: "dialog:toast > button:dismiss",
+      container: "dialog:toast",
+      selector: "#toast-dismiss",
+    }),
   );
   return [seq0, seq1, seq2, seq3, seq4, seq5];
 }
@@ -306,7 +506,9 @@ describe("observe-delta harness", () => {
       const obs = builds[i]!.observation;
       for (const e of obs.elements) recon.set(e.ref, e);
       for (const ref of obs.removed ?? []) recon.delete(ref);
-      expect(refBodies(recon), `resync mismatch at obs${i + 1}`).toBe(refBodies(builds[i]!.fullByRef));
+      expect(refBodies(recon), `resync mismatch at obs${i + 1}`).toBe(
+        refBodies(builds[i]!.fullByRef),
+      );
     }
   });
 
@@ -347,15 +549,42 @@ describe("observe-delta harness", () => {
     // href), not just tag===a. A "Manage cookies"/"Close" action-link has no href
     // (or href="#") and must survive even in a chrome region.
     const page: InteractiveElement[] = [
-      el({ tag: "a", role: "link", visibleText: "Manage cookies", href: null, screenPath: "navigation:footer > link:manage", container: "navigation:footer" }),
-      el({ tag: "a", role: "link", visibleText: "Close banner", href: "#", screenPath: "aside:cookie > link:close", container: "aside:cookie" }),
-      el({ tag: "a", role: "link", visibleText: "Careers", href: "/careers", screenPath: "navigation:footer > link:careers", container: "navigation:footer" }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: "Manage cookies",
+        href: null,
+        screenPath: "navigation:footer > link:manage",
+        container: "navigation:footer",
+      }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: "Close banner",
+        href: "#",
+        screenPath: "aside:cookie > link:close",
+        container: "aside:cookie",
+      }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: "Careers",
+        href: "/careers",
+        screenPath: "navigation:footer > link:careers",
+        container: "navigation:footer",
+      }),
     ];
     expect(isPlainChromeLink(page[0]!)).toBe(false); // no href → kept
     expect(isPlainChromeLink(page[1]!)).toBe(false); // href="#" → kept
     expect(isPlainChromeLink(page[2]!)).toBe(true); // real nav link → collapsible
 
-    const built = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: page, prev: null });
+    const built = buildCompactObservation({
+      sessionId: "s",
+      url: URL,
+      text: "",
+      elements: page,
+      prev: null,
+    });
     const labels = new Set(built.observation.elements.map((e) => e.label));
     expect(labels.has("Manage cookies")).toBe(true);
     expect(labels.has("Close banner")).toBe(true);
@@ -366,7 +595,13 @@ describe("observe-delta harness", () => {
   it("same-hash duplicates: removing one is lossless and the vanished ordinal resolves to null (never a cross-group mis-click to a distinct element)", () => {
     // Two STRUCTURALLY IDENTICAL buttons (same stableElementId) → refs _1/_2.
     const twin = (): InteractiveElement =>
-      el({ tag: "button", role: "button", visibleText: "Remove", screenPath: "list:cart > button:remove", container: "list:cart" });
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Remove",
+        screenPath: "list:cart > button:remove",
+        container: "list:cart",
+      });
     const before = [twin(), twin()];
     const refsBefore = provisionElementRefs(before);
     const ref1 = refsBefore.get(before[0]!)!;
@@ -375,9 +610,21 @@ describe("observe-delta harness", () => {
     expect(ref2).toMatch(/_2$/);
 
     // Observe once (full), then remove the FIRST twin and observe again (delta).
-    const b1 = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: before, prev: null });
+    const b1 = buildCompactObservation({
+      sessionId: "s",
+      url: URL,
+      text: "",
+      elements: before,
+      prev: null,
+    });
     const after = [twin()]; // one identical button remains
-    const b2 = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: after, prev: b1.nextState });
+    const b2 = buildCompactObservation({
+      sessionId: "s",
+      url: URL,
+      text: "",
+      elements: after,
+      prev: b1.nextState,
+    });
 
     // Lossless: the delta reports one ref removed, one unchanged; reconstruction
     // from base ⊕ delta equals the true (single-element) set.
@@ -404,7 +651,9 @@ describe("observe-delta harness", () => {
     expect(obs3.delta).toBe(true);
 
     const target = seq[2]!.find(
-      (e) => e.visibleText === "Add to cart" && e.screenPath === "main:catalog > article:product-7 > button:add",
+      (e) =>
+        e.visibleText === "Add to cart" &&
+        e.screenPath === "main:catalog > article:product-7 > button:add",
     )!;
     const ref = provisionElementRefs(seq[2]!).get(target)!;
 
@@ -555,7 +804,7 @@ function fromCorpus(c: CorpusElement): InteractiveElement {
 function normUrl(u: string | undefined): string {
   if (typeof u !== "string" || u.length === 0) return "about:blank";
   try {
-    const p = new URL(u);
+    const p = new globalThis.URL(u);
     return `${p.origin}${p.pathname}`; // strip query/hash — same PATH = same page
   } catch {
     return u;
@@ -746,7 +995,21 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
       expect(f.elements.length).toBe(h.elements.length);
       for (const e of f.elements) {
         const bag = e as unknown as Record<string, unknown>;
-        for (const field of ["ref", "label", "tag", "role", "type", "value", "checked", "href", "testId", "path", "container", "topmost", "occluded_by"]) {
+        for (const field of [
+          "ref",
+          "label",
+          "tag",
+          "role",
+          "type",
+          "value",
+          "checked",
+          "href",
+          "testId",
+          "path",
+          "container",
+          "topmost",
+          "occluded_by",
+        ]) {
           expect(field in bag, `full element missing "${field}"`).toBe(true);
         }
       }

@@ -200,9 +200,9 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
 
 const observeSchema = z.object({
   session_id: z.string().min(1),
-  // Payload verbosity. Default "compact" (text + actionable elements, ~50%
-  // smaller). Pass "full" for the legacy screen+accessibility+full-field payload
-  // on a genuinely ambiguous step.
+  // Payload verbosity. Default "compact" (stable-ref element/text deltas plus a
+  // complete snapshot pointer). Pass "full" for the legacy
+  // screen+accessibility+full-field payload on a genuinely ambiguous step.
   detail: z.enum(["compact", "full"]).optional(),
 });
 
