@@ -1492,9 +1492,10 @@ export function toCompactElement(
 // a write failure must NEVER break an observe. Rolling one file per session (the
 // latest COMPLETE inventory) — that's what the host wants when it re-expands
 // after a context compaction or greps for an element the delta didn't re-show.
-function observeSnapshotDir(): string {
+function observeSnapshotDir(sessionId: string): string {
   const override = (process.env.TRUSTY_SQUIRE_OBSERVE_DIR ?? "").trim();
-  return override.length > 0 ? override : join(tmpdir(), "trusty-squire-observe");
+  const parent = override.length > 0 ? override : join(tmpdir(), "trusty-squire-observe");
+  return join(parent, sessionId);
 }
 
 function persistObserveSnapshot(
@@ -1506,7 +1507,7 @@ function persistObserveSnapshot(
 ): string | null {
   let temporaryFile: string | null = null;
   try {
-    const dir = observeSnapshotDir();
+    const dir = observeSnapshotDir(session.id);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
     const file = join(dir, `observe-${session.id}.json`);

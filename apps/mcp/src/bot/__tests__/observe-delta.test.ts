@@ -15,9 +15,9 @@
 // the design. NO real/captured credentials: every element's `value` is left
 // null (the harness never sets a secret), per the no-real-creds rule.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type * as GoogleLoginModule from "../google-login.js";
 import type { InteractiveElement } from "../browser.js";
 
@@ -696,16 +696,16 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     expect(snap.elements.some((e: ObservedElement) => typeof e.path === "string")).toBe(true);
   });
 
-  it("persists snapshots with owner-only directory and file permissions", async () => {
-    const secureDir = join(dir, "snapshots");
-    process.env.TRUSTY_SQUIRE_OBSERVE_DIR = secureDir;
+  it("keeps a caller-owned parent unchanged and secures the session directory", async () => {
+    chmodSync(dir, 0o755);
     h.elements = casetifyPage();
     h.visibleText = "Account token details";
 
     const start = await startProvisionSession({ serviceUrl: URL });
     const snapshotFile = start.snapshot_file as string;
 
-    expect(statSync(secureDir).mode & 0o777).toBe(0o700);
+    expect(statSync(dir).mode & 0o777).toBe(0o755);
+    expect(statSync(dirname(snapshotFile)).mode & 0o777).toBe(0o700);
     expect(statSync(snapshotFile).mode & 0o777).toBe(0o600);
   });
 

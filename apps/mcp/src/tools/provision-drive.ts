@@ -150,12 +150,12 @@ const startSchema = z.object({
 
 const OBSERVE_DELTA_CONTRACT =
   "Compact observations use stable refs that remain reusable across observes. " +
-  "The first observe, a URL change, or high churn returns delta:false with the current element set; " +
-  "later delta:true observations emit only changed elements, unchanged counts retained prior elements, " +
-  "and removed lists refs to delete. text_unchanged:true means reuse the prior text because text is empty. " +
-  "snapshot_file points to the complete current snapshot, including omitted elements and path. Reconstruct " +
-  "state by updating elements by ref, deleting removed refs, and retaining unchanged refs/text; an empty " +
-  "delta means nothing changed, not an empty page. ";
+  "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
+  "element map and replace it from snapshot_file because wire elements may omit collapsed chrome links. " +
+  "Only when delta:true, upsert emitted elements by ref, delete refs listed in removed, and retain the " +
+  "remaining elements counted by unchanged. text_unchanged:true means reuse the prior text because text " +
+  "is empty. snapshot_file points to the complete current snapshot, including omitted elements and path. " +
+  "An empty delta means nothing changed, not an empty page. ";
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",

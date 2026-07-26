@@ -216,6 +216,9 @@ describe("TOOLS registry", () => {
       expect(description).toContain("text_unchanged:true");
       expect(description).toContain("snapshot_file");
       expect(description).toContain("nothing changed, not an empty page");
+      expect(description).toContain("delta:false as a full resync");
+      expect(description).toContain("discard the prior element map");
+      expect(description).toContain("Only when delta:true");
     }
   });
 });
