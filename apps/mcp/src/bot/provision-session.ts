@@ -431,12 +431,22 @@ export function stableElementId(el: InteractiveElement): string {
       // that are otherwise identical (same label/path/role, e.g. sibling "Remove"
       // buttons in a list) get DISTINCT identities. Without it, a stable ref is a
       // positional ordinal within a same-hash group: remove the first sibling and
-      // the old `_1` silently retargets the survivor. With the selector folded in,
-      // the removed element's identity is unique, so its old ref finds no match and
-      // resolveTarget returns null (the host re-observes) — it never mis-clicks a
-      // distinct sibling. (If the extractor emits a POSITIONAL selector that shifts
-      // on reorder, the identity changes and the element is re-emitted as a change,
-      // which is still safe — a reported change, never a silent retarget.)
+      // the old `_1` silently retargets the survivor. With a STABLE selector
+      // (id/data-attr) folded in, the removed element's identity is unique, so its
+      // old ref finds no match and resolveTarget returns null (the host
+      // re-observes) — no mis-click.
+      //
+      // Residual limitation: if the extractor can only tell two siblings apart by
+      // a POSITIONAL selector (`:nth-child(n)`), removing the first shifts the
+      // survivor's selector onto the removed node's old value, so the removed
+      // node's old ref can resolve to the survivor. This is NOT a regression (the
+      // pre-selector ordinal scheme had the same recycling) and is bounded to
+      // controls distinguishable ONLY by DOM position — which are perceptually
+      // identical to the host anyway (same label/role/path, so it cannot target
+      // one vs the other through this API regardless). It also makes such an
+      // element re-mint on layout shifts (emitted as a change, never a silent
+      // retarget). Measured cost on the corpus: aggregate delta saving is
+      // unaffected (~65%), so folding the selector in is net-positive.
       el.selector,
     ].join("\u001f"),
   );
@@ -1603,9 +1613,12 @@ export function isChromeRegionPath(el: InteractiveElement): boolean {
 
 // A label that reads as a dismiss / consent / gate action — the collapse must
 // keep these even when they are shipped as a chrome-region <a>, and even when the
-// consent banner gives them a real fallback URL.
+// consent banner gives them a real fallback URL. Errs toward KEEPING (a false
+// positive keeps a nav link, which is safe; a false negative would drop a
+// dismiss control, which is not) — so it covers the accept/reject vocabulary AND
+// its opposites (decline/agree/allow) and the "preferences/opt out/got it" verbs.
 const DISMISS_CONSENT_LABEL_RE =
-  /close|dismiss|skip|no thanks|accept|reject|cookie|consent|not now|maybe later/i;
+  /close|dismiss|skip|no thanks|accept|reject|decline|agree|allow|cookie|consent|preferences|opt.?out|not now|maybe later|got it/i;
 
 // A PLAIN chrome-region NAVIGATION link — the ONLY thing the collapse removes.
 // Buttons, inputs, and role-controls are never plain links (isActionableControl
@@ -1806,9 +1819,15 @@ async function observeSession(
       // Persistence FAILED, so no recovery file exists. A delta (which omits
       // unchanged elements) or a collapsed full snapshot (which omits chrome
       // links) would be UNRECOVERABLE — the host would have no way to re-expand.
-      // Fall back to a FULL, UNCOLLAPSED response (every element inline) and do
-      // NOT advance the delta baseline, so the next observe still diffs against
-      // the last SUCCESSFULLY-persisted snapshot rather than a phantom one.
+      // Fall back to a FULL, UNCOLLAPSED response (every element inline). And
+      // INVALIDATE the delta baseline (null, not "leave it at the last good
+      // state"): the host's reconstruction is now THIS full set, so the next
+      // observe must emit a fresh FULL snapshot too, never a delta computed
+      // against the last-persisted baseline — that stale-baseline delta would
+      // desync a host that has already moved to this full state (a
+      // remove-then-restore-across-a-failed-persist sequence would silently drop
+      // the restored element otherwise).
+      session.prevObserve = null;
       return {
         session_id: session.id,
         url,

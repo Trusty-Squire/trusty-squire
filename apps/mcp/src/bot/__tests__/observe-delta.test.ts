@@ -589,6 +589,15 @@ describe("observe-delta harness", () => {
       el({
         tag: "a",
         role: "link",
+        visibleText: "Decline", // consent verb with a real URL, NOT in a widget
+        href: "/consent/decline",
+        screenPath: "navigation:footer > link:decline",
+        container: "navigation:footer",
+        selector: "#decline",
+      }),
+      el({
+        tag: "a",
+        role: "link",
         visibleText: "Careers",
         href: "/careers",
         screenPath: "navigation:footer > link:careers",
@@ -599,7 +608,8 @@ describe("observe-delta harness", () => {
     expect(isPlainChromeLink(page[1]!)).toBe(false); // href="#" → kept
     expect(isPlainChromeLink(page[2]!)).toBe(false); // href="#close" fragment → kept
     expect(isPlainChromeLink(page[3]!)).toBe(false); // consent widget + real URL → kept
-    expect(isPlainChromeLink(page[4]!)).toBe(true); // real nav link → collapsible
+    expect(isPlainChromeLink(page[4]!)).toBe(false); // "Decline" consent verb → kept
+    expect(isPlainChromeLink(page[5]!)).toBe(true); // real nav link → collapsible
 
     const built = buildCompactObservation({
       sessionId: "s",
@@ -1139,14 +1149,56 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     expect(obs2.elements.length).toBe(h.elements.length); // EVERY element inline
     expect(obs2.unchanged).toBeUndefined();
 
-    // Restore persistence; obs3 same page → a delta again. That it deltas (rather
-    // than a fresh full snapshot) proves obs2 did NOT clobber the baseline.
+    // Restore persistence; obs3 must be a FRESH FULL snapshot (delta:false), NOT
+    // a delta against the pre-failure baseline — the failed observe INVALIDATED
+    // the baseline, so the next observe re-syncs the host from a full snapshot
+    // (with its own recovery file) rather than an A-relative delta.
     process.env.TRUSTY_SQUIRE_OBSERVE_DIR = dir;
     const obs3 = await observe(sid, "compact");
-    expect(obs3.delta).toBe(true);
-    expect(obs3.elements.length).toBe(0);
-    expect(obs3.unchanged).toBe(h.elements.length);
+    expect(obs3.delta).toBe(false);
     expect(typeof obs3.snapshot_file).toBe("string");
+  });
+
+  it("remove-then-restore across a failed persist does NOT desync the host (codex #2)", async () => {
+    // The exact desync sequence: baseline A has element X; B removes X while
+    // persistence fails; C restores X byte-identically to A. If the failed observe
+    // left the baseline at A, the A→C delta would report X unchanged and the host
+    // (which reset to B, without X) would never re-add it. Invalidating the
+    // baseline on failure forces C to be a full re-sync, so X is present.
+    const withX = (): unknown[] => [
+      el({ tag: "button", role: "button", visibleText: "Continue", screenPath: "form:x > button:continue", selector: "#continue" }),
+      el({ tag: "button", role: "button", visibleText: "Special X", screenPath: "form:x > button:x", selector: "#x" }),
+    ];
+    const withoutX = (): unknown[] => [
+      el({ tag: "button", role: "button", visibleText: "Continue", screenPath: "form:x > button:continue", selector: "#continue" }),
+    ];
+    h.elements = withX();
+    h.visibleText = "Form";
+    const a = await startProvisionSession({ serviceUrl: URL }); // A: {Continue, X}
+    expect(a.elements.some((e) => e.label === "Special X")).toBe(true);
+
+    // B: X removed, persistence FAILS.
+    const blocker = join(dir, "blk");
+    writeFileSync(blocker, "x");
+    process.env.TRUSTY_SQUIRE_OBSERVE_DIR = join(blocker, "no");
+    h.elements = withoutX();
+    const b = await observe(a.session_id, "compact");
+    expect(b.delta).toBe(false); // full uncollapsed fallback
+    expect(b.elements.some((e) => e.label === "Special X")).toBe(false);
+
+    // C: X restored (byte-identical to A), persistence RESTORED.
+    process.env.TRUSTY_SQUIRE_OBSERVE_DIR = dir;
+    h.elements = withX();
+    const c = await observe(a.session_id, "compact");
+    // The host must SEE X again — reconstruct C's full set from the emitted
+    // payload (a full re-sync, so elements are complete inline).
+    const cView =
+      c.delta === true
+        ? // (would be the buggy path) apply delta to B's view — X would be missing
+          null
+        : new Map(c.elements.map((e) => [e.ref, e]));
+    expect(c.delta).toBe(false); // full re-sync, not an A-relative delta
+    expect([...(cView as Map<string, ObservedElement>).values()].some((e) => e.label === "Special X")).toBe(true);
   });
 
   it("detail:full refreshes the persisted snapshot as a side-effect (no stale re-expansion)", async () => {
