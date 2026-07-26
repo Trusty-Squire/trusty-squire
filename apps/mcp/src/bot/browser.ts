@@ -7052,13 +7052,13 @@ export class BrowserController {
         let owner: Node | null = top;
         for (let hops = 0; owner !== null && hops < 64; hops += 1) {
           if (owner === el) return { topmost: true, occludedBy: null };
-          const assignedSlot =
+          const assignedSlot: HTMLSlotElement | null =
             owner instanceof Element || owner instanceof Text ? owner.assignedSlot : null;
           if (assignedSlot !== null) {
             owner = assignedSlot;
             continue;
           }
-          const parent = owner.parentNode;
+          const parent: ParentNode | null = owner.parentNode;
           owner = parent instanceof ShadowRoot ? parent.host : parent;
         }
         return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
