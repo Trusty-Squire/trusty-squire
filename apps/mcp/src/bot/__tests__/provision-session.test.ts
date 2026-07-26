@@ -6,7 +6,6 @@ import {
   provisionElementRef,
   provisionElementRefs,
   stableElementId,
-  StaleProvisionRefError,
   AmbiguousProvisionTargetError,
   hostAllowed,
   isSquireControlPlaneHost,
@@ -73,26 +72,28 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     expect(Object.values(c).every((v) => v !== null && v !== undefined)).toBe(true);
   });
 
-  it("keeps role/type/href/testId/path; drops the redundant container", () => {
-    const c = toCompactElement(
-      el({
-        tag: "a",
-        role: "link",
-        type: null,
-        visibleText: "Docs",
-        href: "/docs",
-        testId: "docs-link",
-        screenPath: "nav:main > link:docs",
-        container: "nav:main",
-      }),
-      "@g1:d",
-      NONE,
-    );
+  it("keeps role/type/href/testId; DROPS path from the default payload and the redundant container", () => {
+    const args = el({
+      tag: "a",
+      role: "link",
+      type: null,
+      visibleText: "Docs",
+      href: "/docs",
+      testId: "docs-link",
+      screenPath: "nav:main > link:docs",
+      container: "nav:main",
+    });
+    const c = toCompactElement(args, "@e:d_1", NONE);
     expect(c.href).toBe("/docs");
     expect(c.testId).toBe("docs-link");
-    expect(c.path).toBe("nav:main > link:docs");
+    // path is the single most verbose field and agents act by ref — dropped from
+    // the default payload (85% cut), retained only in the persisted snapshot.
+    expect("path" in c).toBe(false);
     expect("container" in c).toBe(false); // redundant with path
     expect("value" in c).toBe(false);
+    // includePath=true (the persisted snapshot form) DOES carry path.
+    const withPath = toCompactElement(args, "@e:d_1", NONE, true);
+    expect(withPath.path).toBe("nav:main > link:docs");
   });
 
   it("reports the REAL value_len (a length signal, not the value) — even for sealed fields", () => {
@@ -227,20 +228,28 @@ describe("resolveTarget", () => {
     );
   });
 
-  it("resolves a fresh generated ref against live elements", () => {
-    const ref = provisionElementRef(inv[0] as InteractiveElement, 7);
-    expect(ref).toMatch(/^@g7:/);
-    expect(resolveTarget(inv, ref, 7)?.selector).toBe("#g");
+  it("resolves a generation-independent ref against live elements", () => {
+    const ref = provisionElementRef(inv[0] as InteractiveElement);
+    // Stable "@e:<hash>_<ordinal>" — NO generation prefix, so the ref an earlier
+    // observe minted still resolves against a later observe's elements.
+    expect(ref).toMatch(/^@e:[A-Za-z0-9_-]+_1$/);
+    expect(ref).not.toMatch(/@g\d/);
+    expect(resolveTarget(inv, ref)?.selector).toBe("#g");
   });
 
-  it("rejects generated refs from an older observation generation", () => {
-    const ref = provisionElementRef(inv[1] as InteractiveElement, 2);
-    expect(() => resolveTarget(inv, ref, 3)).toThrow(StaleProvisionRefError);
+  it("still resolves a ref minted before an unrelated element list churned", () => {
+    // The ref holds across observations because identity is the stable hash, not
+    // a counter — the whole point of dropping the generation prefix.
+    const ref = provisionElementRef(inv[1] as InteractiveElement);
+    const laterList = [el({ visibleText: "Toast appeared", selector: "#toast" }), ...inv];
+    expect(resolveTarget(laterList, ref)?.selector).toBe("#gh");
   });
 
-  it("returns null when a fresh ref no longer maps to a live element", () => {
-    const ref = provisionElementRef(inv[0] as InteractiveElement, 4);
-    expect(resolveTarget(inv.slice(1), ref, 4)).toBeNull();
+  it("returns null (graceful — host re-observes) when a ref's element is gone", () => {
+    const ref = provisionElementRef(inv[0] as InteractiveElement);
+    // inv[0] removed: identity no longer matches anything → null, never a
+    // mis-click on a recycled node.
+    expect(resolveTarget(inv.slice(1), ref)).toBeNull();
   });
 
   it("fails loudly on ambiguous repeated labels instead of guessing", () => {
@@ -268,13 +277,13 @@ describe("resolveTarget", () => {
       el({ visibleText: "Continue", selector: "#first" }),
       el({ visibleText: "Continue", selector: "#second" }),
     ];
-    const refs = provisionElementRefs(twins, 9);
+    const refs = provisionElementRefs(twins);
     const firstRef = refs.get(twins[0] as InteractiveElement);
     const secondRef = refs.get(twins[1] as InteractiveElement);
     expect(firstRef).toMatch(/_1$/);
     expect(secondRef).toMatch(/_2$/);
     expect(firstRef).not.toBe(secondRef);
-    expect(resolveTarget(twins, secondRef as string, 9)?.selector).toBe("#second");
+    expect(resolveTarget(twins, secondRef as string)?.selector).toBe("#second");
   });
 });
 
@@ -297,12 +306,12 @@ describe("buildAccessibilitySnapshot", () => {
         selector: "#email",
       }),
     ];
-    const snap = buildAccessibilitySnapshot(elements, 5);
+    const snap = buildAccessibilitySnapshot(elements);
     expect(snap?.source).toBe("interactive_dom");
     expect(snap?.refs).toBe(2);
     expect(snap?.tree).toContain('region "dialog:finish-account"');
-    expect(snap?.tree).toContain('button "Create account" ref=@g5:');
-    expect(snap?.tree).toContain('textbox "Email" ref=@g5:');
+    expect(snap?.tree).toContain('button "Create account" ref=@e:');
+    expect(snap?.tree).toContain('textbox "Email" ref=@e:');
   });
 
   it("masks a password-type field value, never leaking the cleartext", () => {
@@ -315,7 +324,7 @@ describe("buildAccessibilitySnapshot", () => {
         selector: "#pw",
       }),
     ];
-    const snap = buildAccessibilitySnapshot(elements, 1);
+    const snap = buildAccessibilitySnapshot(elements);
     expect(snap?.tree).not.toContain("nG^6+HsnfVCcXp8");
     expect(snap?.tree).toContain('value="[sealed]"');
   });
@@ -338,7 +347,7 @@ describe("buildAccessibilitySnapshot", () => {
         selector: "#org",
       }),
     ];
-    const snap = buildAccessibilitySnapshot(elements, 1, undefined, sealed);
+    const snap = buildAccessibilitySnapshot(elements, undefined, sealed);
     expect(snap?.tree).not.toContain("methoxine@gmail.com");
     expect(snap?.tree).toContain('value="[sealed]"');
     // a non-sealed, non-password field keeps its real value
@@ -355,7 +364,7 @@ describe("buildAccessibilitySnapshot", () => {
         selector: "#org",
       }),
     ];
-    const snap = buildAccessibilitySnapshot(elements, 1);
+    const snap = buildAccessibilitySnapshot(elements);
     expect(snap?.tree).toContain('value="Acme Inc"');
   });
 });
@@ -382,7 +391,7 @@ describe("isInboxReadHost", () => {
         screenPath: `main:dashboard > button:${i}`,
       }),
     );
-    const snap = buildAccessibilitySnapshot(elements, 1, 160);
+    const snap = buildAccessibilitySnapshot(elements, 160);
     expect(snap?.truncated).toBe(true);
     expect(snap?.total_chars).toBeGreaterThan(160);
     expect(snap?.tree.endsWith("\n")).toBe(false);

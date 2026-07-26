@@ -51,7 +51,12 @@ function compactKey(c: ReturnType<typeof toCompactElement>): string {
 }
 
 function evalSet(name: string, els: InteractiveElement[]): void {
-  const compact = els.map((e, i) => toCompactElement(e, `@g1:r${i}`, NONE));
+  // includePath=true — this eval asserts information-equivalence of the FULL
+  // (persisted) compact form, where `path` is retained. The default host payload
+  // now drops `path` and leans on the distinct stable `ref` for the same
+  // disambiguation (covered by observe-delta.test.ts). compactKey below still
+  // uses `path`, so the eval must feed the path-bearing form.
+  const compact = els.map((e, i) => toCompactElement(e, `@g1:r${i}`, NONE, true));
 
   // P1 — coverage: 1:1, refs preserved, none dropped.
   expect(compact.length).toBe(els.length);
