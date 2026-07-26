@@ -7051,12 +7051,14 @@ export class BrowserController {
         let owner: Node | null = top;
         for (let hops = 0; owner !== null && hops < 64; hops += 1) {
           if (owner === el) return { topmost: true, occludedBy: null };
-          if (owner.parentNode !== null) {
-            owner = owner.parentNode;
+          const assignedSlot =
+            owner instanceof Element || owner instanceof Text ? owner.assignedSlot : null;
+          if (assignedSlot !== null) {
+            owner = assignedSlot;
             continue;
           }
-          const root = owner.getRootNode();
-          owner = root instanceof ShadowRoot ? root.host : null;
+          const parent = owner.parentNode;
+          owner = parent instanceof ShadowRoot ? parent.host : parent;
         }
         return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
       };

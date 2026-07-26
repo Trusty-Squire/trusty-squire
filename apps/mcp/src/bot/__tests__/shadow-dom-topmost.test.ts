@@ -54,6 +54,24 @@ const PLAIN_FIXTURE = `data:text/html,${encodeURIComponent(`
   <button id="plain" data-testid="plain-btn">Plain Button</button>
 </body></html>`)}`;
 
+const SLOTTED_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:40px">
+  <slotted-widget style="display:inline-block">
+    <span data-testid="slotted-label" style="display:block;padding:20px">Slotted Add To Cart</span>
+  </slotted-widget>
+  <script>
+    class SlottedWidget extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({ mode: "open" });
+        root.innerHTML =
+          '<button id="inner" data-testid="slotted-cta" style="padding:0;font-size:18px"><slot></slot></button>';
+      }
+    }
+    customElements.define("slotted-widget", SlottedWidget);
+  </script>
+</body></html>`)}`;
+
 let browser: Browser;
 
 async function pageFor(url: string): Promise<{ ctrl: BrowserController; page: Page }> {
@@ -121,6 +139,30 @@ describe("extractInteractiveElements — open shadow root occlusion (real Chromi
       expect(plain).toBeDefined();
       expect(plain?.topmost).toBe(true);
       expect(plain?.occludedBy).toBeNull();
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("treats a slotted label as owned by its shadow-root button", async () => {
+    const { ctrl, page } = await pageFor(SLOTTED_FIXTURE);
+    try {
+      const deepestHit = await page.evaluate(() => {
+        const host = document.querySelector("slotted-widget");
+        const button = host?.shadowRoot?.querySelector("#inner");
+        if (!(host instanceof HTMLElement) || !(button instanceof HTMLElement)) return null;
+        const rect = button.getBoundingClientRect();
+        return host.shadowRoot
+          ?.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+          ?.getAttribute("data-testid");
+      });
+      expect(deepestHit).toBe("slotted-label");
+
+      const els = await ctrl.extractInteractiveElements();
+      const cta = els.find((e) => e.testId === "slotted-cta");
+      expect(cta).toBeDefined();
+      expect(cta?.topmost).toBe(true);
+      expect(cta?.occludedBy).toBeNull();
     } finally {
       await page.close();
     }
