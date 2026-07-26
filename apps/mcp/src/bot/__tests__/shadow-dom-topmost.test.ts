@@ -15,6 +15,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
+import { provisionElementRefs, resolveTarget } from "../provision-session.js";
 
 // An open-shadow-root button that flips its own text on click, plus a plain
 // light-DOM button as the unchanged control. Nothing overlaps either button.
@@ -23,12 +24,21 @@ const SHADOW_FIXTURE = `data:text/html,${encodeURIComponent(`
   <button id="plain" data-testid="plain-btn">Plain Button</button>
   <cart-widget></cart-widget>
   <script>
+    class CtaLabel extends HTMLElement {
+      constructor() {
+        super();
+        const root = this.attachShadow({ mode: "open" });
+        root.innerHTML = '<span>Add To Cart</span>';
+      }
+    }
+    customElements.define("cta-label", CtaLabel);
+
     class CartWidget extends HTMLElement {
       constructor() {
         super();
         const root = this.attachShadow({ mode: "open" });
         root.innerHTML =
-          '<button id="buy" data-testid="add-to-cart" style="padding:20px;font-size:18px">Add To Cart</button>';
+          '<button id="buy" data-testid="add-to-cart" aria-label="Add To Cart" style="position:relative;width:180px;height:64px;font-size:18px"><cta-label style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center"></cta-label></button>';
         const btn = root.getElementById("buy");
         btn.addEventListener("click", function () { btn.textContent = "ADDED"; });
       }
@@ -71,7 +81,7 @@ describe("extractInteractiveElements — open shadow root occlusion (real Chromi
     const { ctrl, page } = await pageFor(SHADOW_FIXTURE);
     try {
       const els = await ctrl.extractInteractiveElements();
-      const cta = els.find((e) => e.visibleText === "Add To Cart");
+      const cta = els.find((e) => e.testId === "add-to-cart");
 
       // (a) surfaced by the extractor (shadow-root walk).
       expect(cta).toBeDefined();
@@ -84,7 +94,13 @@ describe("extractInteractiveElements — open shadow root occlusion (real Chromi
 
       // (c) clickable by the ref/selector the extractor emitted — the click
       // must reach the shadow-nested button and fire its handler.
-      await ctrl.click(cta?.selector ?? "");
+      const generation = 1;
+      const ref = cta === undefined ? undefined : provisionElementRefs(els, generation).get(cta);
+      expect(ref).toMatch(/^@g1:/);
+      const resolved = resolveTarget(els, ref ?? "", generation);
+      expect(resolved).toBe(cta);
+      expect(resolved?.visibleText ?? resolved?.ariaLabel).toBe("Add To Cart");
+      await ctrl.click(resolved?.selector ?? "");
       const flipped = await page.evaluate(
         () =>
           document

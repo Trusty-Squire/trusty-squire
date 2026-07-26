@@ -7048,7 +7048,16 @@ export class BrowserController {
           if (deeper === null || deeper === top) break;
           top = deeper;
         }
-        if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
+        let owner: Node | null = top;
+        for (let hops = 0; owner !== null && hops < 64; hops += 1) {
+          if (owner === el) return { topmost: true, occludedBy: null };
+          if (owner.parentNode !== null) {
+            owner = owner.parentNode;
+            continue;
+          }
+          const root = owner.getRootNode();
+          owner = root instanceof ShadowRoot ? root.host : null;
+        }
         return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
       };
 
