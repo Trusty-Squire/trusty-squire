@@ -272,18 +272,41 @@ describe("resolveTarget", () => {
     expect(stableElementId(modal)).not.toBe(stableElementId(background));
   });
 
-  it("adds ordinal suffixes so identical elements still get distinct refs", () => {
+  it("distinguishes same-label siblings by their selector (no ordinal collision)", () => {
+    // A realistic list: two "Remove" buttons, same label/path/role but DIFFERENT
+    // selectors. The selector is folded into stableElementId, so they get distinct
+    // ids and each is ordinal _1 — not a positional _1/_2 pair that would retarget.
     const twins = [
-      el({ visibleText: "Continue", selector: "#first" }),
-      el({ visibleText: "Continue", selector: "#second" }),
+      el({ visibleText: "Remove", screenPath: "list:cart > button:remove", selector: "#remove-0" }),
+      el({ visibleText: "Remove", screenPath: "list:cart > button:remove", selector: "#remove-1" }),
+    ];
+    expect(stableElementId(twins[0] as InteractiveElement)).not.toBe(
+      stableElementId(twins[1] as InteractiveElement),
+    );
+    const refs = provisionElementRefs(twins);
+    const firstRef = refs.get(twins[0] as InteractiveElement) as string;
+    const secondRef = refs.get(twins[1] as InteractiveElement) as string;
+    expect(firstRef).toMatch(/_1$/);
+    expect(secondRef).toMatch(/_1$/);
+    expect(firstRef).not.toBe(secondRef);
+    expect(resolveTarget(twins, secondRef)?.selector).toBe("#remove-1");
+    expect(resolveTarget(twins, firstRef)?.selector).toBe("#remove-0");
+  });
+
+  it("falls back to ordinal suffixes only for TRULY identical elements (same selector too)", () => {
+    // When the extractor can't even distinguish siblings by selector, ordinals
+    // remain the last resort. `id` (not part of stableElementId) tells them apart.
+    const twins = [
+      el({ visibleText: "Continue", selector: "button.cta", id: "first" }),
+      el({ visibleText: "Continue", selector: "button.cta", id: "second" }),
     ];
     const refs = provisionElementRefs(twins);
-    const firstRef = refs.get(twins[0] as InteractiveElement);
-    const secondRef = refs.get(twins[1] as InteractiveElement);
+    const firstRef = refs.get(twins[0] as InteractiveElement) as string;
+    const secondRef = refs.get(twins[1] as InteractiveElement) as string;
     expect(firstRef).toMatch(/_1$/);
     expect(secondRef).toMatch(/_2$/);
     expect(firstRef).not.toBe(secondRef);
-    expect(resolveTarget(twins, secondRef as string)?.selector).toBe("#second");
+    expect(resolveTarget(twins, secondRef)?.id).toBe("second");
   });
 });
 

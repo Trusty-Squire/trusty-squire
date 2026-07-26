@@ -23,6 +23,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -79,6 +80,7 @@ import {
   buildCompactObservation,
   provisionElementRef,
   provisionElementRefs,
+  stableElementId,
   resolveTarget,
   isActionableControl,
   isPlainChromeLink,
@@ -568,6 +570,25 @@ describe("observe-delta harness", () => {
       el({
         tag: "a",
         role: "link",
+        visibleText: "Close banner",
+        href: "#close", // a #-FRAGMENT action link (not exactly "#")
+        screenPath: "aside:cookie > link:close-frag",
+        container: "aside:cookie",
+        selector: "#close-frag",
+      }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: "Accept cookies", // consent control WITH a real fallback URL
+        href: "/cookie-settings",
+        inConsentWidget: true,
+        screenPath: "aside:cookie > link:accept",
+        container: "aside:cookie",
+        selector: "#accept-cookies",
+      }),
+      el({
+        tag: "a",
+        role: "link",
         visibleText: "Careers",
         href: "/careers",
         screenPath: "navigation:footer > link:careers",
@@ -576,7 +597,9 @@ describe("observe-delta harness", () => {
     ];
     expect(isPlainChromeLink(page[0]!)).toBe(false); // no href → kept
     expect(isPlainChromeLink(page[1]!)).toBe(false); // href="#" → kept
-    expect(isPlainChromeLink(page[2]!)).toBe(true); // real nav link → collapsible
+    expect(isPlainChromeLink(page[2]!)).toBe(false); // href="#close" fragment → kept
+    expect(isPlainChromeLink(page[3]!)).toBe(false); // consent widget + real URL → kept
+    expect(isPlainChromeLink(page[4]!)).toBe(true); // real nav link → collapsible
 
     const built = buildCompactObservation({
       sessionId: "s",
@@ -587,7 +610,8 @@ describe("observe-delta harness", () => {
     });
     const labels = new Set(built.observation.elements.map((e) => e.label));
     expect(labels.has("Manage cookies")).toBe(true);
-    expect(labels.has("Close banner")).toBe(true);
+    expect(labels.has("Close banner")).toBe(true); // both bare and #close variants
+    expect(labels.has("Accept cookies")).toBe(true); // consent anchor with a URL
     expect(labels.has("Careers")).toBe(false); // the only true nav link collapsed
     expect(built.observation.chrome_links_collapsed).toBe(1);
   });
@@ -639,6 +663,47 @@ describe("observe-delta harness", () => {
     expect(resolveTarget(after, ref2)).toBeNull();
     // The surviving ordinal resolves to a same-hash element (interchangeable).
     expect(resolveTarget(after, ref1)?.selector).toBe(after[0]!.selector);
+  });
+
+  it("distinct-selector siblings: removing the first NEVER retargets the survivor by its old ref", () => {
+    // The realistic cart case: two "Remove" buttons, same label/path/role but
+    // DIFFERENT selectors (folded into stableElementId). They get DISTINCT refs
+    // (each ordinal _1), so removing the first cannot silently retarget the second.
+    const remove = (selector: string): InteractiveElement =>
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Remove",
+        screenPath: "list:cart > button:remove",
+        container: "list:cart",
+        selector,
+      });
+    const before = [remove("#remove-0"), remove("#remove-1")];
+    const refsBefore = provisionElementRefs(before);
+    const refA = refsBefore.get(before[0]!) as string; // the one we will remove
+    const refB = refsBefore.get(before[1]!) as string; // the survivor
+    expect(refA).not.toBe(refB);
+
+    const b1 = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: before, prev: null });
+    const after = [remove("#remove-1")]; // #remove-0 gone; #remove-1 survives
+    const b2 = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: after, prev: b1.nextState });
+
+    // removed reporting is consistent: exactly the removed element's ref.
+    expect(b2.observation.delta).toBe(true);
+    expect(b2.observation.removed).toEqual([refA]);
+    expect(b2.observation.unchanged).toBe(1); // the survivor was NOT re-emitted
+
+    // The removed element's OLD ref resolves to NULL — it does NOT retarget the
+    // survivor (which is a DISTINCT node), so the host re-observes instead of
+    // mis-clicking. The survivor's own ref still resolves to the survivor.
+    expect(resolveTarget(after, refA)).toBeNull();
+    expect(resolveTarget(after, refB)?.selector).toBe("#remove-1");
+
+    // Lossless reconstruction.
+    const recon = new Map(b1.fullByRef);
+    for (const e of b2.observation.elements) recon.set(e.ref, e);
+    for (const r of b2.observation.removed ?? []) recon.delete(r);
+    expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
   });
 
   it("INV-clickable-unchanged: an unchanged, not-re-emitted element still resolves by its stable ref", () => {
@@ -902,6 +967,97 @@ describe("observe-delta corpus budget (real multi-observe traces)", () => {
   );
 });
 
+// #2 (stable-ref-includes-mutable-path) — ASSESS + report. Measures how often the
+// REGION field that feeds stableElementId flips for a control that is otherwise
+// the same across a same-URL re-observe (which re-mints its ref). Matched by
+// `selector` (the per-control stable key). NOTE: the captured corpus does not
+// store the live extractor's `screenPath` (only the stable HTML5 `landmark`), so
+// this measures the landmark→container proxy — the closest region signal the
+// corpus carries; the live screenPath rate is bounded by, not identical to, this.
+describe("observe-delta mutable-path re-mint rate (#2 assessment)", () => {
+  const dir = corpusDir();
+  const hasCorpus = (() => {
+    try {
+      return existsSync(dir);
+    } catch {
+      return false;
+    }
+  })();
+  const maybe = hasCorpus ? it : it.skip;
+
+  maybe(
+    "reports how often the region field re-mints a stable control's ref on a re-observe",
+    () => {
+      const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+      const runs = new Map<string, Array<{ n: number; file: string }>>();
+      for (const f of files) {
+        const m = f.match(/^(.*)-r(\d+)\.json$/);
+        if (m === null) continue;
+        const list = runs.get(m[1] as string) ?? [];
+        list.push({ n: Number.parseInt(m[2] as string, 10), file: f });
+        runs.set(m[1] as string, list);
+      }
+      const RUN_CAP = Number(process.env.TS_CORPUS_RUN_CAP ?? "500");
+      const runKeys = [...runs.keys()].sort().slice(0, RUN_CAP);
+
+      let matched = 0; // same selector present in both consecutive rounds
+      let regionRemint = 0; // …whose region (container) field changed → ref re-mint
+      let identityRemint = 0; // …whose full stableElementId changed (any cause)
+      for (const key of runKeys) {
+        const rounds = (runs.get(key) as Array<{ n: number; file: string }>).sort(
+          (a, b) => a.n - b.n,
+        );
+        let prev: { url: string; bySel: Map<string, InteractiveElement> } | null = null;
+        for (const { file } of rounds) {
+          let doc: { inventory?: CorpusElement[]; state?: { url?: string } };
+          try {
+            doc = JSON.parse(readFileSync(join(dir, file), "utf8"));
+          } catch {
+            continue;
+          }
+          const inv = doc.inventory ?? [];
+          if (inv.length === 0) continue;
+          const url = normUrl(doc.state?.url);
+          const bySel = new Map<string, InteractiveElement>();
+          for (const c of inv) {
+            const mapped = fromCorpus(c);
+            // Isolate the REGION field: give every element the SAME screenPath so
+            // only `container` (the region proxy) can move the identity here.
+            mapped.screenPath = mapped.selector;
+            bySel.set(mapped.selector, mapped);
+          }
+          if (prev !== null && prev.url === url) {
+            for (const [sel, cur] of bySel) {
+              const before = prev.bySel.get(sel);
+              if (before === undefined) continue;
+              matched += 1;
+              if ((before.container ?? "") !== (cur.container ?? "")) regionRemint += 1;
+              if (stableElementId(before) !== stableElementId(cur)) identityRemint += 1;
+            }
+          }
+          prev = { url, bySel };
+        }
+      }
+
+      expect(matched).toBeGreaterThan(100);
+      const regionRate = regionRemint / matched;
+      const identityRate = identityRemint / matched;
+      // eslint-disable-next-line no-console
+      console.log(
+        `#2 mutable-path assessment: ${matched} same-selector re-observe pairs | ` +
+          `region-field(container) re-mints ${regionRemint} = ${(regionRate * 100).toFixed(2)}% | ` +
+          `any-cause identity re-mints ${(identityRate * 100).toFixed(2)}% ` +
+          `(screenPath not captured in corpus — landmark proxy)`,
+      );
+      // Assertion only guards that the region field is NOT a dominant churn source
+      // (a regression that made region text mutable would spike this). Advisory
+      // threshold, generous.
+      expect(regionRate).toBeLessThan(0.25);
+    },
+    60_000,
+  );
+});
+
 describe("observe-delta wiring (real observe() over a mocked browser)", () => {
   let dir: string;
   beforeEach(() => {
@@ -956,6 +1112,65 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     expect(statSync(dir).mode & 0o777).toBe(0o755);
     expect(statSync(dirname(snapshotFile)).mode & 0o777).toBe(0o700);
     expect(statSync(snapshotFile).mode & 0o777).toBe(0o600);
+  });
+
+  it("persist FAILURE → full uncollapsed response, no snapshot_file, delta baseline NOT advanced", async () => {
+    h.elements = casetifyPage();
+    h.visibleText = "Shop the tech collection.";
+    // obs1: persist SUCCEEDS, establishes the delta baseline.
+    const start = await startProvisionSession({ serviceUrl: URL });
+    const sid = start.session_id;
+    expect(typeof start.snapshot_file).toBe("string");
+    const collapsedCount = start.chrome_links_collapsed ?? 0;
+    expect(collapsedCount).toBeGreaterThan(0); // obs1 collapsed some chrome links
+
+    // Make persistence FAIL: point the observe dir under a regular FILE so
+    // mkdirSync throws (ENOTDIR).
+    const blocker = join(dir, "blocker-file");
+    writeFileSync(blocker, "x");
+    process.env.TRUSTY_SQUIRE_OBSERVE_DIR = join(blocker, "cannot-mkdir");
+
+    // obs2: same page → WOULD be a delta, but persist fails → FULL, UNCOLLAPSED,
+    // no snapshot_file, and the baseline must NOT advance.
+    const obs2 = await observe(sid, "compact");
+    expect(obs2.delta).toBe(false); // NOT a delta (no recovery file)
+    expect(obs2.snapshot_file).toBeUndefined();
+    expect(obs2.chrome_links_collapsed).toBeUndefined(); // uncollapsed
+    expect(obs2.elements.length).toBe(h.elements.length); // EVERY element inline
+    expect(obs2.unchanged).toBeUndefined();
+
+    // Restore persistence; obs3 same page → a delta again. That it deltas (rather
+    // than a fresh full snapshot) proves obs2 did NOT clobber the baseline.
+    process.env.TRUSTY_SQUIRE_OBSERVE_DIR = dir;
+    const obs3 = await observe(sid, "compact");
+    expect(obs3.delta).toBe(true);
+    expect(obs3.elements.length).toBe(0);
+    expect(obs3.unchanged).toBe(h.elements.length);
+    expect(typeof obs3.snapshot_file).toBe("string");
+  });
+
+  it("detail:full refreshes the persisted snapshot as a side-effect (no stale re-expansion)", async () => {
+    h.elements = casetifyPage();
+    h.visibleText = "Page A";
+    const start = await startProvisionSession({ serviceUrl: URL });
+    const sid = start.session_id;
+    const snapshotFile = start.snapshot_file as string;
+
+    // Navigate to a DIFFERENT page, observed ONLY through full mode.
+    const pageB = [
+      el({ tag: "button", role: "button", visibleText: "Only on B", screenPath: "main:b > button:x", selector: "#b" }),
+    ];
+    h.elements = pageB;
+    h.visibleText = "Page B";
+    const full = await observe(sid, "full");
+    // The full payload stays byte-equivalent (no snapshot_file field surfaced).
+    expect(full.snapshot_file).toBeUndefined();
+
+    // But the persisted file was refreshed to page B — re-expansion is NOT stale.
+    const snap = JSON.parse(readFileSync(snapshotFile, "utf8"));
+    expect(snap.elements.length).toBe(1);
+    expect(snap.elements[0].label).toBe("Only on B");
+    expect(snap.elements.some((e: ObservedElement) => e.label === "Casetify")).toBe(false);
   });
 
   it("uses current full page text for internal postcondition checks", async () => {

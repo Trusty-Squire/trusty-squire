@@ -427,6 +427,17 @@ export function stableElementId(el: InteractiveElement): string {
       elementRef(el),
       el.href ?? "",
       el.type ?? "",
+      // The element's own selector — a per-element discriminator so two controls
+      // that are otherwise identical (same label/path/role, e.g. sibling "Remove"
+      // buttons in a list) get DISTINCT identities. Without it, a stable ref is a
+      // positional ordinal within a same-hash group: remove the first sibling and
+      // the old `_1` silently retargets the survivor. With the selector folded in,
+      // the removed element's identity is unique, so its old ref finds no match and
+      // resolveTarget returns null (the host re-observes) — it never mis-clicks a
+      // distinct sibling. (If the extractor emits a POSITIONAL selector that shifts
+      // on reorder, the identity changes and the element is re-emitted as a change,
+      // which is still safe — a reported change, never a silent retarget.)
+      el.selector,
     ].join("\u001f"),
   );
 }
@@ -1590,23 +1601,39 @@ export function isChromeRegionPath(el: InteractiveElement): boolean {
   return false;
 }
 
+// A label that reads as a dismiss / consent / gate action — the collapse must
+// keep these even when they are shipped as a chrome-region <a>, and even when the
+// consent banner gives them a real fallback URL.
+const DISMISS_CONSENT_LABEL_RE =
+  /close|dismiss|skip|no thanks|accept|reject|cookie|consent|not now|maybe later/i;
+
 // A PLAIN chrome-region NAVIGATION link — the ONLY thing the collapse removes.
 // Buttons, inputs, and role-controls are never plain links (isActionableControl
-// short-circuits), so they are always kept regardless of region. AND we require a
-// real navigational href: an <a> with no href (or href="#"/"javascript:") is an
-// ACTION control dressed as a link — a "Manage cookies" / "Close banner" / cookie
-// consent link — not a nav link, so it must NEVER be collapsed even in a chrome
-// region. This closes the "a dismiss control shipped as a bare <a> gets dropped"
-// gap: only links that actually navigate somewhere are collapsible.
+// short-circuits), so they are always kept regardless of region. Beyond that, a
+// link is treated as a NAVIGATION link (collapsible) ONLY when it clearly is one;
+// anything that could be a dismiss/consent control is kept:
+//   - no href, a `#`-fragment href, or a `javascript:` href → an action-link, not
+//     navigation (a "Close banner"/"Manage cookies" anchor) → KEEP.
+//   - inConsentWidget → part of a cookie/consent banner → KEEP.
+//   - label matches a dismiss/consent pattern (close/dismiss/accept/reject/cookie/
+//     …) → KEEP even with a real fallback URL (consent banners often provide one).
+// This closes the "a dismiss control shipped as a bare/consent <a> gets dropped"
+// gap: only true, non-consent navigation links are collapsible.
 export function isPlainChromeLink(el: InteractiveElement): boolean {
   if (isActionableControl(el)) return false;
   const isLink = el.tag === "a" || (el.role ?? "").toLowerCase() === "link";
   if (!isLink) return false;
   if (!isChromeRegionPath(el)) return false;
+  if (el.inConsentWidget === true) return false;
   const href = (el.href ?? "").trim();
-  if (href.length === 0 || href === "#" || href.toLowerCase().startsWith("javascript:")) {
+  if (
+    href.length === 0 ||
+    href.startsWith("#") ||
+    href.toLowerCase().startsWith("javascript:")
+  ) {
     return false;
   }
+  if (DISMISS_CONSENT_LABEL_RE.test(elementRef(el))) return false;
   return true;
 }
 
@@ -1775,10 +1802,28 @@ async function observeSession(
       normalizedText,
       built.fileElements,
     );
+    if (snapshotFile === null) {
+      // Persistence FAILED, so no recovery file exists. A delta (which omits
+      // unchanged elements) or a collapsed full snapshot (which omits chrome
+      // links) would be UNRECOVERABLE — the host would have no way to re-expand.
+      // Fall back to a FULL, UNCOLLAPSED response (every element inline) and do
+      // NOT advance the delta baseline, so the next observe still diffs against
+      // the last SUCCESSFULLY-persisted snapshot rather than a phantom one.
+      return {
+        session_id: session.id,
+        url,
+        text: normalizedText,
+        ...(guidance !== undefined ? { guidance } : {}),
+        elements: [...built.fullByRef.values()],
+        delta: false,
+        elements_total: elements.length,
+        ...(textTruncated ? { text_truncated: true } : {}),
+      };
+    }
     session.prevObserve = built.nextState;
     return {
       ...built.observation,
-      ...(snapshotFile !== null ? { snapshot_file: snapshotFile } : {}),
+      snapshot_file: snapshotFile,
     };
   }
 
@@ -1797,6 +1842,17 @@ async function observeSession(
     ),
     text: normalizedText,
   };
+  // Refresh the persisted snapshot as a SIDE EFFECT so a re-expansion after a
+  // full-only observe can't restore stale state (the previous compact snapshot).
+  // Deliberately NOT surfaced in the payload — the full escape hatch stays
+  // byte-equivalent to the legacy shape (no snapshot_file field added).
+  persistObserveSnapshot(
+    session,
+    generation,
+    url,
+    normalizedText,
+    elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys, true)),
+  );
   const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
   const accessibility = buildAccessibilitySnapshot(elements, undefined, session.sealedFieldKeys);
   return {

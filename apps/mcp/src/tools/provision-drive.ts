@@ -151,7 +151,9 @@ const startSchema = z.object({
 const OBSERVE_DELTA_CONTRACT =
   "Compact observations use stable refs that remain reusable across observes. " +
   "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
-  "element map and replace it from snapshot_file because wire elements may omit collapsed chrome links. " +
+  "element map and replace it from snapshot_file when present (wire elements may omit collapsed chrome " +
+  "links); if delta:false carries NO snapshot_file the wire elements are already the complete, uncollapsed " +
+  "set (a persistence-fallback response) — reset from them directly. " +
   "Only when delta:true, upsert emitted elements by ref, delete refs listed in removed, and retain the " +
   "remaining elements counted by unchanged. text_unchanged:true means reuse the prior text because text " +
   "is empty. snapshot_file points to the complete current snapshot, including omitted elements and path. " +
