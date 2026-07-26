@@ -15,7 +15,7 @@
 // the design. NO real/captured credentials: every element's `value` is left
 // null (the harness never sets a secret), per the no-real-creds rule.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type * as GoogleLoginModule from "../google-login.js";
@@ -77,6 +77,7 @@ import {
   toCompactElement,
   startProvisionSession,
   observe,
+  verifyPostcondition,
   closeAllProvisionSessions,
   type ObserveDeltaState,
   type ObservedElement,
@@ -693,6 +694,33 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     const snap = JSON.parse(readFileSync(obs2.snapshot_file as string, "utf8"));
     expect(snap.elements.length).toBe(h.elements.length);
     expect(snap.elements.some((e: ObservedElement) => typeof e.path === "string")).toBe(true);
+  });
+
+  it("persists snapshots with owner-only directory and file permissions", async () => {
+    const secureDir = join(dir, "snapshots");
+    process.env.TRUSTY_SQUIRE_OBSERVE_DIR = secureDir;
+    h.elements = casetifyPage();
+    h.visibleText = "Account token details";
+
+    const start = await startProvisionSession({ serviceUrl: URL });
+    const snapshotFile = start.snapshot_file as string;
+
+    expect(statSync(secureDir).mode & 0o777).toBe(0o700);
+    expect(statSync(snapshotFile).mode & 0o777).toBe(0o600);
+  });
+
+  it("uses current full page text for internal postcondition checks", async () => {
+    h.elements = casetifyPage();
+    h.visibleText = "Workspace setup complete";
+    const start = await startProvisionSession({ serviceUrl: URL });
+
+    const result = await verifyPostcondition(start.session_id, {
+      kind: "execute_capability",
+      describe: "Workspace setup completed",
+      success_signal: { text_present: "Workspace setup complete" },
+    });
+
+    expect(result.confirmed).toBe(true);
   });
 
   it("INV-full-escape-hatch: detail:full is byte-equivalent and un-deltified regardless of delta history", async () => {

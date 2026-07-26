@@ -17,7 +17,7 @@
 //    `finish`/extract path; the vault stays write-only.
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserController, type InteractiveElement } from "./browser.js";
@@ -1504,20 +1504,30 @@ function persistObserveSnapshot(
   text: string,
   elements: ObservedElement[],
 ): string | null {
+  let temporaryFile: string | null = null;
   try {
     const dir = observeSnapshotDir();
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
     const file = join(dir, `observe-${session.id}.json`);
+    temporaryFile = join(dir, `.observe-${session.id}-${generation}.tmp`);
     writeFileSync(
-      file,
+      temporaryFile,
       JSON.stringify(
         { session_id: session.id, generation, url, elements_total: elements.length, text, elements },
         null,
         2,
       ),
+      { encoding: "utf8", mode: 0o600 },
     );
+    renameSync(temporaryFile, file);
     return file;
   } catch {
+    if (temporaryFile !== null) {
+      try {
+        unlinkSync(temporaryFile);
+      } catch {}
+    }
     return null;
   }
 }
@@ -2310,7 +2320,7 @@ async function snapshotForPostcondition(session: Session): Promise<Postcondition
   const fields = session.lastElements
     .filter((e) => typeof e.value === "string" && e.value.length > 0)
     .map((e) => ({ label: elementRef(e), value_len: (e.value ?? "").length }));
-  return { url: obs.url, text: obs.text, fields };
+  return { url: obs.url, text: session.prevObserve?.text ?? obs.text, fields };
 }
 
 // Verify a recipe's postcondition against the live session — the anti-false-
