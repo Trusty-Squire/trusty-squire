@@ -51,7 +51,7 @@ const SHADOW_FIXTURE = `data:text/html,${encodeURIComponent(`
 // extraction is unchanged".
 const PLAIN_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:40px">
-  <button id="plain" data-testid="plain-btn">Plain Button</button>
+  <button id="plain" data-testid="plain-btn">${"<span>".repeat(80)}Plain Button${"</span>".repeat(80)}</button>
 </body></html>`)}`;
 
 const SLOTTED_FIXTURE = `data:text/html,${encodeURIComponent(`
@@ -134,6 +134,23 @@ describe("extractInteractiveElements — open shadow root occlusion (real Chromi
   it("negative control: plain-DOM extraction is unchanged (button present + topmost)", async () => {
     const { ctrl, page } = await pageFor(PLAIN_FIXTURE);
     try {
+      const hitDepth = await page.evaluate(() => {
+        const button = document.querySelector("#plain");
+        if (!(button instanceof HTMLElement)) return 0;
+        const rect = button.getBoundingClientRect();
+        let hit = document.elementFromPoint(
+          rect.left + rect.width / 2,
+          rect.top + rect.height / 2,
+        );
+        let depth = 0;
+        while (hit !== null && hit !== button) {
+          hit = hit.parentElement;
+          depth += 1;
+        }
+        return depth;
+      });
+      expect(hitDepth).toBeGreaterThan(64);
+
       const els = await ctrl.extractInteractiveElements();
       const plain = els.find((e) => e.visibleText === "Plain Button");
       expect(plain).toBeDefined();
