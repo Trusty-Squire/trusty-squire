@@ -7043,14 +7043,14 @@ export class BrowserController {
         // open shadow root at the same point to reach the deepest composed
         // element, matching what the user's pointer would strike. Closed roots
         // yield a null shadowRoot and the descent stops — same as the DOM.
-        for (let hops = 0; top.shadowRoot !== null && hops < 32; hops += 1) {
+        while (top.shadowRoot !== null) {
           const deeper = top.shadowRoot.elementFromPoint(x, y);
           if (deeper === null || deeper === top) break;
           top = deeper;
         }
         if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
         let owner: Node | null = top;
-        for (let hops = 0; owner !== null && hops < 64; hops += 1) {
+        while (owner !== null) {
           if (owner === el) return { topmost: true, occludedBy: null };
           const assignedSlot: HTMLSlotElement | null =
             owner instanceof Element || owner instanceof Text ? owner.assignedSlot : null;

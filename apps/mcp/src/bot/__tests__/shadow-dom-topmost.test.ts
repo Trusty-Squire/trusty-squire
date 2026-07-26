@@ -72,6 +72,43 @@ const SLOTTED_FIXTURE = `data:text/html,${encodeURIComponent(`
   </script>
 </body></html>`)}`;
 
+const DEEP_SHADOW_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:40px">
+  <script>
+    let host = document.createElement("div");
+    document.body.append(host);
+    for (let depth = 0; depth < 40; depth += 1) {
+      const root = host.attachShadow({ mode: "open" });
+      if (depth === 39) {
+        root.innerHTML =
+          '<button data-testid="deep-shadow-cta" style="width:180px;height:64px">Deep Add To Cart</button>';
+      } else {
+        const next = document.createElement("div");
+        root.append(next);
+        host = next;
+      }
+    }
+  </script>
+</body></html>`)}`;
+
+const DEEP_SLOTTED_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:40px">
+  <script>
+    let content = document.createElement("span");
+    content.textContent = "Deep Slotted Add To Cart";
+    for (let depth = 79; depth >= 0; depth -= 1) {
+      const host = document.createElement("div");
+      host.append(content);
+      const root = host.attachShadow({ mode: "open" });
+      root.innerHTML = depth === 0
+        ? '<button data-testid="deep-slotted-cta" style="padding:20px"><slot></slot></button>'
+        : '<slot></slot>';
+      content = host;
+    }
+    document.body.append(content);
+  </script>
+</body></html>`)}`;
+
 let browser: Browser;
 
 async function pageFor(url: string): Promise<{ ctrl: BrowserController; page: Page }> {
@@ -177,6 +214,32 @@ describe("extractInteractiveElements — open shadow root occlusion (real Chromi
 
       const els = await ctrl.extractInteractiveElements();
       const cta = els.find((e) => e.testId === "slotted-cta");
+      expect(cta).toBeDefined();
+      expect(cta?.topmost).toBe(true);
+      expect(cta?.occludedBy).toBeNull();
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("descends through more than 32 nested open shadow roots", async () => {
+    const { ctrl, page } = await pageFor(DEEP_SHADOW_FIXTURE);
+    try {
+      const els = await ctrl.extractInteractiveElements();
+      const cta = els.find((e) => e.testId === "deep-shadow-cta");
+      expect(cta).toBeDefined();
+      expect(cta?.topmost).toBe(true);
+      expect(cta?.occludedBy).toBeNull();
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("walks more than 64 composed ancestors to a shadow-root button", async () => {
+    const { ctrl, page } = await pageFor(DEEP_SLOTTED_FIXTURE);
+    try {
+      const els = await ctrl.extractInteractiveElements();
+      const cta = els.find((e) => e.testId === "deep-slotted-cta");
       expect(cta).toBeDefined();
       expect(cta?.topmost).toBe(true);
       expect(cta?.occludedBy).toBeNull();
