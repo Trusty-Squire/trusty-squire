@@ -7033,9 +7033,34 @@ export class BrowserController {
         if (r.width < 1 || r.height < 1) return { topmost: false, occludedBy: null };
         const x = Math.min(window.innerWidth - 1, Math.max(0, r.left + r.width / 2));
         const y = Math.min(window.innerHeight - 1, Math.max(0, r.top + r.height / 2));
-        const top = document.elementFromPoint(x, y);
+        let top = document.elementFromPoint(x, y);
         if (top === null) return { topmost: false, occludedBy: null };
+        // document.elementFromPoint returns the shadow HOST, not the control
+        // nested in its open shadow root — so a shadow-DOM CTA (Casetify's
+        // Add-to-Cart web component) hit-tested against its own host would be
+        // reported occludedBy that host and topmost:false, and the host agent
+        // would skip a button nothing actually covers. Re-hit-test inside each
+        // open shadow root at the same point to reach the deepest composed
+        // element, matching what the user's pointer would strike. Closed roots
+        // yield a null shadowRoot and the descent stops — same as the DOM.
+        while (top.shadowRoot !== null) {
+          const deeper = top.shadowRoot.elementFromPoint(x, y);
+          if (deeper === null || deeper === top) break;
+          top = deeper;
+        }
         if (top === el || el.contains(top)) return { topmost: true, occludedBy: null };
+        let owner: Node | null = top;
+        while (owner !== null) {
+          if (owner === el) return { topmost: true, occludedBy: null };
+          const assignedSlot: HTMLSlotElement | null =
+            owner instanceof Element || owner instanceof Text ? owner.assignedSlot : null;
+          if (assignedSlot !== null) {
+            owner = assignedSlot;
+            continue;
+          }
+          const parent: ParentNode | null = owner.parentNode;
+          owner = parent instanceof ShadowRoot ? parent.host : parent;
+        }
         return { topmost: false, occludedBy: regionName(regionFor(top)) ?? elementKind(top) };
       };
 
