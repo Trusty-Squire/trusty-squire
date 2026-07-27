@@ -2551,20 +2551,20 @@ export class BrowserController {
             .trim()
             .toLowerCase();
         const safetyTextFor = (el: Element): string => {
+          const limit = (value: string): string => value.slice(0, 120);
           const values = [
-            el.getAttribute("action-type"),
-            el.getAttribute("aria-label"),
-            el.getAttribute("title"),
-            el.getAttribute("alt"),
-            el.getAttribute("name"),
-            el.getAttribute("id"),
-            el.getAttribute("value"),
-          ]
-            .map(safetyMetadata)
-            .filter((part) => part.length > 0);
-          const text = renderedRaw(el);
-          if (text.length > 0) values.push(text);
-          return [...new Set(values)].join(" ").slice(0, 500);
+            limit(renderedRaw(el)),
+            ...[
+              el.getAttribute("action-type"),
+              el.getAttribute("aria-label"),
+              el.getAttribute("title"),
+              el.getAttribute("alt"),
+              el.getAttribute("name"),
+              el.getAttribute("id"),
+              el.getAttribute("value"),
+            ].map((part) => limit(safetyMetadata(part))),
+          ].filter((part) => part.length > 0);
+          return [...new Set(values)].join(" ");
         };
         // Visibility walks the ANCESTOR chain (crossing shadow-host boundaries):
         // opacity does not inherit, so a button under an opacity:0 wrapper keeps

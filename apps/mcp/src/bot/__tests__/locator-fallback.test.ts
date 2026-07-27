@@ -22,7 +22,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
-import { parseLocatorTarget } from "../provision-session.js";
+import { parseLocatorTarget, shouldBlockUnsafeProvisionAction } from "../provision-session.js";
 
 // Mirrors the Casetify shape: 20 decorative cursor:pointer card-eligible divs
 // BEFORE a bare click-handler <div> CTA whose only child with text is a <span>.
@@ -153,6 +153,11 @@ const ICON_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
 const ACTION_TYPE_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:0">
   <button id="x" action-type="SAVE_PRODUCT" style="width:40px;height:40px"></button>
+</body></html>`)}`;
+
+const LONG_METADATA_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <button id="${"benign".repeat(200)}" style="width:200px;height:40px">Save product</button>
 </body></html>`)}`;
 
 // Many visible divs — css=div must return ambiguous via the pool cap without
@@ -412,6 +417,26 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.text).toBe("");
       expect(resolved.safetyText).toContain("save product");
       expect(resolved.safetyText).not.toContain("SAVE_PRODUCT");
+      await resolved.handle.dispose();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("blocks visible billing text despite long benign metadata", async () => {
+    const { ctrl, page } = await pageFor(LONG_METADATA_SAVE_FIXTURE);
+    try {
+      const resolved = await ctrl.resolvePageTarget("css", "button");
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) throw new Error("unreachable");
+      expect(resolved.safetyText.startsWith("Save product")).toBe(true);
+      expect(
+        shouldBlockUnsafeProvisionAction(
+          "Dashboard Products Live mode",
+          { kind: "click", target: resolved.safetyText },
+          { redactTarget: true },
+        ),
+      ).toMatch(/Mode safety guard/);
       await resolved.handle.dispose();
     } finally {
       await page.close();
