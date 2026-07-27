@@ -30,21 +30,39 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/vault/e2e` | web | Store an opaque, client-encrypted card blob |
 | `GET` | `/v1/vault/e2e` | web/agent | List client-encrypted card metadata without blobs |
 | `GET` | `/v1/vault/e2e/:id` | web/agent | Retrieve an account-owned encrypted card blob |
+| `PATCH` | `/v1/vault/e2e/:id/label` | web | Rename an account-owned encrypted card |
 | `DELETE` | `/v1/vault/e2e/:id` | web | Delete an account-owned encrypted card blob |
 | `POST` | `/v1/vault/payments/audit` | agent | Record a payment attempt without PAN or CVV |
 | `GET` | `/v1/vault/payments/audit` | web/agent | List payment attempts, newest first, with keyset pagination |
 | `GET` | `/v1/pay/config` | agent | Return the configured Vouchflow mandate audience |
-| `POST` | `/v1/pay/approvals` | agent | Create a ten-minute account-scoped payment approval |
+| `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send a Telegram 3-D Secure nudge to the account's linked chat and return `{ sent }` |
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Poll an account-owned payment approval |
+| `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
 | `POST` | `/v1/pay/approvals/:id/approve` | web | Relay a signed mandate and HPKE-sealed card to the operator |
 | `GET` | `/health` | none | Liveness |
+
+Client-encrypted card creation accepts optional plaintext `brand` and `last4`
+display metadata alongside the opaque blob. `brand` must be 1–32 characters,
+start with a letter, and otherwise contain only letters, spaces, and hyphens;
+`last4` must be exactly four digits. The full PAN remains only inside the
+encrypted blob. List responses and GDPR vault exports include `brand` and
+`last4` (`null` for legacy rows). `PATCH /v1/vault/e2e/:id/label` accepts
+`{ label }` and changes only the label; the blob and card metadata remain
+unchanged.
 
 Payment approval creation accepts optional `item` and `reason` strings, storing
 an empty string when either is omitted. The API derives `agent` from the
 authenticated install identity and falls back to `unknown-agent`; clients
 cannot set it. The create response returns `agent`, and polling returns all
-three values for the approval page and signed mandate.
+three values for the approval page and signed mandate. `card_ref` is optional,
+but `operator_pubkey` remains required at creation. Card-less approvals expire
+after 18 minutes to allow the JIT add-card ceremony; approvals created with a
+card keep the 10-minute window. A card-less approval follows the server-enforced
+seal → bind → approve order. Binding is pending-only, write-once, rejects an
+expired approval, and accepts only an `E2ECredential` owned by the same account;
+an unknown or foreign card returns `404`. Approving before a card is bound
+returns `409 { "error": "card_required" }`.
 
 ## Auth model
 

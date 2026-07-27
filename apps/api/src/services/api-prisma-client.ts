@@ -124,6 +124,8 @@ interface E2ECredentialRow {
   account_id: string;
   label: string;
   blob: string;
+  brand: string | null;
+  last4: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -148,7 +150,7 @@ interface PendingPaymentApprovalRow {
   amount_cents: number;
   currency: string;
   nonce: string;
-  card_ref: string;
+  card_ref: string | null;
   operator_pubkey: string;
   item: string;
   reason: string;
@@ -172,6 +174,8 @@ interface EgressGrantRow {
 }
 
 export interface ApiPrismaClient {
+  $transaction<T>(fn: (tx: ApiPrismaClient) => Promise<T>): Promise<T>;
+  $queryRaw(query: TemplateStringsArray, ...values: unknown[]): Promise<unknown[]>;
   machineToken: {
     create(args: { data: Record<string, unknown> }): Promise<MachineTokenRow>;
     findUnique(args: { where: { token: string } }): Promise<MachineTokenRow | null>;
@@ -321,10 +325,14 @@ export interface ApiPrismaClient {
     create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
     findMany(args: {
       where: Record<string, unknown>;
-      select?: { id: true; label: true; created_at: true };
+      select?: { id: true; label: true; brand: true; last4: true; created_at: true };
       orderBy: Record<string, unknown> | Array<Record<string, unknown>>;
     }): Promise<E2ECredentialRow[]>;
     findFirst(args: { where: Record<string, unknown> }): Promise<E2ECredentialRow | null>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
   paymentAuditEvent: {

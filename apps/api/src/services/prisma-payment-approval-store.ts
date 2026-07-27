@@ -4,6 +4,7 @@ import type {
   PendingPaymentApprovalInput,
   PendingPaymentApprovalRecord,
   PendingPaymentApprovalStore,
+  BindCardForAccountResult,
 } from "./in-memory-payment-approval-store.js";
 
 export class PrismaPendingPaymentApprovalStore implements PendingPaymentApprovalStore {
@@ -60,6 +61,37 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
           createdAt: row.created_at,
           expiresAt: row.expires_at,
         };
+  }
+
+  async bindCardForAccount(
+    id: string,
+    accountId: string,
+    cardRef: string,
+    now: Date,
+  ): Promise<BindCardForAccountResult> {
+    return this.prisma.$transaction(async (tx) => {
+      // FOR KEY SHARE blocks concurrent row deletion with the weakest lock used by FK checks.
+      const cards = await tx.$queryRaw`
+        SELECT id
+        FROM "E2ECredential"
+        WHERE id = ${cardRef} AND account_id = ${accountId}
+        FOR KEY SHARE
+      `;
+      if (cards.length === 0) {
+        return "card_not_found";
+      }
+      const result = await tx.pendingPaymentApproval.updateMany({
+        where: {
+          id,
+          account_id: accountId,
+          status: "pending",
+          card_ref: null,
+          expires_at: { gt: now },
+        },
+        data: { card_ref: cardRef },
+      });
+      return result.count > 0 ? "ok" : "not_bindable";
+    });
   }
 
   async approveForAccount(

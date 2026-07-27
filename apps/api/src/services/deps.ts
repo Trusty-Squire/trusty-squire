@@ -260,18 +260,23 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     authPrisma !== null ? new PrismaCredentialStore(authPrisma) : new InMemoryCredentialStore();
   const vaultAuditStore: VaultAuditStore =
     authPrisma !== null ? new PrismaVaultAuditStore(authPrisma) : new InMemoryVaultAuditStore();
-  const e2eCredentialStore: E2ECredentialStore =
-    authPrisma !== null
-      ? new PrismaE2ECredentialStore(authPrisma)
-      : new InMemoryE2ECredentialStore(opts.now);
+  let e2eCredentialStore: E2ECredentialStore;
+  let pendingPaymentApprovalStore: PendingPaymentApprovalStore;
+  if (authPrisma !== null) {
+    e2eCredentialStore = new PrismaE2ECredentialStore(authPrisma);
+    pendingPaymentApprovalStore = new PrismaPendingPaymentApprovalStore(authPrisma);
+  } else {
+    const inMemoryE2ECredentialStore = new InMemoryE2ECredentialStore(opts.now);
+    e2eCredentialStore = inMemoryE2ECredentialStore;
+    pendingPaymentApprovalStore = new InMemoryPendingPaymentApprovalStore(
+      inMemoryE2ECredentialStore,
+      opts.now,
+    );
+  }
   const paymentAuditStore: PaymentAuditStore =
     authPrisma !== null
       ? new PrismaPaymentAuditStore(authPrisma)
       : new InMemoryPaymentAuditStore(opts.now);
-  const pendingPaymentApprovalStore: PendingPaymentApprovalStore =
-    authPrisma !== null
-      ? new PrismaPendingPaymentApprovalStore(authPrisma)
-      : new InMemoryPendingPaymentApprovalStore(opts.now);
   const telegramLinkTokenStore: TelegramLinkTokenStore =
     authPrisma !== null
       ? new PrismaTelegramLinkTokenStore(authPrisma)

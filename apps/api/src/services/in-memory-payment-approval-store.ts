@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import type { InMemoryE2ECredentialStore } from "./in-memory-e2e-credential-store.js";
 
 export interface PendingPaymentApprovalInput {
   merchant: string;
@@ -6,7 +7,7 @@ export interface PendingPaymentApprovalInput {
   amountCents: number;
   currency: string;
   nonce: string;
-  cardRef: string;
+  cardRef: string | null;
   operatorPubkey: string;
   item: string;
   reason: string;
@@ -23,9 +24,17 @@ export interface PendingPaymentApprovalRecord extends PendingPaymentApprovalInpu
   createdAt: Date;
 }
 
+export type BindCardForAccountResult = "card_not_found" | "not_bindable" | "ok";
+
 export interface PendingPaymentApprovalStore {
   create(accountId: string, input: PendingPaymentApprovalInput): Promise<string>;
   getByIdForAccount(id: string, accountId: string): Promise<PendingPaymentApprovalRecord | null>;
+  bindCardForAccount(
+    id: string,
+    accountId: string,
+    cardRef: string,
+    now: Date,
+  ): Promise<BindCardForAccountResult>;
   approveForAccount(
     id: string,
     accountId: string,
@@ -39,7 +48,10 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
   private readonly records = new Map<string, PendingPaymentApprovalRecord>();
   private readonly now: () => Date;
 
-  constructor(now?: () => Date) {
+  constructor(
+    private readonly e2eCredentialStore: InMemoryE2ECredentialStore,
+    now?: () => Date,
+  ) {
     this.now = now ?? (() => new Date());
   }
 
@@ -63,6 +75,30 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
   ): Promise<PendingPaymentApprovalRecord | null> {
     const record = this.records.get(id);
     return record === undefined || record.accountId !== accountId ? null : { ...record };
+  }
+
+  async bindCardForAccount(
+    id: string,
+    accountId: string,
+    cardRef: string,
+    now: Date,
+  ): Promise<BindCardForAccountResult> {
+    // The synchronous check and bind are atomic within one event-loop turn.
+    if (!this.e2eCredentialStore.hasForAccount(cardRef, accountId)) {
+      return "card_not_found";
+    }
+    const record = this.records.get(id);
+    if (
+      record === undefined ||
+      record.accountId !== accountId ||
+      record.status !== "pending" ||
+      record.cardRef !== null ||
+      record.expiresAt <= now
+    ) {
+      return "not_bindable";
+    }
+    record.cardRef = cardRef;
+    return "ok";
   }
 
   async approveForAccount(

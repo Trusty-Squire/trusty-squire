@@ -42,9 +42,9 @@ events, never exposing raw values back to the agent.
 **Client-encrypted card**
 
 A card record encrypted and decrypted by a trusted client with a key produced
-by the enrolled passkey's WebAuthn PRF. The API stores and returns only the
-opaque ciphertext and records metadata-only payment audit events. The
-cryptographic and data-handling contract is owned by
+by the enrolled passkey's WebAuthn PRF. The API cannot derive that key or
+decrypt the full card. The exact storage, display-metadata, and payment-audit
+contracts are owned by
 [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Operate session**
@@ -57,8 +57,9 @@ captcha handling, and extraction.
 
 A short-lived handoff from an active operate session to the user's phone. The
 phone approves the exact purchase and seals the selected card to an ephemeral
-operator key; the API is only an opaque relay. The security contract is owned
-by [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
+operator key; the API enforces the approval state and relays the opaque card
+release. The security contract is owned by
+[`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Sealed slot**
 
@@ -123,8 +124,9 @@ The important boundaries are:
   and configured auth shapes.
 - Audit logs record operations and metadata, not secret values.
 - Client-encrypted card WebAuthn PRF outputs and derived keys remain outside the
-  API; the server stores only opaque ciphertext.
-- Payment card plaintext exists only in the approving browser and the local
+  API; [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data) owns the exact
+  server storage and response boundary.
+- Plaintext PAN and CVV exist only in the approving browser and the local
   operator process, never in the API or coding-agent model.
 
 This boundary applies even when the agent helped create the credential. A

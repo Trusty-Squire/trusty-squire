@@ -438,6 +438,8 @@ export const registerVaultRoute: FastifyPluginAsync<{
           id: credential.id,
           label: credential.label,
           blob: credential.blob,
+          brand: credential.brand,
+          last4: credential.last4,
           created_at: credential.createdAt.toISOString(),
         })),
         payment_audit_events: paymentAuditEvents.map((event) => ({

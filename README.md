@@ -120,7 +120,7 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
   payment, your phone releases the card only to that checkout operator after
   you approve the exact details shown on the approval page. Trusty Squire's API
-  and the coding-agent model never receive plaintext card data. See the
+  and the coding-agent model never receive plaintext PAN or CVV. See the
   [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)
   for the signed mandate's binding contract.
 - Browser screenshots and diagnostics can contain whatever a website visibly rendered. Treat diagnostic artifacts as sensitive and do not ask an agent to re-observe a page after a secret is shown.
