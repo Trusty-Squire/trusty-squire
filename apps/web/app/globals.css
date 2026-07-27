@@ -345,6 +345,44 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
 .kbd .key{border:1px solid var(--line2);border-radius:4px;padding:1px 6px;
   color:var(--muted)}
 
+/* ===================== wallet + keys sections ===================== */
+/* Two labeled groups in the vault list: Wallet above API keys. Muted mono
+   section label, matching the vault's mono-forward identity. */
+.vault-group{margin-top:22px}
+.vault-group:first-of-type{margin-top:8px}
+.sect-label{font-family:var(--mono);font-size:11px;letter-spacing:.14em;
+  text-transform:uppercase;color:var(--faint);margin:0 0 2px;padding:0 4px;
+  font-weight:500}
+.sect-empty{margin:10px 4px 0;font-size:14px;color:var(--muted);line-height:1.55}
+/* Generic card glyph in the 28px brand tile (unknown/legacy card). */
+.ic svg{width:16px;height:16px;color:var(--muted);position:relative}
+/* Empty wallet — a warm, actionable slot, not a dead "No saved cards." */
+.wallet-empty{display:flex;align-items:center;gap:14px;margin-top:8px;
+  padding:16px 14px;border:1px solid var(--line);border-radius:var(--r-md);
+  background:var(--surface)}
+.wallet-empty-line{flex:1;min-width:0;font-size:14px;color:var(--muted);
+  line-height:1.5}
+.add-card-btn{flex:0 0 auto;font-size:13px;font-weight:500;color:var(--fg);
+  border:1px solid var(--line2);border-radius:var(--r-sm);padding:7px 13px;
+  transition:border-color .12s,color .12s}
+.add-card-btn:hover{border-color:var(--accent);color:var(--accent)}
+/* Inline rename input + inline confirm row in a card row's main column. */
+.inline-edit{width:100%;max-width:280px;font-family:var(--mono);font-size:14px;
+  color:var(--fg);background:var(--surface);border:1px solid var(--accent);
+  border-radius:var(--r-sm);padding:5px 8px}
+.inline-edit:focus{outline:none}
+.inline-confirm{display:flex;align-items:center;gap:12px;margin-top:7px}
+.linkbtn.danger{color:var(--err)}
+.linkbtn.danger:hover{color:var(--err);opacity:.8}
+/* Pay-page review anchor — the bound card's last4 as the visual anchor,
+   the beat the user cannot tap past before the passkey. */
+.pay-anchor{margin:20px 0 0;padding-top:16px;border-top:1px solid var(--line);
+  font-size:16px;color:var(--fg);line-height:1.5}
+.pay-anchor .mono{color:var(--accent)}
+/* Honest trust promise under the card form (shared add-card component). */
+.trust-copy{margin:4px 0 0;font-size:12.5px;color:var(--faint);line-height:1.5;
+  max-width:52ch}
+
 /* revealable secret — mask + reveal/copy links, or revealed values */
 .secret{display:flex;align-items:center;gap:12px;margin-top:7px;
   font-family:var(--mono);font-size:13px;flex-wrap:wrap}

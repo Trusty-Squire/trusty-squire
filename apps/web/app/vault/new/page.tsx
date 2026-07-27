@@ -104,7 +104,7 @@ export default function NewCredentialPage() {
             {kind === "login"
               ? "Encrypted; filled into sign-in pages for you, never shown to an agent."
               : kind === "card"
-                ? "Encrypted in this browser. The server cannot decrypt it."
+                ? "Save a card so your agents can pay on your behalf."
                 : "Encrypted, used only via the proxy, never shown to an agent."}
           </p>
         </div>
@@ -123,7 +123,7 @@ export default function NewCredentialPage() {
       </div>
 
       {kind === "card" ? (
-        <CardEntry onSaved={() => router.push("/vault/card")} />
+        <CardEntry onSaved={() => router.push("/vault")} />
       ) : (
         <form className="form cred-form" onSubmit={submit}>
           {kind === "login" ? (

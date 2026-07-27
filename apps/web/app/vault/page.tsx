@@ -4,17 +4,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../components/AppShell";
+import { CardIcon } from "../components/CardIcon";
 import { Modal } from "../components/Modal";
 import { CredentialFields, type FieldsResult } from "../components/CredentialFields";
 import { parseHostList } from "../lib/hosts";
-import {
-  ApiError,
-  apiDelete,
-  apiGet,
-  apiPatch,
-  apiPost,
-  timeAgo,
-} from "../lib/api";
+import { type CardMeta, isLegacyCard } from "../lib/wallet";
+import { ApiError, apiDelete, apiGet, apiPatch, apiPost, timeAgo } from "../lib/api";
 
 interface Cred {
   id: string;
@@ -49,12 +44,20 @@ interface Cred {
 export default function VaultPage() {
   const router = useRouter();
   const [creds, setCreds] = useState<Cred[] | null>(null);
+  // The Wallet (payment cards). Separate list/endpoint from API-key creds;
+  // fetched in parallel and rendered above the keys.
+  const [cards, setCards] = useState<CardMeta[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [undo, setUndo] = useState<Cred | null>(null);
 
   const load = useCallback(async (): Promise<void> => {
-    const res = await apiGet<{ credentials: Cred[] }>("/v1/vault/credentials");
-    setCreds(res.credentials);
+    // Parallel — the two lists are independent, so don't serialize them.
+    const [credRes, cardRes] = await Promise.all([
+      apiGet<{ credentials: Cred[] }>("/v1/vault/credentials"),
+      apiGet<CardMeta[]>("/v1/vault/e2e"),
+    ]);
+    setCreds(credRes.credentials);
+    setCards(cardRes);
   }, []);
 
   useEffect(() => {
@@ -68,9 +71,7 @@ export default function VaultPage() {
           router.replace("/login?next=/vault");
           return;
         }
-        setError(
-          err instanceof Error ? err.message : "Failed to load your vault.",
-        );
+        setError(err instanceof Error ? err.message : "Failed to load your vault.");
       }
     })();
     return () => {
@@ -85,6 +86,18 @@ export default function VaultPage() {
     setCreds((prev) => prev?.filter((c) => c.id !== cred.id) ?? prev);
     setUndo(cred);
   }, []);
+
+  // Card mutations are optimistic and local — a deleted card drops from the
+  // list immediately; a rename updates its label in place.
+  const onCardDeleted = useCallback((id: string) => {
+    setCards((prev) => prev?.filter((c) => c.id !== id) ?? prev);
+  }, []);
+  const onCardRenamed = useCallback((id: string, label: string) => {
+    setCards((prev) => prev?.map((c) => (c.id === id ? { ...c, label } : c)) ?? prev);
+  }, []);
+  const redirectToLogin = useCallback(() => {
+    router.replace("/login?next=/vault");
+  }, [router]);
 
   const restore = useCallback(async () => {
     if (undo === null) return;
@@ -111,10 +124,12 @@ export default function VaultPage() {
       <div className="app-head">
         <div>
           <h1 className="app-title">Vault</h1>
-          <p className="app-sub">Keys your squire has collected.</p>
+          <p className="app-sub">Cards your agents can spend and keys they can use.</p>
         </div>
         <div className="app-head-actions">
-          {creds !== null && <span className="app-count">{creds.length}</span>}
+          {creds !== null && cards !== null && (
+            <span className="app-count">{creds.length + cards.length}</span>
+          )}
           <Link className="head-btn" href="/vault/activity">
             Activity
           </Link>
@@ -145,36 +160,71 @@ export default function VaultPage() {
         </div>
       )}
 
-      {error === null && creds === null && (
+      {error === null && (creds === null || cards === null) && (
         <div className="app-state">
           <p className="hint">Loading…</p>
         </div>
       )}
 
-      {creds !== null && creds.length === 0 && (
-        <div className="app-state">
-          <div className="big">No keys yet</div>
-          <p className="hint">
-            Pair a CLI and let your squire sign up for a service — every key it
-            collects lands here. Or <Link href="/vault/new">add one by hand</Link>.
-          </p>
-        </div>
-      )}
-
-      {creds !== null && creds.length > 0 && (
+      {error === null && creds !== null && cards !== null && (
         <>
-          <div className="vault-list">
-            {creds.map((cred) => (
-              <VaultRow
-                key={cred.id}
-                cred={cred}
-                onDeleted={onDeleted}
-                onChanged={() => {
-                  void load();
-                }}
-              />
-            ))}
-          </div>
+          {/* Wallet — cards agents can spend from. Above API keys, and shown
+              first even when empty (strategy encoded in the layout). */}
+          <section className="vault-group" aria-labelledby="wallet-label">
+            <h2 className="sect-label" id="wallet-label">
+              Wallet
+            </h2>
+            {cards.length === 0 ? (
+              <div className="wallet-empty">
+                <CardIcon brand={null} />
+                <p className="wallet-empty-line">
+                  No card yet — add one so agents can pay on your behalf.
+                </p>
+                <Link className="add-card-btn" href="/vault/card">
+                  Add card
+                </Link>
+              </div>
+            ) : (
+              <div className="vault-list">
+                {cards.map((card) => (
+                  <CardRow
+                    key={card.id}
+                    card={card}
+                    onDeleted={onCardDeleted}
+                    onRenamed={onCardRenamed}
+                    onUnauthorized={redirectToLogin}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+
+          {/* API keys — what agents can use through the proxy. */}
+          <section className="vault-group" aria-labelledby="keys-label">
+            <h2 className="sect-label" id="keys-label">
+              API keys
+            </h2>
+            {creds.length === 0 ? (
+              <p className="sect-empty">
+                No keys yet — pair a CLI and let your squire collect one, or{" "}
+                <Link href="/vault/new">add one by hand</Link>.
+              </p>
+            ) : (
+              <div className="vault-list">
+                {creds.map((cred) => (
+                  <VaultRow
+                    key={cred.id}
+                    cred={cred}
+                    onDeleted={onDeleted}
+                    onChanged={() => {
+                      void load();
+                    }}
+                  />
+                ))}
+              </div>
+            )}
+          </section>
+
           {/* keyboard rail — static "fast" signal (no handlers wired) */}
           <div className="kbd" aria-hidden="true">
             <span className="key">R</span> reveal
@@ -183,7 +233,6 @@ export default function VaultPage() {
           </div>
         </>
       )}
-
     </AppShell>
   );
 }
@@ -300,9 +349,7 @@ function VaultRow({
   const onVerify = useCallback(async () => {
     setStatus("checking");
     try {
-      const res = await apiPost<{ healthy: boolean }>(
-        `/v1/vault/credentials/${cred.id}/health`,
-      );
+      const res = await apiPost<{ healthy: boolean }>(`/v1/vault/credentials/${cred.id}/health`);
       setStatus(res.healthy ? "ok" : "bad");
     } catch {
       setStatus("bad");
@@ -316,9 +363,7 @@ function VaultRow({
   // omitted when the credential has no allowed hosts.
   const host = cred.allowed_hosts[0];
   const usage =
-    cred.last_retrieved_at !== null
-      ? `used ${timeAgo(cred.last_retrieved_at)}`
-      : "never used";
+    cred.last_retrieved_at !== null ? `used ${timeAgo(cred.last_retrieved_at)}` : "never used";
   const ageLabel = `${cred.rotated_at !== null ? "rotated" : "added"} ${cred.age_days}d ago`;
 
   return (
@@ -333,7 +378,10 @@ function VaultRow({
             </span>
           )}
           {cred.stale && (
-            <span className="badge-stale" title="Older than the rotation window — consider re-storing this key.">
+            <span
+              className="badge-stale"
+              title="Older than the rotation window — consider re-storing this key."
+            >
               rotate
             </span>
           )}
@@ -363,15 +411,21 @@ function VaultRow({
             <span className="mask">{busy ? "revealing…" : "••••••••••••••••"}</span>
           )}
           {status === "ok" && (
-            <span className="health-ok" title="Decrypts cleanly under the current master key.">✓ decrypts</span>
+            <span className="health-ok" title="Decrypts cleanly under the current master key.">
+              ✓ decrypts
+            </span>
           )}
           {status === "bad" && (
-            <span className="health-bad" title="The stored envelope did not decrypt.">✗ decrypt failed</span>
+            <span className="health-bad" title="The stored envelope did not decrypt.">
+              ✗ decrypt failed
+            </span>
           )}
           {status === "checking" && <span className="health-ok">checking…</span>}
           {status === "copied" && <span className="health-ok">copied ✓</span>}
           {status === "copyfail" && (
-            <span className="health-bad" title="Clipboard write was blocked by the browser.">copy failed</span>
+            <span className="health-bad" title="Clipboard write was blocked by the browser.">
+              copy failed
+            </span>
           )}
         </div>
       </div>
@@ -412,6 +466,175 @@ function VaultRow({
           }}
         />
       )}
+    </div>
+  );
+}
+
+// A Wallet row — a saved payment card. Reuses the `.vault-list .row` grid
+// (brand tile / main / action) and the shared kebab menu, matching the API
+// key rows exactly. Rename and delete happen inline; the raw PAN is never
+// here — only the display-only brand + last4.
+function CardRow({
+  card,
+  onDeleted,
+  onRenamed,
+  onUnauthorized,
+}: {
+  card: CardMeta;
+  onDeleted: (id: string) => void;
+  onRenamed: (id: string, label: string) => void;
+  onUnauthorized: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [labelDraft, setLabelDraft] = useState(card.label);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const legacy = isLegacyCard(card);
+
+  const cancelEdit = useCallback(() => {
+    setEditing(false);
+    setLabelDraft(card.label);
+    setError(null);
+  }, [card.label]);
+
+  const saveLabel = useCallback(async () => {
+    const next = labelDraft.trim();
+    if (next === "" || next === card.label) {
+      cancelEdit();
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await apiPatch(`/v1/vault/e2e/${card.id}/label`, { label: next });
+      onRenamed(card.id, next);
+      setEditing(false);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Couldn't rename this card.");
+    } finally {
+      setBusy(false);
+    }
+  }, [labelDraft, card.id, card.label, cancelEdit, onRenamed, onUnauthorized]);
+
+  const del = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await apiDelete(`/v1/vault/e2e/${card.id}`);
+      onDeleted(card.id);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        onUnauthorized();
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Couldn't delete this card.");
+      setBusy(false);
+      setConfirmDelete(false);
+    }
+  }, [card.id, onDeleted, onUnauthorized]);
+
+  return (
+    <div className="row">
+      <CardIcon brand={card.brand} />
+      <div>
+        {editing ? (
+          <input
+            className="mono inline-edit"
+            value={labelDraft}
+            autoFocus
+            maxLength={256}
+            aria-label="Card label"
+            onChange={(e) => setLabelDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void saveLabel();
+              if (e.key === "Escape") cancelEdit();
+            }}
+          />
+        ) : (
+          <div className="svc">{card.label}</div>
+        )}
+        <div className="meta">
+          {legacy ? (
+            <span>Re-add to show ····</span>
+          ) : (
+            <>
+              {card.brand !== null && (
+                <>
+                  <span>{card.brand}</span>
+                  <span className="dot">·</span>
+                </>
+              )}
+              <span>··{card.last4}</span>
+            </>
+          )}
+        </div>
+        {error !== null && <div className="form-err">{error}</div>}
+        {editing && (
+          <div className="inline-confirm">
+            <button
+              type="button"
+              className="linkbtn"
+              onClick={() => void saveLabel()}
+              disabled={busy}
+            >
+              {busy ? "Saving…" : "Save"}
+            </button>
+            <button type="button" className="linkbtn q" onClick={cancelEdit} disabled={busy}>
+              Cancel
+            </button>
+          </div>
+        )}
+        {confirmDelete && (
+          <div className="inline-confirm">
+            <span className="meta">Delete this card?</span>
+            <button
+              type="button"
+              className="linkbtn danger"
+              onClick={() => void del()}
+              disabled={busy}
+            >
+              {busy ? "Deleting…" : "Delete"}
+            </button>
+            <button
+              type="button"
+              className="linkbtn q"
+              onClick={() => setConfirmDelete(false)}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+      </div>
+
+      <RowMenu
+        label={`Actions for ${card.label}`}
+        items={[
+          {
+            key: "rename",
+            label: "Rename",
+            onClick: () => {
+              setLabelDraft(card.label);
+              setConfirmDelete(false);
+              setEditing(true);
+            },
+          },
+          {
+            key: "delete",
+            label: "Delete",
+            onClick: () => {
+              setEditing(false);
+              setConfirmDelete(true);
+            },
+            danger: true,
+          },
+        ]}
+      />
     </div>
   );
 }
@@ -630,7 +853,9 @@ function EditModal({
       onSaved();
     } catch (err) {
       if (err instanceof ApiError && err.status === 400) {
-        setError("One of the hosts isn't valid — use a bare hostname like api.example.com (no https://, no path).");
+        setError(
+          "One of the hosts isn't valid — use a bare hostname like api.example.com (no https://, no path).",
+        );
       } else {
         setError(err instanceof Error ? err.message : "Couldn't save your changes.");
       }
@@ -673,7 +898,9 @@ function EditModal({
                     maxLength={60}
                     autoComplete="off"
                   />
-                  <span className="field-hint">Tells entries of the same service apart (prod/dev).</span>
+                  <span className="field-hint">
+                    Tells entries of the same service apart (prod/dev).
+                  </span>
                 </div>
                 <div className="field">
                   <label htmlFor={`edit-hosts-${cred.id}`}>
@@ -715,7 +942,15 @@ function EditModal({
 // Settings gear — outline icon button in the header, next to the "+".
 function GearIcon() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
