@@ -465,7 +465,9 @@ async function runJit(cfg: {
   boundCardRef: string; // what the server binds + echoes as approval.card_ref
   signCardRef?: string; // what the phone signs the mandate over (default = bound)
   poll: (clockMs: number) => PollState;
-  resumeAmountCents?: number; // second (resume) readCheckoutSummary amount
+  // Overrides merged into the second (resume) readCheckoutSummary — lets a test
+  // drift the amount, merchant, or origin out from under the mandate.
+  resumeOverride?: Partial<CheckoutSummary>;
   resumeThrows?: boolean;
   approvalTimeoutMs?: number;
   jitApprovalTimeoutMs?: number;
@@ -546,8 +548,8 @@ async function runJit(cfg: {
       if (call >= 1 && cfg.resumeThrows === true) {
         throw new Error("payment_checkout_total_not_found");
       }
-      if (call >= 1 && cfg.resumeAmountCents !== undefined) {
-        return { ...JIT_CHECKOUT, amount_cents: cfg.resumeAmountCents };
+      if (call >= 1 && cfg.resumeOverride !== undefined) {
+        return { ...JIT_CHECKOUT, ...cfg.resumeOverride };
       }
       return JIT_CHECKOUT;
     }),
@@ -632,7 +634,7 @@ describe("operate_pay JIT add-card ceremony", () => {
     const { result, filledCards, summaryReads } = await runJit({
       boundCardRef: "card_x",
       poll: () => ({ status: "approved", card_ref: "card_x" }),
-      resumeAmountCents: JIT_CHECKOUT.amount_cents + 500,
+      resumeOverride: { amount_cents: JIT_CHECKOUT.amount_cents + 500 },
     });
 
     expect(result).toMatchObject({
@@ -643,6 +645,32 @@ describe("operate_pay JIT add-card ceremony", () => {
     expect(filledCards).toHaveLength(0);
     // Re-read happened (two summary reads: initial + resume).
     expect(summaryReads).toBe(2);
+  });
+
+  it("refuses to fill when the merchant or origin drifts on resume (same total)", async () => {
+    // A mid-ceremony navigation to a different merchant/origin with an
+    // identical total must NOT slip through — the mandate binds those fields.
+    const merchantDrift = await runJit({
+      boundCardRef: "card_x",
+      poll: () => ({ status: "approved", card_ref: "card_x" }),
+      resumeOverride: { merchant: "Different Merchant" },
+    });
+    expect(merchantDrift.result).toMatchObject({
+      status: "payment_amount_mismatch",
+      live_merchant: "Different Merchant",
+    });
+    expect(merchantDrift.filledCards).toHaveLength(0);
+
+    const originDrift = await runJit({
+      boundCardRef: "card_x",
+      poll: () => ({ status: "approved", card_ref: "card_x" }),
+      resumeOverride: { checkout_origin: "https://evil.synthetic.test" },
+    });
+    expect(originDrift.result).toMatchObject({
+      status: "payment_amount_mismatch",
+      live_checkout_origin: "https://evil.synthetic.test",
+    });
+    expect(originDrift.filledCards).toHaveLength(0);
   });
 
   it("fails closed when the live total can no longer be read on resume", async () => {
