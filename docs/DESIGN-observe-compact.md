@@ -104,19 +104,40 @@ sub-tree reads remain unbuilt.
 
 Compact observations minimize repeated context without making the stream lossy:
 
-- **Stable refs.** Refs use `@e:<identity>_<ordinal>` and do not contain an
-  observation generation. An unchanged element keeps resolving across observes.
-  The identity includes the element selector, so same-label siblings with
-  distinct stable selectors get distinct refs; after one is removed, its old ref
-  resolves to `null` instead of retargeting its sibling. There is one bounded,
-  unguarded exception: when sibling controls are distinguishable only by a
-  positional `:nth-child`/`:nth-of-type` selector and `screenPath` does not
-  distinguish their row, removing the first sibling shifts the survivor onto the
-  removed node's identity. The removed node's old ref is then not in `removed`
-  and still resolves to the survivor. `screenPath` normally includes a row/index
-  and prevents this collision. Fully closing it requires an extractor-provided
-  stable node id or a per-observe generation; the latter defeats the stable-ref
-  reuse this design exists to preserve.
+- **Stable refs.** Refs are `@e:<identity>_<ordinal>`. For a normal control the
+  `<identity>` is its generation-independent `stableElementId`, so an unchanged
+  element keeps resolving across observes. The identity includes the element
+  selector, so same-label siblings with distinct stable selectors get distinct
+  refs; after one is removed, its old ref resolves to `null` instead of
+  retargeting its sibling.
+- **Volatile positional-groups (issue #399).** The one recycling case — sibling
+  controls distinguishable *only* by a positional `:nth-child`/`:nth-of-type`/
+  `>> nth=` selector, where removing (or reordering) one shifts a survivor onto
+  the removed node's identity — is closed. `volatilePositionalGroups` detects any
+  group of ≥2 same-base-identity siblings whose selectors are all positional and
+  gives every member a GROUP FINGERPRINT: a hash of the group's members'
+  `stableElementId`s in extraction order. `elementIdentity` prefixes those
+  members' refs with the fingerprint (`<fp>-<hash>`), so a group ref is valid
+  ONLY while the group's composition is byte-identical. Any removal, insertion,
+  or reorder changes the fingerprint, so the departed member's old ref appears in
+  `removed` (or a full resync) and resolves to `null` — never to a surviving
+  sibling. Because the identity is derived from composition (not an observe
+  counter), this also holds WITHIN a turn: the act path re-extracts, so a
+  mutation between observe and act changes the fingerprint and forces a
+  re-observe rather than mis-targeting the shifted sibling. A static group's refs
+  stay stable across observes (no wasted churn), and a filled field or toggled
+  checkbox — mutable state is excluded from `stableElementId` — keeps its ref.
+  These groups are rare, so the corpus token-weighted aggregate saving is
+  unchanged (~66%). Bounded residual: a size-preserving shuffle of TRULY
+  indistinguishable members (delete-one-and-insert-one, or a pure reorder, where
+  members carry zero distinguishing signal — identical label/aria/testid/text,
+  only the `nth` differs) leaves the fingerprint unchanged. That observation is
+  byte-identical to "nothing changed," so no string-derived ref scheme can flag
+  it; real per-row controls carry a distinguishing signal and are non-volatile
+  (guarded by the #398 stable-selector identity). Fully closing it needs an
+  extractor-stamped per-node id that survives DOM mutation — deferred because
+  stamping every interactive node with a persistent attribute is
+  anti-bot-detectable.
 - **Full resyncs.** The first compact observe, a URL change, or element churn over
   60% emits `delta:false`. Replace the prior element map from `snapshot_file`;
   the wire `el_table` may omit collapsed chrome links.
@@ -194,16 +215,18 @@ but not numerically gated.
 
 `apps/mcp/src/bot/__tests__/observe-delta.test.ts` owns the lossless-resync,
 actionable-never-dropped (including dismiss anchors), clickable-unchanged,
-text-delta, distinct-selector no-retarget, corpus budget, snapshot permission and
-failure fallback, remove-then-restore resynchronization, and full-escape-hatch
-invariants, plus the Phase-4 columnar/type-elision marginal. The corpus budget
-requires at least 50% token-weighted aggregate savings vs the pre-delta payload
-while allowing low-savings single-observe and high-churn runs; the Phase-4
-marginal gate separately requires columnar ≥ 10% and combined ≥ columnar on top
-of the delta baseline. Type-elision is measured and printed but not gated because
-its standalone whole-payload marginal is negligible. The lossless-resync
-invariant reconstructs the full element set by parsing the columnar `el_table`
-delta stream.
+text-delta, distinct-selector no-retarget, positional-group volatile re-mint
+(issue #399 — state-differing checkbox siblings, per-row Remove buttons, and
+remove-then-restore across a failed persist), corpus budget, snapshot permission
+and failure fallback, remove-then-restore resynchronization, and
+full-escape-hatch invariants, plus the Phase-4 columnar/type-elision marginal.
+The corpus budget requires at least 50% token-weighted aggregate savings vs the
+pre-delta payload while allowing low-savings single-observe and high-churn runs;
+the Phase-4 marginal gate separately requires columnar ≥ 10% and combined ≥
+columnar on top of the delta baseline. Type-elision is measured and printed but
+not gated because its standalone whole-payload marginal is negligible. The
+lossless-resync invariant reconstructs the full element set by parsing the
+columnar `el_table` delta stream.
 
 ## Non-goals / explicitly avoided
 

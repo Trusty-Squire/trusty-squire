@@ -796,8 +796,14 @@ describe("observe-delta harness", () => {
     expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
   });
 
-  it("positional-selector siblings: removal accepts bounded unguarded identity reuse", () => {
-    const remove = (position: number): InteractiveElement =>
+  it("#399 positional-selector Remove-button group: removing a row invalidates every group ref so no stale ref retargets a survivor", () => {
+    // A per-row "Remove" button list — same label/path/role, distinguished ONLY
+    // by a positional selector. Six stable buttons dilute churn so this stays a
+    // DELTA (so `removed` is emitted). The group's composition FINGERPRINT makes
+    // its members "volatile": removing a row changes the fingerprint, so every
+    // old group ref (departed AND survivors') is invalidated and can never
+    // resolve to a survivor.
+    const removeBtn = (position: number): InteractiveElement =>
       el({
         tag: "button",
         role: "button",
@@ -806,11 +812,20 @@ describe("observe-delta harness", () => {
         container: "list:cart",
         selector: `ul>li:nth-of-type(${position})>button`,
       });
-    const before = [remove(1), remove(2)];
+    const stable = [0, 1, 2, 3, 4, 5].map((i) =>
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: `Item ${i}`,
+        screenPath: `list:cart > article:item-${i} > button:open`,
+        selector: `#open-${i}`,
+      }),
+    );
+    const before = [removeBtn(1), removeBtn(2), removeBtn(3), ...stable];
     const refsBefore = provisionElementRefs(before);
-    const removedNodeRef = refsBefore.get(before[0]!) as string;
-    const survivorOldRef = refsBefore.get(before[1]!) as string;
-    expect(removedNodeRef).not.toBe(survivorOldRef);
+    const removedNodeRef = refsBefore.get(before[0]!) as string; // row 1 — removed
+    const survivor2OldRef = refsBefore.get(before[1]!) as string; // row 2
+    const survivor3OldRef = refsBefore.get(before[2]!) as string; // row 3
 
     const b1 = buildCompactObservation({
       sessionId: "s",
@@ -819,7 +834,8 @@ describe("observe-delta harness", () => {
       elements: before,
       prev: null,
     });
-    const after = [remove(1)];
+    // Row 1 removed → rows 2 & 3 slide up onto nth-of-type(1) and (2).
+    const after = [removeBtn(1), removeBtn(2), ...stable];
     const b2 = buildCompactObservation({
       sessionId: "s",
       url: URL,
@@ -829,25 +845,37 @@ describe("observe-delta harness", () => {
     });
 
     expect(b2.observation.delta).toBe(true);
-    expect(b2.observation.removed).toEqual([survivorOldRef]);
-    expect(b2.observation.removed).not.toContain(removedNodeRef);
-    expect(b2.observation.unchanged).toBe(1);
+    // `removed` names the departed row...
+    expect(b2.observation.removed).toContain(removedNodeRef);
+    // ...and EVERY ref the host is told to drop is genuinely dead — none of them
+    // resolves to a surviving element (the crux of #399, incl. the two survivors'
+    // now-invalid old refs).
+    for (const ref of b2.observation.removed ?? []) {
+      expect(resolveTarget(after, ref)).toBeNull();
+    }
+    expect(resolveTarget(after, removedNodeRef)).toBeNull();
+    expect(resolveTarget(after, survivor2OldRef)).toBeNull();
+    expect(resolveTarget(after, survivor3OldRef)).toBeNull();
 
-    const survivorCurrentRef = provisionElementRefs(after).get(after[0]!) as string;
-    expect(survivorCurrentRef).toBe(removedNodeRef);
-    // The removed node's old ref is recycled onto the survivor without an
-    // invalidation signal, so retaining every non-removed ref does not guard it.
-    expect(resolveTarget(after, survivorCurrentRef)).toBe(after[0]);
-    expect(resolveTarget(after, removedNodeRef)).toBe(after[0]);
-    expect(resolveTarget(after, survivorOldRef)).toBeNull();
+    // The survivors are still reachable — by their CURRENT (re-minted) refs.
+    const refsAfter = provisionElementRefs(after);
+    expect(resolveTarget(after, refsAfter.get(after[0]!) as string)).toBe(after[0]);
+    expect(resolveTarget(after, refsAfter.get(after[1]!) as string)).toBe(after[1]);
 
+    // WITHIN-TURN (no re-observe): the host deletes row 1 then, still holding
+    // observation-1 refs, tries to act on row 2 by its OLD ref against a fresh
+    // extraction. `resolveTarget` is exactly the act path — it returns null
+    // (fingerprint changed), forcing a re-observe rather than deleting row 3.
+    expect(resolveTarget(after, survivor2OldRef)).toBeNull();
+
+    // Lossless reconstruction (base ⊕ changed ⊖ removed == ground truth).
     const recon = new Map(b1.fullByRef);
     for (const e of rows(b2.observation)) recon.set(e.ref, e);
     for (const r of b2.observation.removed ?? []) recon.delete(r);
     expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
   });
 
-  it("positional-selector state change: recycled ref is re-emitted but remains unguarded", () => {
+  it("#399 positional-selector checkbox siblings (differing checked state): removing the first nulls its ref, never retargeting the survivor", () => {
     const checkbox = (position: number, checked: boolean): InteractiveElement =>
       el({
         tag: "input",
@@ -866,10 +894,13 @@ describe("observe-delta harness", () => {
         selector: `#keep-${index}`,
       }),
     );
+    // Two same-label checkboxes with DIFFERENT checked state (the exact finding).
     const before = [checkbox(1, true), checkbox(2, false), ...keepers];
     const refsBefore = provisionElementRefs(before);
-    const removedNodeRef = refsBefore.get(before[0]!) as string;
-    const survivorOldRef = refsBefore.get(before[1]!) as string;
+    const removedNodeRef = refsBefore.get(before[0]!) as string; // checked=true, removed
+    const survivorOldRef = refsBefore.get(before[1]!) as string; // checked=false, survives
+    expect(removedNodeRef).not.toBe(survivorOldRef);
+
     const b1 = buildCompactObservation({
       sessionId: "s",
       url: URL,
@@ -877,6 +908,7 @@ describe("observe-delta harness", () => {
       elements: before,
       prev: null,
     });
+    // First checkbox removed; the survivor (checked=false) slides onto nth(1).
     const after = [checkbox(1, false), ...keepers];
     const b2 = buildCompactObservation({
       sessionId: "s",
@@ -887,18 +919,49 @@ describe("observe-delta harness", () => {
     });
 
     expect(b2.observation.delta).toBe(true);
-    expect(b2.observation.removed).toEqual([survivorOldRef]);
-    expect(b2.observation.removed).not.toContain(removedNodeRef);
-    expect(rows(b2.observation).find((entry) => entry.ref === removedNodeRef)?.checked).toBe(false);
-    // The changed body exposes the survivor's current state, but neither
-    // `removed` nor resolveTarget signals that the underlying node changed.
-    expect(resolveTarget(after, removedNodeRef)).toBe(after[0]);
+    // `removed` names the departed node, and only dead refs.
+    expect(b2.observation.removed).toContain(removedNodeRef);
+    for (const ref of b2.observation.removed ?? []) {
+      expect(resolveTarget(after, ref)).toBeNull();
+    }
+    // The removed node's old ref resolves to NULL — it does NOT retarget the
+    // survivor, even though the survivor now occupies its DOM slot.
+    expect(resolveTarget(after, removedNodeRef)).toBeNull();
     expect(resolveTarget(after, survivorOldRef)).toBeNull();
+    // The survivor stays reachable by its own CURRENT ref, carrying its real
+    // (checked=false) state — no cross-node confusion.
+    const survivorCurrentRef = provisionElementRefs(after).get(after[0]!) as string;
+    expect(survivorCurrentRef).not.toBe(removedNodeRef);
+    expect(resolveTarget(after, survivorCurrentRef)).toBe(after[0]);
+    expect(after[0]!.checked).toBe(false);
 
+    // Lossless reconstruction.
     const recon = new Map(b1.fullByRef);
     for (const e of rows(b2.observation)) recon.set(e.ref, e);
     for (const r of b2.observation.removed ?? []) recon.delete(r);
     expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
+  });
+
+  it("#399 quoted attribute values are NOT misread as positional (stable selectors keep plain, unprefixed refs)", () => {
+    // The selector VALUE merely contains ":nth-child(" — the selector itself is a
+    // STABLE data attribute and must not be treated as a recycling positional
+    // combinator, or it would wrongly get a fingerprint prefix (a byte regression).
+    const mk = (key: string): InteractiveElement =>
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Pick",
+        screenPath: "list:opts > button:pick",
+        container: "list:opts",
+        selector: `[data-key="${key}"]`,
+      });
+    const els = [mk("a:nth-child(1)"), mk("b:nth-child(2)")];
+    const refs = provisionElementRefs(els);
+    // Plain stableElementId ref — no "<fp>-" fingerprint prefix.
+    for (const e of els) expect(refs.get(e)).toBe(`@e:${stableElementId(e)}_1`);
+    // Each resolves to itself by its own distinct stable identity.
+    expect(resolveTarget(els, refs.get(els[0]!) as string)).toBe(els[0]);
+    expect(resolveTarget(els, refs.get(els[1]!) as string)).toBe(els[1]);
   });
 
   it("INV-clickable-unchanged: an unchanged, not-re-emitted element still resolves by its stable ref", () => {
@@ -1572,6 +1635,67 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     expect(
       [...(cView as Map<string, ObservedElement>).values()].some((e) => e.label === "Special X"),
     ).toBe(true);
+  });
+
+  it("#399 remove-then-restore across a failed persist keeps a volatile positional-sibling group in sync", async () => {
+    // Same failed-persist desync sequence, but the churning elements are a
+    // VOLATILE positional-selector group (per-row Remove buttons). Their refs
+    // re-mint every observe (issue #399); this proves that re-mint composes with
+    // the failed-persist baseline invalidation — the host never desyncs, and the
+    // restored row reappears.
+    const rows = (count: number): unknown[] => {
+      const out: unknown[] = [
+        el({
+          tag: "button",
+          role: "button",
+          visibleText: "Done",
+          screenPath: "list:rows > button:done",
+          selector: "#done",
+        }),
+      ];
+      for (let i = 1; i <= count; i++) {
+        out.push(
+          el({
+            tag: "button",
+            role: "button",
+            visibleText: "Remove",
+            screenPath: "list:rows > button:remove",
+            container: "list:rows",
+            selector: `ul>li:nth-of-type(${i})>button`,
+          }),
+        );
+      }
+      return out;
+    };
+    const removeCount = (obs: { elements: Array<{ label?: string }> }): number =>
+      obs.elements.filter((e) => e.label === "Remove").length;
+
+    h.elements = rows(3); // A: Done + 3 Remove rows
+    h.visibleText = "Rows";
+    const a = await startProvisionSession({ serviceUrl: URL });
+    expect(removeCount(a)).toBe(3);
+
+    // B: one row removed while persistence FAILS → full uncollapsed fallback,
+    // delta baseline invalidated.
+    const blocker = join(dir, "blk-vol");
+    writeFileSync(blocker, "x");
+    process.env.TRUSTY_SQUIRE_OBSERVE_DIR = join(blocker, "no");
+    h.elements = rows(2);
+    const b = await observe(a.session_id, "compact");
+    expect(b.delta).toBe(false);
+    expect(removeCount(b)).toBe(2);
+
+    // C: row restored, persistence RESTORED → a FRESH full re-sync (not an
+    // A-relative delta), so the host sees all three rows again — the volatile
+    // group's per-observe re-mint never desyncs across the failure boundary.
+    process.env.TRUSTY_SQUIRE_OBSERVE_DIR = dir;
+    h.elements = rows(3);
+    const c = await observe(a.session_id, "compact");
+    expect(c.delta).toBe(false);
+    expect(removeCount(c)).toBe(3);
+    // No duplicate refs survived the churn.
+    const refsC = c.elements.map((e) => e.ref);
+    expect(new Set(refsC).size).toBe(refsC.length);
   });
 
   it("detail:full refreshes the persisted snapshot as a side-effect (no stale re-expansion)", async () => {
