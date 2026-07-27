@@ -20,7 +20,11 @@ import { createHash, randomInt, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { BrowserController, type InteractiveElement } from "./browser.js";
+import {
+  BrowserController,
+  type InteractiveElement,
+  type PageTargetSafetySignals,
+} from "./browser.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
@@ -1104,19 +1108,18 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
   return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
-export function shouldBlockUnsafeProvisionAction(
+function unsafeProvisionBlockReason(
   pageText: string,
-  action: ProvisionAction,
-  options: { redactTarget?: boolean } = {},
+  safetySignals: PageTargetSafetySignals,
+  target: string | null,
 ): string | null {
-  if (!("target" in action)) return null;
   const appMarkers = authenticatedAppSurfaceMarkers(pageText);
   if (
     appMarkers.length > 0 &&
-    isAccountSetupActionTarget(action.target) &&
+    safetySignals.accountSetup &&
     hasAccountSetupOverlay(pageText)
   ) {
-    if (options.redactTarget === true) {
+    if (target === null) {
       return (
         "Perception guard: this control looks like an account/setup overlay action, " +
         "but authenticated app markers are already visible. Do not retry OAuth or " +
@@ -1125,28 +1128,51 @@ export function shouldBlockUnsafeProvisionAction(
       );
     }
     return (
-      `Perception guard: "${action.target}" looks like an account/setup overlay action, ` +
+      `Perception guard: "${target}" looks like an account/setup overlay action, ` +
       `but authenticated app markers are already visible (${appMarkers.join(", ")}). ` +
       `Do not retry OAuth or repeatedly press this overlay; use app navigation/direct ` +
       `same-origin URLs or complete only the minimal required setup.`
     );
   }
   if (
-    isBillingObjectActionTarget(action.target) &&
+    safetySignals.billingObject &&
     /\b(?:live|production)\s+mode\b/i.test(pageText)
   ) {
-    if (options.redactTarget === true) {
+    if (target === null) {
       return (
         "Mode safety guard: this control can create or save billing objects, " +
         "but live/production mode is visible. Switch to the required test/sandbox mode before acting."
       );
     }
     return (
-      `Mode safety guard: "${action.target}" can create or save billing objects, ` +
+      `Mode safety guard: "${target}" can create or save billing objects, ` +
       `but live/production mode is visible. Switch to the required test/sandbox mode before acting.`
     );
   }
   return null;
+}
+
+export function shouldBlockUnsafeProvisionSignals(
+  pageText: string,
+  safetySignals: PageTargetSafetySignals,
+): string | null {
+  return unsafeProvisionBlockReason(pageText, safetySignals, null);
+}
+
+export function shouldBlockUnsafeProvisionAction(
+  pageText: string,
+  action: ProvisionAction,
+  options: { redactTarget?: boolean } = {},
+): string | null {
+  if (!("target" in action)) return null;
+  return unsafeProvisionBlockReason(
+    pageText,
+    {
+      accountSetup: isAccountSetupActionTarget(action.target),
+      billingObject: isBillingObjectActionTarget(action.target),
+    },
+    options.redactTarget === true ? null : action.target,
+  );
 }
 
 export function buildScreenOutline(
@@ -2376,21 +2402,17 @@ export async function act(
         // `css=<selector>` (or any target whose string carries no verb/noun the
         // guard matches) could resolve to a destructive billing/setup control the
         // guard couldn't see through — clicking "Save product" in live mode via
-        // css=#submit. Re-run it against the RESOLVED visible text now that we
-        // know what the locator actually points at (no-mistakes review).
+        // css=#submit. Re-run it against compact safety signals computed from the
+        // resolved control now that we know what the locator actually points at.
         // Mark the session non-promotable BEFORE the click: a locator click can't
         // be replayed from the inventory (the element was never in it), so a
         // skill synthesized from this run would silently omit the step. Setting
         // it up front means a click that lands but then throws still can't leave
         // the session promotable (see captureAndPromoteSession) (codex).
         try {
-          const resolvedBlock = shouldBlockUnsafeProvisionAction(
+          const resolvedBlock = shouldBlockUnsafeProvisionSignals(
             pageText,
-            {
-              ...action,
-              target: resolved.safetyText || resolved.text,
-            },
-            { redactTarget: true },
+            resolved.safetySignals,
           );
           if (resolvedBlock !== null) throw new Error(resolvedBlock);
           session.usedLocatorFallback = true;

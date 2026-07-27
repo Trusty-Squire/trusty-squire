@@ -56,6 +56,11 @@ const require = createRequire(import.meta.url);
 
 export type StealthProfile = "baseline" | "cdp_hardened";
 
+export interface PageTargetSafetySignals {
+  billingObject: boolean;
+  accountSetup: boolean;
+}
+
 // Whether to use the CDP-hardened launcher (patchright, which runs
 // evaluations in an isolated world and removes the automation tells —
 // mainWorldExecution, navigator.webdriver, viewport — that Turnstile /
@@ -2524,7 +2529,12 @@ export class BrowserController {
     mode: "text" | "css",
     value: string,
   ): Promise<
-    | { ok: true; handle: ElementHandle<Element>; text: string; safetyText: string }
+    | {
+        ok: true;
+        handle: ElementHandle<Element>;
+        text: string;
+        safetySignals: PageTargetSafetySignals;
+      }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
   > {
     if (!this.page) throw new Error("Browser not started");
@@ -2550,8 +2560,8 @@ export class BrowserController {
             .replace(/\s+/g, " ")
             .trim()
             .toLowerCase();
-        const safetyTextFor = (el: Element): string => {
-          const values = [
+        const safetySignalsFor = (el: Element): PageTargetSafetySignals => {
+          const safetyText = [
             renderedRaw(el),
             el.getAttribute("aria-label"),
             el.getAttribute("title"),
@@ -2562,8 +2572,21 @@ export class BrowserController {
             el.getAttribute("value"),
           ]
             .map((part) => safetyMetadata(part))
-            .filter((part) => part.length > 0);
-          return [...new Set(values)].join(" ");
+            .filter((part) => part.length > 0)
+            .join(" ");
+          // Keep these predicates in sync with isBillingObjectActionTarget and
+          // isAccountSetupActionTarget in provision-session.ts.
+          return {
+            billingObject:
+              /\b(create|save|add|finish)\b/i.test(safetyText) &&
+              /\b(product|price|pricing|subscription|billing|payment|invoice|checkout)\b/i.test(
+                safetyText,
+              ),
+            accountSetup:
+              /\b(?:create|finish|complete|set up|setup)\s+(?:your\s+)?(?:account|profile|organization|workspace|business)\b/i.test(
+                safetyText,
+              ),
+          };
         };
         // Visibility walks the ANCESTOR chain (crossing shadow-host boundaries):
         // opacity does not inherit, so a button under an opacity:0 wrapper keeps
@@ -2644,7 +2667,7 @@ export class BrowserController {
               count: 0,
               candidates: [] as string[],
               text: "",
-              safetyText: "",
+              safetySignals: { billingObject: false, accountSetup: false },
             };
           }
           const affordable = all.filter((el) => isVisible(el) && hasClickAffordance(el));
@@ -2672,7 +2695,7 @@ export class BrowserController {
             count: pool.length,
             candidates: pool.slice(0, 8).map((el) => renderedRaw(el).slice(0, 60)),
             text: "",
-            safetyText: "",
+            safetySignals: { billingObject: false, accountSetup: false },
           };
         }
         // Collapse nesting WITHOUT silently merging two genuine controls. A
@@ -2702,7 +2725,10 @@ export class BrowserController {
           count: uniq.length,
           candidates,
           text: win !== null ? renderedRaw(win).slice(0, 120) : "",
-          safetyText: win !== null ? safetyTextFor(win) : "",
+          safetySignals:
+            win !== null
+              ? safetySignalsFor(win)
+              : { billingObject: false, accountSetup: false },
         };
       },
       { mode, value },
@@ -2711,7 +2737,7 @@ export class BrowserController {
       count: r.count,
       candidates: r.candidates,
       text: r.text,
-      safetyText: r.safetyText,
+      safetySignals: r.safetySignals,
     }));
     if (meta.count !== 1) {
       await resultHandle.dispose();
@@ -2733,7 +2759,7 @@ export class BrowserController {
       ok: true,
       handle: asElement,
       text: meta.text ?? "",
-      safetyText: meta.safetyText ?? "",
+      safetySignals: meta.safetySignals ?? { billingObject: false, accountSetup: false },
     };
   }
 

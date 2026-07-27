@@ -40,8 +40,16 @@ const h = vi.hoisted(() => ({
   twoCaptchaCalls: [] as string[],
   consentDismissCalls: 0,
   consentCta: null as string | null,
-  locatorResolve: { ok: true, text: "Add To Cart", safetyText: "Add To Cart" } as
-    | { ok: true; text: string; safetyText: string }
+  locatorResolve: {
+    ok: true,
+    text: "Add To Cart",
+    safetySignals: { billingObject: false, accountSetup: false },
+  } as
+    | {
+        ok: true;
+        text: string;
+        safetySignals: { billingObject: boolean; accountSetup: boolean };
+      }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
   locatorClickCalls: 0,
   locatorDisposeCalls: 0,
@@ -142,7 +150,7 @@ vi.mock("../browser.js", () => ({
           ok: true;
           handle: { dispose: () => Promise<void> };
           text: string;
-          safetyText: string;
+          safetySignals: { billingObject: boolean; accountSetup: boolean };
         }
       | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
     > {
@@ -155,7 +163,7 @@ vi.mock("../browser.js", () => ({
             },
           },
           text: h.locatorResolve.text,
-          safetyText: h.locatorResolve.safetyText,
+          safetySignals: h.locatorResolve.safetySignals,
         };
       }
       return h.locatorResolve;
@@ -276,7 +284,11 @@ beforeEach(() => {
   h.twoCaptchaAvailable = false;
   h.twoCaptchaResult = { kind: "ok", token: "captcha-token", durationMs: 1 };
   h.twoCaptchaCalls = [];
-  h.locatorResolve = { ok: true, text: "Add To Cart", safetyText: "Add To Cart" };
+  h.locatorResolve = {
+    ok: true,
+    text: "Add To Cart",
+    safetySignals: { billingObject: false, accountSetup: false },
+  };
   h.locatorClickCalls = 0;
   h.locatorDisposeCalls = 0;
 });
@@ -312,7 +324,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     h.locatorResolve = {
       ok: true,
       text: "Save product",
-      safetyText: "Save product",
+      safetySignals: { billingObject: true, accountSetup: false },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
     await expect(
@@ -327,8 +339,8 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     h.visibleText = "Dashboard Products Live mode";
     h.locatorResolve = {
       ok: true,
-      text: "",
-      safetyText: `save product ${token}`,
+      text: token,
+      safetySignals: { billingObject: true, accountSetup: false },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
     const error = await act(obs.session_id, {
@@ -342,12 +354,28 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(h.locatorDisposeCalls).toBe(1);
   });
 
+  it("blocks a locator resolving to an account-setup control over authenticated UI", async () => {
+    h.visibleText =
+      "Finish creating your account Create account CP Cactus Practice Test mode Products";
+    h.locatorResolve = {
+      ok: true,
+      text: "",
+      safetySignals: { billingObject: false, accountSetup: true },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
+    await expect(
+      act(obs.session_id, { kind: "click", target: "css=#finish-account" }),
+    ).rejects.toThrow(/Perception guard/);
+    expect(h.locatorClickCalls).toBe(0);
+    expect(h.locatorDisposeCalls).toBe(1);
+  });
+
   it("allows a css= locator resolving to a safe control (guard is not over-eager)", async () => {
     h.visibleText = "Product configurator";
     h.locatorResolve = {
       ok: true,
       text: "Add To Cart",
-      safetyText: "Add To Cart ADD_TO_CART",
+      safetySignals: { billingObject: false, accountSetup: false },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
     await act(obs.session_id, { kind: "click", target: "css=#atc" });
@@ -359,7 +387,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     h.locatorResolve = {
       ok: true,
       text: "Add To Cart",
-      safetyText: "Add To Cart ADD_TO_CART",
+      safetySignals: { billingObject: false, accountSetup: false },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
     await act(obs.session_id, { kind: "click", target: "css=#atc" });

@@ -22,7 +22,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
-import { parseLocatorTarget, shouldBlockUnsafeProvisionAction } from "../provision-session.js";
+import {
+  parseLocatorTarget,
+  shouldBlockUnsafeProvisionSignals,
+} from "../provision-session.js";
 
 // Mirrors the Casetify shape: 20 decorative cursor:pointer card-eligible divs
 // BEFORE a bare click-handler <div> CTA whose only child with text is a <span>.
@@ -176,6 +179,16 @@ const LONG_SAFETY_SUFFIX_FIXTURES = [
 </body></html>`)}`,
   },
 ] as const;
+
+const LARGE_VALUE_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <script>
+    const textarea = document.createElement("textarea");
+    textarea.style.cssText = "width:200px;height:40px";
+    textarea.setAttribute("value", "x".repeat(1000000) + "_SAVE_PRODUCT");
+    document.body.append(textarea);
+  </script>
+</body></html>`)}`;
 
 // Many visible divs — css=div must return ambiguous via the pool cap without
 // running the pairwise O(n^2) nesting scan over all of them.
@@ -335,7 +348,10 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("Add To Cart");
-      expect(resolved.safetyText).toContain("add to cart");
+      expect(resolved.safetySignals).toEqual({
+        billingObject: true,
+        accountSetup: false,
+      });
 
       await ctrl.clickHandle(resolved.handle);
       await resolved.handle.dispose();
@@ -409,16 +425,17 @@ describe("resolvePageTarget (real Chromium)", () => {
     }
   });
 
-  it("returns accessible metadata separately from the visible audit label", async () => {
+  it("returns accessible safety signals separately from the visible audit label", async () => {
     const { ctrl, page } = await pageFor(ICON_ONLY_SAVE_FIXTURE);
     try {
       const resolved = await ctrl.resolvePageTarget("css", "#saveIcon");
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("");
-      expect(resolved.safetyText).toContain("save product");
-      expect(resolved.safetyText).toContain("persist billing product");
-      expect(resolved.safetyText).toContain("save icon");
+      expect(resolved.safetySignals).toEqual({
+        billingObject: true,
+        accountSetup: false,
+      });
       await resolved.handle.dispose();
     } finally {
       await page.close();
@@ -432,8 +449,7 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("");
-      expect(resolved.safetyText).toContain("save product");
-      expect(resolved.safetyText).not.toContain("SAVE_PRODUCT");
+      expect(resolved.safetySignals.billingObject).toBe(true);
       await resolved.handle.dispose();
     } finally {
       await page.close();
@@ -446,12 +462,10 @@ describe("resolvePageTarget (real Chromium)", () => {
       const resolved = await ctrl.resolvePageTarget("css", "button");
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
-      expect(resolved.safetyText.startsWith("save product")).toBe(true);
       expect(
-        shouldBlockUnsafeProvisionAction(
+        shouldBlockUnsafeProvisionSignals(
           "Dashboard Products Live mode",
-          { kind: "click", target: resolved.safetyText },
-          { redactTarget: true },
+          resolved.safetySignals,
         ),
       ).toMatch(/Mode safety guard/);
       await resolved.handle.dispose();
@@ -468,12 +482,10 @@ describe("resolvePageTarget (real Chromium)", () => {
         const resolved = await ctrl.resolvePageTarget("css", "button");
         expect(resolved.ok).toBe(true);
         if (!resolved.ok) throw new Error("unreachable");
-        expect(resolved.safetyText).toContain("save product");
         expect(
-          shouldBlockUnsafeProvisionAction(
+          shouldBlockUnsafeProvisionSignals(
             "Dashboard Products Live mode",
-            { kind: "click", target: resolved.safetyText },
-            { redactTarget: true },
+            resolved.safetySignals,
           ),
         ).toMatch(/Mode safety guard/);
         await resolved.handle.dispose();
@@ -482,6 +494,24 @@ describe("resolvePageTarget (real Chromium)", () => {
       }
     },
   );
+
+  it("returns compact safety signals for a megabyte-scale value", async () => {
+    const { ctrl, page } = await pageFor(LARGE_VALUE_SAVE_FIXTURE);
+    try {
+      const resolved = await ctrl.resolvePageTarget("css", "textarea");
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) throw new Error("unreachable");
+      expect(resolved.safetySignals).toEqual({
+        billingObject: true,
+        accountSetup: false,
+      });
+      expect("safetyText" in resolved).toBe(false);
+      expect(JSON.stringify(resolved.safetySignals).length).toBeLessThan(100);
+      await resolved.handle.dispose();
+    } finally {
+      await page.close();
+    }
+  });
 
   it("pierces an open shadow root", async () => {
     const { ctrl, page } = await pageFor(SHADOW_FIXTURE);
