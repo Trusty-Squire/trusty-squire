@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import type { InMemoryE2ECredentialStore } from "./in-memory-e2e-credential-store.js";
 
 export interface PendingPaymentApprovalInput {
   merchant: string;
@@ -23,13 +24,17 @@ export interface PendingPaymentApprovalRecord extends PendingPaymentApprovalInpu
   createdAt: Date;
 }
 
+export type BindCardForAccountResult = "card_not_found" | "not_bindable" | "ok";
+
 export interface PendingPaymentApprovalStore {
   create(accountId: string, input: PendingPaymentApprovalInput): Promise<string>;
   getByIdForAccount(id: string, accountId: string): Promise<PendingPaymentApprovalRecord | null>;
-  // Binds a card to a still-card-less pending approval. Write-once: succeeds
-  // only while status is "pending", card_ref is null, and the approval has
-  // not expired. Returns false on any other state.
-  bindCardForAccount(id: string, accountId: string, cardRef: string, now: Date): Promise<boolean>;
+  bindCardForAccount(
+    id: string,
+    accountId: string,
+    cardRef: string,
+    now: Date,
+  ): Promise<BindCardForAccountResult>;
   approveForAccount(
     id: string,
     accountId: string,
@@ -43,7 +48,10 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
   private readonly records = new Map<string, PendingPaymentApprovalRecord>();
   private readonly now: () => Date;
 
-  constructor(now?: () => Date) {
+  constructor(
+    private readonly e2eCredentialStore: InMemoryE2ECredentialStore,
+    now?: () => Date,
+  ) {
     this.now = now ?? (() => new Date());
   }
 
@@ -74,7 +82,10 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     accountId: string,
     cardRef: string,
     now: Date,
-  ): Promise<boolean> {
+  ): Promise<BindCardForAccountResult> {
+    if (!this.e2eCredentialStore.hasForAccount(cardRef, accountId)) {
+      return "card_not_found";
+    }
     const record = this.records.get(id);
     if (
       record === undefined ||
@@ -83,10 +94,10 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
       record.cardRef !== null ||
       record.expiresAt <= now
     ) {
-      return false;
+      return "not_bindable";
     }
     record.cardRef = cardRef;
-    return true;
+    return "ok";
   }
 
   async approveForAccount(

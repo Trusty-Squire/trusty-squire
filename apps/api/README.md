@@ -35,7 +35,7 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/vault/payments/audit` | agent | Record a payment attempt without PAN or CVV |
 | `GET` | `/v1/vault/payments/audit` | web/agent | List payment attempts, newest first, with keyset pagination |
 | `GET` | `/v1/pay/config` | agent | Return the configured Vouchflow mandate audience |
-| `POST` | `/v1/pay/approvals` | agent | Create a ten-minute account-scoped payment approval, optionally card-less |
+| `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send a Telegram 3-D Secure nudge to the account's linked chat and return `{ sent }` |
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Poll an account-owned payment approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
@@ -55,11 +55,13 @@ an empty string when either is omitted. The API derives `agent` from the
 authenticated install identity and falls back to `unknown-agent`; clients
 cannot set it. The create response returns `agent`, and polling returns all
 three values for the approval page and signed mandate. `card_ref` is optional,
-but `operator_pubkey` remains required at creation. A card-less approval follows
-the server-enforced seal → bind → approve order. Binding is pending-only,
-write-once, rejects an expired approval, and accepts only an `E2ECredential`
-owned by the same account; an unknown or foreign card returns `404`. Approving
-before a card is bound returns `409 { "error": "card_required" }`.
+but `operator_pubkey` remains required at creation. Card-less approvals expire
+after 18 minutes to allow the JIT add-card ceremony; approvals created with a
+card keep the 10-minute window. A card-less approval follows the server-enforced
+seal → bind → approve order. Binding is pending-only, write-once, rejects an
+expired approval, and accepts only an `E2ECredential` owned by the same account;
+an unknown or foreign card returns `404`. Approving before a card is bound
+returns `409 { "error": "card_required" }`.
 
 ## Auth model
 

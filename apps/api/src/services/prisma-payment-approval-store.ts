@@ -4,6 +4,7 @@ import type {
   PendingPaymentApprovalInput,
   PendingPaymentApprovalRecord,
   PendingPaymentApprovalStore,
+  BindCardForAccountResult,
 } from "./in-memory-payment-approval-store.js";
 
 export class PrismaPendingPaymentApprovalStore implements PendingPaymentApprovalStore {
@@ -67,18 +68,26 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
     accountId: string,
     cardRef: string,
     now: Date,
-  ): Promise<boolean> {
-    const result = await this.prisma.pendingPaymentApproval.updateMany({
-      where: {
-        id,
-        account_id: accountId,
-        status: "pending",
-        card_ref: null,
-        expires_at: { gt: now },
-      },
-      data: { card_ref: cardRef },
+  ): Promise<BindCardForAccountResult> {
+    return this.prisma.$transaction(async (tx) => {
+      const card = await tx.e2ECredential.findFirst({
+        where: { id: cardRef, account_id: accountId },
+      });
+      if (card === null) {
+        return "card_not_found";
+      }
+      const result = await tx.pendingPaymentApproval.updateMany({
+        where: {
+          id,
+          account_id: accountId,
+          status: "pending",
+          card_ref: null,
+          expires_at: { gt: now },
+        },
+        data: { card_ref: cardRef },
+      });
+      return result.count > 0 ? "ok" : "not_bindable";
     });
-    return result.count > 0;
   }
 
   async approveForAccount(

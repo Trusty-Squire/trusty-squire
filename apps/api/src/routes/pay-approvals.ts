@@ -207,24 +207,17 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         reply.code(409).send({ error: "payment_approval_expired" });
         return;
       }
-      // The card must be a credential this account owns. getByIdForAccount is
-      // account-scoped, so a foreign card id resolves to null → 404.
-      const card = await opts.deps.e2eCredentialStore.getByIdForAccount(
-        parsed.data.card_ref,
-        auth.account_id,
-      );
-      if (card === null) {
-        reply.code(404).send({ error: "card_not_found" });
-        return;
-      }
-      const bound = await opts.deps.pendingPaymentApprovalStore.bindCardForAccount(
+      const bindResult = await opts.deps.pendingPaymentApprovalStore.bindCardForAccount(
         req.params.id,
         auth.account_id,
         parsed.data.card_ref,
         now,
       );
-      if (!bound) {
-        // The approval changed or expired between the read and the write.
+      if (bindResult === "card_not_found") {
+        reply.code(404).send({ error: "card_not_found" });
+        return;
+      }
+      if (bindResult === "not_bindable") {
         reply.code(409).send({ error: "payment_approval_not_pending" });
         return;
       }

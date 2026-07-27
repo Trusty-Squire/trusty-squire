@@ -94,6 +94,10 @@ export class InMemoryE2ECredentialStore implements E2ECredentialStore {
     return record === undefined || record.accountId !== accountId ? null : { ...record };
   }
 
+  hasForAccount(id: string, accountId: string): boolean {
+    return this.records.get(id)?.accountId === accountId;
+  }
+
   async updateLabelForAccount(id: string, accountId: string, label: string): Promise<boolean> {
     const record = this.records.get(id);
     if (record === undefined || record.accountId !== accountId) return false;

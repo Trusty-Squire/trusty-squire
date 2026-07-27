@@ -537,6 +537,44 @@ describe("payment approval relay", () => {
     expect(get.json()).toMatchObject({ card_ref: null });
   });
 
+  it("keeps an approval card-less when its selected card was deleted", async () => {
+    const created = await createCardlessApproval();
+    const deletedCard = await createOwnedCard(webCookie, "1001");
+    const deleted = await server.inject({
+      method: "DELETE",
+      url: `/v1/vault/e2e/${deletedCard}`,
+      headers: { cookie: webCookie },
+    });
+    expect(deleted.statusCode).toBe(204);
+
+    const rejected = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: deletedCard },
+    });
+    expect(rejected.statusCode).toBe(404);
+    expect(rejected.json()).toEqual({ error: "card_not_found" });
+
+    const pending = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(pending.statusCode).toBe(200);
+    expect(pending.json()).toMatchObject({ card_ref: null, status: "pending" });
+
+    const freshCard = await createOwnedCard(webCookie, "1002");
+    const rebound = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: freshCard },
+    });
+    expect(rebound.statusCode).toBe(200);
+    expect(rebound.json()).toEqual({ card_ref: freshCard });
+  });
+
   it("rejects binding a card to another account's approval (404 not_found)", async () => {
     const created = await createCardlessApproval();
     const otherCard = await createOwnedCard(otherWebCookie);
