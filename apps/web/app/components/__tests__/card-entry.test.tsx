@@ -40,9 +40,7 @@ describe("CardEntry — the shared sensitive add-card flow", () => {
   it("makes only PAN-scoped trust claims on the pre-enrollment gate", async () => {
     pairing.getPairingState.mockResolvedValue({ enrolled: false });
     const { container } = render(<CardEntry />);
-    await waitFor(() =>
-      expect(screen.getByText("Set up payments on this device")).toBeTruthy(),
-    );
+    await waitFor(() => expect(screen.getByText("Set up payments on this device")).toBeTruthy());
     const text = container.textContent ?? "";
     // The overbroad whole-card claim is a lie now that last4 + brand are stored.
     expect(text).not.toContain("Your card is never readable");

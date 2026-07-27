@@ -3,10 +3,10 @@
 // so the money-path logic (which brand, which last4, which bound card) is
 // unit-testable without a DOM.
 
-// The one honest trust promise, shown wherever a card is entered. The old
-// "the server cannot decrypt it" is FALSE now that brand + last4 are stored
-// for display; the full PAN stays sealed. Single source so the two add-card
-// surfaces (/vault/card and the pay page) can never drift.
+// The full trust promise shown with the card form. A whole-card "the server
+// cannot read it" promise would be false now that brand + last4 are stored for
+// display; the protected payload remains unreadable. Single source so the two
+// add-card surfaces (/vault/card and the pay page) cannot drift.
 export const CARD_TRUST_COPY =
   "Your full card number is encrypted in this browser and never readable by our servers. We store only the last 4 digits and card brand, for display.";
 
@@ -40,7 +40,8 @@ export function detectCardBrand(pan: string): string | null {
 }
 
 // Last four digits of a PAN, or null if there aren't four. The value the
-// server stores for display; the full number never leaves this browser.
+// server stores for display; the plaintext full number never leaves this
+// browser.
 export function cardLast4(pan: string): string | null {
   const digits = pan.replace(/\D/g, "");
   if (digits.length < 4) return null;
@@ -58,10 +59,7 @@ export function isLegacyCard(card: Pick<CardMeta, "brand" | "last4">): boolean {
 // ONLY honest source for the last4 shown before the passkey ceremony — never
 // local page state, never a post-passkey blob decrypt. Returns null when the
 // approval is card-less or the bound id isn't in the list.
-export function boundCardMeta(
-  cardRef: string | null,
-  cards: readonly CardMeta[],
-): CardMeta | null {
+export function boundCardMeta(cardRef: string | null, cards: readonly CardMeta[]): CardMeta | null {
   if (cardRef === null) return null;
   return cards.find((card) => card.id === cardRef) ?? null;
 }

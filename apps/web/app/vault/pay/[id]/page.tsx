@@ -94,9 +94,7 @@ export default function PaymentApprovalPage() {
 
   const fetchState = useCallback(async (): Promise<{
     approval: Approval;
-    cards:
-      | { ok: true; value: readonly CardMeta[] }
-      | { ok: false; error: unknown };
+    cards: { ok: true; value: readonly CardMeta[] } | { ok: false; error: unknown };
   }> => {
     const [approval, cards] = await Promise.all([
       fetchApproval(),
@@ -119,9 +117,7 @@ export default function PaymentApprovalPage() {
         redirectToLogin();
         return;
       }
-      setCardMetadataError(
-        err instanceof Error ? err.message : "Failed to load the card details.",
-      );
+      setCardMetadataError(err instanceof Error ? err.message : "Failed to load the card details.");
     } finally {
       setRefreshingCards(false);
     }
@@ -215,9 +211,7 @@ export default function PaymentApprovalPage() {
           }
         }
 
-        setError(
-          bindFailure instanceof Error ? bindFailure.message : "Failed to attach the card.",
-        );
+        setError(bindFailure instanceof Error ? bindFailure.message : "Failed to attach the card.");
       } finally {
         setBinding(false);
       }
@@ -307,8 +301,10 @@ export default function PaymentApprovalPage() {
         ? "This payment approval has expired."
         : "This payment is no longer pending.";
 
-  const boundCard =
-    approval !== null ? boundCardMeta(approval.card_ref, cards ?? []) : null;
+  const boundCard = approval !== null ? boundCardMeta(approval.card_ref, cards ?? []) : null;
+  // The ref intentionally preserves the approval's immutable origin across
+  // polling and recovery; approval state changes already drive each render.
+  // eslint-disable-next-line react-hooks/refs
   const isJitOrigin = jitOrigin.current === true;
   const jitBindingMismatch =
     isJitOrigin &&
@@ -316,8 +312,7 @@ export default function PaymentApprovalPage() {
     approval.card_ref !== null &&
     (savedCardId === null || approval.card_ref !== savedCardId);
   const hasBoundCardMetadata = boundCard?.last4 != null;
-  const jitReviewBlocked =
-    isJitOrigin && (jitBindingMismatch || !hasBoundCardMetadata);
+  const jitReviewBlocked = isJitOrigin && (jitBindingMismatch || !hasBoundCardMetadata);
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
   const cardLine =
@@ -424,8 +419,8 @@ export default function PaymentApprovalPage() {
             <div className="app-banner err">
               {jitBindingMismatch
                 ? "This payment was attached to a different card than the one you added."
-                : cardMetadataError ??
-                  "We couldn't verify the saved card details for this payment."}
+                : (cardMetadataError ??
+                  "We couldn't verify the saved card details for this payment.")}
               {!jitBindingMismatch && (
                 <button
                   className="linkbtn"

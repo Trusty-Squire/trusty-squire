@@ -6,8 +6,9 @@ import { CardEntry } from "../../components/CardEntry";
 
 // Add-only. Viewing, renaming, and deleting a saved card now live inline in
 // the vault list's Wallet section — this page is just the add flow. The
-// sensitive card entry + HPKE seal + honest trust copy come from the shared
-// CardEntry component (also used by the pay page's JIT add-card mode).
+// sensitive card entry, client-side storage encryption, and honest trust copy
+// come from the shared CardEntry component (also used by the pay page's JIT
+// add-card mode).
 export default function CardPage() {
   const router = useRouter();
   return (

@@ -42,9 +42,9 @@ events, never exposing raw values back to the agent.
 **Client-encrypted card**
 
 A card record encrypted and decrypted by a trusted client with a key produced
-by the enrolled passkey's WebAuthn PRF. The API cannot derive that key or
-decrypt the full card. The exact storage, display-metadata, and payment-audit
-contracts are owned by
+by the enrolled passkey's WebAuthn PRF. The API stores the protected payload,
+serves constrained display metadata, and records metadata-only payment audit
+events. The precise cryptographic and server-visible data contract is owned by
 [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Operate session**
@@ -56,9 +56,10 @@ captcha handling, and extraction.
 **Payment approval**
 
 A short-lived handoff from an active operate session to the user's phone. The
-phone approves the exact purchase and seals the selected card to an ephemeral
-operator key; the API enforces the approval state and relays the opaque card
-release. The security contract is owned by
+phone can add and bind a card when needed, reviews the server-bound card and
+exact purchase, and then seals that card to an ephemeral operator key. The
+API enforces the approval state and relays the opaque card release. The security
+contract is owned by
 [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Sealed slot**
@@ -125,8 +126,8 @@ The important boundaries are:
   and configured auth shapes.
 - Audit logs record operations and metadata, not secret values.
 - Client-encrypted card WebAuthn PRF outputs and derived keys remain outside the
-  API; [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data) owns the exact
-  server storage and response boundary.
+  API; [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data) owns the
+  server-visible card-data boundary.
 - Plaintext PAN and CVV exist only in the approving browser and the local
   operator process, never in the API or coding-agent model.
 
@@ -160,7 +161,10 @@ agent starts operate_pay in the active checkout
   -> operator reads merchant, origin, and total and adds optional item/reason
   -> operator creates an ephemeral key; API creates a short-lived approval relay
      and attaches the server-derived requesting-agent label
-  -> user reviews and approves the purchase on a paired phone
+  -> if the approval has no card, the user adds one and the API binds that saved
+     card to the still-pending approval
+  -> user reviews the purchase and server-bound card on a paired phone
+  -> user approves the purchase
   -> phone decrypts the selected card and seals it to that operator key
   -> operator verifies the signed mandate, opens the card, and fills checkout
   -> when 3-D Secure is required, the API nudges a linked Telegram chat and

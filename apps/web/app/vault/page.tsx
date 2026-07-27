@@ -9,14 +9,7 @@ import { Modal } from "../components/Modal";
 import { CredentialFields, type FieldsResult } from "../components/CredentialFields";
 import { parseHostList } from "../lib/hosts";
 import { type CardMeta, isLegacyCard } from "../lib/wallet";
-import {
-  ApiError,
-  apiDelete,
-  apiGet,
-  apiPatch,
-  apiPost,
-  timeAgo,
-} from "../lib/api";
+import { ApiError, apiDelete, apiGet, apiPatch, apiPost, timeAgo } from "../lib/api";
 
 interface Cred {
   id: string;
@@ -78,9 +71,7 @@ export default function VaultPage() {
           router.replace("/login?next=/vault");
           return;
         }
-        setError(
-          err instanceof Error ? err.message : "Failed to load your vault.",
-        );
+        setError(err instanceof Error ? err.message : "Failed to load your vault.");
       }
     })();
     return () => {
@@ -242,7 +233,6 @@ export default function VaultPage() {
           </div>
         </>
       )}
-
     </AppShell>
   );
 }
@@ -359,9 +349,7 @@ function VaultRow({
   const onVerify = useCallback(async () => {
     setStatus("checking");
     try {
-      const res = await apiPost<{ healthy: boolean }>(
-        `/v1/vault/credentials/${cred.id}/health`,
-      );
+      const res = await apiPost<{ healthy: boolean }>(`/v1/vault/credentials/${cred.id}/health`);
       setStatus(res.healthy ? "ok" : "bad");
     } catch {
       setStatus("bad");
@@ -375,9 +363,7 @@ function VaultRow({
   // omitted when the credential has no allowed hosts.
   const host = cred.allowed_hosts[0];
   const usage =
-    cred.last_retrieved_at !== null
-      ? `used ${timeAgo(cred.last_retrieved_at)}`
-      : "never used";
+    cred.last_retrieved_at !== null ? `used ${timeAgo(cred.last_retrieved_at)}` : "never used";
   const ageLabel = `${cred.rotated_at !== null ? "rotated" : "added"} ${cred.age_days}d ago`;
 
   return (
@@ -392,7 +378,10 @@ function VaultRow({
             </span>
           )}
           {cred.stale && (
-            <span className="badge-stale" title="Older than the rotation window — consider re-storing this key.">
+            <span
+              className="badge-stale"
+              title="Older than the rotation window — consider re-storing this key."
+            >
               rotate
             </span>
           )}
@@ -422,15 +411,21 @@ function VaultRow({
             <span className="mask">{busy ? "revealing…" : "••••••••••••••••"}</span>
           )}
           {status === "ok" && (
-            <span className="health-ok" title="Decrypts cleanly under the current master key.">✓ decrypts</span>
+            <span className="health-ok" title="Decrypts cleanly under the current master key.">
+              ✓ decrypts
+            </span>
           )}
           {status === "bad" && (
-            <span className="health-bad" title="The stored envelope did not decrypt.">✗ decrypt failed</span>
+            <span className="health-bad" title="The stored envelope did not decrypt.">
+              ✗ decrypt failed
+            </span>
           )}
           {status === "checking" && <span className="health-ok">checking…</span>}
           {status === "copied" && <span className="health-ok">copied ✓</span>}
           {status === "copyfail" && (
-            <span className="health-bad" title="Clipboard write was blocked by the browser.">copy failed</span>
+            <span className="health-bad" title="Clipboard write was blocked by the browser.">
+              copy failed
+            </span>
           )}
         </div>
       </div>
@@ -581,7 +576,12 @@ function CardRow({
         {error !== null && <div className="form-err">{error}</div>}
         {editing && (
           <div className="inline-confirm">
-            <button type="button" className="linkbtn" onClick={() => void saveLabel()} disabled={busy}>
+            <button
+              type="button"
+              className="linkbtn"
+              onClick={() => void saveLabel()}
+              disabled={busy}
+            >
               {busy ? "Saving…" : "Save"}
             </button>
             <button type="button" className="linkbtn q" onClick={cancelEdit} disabled={busy}>
@@ -592,7 +592,12 @@ function CardRow({
         {confirmDelete && (
           <div className="inline-confirm">
             <span className="meta">Delete this card?</span>
-            <button type="button" className="linkbtn danger" onClick={() => void del()} disabled={busy}>
+            <button
+              type="button"
+              className="linkbtn danger"
+              onClick={() => void del()}
+              disabled={busy}
+            >
               {busy ? "Deleting…" : "Delete"}
             </button>
             <button
@@ -848,7 +853,9 @@ function EditModal({
       onSaved();
     } catch (err) {
       if (err instanceof ApiError && err.status === 400) {
-        setError("One of the hosts isn't valid — use a bare hostname like api.example.com (no https://, no path).");
+        setError(
+          "One of the hosts isn't valid — use a bare hostname like api.example.com (no https://, no path).",
+        );
       } else {
         setError(err instanceof Error ? err.message : "Couldn't save your changes.");
       }
@@ -891,7 +898,9 @@ function EditModal({
                     maxLength={60}
                     autoComplete="off"
                   />
-                  <span className="field-hint">Tells entries of the same service apart (prod/dev).</span>
+                  <span className="field-hint">
+                    Tells entries of the same service apart (prod/dev).
+                  </span>
                 </div>
                 <div className="field">
                   <label htmlFor={`edit-hosts-${cred.id}`}>
@@ -933,7 +942,15 @@ function EditModal({
 // Settings gear — outline icon button in the header, next to the "+".
 function GearIcon() {
   return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
     </svg>
