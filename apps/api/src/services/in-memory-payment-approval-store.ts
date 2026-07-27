@@ -29,12 +29,7 @@ export interface PendingPaymentApprovalStore {
   // Binds a card to a still-card-less pending approval. Write-once: succeeds
   // only while status is "pending", card_ref is null, and the approval has
   // not expired. Returns false on any other state.
-  bindCardForAccount(
-    id: string,
-    accountId: string,
-    cardRef: string,
-    now: Date,
-  ): Promise<boolean>;
+  bindCardForAccount(id: string, accountId: string, cardRef: string, now: Date): Promise<boolean>;
   approveForAccount(
     id: string,
     accountId: string,

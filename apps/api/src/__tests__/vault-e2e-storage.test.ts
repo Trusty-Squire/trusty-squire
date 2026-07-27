@@ -217,9 +217,9 @@ describe("E2E credential and payment audit routes", () => {
       url: "/v1/vault/e2e",
       headers: { cookie: webCookie },
     });
-    const row = (list.json() as Array<{ id: string; label: string; brand: string; last4: string }>).find(
-      (r) => r.id === id,
-    );
+    const row = (
+      list.json() as Array<{ id: string; label: string; brand: string; last4: string }>
+    ).find((r) => r.id === id);
     expect(row).toMatchObject({ label: "New label", brand: "mc", last4: "1111" });
   });
 

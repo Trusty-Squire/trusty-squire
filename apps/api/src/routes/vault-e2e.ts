@@ -14,7 +14,10 @@ const e2eBody = z.object({
     .string()
     .regex(/^[A-Za-z][A-Za-z \-]{0,31}$/)
     .optional(),
-  last4: z.string().regex(/^\d{4}$/).optional(),
+  last4: z
+    .string()
+    .regex(/^\d{4}$/)
+    .optional(),
 });
 
 const labelBody = z.object({

@@ -42,13 +42,24 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/pay/approvals/:id/approve` | web | Relay a signed mandate and HPKE-sealed card to the operator |
 | `GET` | `/health` | none | Liveness |
 
+Client-encrypted card creation accepts optional plaintext `brand` and `last4`
+display metadata alongside the opaque blob. `brand` must be a 1–32 character
+card-network name containing only letters, spaces, and hyphens; `last4` must be
+exactly four digits. The full PAN remains only inside the encrypted blob. List
+responses and GDPR vault exports include `brand` and `last4` (`null` for legacy
+rows). `PATCH /v1/vault/e2e/:id/label` accepts `{ label }` and changes only the
+label; the blob and card metadata remain unchanged.
+
 Payment approval creation accepts optional `item` and `reason` strings, storing
 an empty string when either is omitted. The API derives `agent` from the
 authenticated install identity and falls back to `unknown-agent`; clients
 cannot set it. The create response returns `agent`, and polling returns all
-three values for the approval page and signed mandate. `card_ref` is optional:
-a card-less approval follows the server-enforced seal → bind → approve order,
-and cannot be approved until an account-owned card is bound.
+three values for the approval page and signed mandate. `card_ref` is optional,
+but `operator_pubkey` remains required at creation. A card-less approval follows
+the server-enforced seal → bind → approve order. Binding is pending-only,
+write-once, rejects an expired approval, and accepts only an `E2ECredential`
+owned by the same account; an unknown or foreign card returns `404`. Approving
+before a card is bound returns `409 { "error": "card_required" }`.
 
 ## Auth model
 
