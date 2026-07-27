@@ -300,6 +300,12 @@ model E2ECredential {
   account_id String   @db.VarChar(26)
   label      String
   blob       String
+  // Plaintext display-only metadata for payment cards. The server cannot
+  // derive these from the passkey-sealed blob, so they are written at store
+  // time. Never a full PAN — brand + last 4 digits only. Nullable: legacy
+  // cards (and non-card credentials) render label-only.
+  brand      String?
+  last4      String?
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
@@ -334,7 +340,9 @@ model PendingPaymentApproval {
   amount_cents    Int
   currency        String
   nonce           String
-  card_ref        String
+  // Nullable: a JIT add-card approval is minted card-less and bound to a
+  // stored card later via POST /v1/pay/approvals/:id/bind-card (write-once).
+  card_ref        String?
   operator_pubkey String
   item            String   @default("")
   reason          String   @default("")

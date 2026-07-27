@@ -5,6 +5,20 @@ import type { ApiDeps } from "../services/deps.js";
 const e2eBody = z.object({
   label: z.string().min(1).max(256),
   blob: z.string().min(1).max(8192),
+  // Display-only card metadata. Never a full PAN — brand + last 4 digits
+  // only; the full number stays inside the passkey-sealed `blob`. `brand`
+  // is a network name (Visa, Mastercard, Amex, …) and must contain NO
+  // digits, so a PAN can never be smuggled into it. `last4` is exactly 4
+  // digits.
+  brand: z
+    .string()
+    .regex(/^[A-Za-z][A-Za-z \-]{0,31}$/)
+    .optional(),
+  last4: z.string().regex(/^\d{4}$/).optional(),
+});
+
+const labelBody = z.object({
+  label: z.string().min(1).max(256),
 });
 
 const paymentAuditBody = z.object({
@@ -50,6 +64,7 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
       auth.account_id,
       parsed.data.label,
       parsed.data.blob,
+      { brand: parsed.data.brand ?? null, last4: parsed.data.last4 ?? null },
     );
     return reply.code(201).send({ id });
   });
@@ -60,10 +75,36 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
       records.map((record) => ({
         id: record.id,
         label: record.label,
+        brand: record.brand,
+        last4: record.last4,
         createdAt: record.createdAt.toISOString(),
       })),
     );
   });
+
+  fastify.patch<{ Params: { id: string } }>(
+    "/v1/vault/e2e/:id/label",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = labelBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const updated = await opts.deps.e2eCredentialStore.updateLabelForAccount(
+        req.params.id,
+        auth.account_id,
+        parsed.data.label,
+      );
+      if (!updated) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      return reply.code(200).send({ id: req.params.id, label: parsed.data.label });
+    },
+  );
 
   fastify.get<{ Params: { id: string } }>(
     "/v1/vault/e2e/:id",

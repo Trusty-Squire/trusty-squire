@@ -92,6 +92,41 @@ describe("payment approval relay", () => {
     };
   }
 
+  async function createCardlessApproval(): Promise<{ id: string }> {
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {
+        merchant: "Synthetic Books",
+        checkout_origin: "https://checkout.synthetic.test",
+        amount_cents: 2599,
+        currency: "USD",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+      },
+    });
+    expect(response.statusCode).toBe(201);
+    return response.json() as { id: string };
+  }
+
+  // Creates an E2ECredential (card) owned by the account behind `cookie`,
+  // returning its id — the value the JIT ceremony binds as card_ref.
+  async function createOwnedCard(cookie: string, last4 = "4242"): Promise<string> {
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/vault/e2e",
+      headers: { cookie },
+      payload: {
+        label: "Synthetic Visa",
+        blob: '{ "ciphertext": "synthetic-sealed-card" }',
+        brand: "visa",
+        last4,
+      },
+    });
+    expect(res.statusCode).toBe(201);
+    return (res.json() as { id: string }).id;
+  }
+
   it("creates a pending approval and returns it", async () => {
     const created = await createApproval();
     expect(created.nonce).toMatch(/^[A-Za-z0-9_-]{22}$/);
@@ -340,6 +375,161 @@ describe("payment approval relay", () => {
 
     expect(response.statusCode).toBe(404);
     expect(response.json()).toEqual({ error: "not_found" });
+  });
+
+  // ── JIT add-card ceremony: card-less create → bind → approve ──────────
+
+  it("creates a card-less approval (JIT add-card handle) with a null card_ref", async () => {
+    const created = await createCardlessApproval();
+    const get = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(get.statusCode).toBe(200);
+    // Card-less, but the operator pubkey is minted at create regardless.
+    expect(get.json()).toMatchObject({
+      card_ref: null,
+      operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+      status: "pending",
+    });
+  });
+
+  it("binds an owned card to a card-less approval, then approve succeeds", async () => {
+    const created = await createCardlessApproval();
+    const cardId = await createOwnedCard(webCookie);
+
+    const bind = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: cardId },
+    });
+    expect(bind.statusCode).toBe(200);
+    expect(bind.json()).toEqual({ status: "bound", card_ref: cardId });
+
+    const get = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(get.json()).toMatchObject({ card_ref: cardId });
+
+    const approve = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
+      payload: { jws: "synthetic.header.sig", sealed_card: "c2VhbGVkLXN5bnRoZXRpYy1jYXJk" },
+    });
+    expect(approve.statusCode).toBe(200);
+    expect(approve.json()).toEqual({ status: "approved" });
+  });
+
+  it("refuses to approve a card-less approval (409 card_required)", async () => {
+    const created = await createCardlessApproval();
+    const approve = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
+      payload: { jws: "synthetic.header.sig", sealed_card: "c2VhbGVkLXN5bnRoZXRpYy1jYXJk" },
+    });
+    expect(approve.statusCode).toBe(409);
+    expect(approve.json()).toEqual({ error: "card_required" });
+  });
+
+  it("is write-once: a second bind on an already-bound approval is rejected", async () => {
+    const created = await createCardlessApproval();
+    const firstCard = await createOwnedCard(webCookie, "4242");
+    const secondCard = await createOwnedCard(webCookie, "1111");
+
+    const bind1 = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: firstCard },
+    });
+    expect(bind1.statusCode).toBe(200);
+
+    const bind2 = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: secondCard },
+    });
+    expect(bind2.statusCode).toBe(409);
+    expect(bind2.json()).toEqual({ error: "card_already_bound" });
+
+    // The originally-bound card is unchanged.
+    const get = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(get.json()).toMatchObject({ card_ref: firstCard });
+  });
+
+  it("rejects binding a card owned by a different account (404 card_not_found)", async () => {
+    const created = await createCardlessApproval();
+    const foreignCard = await createOwnedCard(otherWebCookie);
+
+    const bind = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: foreignCard },
+    });
+    expect(bind.statusCode).toBe(404);
+    expect(bind.json()).toEqual({ error: "card_not_found" });
+
+    // The approval stays card-less — no foreign card leaked in.
+    const get = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(get.json()).toMatchObject({ card_ref: null });
+  });
+
+  it("rejects binding a card to another account's approval (404 not_found)", async () => {
+    const created = await createCardlessApproval();
+    const otherCard = await createOwnedCard(otherWebCookie);
+
+    const bind = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: otherWebCookie },
+      payload: { card_ref: otherCard },
+    });
+    expect(bind.statusCode).toBe(404);
+    expect(bind.json()).toEqual({ error: "payment_approval_not_found" });
+  });
+
+  it("is pending-only: cannot rebind after the approval is approved", async () => {
+    const created = await createCardlessApproval();
+    const cardId = await createOwnedCard(webCookie);
+
+    await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: cardId },
+    });
+    const approve = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/approve`,
+      headers: { cookie: webCookie },
+      payload: { jws: "synthetic.header.sig", sealed_card: "c2VhbGVkLXN5bnRoZXRpYy1jYXJk" },
+    });
+    expect(approve.statusCode).toBe(200);
+
+    const rebind = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: cardId },
+    });
+    expect(rebind.statusCode).toBe(409);
+    expect(rebind.json()).toEqual({ error: "payment_approval_not_pending" });
   });
 
   it("denies cross-account reads and approvals", async () => {

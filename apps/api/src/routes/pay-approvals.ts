@@ -27,7 +27,9 @@ const createBody = z.object({
     }),
   amount_cents: z.number().int().min(0).max(2_147_483_647),
   currency: z.string().min(1).max(8),
-  card_ref: z.string().min(1).max(64),
+  // Optional: a JIT add-card ceremony mints the approval card-less and binds
+  // the card later via POST /v1/pay/approvals/:id/bind-card.
+  card_ref: z.string().min(1).max(64).optional(),
   operator_pubkey: z.string().min(1).max(512),
   item: z.string().max(500).optional(),
   reason: z.string().max(500).optional(),
@@ -36,6 +38,10 @@ const createBody = z.object({
 const approveBody = z.object({
   jws: z.string().max(8192),
   sealed_card: z.string().max(16384),
+});
+
+const bindCardBody = z.object({
+  card_ref: z.string().min(1).max(64),
 });
 
 export const registerPayApprovalsRoute: FastifyPluginAsync<{
@@ -71,7 +77,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       amountCents: parsed.data.amount_cents,
       currency: parsed.data.currency,
       nonce,
-      cardRef: parsed.data.card_ref,
+      cardRef: parsed.data.card_ref ?? null,
       operatorPubkey: parsed.data.operator_pubkey,
       item: parsed.data.item ?? "",
       reason: parsed.data.reason ?? "",
@@ -159,6 +165,62 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     },
   );
 
+  // Binds a stored card to a card-less pending approval (the JIT add-card
+  // ceremony). Web-authed, pending-only, write-once, and the bound card must
+  // be an E2ECredential owned by the same account. Converts the
+  // seal→bind→approve ordering from client convention into a server-enforced
+  // state machine.
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/pay/approvals/:id/bind-card",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = bindCardBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (record === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      if (record.status !== "pending") {
+        reply.code(409).send({ error: "payment_approval_not_pending" });
+        return;
+      }
+      if (record.cardRef !== null) {
+        reply.code(409).send({ error: "card_already_bound" });
+        return;
+      }
+      // The card must be a credential this account owns. getByIdForAccount is
+      // account-scoped, so a foreign card id resolves to null → 404.
+      const card = await opts.deps.e2eCredentialStore.getByIdForAccount(
+        parsed.data.card_ref,
+        auth.account_id,
+      );
+      if (card === null) {
+        reply.code(404).send({ error: "card_not_found" });
+        return;
+      }
+      const bound = await opts.deps.pendingPaymentApprovalStore.bindCardForAccount(
+        req.params.id,
+        auth.account_id,
+        parsed.data.card_ref,
+      );
+      if (!bound) {
+        // Lost a race (approved or bound between the read and the write).
+        reply.code(409).send({ error: "payment_approval_not_pending" });
+        return;
+      }
+      return reply.code(200).send({ status: "bound", card_ref: parsed.data.card_ref });
+    },
+  );
+
   fastify.post<{ Params: { id: string } }>(
     "/v1/pay/approvals/:id/approve",
     { preHandler: opts.requireWeb },
@@ -176,6 +238,12 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       );
       if (record === null) {
         reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      // A card-less mandate cannot be approved — the card must be bound first
+      // (seal→bind→approve). Server-enforced, not client convention.
+      if (record.cardRef === null) {
+        reply.code(409).send({ error: "card_required" });
         return;
       }
       const now = opts.deps.now?.() ?? new Date();

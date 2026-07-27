@@ -114,6 +114,158 @@ describe("E2E credential and payment audit routes", () => {
     expect(missing.statusCode).toBe(404);
   });
 
+  it("stores and returns card brand/last4 display metadata; legacy rows are null", async () => {
+    const withMeta = await server.inject({
+      method: "POST",
+      url: "/v1/vault/e2e",
+      headers: { cookie: webCookie },
+      payload: {
+        label: "Personal Visa",
+        blob: '{ "ciphertext": "synthetic-sealed-pan" }',
+        brand: "visa",
+        last4: "4242",
+      },
+    });
+    expect(withMeta.statusCode).toBe(201);
+    const metaId = (withMeta.json() as { id: string }).id;
+
+    // A card added before the metadata columns existed — no brand/last4.
+    const legacy = await server.inject({
+      method: "POST",
+      url: "/v1/vault/e2e",
+      headers: { cookie: webCookie },
+      payload: { label: "Legacy card", blob: '{ "ciphertext": "synthetic-legacy" }' },
+    });
+    expect(legacy.statusCode).toBe(201);
+    const legacyId = (legacy.json() as { id: string }).id;
+
+    const list = await server.inject({
+      method: "GET",
+      url: "/v1/vault/e2e",
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(list.statusCode).toBe(200);
+    const rows = list.json() as Array<{
+      id: string;
+      brand: string | null;
+      last4: string | null;
+    }>;
+    const meta = rows.find((r) => r.id === metaId);
+    const legacyRow = rows.find((r) => r.id === legacyId);
+    expect(meta).toMatchObject({ brand: "visa", last4: "4242" });
+    expect(legacyRow).toMatchObject({ brand: null, last4: null });
+    // The sealed blob never leaks into the list.
+    expect(JSON.stringify(rows)).not.toContain("synthetic-sealed-pan");
+  });
+
+  it("rejects a full PAN supplied as last4 on the card blob route", async () => {
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/vault/e2e",
+      headers: { cookie: webCookie },
+      payload: {
+        label: "Bad card",
+        blob: '{ "ciphertext": "x" }',
+        brand: "visa",
+        last4: "4242424242424242",
+      },
+    });
+    expect(response.statusCode).toBe(400);
+  });
+
+  it("rejects a PAN smuggled into the brand field", async () => {
+    for (const brand of ["4242424242424242", "4242 4242 4242 4242", "visa1"]) {
+      const response = await server.inject({
+        method: "POST",
+        url: "/v1/vault/e2e",
+        headers: { cookie: webCookie },
+        payload: { label: "Bad brand", blob: '{ "ciphertext": "x" }', brand, last4: "4242" },
+      });
+      expect(response.statusCode).toBe(400);
+    }
+  });
+
+  it("edits a card label in place (own record only)", async () => {
+    const create = await server.inject({
+      method: "POST",
+      url: "/v1/vault/e2e",
+      headers: { cookie: webCookie },
+      payload: { label: "Old label", blob: '{ "ciphertext": "x" }', brand: "mc", last4: "1111" },
+    });
+    const id = (create.json() as { id: string }).id;
+
+    const patch = await server.inject({
+      method: "PATCH",
+      url: `/v1/vault/e2e/${id}/label`,
+      headers: { cookie: webCookie },
+      payload: { label: "New label" },
+    });
+    expect(patch.statusCode).toBe(200);
+    expect(patch.json()).toEqual({ id, label: "New label" });
+
+    // The single-record GET returns the sealed blob; confirm the label moved.
+    const get = await server.inject({
+      method: "GET",
+      url: `/v1/vault/e2e/${id}`,
+      headers: { cookie: webCookie },
+    });
+    expect(get.json()).toMatchObject({ label: "New label" });
+
+    // brand/last4 (surfaced only on the list) untouched by the label-only edit.
+    const list = await server.inject({
+      method: "GET",
+      url: "/v1/vault/e2e",
+      headers: { cookie: webCookie },
+    });
+    const row = (list.json() as Array<{ id: string; label: string; brand: string; last4: string }>).find(
+      (r) => r.id === id,
+    );
+    expect(row).toMatchObject({ label: "New label", brand: "mc", last4: "1111" });
+  });
+
+  it("rejects an empty label on PATCH", async () => {
+    const create = await server.inject({
+      method: "POST",
+      url: "/v1/vault/e2e",
+      headers: { cookie: webCookie },
+      payload: { label: "Keep", blob: '{ "ciphertext": "x" }' },
+    });
+    const id = (create.json() as { id: string }).id;
+    const patch = await server.inject({
+      method: "PATCH",
+      url: `/v1/vault/e2e/${id}/label`,
+      headers: { cookie: webCookie },
+      payload: { label: "" },
+    });
+    expect(patch.statusCode).toBe(400);
+  });
+
+  it("denies a cross-account label PATCH", async () => {
+    const create = await server.inject({
+      method: "POST",
+      url: "/v1/vault/e2e",
+      headers: { cookie: webCookie },
+      payload: { label: "Owner label", blob: '{ "ciphertext": "x" }' },
+    });
+    const id = (create.json() as { id: string }).id;
+
+    const patch = await server.inject({
+      method: "PATCH",
+      url: `/v1/vault/e2e/${id}/label`,
+      headers: { cookie: otherWebCookie },
+      payload: { label: "Hijacked" },
+    });
+    expect(patch.statusCode).toBe(404);
+
+    // The victim's label is unchanged.
+    const get = await server.inject({
+      method: "GET",
+      url: `/v1/vault/e2e/${id}`,
+      headers: { cookie: webCookie },
+    });
+    expect(get.json()).toMatchObject({ label: "Owner label" });
+  });
+
   it("rejects a full PAN in last4", async () => {
     const response = await server.inject({
       method: "POST",

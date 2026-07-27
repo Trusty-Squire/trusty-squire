@@ -6,7 +6,7 @@ export interface PendingPaymentApprovalInput {
   amountCents: number;
   currency: string;
   nonce: string;
-  cardRef: string;
+  cardRef: string | null;
   operatorPubkey: string;
   item: string;
   reason: string;
@@ -26,6 +26,10 @@ export interface PendingPaymentApprovalRecord extends PendingPaymentApprovalInpu
 export interface PendingPaymentApprovalStore {
   create(accountId: string, input: PendingPaymentApprovalInput): Promise<string>;
   getByIdForAccount(id: string, accountId: string): Promise<PendingPaymentApprovalRecord | null>;
+  // Binds a card to a still-card-less pending approval. Write-once: succeeds
+  // only while status is "pending" AND card_ref is null. Returns false on any
+  // other state (already bound, already approved, gone).
+  bindCardForAccount(id: string, accountId: string, cardRef: string): Promise<boolean>;
   approveForAccount(
     id: string,
     accountId: string,
@@ -63,6 +67,20 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
   ): Promise<PendingPaymentApprovalRecord | null> {
     const record = this.records.get(id);
     return record === undefined || record.accountId !== accountId ? null : { ...record };
+  }
+
+  async bindCardForAccount(id: string, accountId: string, cardRef: string): Promise<boolean> {
+    const record = this.records.get(id);
+    if (
+      record === undefined ||
+      record.accountId !== accountId ||
+      record.status !== "pending" ||
+      record.cardRef !== null
+    ) {
+      return false;
+    }
+    record.cardRef = cardRef;
+    return true;
   }
 
   async approveForAccount(

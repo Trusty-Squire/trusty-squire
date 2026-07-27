@@ -62,6 +62,14 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
         };
   }
 
+  async bindCardForAccount(id: string, accountId: string, cardRef: string): Promise<boolean> {
+    const result = await this.prisma.pendingPaymentApproval.updateMany({
+      where: { id, account_id: accountId, status: "pending", card_ref: null },
+      data: { card_ref: cardRef },
+    });
+    return result.count > 0;
+  }
+
   async approveForAccount(
     id: string,
     accountId: string,
