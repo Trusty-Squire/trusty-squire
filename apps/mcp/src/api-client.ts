@@ -113,7 +113,8 @@ export interface PaymentApproval {
   amount_cents: number;
   currency: string;
   nonce: string;
-  card_ref: string;
+  // null for a card-less JIT approval until the add-card ceremony binds one.
+  card_ref: string | null;
   operator_pubkey: string;
   jws: string | null;
   sealed_card: string | null;
@@ -142,7 +143,10 @@ export class ApiClient {
     checkout_origin: string;
     amount_cents: number;
     currency: string;
-    card_ref: string;
+    // Absent = card-less JIT approval; the card is bound later via
+    // POST /v1/pay/approvals/:id/bind-card. JSON.stringify drops the key when
+    // it is undefined, so the server sees no card_ref.
+    card_ref?: string;
     operator_pubkey: string;
     item: string;
     reason: string;

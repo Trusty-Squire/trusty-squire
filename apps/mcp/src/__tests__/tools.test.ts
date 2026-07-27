@@ -8,6 +8,19 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
+import type { PaymentBrowser } from "../bot/pay-operator.js";
+import type * as ProvisionSession from "../bot/provision-session.js";
+
+// operate_pay's handler reaches into the single active browser session via
+// activeProvisionBrowser(). There is no real session in a unit test, so mock
+// just that getter (everything else in the module is preserved) and hand back
+// a stub whose checkout summary the resolution tests can control.
+let mockBrowser: PaymentBrowser;
+vi.mock("../bot/provision-session.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ProvisionSession>();
+  return { ...actual, activeProvisionBrowser: () => mockBrowser };
+});
+
 import {
   auditLogTool,
   listAppAccessTool,
@@ -17,6 +30,20 @@ import {
   revokeAppAccessTool,
   TOOLS,
 } from "../tools/index.js";
+
+function stubBrowser(): PaymentBrowser {
+  return {
+    readCheckoutSummary: vi.fn().mockResolvedValue({
+      merchant: "M",
+      checkout_origin: "https://m.test",
+      amount_cents: 100,
+      currency: "USD",
+    }),
+    fillAndSubmitCheckout: vi.fn().mockResolvedValue({ three_ds_required: false }),
+    waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
+    currentUrl: vi.fn().mockReturnValue("https://m.test/checkout"),
+  };
+}
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
@@ -68,8 +95,10 @@ describe("list_payment_cards", () => {
 });
 
 describe("operate_pay card selection", () => {
-  it("rejects missing or conflicting card selectors", () => {
-    expect(() => operatePayTool.inputSchema.parse({})).toThrow();
+  it("accepts no selector (resolves against cards on file) but rejects both", () => {
+    // Neither is now valid — the handler resolves against the cards on file
+    // (0 → JIT ceremony, 1 → use it, >1 → error). Both is still rejected.
+    expect(() => operatePayTool.inputSchema.parse({})).not.toThrow();
     expect(() =>
       operatePayTool.inputSchema.parse({ card_ref: "card_1", card_label: "Personal" }),
     ).toThrow();
@@ -84,6 +113,91 @@ describe("operate_pay card selection", () => {
     const args = operatePayTool.inputSchema.parse({ card_label: "Personal" });
 
     await expect(operatePayTool.handler(args, api)).rejects.toThrow(/Multiple saved payment cards/);
+  });
+
+  it("no selector + >1 cards on file errors listing the labels (never guesses)", async () => {
+    const listPaymentCards = vi.fn().mockResolvedValue([
+      { id: "card_1", label: "Personal" },
+      { id: "card_2", label: "Work" },
+    ]);
+    const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse({});
+
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+      /Multiple saved payment cards on file.*"Personal".*"Work".*specify card_ref or card_label/,
+    );
+  });
+
+  it("no selector + exactly 1 card on file uses that card (has-card, not JIT)", async () => {
+    mockBrowser = stubBrowser();
+    const listPaymentCards = vi.fn().mockResolvedValue([{ id: "card_only", label: "Personal" }]);
+    // The approval expires immediately, so the operator terminates without
+    // side effects; we only assert what card_ref the handler resolved.
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_1",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(0).toISOString(),
+    });
+    const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
+    const getPaymentApproval = vi
+      .fn()
+      .mockResolvedValue({ id: "appr_1", status: "expired", card_ref: "card_only" });
+    const api = makeMockApi({
+      listPaymentCards,
+      createPaymentApproval,
+      getPaymentConfig,
+      getPaymentApproval,
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse({
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+    });
+
+    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+    expect(createPaymentApproval).toHaveBeenCalledOnce();
+    // The single card on file was resolved and sent as card_ref (has-card).
+    expect(createPaymentApproval.mock.calls[0]![0]).toMatchObject({ card_ref: "card_only" });
+    // Has-card timeout is the plain shape — no card_required, no JIT hint.
+    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(result).not.toHaveProperty("card_persisted");
+  });
+
+  it("no selector + 0 cards mints a CARD-LESS approval (JIT ceremony)", async () => {
+    mockBrowser = stubBrowser();
+    const listPaymentCards = vi.fn().mockResolvedValue([]);
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_jit",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(0).toISOString(),
+    });
+    const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
+    const getPaymentApproval = vi
+      .fn()
+      .mockResolvedValue({ id: "appr_jit", status: "expired", card_ref: null });
+    const api = makeMockApi({
+      listPaymentCards,
+      createPaymentApproval,
+      getPaymentConfig,
+      getPaymentApproval,
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse({
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+    });
+
+    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+    expect(createPaymentApproval).toHaveBeenCalledOnce();
+    // Card-less create — no card_ref sent.
+    expect(createPaymentApproval.mock.calls[0]![0]).not.toHaveProperty("card_ref");
+    // A card-less approval that expires before a card is bound → card_required.
+    expect(result).toMatchObject({
+      status: "payment_card_required",
+      needs_user: { wall: "card_required" },
+    });
   });
 });
 
