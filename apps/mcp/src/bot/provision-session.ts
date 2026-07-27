@@ -403,18 +403,24 @@ async function startBrowserBounded(browser: BrowserController, sessionId: string
 const norm = (s: string | null | undefined): string =>
   (s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 
-// Element ref = a STABLE, generation-independent handle: "@e:<hash>_<ordinal>".
-// (Was "@g<generation>:<hash>_<ordinal>".) The generation prefix is gone on
-// purpose: the per-session observe delta does NOT re-emit an element that did not
-// change between observes, so the ref the host already holds must keep resolving —
-// a generation-stamped ref would go "stale" the instant a later observe bumped
-// the counter, even though the element is right there. The `@e:` sigil only
+// Element ref = a STABLE-by-default handle: "@e:<identity>_<ordinal>". For a
+// normal control `<identity>` is its generation-independent stableElementId, so
+// the per-session observe delta can leave an unchanged element un-re-emitted and
+// the ref the host already holds keeps resolving. The `@e:` sigil only
 // disambiguates a ref from a free-text label target (a label may legitimately end
 // in "_<digits>"). Staleness is guarded by IDENTITY, not a counter: a ref whose
 // element is now gone finds no match in resolveTarget → returns null → the caller
-// fails loudly ("no element matched") and the host re-observes. Stable selectors
-// prevent recycled-node retargeting; the accepted positional-only exception is
-// documented at stableElementId.
+// fails loudly ("no element matched") and the host re-observes.
+//
+// The exceptional identity form (issue #399) applies to same-base-identity
+// siblings distinguished ONLY by positional selectors. Those "volatile" members
+// get an identity prefixed with their sibling group's composition FINGERPRINT
+// ("<fp>-<hash>", see volatilePositionalGroups + elementIdentity), so a ref is
+// valid only while that fingerprint matches. A membership-count change re-mints
+// the group and makes every old ref resolve to null, never to a survivor.
+// Size-preserving changes among truly indistinguishable members are the bounded
+// residual documented at volatilePositionalGroups. `<fp>-` stays within the id
+// charset below, so no parsing changes are needed.
 const PROVISION_REF_RE = /^@e:([a-z0-9_-]+)$/i;
 const PROVISION_REF_ID_RE = /^(.+)_(\d+)$/;
 
@@ -437,17 +443,23 @@ function shortHash(s: string): string {
   return createHash("sha256").update(s).digest("base64url").slice(0, 12);
 }
 
+function baseIdentityFields(el: InteractiveElement): string[] {
+  return [
+    el.screenPath ?? "",
+    el.testId ?? "",
+    el.container ?? "",
+    el.role ?? "",
+    el.tag,
+    elementRef(el),
+    el.href ?? "",
+    el.type ?? "",
+  ];
+}
+
 export function stableElementId(el: InteractiveElement): string {
   return shortHash(
     [
-      el.screenPath ?? "",
-      el.testId ?? "",
-      el.container ?? "",
-      el.role ?? "",
-      el.tag,
-      elementRef(el),
-      el.href ?? "",
-      el.type ?? "",
+      ...baseIdentityFields(el),
       // The element's own selector — a per-element discriminator so two controls
       // that are otherwise identical (same label/path/role, e.g. sibling "Remove"
       // buttons in a list) get DISTINCT identities. Without it, a stable ref is a
@@ -459,19 +471,103 @@ export function stableElementId(el: InteractiveElement): string {
       //
       // Mutable state (`checked`, value length, topmost/occlusion) is deliberately
       // excluded so fills, toggles, and visibility changes keep the same ref.
-      // Accepted UNGUARDED exception: with a purely POSITIONAL selector
-      // (`:nth-child`/`:nth-of-type`) AND non-disambiguating path fields, removing
-      // the first sibling shifts the survivor onto the removed node's old ref.
-      // That recycled ref is NOT in `removed`, so even a contract-following host
-      // can reuse it and target the survivor. Screen paths normally encode the
-      // row/index and prevent this collision. Fully closing it requires a stable
-      // extractor node id or cross-observe generation tracking; the latter is
-      // deliberately omitted because it defeats stable-ref reuse. If sibling
-      // bodies differ, the recycled ref is re-emitted with current state, but the
-      // underlying node swap remains unsignaled.
+      // A purely POSITIONAL selector (`:nth-of-type`/`:nth-child`/`>> nth=`)
+      // recycles on sibling removal, so this hash alone would let a survivor
+      // slide onto a departed node's identity. Closed one layer up (issue #399):
+      // volatilePositionalGroups fingerprints such sibling groups and
+      // elementIdentity prefixes their refs with that fingerprint, so a group
+      // size change makes every old positional ref resolve to null.
       el.selector,
     ].join("\u001f"),
   );
+}
+
+// The base identity WITHOUT the selector — the grouping key for same-label
+// sibling detection.
+function baseElementKey(el: InteractiveElement): string {
+  return baseIdentityFields(el).join("\u001f");
+}
+
+// A selector that pins an element only by its POSITION among siblings
+// (`:nth-of-type`/`:nth-child`, or Playwright's `>> nth=` index). Such selectors
+// RECYCLE: remove an earlier sibling and a later one slides into the vacated
+// position, so the identical selector string then designates a DIFFERENT node.
+// Stable anchors (#id, [data-testid], [name=…]) never recycle this way. Quoted
+// attribute VALUES (incl. backslash-escaped quotes) are blanked first so a stable
+// `[data-key="x:nth-child(1)"]` — the value merely CONTAINS the syntax — is not
+// misread as a positional combinator; only real structural syntax counts.
+const POSITIONAL_SELECTOR_RE = /:nth-of-type\(|:nth-child\(|>>\s*nth=/i;
+const QUOTED_VALUE_RE = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g;
+function isPositionalSelector(selector: string): boolean {
+  return POSITIONAL_SELECTOR_RE.test(selector.replace(QUOTED_VALUE_RE, '""'));
+}
+
+// A "volatile positional group": the ≥2 POSITIONAL members of a same-base-identity
+// group (any stable-anchored siblings in the same base group keep their plain,
+// non-volatile refs). Removing one shifts a survivor's positional selector onto a
+// departed node's identity, so a purely structural ref would silently retarget
+// the survivor (issue #399). Returns each such member mapped to a GROUP
+// FINGERPRINT — a hash of the positional members' stableElementIds in extraction
+// order. elementIdentity prefixes the member's ref with that fingerprint, so the
+// ref is valid ONLY while the positional membership matches.
+//
+// Guarantees (the #399 invariant): after a member is REMOVED (group size N→N-1),
+// the fingerprint changes, so the departed member's old ref appears in `removed`
+// (or a full resync) and resolves to null — never a survivor — including WITHIN a
+// turn (the act path re-extracts, so a mid-turn removal changes the fingerprint
+// and forces a re-observe rather than mis-targeting a shifted sibling). Because
+// the identity is composition-derived (not an observe counter), a static group's
+// refs stay stable across observes (no wasted churn) and a toggled checkbox /
+// filled field keeps its ref (mutable state is excluded from stableElementId).
+//
+// Bounded residual: the fingerprint is built from the members' own
+// position-derived hashes, so a SIZE-PRESERVING shuffle of TRULY INDISTINGUISHABLE
+// members — delete-one-and-insert-one, or a pure reorder, where the members carry
+// ZERO distinguishing signal (identical label/aria/testid/text/screenPath, only
+// the nth differs) — leaves the fingerprint unchanged and is not detected. This
+// is information-theoretically unavoidable for a string-derived identity: such an
+// observation is byte-identical to "nothing changed," so no ref scheme can flag
+// it. Real per-row controls carry a distinguishing signal (row text / aria-label
+// / a data-id), which lands them in DISTINCT base groups (non-volatile) where the
+// #398 stable-selector identity already guards them. Fully closing the residual
+// needs an extractor-stamped per-node id that survives DOM mutation — deferred
+// because stamping every interactive node with a persistent attribute is
+// anti-bot-detectable (a worse regression than the residual it removes).
+function volatilePositionalGroups(
+  elements: readonly InteractiveElement[],
+): Map<InteractiveElement, string> {
+  const groups = new Map<string, InteractiveElement[]>();
+  for (const el of elements) {
+    const key = baseElementKey(el);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [el]);
+    else group.push(el);
+  }
+  const fingerprintOf = new Map<InteractiveElement, string>();
+  for (const group of groups.values()) {
+    // ≥2 positional siblings sharing a base identity can recycle onto EACH
+    // OTHER; a lone positional member (or any stable-anchored member) cannot.
+    const positional = group.filter((el) => isPositionalSelector(el.selector));
+    if (positional.length < 2) continue;
+    // Extraction-order fingerprint: sensitive to membership-count and selector-
+    // sequence changes, subject to the size-preserving residual above.
+    const fp = shortHash(positional.map((el) => stableElementId(el)).join(""));
+    for (const el of positional) fingerprintOf.set(el, fp);
+  }
+  return fingerprintOf;
+}
+
+// The ref identity of one element. A volatile positional-group member is
+// prefixed with its group fingerprint (`<fp>-<hash>`) so its ref survives only
+// while the group's composition is unchanged; everything else uses its plain,
+// composition-independent stableElementId (byte-identical to the pre-#399 ref).
+function elementIdentity(
+  el: InteractiveElement,
+  fingerprintOf: ReadonlyMap<InteractiveElement, string>,
+): string {
+  const base = stableElementId(el);
+  const fp = fingerprintOf.get(el);
+  return fp === undefined ? base : `${fp}-${base}`;
 }
 
 export function provisionElementRef(el: InteractiveElement, ordinal = 1): string {
@@ -492,13 +588,14 @@ function parseProvisionRef(target: string): { id: string; ordinal: number | null
 export function provisionElementRefs(
   elements: readonly InteractiveElement[],
 ): Map<InteractiveElement, string> {
+  const fingerprintOf = volatilePositionalGroups(elements);
   const seen = new Map<string, number>();
   const refs = new Map<InteractiveElement, string>();
   for (const el of elements) {
-    const id = stableElementId(el);
+    const id = elementIdentity(el, fingerprintOf);
     const ordinal = (seen.get(id) ?? 0) + 1;
     seen.set(id, ordinal);
-    refs.set(el, provisionElementRef(el, ordinal));
+    refs.set(el, `@e:${id}_${ordinal}`);
   }
   return refs;
 }
@@ -534,17 +631,23 @@ export function resolveTarget(
 ): InteractiveElement | null {
   const parsedRef = parseProvisionRef(target);
   if (parsedRef !== null) {
-    // Staleness guard: a ref whose identity is absent returns null (the caller
-    // re-observes). The unguarded positional identity-recycling exception is
-    // documented at stableElementId.
+    // Staleness guard: a ref whose identity is absent among the LIVE elements
+    // returns null (the caller re-observes). Identity is recomputed here from the
+    // live set, so a volatile positional-group ref carries the group's fingerprint
+    // at mint time; if the live group has a different fingerprint, the stale ref
+    // resolves to null instead of retargeting a survivor (issue #399). This holds
+    // WITHIN a turn too: the act path re-extracts, so a membership-count change
+    // between observe and act changes the fingerprint and forces a re-observe.
     //
     // Ordinal caveat (same-hash duplicates): the `_<ordinal>` suffix positionally
-    // disambiguates elements that hash IDENTICALLY. Mutable state is intentionally
-    // absent from that hash, so members need not have identical checked/value/
-    // visibility state. If one is removed, an ordinal can resolve to a survivor;
-    // the recycled ordinal is not invalidated by `removed`. An ordinal past the
-    // current group size still returns null.
-    const matches = elements.filter((el) => stableElementId(el) === parsedRef.id);
+    // disambiguates elements that hash IDENTICALLY (same selector too — NOT the
+    // positional-sibling case, which the fingerprint covers). Mutable state is
+    // intentionally absent from that hash, so members need not have identical
+    // checked/value/visibility state. If one is removed, an ordinal can resolve to
+    // a survivor; the recycled ordinal is not invalidated by `removed`. An ordinal
+    // past the current group size still returns null.
+    const fingerprintOf = volatilePositionalGroups(elements);
+    const matches = elements.filter((el) => elementIdentity(el, fingerprintOf) === parsedRef.id);
     if (parsedRef.ordinal !== null) {
       const match = matches[parsedRef.ordinal - 1];
       return match ?? null;
@@ -2161,6 +2264,9 @@ export async function act(
       }
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
+      // resolveTarget recomputes identities (incl. volatile positional-group
+      // fingerprints) from these FRESH elements, so a ref whose group fingerprint
+      // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
         throw new Error(`type_secret: no element matched target "${action.target}".`);
@@ -2192,6 +2298,9 @@ export async function act(
       // Re-resolve against FRESH elements every act — never trust a stale index.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
+      // resolveTarget recomputes identities (incl. volatile positional-group
+      // fingerprints) from these FRESH elements, so a ref whose group fingerprint
+      // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
         throw new Error(
