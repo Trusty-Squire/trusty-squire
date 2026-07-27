@@ -40,8 +40,8 @@ const h = vi.hoisted(() => ({
   twoCaptchaCalls: [] as string[],
   consentDismissCalls: 0,
   consentCta: null as string | null,
-  locatorResolve: { ok: true, text: "Add To Cart" } as
-    | { ok: true; text: string }
+  locatorResolve: { ok: true, text: "Add To Cart", safetyText: "Add To Cart" } as
+    | { ok: true; text: string; safetyText: string }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
   locatorClickCalls: 0,
 }));
@@ -137,11 +137,21 @@ vi.mock("../browser.js", () => ({
       _mode: string,
       _value: string,
     ): Promise<
-      | { ok: true; handle: { dispose: () => Promise<void> }; text: string }
+      | {
+          ok: true;
+          handle: { dispose: () => Promise<void> };
+          text: string;
+          safetyText: string;
+        }
       | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
     > {
       if (h.locatorResolve.ok) {
-        return { ok: true, handle: { dispose: async () => {} }, text: h.locatorResolve.text };
+        return {
+          ok: true,
+          handle: { dispose: async () => {} },
+          text: h.locatorResolve.text,
+          safetyText: h.locatorResolve.safetyText,
+        };
       }
       return h.locatorResolve;
     }
@@ -208,6 +218,7 @@ import {
   parseElementsTable,
 } from "../provision-session.js";
 import {
+  provisionRememberTool,
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
   provisionStoreLoginTool,
@@ -260,7 +271,7 @@ beforeEach(() => {
   h.twoCaptchaAvailable = false;
   h.twoCaptchaResult = { kind: "ok", token: "captcha-token", durationMs: 1 };
   h.twoCaptchaCalls = [];
-  h.locatorResolve = { ok: true, text: "Add To Cart" };
+  h.locatorResolve = { ok: true, text: "Add To Cart", safetyText: "Add To Cart" };
   h.locatorClickCalls = 0;
 });
 afterEach(async () => {
@@ -292,7 +303,11 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
   // re-run the guard against the RESOLVED visible text before clicking.
   it("blocks a css= locator that resolves to a billing-object control in live mode", async () => {
     h.visibleText = "Dashboard Products Live mode";
-    h.locatorResolve = { ok: true, text: "Save product" };
+    h.locatorResolve = {
+      ok: true,
+      text: "Save product",
+      safetyText: "Save product",
+    };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
     await expect(
       act(obs.session_id, { kind: "click", target: "css=#save" }),
@@ -301,12 +316,53 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(h.locatorClickCalls).toBe(0);
   });
 
+  it("blocks an icon-only css= target using its accessible label", async () => {
+    h.visibleText = "Dashboard Products Live mode";
+    h.locatorResolve = { ok: true, text: "", safetyText: "Save product SAVE_PRODUCT" };
+    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
+    await expect(
+      act(obs.session_id, { kind: "click", target: "css=#save-icon" }),
+    ).rejects.toThrow(/Mode safety guard/);
+    expect(h.locatorClickCalls).toBe(0);
+  });
+
   it("allows a css= locator resolving to a safe control (guard is not over-eager)", async () => {
     h.visibleText = "Product configurator";
-    h.locatorResolve = { ok: true, text: "Add To Cart" };
+    h.locatorResolve = {
+      ok: true,
+      text: "Add To Cart",
+      safetyText: "Add To Cart ADD_TO_CART",
+    };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
     await act(obs.session_id, { kind: "click", target: "css=#atc" });
     expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("refuses to remember a session that used a locator fallback", async () => {
+    h.visibleText = "Product configurator";
+    h.locatorResolve = {
+      ok: true,
+      text: "Add To Cart",
+      safetyText: "Add To Cart ADD_TO_CART",
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
+    await act(obs.session_id, { kind: "click", target: "css=#atc" });
+
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: obs.session_id,
+          name: "locator-session",
+          goal: "Add a product to the cart",
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Cart contains the product",
+            success_signal: { text_present: "Cart" },
+          },
+        },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/locator fallback.*cannot represent/i);
   });
 });
 

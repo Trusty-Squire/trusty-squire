@@ -2365,7 +2365,7 @@ export async function act(
         // know what the locator actually points at (no-mistakes review).
         const resolvedBlock = shouldBlockUnsafeProvisionAction(pageText, {
           ...action,
-          target: resolved.text,
+          target: resolved.safetyText || resolved.text,
         });
         if (resolvedBlock !== null) throw new Error(resolvedBlock);
         // Mark the session non-promotable BEFORE the click: a locator click can't
@@ -2754,6 +2754,11 @@ export async function rememberRecipe(
 ): Promise<{ file: string; name: string; steps: number; secrets: string[] }> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (session.usedLocatorFallback) {
+    throw new Error(
+      "operate_remember refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
+    );
+  }
   const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
   const recipe: OperatorRecipe = {
     name: opts.name,

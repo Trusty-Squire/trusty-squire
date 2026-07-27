@@ -127,6 +127,29 @@ const NESTED_WEAK_FIXTURE = `data:text/html,${encodeURIComponent(`
   </script>
 </body></html>`)}`;
 
+const WEAK_ANCESTOR_STRONG_CHILD_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <script>
+    window.__outer = 0; window.__inner = 0;
+    const outer = document.createElement("div");
+    outer.style.cssText = "cursor:pointer;padding:24px";
+    outer.addEventListener("click", () => { window.__outer++; });
+    const inner = document.createElement("button");
+    inner.textContent = "Add To Cart";
+    inner.style.cssText = "cursor:pointer;width:200px;height:40px";
+    inner.addEventListener("click", () => { window.__inner++; });
+    outer.append(inner);
+    document.body.append(outer);
+  </script>
+</body></html>`)}`;
+
+const ICON_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <button id="save" aria-label="Save product" title="Persist billing product"
+    name="save-product" value="save" action-type="SAVE_PRODUCT"
+    style="width:40px;height:40px"></button>
+</body></html>`)}`;
+
 // Many visible divs — css=div must return ambiguous via the pool cap without
 // running the pairwise O(n^2) nesting scan over all of them.
 const MANY_DIVS_FIXTURE = `data:text/html,${encodeURIComponent(`
@@ -285,6 +308,7 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("Add To Cart");
+      expect(resolved.safetyText).toContain("ADD_TO_CART");
 
       await ctrl.clickHandle(resolved.handle);
       await resolved.handle.dispose();
@@ -353,6 +377,23 @@ describe("resolvePageTarget (real Chromium)", () => {
       await ctrl.clickHandle(resolved.handle);
       await resolved.handle.dispose();
       expect(await cart(page)).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("returns accessible metadata separately from the visible audit label", async () => {
+    const { ctrl, page } = await pageFor(ICON_ONLY_SAVE_FIXTURE);
+    try {
+      const resolved = await ctrl.resolvePageTarget("css", "#save");
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) throw new Error("unreachable");
+      expect(resolved.text).toBe("");
+      expect(resolved.safetyText).toContain("Save product");
+      expect(resolved.safetyText).toContain("Persist billing product");
+      expect(resolved.safetyText).toContain("save-product");
+      expect(resolved.safetyText).toContain("SAVE_PRODUCT");
+      await resolved.handle.dispose();
     } finally {
       await page.close();
     }
@@ -520,6 +561,20 @@ describe("resolvePageTarget (real Chromium)", () => {
       const resolved = await ctrl.resolvePageTarget("text", "Add To Cart");
       // Both bare divs carry their own listener; picking the inner would bubble
       // into the outer and fire both. Must refuse instead.
+      expect(resolved.ok).toBe(false);
+      if (resolved.ok) throw new Error("unreachable");
+      expect(resolved.reason).toBe("ambiguous");
+      expect(await page.evaluate(() => (window as unknown as { __outer: number }).__outer)).toBe(0);
+      expect(await page.evaluate(() => (window as unknown as { __inner: number }).__inner)).toBe(0);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("keeps a weak handler ancestor wrapping a strong control ambiguous", async () => {
+    const { ctrl, page } = await pageFor(WEAK_ANCESTOR_STRONG_CHILD_FIXTURE);
+    try {
+      const resolved = await ctrl.resolvePageTarget("text", "Add To Cart");
       expect(resolved.ok).toBe(false);
       if (resolved.ok) throw new Error("unreachable");
       expect(resolved.reason).toBe("ambiguous");

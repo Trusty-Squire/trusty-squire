@@ -2512,9 +2512,9 @@ export class BrowserController {
   //     cursor:pointer). Plain prose that merely contains the words is excluded.
   //     Open shadow roots are pierced.
   //   • css mode — the author's selector, restricted to VISIBLE matches.
-  //   • A weak (cursor-only) wrapper that sits inside a strong control, or wraps
-  //     another candidate, collapses away; two GENUINE nested controls stay
-  //     ambiguous rather than being silently merged.
+  //   • A weak (cursor-only) descendant inside a strong control collapses away;
+  //     weak ancestors and two GENUINE nested controls stay ambiguous rather
+  //     than being silently merged.
   //   • 0 matches → {ok:false, reason:"none"}; >1 → {ok:false, reason:"ambiguous"}
   //     with the candidate texts so the host can disambiguate. Exactly 1 returns
   //     a live ElementHandle to the winner. The caller acts through the handle
@@ -2524,7 +2524,7 @@ export class BrowserController {
     mode: "text" | "css",
     value: string,
   ): Promise<
-    | { ok: true; handle: ElementHandle<Element>; text: string }
+    | { ok: true; handle: ElementHandle<Element>; text: string; safetyText: string }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
   > {
     if (!this.page) throw new Error("Browser not started");
@@ -2543,6 +2543,20 @@ export class BrowserController {
           return (typeof it === "string" ? it : (el.textContent ?? "")).replace(/\s+/g, " ").trim();
         };
         const rendered = (el: Element): string => renderedRaw(el).toLowerCase();
+        const safetyTextFor = (el: Element): string => {
+          const values = [
+            el.getAttribute("aria-label"),
+            el.getAttribute("title"),
+            el.getAttribute("alt"),
+            el.getAttribute("value"),
+            el.getAttribute("name"),
+            el.getAttribute("action-type"),
+            renderedRaw(el),
+          ]
+            .map((part) => (part ?? "").replace(/\s+/g, " ").trim())
+            .filter((part) => part.length > 0);
+          return [...new Set(values)].join(" ").slice(0, 500);
+        };
         // Visibility walks the ANCESTOR chain (crossing shadow-host boundaries):
         // opacity does not inherit, so a button under an opacity:0 wrapper keeps
         // its own computed opacity 1 and a self-only check would wrongly treat it
@@ -2616,7 +2630,15 @@ export class BrowserController {
           pool = all.filter(isVisible);
         } else {
           const want = norm(value);
-          if (want.length === 0) return { count: 0, candidates: [] as string[] };
+          if (want.length === 0) {
+            return {
+              element: null,
+              count: 0,
+              candidates: [] as string[],
+              text: "",
+              safetyText: "",
+            };
+          }
           const affordable = all.filter((el) => isVisible(el) && hasClickAffordance(el));
           const exact = affordable.filter((el) => rendered(el) === want);
           // Prefer exact-text matches; only fall back to "contains" (with a
@@ -2642,17 +2664,17 @@ export class BrowserController {
             count: pool.length,
             candidates: pool.slice(0, 8).map((el) => renderedRaw(el).slice(0, 60)),
             text: "",
+            safetyText: "",
           };
         }
         // Collapse nesting WITHOUT silently merging two genuine controls. A
         // STRONG candidate (real interactive semantics) always survives. A WEAK
         // candidate (only inherits cursor:pointer — a decorative wrapper or the
-        // inner label span of a real control) is dropped ONLY relative to a
-        // STRONG partner: when it sits inside a strong candidate (it's part of
-        // that control's subtree, e.g. Casetify's <span> inside the button
-        // <div>) or when it wraps a strong candidate (a pointer div around the
-        // real button). Two WEAK candidates in a nesting relationship — each a
-        // bare click-handler div with its own listener — are NOT collapsed:
+        // inner label span of a real control) is dropped only when it sits
+        // inside a strong candidate (it's part of that control's subtree, e.g.
+        // Casetify's <span> inside the button <div>). Two WEAK candidates in a
+        // nesting relationship — each a bare click-handler div with its own
+        // listener — are NOT collapsed:
         // dropping the outer would pick the inner, whose click bubbles to the
         // outer and fires BOTH handlers (a double add-to-cart). They both
         // survive → reported ambiguous rather than silently double-clicked (codex).
@@ -2661,7 +2683,6 @@ export class BrowserController {
           for (const other of pool) {
             if (other === el) continue;
             if (other.contains(el) && isStrong(other)) return false;
-            if (el.contains(other) && isStrong(other)) return false;
           }
           return true;
         });
@@ -2673,6 +2694,7 @@ export class BrowserController {
           count: uniq.length,
           candidates,
           text: win !== null ? renderedRaw(win).slice(0, 120) : "",
+          safetyText: win !== null ? safetyTextFor(win) : "",
         };
       },
       { mode, value },
@@ -2681,6 +2703,7 @@ export class BrowserController {
       count: r.count,
       candidates: r.candidates,
       text: r.text,
+      safetyText: r.safetyText,
     }));
     if (meta.count !== 1) {
       await resultHandle.dispose();
@@ -2698,7 +2721,12 @@ export class BrowserController {
       await winHandle.dispose();
       return { ok: false, reason: "none", candidates: meta.candidates };
     }
-    return { ok: true, handle: asElement, text: meta.text ?? "" };
+    return {
+      ok: true,
+      handle: asElement,
+      text: meta.text ?? "",
+      safetyText: meta.safetyText ?? "",
+    };
   }
 
   private async locatorClickState(
