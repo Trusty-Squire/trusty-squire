@@ -7,10 +7,11 @@ const api = vi.hoisted(() => ({
   apiGet: vi.fn(),
   apiPost: vi.fn(),
 }));
+const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 
 vi.mock("next/navigation", () => ({
   useParams: () => ({ id: "appr_1" }),
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => router,
   usePathname: () => "/vault/pay/appr_1",
 }));
 
@@ -60,6 +61,8 @@ const DECOY_CARD = {
 };
 
 let bound = false;
+let cardListFailures = 0;
+let failCardListAfterBind = false;
 
 function approvalBody() {
   return {
@@ -80,11 +83,17 @@ function approvalBody() {
 
 beforeEach(() => {
   bound = false;
+  cardListFailures = 0;
+  failCardListAfterBind = false;
   vi.clearAllMocks();
   api.apiGet.mockImplementation((path: string) => {
     if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
     if (path === "/v1/pay/approvals/appr_1") return Promise.resolve(approvalBody());
     if (path === "/v1/vault/e2e") {
+      if (cardListFailures > 0) {
+        cardListFailures -= 1;
+        return Promise.reject(new Error("card list unavailable"));
+      }
       return Promise.resolve(bound ? [BOUND_CARD, DECOY_CARD] : [DECOY_CARD]);
     }
     return Promise.reject(new Error(`unexpected GET ${path}`));
@@ -92,6 +101,7 @@ beforeEach(() => {
   api.apiPost.mockImplementation((path: string) => {
     if (path === "/v1/pay/approvals/appr_1/bind-card") {
       bound = true;
+      if (failCardListAfterBind) cardListFailures += 1;
       return Promise.resolve({ card_ref: "card_new" });
     }
     return Promise.resolve({});
@@ -139,5 +149,40 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.queryByTestId("card-entry")).toBeNull();
     const anchor = screen.getByText(/Pay with/);
     expect(anchor.textContent).toContain("··4242");
+  });
+
+  it("blocks approval when the server-bound card metadata cannot be loaded", async () => {
+    bound = true;
+    cardListFailures = 1;
+    render(<PaymentApprovalPage />);
+
+    const approve = await screen.findByRole("button", { name: /Approve payment/ });
+    expect(approve.hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByText(/your saved card/i)).toBeNull();
+    expect(screen.getByText("card list unavailable")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+  });
+
+  it("preserves a successful bind when metadata refresh fails and retries only metadata", async () => {
+    failCardListAfterBind = true;
+    render(<PaymentApprovalPage />);
+    await waitFor(() => expect(screen.getByTestId("card-entry")).toBeTruthy());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("card-entry"));
+
+    const approve = await screen.findByRole("button", { name: /Approve payment/ });
+    expect(approve.hasAttribute("disabled")).toBe(true);
+    expect(screen.queryByTestId("card-entry")).toBeNull();
+    expect(screen.queryByText(/your saved card/i)).toBeNull();
+    expect(screen.getByText("card list unavailable")).toBeTruthy();
+
+    await user.click(screen.getByRole("button", { name: "Retry" }));
+    const anchor = await screen.findByText(/Pay with/);
+    expect(anchor.textContent).toContain("··4242");
+    expect(screen.getByRole("button", { name: /Approve payment/ }).hasAttribute("disabled")).toBe(
+      false,
+    );
+    expect(api.apiPost).toHaveBeenCalledTimes(1);
   });
 });

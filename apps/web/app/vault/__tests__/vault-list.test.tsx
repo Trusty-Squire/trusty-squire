@@ -4,19 +4,6 @@ import { cleanup, render, screen, waitFor, within } from "@testing-library/react
 import userEvent from "@testing-library/user-event";
 
 const api = vi.hoisted(() => ({
-  apiGet: vi.fn(),
-  apiPost: vi.fn(),
-  apiPatch: vi.fn(),
-  apiDelete: vi.fn(),
-}));
-
-vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
-  usePathname: () => "/vault",
-  useParams: () => ({}),
-}));
-
-vi.mock("../../lib/api", () => ({
   ApiError: class ApiError extends Error {
     status: number;
     constructor(message: string, status: number) {
@@ -24,6 +11,21 @@ vi.mock("../../lib/api", () => ({
       this.status = status;
     }
   },
+  apiGet: vi.fn(),
+  apiPost: vi.fn(),
+  apiPatch: vi.fn(),
+  apiDelete: vi.fn(),
+}));
+const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => router,
+  usePathname: () => "/vault",
+  useParams: () => ({}),
+}));
+
+vi.mock("../../lib/api", () => ({
+  ApiError: api.ApiError,
   apiGet: api.apiGet,
   apiPost: api.apiPost,
   apiPatch: api.apiPatch,
@@ -139,5 +141,39 @@ describe("vault list — Wallet section", () => {
     await waitFor(() =>
       expect(api.apiDelete).toHaveBeenCalledWith("/v1/vault/e2e/card_a"),
     );
+  });
+
+  it("redirects to login when inline card rename sees an expired session", async () => {
+    mockLists([FULL_CARD]);
+    api.apiPatch.mockRejectedValue(new api.ApiError("unauthorized", 401));
+    render(<VaultPage />);
+    await waitFor(() => expect(screen.getByText("Personal")).toBeTruthy());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Actions for Personal" }));
+    await user.click(screen.getByRole("menuitem", { name: "Rename" }));
+    const input = screen.getByLabelText("Card label");
+    await user.clear(input);
+    await user.type(input, "Travel");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?next=/vault"));
+    expect(screen.queryByText("unauthorized")).toBeNull();
+  });
+
+  it("redirects to login when inline card delete sees an expired session", async () => {
+    mockLists([FULL_CARD]);
+    api.apiDelete.mockRejectedValue(new api.ApiError("unauthorized", 401));
+    render(<VaultPage />);
+    await waitFor(() => expect(screen.getByText("Personal")).toBeTruthy());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Actions for Personal" }));
+    await user.click(screen.getByRole("menuitem", { name: "Delete" }));
+    const confirmRow = screen.getByText("Delete this card?").parentElement as HTMLElement;
+    await user.click(within(confirmRow).getByRole("button", { name: "Delete" }));
+
+    await waitFor(() => expect(router.replace).toHaveBeenCalledWith("/login?next=/vault"));
+    expect(screen.queryByText("unauthorized")).toBeNull();
   });
 });

@@ -104,6 +104,9 @@ export default function VaultPage() {
   const onCardRenamed = useCallback((id: string, label: string) => {
     setCards((prev) => prev?.map((c) => (c.id === id ? { ...c, label } : c)) ?? prev);
   }, []);
+  const redirectToLogin = useCallback(() => {
+    router.replace("/login?next=/vault");
+  }, [router]);
 
   const restore = useCallback(async () => {
     if (undo === null) return;
@@ -198,6 +201,7 @@ export default function VaultPage() {
                     card={card}
                     onDeleted={onCardDeleted}
                     onRenamed={onCardRenamed}
+                    onUnauthorized={redirectToLogin}
                   />
                 ))}
               </div>
@@ -479,10 +483,12 @@ function CardRow({
   card,
   onDeleted,
   onRenamed,
+  onUnauthorized,
 }: {
   card: CardMeta;
   onDeleted: (id: string) => void;
   onRenamed: (id: string, label: string) => void;
+  onUnauthorized: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [labelDraft, setLabelDraft] = useState(card.label);
@@ -510,11 +516,15 @@ function CardRow({
       onRenamed(card.id, next);
       setEditing(false);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        onUnauthorized();
+        return;
+      }
       setError(err instanceof Error ? err.message : "Couldn't rename this card.");
     } finally {
       setBusy(false);
     }
-  }, [labelDraft, card.id, card.label, cancelEdit, onRenamed]);
+  }, [labelDraft, card.id, card.label, cancelEdit, onRenamed, onUnauthorized]);
 
   const del = useCallback(async () => {
     setBusy(true);
@@ -523,11 +533,15 @@ function CardRow({
       await apiDelete(`/v1/vault/e2e/${card.id}`);
       onDeleted(card.id);
     } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        onUnauthorized();
+        return;
+      }
       setError(err instanceof Error ? err.message : "Couldn't delete this card.");
       setBusy(false);
       setConfirmDelete(false);
     }
-  }, [card.id, onDeleted]);
+  }, [card.id, onDeleted, onUnauthorized]);
 
   return (
     <div className="row">
