@@ -103,8 +103,16 @@ Compact observations minimize repeated context without making the stream lossy:
 
 - **Stable refs.** Refs use `@e:<identity>_<ordinal>` and do not contain an
   observation generation. An unchanged element keeps resolving across observes.
-  If its identity changes or it disappears, the old ref no longer resolves; a
-  removed ref is also listed in `removed` when the response is a delta.
+  Normally, if its identity changes or it disappears, the old ref no longer
+  resolves and is listed in `removed` when the response is a delta. There is one
+  bounded, unguarded exception: when sibling controls are distinguishable only
+  by a positional `:nth-child`/`:nth-of-type` selector and `screenPath` does not
+  distinguish their row, removing the first sibling shifts the survivor onto the
+  removed node's identity. The removed node's old ref is then not in `removed`
+  and still resolves to the survivor. `screenPath` normally includes a row/index
+  and prevents this collision. Fully closing it requires an extractor-provided
+  stable node id or a per-observe generation; the latter defeats the stable-ref
+  reuse this design exists to preserve.
 - **Full resyncs.** The first compact observe, a URL change, or element churn over
   60% emits `delta:false`. Replace the prior element map from `snapshot_file`;
   the wire `elements` list may omit collapsed chrome links.
