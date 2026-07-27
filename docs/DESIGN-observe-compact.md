@@ -34,9 +34,10 @@ Inside `elements`:
    `elements` already carries (same 75 / 88 refs). Pure duplication.
 2. ~30% of the `elements` block is serialized `null`/`""`/`false`.
 3. `container` is 100% redundant with `path` (`path` = `<container> > <kind>:<label>`).
-4. The planner drives off `text` (read state) + `elements` (pick `ref`); the
-   `screen` region-tree and `accessibility` flat-tree are not needed to choose an
-   action. `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
+4. The planner drives off `text` (read state) + the element inventory (pick
+   `ref`); the `screen` region-tree and `accessibility` flat-tree are not needed
+   to choose an action. `occluded_by`/`topmost`/`href` ARE load-bearing — keep
+   them (per-element).
 
 ## The one knob — `detail`
 
@@ -61,10 +62,10 @@ When `detail` is `compact` (the default), `observeSession`:
 
 - **Omit `screen` + `accessibility`** (the two re-encodings). Also skip computing
   them (CPU win).
-- **Compact `elements`**: omit empty fields; preserve `checked` for both true and
-  false checkable states, emit `topmost` only when `false` (the informative
-  case), and emit `occluded_by` only when set. Keep `ref`, `label`, `tag`, `role`,
-  `type`, `href`, and `testId`.
+- **Build compact element records**: omit empty fields; preserve `checked` for
+  both true and false checkable states, emit `topmost` only when `false` (the
+  informative case), and emit `occluded_by` only when set. Keep `ref`, `label`,
+  `tag`, `role`, `type`, `href`, and `testId`.
 - **Drop `path` and `container` from the wire payload.** `container` is redundant
   with `path`; the verbose `path` remains in the complete persisted snapshot for
   re-expansion and targeted searches.
@@ -118,11 +119,11 @@ Compact observations minimize repeated context without making the stream lossy:
   reuse this design exists to preserve.
 - **Full resyncs.** The first compact observe, a URL change, or element churn over
   60% emits `delta:false`. Replace the prior element map from `snapshot_file`;
-  the wire `elements` list may omit collapsed chrome links.
+  the wire `el_table` may omit collapsed chrome links.
 - **Incremental updates.** A same-URL, low-churn observe emits `delta:true`.
-  Upsert the emitted `elements` by ref, delete `removed`, and retain the elements
-  represented by `unchanged`. An empty delta means nothing changed, not that the
-  page is empty.
+  Parse and upsert the emitted `el_table` rows by ref, delete `removed`, and
+  retain the elements represented by `unchanged`. An empty delta means nothing
+  changed, not that the page is empty.
 - **Text deltas.** When normalized page text is byte-identical to the prior
   observe, `text` is empty and `text_unchanged:true` tells the host to reuse its
   previous text. Changed text is emitted in full.
@@ -131,7 +132,7 @@ Compact observations minimize repeated context without making the stream lossy:
   inventory, including `path` and `text_truncated`. Its session directory is mode
   `0700` and the file is mode `0600`, so the host can safely re-expand after its
   own context compacts. If persistence fails, the response falls back to
-  `delta:false` with every element uncollapsed on the wire and no `snapshot_file`;
+  `delta:false` with a complete, uncollapsed `el_table` and no `snapshot_file`;
   the delta baseline is invalidated so the next compact observe is another full
   resync.
 - **Safe chrome collapse.** Full compact resyncs may omit only navigational
@@ -147,14 +148,62 @@ payload shape byte-for-byte. As an unsurfaced side effect it replaces the
 persisted snapshot, invalidates the compact baseline so the next compact observe
 is a full resync, and removes the stale snapshot if persistence fails.
 
+## Phase 4 — columnar element encoding + type-elision ✅ shipped
+
+Two per-element encoding transforms applied on TOP of the Phase-3 delta. Both
+change only the COMPACT wire; the persisted snapshot file and `detail:"full"`
+keep full fidelity.
+
+- **Columnar `el_table`.** A compact `elements` JSON array repeated every field
+  NAME on every element (`"ref":`, `"label":`, `"tag":`, …). The compact wire now
+  carries the element set as `el_table`: a tab-delimited table whose first line is
+  a header naming the columns present in this emit (a subset of
+  `ref,label,tag,role,type,value_len,checked,href,testId,topmost,occluded_by`,
+  always leading `ref,label,tag`), then one tab-joined row per element in header
+  order. An empty cell means the field is absent; `value_len` is numeric,
+  `checked`/`topmost` are `true`/`false`. Tab, newline, carriage-return and
+  backslash inside a cell are backslash-escaped (`\t \n \r \\`) — measured
+  escaping overhead on the corpus is negligible (<0.1% of labels carry any of
+  them). Column order is canonical so a parsed row reconstructs byte-identically
+  (`parseElementsTable` is the inverse and backs the lossless-resync gate).
+  `el_table` is omitted entirely when an emit has no element rows (e.g. an
+  all-unchanged delta). It composes with the delta exactly as `elements` did:
+  on `delta:true` it lists only the changed rows (upsert by ref); on a full
+  resync it is the resync set minus collapsed chrome links; `removed`/`unchanged`/
+  `text_unchanged` are unchanged. `detail:"full"` keeps the `elements` JSON array
+  (the escape hatch stays byte-equivalent to the legacy shape).
+- **Type-elision.** On the wire form only, drop a `type` value the planner
+  already infers from tag/role — `button`/`submit` (implied by the tag/role) and
+  `text` (the default input type); other types (email, password, checkbox, …) are
+  kept. An input action control keeps `button`/`submit` unless its tag or role
+  already identifies it as a button. `role` elision was measured at ~0.08% and
+  SKIPPED. A `landmark`→1-char code was scoped but is a no-op: the region field
+  (`container`/`landmark`) was already dropped from the compact wire in Phase 1,
+  so there is nothing left to shorten — that saving is already banked.
+
+**Measured MARGINAL saving on top of the Phase-3 delta** uses the whole
+production-shaped observation over ~500 real corpus runs / ~4,200 observes:
+corpus-derived page text with text-delta behavior, every emitted field, and the
+fixed `snapshot_file` cost. The harness prints aggregate and per-run
+p10/median/p90 for columnar, type-elision, and combined. The measured aggregates
+are 14.5%, 1.8%, and 15.9%, respectively. Columnar is gated at ≥10%, combined
+must be at least columnar, and the small net-positive type-elision is measured
+but not numerically gated.
+
 ## Regression gates
 
 `apps/mcp/src/bot/__tests__/observe-delta.test.ts` owns the lossless-resync,
 actionable-never-dropped (including dismiss anchors), clickable-unchanged,
 text-delta, distinct-selector no-retarget, corpus budget, snapshot permission and
 failure fallback, remove-then-restore resynchronization, and full-escape-hatch
-invariants. The corpus budget requires at least 50% token-weighted aggregate
-savings while allowing low-savings single-observe and high-churn runs.
+invariants, plus the Phase-4 columnar/type-elision marginal. The corpus budget
+requires at least 50% token-weighted aggregate savings vs the pre-delta payload
+while allowing low-savings single-observe and high-churn runs; the Phase-4
+marginal gate separately requires columnar ≥ 10% and combined ≥ columnar on top
+of the delta baseline. Type-elision is measured and printed but not gated because
+its standalone whole-payload marginal is negligible. The lossless-resync
+invariant reconstructs the full element set by parsing the columnar `el_table`
+delta stream.
 
 ## Non-goals / explicitly avoided
 

@@ -148,24 +148,41 @@ export interface Observation {
   // Compact relational view of interactive DOM regions. This is intentionally
   // smaller than raw DOM but preserves hierarchy/occlusion that flat text loses.
   screen?: ScreenOutline;
-  // AXI-style planner scan surface. Additive: the rich elements[] inventory
-  // remains the source of truth for actionability/state.
+  // AXI-style planner scan surface. Additive in full mode: the rich `elements`
+  // inventory remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
-  elements: ObservedElement[];
+  // FULL-mode element inventory (the legacy escape hatch): one JSON object per
+  // element with every field. In COMPACT mode `elements` is absent and the
+  // element set rides on `el_table` instead (see below).
+  elements?: ObservedElement[];
+  // COMPACT-mode element inventory as a tab-delimited table (docs/DESIGN-observe-
+  // compact.md § Phase 4). The first line is a tab-joined HEADER naming the
+  // columns present in this emit (a subset of ref,label,tag,role,type,value_len,
+  // checked,href,testId,topmost,occluded_by, always starting ref,label,tag);
+  // each following line is ONE element, tab-joined cells in header order. An
+  // empty cell means the field is absent for that element. Tab, newline,
+  // carriage-return and backslash inside a cell are backslash-escaped (\t \n \r
+  // \\). Numeric (value_len) and boolean (checked,topmost) cells are their plain
+  // text form. On a DELTA emit `el_table` carries ONLY the changed elements (same
+  // upsert-by-ref/`removed`/`unchanged` semantics as before); it is ABSENT when
+  // no element changed. On a FULL emit it is the resync set (minus collapsed
+  // chrome links, which stay in snapshot_file). `detail:"full"` uses `elements`
+  // (JSON), never this.
+  el_table?: string;
   // Compact-mode bookkeeping so omission is never silent: the complete current
   // element count (including delta/collapsed omissions), and whether page text
   // was capped at 4000 characters. Absent in full mode.
   elements_total?: number;
   text_truncated?: boolean;
   // Per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA emit,
-  // `elements` carries ONLY the elements whose compact form changed vs the
-  // previous observation; `delta` is true and `unchanged` counts the elements
-  // that were identical and therefore omitted (present in the persisted
-  // snapshot_file). `removed` lists refs that were present last observe and are
-  // now gone (usually empty). On a FULL compact emit `delta` is false and
-  // `unchanged`/`removed` are absent; `elements` is the resync set but may omit
+  // `el_table` carries ONLY the rows whose compact form changed vs the previous
+  // observation; `delta` is true and `unchanged` counts the elements that were
+  // identical and therefore omitted (present in the persisted snapshot_file).
+  // `removed` lists refs that were present last observe and are now gone
+  // (usually empty). On a FULL compact emit `delta` is false and
+  // `unchanged`/`removed` are absent; `el_table` is the resync set but may omit
   // collapsed chrome links that remain in snapshot_file. If persistence fails,
-  // snapshot_file is absent and `elements` is instead complete and uncollapsed.
+  // snapshot_file is absent and `el_table` is instead complete and uncollapsed.
   // A full snapshot is emitted on the first observe, a URL change, or high churn
   // (SPA re-render).
   delta?: boolean;
@@ -178,7 +195,7 @@ export interface Observation {
   // blob is a large share of each observe.
   text_unchanged?: boolean;
   // FULL compact emit only: count of plain chrome-region <a> links collapsed out
-  // of `elements` (a site-dependent bonus). The collapsed links stay in
+  // of `el_table` (a site-dependent bonus). The collapsed links stay in
   // snapshot_file. Buttons/inputs/dismiss controls are never collapsed.
   chrome_links_collapsed?: number;
   // Every observe writes the COMPLETE current snapshot (all elements, WITH the
@@ -1479,6 +1496,20 @@ export function generatePassword(length = 24): string {
 // "full" per call on a genuinely ambiguous step.
 export type ObserveDetail = "none" | "compact" | "full";
 
+// Type-elision (docs/DESIGN-observe-compact.md § Phase 4). `text` is always the
+// default input type; `button`/`submit` are redundant only when the tag or role
+// already identifies a button. Other types and unmarked input action controls
+// are load-bearing and kept. Applied only to the wire form, never the persisted
+// file.
+const ELIDED_TYPES = new Set(["button", "submit", "text"]);
+
+function shouldElideType(el: InteractiveElement): boolean {
+  const type = (el.type ?? "").toLowerCase();
+  if (!ELIDED_TYPES.has(type)) return false;
+  if (type === "text") return true;
+  return el.tag === "button" || (el.role ?? "").toLowerCase() === "button";
+}
+
 // One element, compacted: ref/label/tag always; every other field omitted when
 // empty. `value`→`value_len` (never the raw value — keeps the sealed-field moat);
 // `checked` kept for real checkables (true OR false), omitted when null;
@@ -1493,10 +1524,14 @@ export function toCompactElement(
   // the host can re-expand or grep. It is also excluded from the delta identity,
   // so a layout-only path shift never forces a re-emit.
   includePath = false,
+  // Apply type-elision (Phase 4) to the WIRE form. The persisted file
+  // form keeps full fidelity for re-expansion, so callers that write the file
+  // pass false.
+  elide = false,
 ): ObservedElement {
   const out: ObservedElement = { ref, label: presentLabel(el, sealed), tag: el.tag };
   if (el.role) out.role = el.role;
-  if (el.type) out.type = el.type;
+  if (el.type && !(elide && shouldElideType(el))) out.type = el.type;
   // value_len is a LENGTH signal, not the value — report the REAL character count.
   // presentFieldValue masks a sealed field to "[sealed]" (8 chars), so using its
   // length made a correctly-filled 19-char email read as value_len:8 and misled
@@ -1511,6 +1546,129 @@ export function toCompactElement(
   if (el.topmost === false) out.topmost = false;
   if (el.occludedBy) out.occluded_by = el.occludedBy;
   return out;
+}
+
+// Columnar wire encoding (docs/DESIGN-observe-compact.md § Phase 4). The compact
+// `elements` array repeated every field NAME on every element; a tab-delimited
+// table names each column ONCE in a header line, then one terse row per element.
+// Column order is CANONICAL (matches toCompactElement's field order) so a parsed
+// row reconstructs byte-identically. `ref`/`label`/`tag` are always present;
+// other columns appear only when at least one emitted element carries them.
+const ELEMENT_TABLE_COLUMNS = [
+  "ref",
+  "label",
+  "tag",
+  "role",
+  "type",
+  "value_len",
+  "checked",
+  "href",
+  "testId",
+  "topmost",
+  "occluded_by",
+] as const;
+type ElementColumn = (typeof ELEMENT_TABLE_COLUMNS)[number];
+
+// The string cell for one column of one element, or undefined when absent.
+// Booleans/numbers render as plain text; the parser coerces them back.
+function elementCell(e: ObservedElement, col: ElementColumn): string | undefined {
+  switch (col) {
+    case "ref":
+      return e.ref;
+    case "label":
+      return e.label;
+    case "tag":
+      return e.tag;
+    case "role":
+      return e.role ?? undefined;
+    case "type":
+      return e.type ?? undefined;
+    case "value_len":
+      return e.value_len !== undefined ? String(e.value_len) : undefined;
+    case "checked":
+      return e.checked === true ? "true" : e.checked === false ? "false" : undefined;
+    case "href":
+      return e.href ?? undefined;
+    case "testId":
+      return e.testId ?? undefined;
+    case "topmost":
+      return e.topmost === false ? "false" : undefined;
+    case "occluded_by":
+      return e.occluded_by ?? undefined;
+  }
+}
+
+// Escape the only bytes that break the tab/newline framing. Backslash FIRST so
+// the decoder's single pass is unambiguous.
+function escapeCell(v: string): string {
+  return v.replace(/\\/g, "\\\\").replace(/\t/g, "\\t").replace(/\n/g, "\\n").replace(/\r/g, "\\r");
+}
+function unescapeCell(v: string): string {
+  return v.replace(/\\(.)/g, (_m, c: string) =>
+    c === "t" ? "\t" : c === "n" ? "\n" : c === "r" ? "\r" : c,
+  );
+}
+
+// Encode a set of compact elements as the tab table. Returns "" for an empty set
+// (the caller then omits `el_table` — an empty table costs a header for nothing).
+export function encodeElementsTable(els: readonly ObservedElement[]): string {
+  if (els.length === 0) return "";
+  const columns = ELEMENT_TABLE_COLUMNS.filter(
+    (c) =>
+      c === "ref" ||
+      c === "label" ||
+      c === "tag" ||
+      els.some((e) => elementCell(e, c) !== undefined),
+  );
+  const header = columns.join("\t");
+  const rows = els.map((e) => columns.map((c) => escapeCell(elementCell(e, c) ?? "")).join("\t"));
+  return [header, ...rows].join("\n");
+}
+
+// Inverse of encodeElementsTable — reconstruct the compact elements from the wire
+// table. The delta stream's losslessness gate (INV-lossless-resync) round-trips
+// through this, and it documents the EXACT parse the host performs. An empty
+// cell (or a header column absent for a row) means the field is absent; only the
+// three mandatory columns are always assigned.
+export function parseElementsTable(table: string): ObservedElement[] {
+  if (table.length === 0) return [];
+  const lines = table.split("\n");
+  const columns = (lines[0] ?? "").split("\t");
+  const out: ObservedElement[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cells = (lines[i] ?? "").split("\t").map(unescapeCell);
+    const e: ObservedElement = { ref: "", label: "", tag: "" };
+    columns.forEach((col, idx) => {
+      const raw = cells[idx] ?? "";
+      if (col === "ref") e.ref = raw;
+      else if (col === "label") e.label = raw;
+      else if (col === "tag") e.tag = raw;
+      else if (raw === "")
+        return; // absent optional field
+      else if (col === "role") e.role = raw;
+      else if (col === "type") e.type = raw;
+      else if (col === "value_len") e.value_len = Number(raw);
+      else if (col === "checked") e.checked = raw === "true";
+      else if (col === "href") e.href = raw;
+      else if (col === "testId") e.testId = raw;
+      else if (col === "topmost") e.topmost = false;
+      else if (col === "occluded_by") e.occluded_by = raw;
+    });
+    out.push(e);
+  }
+  return out;
+}
+
+// The compact wire carries its element set as `el_table` (columnar); an empty set
+// omits the field entirely. FULL mode keeps `elements` (JSON). One helper so both
+// buildCompactObservation branches and the persist-fallback stay consistent.
+function emitElements(
+  els: readonly ObservedElement[],
+  encode: "columnar" | "json",
+): Pick<Observation, "elements" | "el_table"> {
+  if (encode === "json") return { elements: [...els] };
+  const table = encodeElementsTable(els);
+  return table.length > 0 ? { el_table: table } : {};
 }
 
 // Session-scoped observe-snapshot persistence (docs/DESIGN-observe-compact.md).
@@ -1680,7 +1838,7 @@ export interface CompactObservationBuild {
   // the complete snapshot (so this pure core stays filesystem-free).
   observation: Observation;
   // The COMPLETE compact set (path EXCLUDED) keyed by ref — the reconstruction
-  // ground truth: emitted `elements` is a subset of this on a delta/collapse.
+  // ground truth: emitted wire records are a subset on a delta/collapse.
   fullByRef: Map<string, ObservedElement>;
   // The COMPLETE snapshot the caller persists to the session file (path INCLUDED).
   fileElements: ObservedElement[];
@@ -1702,9 +1860,18 @@ export function buildCompactObservation(args: {
   elements: readonly InteractiveElement[];
   sealed?: ReadonlySet<string>;
   prev: ObserveDeltaState | null;
+  // Wire encoding of the emitted element set. Default "columnar" (the tab table).
+  // The eval harness passes "json" to measure the columnar transform's marginal
+  // against the pre-columnar payload; production always uses the default.
+  encode?: "columnar" | "json";
+  // Apply Phase-4 type-elision to the wire element form. Default true; the eval
+  // harness passes false to isolate the type-elision transform's marginal.
+  elide?: boolean;
 }): CompactObservationBuild {
   const { sessionId, url, text, elements, prev } = args;
   const sealed = args.sealed ?? new Set<string>();
+  const encode = args.encode ?? "columnar";
+  const elide = args.elide ?? true;
   const refs = provisionElementRefs(elements);
   const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
 
@@ -1713,9 +1880,11 @@ export function buildCompactObservation(args: {
   const fileElements: ObservedElement[] = [];
   for (const el of elements) {
     const ref = refOf(el);
-    fullByRef.set(ref, toCompactElement(el, ref, sealed, false));
+    fullByRef.set(ref, toCompactElement(el, ref, sealed, false, elide));
     serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
-    fileElements.push(toCompactElement(el, ref, sealed, true));
+    // The persisted file keeps FULL fidelity (path included, no elision) so a
+    // re-expansion after a host compaction loses nothing.
+    fileElements.push(toCompactElement(el, ref, sealed, true, false));
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
 
@@ -1724,7 +1893,6 @@ export function buildCompactObservation(args: {
     url,
     text,
     ...(args.guidance !== undefined ? { guidance: args.guidance } : {}),
-    elements: [],
     elements_total: elements.length,
     ...(args.textTruncated === true ? { text_truncated: true } : {}),
   };
@@ -1748,7 +1916,7 @@ export function buildCompactObservation(args: {
         observation: {
           ...base,
           ...(textUnchanged ? { text: "", text_unchanged: true } : {}),
-          elements: changed,
+          ...emitElements(changed, encode),
           delta: true,
           unchanged,
           ...(removed.length > 0 ? { removed } : {}),
@@ -1775,7 +1943,7 @@ export function buildCompactObservation(args: {
   return {
     observation: {
       ...base,
-      elements: emitted,
+      ...emitElements(emitted, encode),
       delta: false,
       ...(chromeLinksCollapsed > 0 ? { chrome_links_collapsed: chromeLinksCollapsed } : {}),
     },
@@ -1844,7 +2012,9 @@ async function observeSession(
         url,
         text: normalizedText,
         ...(guidance !== undefined ? { guidance } : {}),
-        elements: [...built.fullByRef.values()],
+        // Still a COMPACT response — carry the (uncollapsed) set as the columnar
+        // table so the host parses it the same way as any other compact observe.
+        ...emitElements([...built.fullByRef.values()], "columnar"),
         delta: false,
         elements_total: elements.length,
         ...(textTruncated ? { text_truncated: true } : {}),
@@ -2405,9 +2575,10 @@ export async function rememberRecipe(
 async function snapshotForPostcondition(session: Session): Promise<PostconditionSnapshot> {
   const obs = await observeSession(session);
   // Read lengths off the RAW elements (session.lastElements, set by
-  // observeSession) — obs.elements masks sealed/password values to a fixed
-  // placeholder, which would corrupt a min_value_len success-signal. Lengths
-  // never expose the value, so this stays leak-free.
+  // observeSession). The compact wire carries only value_len and never the raw
+  // value; deriving from the live elements preserves the real length for a
+  // min_value_len success-signal. Lengths never expose the value, so this stays
+  // leak-free.
   const fields = session.lastElements
     .filter((e) => typeof e.value === "string" && e.value.length > 0)
     .map((e) => ({ label: elementRef(e), value_len: (e.value ?? "").length }));

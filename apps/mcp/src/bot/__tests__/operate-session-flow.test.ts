@@ -183,6 +183,7 @@ import {
   captchaGate,
   finishProvisionSession,
   closeAllProvisionSessions,
+  parseElementsTable,
 } from "../provision-session.js";
 import {
   provisionPrepareLoginTool,
@@ -774,7 +775,8 @@ describe("observation detail ladder (none < compact < full)", () => {
     expect(obs.screen).toBeUndefined();
     expect(obs.accessibility).toBeUndefined();
     expect(obs.elements_total).toBe(1);
-    const e = obs.elements[0]!;
+    // Compact wire carries the element set as the columnar el_table (Phase 4).
+    const e = parseElementsTable(obs.el_table!)[0]!;
     const bag = e as unknown as Record<string, unknown>;
     expect(bag.value).toBeUndefined();
     expect(e.value_len).toBe(4);
