@@ -197,6 +197,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         reply.code(409).send({ error: "card_already_bound" });
         return;
       }
+      const now = opts.deps.now?.() ?? new Date();
+      if (record.expiresAt <= now) {
+        reply.code(409).send({ error: "payment_approval_expired" });
+        return;
+      }
       // The card must be a credential this account owns. getByIdForAccount is
       // account-scoped, so a foreign card id resolves to null → 404.
       const card = await opts.deps.e2eCredentialStore.getByIdForAccount(
@@ -211,13 +216,14 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         req.params.id,
         auth.account_id,
         parsed.data.card_ref,
+        now,
       );
       if (!bound) {
-        // Lost a race (approved or bound between the read and the write).
+        // The approval changed or expired between the read and the write.
         reply.code(409).send({ error: "payment_approval_not_pending" });
         return;
       }
-      return reply.code(200).send({ status: "bound", card_ref: parsed.data.card_ref });
+      return reply.code(200).send({ card_ref: parsed.data.card_ref });
     },
   );
 

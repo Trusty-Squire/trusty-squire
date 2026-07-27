@@ -406,7 +406,7 @@ describe("payment approval relay", () => {
       payload: { card_ref: cardId },
     });
     expect(bind.statusCode).toBe(200);
-    expect(bind.json()).toEqual({ status: "bound", card_ref: cardId });
+    expect(bind.json()).toEqual({ card_ref: cardId });
 
     const get = await server.inject({
       method: "GET",
@@ -435,6 +435,28 @@ describe("payment approval relay", () => {
     });
     expect(approve.statusCode).toBe(409);
     expect(approve.json()).toEqual({ error: "card_required" });
+  });
+
+  it("rejects binding an owned card after the approval expires", async () => {
+    const created = await createCardlessApproval();
+    const cardId = await createOwnedCard(webCookie, "0007");
+    nowMs += 10 * 60 * 1000 + 1;
+
+    const bind = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/bind-card`,
+      headers: { cookie: webCookie },
+      payload: { card_ref: cardId },
+    });
+    expect(bind.statusCode).toBe(409);
+    expect(bind.json()).toEqual({ error: "payment_approval_expired" });
+
+    const get = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(get.json()).toMatchObject({ status: "expired", card_ref: null });
   });
 
   it("is write-once: a second bind on an already-bound approval is rejected", async () => {

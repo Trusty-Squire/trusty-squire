@@ -30,13 +30,15 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/vault/e2e` | web | Store an opaque, client-encrypted card blob |
 | `GET` | `/v1/vault/e2e` | web/agent | List client-encrypted card metadata without blobs |
 | `GET` | `/v1/vault/e2e/:id` | web/agent | Retrieve an account-owned encrypted card blob |
+| `PATCH` | `/v1/vault/e2e/:id/label` | web | Rename an account-owned encrypted card |
 | `DELETE` | `/v1/vault/e2e/:id` | web | Delete an account-owned encrypted card blob |
 | `POST` | `/v1/vault/payments/audit` | agent | Record a payment attempt without PAN or CVV |
 | `GET` | `/v1/vault/payments/audit` | web/agent | List payment attempts, newest first, with keyset pagination |
 | `GET` | `/v1/pay/config` | agent | Return the configured Vouchflow mandate audience |
-| `POST` | `/v1/pay/approvals` | agent | Create a ten-minute account-scoped payment approval |
+| `POST` | `/v1/pay/approvals` | agent | Create a ten-minute account-scoped payment approval, optionally card-less |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send a Telegram 3-D Secure nudge to the account's linked chat and return `{ sent }` |
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Poll an account-owned payment approval |
+| `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
 | `POST` | `/v1/pay/approvals/:id/approve` | web | Relay a signed mandate and HPKE-sealed card to the operator |
 | `GET` | `/health` | none | Liveness |
 
@@ -44,7 +46,9 @@ Payment approval creation accepts optional `item` and `reason` strings, storing
 an empty string when either is omitted. The API derives `agent` from the
 authenticated install identity and falls back to `unknown-agent`; clients
 cannot set it. The create response returns `agent`, and polling returns all
-three values for the approval page and signed mandate.
+three values for the approval page and signed mandate. `card_ref` is optional:
+a card-less approval follows the server-enforced seal → bind → approve order,
+and cannot be approved until an account-owned card is bound.
 
 ## Auth model
 

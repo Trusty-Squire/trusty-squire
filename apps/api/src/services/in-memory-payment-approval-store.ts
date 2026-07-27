@@ -27,9 +27,14 @@ export interface PendingPaymentApprovalStore {
   create(accountId: string, input: PendingPaymentApprovalInput): Promise<string>;
   getByIdForAccount(id: string, accountId: string): Promise<PendingPaymentApprovalRecord | null>;
   // Binds a card to a still-card-less pending approval. Write-once: succeeds
-  // only while status is "pending" AND card_ref is null. Returns false on any
-  // other state (already bound, already approved, gone).
-  bindCardForAccount(id: string, accountId: string, cardRef: string): Promise<boolean>;
+  // only while status is "pending", card_ref is null, and the approval has
+  // not expired. Returns false on any other state.
+  bindCardForAccount(
+    id: string,
+    accountId: string,
+    cardRef: string,
+    now: Date,
+  ): Promise<boolean>;
   approveForAccount(
     id: string,
     accountId: string,
@@ -69,13 +74,19 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     return record === undefined || record.accountId !== accountId ? null : { ...record };
   }
 
-  async bindCardForAccount(id: string, accountId: string, cardRef: string): Promise<boolean> {
+  async bindCardForAccount(
+    id: string,
+    accountId: string,
+    cardRef: string,
+    now: Date,
+  ): Promise<boolean> {
     const record = this.records.get(id);
     if (
       record === undefined ||
       record.accountId !== accountId ||
       record.status !== "pending" ||
-      record.cardRef !== null
+      record.cardRef !== null ||
+      record.expiresAt <= now
     ) {
       return false;
     }
