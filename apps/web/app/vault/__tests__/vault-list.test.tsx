@@ -138,9 +138,7 @@ describe("vault list — Wallet section", () => {
     const confirmRow = screen.getByText("Delete this card?").parentElement as HTMLElement;
     await user.click(within(confirmRow).getByRole("button", { name: "Delete" }));
 
-    await waitFor(() =>
-      expect(api.apiDelete).toHaveBeenCalledWith("/v1/vault/e2e/card_a"),
-    );
+    await waitFor(() => expect(api.apiDelete).toHaveBeenCalledWith("/v1/vault/e2e/card_a"));
   });
 
   it("redirects to login when inline card rename sees an expired session", async () => {

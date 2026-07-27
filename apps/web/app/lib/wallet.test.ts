@@ -56,7 +56,13 @@ describe("isLegacyCard", () => {
 describe("boundCardMeta — the anti-blind-sign source of truth", () => {
   const cards: CardMeta[] = [
     { id: "card_a", label: "Personal", brand: "Visa", last4: "4242", createdAt: "2026-07-01" },
-    { id: "card_b", label: "Business", brand: "Mastercard", last4: "4444", createdAt: "2026-07-02" },
+    {
+      id: "card_b",
+      label: "Business",
+      brand: "Mastercard",
+      last4: "4444",
+      createdAt: "2026-07-02",
+    },
   ];
 
   it("returns the SERVER-BOUND card, not the first or any other card", () => {

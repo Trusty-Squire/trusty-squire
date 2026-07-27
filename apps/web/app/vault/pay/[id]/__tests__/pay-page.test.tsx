@@ -35,7 +35,11 @@ vi.mock("../../../../lib/vouchflow", () => ({
 
 vi.mock("../../../../components/CardEntry", () => ({
   CardEntry: (props: { onSaved?: (r: { id: string }) => void }) => (
-    <button type="button" data-testid="card-entry" onClick={() => props.onSaved?.({ id: "card_new" })}>
+    <button
+      type="button"
+      data-testid="card-entry"
+      onClick={() => props.onSaved?.({ id: "card_new" })}
+    >
       add card (stub)
     </button>
   ),
@@ -162,15 +166,17 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(anchor.textContent).not.toContain("9999");
 
     // Approve is the lone action, and only appears after the card is bound.
-    expect(
-      screen.getByRole("button", { name: /Approve payment/ }).hasAttribute("disabled"),
-    ).toBe(false);
+    expect(screen.getByRole("button", { name: /Approve payment/ }).hasAttribute("disabled")).toBe(
+      false,
+    );
   });
 
   it("goes straight to the review beat for an already-bound approval", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
-    await waitFor(() => expect(screen.getByRole("button", { name: /Approve payment/ })).toBeTruthy());
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Approve payment/ })).toBeTruthy(),
+    );
     expect(screen.queryByTestId("card-entry")).toBeNull();
     const anchor = screen.getByText(/Pay with/);
     expect(anchor.textContent).toContain("··4242");
@@ -267,9 +273,7 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.queryByTestId("card-entry")).toBeNull();
     expect(screen.queryByText("bind response lost")).toBeNull();
     expect(
-      api.apiGet.mock.calls.filter(
-        ([path]) => path === "/v1/pay/approvals/appr_1",
-      ),
+      api.apiGet.mock.calls.filter(([path]) => path === "/v1/pay/approvals/appr_1"),
     ).toHaveLength(2);
   });
 
@@ -285,9 +289,7 @@ describe("pay page — JIT add-card ceremony", () => {
     const approve = await screen.findByRole("button", { name: /Approve payment/ });
     expect(approve.hasAttribute("disabled")).toBe(true);
     expect(
-      screen.getByText(
-        "This payment was attached to a different card than the one you added.",
-      ),
+      screen.getByText("This payment was attached to a different card than the one you added."),
     ).toBeTruthy();
     expect(screen.queryByText(/your saved card/i)).toBeNull();
     expect(screen.queryByText(/··9999/)).toBeNull();

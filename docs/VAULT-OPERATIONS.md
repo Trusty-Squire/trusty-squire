@@ -74,7 +74,7 @@ live under the DEK/KEK and are untouched by a master-key rotation.
 | `POST /v1/vault/credentials/:id/health` | web | Envelope integrity probe — confirms the row still decrypts under the current keyring. No secret returned, no retrieval counted. `healthy:false` ≠ HTTP error. |
 | `POST /v1/vault/credentials/:id/restore` | web | Undelete a soft-deleted credential. `409` if a live `(service,label)` twin holds the slot. |
 | `POST /v1/vault/credentials/revoke-all` | web | Kill-switch: soft-delete every active credential. Requires `{ confirm: true }`. Recoverable via restore until retention sweeps. |
-| `GET /v1/vault/export` | web | GDPR export — credential metadata, opaque encrypted-card blobs, and vault + payment audit trails. No plaintext secret values. |
+| `GET /v1/vault/export` | web | GDPR export — credential metadata, client-encrypted card records, and vault + payment audit trails. No plaintext secret values. |
 | `DELETE /v1/vault/account` | web | GDPR erasure — irreversibly hard-purge all credential rows AND the audit trail. Requires `{ confirm: true }`. |
 
 `revoke-all` (soft, recoverable) vs `DELETE /v1/vault/account` (hard,
@@ -129,8 +129,10 @@ list response — advisory only, not enforced.
   key must be backed up independently of the database** (it lives as a
   Fly secret; export it to your password manager / KMS out-of-band).
   Losing `LOCAL_KMS_KEY` = losing every credential, restore or not.
-  `E2ECredential` rows contain opaque client ciphertext instead; restoring them
-  still requires the matching enrolled passkey.
+  Restored `E2ECredential` rows still require the matching enrolled passkey to
+  recover their protected card payload; see the
+  [`SECURITY.md` contract](../SECURITY.md#client-encrypted-card-data) for the
+  server-visible fields.
 - **Restore procedure:** restore the Fly volume snapshot, confirm
   `LOCAL_KMS_KEY` (and any `LOCAL_KMS_LEGACY_KEYS`) match the snapshot's
   era, then run `vault-decrypt-check` to confirm decryptability before

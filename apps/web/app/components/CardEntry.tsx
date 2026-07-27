@@ -117,9 +117,9 @@ export function CardEntry({ onSaved }: CardEntryProps) {
           throw new Error("This device can't use passkeys, or the request was cancelled.");
         }
         const blob = await encryptCard(key, card);
-        // Display-only metadata derived from the PAN in this browser. The full
-        // number stays sealed in `blob`; the server only ever sees brand +
-        // last4 (both validated server-side to hold no full PAN).
+        // Display-only metadata derived from the PAN in this browser. Outside
+        // the encrypted `blob`, the server sees only brand + last4 (both
+        // validated server-side to hold no full PAN).
         const brand = detectCardBrand(pan);
         const last4 = cardLast4(pan);
         const { id } = await apiPost<{ id: string }>("/v1/vault/e2e", {
@@ -181,8 +181,7 @@ export function CardEntry({ onSaved }: CardEntryProps) {
             <h2>Set up payments on this device</h2>
             <p className="app-sub">
               A one-time Face ID / Touch ID setup lets this device encrypt and approve card
-              payments. Your full card number is encrypted here and never readable by our
-              servers.
+              payments. Your full card number is encrypted here and never readable by our servers.
             </p>
             {pairingError !== null && <div className="form-err">{pairingError}</div>}
             <button
