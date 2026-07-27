@@ -1496,40 +1496,18 @@ export function generatePassword(length = 24): string {
 // "full" per call on a genuinely ambiguous step.
 export type ObserveDetail = "none" | "compact" | "full";
 
-// Field-elision (docs/DESIGN-observe-compact.md § Phase 4). A practical `type`
-// value the planner can already infer from tag/role — no per-element information.
-// `button`/`submit` are implied by a <button>/role=button; `text` is the default
-// <input> type. Other types (email, password, checkbox, radio, search, …) ARE
-// load-bearing and kept. Applied only to the wire form, never the persisted file.
+// Field-elision (docs/DESIGN-observe-compact.md § Phase 4). `text` is always the
+// default input type; `button`/`submit` are redundant only when the tag or role
+// already identifies a button. Other types and unmarked input action controls
+// are load-bearing and kept. Applied only to the wire form, never the persisted
+// file.
 const ELIDED_TYPES = new Set(["button", "submit", "text"]);
 
-// Field-elision — href handling. A navigational link in a chrome region (nav/
-// footer/aside/banner) is targeted by ref, never by URL, so its href is pure
-// bytes → DROP it. Everywhere else keep it but pathname-only (strip origin,
-// query and hash), which is what a `goto` needs and cuts the long absolute-URL
-// tail. SAFETY carry-over (#398 dismiss-anchor guard): a dismiss/consent/action
-// control — in a consent widget, a fragment/javascript href, or a dismiss-labeled
-// control — keeps its href VERBATIM. Elision never drops the element itself
-// (that is the collapse's job, unchanged); it only shapes the href field on an
-// element that is already being emitted, so a control can never be dropped or
-// made indistinguishable by ref through this path.
-function compactHref(el: InteractiveElement): string | undefined {
-  const href = (el.href ?? "").trim();
-  if (href.length === 0) return undefined;
-  const lower = href.toLowerCase();
-  const isDismissish =
-    el.inConsentWidget === true ||
-    href.startsWith("#") ||
-    lower.startsWith("javascript:") ||
-    DISMISS_CONSENT_LABEL_RE.test(elementRef(el));
-  if (isDismissish) return href; // preserve verbatim — never obscure a dismiss control
-  if (!isActionableControl(el) && isChromeRegionPath(el)) return undefined; // drop plain chrome nav href
-  if (lower.startsWith("mailto:") || lower.startsWith("tel:")) return href;
-  try {
-    return new URL(href, "http://x").pathname; // pathname-only (also normalizes relative)
-  } catch {
-    return href;
-  }
+function shouldElideType(el: InteractiveElement): boolean {
+  const type = (el.type ?? "").toLowerCase();
+  if (!ELIDED_TYPES.has(type)) return false;
+  if (type === "text") return true;
+  return el.tag === "button" || (el.role ?? "").toLowerCase() === "button";
 }
 
 // One element, compacted: ref/label/tag always; every other field omitted when
@@ -1546,14 +1524,14 @@ export function toCompactElement(
   // the host can re-expand or grep. It is also excluded from the delta identity,
   // so a layout-only path shift never forces a re-emit.
   includePath = false,
-  // Apply field-elision (type/href — Phase 4) to the WIRE form. The persisted
-  // file form keeps full fidelity for re-expansion, so callers that write the
-  // file pass false.
+  // Apply field-elision (type — Phase 4) to the WIRE form. The persisted file
+  // form keeps full fidelity for re-expansion, so callers that write the file
+  // pass false.
   elide = false,
 ): ObservedElement {
   const out: ObservedElement = { ref, label: presentLabel(el, sealed), tag: el.tag };
   if (el.role) out.role = el.role;
-  if (el.type && !(elide && ELIDED_TYPES.has(el.type.toLowerCase()))) out.type = el.type;
+  if (el.type && !(elide && shouldElideType(el))) out.type = el.type;
   // value_len is a LENGTH signal, not the value — report the REAL character count.
   // presentFieldValue masks a sealed field to "[sealed]" (8 chars), so using its
   // length made a correctly-filled 19-char email read as value_len:8 and misled
@@ -1562,8 +1540,7 @@ export function toCompactElement(
   const realLen = (el.value ?? "").length;
   if (realLen > 0) out.value_len = realLen;
   if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
-  const href = elide ? compactHref(el) : el.href ? el.href : undefined;
-  if (href !== undefined) out.href = href;
+  if (el.href) out.href = el.href;
   if (el.testId) out.testId = el.testId;
   if (includePath && el.screenPath) out.path = el.screenPath;
   if (el.topmost === false) out.topmost = false;

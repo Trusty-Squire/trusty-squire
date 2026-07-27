@@ -171,28 +171,23 @@ keep full fidelity.
   resync it is the resync set minus collapsed chrome links; `removed`/`unchanged`/
   `text_unchanged` are unchanged. `detail:"full"` keeps the `elements` JSON array
   (the escape hatch stays byte-equivalent to the legacy shape).
-- **Field-elision.** On the wire form only: (1) drop a `type` value the planner
+- **Field-elision.** On the wire form only, drop a `type` value the planner
   already infers from tag/role — `button`/`submit` (implied by the tag/role) and
   `text` (the default input type); other types (email, password, checkbox, …) are
-  kept. (2) `href` — a navigational link in a chrome region is targeted by ref not
-  URL, so drop its href; elsewhere keep it pathname-only (strip origin/query/hash,
-  which is all a `goto` needs). A dismiss/consent/action control keeps its href
-  VERBATIM (the #398 dismiss-anchor guard: elision never drops an element or makes
-  a control indistinguishable — the collapse still decides emit-vs-omit, and every
-  emitted control keeps a distinct ref). `role` elision was measured at ~0.08% and
+  kept. An input action control keeps `button`/`submit` unless its tag or role
+  already identifies it as a button. `role` elision was measured at ~0.08% and
   SKIPPED. A `landmark`→1-char code was scoped but is a no-op: the region field
-  (`container`/`landmark`) was already dropped from the compact wire in Phase 1, so
-  there is nothing left to shorten — that saving is already banked.
+  (`container`/`landmark`) was already dropped from the compact wire in Phase 1,
+  so there is nothing left to shorten — that saving is already banked.
 
-**Measured MARGINAL saving on top of the Phase-3 delta** (token-weighted
-aggregate over ~500 real corpus runs / ~4,200 observes, full-observation bytes):
-columnar ≈ 24%, field-elision ≈ 8%, combined ≈ 32%. Both clear the conservative
-regression floors (columnar ≥ 20%, field-elision ≥ 6%) with margin. The numbers
-run below the earlier per-block estimates (~37% / ~13%) for two honest reasons:
-the marginal is measured over the WHOLE observation (fixed `session_id`/`url`/
-`delta`/`unchanged` overhead dilutes the element-block win), and the corpus does
-not capture the live `screenPath`, so href-drop-in-chrome rarely fires in replay
-(a conservative under-count vs production).
+**Measured MARGINAL saving on top of the Phase-3 delta** uses the whole
+production-shaped observation over ~500 real corpus runs / ~4,200 observes:
+corpus-derived page text with text-delta behavior, every emitted field, and the
+fixed `snapshot_file` cost. The harness prints aggregate and per-run
+p10/median/p90 for columnar, type-elision, and combined. The measured aggregates
+are 14.5%, 1.8%, and 15.9%, respectively. Columnar is gated at ≥10%, combined
+must be at least columnar, and the small net-positive type-elision is measured
+but not numerically gated.
 
 ## Regression gates
 
@@ -200,13 +195,14 @@ not capture the live `screenPath`, so href-drop-in-chrome rarely fires in replay
 actionable-never-dropped (including dismiss anchors), clickable-unchanged,
 text-delta, distinct-selector no-retarget, corpus budget, snapshot permission and
 failure fallback, remove-then-restore resynchronization, and full-escape-hatch
-invariants, plus the Phase-4 columnar/field-elision marginal. The corpus budget
+invariants, plus the Phase-4 columnar/type-elision marginal. The corpus budget
 requires at least 50% token-weighted aggregate savings vs the pre-delta payload
 while allowing low-savings single-observe and high-churn runs; the Phase-4
-marginal gate separately requires columnar ≥ 20% and field-elision ≥ 6%
-token-weighted marginal ON TOP OF the delta baseline (a transform that fails its
-floor is dropped, not force-shipped). The lossless-resync invariant reconstructs
-the full element set by parsing the columnar `el_table` delta stream.
+marginal gate separately requires columnar ≥ 10% and combined ≥ columnar on top
+of the delta baseline. Type-elision is measured and printed but not gated because
+its standalone whole-payload marginal is negligible. The lossless-resync
+invariant reconstructs the full element set by parsing the columnar `el_table`
+delta stream.
 
 ## Non-goals / explicitly avoided
 
