@@ -74,7 +74,9 @@ export default function PaymentApprovalPage() {
   // The account's cards — the ONLY honest source for the last4 shown before
   // the passkey ceremony. Keyed by the approval's server-bound card_ref, never
   // by local page state or a post-passkey blob decrypt.
-  const [cards, setCards] = useState<readonly CardMeta[]>([]);
+  const [cards, setCards] = useState<readonly CardMeta[] | null>(null);
+  const [cardMetadataError, setCardMetadataError] = useState<string | null>(null);
+  const [refreshingCards, setRefreshingCards] = useState(false);
   const [busy, setBusy] = useState(false);
   const [binding, setBinding] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,20 +85,40 @@ export default function PaymentApprovalPage() {
     router.replace(`/login?next=/vault/pay/${encodeURIComponent(id)}`);
   }, [id, router]);
 
-  // Fetch the approval + card list together. Pure fetch (no setState) so it
-  // can back both the mount effect and the post-bind refresh without tripping
-  // the set-state-in-effect rule. The card list is best-effort enrichment for
-  // the review anchor — its failure must not block a has-card approval.
   const fetchState = useCallback(async (): Promise<{
     approval: Approval;
-    cards: readonly CardMeta[];
+    cards:
+      | { ok: true; value: readonly CardMeta[] }
+      | { ok: false; error: unknown };
   }> => {
     const [approval, cards] = await Promise.all([
       apiGet<Approval>(`/v1/pay/approvals/${encodeURIComponent(id)}`),
-      apiGet<CardMeta[]>("/v1/vault/e2e").catch(() => [] as CardMeta[]),
+      apiGet<CardMeta[]>("/v1/vault/e2e").then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      ),
     ]);
     return { approval, cards };
   }, [id]);
+
+  const refreshCardMetadata = useCallback(async (): Promise<void> => {
+    setRefreshingCards(true);
+    setCardMetadataError(null);
+    try {
+      setCards(await apiGet<CardMeta[]>("/v1/vault/e2e"));
+    } catch (err) {
+      setCards(null);
+      if (err instanceof ApiError && err.status === 401) {
+        redirectToLogin();
+        return;
+      }
+      setCardMetadataError(
+        err instanceof Error ? err.message : "Failed to load the card details.",
+      );
+    } finally {
+      setRefreshingCards(false);
+    }
+  }, [redirectToLogin]);
 
   useEffect(() => {
     let cancelled = false;
@@ -104,7 +126,21 @@ export default function PaymentApprovalPage() {
       .then((state) => {
         if (cancelled) return;
         setApproval(state.approval);
-        setCards(state.cards);
+        if (state.cards.ok) {
+          setCards(state.cards.value);
+          setCardMetadataError(null);
+          return;
+        }
+        setCards(null);
+        if (state.cards.error instanceof ApiError && state.cards.error.status === 401) {
+          redirectToLogin();
+          return;
+        }
+        setCardMetadataError(
+          state.cards.error instanceof Error
+            ? state.cards.error.message
+            : "Failed to load the card details.",
+        );
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -127,12 +163,17 @@ export default function PaymentApprovalPage() {
       setBinding(true);
       setError(null);
       try {
-        await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/bind-card`, {
-          card_ref: cardId,
-        });
-        const state = await fetchState();
-        setApproval(state.approval);
-        setCards(state.cards);
+        const result = await apiPost<{ card_ref: string }>(
+          `/v1/pay/approvals/${encodeURIComponent(id)}/bind-card`,
+          {
+            card_ref: cardId,
+          },
+        );
+        setApproval((current) =>
+          current === null ? current : { ...current, card_ref: result.card_ref },
+        );
+        setCards(null);
+        await refreshCardMetadata();
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           redirectToLogin();
@@ -143,11 +184,12 @@ export default function PaymentApprovalPage() {
         setBinding(false);
       }
     },
-    [id, fetchState, redirectToLogin],
+    [id, redirectToLogin, refreshCardMetadata],
   );
 
   const approve = useCallback(async () => {
     if (approval === null || approval.status !== "pending" || approval.card_ref === null) return;
+    if (boundCardMeta(approval.card_ref, cards ?? [])?.last4 == null) return;
     const cardRef = approval.card_ref;
 
     setBusy(true);
@@ -211,7 +253,7 @@ export default function PaymentApprovalPage() {
       card = undefined;
       setBusy(false);
     }
-  }, [approval, id, redirectToLogin]);
+  }, [approval, cards, id, redirectToLogin]);
 
   const terminalMessage =
     approval?.status === "approved"
@@ -220,16 +262,14 @@ export default function PaymentApprovalPage() {
         ? "This payment approval has expired."
         : "This payment is no longer pending.";
 
-  const boundCard = approval !== null ? boundCardMeta(approval.card_ref, cards) : null;
+  const boundCard =
+    approval !== null ? boundCardMeta(approval.card_ref, cards ?? []) : null;
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
-  // "Visa ··1234" when the bound card has stored metadata; a neutral fallback
-  // for a legacy card without metadata (still the account's card, just no
-  // display digits until re-added).
   const cardLine =
     boundCard?.last4 != null
       ? `${boundCard.brand !== null ? `${boundCard.brand} ` : ""}··${boundCard.last4}`
-      : "your saved card";
+      : null;
   const needsCard = approval?.status === "pending" && approval.card_ref === null;
 
   return (
@@ -310,16 +350,31 @@ export default function PaymentApprovalPage() {
             ))}
           </dl>
 
-          <p className="pay-anchor">
-            Pay with <span className="mono">{cardLine}</span> · {amountLabel} to{" "}
-            {approval.merchant}
-          </p>
+          {cardLine !== null ? (
+            <p className="pay-anchor">
+              Pay with <span className="mono">{cardLine}</span> · {amountLabel} to{" "}
+              {approval.merchant}
+            </p>
+          ) : (
+            <div className="app-banner err">
+              {cardMetadataError ??
+                "We couldn't verify the saved card details for this payment."}
+              <button
+                className="linkbtn"
+                type="button"
+                onClick={() => void refreshCardMetadata()}
+                disabled={refreshingCards}
+              >
+                {refreshingCards ? "Retrying…" : "Retry"}
+              </button>
+            </div>
+          )}
 
           <button
             className="btn-primary"
             type="button"
             onClick={() => void approve()}
-            disabled={busy}
+            disabled={busy || cardLine === null}
           >
             {busy ? "Approving…" : "Approve payment"}
           </button>

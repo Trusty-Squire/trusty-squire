@@ -1,9 +1,12 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+
+const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn() }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  useRouter: () => router,
   usePathname: () => "/vault/card",
 }));
 
@@ -17,10 +20,23 @@ vi.mock("../../../lib/api", () => ({
 // Stub the shared add-card component — the point of this page is that it is
 // add-ONLY, driven by the shared CardEntry, with the manage UI removed.
 vi.mock("../../../components/CardEntry", () => ({
-  CardEntry: () => <div data-testid="card-entry">shared add-card</div>,
+  CardEntry: (props: { onSaved?: (result: { id: string }) => void }) => (
+    <button
+      type="button"
+      data-testid="card-entry"
+      onClick={() => props.onSaved?.({ id: "card_new" })}
+    >
+      shared add-card
+    </button>
+  ),
+}));
+
+vi.mock("../../../components/CredentialFields", () => ({
+  CredentialFields: () => <div data-testid="credential-fields" />,
 }));
 
 import CardPage from "../page";
+import NewCredentialPage from "../../new/page";
 
 afterEach(() => cleanup());
 
@@ -42,5 +58,17 @@ describe("/vault/card — add-only", () => {
     const { container } = render(<CardPage />);
     await waitFor(() => expect(screen.getByTestId("card-entry")).toBeTruthy());
     expect((container.textContent ?? "").toLowerCase()).not.toContain("cannot decrypt");
+  });
+});
+
+describe("/vault/new — card save", () => {
+  it("returns to the vault after saving from the Card tab", async () => {
+    render(<NewCredentialPage />);
+    const user = userEvent.setup();
+
+    await user.click(screen.getByRole("button", { name: "Card" }));
+    await user.click(screen.getByTestId("card-entry"));
+
+    expect(router.push).toHaveBeenCalledWith("/vault");
   });
 });
