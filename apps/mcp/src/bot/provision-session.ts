@@ -1107,6 +1107,7 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
 export function shouldBlockUnsafeProvisionAction(
   pageText: string,
   action: ProvisionAction,
+  options: { redactTarget?: boolean } = {},
 ): string | null {
   if (!("target" in action)) return null;
   const appMarkers = authenticatedAppSurfaceMarkers(pageText);
@@ -1115,6 +1116,14 @@ export function shouldBlockUnsafeProvisionAction(
     isAccountSetupActionTarget(action.target) &&
     hasAccountSetupOverlay(pageText)
   ) {
+    if (options.redactTarget === true) {
+      return (
+        "Perception guard: this control looks like an account/setup overlay action, " +
+        "but authenticated app markers are already visible. Do not retry OAuth or " +
+        "repeatedly press this overlay; use app navigation/direct same-origin URLs " +
+        "or complete only the minimal required setup."
+      );
+    }
     return (
       `Perception guard: "${action.target}" looks like an account/setup overlay action, ` +
       `but authenticated app markers are already visible (${appMarkers.join(", ")}). ` +
@@ -1126,6 +1135,12 @@ export function shouldBlockUnsafeProvisionAction(
     isBillingObjectActionTarget(action.target) &&
     /\b(?:live|production)\s+mode\b/i.test(pageText)
   ) {
+    if (options.redactTarget === true) {
+      return (
+        "Mode safety guard: this control can create or save billing objects, " +
+        "but live/production mode is visible. Switch to the required test/sandbox mode before acting."
+      );
+    }
     return (
       `Mode safety guard: "${action.target}" can create or save billing objects, ` +
       `but live/production mode is visible. Switch to the required test/sandbox mode before acting.`
@@ -2363,18 +2378,22 @@ export async function act(
         // guard couldn't see through — clicking "Save product" in live mode via
         // css=#submit. Re-run it against the RESOLVED visible text now that we
         // know what the locator actually points at (no-mistakes review).
-        const resolvedBlock = shouldBlockUnsafeProvisionAction(pageText, {
-          ...action,
-          target: resolved.safetyText || resolved.text,
-        });
-        if (resolvedBlock !== null) throw new Error(resolvedBlock);
         // Mark the session non-promotable BEFORE the click: a locator click can't
         // be replayed from the inventory (the element was never in it), so a
         // skill synthesized from this run would silently omit the step. Setting
         // it up front means a click that lands but then throws still can't leave
         // the session promotable (see captureAndPromoteSession) (codex).
-        session.usedLocatorFallback = true;
         try {
+          const resolvedBlock = shouldBlockUnsafeProvisionAction(
+            pageText,
+            {
+              ...action,
+              target: resolved.safetyText || resolved.text,
+            },
+            { redactTarget: true },
+          );
+          if (resolvedBlock !== null) throw new Error(resolvedBlock);
+          session.usedLocatorFallback = true;
           if (action.kind === "click") await browser.clickHandle(resolved.handle);
           else await browser.jsClickHandle(resolved.handle);
         } finally {

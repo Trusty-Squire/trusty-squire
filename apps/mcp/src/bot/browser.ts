@@ -2543,18 +2543,27 @@ export class BrowserController {
           return (typeof it === "string" ? it : (el.textContent ?? "")).replace(/\s+/g, " ").trim();
         };
         const rendered = (el: Element): string => renderedRaw(el).toLowerCase();
+        const safetyMetadata = (value: string | null): string =>
+          (value ?? "")
+            .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+            .replace(/[_.\/-]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase();
         const safetyTextFor = (el: Element): string => {
           const values = [
+            el.getAttribute("action-type"),
             el.getAttribute("aria-label"),
             el.getAttribute("title"),
             el.getAttribute("alt"),
-            el.getAttribute("value"),
             el.getAttribute("name"),
-            el.getAttribute("action-type"),
-            renderedRaw(el),
+            el.getAttribute("id"),
+            el.getAttribute("value"),
           ]
-            .map((part) => (part ?? "").replace(/\s+/g, " ").trim())
+            .map(safetyMetadata)
             .filter((part) => part.length > 0);
+          const text = renderedRaw(el);
+          if (text.length > 0) values.push(text);
           return [...new Set(values)].join(" ").slice(0, 500);
         };
         // Visibility walks the ANCESTOR chain (crossing shadow-host boundaries):

@@ -145,9 +145,14 @@ const WEAK_ANCESTOR_STRONG_CHILD_FIXTURE = `data:text/html,${encodeURIComponent(
 
 const ICON_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:0">
-  <button id="save" aria-label="Save product" title="Persist billing product"
+  <button id="saveIcon" aria-label="saveProduct" title="PersistBillingProduct"
     name="save-product" value="save" action-type="SAVE_PRODUCT"
     style="width:40px;height:40px"></button>
+</body></html>`)}`;
+
+const ACTION_TYPE_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <button id="x" action-type="SAVE_PRODUCT" style="width:40px;height:40px"></button>
 </body></html>`)}`;
 
 // Many visible divs — css=div must return ambiguous via the pool cap without
@@ -308,7 +313,7 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("Add To Cart");
-      expect(resolved.safetyText).toContain("ADD_TO_CART");
+      expect(resolved.safetyText).toContain("add to cart");
 
       await ctrl.clickHandle(resolved.handle);
       await resolved.handle.dispose();
@@ -385,14 +390,28 @@ describe("resolvePageTarget (real Chromium)", () => {
   it("returns accessible metadata separately from the visible audit label", async () => {
     const { ctrl, page } = await pageFor(ICON_ONLY_SAVE_FIXTURE);
     try {
-      const resolved = await ctrl.resolvePageTarget("css", "#save");
+      const resolved = await ctrl.resolvePageTarget("css", "#saveIcon");
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("");
-      expect(resolved.safetyText).toContain("Save product");
-      expect(resolved.safetyText).toContain("Persist billing product");
-      expect(resolved.safetyText).toContain("save-product");
-      expect(resolved.safetyText).toContain("SAVE_PRODUCT");
+      expect(resolved.safetyText).toContain("save product");
+      expect(resolved.safetyText).toContain("persist billing product");
+      expect(resolved.safetyText).toContain("save icon");
+      await resolved.handle.dispose();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("token-normalizes action-type safety metadata", async () => {
+    const { ctrl, page } = await pageFor(ACTION_TYPE_ONLY_SAVE_FIXTURE);
+    try {
+      const resolved = await ctrl.resolvePageTarget("css", "#x");
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) throw new Error("unreachable");
+      expect(resolved.text).toBe("");
+      expect(resolved.safetyText).toContain("save product");
+      expect(resolved.safetyText).not.toContain("SAVE_PRODUCT");
       await resolved.handle.dispose();
     } finally {
       await page.close();

@@ -44,6 +44,7 @@ const h = vi.hoisted(() => ({
     | { ok: true; text: string; safetyText: string }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
   locatorClickCalls: 0,
+  locatorDisposeCalls: 0,
 }));
 
 vi.mock("../browser.js", () => ({
@@ -148,7 +149,11 @@ vi.mock("../browser.js", () => ({
       if (h.locatorResolve.ok) {
         return {
           ok: true,
-          handle: { dispose: async () => {} },
+          handle: {
+            dispose: async () => {
+              h.locatorDisposeCalls += 1;
+            },
+          },
           text: h.locatorResolve.text,
           safetyText: h.locatorResolve.safetyText,
         };
@@ -273,6 +278,7 @@ beforeEach(() => {
   h.twoCaptchaCalls = [];
   h.locatorResolve = { ok: true, text: "Add To Cart", safetyText: "Add To Cart" };
   h.locatorClickCalls = 0;
+  h.locatorDisposeCalls = 0;
 });
 afterEach(async () => {
   await closeAllProvisionSessions();
@@ -317,13 +323,23 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
   });
 
   it("blocks an icon-only css= target using its accessible label", async () => {
+    const token = "tokensecretvalue123";
     h.visibleText = "Dashboard Products Live mode";
-    h.locatorResolve = { ok: true, text: "", safetyText: "Save product SAVE_PRODUCT" };
+    h.locatorResolve = {
+      ok: true,
+      text: "",
+      safetyText: `save product ${token}`,
+    };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
-    await expect(
-      act(obs.session_id, { kind: "click", target: "css=#save-icon" }),
-    ).rejects.toThrow(/Mode safety guard/);
+    const error = await act(obs.session_id, {
+      kind: "click",
+      target: "css=#save-icon",
+    }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/Mode safety guard/);
+    expect((error as Error).message).not.toContain(token);
     expect(h.locatorClickCalls).toBe(0);
+    expect(h.locatorDisposeCalls).toBe(1);
   });
 
   it("allows a css= locator resolving to a safe control (guard is not over-eager)", async () => {
