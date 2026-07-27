@@ -1,11 +1,11 @@
-import { createHash, generateKeyPairSync } from "node:crypto";
+import { createHash, generateKeyPairSync, type KeyObject } from "node:crypto";
 import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
 import { executeOperatePay, type PaymentBrowser } from "../pay-operator.js";
 import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
-import type { CheckoutCard } from "../browser.js";
+import type { CheckoutCard, CheckoutSummary } from "../browser.js";
 
 const CHECKOUT = {
   merchant: "Synthetic Merchant",
@@ -383,5 +383,335 @@ describe("operate_pay", () => {
     });
     expect(notifyCalls).toHaveLength(0);
     expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
+  });
+
+  // IRON-RULE regression: the has-card path must be byte-for-byte the same
+  // flow it was before the JIT branch existed. The JIT-only resume re-read of
+  // the live total must NOT run for a has-card payment.
+  it("REGRESSION: has-card path does not re-read the checkout total on resume", async () => {
+    const { result, browser } = await harness("happy");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    // Exactly one summary read (the initial one). A second call would mean the
+    // JIT resume re-read leaked into the has-card path.
+    expect(browser.readCheckoutSummary).toHaveBeenCalledTimes(1);
+    expect(result).not.toHaveProperty("card_persisted");
+  });
+});
+
+// ── JIT add-card ceremony (card-less approval → server-bound card_ref) ──────
+//
+// These exercise the money-path crypto invariant that matters most: on resume
+// the operator has NO card_ref of its own (args.card_ref is absent), so it must
+// re-canonicalize the mandate with the card_ref the ceremony bound SERVER-SIDE.
+// Miss that and every JIT payment hash-mismatches and silently rejects.
+
+const JIT_CHECKOUT: CheckoutSummary = {
+  merchant: "Synthetic Merchant",
+  checkout_origin: "https://checkout.synthetic.test",
+  amount_cents: 2_599,
+  currency: "USD",
+};
+
+type PollState = { status: "pending" | "approved" | "expired"; card_ref: string | null };
+
+async function buildApprovedMandate(params: {
+  operatorPubkey: string;
+  privateKey: KeyObject;
+  signCardRef: string;
+  nonce: string;
+  agent: string;
+  audience?: string;
+  issuer?: string;
+}): Promise<{ jws: string; sealed_card: string }> {
+  const recipientHash = createHash("sha256")
+    .update(Buffer.from(params.operatorPubkey, "base64url"))
+    .digest("base64url");
+  const canonical = canonicalize({
+    merchant: JIT_CHECKOUT.merchant,
+    checkout_origin: JIT_CHECKOUT.checkout_origin,
+    amount_cents: JIT_CHECKOUT.amount_cents,
+    currency: JIT_CHECKOUT.currency,
+    nonce: params.nonce,
+    // The mandate is signed over whatever card_ref the phone saw. In the happy
+    // path that equals the server-bound ref; the swap test signs a different one.
+    card_ref: params.signCardRef,
+    recipient_pubkey_hash: recipientHash,
+    item: "",
+    reason: "",
+    agent: params.agent,
+  })!;
+  const aad = createHash("sha256").update(canonical, "utf8").digest();
+  const jws = await new SignJWT({
+    payload_sha256: aad.toString("base64url"),
+    context: "purchase",
+    confidence: "low",
+    mandate_id: "jit-mandate",
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(params.issuer ?? "https://vouchflow.dev")
+    .setAudience(params.audience ?? "customer_test")
+    .sign(params.privateKey);
+  const sealed_card = await sealToRecipient(
+    params.operatorPubkey,
+    new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
+    aad,
+  );
+  return { jws, sealed_card };
+}
+
+async function runJit(cfg: {
+  cardRefArg?: string; // set = has-card comparison run (NOT a JIT ceremony)
+  boundCardRef: string; // what the server binds + echoes as approval.card_ref
+  signCardRef?: string; // what the phone signs the mandate over (default = bound)
+  poll: (clockMs: number) => PollState;
+  resumeAmountCents?: number; // second (resume) readCheckoutSummary amount
+  resumeThrows?: boolean;
+  approvalTimeoutMs?: number;
+  jitApprovalTimeoutMs?: number;
+}): Promise<{
+  result: Record<string, unknown>;
+  approvalBodies: Array<Record<string, unknown>>;
+  filledCards: CheckoutCard[];
+  auditBodies: unknown[];
+  summaryReads: number;
+}> {
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = await exportJWK(publicKey);
+  const approvalBodies: Array<Record<string, unknown>> = [];
+  const filledCards: CheckoutCard[] = [];
+  const auditBodies: unknown[] = [];
+  const nonce = "jit-nonce";
+  const agent = "jit-agent";
+  let clock = 0;
+  let summaryReads = 0;
+
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url === "https://vouchflow.test/.well-known/jwks.json") {
+      return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
+    }
+    if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+      approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return Response.json(
+        { id: "appr_jit", nonce, agent, expires_at: new Date(8.64e15).toISOString() },
+        { status: 201 },
+      );
+    }
+    if (url.endsWith("/v1/pay/approvals/appr_jit") && init?.method === "GET") {
+      const state = cfg.poll(clock);
+      const operatorPubkey = String(approvalBodies[0]!.operator_pubkey);
+      if (state.status === "approved") {
+        const { jws, sealed_card } = await buildApprovedMandate({
+          operatorPubkey,
+          privateKey,
+          signCardRef: cfg.signCardRef ?? cfg.boundCardRef,
+          nonce,
+          agent,
+        });
+        return Response.json({
+          id: "appr_jit",
+          status: "approved",
+          ...JIT_CHECKOUT,
+          nonce,
+          card_ref: state.card_ref,
+          operator_pubkey: operatorPubkey,
+          jws,
+          sealed_card,
+          expires_at: new Date(8.64e15).toISOString(),
+        });
+      }
+      return Response.json({
+        id: "appr_jit",
+        status: state.status,
+        ...JIT_CHECKOUT,
+        nonce,
+        card_ref: state.card_ref,
+        operator_pubkey: operatorPubkey,
+        jws: null,
+        sealed_card: null,
+        expires_at: new Date(8.64e15).toISOString(),
+      });
+    }
+    if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
+      auditBodies.push(JSON.parse(String(init.body)) as unknown);
+      return Response.json({ id: "audit_jit" }, { status: 201 });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }) as typeof fetch;
+
+  const browser: PaymentBrowser = {
+    readCheckoutSummary: vi.fn(async () => {
+      const call = summaryReads++;
+      if (call >= 1 && cfg.resumeThrows === true) {
+        throw new Error("payment_checkout_total_not_found");
+      }
+      if (call >= 1 && cfg.resumeAmountCents !== undefined) {
+        return { ...JIT_CHECKOUT, amount_cents: cfg.resumeAmountCents };
+      }
+      return JIT_CHECKOUT;
+    }),
+    currentUrl: vi.fn().mockReturnValue(`${JIT_CHECKOUT.checkout_origin}/session/test`),
+    fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
+      filledCards.push(card);
+      return { three_ds_required: false };
+    }),
+    waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
+  };
+
+  const api = new ApiClient({
+    apiBaseUrl: "https://api.test",
+    registryBaseUrl: "https://registry.test",
+    agentSessionToken: "synthetic-session-token",
+    fetch: fetchMock,
+  });
+
+  const result = (await executeOperatePay(
+    {
+      ...(cfg.cardRefArg !== undefined ? { card_ref: cfg.cardRefArg } : {}),
+      merchant: JIT_CHECKOUT.merchant,
+      amount_cents: JIT_CHECKOUT.amount_cents,
+      currency: JIT_CHECKOUT.currency,
+    },
+    api,
+    browser,
+    {
+      fetch: fetchMock,
+      now: () => clock,
+      sleep: async (ms) => {
+        clock += ms;
+      },
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      ...(cfg.approvalTimeoutMs !== undefined ? { approvalTimeoutMs: cfg.approvalTimeoutMs } : {}),
+      ...(cfg.jitApprovalTimeoutMs !== undefined
+        ? { jitApprovalTimeoutMs: cfg.jitApprovalTimeoutMs }
+        : {}),
+    },
+  )) as Record<string, unknown>;
+
+  return { result, approvalBodies, filledCards, auditBodies, summaryReads };
+}
+
+describe("operate_pay JIT add-card ceremony", () => {
+  it("mints a card-less approval and resumes with the SERVER-BOUND card_ref", async () => {
+    const { result, approvalBodies, filledCards, auditBodies } = await runJit({
+      boundCardRef: "card_bound_by_server",
+      poll: () => ({ status: "approved", card_ref: "card_bound_by_server" }),
+    });
+
+    // The mandate was signed over the bound card_ref; the operator (which has no
+    // args.card_ref) could only pass verifyMandate by re-canonicalizing with it.
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    // Card-less create — no card_ref in the create body.
+    expect(approvalBodies[0]).not.toHaveProperty("card_ref");
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_submitted" })]);
+  });
+
+  it("rejects a mandate signed over a different card_ref than the server bound", async () => {
+    const { result, filledCards, auditBodies } = await runJit({
+      boundCardRef: "card_RIGHT",
+      signCardRef: "card_WRONG",
+      poll: () => ({ status: "approved", card_ref: "card_RIGHT" }),
+    });
+
+    // Operator canonicalizes with the bound "card_RIGHT"; the mandate was signed
+    // over "card_WRONG" → hash mismatch → fail closed. A card swap can't slip in.
+    expect(result).toMatchObject({
+      status: "payment_mandate_rejected",
+      reason: "payload_hash_mismatch",
+    });
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
+  });
+
+  it("refuses to fill when the live total drifts from the mandate amount on resume", async () => {
+    const { result, filledCards, summaryReads } = await runJit({
+      boundCardRef: "card_x",
+      poll: () => ({ status: "approved", card_ref: "card_x" }),
+      resumeAmountCents: JIT_CHECKOUT.amount_cents + 500,
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_amount_mismatch",
+      mandate_amount_cents: JIT_CHECKOUT.amount_cents,
+      live_amount_cents: JIT_CHECKOUT.amount_cents + 500,
+    });
+    expect(filledCards).toHaveLength(0);
+    // Re-read happened (two summary reads: initial + resume).
+    expect(summaryReads).toBe(2);
+  });
+
+  it("fails closed when the live total can no longer be read on resume", async () => {
+    const { result, filledCards } = await runJit({
+      boundCardRef: "card_x",
+      poll: () => ({ status: "approved", card_ref: "card_x" }),
+      resumeThrows: true,
+    });
+
+    expect(result).toMatchObject({ status: "payment_amount_mismatch" });
+    expect(filledCards).toHaveLength(0);
+  });
+
+  it("returns card_required when the link expires before a card is added", async () => {
+    const { result, filledCards } = await runJit({
+      boundCardRef: "unused",
+      poll: () => ({ status: "expired", card_ref: null }),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_card_required",
+      needs_user: { wall: "card_required" },
+    });
+    expect(result).not.toHaveProperty("card_persisted");
+    expect(filledCards).toHaveLength(0);
+  });
+
+  it("times out (card persists) when a card was added but never approved", async () => {
+    const { result, filledCards } = await runJit({
+      boundCardRef: "card_stored",
+      // Card was bound mid-ceremony, but the approval expired before sign-off.
+      poll: () => ({ status: "expired", card_ref: "card_stored" }),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_approval_timeout",
+      card_persisted: true,
+    });
+    expect(result).not.toHaveProperty("needs_user");
+    expect(filledCards).toHaveLength(0);
+  });
+
+  it("waits longer than a has-card approval before giving up (JIT wait budget)", async () => {
+    // Approval flips to approved at 330s — past the 5-min has-card budget but
+    // inside the ~18-min JIT budget. The only difference between the two runs is
+    // whether a card_ref is supplied, which is exactly what selects the budget.
+    const approveAt = 330_000;
+    const poll = (clockMs: number): PollState =>
+      clockMs >= approveAt
+        ? { status: "approved", card_ref: "card_bound_by_server" }
+        : { status: "pending", card_ref: "card_bound_by_server" };
+
+    const jit = await runJit({
+      boundCardRef: "card_bound_by_server",
+      poll,
+      approvalTimeoutMs: 5 * 60 * 1000,
+      jitApprovalTimeoutMs: 18 * 60 * 1000,
+    });
+    expect(jit.result).toMatchObject({ status: "payment_submitted" });
+
+    const hasCard = await runJit({
+      cardRefArg: "card_bound_by_server",
+      boundCardRef: "card_bound_by_server",
+      poll,
+      approvalTimeoutMs: 5 * 60 * 1000,
+      jitApprovalTimeoutMs: 18 * 60 * 1000,
+    });
+    // Same script, but the 5-min has-card budget expires before 330s.
+    expect(hasCard.result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(hasCard.filledCards).toHaveLength(0);
   });
 });
