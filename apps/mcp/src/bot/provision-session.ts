@@ -437,14 +437,16 @@ export function stableElementId(el: InteractiveElement): string {
       // old ref finds no match and resolveTarget returns null (the host
       // re-observes) — no mis-click.
       //
-      // Accepted exception: if siblings differ only by a POSITIONAL selector
-      // (`:nth-child`/`:nth-of-type`), removing the first shifts the survivor onto
-      // the removed node's old selector and therefore reuses the same ref string.
-      // Stateless resolution cannot fail closed in that case without restoring a
-      // per-observe generation epoch, which would break stable-ref delta reuse.
-      // The bound is perceptually identical controls: same label/role/path and
-      // compact body, so the host cannot express row-specific intent through this
-      // API; the delta still reports the other departed positional ref.
+      // Mutable state (`checked`, value length, topmost/occlusion) is deliberately
+      // excluded so fills, toggles, and visibility changes keep the same ref.
+      // Accepted exception: with a purely POSITIONAL selector
+      // (`:nth-child`/`:nth-of-type`) AND non-disambiguating path fields, removing
+      // the first sibling can shift a state-differing survivor onto its old ref.
+      // Screen paths normally encode the row/index and prevent this. Stateless
+      // resolution cannot fail closed without restoring a generation epoch or
+      // folding mutable state into identity, both of which break stable-ref reuse.
+      // The delta still emits current state and lists the departed ref in
+      // `removed`; hosts must apply both before acting on retained refs.
       el.selector,
     ].join("\u001f"),
   );
@@ -516,14 +518,12 @@ export function resolveTarget(
     // at stableElementId.
     //
     // Ordinal caveat (same-hash duplicates): the `_<ordinal>` suffix positionally
-    // disambiguates elements that hash IDENTICALLY (same screenPath/testId/label/
-    // role/tag/href/type). Ordinals are assigned in DOM order, so if one member of
-    // a duplicate group is removed across observes, a reused old ordinal resolves
-    // to a SURVIVING member of the same group rather than null. That is safe by
-    // construction: same stableElementId means the elements are structurally
-    // interchangeable (indistinguishable to the host). An ordinal past the current
-    // group size still returns null, and the delta's `removed` list tells a
-    // well-behaved host the old ref is gone.
+    // disambiguates elements that hash IDENTICALLY. Mutable state is intentionally
+    // absent from that hash, so members need not have identical checked/value/
+    // visibility state. If one is removed, an ordinal can resolve to a survivor;
+    // the delta emits state changes and lists departed refs in `removed`, which a
+    // host must apply before acting. An ordinal past the current group size still
+    // returns null.
     const matches = elements.filter((el) => stableElementId(el) === parsedRef.id);
     if (parsedRef.ordinal !== null) {
       const match = matches[parsedRef.ordinal - 1];
