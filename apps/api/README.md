@@ -43,12 +43,13 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `GET` | `/health` | none | Liveness |
 
 Client-encrypted card creation accepts optional plaintext `brand` and `last4`
-display metadata alongside the opaque blob. `brand` must be a 1–32 character
-card-network name containing only letters, spaces, and hyphens; `last4` must be
-exactly four digits. The full PAN remains only inside the encrypted blob. List
-responses and GDPR vault exports include `brand` and `last4` (`null` for legacy
-rows). `PATCH /v1/vault/e2e/:id/label` accepts `{ label }` and changes only the
-label; the blob and card metadata remain unchanged.
+display metadata alongside the opaque blob. `brand` must be 1–32 characters,
+start with a letter, and otherwise contain only letters, spaces, and hyphens;
+`last4` must be exactly four digits. The full PAN remains only inside the
+encrypted blob. List responses and GDPR vault exports include `brand` and
+`last4` (`null` for legacy rows). `PATCH /v1/vault/e2e/:id/label` accepts
+`{ label }` and changes only the label; the blob and card metadata remain
+unchanged.
 
 Payment approval creation accepts optional `item` and `reason` strings, storing
 an empty string when either is omitted. The API derives `agent` from the
