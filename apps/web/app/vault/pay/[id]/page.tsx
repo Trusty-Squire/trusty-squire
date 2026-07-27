@@ -79,11 +79,17 @@ export default function PaymentApprovalPage() {
   const [refreshingCards, setRefreshingCards] = useState(false);
   const [busy, setBusy] = useState(false);
   const [binding, setBinding] = useState(false);
+  const [savedCardId, setSavedCardId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const redirectToLogin = useCallback(() => {
     router.replace(`/login?next=/vault/pay/${encodeURIComponent(id)}`);
   }, [id, router]);
+
+  const fetchApproval = useCallback(
+    () => apiGet<Approval>(`/v1/pay/approvals/${encodeURIComponent(id)}`),
+    [id],
+  );
 
   const fetchState = useCallback(async (): Promise<{
     approval: Approval;
@@ -92,14 +98,14 @@ export default function PaymentApprovalPage() {
       | { ok: false; error: unknown };
   }> => {
     const [approval, cards] = await Promise.all([
-      apiGet<Approval>(`/v1/pay/approvals/${encodeURIComponent(id)}`),
+      fetchApproval(),
       apiGet<CardMeta[]>("/v1/vault/e2e").then(
         (value) => ({ ok: true as const, value }),
         (error: unknown) => ({ ok: false as const, error }),
       ),
     ]);
     return { approval, cards };
-  }, [id]);
+  }, [fetchApproval]);
 
   const refreshCardMetadata = useCallback(async (): Promise<void> => {
     setRefreshingCards(true);
@@ -126,6 +132,7 @@ export default function PaymentApprovalPage() {
       .then((state) => {
         if (cancelled) return;
         setApproval(state.approval);
+        setSavedCardId(null);
         if (state.cards.ok) {
           setCards(state.cards.value);
           setCardMetadataError(null);
@@ -155,41 +162,70 @@ export default function PaymentApprovalPage() {
     };
   }, [fetchState, redirectToLogin]);
 
-  // JIT add-card: the freshly stored card is bound to this card-less approval
-  // server-side, then we reload so the review beat renders from the bound
-  // card_ref. Approval stays pending — only card_ref transitions null → set.
   const bindCard = useCallback(
     async (cardId: string) => {
+      setSavedCardId(cardId);
       setBinding(true);
       setError(null);
       try {
-        const result = await apiPost<{ card_ref: string }>(
-          `/v1/pay/approvals/${encodeURIComponent(id)}/bind-card`,
-          {
-            card_ref: cardId,
-          },
-        );
-        setApproval((current) =>
-          current === null ? current : { ...current, card_ref: result.card_ref },
-        );
-        setCards(null);
-        await refreshCardMetadata();
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 401) {
-          redirectToLogin();
+        let bindFailure: unknown;
+        try {
+          const result = await apiPost<{ card_ref: string }>(
+            `/v1/pay/approvals/${encodeURIComponent(id)}/bind-card`,
+            {
+              card_ref: cardId,
+            },
+          );
+          if (result.card_ref !== cardId) {
+            throw new Error("The payment was attached to an unexpected card.");
+          }
+          setApproval((current) =>
+            current === null ? current : { ...current, card_ref: result.card_ref },
+          );
+          setCards(null);
+          await refreshCardMetadata();
           return;
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 401) {
+            redirectToLogin();
+            return;
+          }
+          bindFailure = err;
         }
-        setError(err instanceof Error ? err.message : "Failed to attach the card.");
+
+        try {
+          const current = await fetchApproval();
+          setApproval(current);
+          if (current.card_ref === cardId) {
+            setCards(null);
+            await refreshCardMetadata();
+            return;
+          }
+          if (current.card_ref !== null) {
+            setError("This payment is already attached to a different card.");
+            return;
+          }
+        } catch (err) {
+          if (err instanceof ApiError && err.status === 401) {
+            redirectToLogin();
+            return;
+          }
+        }
+
+        setError(
+          bindFailure instanceof Error ? bindFailure.message : "Failed to attach the card.",
+        );
       } finally {
         setBinding(false);
       }
     },
-    [id, redirectToLogin, refreshCardMetadata],
+    [fetchApproval, id, redirectToLogin, refreshCardMetadata],
   );
 
   const approve = useCallback(async () => {
     if (approval === null || approval.status !== "pending" || approval.card_ref === null) return;
-    if (boundCardMeta(approval.card_ref, cards ?? [])?.last4 == null) return;
+    const isJitReview = savedCardId !== null && approval.card_ref === savedCardId;
+    if (isJitReview && boundCardMeta(approval.card_ref, cards ?? [])?.last4 == null) return;
     const cardRef = approval.card_ref;
 
     setBusy(true);
@@ -253,7 +289,7 @@ export default function PaymentApprovalPage() {
       card = undefined;
       setBusy(false);
     }
-  }, [approval, cards, id, redirectToLogin]);
+  }, [approval, cards, id, redirectToLogin, savedCardId]);
 
   const terminalMessage =
     approval?.status === "approved"
@@ -264,12 +300,15 @@ export default function PaymentApprovalPage() {
 
   const boundCard =
     approval !== null ? boundCardMeta(approval.card_ref, cards ?? []) : null;
+  const isJitReview =
+    savedCardId !== null && approval?.card_ref !== null && approval?.card_ref === savedCardId;
+  const hasBoundCardMetadata = boundCard?.last4 != null;
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
   const cardLine =
     boundCard?.last4 != null
       ? `${boundCard.brand !== null ? `${boundCard.brand} ` : ""}··${boundCard.last4}`
-      : null;
+      : "your saved card";
   const needsCard = approval?.status === "pending" && approval.card_ref === null;
 
   return (
@@ -307,6 +346,17 @@ export default function PaymentApprovalPage() {
           </p>
           {binding ? (
             <p className="app-sub">Attaching card…</p>
+          ) : savedCardId !== null ? (
+            <div>
+              <p className="app-sub">Your card is saved, but it still needs to be attached.</p>
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={() => void bindCard(savedCardId)}
+              >
+                Retry attaching card
+              </button>
+            </div>
           ) : (
             <CardEntry onSaved={({ id: cardId }) => void bindCard(cardId)} />
           )}
@@ -350,7 +400,7 @@ export default function PaymentApprovalPage() {
             ))}
           </dl>
 
-          {cardLine !== null ? (
+          {hasBoundCardMetadata || !isJitReview ? (
             <p className="pay-anchor">
               Pay with <span className="mono">{cardLine}</span> · {amountLabel} to{" "}
               {approval.merchant}
@@ -374,7 +424,7 @@ export default function PaymentApprovalPage() {
             className="btn-primary"
             type="button"
             onClick={() => void approve()}
-            disabled={busy || cardLine === null}
+            disabled={busy || (isJitReview && !hasBoundCardMetadata)}
           >
             {busy ? "Approving…" : "Approve payment"}
           </button>
