@@ -379,6 +379,25 @@ describe("payment approval relay", () => {
 
   // ── JIT add-card ceremony: card-less create → bind → approve ──────────
 
+  it("gives a card-less JIT create an 18-min TTL and a has-card create 10 min", async () => {
+    // nowMs is pinned to 2026-07-23T12:00:00.000Z in beforeEach.
+    const cardless = await createCardlessApproval();
+    expect(cardless).toMatchObject({});
+    const cardlessGet = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${cardless.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    // 12:00:00 + 18 min.
+    expect((cardlessGet.json() as { expires_at: string }).expires_at).toBe(
+      "2026-07-23T12:18:00.000Z",
+    );
+
+    const hasCard = await createApproval();
+    // createApproval sends card_ref → keeps the 10-min tap window.
+    expect(hasCard.expires_at).toBe("2026-07-23T12:10:00.000Z");
+  });
+
   it("creates a card-less approval (JIT add-card handle) with a null card_ref", async () => {
     const created = await createCardlessApproval();
     const get = await server.inject({
@@ -440,12 +459,18 @@ describe("payment approval relay", () => {
   it("rejects binding an owned card after the approval expires", async () => {
     const created = await createCardlessApproval();
     const cardId = await createOwnedCard(webCookie, "0007");
-    nowMs += 10 * 60 * 1000 + 1;
+    // Card-less approvals get an 18-min JIT TTL — advance past it. That also
+    // exceeds the 15-min web-session idle window, so re-mint the cookie (a
+    // real user is still signed in) to isolate approval expiry from session
+    // expiry.
+    nowMs += 18 * 60 * 1000 + 1;
+    const payer = await deps.accountStore.findAccountByEmail("payer@example.test");
+    const freshCookie = await makeWebSession(deps, payer!.id, new Date(nowMs));
 
     const bind = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/bind-card`,
-      headers: { cookie: webCookie },
+      headers: { cookie: freshCookie },
       payload: { card_ref: cardId },
     });
     expect(bind.statusCode).toBe(409);

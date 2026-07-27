@@ -68,7 +68,12 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     }
 
     const now = opts.deps.now?.() ?? new Date();
-    const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
+    // Card-less (JIT add-card) approvals need a longer window: the user
+    // fills a first-time card form + passkey ceremony, not a one-tap
+    // approve, so 18 min vs the 10-min has-card tap window. The MCP side
+    // waits ~18 min; without this the real window was capped at 10.
+    const ttlMs = parsed.data.card_ref == null ? 18 * 60 * 1000 : 10 * 60 * 1000;
+    const expiresAt = new Date(now.getTime() + ttlMs);
     const nonce = randomBytes(16).toString("base64url");
     const agent = auth.agent_identity ?? "unknown-agent";
     const id = await opts.deps.pendingPaymentApprovalStore.create(auth.account_id, {
