@@ -182,6 +182,13 @@ function safeFailureReason(error: unknown): string {
   return known.includes(message) ? message : "mandate_verification_failed";
 }
 
+// A card_ref counts as "bound" only when it is a non-blank string. Used for
+// both the timeout classification (no card → card_required) and the resume
+// guard (never canonicalize over an empty/whitespace ref), so the two agree.
+function hasBoundCard(ref: string | null | undefined): ref is string {
+  return typeof ref === "string" && ref.trim().length > 0;
+}
+
 // Terminal for every JIT path that ends without a card on file (link expired
 // before a card was added, add-card failed, or abandoned before card entry).
 // Extends the host-facing needs_user.wall vocabulary with "card_required".
@@ -304,7 +311,7 @@ export async function executeOperatePay(
     // stored but never approved" (payment_approval_timeout, card persists).
     let boundCardRef: string | null = args.card_ref ?? null;
     const timeoutResult = (): Record<string, unknown> => {
-      if (jit && boundCardRef === null) {
+      if (jit && !hasBoundCard(boundCardRef)) {
         return cardRequiredResult(
           approvalUrl,
           checkout,
@@ -362,7 +369,7 @@ export async function executeOperatePay(
     // use the card_ref the ceremony bound — anything else hash-mismatches
     // verifyMandate and silently rejects every JIT payment.
     const cardRef = args.card_ref ?? approved.card_ref;
-    if (typeof cardRef !== "string" || cardRef.length === 0) {
+    if (!hasBoundCard(cardRef)) {
       // The server 409s an approve on a null card_ref, so a JIT approval can
       // only reach "approved" with a bound card. Fail closed if that invariant
       // is ever violated rather than canonicalize with an empty ref.
@@ -371,35 +378,6 @@ export async function executeOperatePay(
         reason: "card_ref_unbound",
         approval_url: approvalUrl,
       };
-    }
-
-    // [#13] JIT nearly doubles the window between reading the total and
-    // filling it. Re-read the live checkout before submitting; if the amount
-    // or currency drifted from what the mandate approved, refuse to fill.
-    // The has-card path (jit === false) skips this — its behavior is unchanged.
-    if (jit) {
-      let live: CheckoutSummary | undefined;
-      try {
-        live = await browser.readCheckoutSummary(args.currency);
-      } catch {
-        live = undefined;
-      }
-      if (
-        live === undefined ||
-        live.amount_cents !== checkout.amount_cents ||
-        live.currency !== checkout.currency
-      ) {
-        return {
-          status: "payment_amount_mismatch",
-          approval_url: approvalUrl,
-          merchant: checkout.merchant,
-          mandate_amount_cents: checkout.amount_cents,
-          mandate_currency: checkout.currency,
-          ...(live !== undefined
-            ? { live_amount_cents: live.amount_cents, live_currency: live.currency }
-            : {}),
-        };
-      }
     }
 
     const publicKeyBytes = fromBase64Url(keypair.publicKey);
@@ -461,6 +439,46 @@ export async function executeOperatePay(
           : typeof claims.jti === "string"
             ? claims.jti
             : undefined;
+    // [#13][P1] JIT nearly doubles the window between reading the checkout and
+    // filling it, so a mid-ceremony navigation could swap the merchant, origin,
+    // or total out from under the signed mandate. Re-read the live checkout
+    // immediately before filling (smallest possible time-of-check→time-of-use
+    // gap) and refuse if ANY signed field the mandate binds — merchant, origin,
+    // amount, currency — drifted. The card was opened above but is never
+    // submitted on a mismatch; the outer finally zeroes it. The has-card path
+    // (jit === false) skips this entirely — its behavior is unchanged.
+    if (jit) {
+      let live: CheckoutSummary | undefined;
+      try {
+        live = await browser.readCheckoutSummary(args.currency);
+      } catch {
+        live = undefined;
+      }
+      if (
+        live === undefined ||
+        live.amount_cents !== checkout.amount_cents ||
+        live.currency !== checkout.currency ||
+        live.merchant !== checkout.merchant ||
+        live.checkout_origin !== checkout.checkout_origin
+      ) {
+        return {
+          status: "payment_amount_mismatch",
+          approval_url: approvalUrl,
+          merchant: checkout.merchant,
+          mandate_amount_cents: checkout.amount_cents,
+          mandate_currency: checkout.currency,
+          ...(live !== undefined
+            ? {
+                live_amount_cents: live.amount_cents,
+                live_currency: live.currency,
+                live_merchant: live.merchant,
+                live_checkout_origin: live.checkout_origin,
+              }
+            : {}),
+        };
+      }
+    }
+
     let paymentStatus = "payment_submitted";
     let submitResult: CheckoutSubmitResult = { three_ds_required: false };
     try {
