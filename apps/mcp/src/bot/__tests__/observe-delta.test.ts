@@ -715,62 +715,9 @@ describe("observe-delta harness", () => {
     for (const e of b2.observation.elements) recon.set(e.ref, e);
     for (const r of b2.observation.removed ?? []) recon.delete(r);
     expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
-
-    const checkbox = (position: number, checked: boolean): InteractiveElement =>
-      el({
-        tag: "input",
-        type: "checkbox",
-        role: "checkbox",
-        visibleText: "Notify me",
-        screenPath: "list:settings > checkbox:notify",
-        container: "list:settings",
-        selector: `ul>li:nth-of-type(${position})>input`,
-        checked,
-      });
-    const keepers = [1, 2, 3].map((index) =>
-      el({
-        visibleText: `Keep ${index}`,
-        screenPath: `main:settings > button:keep-${index}`,
-        selector: `#keep-${index}`,
-      }),
-    );
-    const checkedBefore = [checkbox(1, true), checkbox(2, false), ...keepers];
-    const checkedRefs = provisionElementRefs(checkedBefore);
-    const checkedRemovedNodeRef = checkedRefs.get(checkedBefore[0]!) as string;
-    const checkedSurvivorOldRef = checkedRefs.get(checkedBefore[1]!) as string;
-    const checkedB1 = buildCompactObservation({
-      sessionId: "s",
-      url: URL,
-      text: "",
-      elements: checkedBefore,
-      prev: null,
-    });
-    const checkedAfter = [checkbox(1, false), ...keepers];
-    const checkedB2 = buildCompactObservation({
-      sessionId: "s",
-      url: URL,
-      text: "",
-      elements: checkedAfter,
-      prev: checkedB1.nextState,
-    });
-
-    expect(checkedB2.observation.delta).toBe(true);
-    // `removed` is the host guard against reusing the departed positional ref.
-    expect(checkedB2.observation.removed).toEqual([checkedSurvivorOldRef]);
-    expect(
-      checkedB2.observation.elements.find((entry) => entry.ref === checkedRemovedNodeRef)
-        ?.checked,
-    ).toBe(false);
-    expect(resolveTarget(checkedAfter, checkedRemovedNodeRef)).toBe(checkedAfter[0]);
-    expect(resolveTarget(checkedAfter, checkedSurvivorOldRef)).toBeNull();
-
-    const checkedRecon = new Map(checkedB1.fullByRef);
-    for (const e of checkedB2.observation.elements) checkedRecon.set(e.ref, e);
-    for (const r of checkedB2.observation.removed ?? []) checkedRecon.delete(r);
-    expect(refBodies(checkedRecon)).toBe(refBodies(checkedB2.fullByRef));
   });
 
-  it("positional-selector siblings: removal reports the departed ref and accepts bounded identity reuse", () => {
+  it("positional-selector siblings: removal accepts bounded unguarded identity reuse", () => {
     const remove = (position: number): InteractiveElement =>
       el({
         tag: "button",
@@ -804,11 +751,70 @@ describe("observe-delta harness", () => {
 
     expect(b2.observation.delta).toBe(true);
     expect(b2.observation.removed).toEqual([survivorOldRef]);
+    expect(b2.observation.removed).not.toContain(removedNodeRef);
     expect(b2.observation.unchanged).toBe(1);
 
     const survivorCurrentRef = provisionElementRefs(after).get(after[0]!) as string;
     expect(survivorCurrentRef).toBe(removedNodeRef);
+    // The removed node's old ref is recycled onto the survivor without an
+    // invalidation signal, so retaining every non-removed ref does not guard it.
     expect(resolveTarget(after, survivorCurrentRef)).toBe(after[0]);
+    expect(resolveTarget(after, removedNodeRef)).toBe(after[0]);
+    expect(resolveTarget(after, survivorOldRef)).toBeNull();
+
+    const recon = new Map(b1.fullByRef);
+    for (const e of b2.observation.elements) recon.set(e.ref, e);
+    for (const r of b2.observation.removed ?? []) recon.delete(r);
+    expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
+  });
+
+  it("positional-selector state change: recycled ref is re-emitted but remains unguarded", () => {
+    const checkbox = (position: number, checked: boolean): InteractiveElement =>
+      el({
+        tag: "input",
+        type: "checkbox",
+        role: "checkbox",
+        visibleText: "Notify me",
+        screenPath: "list:settings > checkbox:notify",
+        container: "list:settings",
+        selector: `ul>li:nth-of-type(${position})>input`,
+        checked,
+      });
+    const keepers = [1, 2, 3].map((index) =>
+      el({
+        visibleText: `Keep ${index}`,
+        screenPath: `main:settings > button:keep-${index}`,
+        selector: `#keep-${index}`,
+      }),
+    );
+    const before = [checkbox(1, true), checkbox(2, false), ...keepers];
+    const refsBefore = provisionElementRefs(before);
+    const removedNodeRef = refsBefore.get(before[0]!) as string;
+    const survivorOldRef = refsBefore.get(before[1]!) as string;
+    const b1 = buildCompactObservation({
+      sessionId: "s",
+      url: URL,
+      text: "",
+      elements: before,
+      prev: null,
+    });
+    const after = [checkbox(1, false), ...keepers];
+    const b2 = buildCompactObservation({
+      sessionId: "s",
+      url: URL,
+      text: "",
+      elements: after,
+      prev: b1.nextState,
+    });
+
+    expect(b2.observation.delta).toBe(true);
+    expect(b2.observation.removed).toEqual([survivorOldRef]);
+    expect(b2.observation.removed).not.toContain(removedNodeRef);
+    expect(
+      b2.observation.elements.find((entry) => entry.ref === removedNodeRef)?.checked,
+    ).toBe(false);
+    // The changed body exposes the survivor's current state, but neither
+    // `removed` nor resolveTarget signals that the underlying node changed.
     expect(resolveTarget(after, removedNodeRef)).toBe(after[0]);
     expect(resolveTarget(after, survivorOldRef)).toBeNull();
 

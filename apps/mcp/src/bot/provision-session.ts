@@ -439,14 +439,16 @@ export function stableElementId(el: InteractiveElement): string {
       //
       // Mutable state (`checked`, value length, topmost/occlusion) is deliberately
       // excluded so fills, toggles, and visibility changes keep the same ref.
-      // Accepted exception: with a purely POSITIONAL selector
+      // Accepted UNGUARDED exception: with a purely POSITIONAL selector
       // (`:nth-child`/`:nth-of-type`) AND non-disambiguating path fields, removing
-      // the first sibling can shift a state-differing survivor onto its old ref.
-      // Screen paths normally encode the row/index and prevent this. Stateless
-      // resolution cannot fail closed without restoring a generation epoch or
-      // folding mutable state into identity, both of which break stable-ref reuse.
-      // The delta still emits current state and lists the departed ref in
-      // `removed`; hosts must apply both before acting on retained refs.
+      // the first sibling shifts the survivor onto the removed node's old ref.
+      // That recycled ref is NOT in `removed`, so even a contract-following host
+      // can reuse it and target the survivor. Screen paths normally encode the
+      // row/index and prevent this collision. Fully closing it requires a stable
+      // extractor node id or cross-observe generation tracking; the latter is
+      // deliberately omitted because it defeats stable-ref reuse. If sibling
+      // bodies differ, the recycled ref is re-emitted with current state, but the
+      // underlying node swap remains unsignaled.
       el.selector,
     ].join("\u001f"),
   );
@@ -512,18 +514,16 @@ export function resolveTarget(
 ): InteractiveElement | null {
   const parsedRef = parseProvisionRef(target);
   if (parsedRef !== null) {
-    // Staleness guard: a ref whose element is gone matches nothing here and
-    // returns null (the caller re-observes). Stable selectors need no generation
-    // counter; positional-only identity reuse is the bounded exception documented
-    // at stableElementId.
+    // Staleness guard: a ref whose identity is absent returns null (the caller
+    // re-observes). The unguarded positional identity-recycling exception is
+    // documented at stableElementId.
     //
     // Ordinal caveat (same-hash duplicates): the `_<ordinal>` suffix positionally
     // disambiguates elements that hash IDENTICALLY. Mutable state is intentionally
     // absent from that hash, so members need not have identical checked/value/
     // visibility state. If one is removed, an ordinal can resolve to a survivor;
-    // the delta emits state changes and lists departed refs in `removed`, which a
-    // host must apply before acting. An ordinal past the current group size still
-    // returns null.
+    // the recycled ordinal is not invalidated by `removed`. An ordinal past the
+    // current group size still returns null.
     const matches = elements.filter((el) => stableElementId(el) === parsedRef.id);
     if (parsedRef.ordinal !== null) {
       const match = matches[parsedRef.ordinal - 1];
