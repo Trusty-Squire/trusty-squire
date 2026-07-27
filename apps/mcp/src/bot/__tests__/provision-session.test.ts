@@ -38,7 +38,11 @@ import {
   makeTwoCaptchaVaultProxy,
   toCompactElement,
 } from "../provision-session.js";
-import { looksLikeCodeIdentifier, findCredentialTokens, keyFamilyPrefix } from "../credential-shape.js";
+import {
+  looksLikeCodeIdentifier,
+  findCredentialTokens,
+  keyFamilyPrefix,
+} from "../credential-shape.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
 // the rest get inert defaults so the fixtures stay readable.
@@ -119,9 +123,17 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
   });
 
   it("keeps checked for real checkables (true AND false), omits when null", () => {
-    expect(toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a", NONE).checked).toBe(true);
-    expect(toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b", NONE).checked).toBe(false);
-    expect("checked" in toCompactElement(el({ tag: "button", checked: null }), "@g1:c", NONE)).toBe(false);
+    expect(
+      toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a", NONE)
+        .checked,
+    ).toBe(true);
+    expect(
+      toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b", NONE)
+        .checked,
+    ).toBe(false);
+    expect("checked" in toCompactElement(el({ tag: "button", checked: null }), "@g1:c", NONE)).toBe(
+      false,
+    );
   });
 
   it("emits topmost only when false and occluded_by only when set", () => {
@@ -132,22 +144,39 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     );
     expect(occluded.topmost).toBe(false);
     expect(occluded.occluded_by).toBe("modal:dialog");
-    const top = toCompactElement(el({ tag: "button", visibleText: "Top", topmost: true }), "@g1:t", NONE);
+    const top = toCompactElement(
+      el({ tag: "button", visibleText: "Top", topmost: true }),
+      "@g1:t",
+      NONE,
+    );
     expect("topmost" in top).toBe(false);
     expect("occluded_by" in top).toBe(false);
   });
 
   it("is materially smaller than the full element shape", () => {
     const e = el({
-      tag: "a", role: "link", visibleText: "Pricing", href: "/pricing",
+      tag: "a",
+      role: "link",
+      visibleText: "Pricing",
+      href: "/pricing",
       screenPath: "navigation:skip-to-contentopenroutersearch > link:pricing",
-      container: "navigation:skip-to-contentopenroutersearch", topmost: true,
+      container: "navigation:skip-to-contentopenroutersearch",
+      topmost: true,
     });
     const full = {
-      ref: "@g1:z", label: "Pricing", tag: "a", role: "link", type: null, value: null,
-      checked: null, href: "/pricing", testId: null,
+      ref: "@g1:z",
+      label: "Pricing",
+      tag: "a",
+      role: "link",
+      type: null,
+      value: null,
+      checked: null,
+      href: "/pricing",
+      testId: null,
       path: "navigation:skip-to-contentopenroutersearch > link:pricing",
-      container: "navigation:skip-to-contentopenroutersearch", topmost: true, occluded_by: null,
+      container: "navigation:skip-to-contentopenroutersearch",
+      topmost: true,
+      occluded_by: null,
     };
     const compactBytes = JSON.stringify(toCompactElement(e, "@g1:z", NONE)).length;
     expect(compactBytes).toBeLessThan(JSON.stringify(full).length * 0.6);
@@ -400,7 +429,9 @@ describe("isInboxReadHost", () => {
   });
 
   it("does NOT flag the service or identity-provider hosts (those stay in the recipe)", () => {
-    expect(isInboxReadHost("https://next-app.useplunk.com/auth/verify-email?token=abc")).toBe(false);
+    expect(isInboxReadHost("https://next-app.useplunk.com/auth/verify-email?token=abc")).toBe(
+      false,
+    );
     expect(isInboxReadHost("https://accounts.google.com/o/oauth2/v2/auth")).toBe(false);
     expect(isInboxReadHost("https://github.com/login/oauth/authorize")).toBe(false);
     expect(isInboxReadHost("not a url")).toBe(false);
@@ -494,9 +525,9 @@ describe("extractSenderEmail (source_from provenance — wrong-sender guard)", (
   });
 
   it("buildVerificationResult surfaces source_from when provided, omits it otherwise", () => {
-    expect(buildVerificationResult("sk_1", "492013", null, "search-api@brave.com").source_from).toBe(
-      "search-api@brave.com",
-    );
+    expect(
+      buildVerificationResult("sk_1", "492013", null, "search-api@brave.com").source_from,
+    ).toBe("search-api@brave.com");
     expect(buildVerificationResult("sk_1", "492013", null).source_from).toBeUndefined();
   });
 });
@@ -528,8 +559,12 @@ describe("redactEmailForTrace (PR3 — user email never lands in a recipe)", () 
 
 describe("scrubKnownEmail (PR3d — exact known-email scrub in trace text)", () => {
   it("replaces every occurrence of the known email with the slot token", () => {
-    expect(scrubKnownEmail("signed in as ada@x.com", "ada@x.com")).toBe("signed in as ${EMAIL_ALIAS}");
-    expect(scrubKnownEmail("ada@x.com / ada@x.com", "ada@x.com")).toBe("${EMAIL_ALIAS} / ${EMAIL_ALIAS}");
+    expect(scrubKnownEmail("signed in as ada@x.com", "ada@x.com")).toBe(
+      "signed in as ${EMAIL_ALIAS}",
+    );
+    expect(scrubKnownEmail("ada@x.com / ada@x.com", "ada@x.com")).toBe(
+      "${EMAIL_ALIAS} / ${EMAIL_ALIAS}",
+    );
   });
 
   it("is a no-op when the email is null, empty, or absent", () => {
@@ -716,9 +751,9 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
 
   it("allows tenant sibling hosts once they are added after organic redirect", () => {
     expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com"])).toBe(false);
-    expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com", "tsagent.kinde.com"])).toBe(
-      true,
-    );
+    expect(
+      hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com", "tsagent.kinde.com"]),
+    ).toBe(true);
   });
 
   it("HARD-blocks Squire's own control plane even when the agent added it to the allow-set", () => {
@@ -731,9 +766,9 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
       "https://trusty-squire-api.fly.dev/v1/vault/credentials",
       "https://trustysquire.com/vault",
     ]) {
-      expect(hostAllowed(url, ["trustysquire.ai", "trusty-squire-api.fly.dev", "trustysquire.com"])).toBe(
-        false,
-      );
+      expect(
+        hostAllowed(url, ["trustysquire.ai", "trusty-squire-api.fly.dev", "trustysquire.com"]),
+      ).toBe(false);
     }
   });
 });
@@ -970,7 +1005,9 @@ describe("isOnboardingOrOrgForm (setup forms are not walls)", () => {
     expect(isOnboardingOrOrgForm("Tell us about yourself to finish setup")).toBe(true);
   });
   it("detects growthbook's 'you aren't part of an organization yet'", () => {
-    expect(isOnboardingOrOrgForm("You aren't part of an organization yet. Create one to continue.")).toBe(true);
+    expect(
+      isOnboardingOrOrgForm("You aren't part of an organization yet. Create one to continue."),
+    ).toBe(true);
   });
   it("detects an anyscale-style create-org/workspace form", () => {
     expect(isOnboardingOrOrgForm("Create your organization Name your team")).toBe(true);
@@ -982,13 +1019,19 @@ describe("isOnboardingOrOrgForm (setup forms are not walls)", () => {
 
 describe("hasOneTimeSecretModal (Luma one-time reveal)", () => {
   it("detects 'you won't be able to see this again'", () => {
-    expect(hasOneTimeSecretModal("Copy your API key. You won't be able to view it again.")).toBe(true);
+    expect(hasOneTimeSecretModal("Copy your API key. You won't be able to view it again.")).toBe(
+      true,
+    );
   });
   it("detects 'make sure to copy your secret now'", () => {
-    expect(hasOneTimeSecretModal("Make sure to copy your secret key now and store it securely.")).toBe(true);
+    expect(
+      hasOneTimeSecretModal("Make sure to copy your secret key now and store it securely."),
+    ).toBe(true);
   });
   it("does NOT fire on an ordinary always-visible key field", () => {
-    expect(hasOneTimeSecretModal("Your API key: sk-live-abc123 (always available here)")).toBe(false);
+    expect(hasOneTimeSecretModal("Your API key: sk-live-abc123 (always available here)")).toBe(
+      false,
+    );
   });
 });
 
@@ -997,13 +1040,17 @@ describe("hasExistingAccountSignal (real-identity already registered — OpenRou
     expect(hasExistingAccountSignal("Sign in to continue. Invalid credentials.")).toBe(true);
   });
   it("detects 'an account with this email already exists'", () => {
-    expect(hasExistingAccountSignal("An account with this email already exists. Sign in instead.")).toBe(true);
+    expect(
+      hasExistingAccountSignal("An account with this email already exists. Sign in instead."),
+    ).toBe(true);
   });
   it("detects 'email is already registered'", () => {
     expect(hasExistingAccountSignal("That email is already registered.")).toBe(true);
   });
   it("does NOT fire on a clean fresh signup form", () => {
-    expect(hasExistingAccountSignal("Create your account — enter your email to get started")).toBe(false);
+    expect(hasExistingAccountSignal("Create your account — enter your email to get started")).toBe(
+      false,
+    );
   });
   it("does NOT fire on a bare 'Already have an account? Sign in' link", () => {
     expect(hasExistingAccountSignal("Sign up. Already have an account? Sign in")).toBe(false);
@@ -1063,12 +1110,16 @@ describe("looksLikeLoginChooser (auth wall, not the app surface)", () => {
 
 describe("hasNotFoundPageSignal (stale/404 signup URL)", () => {
   it("detects a sparse 404 page (the Loops /signup case)", () => {
-    expect(hasNotFoundPageSignal("404 L'oops! The page you're looking for doesn't exist. Home")).toBe(true);
+    expect(
+      hasNotFoundPageSignal("404 L'oops! The page you're looking for doesn't exist. Home"),
+    ).toBe(true);
     expect(hasNotFoundPageSignal("Page not found")).toBe(true);
     expect(hasNotFoundPageSignal("Sorry, that page couldn't be found.")).toBe(true);
   });
   it("does NOT fire on a real signup form", () => {
-    expect(hasNotFoundPageSignal("Sign up for Loops Work Email First Name Company Sign up")).toBe(false);
+    expect(hasNotFoundPageSignal("Sign up for Loops Work Email First Name Company Sign up")).toBe(
+      false,
+    );
   });
   it("does NOT fire on a long app page that merely mentions 404", () => {
     const longPage = "Dashboard ".repeat(80) + "HTTP 404 errors this week: 3";
@@ -1185,7 +1236,12 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
 describe("makeTwoCaptchaVaultProxy (2Captcha through the injecting vault proxy)", () => {
   it("injects the key as a ${SECRET} query param (in.php/res.php) — never raw", async () => {
     const useCredential = vi.fn().mockResolvedValue({
-      response: { status: 200, headers: {}, body: JSON.stringify({ status: 1, request: "id" }), truncated: false },
+      response: {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({ status: 1, request: "id" }),
+        truncated: false,
+      },
     });
     const proxy = makeTwoCaptchaVaultProxy({ useCredential } as unknown as ApiClient);
     const r = await proxy.request({

@@ -162,9 +162,12 @@ export interface Observation {
   // previous observation; `delta` is true and `unchanged` counts the elements
   // that were identical and therefore omitted (present in the persisted
   // snapshot_file). `removed` lists refs that were present last observe and are
-  // now gone (usually empty). On a FULL compact emit `delta` is false, `elements`
-  // is the complete set, and `unchanged`/`removed` are absent. A full snapshot is
-  // emitted on the first observe, a URL change, or high churn (SPA re-render).
+  // now gone (usually empty). On a FULL compact emit `delta` is false and
+  // `unchanged`/`removed` are absent; `elements` is the resync set but may omit
+  // collapsed chrome links that remain in snapshot_file. If persistence fails,
+  // snapshot_file is absent and `elements` is instead complete and uncollapsed.
+  // A full snapshot is emitted on the first observe, a URL change, or high churn
+  // (SPA re-render).
   delta?: boolean;
   unchanged?: number;
   removed?: string[];
@@ -1467,12 +1470,13 @@ export function generatePassword(length = 24): string {
 // Observation verbosity — ONE ordered knob (docs/DESIGN-observe-compact.md), set
 // per call via operate_observe{detail} / operate_act{detail}:
 //   "none"    — bare ack, no perception (operate_act only; for chained fills).
-//   "compact" — text + actionable elements; empty fields omitted, value→value_len,
-//               `container` dropped, no screen/accessibility. The DEFAULT.
+//   "compact" — stable-ref element/text deltas + a complete snapshot pointer;
+//               empty fields omitted, value→value_len, `path`/`container`
+//               dropped from the wire, no screen/accessibility. The DEFAULT.
 //   "full"    — the legacy payload: screen + accessibility + full element fields.
-// Compact is information-equivalent to full (eval + live smoke), ~50% smaller, so
-// it's the default with no global override — the planner escalates to "full" per
-// call on a genuinely ambiguous step.
+// The persisted compact snapshot preserves the complete inventory; see the
+// design doc for reconstruction and measured savings. The planner escalates to
+// "full" per call on a genuinely ambiguous step.
 export type ObserveDetail = "none" | "compact" | "full";
 
 // One element, compacted: ref/label/tag always; every other field omitted when
@@ -1574,9 +1578,9 @@ function persistObserveSnapshot(
 
 // An actionable control the chrome-link collapse must NEVER drop: any
 // button/input, or an element whose role is button/tab/checkbox/radio/menuitem,
-// or a type=submit. Dismiss/consent/gate controls (Close banner, Manage cookies,
-// Dismiss sign-in) are all buttons, so they survive the collapse by construction
-// even when they live in a chrome region (aside/footer/dialog).
+// or a type=submit. Button-shaped dismiss/consent/gate controls survive by
+// construction even in a chrome region; link-shaped variants are guarded
+// separately by isPlainChromeLink.
 export function isActionableControl(el: InteractiveElement): boolean {
   const role = (el.role ?? "").toLowerCase();
   if (
@@ -1649,11 +1653,7 @@ export function isPlainChromeLink(el: InteractiveElement): boolean {
   if (!isChromeRegionPath(el)) return false;
   if (el.inConsentWidget === true) return false;
   const href = (el.href ?? "").trim();
-  if (
-    href.length === 0 ||
-    href.startsWith("#") ||
-    href.toLowerCase().startsWith("javascript:")
-  ) {
+  if (href.length === 0 || href.startsWith("#") || href.toLowerCase().startsWith("javascript:")) {
     return false;
   }
   if (DISMISS_CONSENT_LABEL_RE.test(elementRef(el))) return false;

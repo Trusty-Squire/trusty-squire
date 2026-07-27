@@ -24,9 +24,21 @@ import { toCompactElement, elementRef } from "../provision-session.js";
 
 function el(over: Partial<InteractiveElement>): InteractiveElement {
   return {
-    index: 0, tag: "button", type: null, id: null, name: null, placeholder: null,
-    ariaLabel: null, role: null, labelText: null, visibleText: null, selector: "x",
-    visible: true, inViewport: true, inConsentWidget: false, ...over,
+    index: 0,
+    tag: "button",
+    type: null,
+    id: null,
+    name: null,
+    placeholder: null,
+    ariaLabel: null,
+    role: null,
+    labelText: null,
+    visibleText: null,
+    selector: "x",
+    visible: true,
+    inViewport: true,
+    inConsentWidget: false,
+    ...over,
   };
 }
 
@@ -36,17 +48,32 @@ const NONE = new Set<string>();
 // alters (container + raw value) — the baseline "what full mode can distinguish".
 function fullKey(e: InteractiveElement): string {
   return JSON.stringify([
-    elementRef(e), e.tag, e.role, e.type, e.href ?? null, e.screenPath ?? null,
-    e.container ?? null, e.checked ?? null, e.topmost ?? null, e.occludedBy ?? null,
+    elementRef(e),
+    e.tag,
+    e.role,
+    e.type,
+    e.href ?? null,
+    e.screenPath ?? null,
+    e.container ?? null,
+    e.checked ?? null,
+    e.topmost ?? null,
+    e.occludedBy ?? null,
     e.value ?? null,
   ]);
 }
 // Identity derivable from the COMPACT element (no ref).
 function compactKey(c: ReturnType<typeof toCompactElement>): string {
   return JSON.stringify([
-    c.label, c.tag, c.role ?? null, c.type ?? null, c.href ?? null, c.path ?? null,
-    "checked" in c ? c.checked : null, "topmost" in c ? c.topmost : null,
-    c.occluded_by ?? null, c.value_len ?? 0,
+    c.label,
+    c.tag,
+    c.role ?? null,
+    c.type ?? null,
+    c.href ?? null,
+    c.path ?? null,
+    "checked" in c ? c.checked : null,
+    "topmost" in c ? c.topmost : null,
+    c.occluded_by ?? null,
+    c.value_len ?? 0,
   ]);
 }
 
@@ -92,46 +119,136 @@ function evalSet(name: string, els: InteractiveElement[]): void {
 describe("observe-compact eval — information equivalence on hard cases", () => {
   it("repeated buttons disambiguate by path (GCP-style 'Show key' rows)", () => {
     evalSet("repeated-show-key", [
-      el({ tag: "button", visibleText: "Show key", screenPath: "row:browser-key > button:show-key", container: "row:browser-key" }),
-      el({ tag: "button", visibleText: "Show key", screenPath: "row:server-key > button:show-key", container: "row:server-key" }),
-      el({ tag: "button", visibleText: "More options", screenPath: "row:browser-key > button:more", container: "row:browser-key" }),
-      el({ tag: "button", visibleText: "More options", screenPath: "row:server-key > button:more", container: "row:server-key" }),
+      el({
+        tag: "button",
+        visibleText: "Show key",
+        screenPath: "row:browser-key > button:show-key",
+        container: "row:browser-key",
+      }),
+      el({
+        tag: "button",
+        visibleText: "Show key",
+        screenPath: "row:server-key > button:show-key",
+        container: "row:server-key",
+      }),
+      el({
+        tag: "button",
+        visibleText: "More options",
+        screenPath: "row:browser-key > button:more",
+        container: "row:browser-key",
+      }),
+      el({
+        tag: "button",
+        visibleText: "More options",
+        screenPath: "row:server-key > button:more",
+        container: "row:server-key",
+      }),
     ]);
   });
 
   it("link vs button with the same label disambiguate by tag+href (OpenRouter nav 'Models')", () => {
     evalSet("nav-models", [
-      el({ tag: "a", role: "link", visibleText: "Models", href: "/models", screenPath: "nav:top > link:models", container: "nav:top" }),
-      el({ tag: "button", visibleText: "Models", screenPath: "nav:top > button:models", container: "nav:top" }),
+      el({
+        tag: "a",
+        role: "link",
+        visibleText: "Models",
+        href: "/models",
+        screenPath: "nav:top > link:models",
+        container: "nav:top",
+      }),
+      el({
+        tag: "button",
+        visibleText: "Models",
+        screenPath: "nav:top > button:models",
+        container: "nav:top",
+      }),
     ]);
   });
 
   it("modal overlay: background duplicate distinguished by occluded_by/topmost", () => {
     evalSet("modal-overlay", [
-      el({ tag: "button", visibleText: "Continue", topmost: true, screenPath: "dialog:add-key > button:continue", container: "dialog:add-key" }),
-      el({ tag: "button", visibleText: "Continue", topmost: false, occludedBy: "dialog:add-key", screenPath: "form:signup > button:continue", container: "form:signup" }),
+      el({
+        tag: "button",
+        visibleText: "Continue",
+        topmost: true,
+        screenPath: "dialog:add-key > button:continue",
+        container: "dialog:add-key",
+      }),
+      el({
+        tag: "button",
+        visibleText: "Continue",
+        topmost: false,
+        occludedBy: "dialog:add-key",
+        screenPath: "form:signup > button:continue",
+        container: "form:signup",
+      }),
     ]);
   });
 
   it("icon-only controls keep their derived label + testId", () => {
     evalSet("icon-only", [
-      el({ tag: "button", visibleText: null, ariaLabel: "Copy key", testId: "copy-key", screenPath: "dialog:key > button:copy", container: "dialog:key" }),
-      el({ tag: "button", visibleText: null, iconLabel: "Sign in with Google", screenPath: "main:signin > button:google", container: "main:signin" }),
+      el({
+        tag: "button",
+        visibleText: null,
+        ariaLabel: "Copy key",
+        testId: "copy-key",
+        screenPath: "dialog:key > button:copy",
+        container: "dialog:key",
+      }),
+      el({
+        tag: "button",
+        visibleText: null,
+        iconLabel: "Sign in with Google",
+        screenPath: "main:signin > button:google",
+        container: "main:signin",
+      }),
     ]);
   });
 
   it("signup error state: error region + the email field it refers to stay distinct", () => {
     evalSet("signup-error", [
-      el({ tag: "div", role: "alert", visibleText: "Sorry, we don't allow public domains", screenPath: "form:signup > alert:email-error", container: "form:signup" }),
-      el({ tag: "input", type: "email", value: "user@gmail.com", screenPath: "form:signup > input:work-email", container: "form:signup" }),
-      el({ tag: "input", type: "text", value: "Acme", screenPath: "form:signup > input:org", container: "form:signup" }),
+      el({
+        tag: "div",
+        role: "alert",
+        visibleText: "Sorry, we don't allow public domains",
+        screenPath: "form:signup > alert:email-error",
+        container: "form:signup",
+      }),
+      el({
+        tag: "input",
+        type: "email",
+        value: "user@gmail.com",
+        screenPath: "form:signup > input:work-email",
+        container: "form:signup",
+      }),
+      el({
+        tag: "input",
+        type: "text",
+        value: "Acme",
+        screenPath: "form:signup > input:org",
+        container: "form:signup",
+      }),
     ]);
   });
 
   it("checkbox states (true/false) survive for real checkables", () => {
     evalSet("checkboxes", [
-      el({ tag: "input", type: "checkbox", checked: false, visibleText: "I agree to the Terms", screenPath: "form:signup > checkbox:tos", container: "form:signup" }),
-      el({ tag: "input", type: "checkbox", checked: true, visibleText: "Subscribe", screenPath: "form:signup > checkbox:news", container: "form:signup" }),
+      el({
+        tag: "input",
+        type: "checkbox",
+        checked: false,
+        visibleText: "I agree to the Terms",
+        screenPath: "form:signup > checkbox:tos",
+        container: "form:signup",
+      }),
+      el({
+        tag: "input",
+        type: "checkbox",
+        checked: true,
+        visibleText: "Subscribe",
+        screenPath: "form:signup > checkbox:news",
+        container: "form:signup",
+      }),
     ]);
   });
 });

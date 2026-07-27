@@ -81,7 +81,9 @@ or snapshot pointer.
 
 Measured on a real six-observe Casetify sequence, compact deltas cut context by
 78%; dropping `path` from the wire payload raised the cut to 85%. The
-token-weighted aggregate over the real corpus is 60–65%.
+token-weighted aggregate over the real corpus is approximately 66%. Across
+approximately 58,000 same-selector re-observe pairs, mutable path-region data
+re-minted 0.00% of refs.
 
 ## Phase 2 — the `detail` ladder ✅ shipped
 
@@ -103,10 +105,11 @@ Compact observations minimize repeated context without making the stream lossy:
 
 - **Stable refs.** Refs use `@e:<identity>_<ordinal>` and do not contain an
   observation generation. An unchanged element keeps resolving across observes.
-  Normally, if its identity changes or it disappears, the old ref no longer
-  resolves and is listed in `removed` when the response is a delta. There is one
-  bounded, unguarded exception: when sibling controls are distinguishable only
-  by a positional `:nth-child`/`:nth-of-type` selector and `screenPath` does not
+  The identity includes the element selector, so same-label siblings with
+  distinct stable selectors get distinct refs; after one is removed, its old ref
+  resolves to `null` instead of retargeting its sibling. There is one bounded,
+  unguarded exception: when sibling controls are distinguishable only by a
+  positional `:nth-child`/`:nth-of-type` selector and `screenPath` does not
   distinguish their row, removing the first sibling shifts the survivor onto the
   removed node's identity. The removed node's old ref is then not in `removed`
   and still resolves to the survivor. `screenPath` normally includes a row/index
@@ -125,24 +128,33 @@ Compact observations minimize repeated context without making the stream lossy:
   previous text. Changed text is emitted in full.
 - **Complete snapshot.** Every compact observe atomically replaces one
   session-scoped JSON file containing the complete current text and element
-  inventory, including `path`. Its session directory is mode `0700` and the file
-  is mode `0600`, so the host can safely re-expand after its own context compacts.
+  inventory, including `path` and `text_truncated`. Its session directory is mode
+  `0700` and the file is mode `0600`, so the host can safely re-expand after its
+  own context compacts. If persistence fails, the response falls back to
+  `delta:false` with every element uncollapsed on the wire and no `snapshot_file`;
+  the delta baseline is invalidated so the next compact observe is another full
+  resync.
 - **Safe chrome collapse.** Full compact resyncs may omit only navigational
   `<a>`/link elements in chrome regions such as navigation, banners, asides, and
-  footers. Buttons, inputs, role-controls, submit controls, and non-navigating
-  dismiss/consent links are never collapsed. `chrome_links_collapsed` reports the
+  footers. Buttons, inputs, role-controls, submit controls, fragment or
+  JavaScript links, links without an `href`, links inside a consent widget, and
+  links labeled as close/dismiss/accept/reject/decline/agree/cookie/consent/
+  preferences actions are never collapsed. `chrome_links_collapsed` reports the
   omitted count; the file still contains them.
 
 `detail:"full"` bypasses all delta and collapse behavior and preserves the rich
-payload shape.
+payload shape byte-for-byte. As an unsurfaced side effect it replaces the
+persisted snapshot, invalidates the compact baseline so the next compact observe
+is a full resync, and removes the stale snapshot if persistence fails.
 
 ## Regression gates
 
 `apps/mcp/src/bot/__tests__/observe-delta.test.ts` owns the lossless-resync,
-actionable-never-dropped, clickable-unchanged, text-delta, corpus budget, snapshot
-permission, and full-escape-hatch invariants. The corpus budget requires at least
-50% token-weighted aggregate savings while allowing low-savings single-observe
-and high-churn runs.
+actionable-never-dropped (including dismiss anchors), clickable-unchanged,
+text-delta, distinct-selector no-retarget, corpus budget, snapshot permission and
+failure fallback, remove-then-restore resynchronization, and full-escape-hatch
+invariants. The corpus budget requires at least 50% token-weighted aggregate
+savings while allowing low-savings single-observe and high-churn runs.
 
 ## Non-goals / explicitly avoided
 

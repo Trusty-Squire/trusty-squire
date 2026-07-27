@@ -695,9 +695,21 @@ describe("observe-delta harness", () => {
     const refB = refsBefore.get(before[1]!) as string; // the survivor
     expect(refA).not.toBe(refB);
 
-    const b1 = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: before, prev: null });
+    const b1 = buildCompactObservation({
+      sessionId: "s",
+      url: URL,
+      text: "",
+      elements: before,
+      prev: null,
+    });
     const after = [remove("#remove-1")]; // #remove-0 gone; #remove-1 survives
-    const b2 = buildCompactObservation({ sessionId: "s", url: URL, text: "", elements: after, prev: b1.nextState });
+    const b2 = buildCompactObservation({
+      sessionId: "s",
+      url: URL,
+      text: "",
+      elements: after,
+      prev: b1.nextState,
+    });
 
     // removed reporting is consistent: exactly the removed element's ref.
     expect(b2.observation.delta).toBe(true);
@@ -810,9 +822,9 @@ describe("observe-delta harness", () => {
     expect(b2.observation.delta).toBe(true);
     expect(b2.observation.removed).toEqual([survivorOldRef]);
     expect(b2.observation.removed).not.toContain(removedNodeRef);
-    expect(
-      b2.observation.elements.find((entry) => entry.ref === removedNodeRef)?.checked,
-    ).toBe(false);
+    expect(b2.observation.elements.find((entry) => entry.ref === removedNodeRef)?.checked).toBe(
+      false,
+    );
     // The changed body exposes the survivor's current state, but neither
     // `removed` nor resolveTarget signals that the underlying node changed.
     expect(resolveTarget(after, removedNodeRef)).toBe(after[0]);
@@ -859,8 +871,8 @@ describe("observe-delta harness", () => {
 
   it("INV-token-budget: the delta path meaningfully shrinks a repeated-observe run (delta not silently disabled)", () => {
     // NOTE: the ≥50%-aggregate guard against REAL data lives in the corpus test
-    // below — the measured token-weighted aggregate over the corpus is ~60% and
-    // the per-run tail legitimately dips under 20% (single-observe / high-churn
+    // below; docs/DESIGN-observe-compact.md owns the current measured aggregate.
+    // The per-run tail legitimately dips under 20% (single-observe / high-churn
     // runs), so a per-run <30% assertion would false-fail. This synthetic case is
     // a multi-observe run with repetition, so it clears the floor with margin and
     // guards against a regression that silently turns delta OFF.
@@ -932,9 +944,10 @@ describe("observe-delta harness", () => {
 //
 // Runs only where the onboarding corpus exists (a dev box). Groups the per-round
 // captures into runs, replays each run through the delta core, and asserts the
-// TOKEN-WEIGHTED aggregate saving across the sample is ≥ 50% (measured ~60% on
-// the full corpus). Per-run savings are PRINTED (p10/median/p90) but NOT asserted
-// — the tail legitimately includes single-observe and high-churn runs near 0%.
+// TOKEN-WEIGHTED aggregate saving across the sample is ≥ 50%; the design doc
+// owns the current measured aggregate. Per-run savings are PRINTED
+// (p10/median/p90) but NOT asserted — the tail legitimately includes
+// single-observe and high-churn runs near 0%.
 // `value` is never committed and is replaced with a same-length placeholder here
 // so the field-fill change-signal survives without carrying any real secret.
 function corpusDir(): string {
@@ -1289,11 +1302,29 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     // (which reset to B, without X) would never re-add it. Invalidating the
     // baseline on failure forces C to be a full re-sync, so X is present.
     const withX = (): unknown[] => [
-      el({ tag: "button", role: "button", visibleText: "Continue", screenPath: "form:x > button:continue", selector: "#continue" }),
-      el({ tag: "button", role: "button", visibleText: "Special X", screenPath: "form:x > button:x", selector: "#x" }),
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Continue",
+        screenPath: "form:x > button:continue",
+        selector: "#continue",
+      }),
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Special X",
+        screenPath: "form:x > button:x",
+        selector: "#x",
+      }),
     ];
     const withoutX = (): unknown[] => [
-      el({ tag: "button", role: "button", visibleText: "Continue", screenPath: "form:x > button:continue", selector: "#continue" }),
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Continue",
+        screenPath: "form:x > button:continue",
+        selector: "#continue",
+      }),
     ];
     h.elements = withX();
     h.visibleText = "Form";
@@ -1321,7 +1352,9 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
           null
         : new Map(c.elements.map((e) => [e.ref, e]));
     expect(c.delta).toBe(false); // full re-sync, not an A-relative delta
-    expect([...(cView as Map<string, ObservedElement>).values()].some((e) => e.label === "Special X")).toBe(true);
+    expect(
+      [...(cView as Map<string, ObservedElement>).values()].some((e) => e.label === "Special X"),
+    ).toBe(true);
   });
 
   it("detail:full refreshes the persisted snapshot as a side-effect (no stale re-expansion)", async () => {
@@ -1333,7 +1366,13 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
 
     // Navigate to a DIFFERENT page, observed ONLY through full mode.
     const pageB = [
-      el({ tag: "button", role: "button", visibleText: "Only on B", screenPath: "main:b > button:x", selector: "#b" }),
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Only on B",
+        screenPath: "main:b > button:x",
+        selector: "#b",
+      }),
     ];
     h.elements = pageB;
     h.visibleText = "Page B";
