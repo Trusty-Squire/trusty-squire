@@ -102,7 +102,6 @@ apps/
 
 packages/
   vault/        Encrypted credential storage primitives.
-  inbox/        Inbound email parsing and verification-code helpers.
   skill-schema/ Shared Zod schemas for signed skills, replay steps, and failure
                 taxonomy.
 ```
@@ -187,6 +186,12 @@ capture -> synthesize -> sign -> publish -> verify -> active
 - Verification replays the flow before it becomes active.
 - Active skills serve future provisions faster and with less exploration.
 
+Only inventory-backed actions are promotable. A session can still complete by
+using `operate_act` with a live `text=…` or `css=…` locator when a visible
+control has no observed ref, but that off-inventory click cannot be synthesized
+into a portable skill step. Such a session is therefore skipped by
+auto-promotion and cannot be saved as an operator recipe.
+
 The same captures must produce byte-identical skills. Promotion must not depend
 on clocks, random numbers, or plaintext credentials.
 
@@ -255,7 +260,6 @@ The public docs set is intentionally small:
 - `docs/ARCHITECTURE.md`: canonical system overview and data flows.
 - `docs/VAULT-OPERATIONS.md`: vault operator runbook.
 - `docs/DEPLOY-registry.md`: registry deployment notes.
-- `docs/BUSINESS-MODEL.md`: pricing and positioning model.
 
 Design memos, spike notes, stale implementation plans, and E2E scratchpads
 belong in git history or private planning material, not in the public launch

@@ -164,7 +164,12 @@ const OBSERVE_DELTA_CONTRACT =
   "in removed, and retain the remaining elements counted by unchanged. text_unchanged:true means reuse the " +
   "prior text because text is empty. snapshot_file points to the complete current snapshot (all elements, " +
   "with path). An empty delta (no el_table) means nothing changed, not an empty page. " +
-  'detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ';
+  'detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ' +
+  "If a control you can see in `text`/the screenshot has NO row in el_table (a bare unlabeled clickable " +
+  'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_act click/js_click ' +
+  'target=`text="…"` or `css=…` (see operate_act). `click` respects actionability and throws if an overlay ' +
+  "intercepts; dismiss the overlay or deliberately use `js_click`, which directly dispatches through a " +
+  "transparent overlay. ";
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
@@ -321,6 +326,21 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   description:
     "Take one action in a provisioning session, then return the resulting " +
     "observation. kinds: click (target=element ref, preferably an el_table row's ref), type (target + text), " +
+    "" +
+    "TARGET FALLBACK (clicking only) — when a control you can SEE (in the " +
+    "observation text or screenshot) has NO ref in el_table (a bare click-handler " +
+    '<div> with no role/label, e.g. a SPA "Add To Cart"), pass target as a locator ' +
+    'instead of a ref: `text="Add To Cart"` (a CLICKABLE element whose visible ' +
+    "text matches, case-insensitive, hidden descendants ignored, open shadow roots " +
+    "pierced) or `css=<selector>` (a raw CSS selector). Only for click / js_click " +
+    "(a form field to type into has a ref — use it). Resolved against the LIVE " +
+    "page, not el_table, so it reaches controls the inventory never emitted. It " +
+    "refuses an ambiguous match (returns the candidate texts — narrow with an " +
+    "exact text= or a css= selector). `click` is actionability-checked and throws " +
+    "if an overlay intercepts; dismiss the overlay or deliberately use `js_click`, " +
+    "the explicit direct DOM dispatch that fires through a transparent overlay. " +
+    "Prefer a real ref when one exists; reach for " +
+    "text=/css= only when none does. " +
     "goto (url — domain-scoped), press (key, e.g. Enter), oauth_click (target — " +
     "use for 'Continue with Google/GitHub' so the popup is adopted), " +
     "oauth_settle (return to the product page after the OAuth handshake), " +
