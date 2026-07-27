@@ -160,6 +160,23 @@ const LONG_METADATA_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
   <button id="${"benign".repeat(200)}" style="width:200px;height:40px">Save product</button>
 </body></html>`)}`;
 
+const LONG_SAFETY_SUFFIX_FIXTURES = [
+  {
+    source: "visible text",
+    fixture: `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <button style="width:200px;height:40px">${"Benign ".repeat(40)}Save product</button>
+</body></html>`)}`,
+  },
+  {
+    source: "aria-label",
+    fixture: `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <button aria-label="${"benign ".repeat(40)}Save product" style="width:200px;height:40px"></button>
+</body></html>`)}`,
+  },
+] as const;
+
 // Many visible divs — css=div must return ambiguous via the pool cap without
 // running the pairwise O(n^2) nesting scan over all of them.
 const MANY_DIVS_FIXTURE = `data:text/html,${encodeURIComponent(`
@@ -429,7 +446,7 @@ describe("resolvePageTarget (real Chromium)", () => {
       const resolved = await ctrl.resolvePageTarget("css", "button");
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
-      expect(resolved.safetyText.startsWith("Save product")).toBe(true);
+      expect(resolved.safetyText.startsWith("save product")).toBe(true);
       expect(
         shouldBlockUnsafeProvisionAction(
           "Dashboard Products Live mode",
@@ -442,6 +459,29 @@ describe("resolvePageTarget (real Chromium)", () => {
       await page.close();
     }
   });
+
+  it.each(LONG_SAFETY_SUFFIX_FIXTURES)(
+    "blocks billing text after long benign $source content",
+    async ({ fixture }) => {
+      const { ctrl, page } = await pageFor(fixture);
+      try {
+        const resolved = await ctrl.resolvePageTarget("css", "button");
+        expect(resolved.ok).toBe(true);
+        if (!resolved.ok) throw new Error("unreachable");
+        expect(resolved.safetyText).toContain("save product");
+        expect(
+          shouldBlockUnsafeProvisionAction(
+            "Dashboard Products Live mode",
+            { kind: "click", target: resolved.safetyText },
+            { redactTarget: true },
+          ),
+        ).toMatch(/Mode safety guard/);
+        await resolved.handle.dispose();
+      } finally {
+        await page.close();
+      }
+    },
+  );
 
   it("pierces an open shadow root", async () => {
     const { ctrl, page } = await pageFor(SHADOW_FIXTURE);
