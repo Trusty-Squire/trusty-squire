@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { decryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { sealToRecipient } from "@trusty-squire/vault/hpke";
@@ -81,6 +81,7 @@ export default function PaymentApprovalPage() {
   const [binding, setBinding] = useState(false);
   const [savedCardId, setSavedCardId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const jitOrigin = useRef<boolean | null>(null);
 
   const redirectToLogin = useCallback(() => {
     router.replace(`/login?next=/vault/pay/${encodeURIComponent(id)}`);
@@ -131,6 +132,9 @@ export default function PaymentApprovalPage() {
     void fetchState()
       .then((state) => {
         if (cancelled) return;
+        if (jitOrigin.current === null) {
+          jitOrigin.current = state.approval.card_ref === null;
+        }
         setApproval(state.approval);
         setSavedCardId(null);
         if (state.cards.ok) {
@@ -202,7 +206,6 @@ export default function PaymentApprovalPage() {
             return;
           }
           if (current.card_ref !== null) {
-            setError("This payment is already attached to a different card.");
             return;
           }
         } catch (err) {
@@ -224,8 +227,14 @@ export default function PaymentApprovalPage() {
 
   const approve = useCallback(async () => {
     if (approval === null || approval.status !== "pending" || approval.card_ref === null) return;
-    const isJitReview = savedCardId !== null && approval.card_ref === savedCardId;
-    if (isJitReview && boundCardMeta(approval.card_ref, cards ?? [])?.last4 == null) return;
+    if (
+      jitOrigin.current === true &&
+      (savedCardId === null ||
+        approval.card_ref !== savedCardId ||
+        boundCardMeta(approval.card_ref, cards ?? [])?.last4 == null)
+    ) {
+      return;
+    }
     const cardRef = approval.card_ref;
 
     setBusy(true);
@@ -300,9 +309,15 @@ export default function PaymentApprovalPage() {
 
   const boundCard =
     approval !== null ? boundCardMeta(approval.card_ref, cards ?? []) : null;
-  const isJitReview =
-    savedCardId !== null && approval?.card_ref !== null && approval?.card_ref === savedCardId;
+  const isJitOrigin = jitOrigin.current === true;
+  const jitBindingMismatch =
+    isJitOrigin &&
+    approval !== null &&
+    approval.card_ref !== null &&
+    (savedCardId === null || approval.card_ref !== savedCardId);
   const hasBoundCardMetadata = boundCard?.last4 != null;
+  const jitReviewBlocked =
+    isJitOrigin && (jitBindingMismatch || !hasBoundCardMetadata);
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
   const cardLine =
@@ -400,23 +415,27 @@ export default function PaymentApprovalPage() {
             ))}
           </dl>
 
-          {hasBoundCardMetadata || !isJitReview ? (
+          {!jitReviewBlocked ? (
             <p className="pay-anchor">
               Pay with <span className="mono">{cardLine}</span> · {amountLabel} to{" "}
               {approval.merchant}
             </p>
           ) : (
             <div className="app-banner err">
-              {cardMetadataError ??
-                "We couldn't verify the saved card details for this payment."}
-              <button
-                className="linkbtn"
-                type="button"
-                onClick={() => void refreshCardMetadata()}
-                disabled={refreshingCards}
-              >
-                {refreshingCards ? "Retrying…" : "Retry"}
-              </button>
+              {jitBindingMismatch
+                ? "This payment was attached to a different card than the one you added."
+                : cardMetadataError ??
+                  "We couldn't verify the saved card details for this payment."}
+              {!jitBindingMismatch && (
+                <button
+                  className="linkbtn"
+                  type="button"
+                  onClick={() => void refreshCardMetadata()}
+                  disabled={refreshingCards}
+                >
+                  {refreshingCards ? "Retrying…" : "Retry"}
+                </button>
+              )}
             </div>
           )}
 
@@ -424,7 +443,7 @@ export default function PaymentApprovalPage() {
             className="btn-primary"
             type="button"
             onClick={() => void approve()}
-            disabled={busy || (isJitReview && !hasBoundCardMetadata)}
+            disabled={busy || jitReviewBlocked}
           >
             {busy ? "Approving…" : "Approve payment"}
           </button>

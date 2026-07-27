@@ -70,6 +70,7 @@ let cardListFailures = 0;
 let failCardListAfterBind = false;
 let bindFailures = 0;
 let loseBindResponse = false;
+let lostResponseCardRef = "card_new";
 let cardListOverride: unknown[] | null = null;
 
 function approvalBody() {
@@ -80,7 +81,7 @@ function approvalBody() {
     amount_cents: 6000,
     currency: "USD",
     nonce: "nonce",
-    card_ref: bound ? "card_new" : null,
+    card_ref: bound ? lostResponseCardRef : null,
     operator_pubkey: "AAAA",
     expires_at: "2026-07-01T00:10:00.000Z",
     item: "phone case",
@@ -95,6 +96,7 @@ beforeEach(() => {
   failCardListAfterBind = false;
   bindFailures = 0;
   loseBindResponse = false;
+  lostResponseCardRef = "card_new";
   cardListOverride = null;
   vi.clearAllMocks();
   api.apiGet.mockImplementation((path: string) => {
@@ -160,7 +162,9 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(anchor.textContent).not.toContain("9999");
 
     // Approve is the lone action, and only appears after the card is bound.
-    expect(screen.getByRole("button", { name: /Approve payment/ })).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /Approve payment/ }).hasAttribute("disabled"),
+    ).toBe(false);
   });
 
   it("goes straight to the review beat for an already-bound approval", async () => {
@@ -267,5 +271,25 @@ describe("pay page — JIT add-card ceremony", () => {
         ([path]) => path === "/v1/pay/approvals/appr_1",
       ),
     ).toHaveLength(2);
+  });
+
+  it("blocks a JIT approval reconciled to a different card", async () => {
+    loseBindResponse = true;
+    lostResponseCardRef = "card_other";
+    render(<PaymentApprovalPage />);
+    await waitFor(() => expect(screen.getByTestId("card-entry")).toBeTruthy());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("card-entry"));
+
+    const approve = await screen.findByRole("button", { name: /Approve payment/ });
+    expect(approve.hasAttribute("disabled")).toBe(true);
+    expect(
+      screen.getByText(
+        "This payment was attached to a different card than the one you added.",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText(/your saved card/i)).toBeNull();
+    expect(screen.queryByText(/··9999/)).toBeNull();
   });
 });
