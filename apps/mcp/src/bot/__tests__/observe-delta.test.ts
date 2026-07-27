@@ -964,6 +964,41 @@ describe("observe-delta harness", () => {
     expect(resolveTarget(els, refs.get(els[1]!) as string)).toBe(els[1]);
   });
 
+  it("#399 mixed-selector base groups fingerprint only their positional siblings", () => {
+    const sibling = (selector: string): InteractiveElement =>
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Remove",
+        screenPath: "list:cart > button:remove",
+        container: "list:cart",
+        selector,
+      });
+    const stable = sibling("#keep");
+    const removed = sibling("ul>li:nth-of-type(1)>button");
+    const survivor = sibling("ul>li:nth-of-type(2)>button");
+    const before = [stable, removed, survivor];
+    const refsBefore = provisionElementRefs(before);
+    const stableRef = refsBefore.get(stable) as string;
+    const removedRef = refsBefore.get(removed) as string;
+    const survivorRef = refsBefore.get(survivor) as string;
+
+    expect(stableRef).toBe(`@e:${stableElementId(stable)}_1`);
+    for (const positional of [removed, survivor]) {
+      const ref = refsBefore.get(positional) as string;
+      expect(ref).not.toBe(`@e:${stableElementId(positional)}_1`);
+      expect(ref).toMatch(/^@e:[A-Za-z0-9_-]{12}-[A-Za-z0-9_-]{12}_1$/);
+      expect(ref.endsWith(`-${stableElementId(positional)}_1`)).toBe(true);
+    }
+
+    const after = [stable, sibling("ul>li:nth-of-type(1)>button")];
+    const refsAfter = provisionElementRefs(after);
+    expect(refsAfter.get(stable)).toBe(stableRef);
+    expect(resolveTarget(after, stableRef)).toBe(after[0]);
+    expect(resolveTarget(after, removedRef)).toBeNull();
+    expect(resolveTarget(after, survivorRef)).toBeNull();
+  });
+
   it("INV-clickable-unchanged: an unchanged, not-re-emitted element still resolves by its stable ref", () => {
     const seq = sequence();
     const builds = driveCore(seq);
@@ -1643,7 +1678,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     // re-mint every observe (issue #399); this proves that re-mint composes with
     // the failed-persist baseline invalidation — the host never desyncs, and the
     // restored row reappears.
-    const rows = (count: number): unknown[] => {
+    const rowElements = (count: number): unknown[] => {
       const out: unknown[] = [
         el({
           tag: "button",
@@ -1667,10 +1702,10 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
       }
       return out;
     };
-    const removeCount = (obs: { elements: Array<{ label?: string }> }): number =>
-      obs.elements.filter((e) => e.label === "Remove").length;
+    const removeCount = (obs: Observation): number =>
+      rows(obs).filter((e) => e.label === "Remove").length;
 
-    h.elements = rows(3); // A: Done + 3 Remove rows
+    h.elements = rowElements(3); // A: Done + 3 Remove rows
     h.visibleText = "Rows";
     const a = await startProvisionSession({ serviceUrl: URL });
     expect(removeCount(a)).toBe(3);
@@ -1680,7 +1715,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     const blocker = join(dir, "blk-vol");
     writeFileSync(blocker, "x");
     process.env.TRUSTY_SQUIRE_OBSERVE_DIR = join(blocker, "no");
-    h.elements = rows(2);
+    h.elements = rowElements(2);
     const b = await observe(a.session_id, "compact");
     expect(b.delta).toBe(false);
     expect(removeCount(b)).toBe(2);
@@ -1689,12 +1724,12 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     // A-relative delta), so the host sees all three rows again — the volatile
     // group's per-observe re-mint never desyncs across the failure boundary.
     process.env.TRUSTY_SQUIRE_OBSERVE_DIR = dir;
-    h.elements = rows(3);
+    h.elements = rowElements(3);
     const c = await observe(a.session_id, "compact");
     expect(c.delta).toBe(false);
     expect(removeCount(c)).toBe(3);
     // No duplicate refs survived the churn.
-    const refsC = c.elements.map((e) => e.ref);
+    const refsC = rows(c).map((e) => e.ref);
     expect(new Set(refsC).size).toBe(refsC.length);
   });
 

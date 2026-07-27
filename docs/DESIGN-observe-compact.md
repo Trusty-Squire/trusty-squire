@@ -114,19 +114,22 @@ Compact observations minimize repeated context without making the stream lossy:
   controls distinguishable *only* by a positional `:nth-child`/`:nth-of-type`/
   `>> nth=` selector, where removing (or reordering) one shifts a survivor onto
   the removed node's identity — is closed. `volatilePositionalGroups` detects any
-  group of ≥2 same-base-identity siblings whose selectors are all positional and
-  gives every member a GROUP FINGERPRINT: a hash of the group's members'
-  `stableElementId`s in extraction order. `elementIdentity` prefixes those
-  members' refs with the fingerprint (`<fp>-<hash>`), so a group ref is valid
-  ONLY while the group's composition is byte-identical. Any removal, insertion,
-  or reorder changes the fingerprint, so the departed member's old ref appears in
-  `removed` (or a full resync) and resolves to `null` — never to a surviving
-  sibling. Because the identity is derived from composition (not an observe
-  counter), this also holds WITHIN a turn: the act path re-extracts, so a
-  mutation between observe and act changes the fingerprint and forces a
-  re-observe rather than mis-targeting the shifted sibling. A static group's refs
-  stay stable across observes (no wasted churn), and a filled field or toggled
-  checkbox — mutable state is excluded from `stableElementId` — keeps its ref.
+  the ≥2 positional members of any same-base-identity group and gives those
+  members a GROUP FINGERPRINT: a hash of the positional members'
+  `stableElementId`s in extraction order. Stable-anchored members of the same base
+  group keep their plain refs. `elementIdentity` prefixes the positional members'
+  refs with the fingerprint (`<fp>-<hash>`), so a group ref is valid ONLY while
+  its positional membership is byte-identical. A positional-member removal, or
+  any change that alters the positional subset's sequence of distinguishing
+  content, changes the fingerprint except for the bounded residual below. The
+  departed member's old ref therefore appears in `removed` (or a full resync) and
+  resolves to `null` — never to a surviving sibling. Because the identity is
+  derived from composition (not an observe counter), this also holds WITHIN a
+  turn: the act path re-extracts, so a mutation between observe and act changes
+  the fingerprint and forces a re-observe rather than mis-targeting the shifted
+  sibling. A static group's refs stay stable across observes (no wasted churn),
+  and a filled field or toggled checkbox — mutable state is excluded from
+  `stableElementId` — keeps its ref.
   These groups are rare, so the corpus token-weighted aggregate saving is
   unchanged (~66%). Bounded residual: a size-preserving shuffle of TRULY
   indistinguishable members (delete-one-and-insert-one, or a pure reorder, where

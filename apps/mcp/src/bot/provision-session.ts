@@ -442,17 +442,23 @@ function shortHash(s: string): string {
   return createHash("sha256").update(s).digest("base64url").slice(0, 12);
 }
 
+function baseIdentityFields(el: InteractiveElement): string[] {
+  return [
+    el.screenPath ?? "",
+    el.testId ?? "",
+    el.container ?? "",
+    el.role ?? "",
+    el.tag,
+    elementRef(el),
+    el.href ?? "",
+    el.type ?? "",
+  ];
+}
+
 export function stableElementId(el: InteractiveElement): string {
   return shortHash(
     [
-      el.screenPath ?? "",
-      el.testId ?? "",
-      el.container ?? "",
-      el.role ?? "",
-      el.tag,
-      elementRef(el),
-      el.href ?? "",
-      el.type ?? "",
+      ...baseIdentityFields(el),
       // The element's own selector — a per-element discriminator so two controls
       // that are otherwise identical (same label/path/role, e.g. sibling "Remove"
       // buttons in a list) get DISTINCT identities. Without it, a stable ref is a
@@ -476,19 +482,9 @@ export function stableElementId(el: InteractiveElement): string {
 }
 
 // The base identity WITHOUT the selector — the grouping key for same-label
-// sibling detection. MUST stay in sync with the non-selector fields of
-// stableElementId above (same fields, same order, same join).
+// sibling detection.
 function baseElementKey(el: InteractiveElement): string {
-  return [
-    el.screenPath ?? "",
-    el.testId ?? "",
-    el.container ?? "",
-    el.role ?? "",
-    el.tag,
-    elementRef(el),
-    el.href ?? "",
-    el.type ?? "",
-  ].join("");
+  return baseIdentityFields(el).join("\u001f");
 }
 
 // A selector that pins an element only by its POSITION among siblings
@@ -505,13 +501,14 @@ function isPositionalSelector(selector: string): boolean {
   return POSITIONAL_SELECTOR_RE.test(selector.replace(QUOTED_VALUE_RE, '""'));
 }
 
-// A "volatile positional group": ≥2 same-base-identity siblings whose selectors
-// are POSITIONAL (recycling). Removing one shifts a survivor's positional
-// selector onto a departed node's identity, so a purely structural ref would
-// silently retarget the survivor (issue #399). Returns each such member mapped to
-// a GROUP FINGERPRINT — a hash of the group's members' stableElementIds in
-// extraction order. elementIdentity prefixes the member's ref with that
-// fingerprint, so the ref is valid ONLY while the group's composition matches.
+// A "volatile positional group": the ≥2 POSITIONAL members of a same-base-identity
+// group (any stable-anchored siblings in the same base group keep their plain,
+// non-volatile refs). Removing one shifts a survivor's positional selector onto a
+// departed node's identity, so a purely structural ref would silently retarget
+// the survivor (issue #399). Returns each such member mapped to a GROUP
+// FINGERPRINT — a hash of the positional members' stableElementIds in extraction
+// order. elementIdentity prefixes the member's ref with that fingerprint, so the
+// ref is valid ONLY while the positional membership matches.
 //
 // Guarantees (the #399 invariant): after a member is REMOVED (group size N→N-1),
 // the fingerprint changes, so the departed member's old ref appears in `removed`
