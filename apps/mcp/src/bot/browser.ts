@@ -23,14 +23,7 @@
 // gate).
 
 import { chromium as baseChromium } from "playwright";
-import type {
-  Browser,
-  BrowserContext,
-  CDPSession,
-  ElementHandle,
-  Locator,
-  Page,
-} from "playwright";
+import type { Browser, BrowserContext, CDPSession, ElementHandle, Locator, Page } from "playwright";
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
@@ -2598,7 +2591,8 @@ export class BrowserController {
           let node: Element | null = el;
           while (node !== null) {
             const s = window.getComputedStyle(node);
-            if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0") return false;
+            if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0")
+              return false;
             const parentEl: Element | null = node.parentElement;
             if (parentEl !== null) {
               node = parentEl;
@@ -2615,7 +2609,13 @@ export class BrowserController {
         const isStrong = (el: Element): boolean => {
           const tag = el.tagName.toLowerCase();
           const role = el.getAttribute("role");
-          if (tag === "button" || tag === "a" || tag === "label" || tag === "select" || tag === "summary")
+          if (
+            tag === "button" ||
+            tag === "a" ||
+            tag === "label" ||
+            tag === "select" ||
+            tag === "summary"
+          )
             return true;
           if (
             role === "button" ||
@@ -2726,9 +2726,7 @@ export class BrowserController {
           candidates,
           text: win !== null ? renderedRaw(win).slice(0, 120) : "",
           safetySignals:
-            win !== null
-              ? safetySignalsFor(win)
-              : { billingObject: false, accountSetup: false },
+            win !== null ? safetySignalsFor(win) : { billingObject: false, accountSetup: false },
         };
       },
       { mode, value },

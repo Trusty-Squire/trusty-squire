@@ -22,10 +22,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
 import { BrowserController } from "../browser.js";
-import {
-  parseLocatorTarget,
-  shouldBlockUnsafeProvisionSignals,
-} from "../provision-session.js";
+import { parseLocatorTarget, shouldBlockUnsafeProvisionSignals } from "../provision-session.js";
 
 // Mirrors the Casetify shape: 20 decorative cursor:pointer card-eligible divs
 // BEFORE a bare click-handler <div> CTA whose only child with text is a <span>.
@@ -314,7 +311,10 @@ const cart = (page: Page): Promise<number> =>
 describe("parseLocatorTarget", () => {
   it("parses text= with and without quotes", () => {
     expect(parseLocatorTarget("text=Add To Cart")).toEqual({ mode: "text", value: "Add To Cart" });
-    expect(parseLocatorTarget('text="Add To Cart"')).toEqual({ mode: "text", value: "Add To Cart" });
+    expect(parseLocatorTarget('text="Add To Cart"')).toEqual({
+      mode: "text",
+      value: "Add To Cart",
+    });
     expect(parseLocatorTarget("text='Buy now'")).toEqual({ mode: "text", value: "Buy now" });
   });
   it("parses css=", () => {
@@ -414,7 +414,10 @@ describe("resolvePageTarget (real Chromium)", () => {
   it("resolves + clicks via a css= selector", async () => {
     const { ctrl, page } = await pageFor(CASETIFY_FIXTURE);
     try {
-      const resolved = await ctrl.resolvePageTarget("css", "#PDP_2025_PRODUCT_ACTION_ADD_TO_CART_BTN");
+      const resolved = await ctrl.resolvePageTarget(
+        "css",
+        "#PDP_2025_PRODUCT_ACTION_ADD_TO_CART_BTN",
+      );
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       await ctrl.clickHandle(resolved.handle);
@@ -463,10 +466,7 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       expect(
-        shouldBlockUnsafeProvisionSignals(
-          "Dashboard Products Live mode",
-          resolved.safetySignals,
-        ),
+        shouldBlockUnsafeProvisionSignals("Dashboard Products Live mode", resolved.safetySignals),
       ).toMatch(/Mode safety guard/);
       await resolved.handle.dispose();
     } finally {
@@ -483,10 +483,7 @@ describe("resolvePageTarget (real Chromium)", () => {
         expect(resolved.ok).toBe(true);
         if (!resolved.ok) throw new Error("unreachable");
         expect(
-          shouldBlockUnsafeProvisionSignals(
-            "Dashboard Products Live mode",
-            resolved.safetySignals,
-          ),
+          shouldBlockUnsafeProvisionSignals("Dashboard Products Live mode", resolved.safetySignals),
         ).toMatch(/Mode safety guard/);
         await resolved.handle.dispose();
       } finally {
@@ -625,25 +622,21 @@ describe("resolvePageTarget (real Chromium)", () => {
     }
   });
 
-  it(
-    "click rejects an overlay while explicit js_click dispatches once",
-    async () => {
-      const { ctrl, page } = await pageFor(OVERLAY_FIXTURE);
-      try {
-        const resolved = await ctrl.resolvePageTarget("text", "Add To Cart");
-        expect(resolved.ok).toBe(true);
-        if (!resolved.ok) throw new Error("unreachable");
-        await expect(ctrl.clickHandle(resolved.handle)).rejects.toThrow();
-        expect(await cart(page)).toBe(0);
-        await ctrl.jsClickHandle(resolved.handle);
-        await resolved.handle.dispose();
-        expect(await cart(page)).toBe(1);
-      } finally {
-        await page.close();
-      }
-    },
-    12_000,
-  );
+  it("click rejects an overlay while explicit js_click dispatches once", async () => {
+    const { ctrl, page } = await pageFor(OVERLAY_FIXTURE);
+    try {
+      const resolved = await ctrl.resolvePageTarget("text", "Add To Cart");
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) throw new Error("unreachable");
+      await expect(ctrl.clickHandle(resolved.handle)).rejects.toThrow();
+      expect(await cart(page)).toBe(0);
+      await ctrl.jsClickHandle(resolved.handle);
+      await resolved.handle.dispose();
+      expect(await cart(page)).toBe(1);
+    } finally {
+      await page.close();
+    }
+  }, 12_000);
 
   it("keeps two genuine nested controls ambiguous (no silent inner-pick)", async () => {
     const { ctrl, page } = await pageFor(NESTED_STRONG_FIXTURE);

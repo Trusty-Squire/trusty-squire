@@ -34,10 +34,11 @@ Inside `elements`:
    `elements` already carries (same 75 / 88 refs). Pure duplication.
 2. ~30% of the `elements` block is serialized `null`/`""`/`false`.
 3. `container` is 100% redundant with `path` (`path` = `<container> > <kind>:<label>`).
-4. The planner drives off `text` (read state) + the element inventory (pick
-   `ref`); the `screen` region-tree and `accessibility` flat-tree are not needed
-   to choose an action. `occluded_by`/`topmost`/`href` ARE load-bearing — keep
-   them (per-element).
+4. The planner normally drives off `text` (read state) + the element inventory
+   (pick `ref`). If a visible clickable control has no inventory row,
+   `operate_act` has a click-only live `text=…`/`css=…` fallback. The `screen`
+   region-tree and `accessibility` flat-tree are not needed to choose an action.
+   `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
 
 ## The one knob — `detail`
 
@@ -228,6 +229,10 @@ columnar on top of the delta baseline. Type-elision is measured and printed but
 not gated because its standalone whole-payload marginal is negligible. The
 lossless-resync invariant reconstructs the full element set by parsing the
 columnar `el_table` delta stream.
+
+`apps/mcp/src/bot/__tests__/locator-fallback.test.ts` owns the ref-less click
+fallback gates: visible clickable matching, ambiguity refusal, overlay behavior,
+shadow roots, disabled controls, bounded candidate scans, and handle disposal.
 
 ## Non-goals / explicitly avoided
 

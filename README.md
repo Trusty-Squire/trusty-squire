@@ -72,7 +72,7 @@ Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline
 2. Trusty Squire opens a real browser and works through the service flow one step at a time. It can use a Google or GitHub session that you explicitly connect.
 3. When the site reveals an API key or client secret, Trusty Squire captures it into the vault without returning the raw value through its credential tools.
 4. The agent can make an authenticated request through Trusty Squire or create a host-scoped, rate-limited app grant.
-5. Successful flows can become signed registry skills, so later runs can replay verified steps instead of rediscovering every click.
+5. Eligible successful flows can become signed registry skills, so later runs can replay verified steps instead of rediscovering every click.
 
 If a site requires phone verification, a hard CAPTCHA, an unsupported payment,
 3-D Secure, or another human decision, the run stops and tells you. It does not
@@ -135,9 +135,13 @@ for the system and data flows.
 
 ## MCP tools
 
-- `operate_start`, `operate_observe`, and `operate_act` open a website, inspect the current state, and perform one browser action at a time.
+- `operate_start`, `operate_observe`, and `operate_act` open a website, inspect
+  the current state, and perform one browser action at a time. If a visible
+  control has no observed ref, `click` and `js_click` can target its live
+  `text=…` or `css=…` locator; that one-off fallback is not replayable.
 - `operate_extract` captures a generated credential into a sealed slot or the vault.
-- `operate_remember` and `operate_use` save and replay successful website flows.
+- `operate_remember` and `operate_use` save and replay eligible successful flows
+  built from observed refs.
 - `list_payment_cards` returns saved-card labels and opaque references;
   `operate_pay` requests phone approval, fills a checkout, and waits for the
   user to resolve 3-D Secure before handing back unresolved challenges.
@@ -172,7 +176,6 @@ trusty-squire/
 │   └── web/        Marketing site and vault UI
 └── packages/
     ├── vault/        Encrypted credential storage and audit log
-    ├── inbox/        Email verification code and link extraction
     └── skill-schema/ Shared schema for replayable website skills
 ```
 

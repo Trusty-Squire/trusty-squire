@@ -327,9 +327,9 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
       safetySignals: { billingObject: true, accountSetup: false },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
-    await expect(
-      act(obs.session_id, { kind: "click", target: "css=#save" }),
-    ).rejects.toThrow(/Mode safety guard/);
+    await expect(act(obs.session_id, { kind: "click", target: "css=#save" })).rejects.toThrow(
+      /Mode safety guard/,
+    );
     // The click must NOT have been dispatched.
     expect(h.locatorClickCalls).toBe(0);
   });

@@ -1114,11 +1114,7 @@ function unsafeProvisionBlockReason(
   target: string | null,
 ): string | null {
   const appMarkers = authenticatedAppSurfaceMarkers(pageText);
-  if (
-    appMarkers.length > 0 &&
-    safetySignals.accountSetup &&
-    hasAccountSetupOverlay(pageText)
-  ) {
+  if (appMarkers.length > 0 && safetySignals.accountSetup && hasAccountSetupOverlay(pageText)) {
     if (target === null) {
       return (
         "Perception guard: this control looks like an account/setup overlay action, " +
@@ -1134,10 +1130,7 @@ function unsafeProvisionBlockReason(
       `same-origin URLs or complete only the minimal required setup.`
     );
   }
-  if (
-    safetySignals.billingObject &&
-    /\b(?:live|production)\s+mode\b/i.test(pageText)
-  ) {
+  if (safetySignals.billingObject && /\b(?:live|production)\s+mode\b/i.test(pageText)) {
     if (target === null) {
       return (
         "Mode safety guard: this control can create or save billing objects, " +
@@ -2410,10 +2403,7 @@ export async function act(
         // it up front means a click that lands but then throws still can't leave
         // the session promotable (see captureAndPromoteSession) (codex).
         try {
-          const resolvedBlock = shouldBlockUnsafeProvisionSignals(
-            pageText,
-            resolved.safetySignals,
-          );
+          const resolvedBlock = shouldBlockUnsafeProvisionSignals(pageText, resolved.safetySignals);
           if (resolvedBlock !== null) throw new Error(resolvedBlock);
           session.usedLocatorFallback = true;
           if (action.kind === "click") await browser.clickHandle(resolved.handle);
