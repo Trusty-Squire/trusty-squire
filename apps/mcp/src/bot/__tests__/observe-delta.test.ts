@@ -18,6 +18,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   chmodSync,
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -1109,6 +1110,19 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     const snap = JSON.parse(readFileSync(obs2.snapshot_file as string, "utf8"));
     expect(snap.elements.length).toBe(h.elements.length);
     expect(snap.elements.some((e: ObservedElement) => typeof e.path === "string")).toBe(true);
+    expect(snap.text_truncated).toBe(false);
+  });
+
+  it("persists the text truncation marker with the capped snapshot text", async () => {
+    h.elements = casetifyPage();
+    h.visibleText = "x".repeat(4001);
+
+    const start = await startProvisionSession({ serviceUrl: URL });
+    const snap = JSON.parse(readFileSync(start.snapshot_file as string, "utf8"));
+
+    expect(start.text_truncated).toBe(true);
+    expect(snap.text).toHaveLength(4000);
+    expect(snap.text_truncated).toBe(true);
   });
 
   it("keeps a caller-owned parent unchanged and secures the session directory", async () => {
@@ -1131,6 +1145,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     const start = await startProvisionSession({ serviceUrl: URL });
     const sid = start.session_id;
     expect(typeof start.snapshot_file).toBe("string");
+    const snapshotFile = start.snapshot_file as string;
     const collapsedCount = start.chrome_links_collapsed ?? 0;
     expect(collapsedCount).toBeGreaterThan(0); // obs1 collapsed some chrome links
 
@@ -1148,6 +1163,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     expect(obs2.chrome_links_collapsed).toBeUndefined(); // uncollapsed
     expect(obs2.elements.length).toBe(h.elements.length); // EVERY element inline
     expect(obs2.unchanged).toBeUndefined();
+    expect(existsSync(snapshotFile)).toBe(false);
 
     // Restore persistence; obs3 must be a FRESH FULL snapshot (delta:false), NOT
     // a delta against the pre-failure baseline — the failed observe INVALIDATED
@@ -1223,6 +1239,50 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     expect(snap.elements.length).toBe(1);
     expect(snap.elements[0].label).toBe("Only on B");
     expect(snap.elements.some((e: ObservedElement) => e.label === "Casetify")).toBe(false);
+  });
+
+  it("detail:full invalidates the compact baseline before a same-length value change", async () => {
+    const field = (value: string): InteractiveElement =>
+      el({
+        tag: "input",
+        role: "textbox",
+        visibleText: "Workspace",
+        value,
+        selector: "#workspace",
+        screenPath: "form:workspace > input:workspace",
+      });
+    h.elements = [field("alpha")];
+    const start = await startProvisionSession({ serviceUrl: URL });
+
+    const full = await observe(start.session_id, "full");
+    expect(full.elements[0]?.value).toBe("alpha");
+
+    h.elements = [field("bravo")];
+    const compact = await observe(start.session_id, "compact");
+    expect(compact.delta).toBe(false);
+    expect(compact.elements[0]?.value_len).toBe(5);
+
+    const next = await observe(start.session_id, "compact");
+    expect(next.delta).toBe(true);
+  });
+
+  it("detail:full removes a stale snapshot when its side-effect persist fails", async () => {
+    h.elements = casetifyPage();
+    h.visibleText = "Account page";
+    const start = await startProvisionSession({ serviceUrl: URL });
+    const sid = start.session_id;
+    const snapshotFile = start.snapshot_file as string;
+    const fullBeforeFailure = await observe(sid, "full");
+
+    mkdirSync(join(dirname(snapshotFile), `.observe-${sid}-3.tmp`));
+    const fullAfterFailure = await observe(sid, "full");
+
+    expect(fullAfterFailure).toEqual(fullBeforeFailure);
+    expect(existsSync(snapshotFile)).toBe(false);
+
+    const compact = await observe(sid, "compact");
+    expect(compact.delta).toBe(false);
+    expect(typeof compact.snapshot_file).toBe("string");
   });
 
   it("uses current full page text for internal postcondition checks", async () => {

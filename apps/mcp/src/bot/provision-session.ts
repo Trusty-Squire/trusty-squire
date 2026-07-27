@@ -274,6 +274,7 @@ interface Session {
   // compact set against this and emits only what changed. Null until the first
   // observe. Reset on a URL change so a delta never crosses pages.
   prevObserve: ObserveDeltaState | null;
+  observeSnapshotFile: string | null;
   // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
   // ordered, TEXT-targeted action trace of this session, so a successful run can
   // be `remember`ed as a replayable rail. Records visible text + non-secret
@@ -1305,6 +1306,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     sealedFieldKeys: new Set(),
     lastElements: [],
     prevObserve: null,
+    observeSnapshotFile: null,
     actionTrace: [],
     captureRounds: [],
     startedAt: Date.now(),
@@ -1525,14 +1527,15 @@ function persistObserveSnapshot(
   generation: number,
   url: string,
   text: string,
+  textTruncated: boolean,
   elements: ObservedElement[],
 ): string | null {
   let temporaryFile: string | null = null;
+  const dir = observeSnapshotDir(session.id);
+  const file = join(dir, `observe-${session.id}.json`);
   try {
-    const dir = observeSnapshotDir(session.id);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
-    const file = join(dir, `observe-${session.id}.json`);
     temporaryFile = join(dir, `.observe-${session.id}-${generation}.tmp`);
     writeFileSync(
       temporaryFile,
@@ -1543,6 +1546,7 @@ function persistObserveSnapshot(
           url,
           elements_total: elements.length,
           text,
+          text_truncated: textTruncated,
           elements,
         },
         null,
@@ -1551,6 +1555,7 @@ function persistObserveSnapshot(
       { encoding: "utf8", mode: 0o600 },
     );
     renameSync(temporaryFile, file);
+    session.observeSnapshotFile = file;
     return file;
   } catch {
     if (temporaryFile !== null) {
@@ -1558,6 +1563,13 @@ function persistObserveSnapshot(
         unlinkSync(temporaryFile);
       } catch {}
     }
+    for (const staleFile of new Set([session.observeSnapshotFile, file])) {
+      if (staleFile === null) continue;
+      try {
+        unlinkSync(staleFile);
+      } catch {}
+    }
+    session.observeSnapshotFile = null;
     return null;
   }
 }
@@ -1813,6 +1825,7 @@ async function observeSession(
       generation,
       url,
       normalizedText,
+      textTruncated,
       built.fileElements,
     );
     if (snapshotFile === null) {
@@ -1848,19 +1861,8 @@ async function observeSession(
 
   // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
   // pre-delta full payload: every element with every field, screen, and
-  // accessibility, never a delta and never a chrome collapse. It still refreshes
-  // the delta baseline (session state only, not payload) so a compact observe
-  // AFTER a full doesn't diff against a stale map.
-  session.prevObserve = {
-    url,
-    byRef: new Map(
-      elements.map((el) => [
-        refOf(el),
-        JSON.stringify(toCompactElement(el, refOf(el), session.sealedFieldKeys, false)),
-      ]),
-    ),
-    text: normalizedText,
-  };
+  // accessibility, never a delta and never a chrome collapse.
+  session.prevObserve = null;
   // Refresh the persisted snapshot as a SIDE EFFECT so a re-expansion after a
   // full-only observe can't restore stale state (the previous compact snapshot).
   // Deliberately NOT surfaced in the payload — the full escape hatch stays
@@ -1870,6 +1872,7 @@ async function observeSession(
     generation,
     url,
     normalizedText,
+    textTruncated,
     elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys, true)),
   );
   const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
