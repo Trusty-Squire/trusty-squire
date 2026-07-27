@@ -147,14 +147,51 @@ payload shape byte-for-byte. As an unsurfaced side effect it replaces the
 persisted snapshot, invalidates the compact baseline so the next compact observe
 is a full resync, and removes the stale snapshot if persistence fails.
 
+## Phase 4 — columnar element encoding ✅ shipped
+
+A per-element encoding transform applied on TOP of the Phase-3 delta. It changes
+only the COMPACT wire; the persisted snapshot file and `detail:"full"` keep full
+fidelity.
+
+- **Columnar `el_table`.** A compact `elements` JSON array repeated every field
+  NAME on every element (`"ref":`, `"label":`, `"tag":`, …). The compact wire now
+  carries the element set as `el_table`: a tab-delimited table whose first line is
+  a header naming the columns present in this emit (a subset of
+  `ref,label,tag,role,type,value_len,checked,href,testId,topmost,occluded_by`,
+  always leading `ref,label,tag`), then one tab-joined row per element in header
+  order. An empty cell means the field is absent; `value_len` is numeric,
+  `checked`/`topmost` are `true`/`false`. Tab, newline, carriage-return and
+  backslash inside a cell are backslash-escaped (`\t \n \r \\`) — measured
+  escaping overhead on the corpus is negligible (<0.1% of labels carry any of
+  them). Column order is canonical so a parsed row reconstructs byte-identically
+  (`parseElementsTable` is the inverse and backs the lossless-resync gate).
+  `el_table` is omitted entirely when an emit has no element rows (e.g. an
+  all-unchanged delta). It composes with the delta exactly as `elements` did:
+  on `delta:true` it lists only the changed rows (upsert by ref); on a full
+  resync it is the resync set minus collapsed chrome links; `removed`/`unchanged`/
+  `text_unchanged` are unchanged. `detail:"full"` keeps the `elements` JSON array
+  (the escape hatch stays byte-equivalent to the legacy shape).
+
+**Measured MARGINAL saving on top of the Phase-3 delta** (token-weighted
+aggregate over ~500 real corpus runs / ~4,200 observes, full-observation bytes):
+columnar ≈ 24%, clearing the conservative regression floor (≥ 20%) with margin. It
+runs below the earlier per-block estimate (~37%) for an honest reason: the
+marginal is measured over the WHOLE observation, so the fixed `session_id`/`url`/
+`delta`/`unchanged` overhead dilutes the element-block win.
+
 ## Regression gates
 
 `apps/mcp/src/bot/__tests__/observe-delta.test.ts` owns the lossless-resync,
 actionable-never-dropped (including dismiss anchors), clickable-unchanged,
 text-delta, distinct-selector no-retarget, corpus budget, snapshot permission and
 failure fallback, remove-then-restore resynchronization, and full-escape-hatch
-invariants. The corpus budget requires at least 50% token-weighted aggregate
-savings while allowing low-savings single-observe and high-churn runs.
+invariants, plus the Phase-4 columnar marginal. The corpus budget requires at
+least 50% token-weighted aggregate savings vs the pre-delta payload while allowing
+low-savings single-observe and high-churn runs; the Phase-4 marginal gate
+separately requires columnar ≥ 20% token-weighted marginal ON TOP OF the delta
+baseline (a transform that fails its floor is dropped, not force-shipped). The
+lossless-resync invariant reconstructs the full element set by parsing the
+columnar `el_table` delta stream.
 
 ## Non-goals / explicitly avoided
 

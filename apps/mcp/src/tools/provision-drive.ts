@@ -149,22 +149,29 @@ const startSchema = z.object({
 });
 
 const OBSERVE_DELTA_CONTRACT =
-  "Compact observations use stable refs that remain reusable across observes. " +
+  "Compact observations carry their elements in `el_table`: a TAB-delimited table whose FIRST line is the " +
+  "header (tab-joined column names, a subset of ref,label,tag,role,type,value_len,checked,href,testId," +
+  "topmost,occluded_by, always starting ref,label,tag) and each following line is ONE element (tab-joined " +
+  "cells in header order). An empty cell = that field is absent for that element; value_len is a number, " +
+  "checked/topmost are true/false; a tab, newline, carriage-return or backslash inside a cell is " +
+  "backslash-escaped (\\t \\n \\r \\\\). el_table is absent when the emit has no element rows. " +
+  "The stable refs remain reusable across observes. " +
   "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
-  "element map and replace it from snapshot_file when present (wire elements may omit collapsed chrome " +
-  "links); if delta:false carries NO snapshot_file the wire elements are already the complete, uncollapsed " +
-  "set (a persistence-fallback response) — reset from them directly. " +
-  "Only when delta:true, upsert emitted elements by ref, delete refs listed in removed, and retain the " +
-  "remaining elements counted by unchanged. text_unchanged:true means reuse the prior text because text " +
-  "is empty. snapshot_file points to the complete current snapshot, including omitted elements and path. " +
-  "An empty delta means nothing changed, not an empty page. ";
+  "element map and rebuild it from this el_table (or from snapshot_file — the table may omit collapsed " +
+  "chrome links, which the file keeps); a delta:false with NO snapshot_file already has the complete, " +
+  "uncollapsed set in el_table (a persistence-fallback response) — reset from it directly. " +
+  "Only when delta:true, el_table lists ONLY the changed elements: upsert them by ref, delete refs listed " +
+  "in removed, and retain the remaining elements counted by unchanged. text_unchanged:true means reuse the " +
+  "prior text because text is empty. snapshot_file points to the complete current snapshot (all elements, " +
+  "with path). An empty delta (no el_table) means nothing changed, not an empty page. " +
+  'detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ';
 
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
     "Begin an interactive provisioning session: opens a scoped browser on the " +
     "user's machine at service_url and returns the initial compact observation " +
-    "{session_id, url, text, elements, delta, snapshot_file}. " +
+    "{session_id, url, text, el_table, delta, snapshot_file}. " +
     OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup with " +
     "operate_act, re-read with operate_observe, and call operate_extract " +
@@ -212,8 +219,9 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
     "Re-read the current page of a provisioning session. DEFAULT is a COMPACT " +
-    "payload where each element has a stable `ref` (pass as operate_act.target) " +
-    "plus compact label/role/href/value_len fields; path is retained only in snapshot_file, " +
+    "payload whose elements ride in `el_table` (a tab-delimited table; each row's " +
+    "stable `ref` is the operate_act.target) with compact label/role/href/value_len " +
+    "columns; path is retained only in snapshot_file, " +
     "and redundant screen/accessibility trees are omitted. " +
     OBSERVE_DELTA_CONTRACT +
     "Pass " +
@@ -312,7 +320,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   name: "operate_act",
   description:
     "Take one action in a provisioning session, then return the resulting " +
-    "observation. kinds: click (target=element ref, preferably elements[].ref), type (target + text), " +
+    "observation. kinds: click (target=element ref, preferably an el_table row's ref), type (target + text), " +
     "goto (url — domain-scoped), press (key, e.g. Enter), oauth_click (target — " +
     "use for 'Continue with Google/GitHub' so the popup is adopted), " +
     "oauth_settle (return to the product page after the OAuth handshake), " +

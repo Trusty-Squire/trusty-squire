@@ -89,9 +89,18 @@ import {
   observe,
   verifyPostcondition,
   closeAllProvisionSessions,
+  encodeElementsTable,
+  parseElementsTable,
+  type Observation,
   type ObserveDeltaState,
   type ObservedElement,
 } from "../provision-session.js";
+
+// The compact wire carries its element set as the columnar `el_table` (Phase 4).
+// Decode it back to elements — the host does the same. Absent table = no elements.
+function rows(obs: Observation): ObservedElement[] {
+  return obs.el_table !== undefined ? parseElementsTable(obs.el_table) : [];
+}
 
 function el(partial: Partial<InteractiveElement>): InteractiveElement {
   return {
@@ -495,7 +504,7 @@ describe("observe-delta harness", () => {
     const obs1 = builds[0]!.observation;
     const fileRefs = new Set(builds[0]!.fileElements.map((e) => e.ref));
     expect(fileRefs).toEqual(new Set(builds[0]!.fullByRef.keys()));
-    const emittedRefs0 = new Set(obs1.elements.map((e) => e.ref));
+    const emittedRefs0 = new Set(rows(obs1).map((e) => e.ref));
     const missingFromWire = [...fileRefs].filter((r) => !emittedRefs0.has(r));
     expect(missingFromWire.length).toBe(obs1.chrome_links_collapsed);
     // Every ref the wire dropped is retrievable from the persisted snapshot.
@@ -507,7 +516,7 @@ describe("observe-delta harness", () => {
     const recon = new Map(builds[0]!.fullByRef);
     for (let i = 1; i < builds.length; i++) {
       const obs = builds[i]!.observation;
-      for (const e of obs.elements) recon.set(e.ref, e);
+      for (const e of rows(obs)) recon.set(e.ref, e);
       for (const ref of obs.removed ?? []) recon.delete(ref);
       expect(refBodies(recon), `resync mismatch at obs${i + 1}`).toBe(
         refBodies(builds[i]!.fullByRef),
@@ -518,7 +527,7 @@ describe("observe-delta harness", () => {
   it("INV-actionable-never-dropped: dismiss/consent/gate controls always survive a full observe", () => {
     const builds = driveCore(sequence());
     const obs1 = builds[0]!.observation; // the FULL emit (only place collapse runs)
-    const emittedLabels = new Set(obs1.elements.map((e) => e.label));
+    const emittedLabels = new Set(rows(obs1).map((e) => e.label));
 
     // The three real failing cases from the analysis — a dismiss control in an
     // aside, in navigation:footer, and in a dialog — must all be emitted.
@@ -528,7 +537,7 @@ describe("observe-delta harness", () => {
 
     // Generically: EVERY actionable control in the ground truth is emitted (never
     // collapsed), even though plain chrome links WERE collapsed.
-    const emittedRefs = new Set(obs1.elements.map((e) => e.ref));
+    const emittedRefs = new Set(rows(obs1).map((e) => e.ref));
     const source = sequence()[0]!;
     const sourceRefs = provisionElementRefs(source);
     let actionableCount = 0;
@@ -619,7 +628,7 @@ describe("observe-delta harness", () => {
       elements: page,
       prev: null,
     });
-    const labels = new Set(built.observation.elements.map((e) => e.label));
+    const labels = new Set(rows(built.observation).map((e) => e.label));
     expect(labels.has("Manage cookies")).toBe(true);
     expect(labels.has("Close banner")).toBe(true); // both bare and #close variants
     expect(labels.has("Accept cookies")).toBe(true); // consent anchor with a URL
@@ -666,7 +675,7 @@ describe("observe-delta harness", () => {
     expect(b2.observation.delta).toBe(true);
     expect(b2.observation.removed).toEqual([ref2]); // the surplus ordinal is gone
     const recon = new Map(b1.fullByRef);
-    for (const e of b2.observation.elements) recon.set(e.ref, e);
+    for (const e of rows(b2.observation)) recon.set(e.ref, e);
     for (const r of b2.observation.removed ?? []) recon.delete(r);
     expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
 
@@ -724,7 +733,7 @@ describe("observe-delta harness", () => {
 
     // Lossless reconstruction.
     const recon = new Map(b1.fullByRef);
-    for (const e of b2.observation.elements) recon.set(e.ref, e);
+    for (const e of rows(b2.observation)) recon.set(e.ref, e);
     for (const r of b2.observation.removed ?? []) recon.delete(r);
     expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
   });
@@ -775,7 +784,7 @@ describe("observe-delta harness", () => {
     expect(resolveTarget(after, survivorOldRef)).toBeNull();
 
     const recon = new Map(b1.fullByRef);
-    for (const e of b2.observation.elements) recon.set(e.ref, e);
+    for (const e of rows(b2.observation)) recon.set(e.ref, e);
     for (const r of b2.observation.removed ?? []) recon.delete(r);
     expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
   });
@@ -822,7 +831,7 @@ describe("observe-delta harness", () => {
     expect(b2.observation.delta).toBe(true);
     expect(b2.observation.removed).toEqual([survivorOldRef]);
     expect(b2.observation.removed).not.toContain(removedNodeRef);
-    expect(b2.observation.elements.find((entry) => entry.ref === removedNodeRef)?.checked).toBe(
+    expect(rows(b2.observation).find((entry) => entry.ref === removedNodeRef)?.checked).toBe(
       false,
     );
     // The changed body exposes the survivor's current state, but neither
@@ -831,7 +840,7 @@ describe("observe-delta harness", () => {
     expect(resolveTarget(after, survivorOldRef)).toBeNull();
 
     const recon = new Map(b1.fullByRef);
-    for (const e of b2.observation.elements) recon.set(e.ref, e);
+    for (const e of rows(b2.observation)) recon.set(e.ref, e);
     for (const r of b2.observation.removed ?? []) recon.delete(r);
     expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
   });
@@ -853,7 +862,7 @@ describe("observe-delta harness", () => {
     const ref = provisionElementRefs(seq[2]!).get(target)!;
 
     // It was collapsed into the {unchanged: N} count, not re-sent.
-    expect(obs3.elements.some((e) => e.ref === ref)).toBe(false);
+    expect(rows(obs3).some((e) => e.ref === ref)).toBe(false);
     expect(obs3.unchanged).toBeGreaterThan(100);
 
     // But the host can still click it: resolve the STALE ref against the live
@@ -1098,6 +1107,113 @@ describe("observe-delta corpus budget (real multi-observe traces)", () => {
   );
 });
 
+// ── MARGINAL saving of the columnar encoding, ON TOP OF the delta baseline
+//    (Phase 4) ──
+//
+// The delta baseline is the #398 wire: elements as a JSON array (encode:"json").
+// Columnar (encode:"columnar") is replayed over the SAME real corpus stream as an
+// independent delta run and we sum the emitted-observation bytes. Token-weighted
+// aggregate marginal = 1 - sum(columnar) / sum(baseline). The gate is a
+// CONSERVATIVE floor below the ~37% estimate: columnar ≥ 20%. Per-run
+// p10/median/p90 are printed, not gated (the tail has single-observe / all-
+// unchanged runs whose fixed overhead dominates).
+describe("observe-delta Phase-4 marginal (columnar)", () => {
+  const dir = corpusDir();
+  const hasCorpus = (() => {
+    try {
+      return existsSync(dir);
+    } catch {
+      return false;
+    }
+  })();
+  const maybe = hasCorpus ? it : it.skip;
+
+  maybe(
+    "columnar ≥ 20% marginal over the delta baseline; prints p10/median/p90",
+    () => {
+      const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
+      const runs = new Map<string, Array<{ n: number; file: string }>>();
+      for (const f of files) {
+        const m = f.match(/^(.*)-r(\d+)\.json$/);
+        if (m === null) continue;
+        const key = m[1] as string;
+        const list = runs.get(key) ?? [];
+        list.push({ n: Number.parseInt(m[2] as string, 10), file: f });
+        runs.set(key, list);
+      }
+      const RUN_CAP = Number(process.env.TS_CORPUS_RUN_CAP ?? "500");
+      const runKeys = [...runs.keys()].sort().slice(0, RUN_CAP);
+
+      const variants = {
+        baseline: { encode: "json" as const },
+        columnar: { encode: "columnar" as const },
+      };
+      const agg: Record<keyof typeof variants, number> = { baseline: 0, columnar: 0 };
+      const perRunColumnar: number[] = [];
+      let observesMeasured = 0;
+
+      for (const key of runKeys) {
+        const rounds = (runs.get(key) as Array<{ n: number; file: string }>).sort(
+          (a, b) => a.n - b.n,
+        );
+        // Parse each round once; replay the identical stream per variant.
+        const stream: Array<{ elements: InteractiveElement[]; url: string }> = [];
+        for (const { file } of rounds) {
+          let doc: { inventory?: CorpusElement[]; state?: { url?: string } };
+          try {
+            doc = JSON.parse(readFileSync(join(dir, file), "utf8"));
+          } catch {
+            continue;
+          }
+          const inv = doc.inventory ?? [];
+          if (inv.length === 0) continue;
+          stream.push({ elements: inv.map(fromCorpus), url: normUrl(doc.state?.url) });
+        }
+        if (stream.length === 0) continue;
+
+        const runBytes: Record<keyof typeof variants, number> = { baseline: 0, columnar: 0 };
+        for (const [name, opt] of Object.entries(variants) as Array<
+          [keyof typeof variants, { encode: "json" | "columnar" }]
+        >) {
+          let prev: ObserveDeltaState | null = null;
+          for (const { elements, url } of stream) {
+            const built = buildCompactObservation({
+              sessionId: key,
+              url,
+              text: "",
+              elements,
+              prev,
+              encode: opt.encode,
+            });
+            prev = built.nextState;
+            runBytes[name] += JSON.stringify(built.observation).length;
+          }
+        }
+        observesMeasured += stream.length;
+        agg.baseline += runBytes.baseline;
+        agg.columnar += runBytes.columnar;
+        if (runBytes.baseline > 0) perRunColumnar.push(1 - runBytes.columnar / runBytes.baseline);
+      }
+
+      expect(perRunColumnar.length).toBeGreaterThan(20);
+      const marginal = 1 - agg.columnar / agg.baseline;
+      const s = [...perRunColumnar].sort((a, b) => a - b);
+      // eslint-disable-next-line no-console
+      console.log(
+        `Phase-4 marginal (${perRunColumnar.length} runs / ${observesMeasured} observes | ` +
+          `baseline ${agg.baseline}B) columnar aggregate ${(marginal * 100).toFixed(1)}% | ` +
+          `per-run p10 ${(quantile(s, 0.1) * 100).toFixed(1)}% median ${(quantile(s, 0.5) * 100).toFixed(1)}% ` +
+          `p90 ${(quantile(s, 0.9) * 100).toFixed(1)}%`,
+      );
+
+      // Conservative floor — if columnar underdelivers, the commit is dropped and
+      // the real number is reported (per the task), not force-shipped.
+      expect(marginal).toBeGreaterThanOrEqual(0.2);
+    },
+    60_000,
+  );
+});
+
 // #2 (stable-ref-includes-mutable-path) — ASSESS + report. Measures how often the
 // REGION field that feeds stableElementId flips for a control that is otherwise
 // the same across a same-URL re-observe (which re-mints its ref). Matched by
@@ -1220,7 +1336,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     // and the text blob is collapsed to a marker.
     const obs2 = await observe(sid, "compact");
     expect(obs2.delta).toBe(true);
-    expect(obs2.elements.length).toBe(0);
+    expect(rows(obs2).length).toBe(0);
     expect(obs2.unchanged).toBe(h.elements.length);
     expect(obs2.text_unchanged).toBe(true);
     expect(obs2.text).toBe("");
@@ -1281,7 +1397,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     expect(obs2.delta).toBe(false); // NOT a delta (no recovery file)
     expect(obs2.snapshot_file).toBeUndefined();
     expect(obs2.chrome_links_collapsed).toBeUndefined(); // uncollapsed
-    expect(obs2.elements.length).toBe(h.elements.length); // EVERY element inline
+    expect(rows(obs2).length).toBe(h.elements.length); // EVERY element inline
     expect(obs2.unchanged).toBeUndefined();
     expect(existsSync(snapshotFile)).toBe(false);
 
@@ -1329,7 +1445,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     h.elements = withX();
     h.visibleText = "Form";
     const a = await startProvisionSession({ serviceUrl: URL }); // A: {Continue, X}
-    expect(a.elements.some((e) => e.label === "Special X")).toBe(true);
+    expect(rows(a).some((e) => e.label === "Special X")).toBe(true);
 
     // B: X removed, persistence FAILS.
     const blocker = join(dir, "blk");
@@ -1338,7 +1454,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     h.elements = withoutX();
     const b = await observe(a.session_id, "compact");
     expect(b.delta).toBe(false); // full uncollapsed fallback
-    expect(b.elements.some((e) => e.label === "Special X")).toBe(false);
+    expect(rows(b).some((e) => e.label === "Special X")).toBe(false);
 
     // C: X restored (byte-identical to A), persistence RESTORED.
     process.env.TRUSTY_SQUIRE_OBSERVE_DIR = dir;
@@ -1350,7 +1466,7 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
       c.delta === true
         ? // (would be the buggy path) apply delta to B's view — X would be missing
           null
-        : new Map(c.elements.map((e) => [e.ref, e]));
+        : new Map(rows(c).map((e) => [e.ref, e]));
     expect(c.delta).toBe(false); // full re-sync, not an A-relative delta
     expect(
       [...(cView as Map<string, ObservedElement>).values()].some((e) => e.label === "Special X"),
@@ -1401,12 +1517,12 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
     const start = await startProvisionSession({ serviceUrl: URL });
 
     const full = await observe(start.session_id, "full");
-    expect(full.elements[0]?.value).toBe("alpha");
+    expect(full.elements![0]?.value).toBe("alpha");
 
     h.elements = [field("bravo")];
     const compact = await observe(start.session_id, "compact");
     expect(compact.delta).toBe(false);
-    expect(compact.elements[0]?.value_len).toBe(5);
+    expect(rows(compact)[0]?.value_len).toBe(5);
 
     const next = await observe(start.session_id, "compact");
     expect(next.delta).toBe(true);
@@ -1465,8 +1581,8 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
       expect(f.chrome_links_collapsed).toBeUndefined();
       expect(f.text_unchanged).toBeUndefined();
       expect(f.snapshot_file).toBeUndefined(); // escape hatch is the legacy shape
-      expect(f.elements.length).toBe(h.elements.length);
-      for (const e of f.elements) {
+      expect(f.elements!.length).toBe(h.elements.length);
+      for (const e of f.elements!) {
         const bag = e as unknown as Record<string, unknown>;
         for (const field of [
           "ref",
