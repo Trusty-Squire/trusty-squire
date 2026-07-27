@@ -359,6 +359,12 @@ export async function executeOperatePay(
       await deps.sleep(deps.pollIntervalMs);
     }
     if (approved === undefined) {
+      if (jit) {
+        try {
+          const final = await api.getPaymentApproval(created.id);
+          boundCardRef = final.card_ref;
+        } catch {}
+      }
       return timeoutResult();
     }
 

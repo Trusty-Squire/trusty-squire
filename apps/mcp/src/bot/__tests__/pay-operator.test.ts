@@ -713,6 +713,39 @@ describe("operate_pay JIT add-card ceremony", () => {
     expect(filledCards).toHaveLength(0);
   });
 
+  it("refreshes the final card binding only for JIT deadline exits", async () => {
+    let jitPolls = 0;
+    const jit = await runJit({
+      boundCardRef: "card_stored",
+      poll: (clockMs) => {
+        jitPolls += 1;
+        return {
+          status: "pending",
+          card_ref: clockMs > 0 ? "card_stored" : null,
+        };
+      },
+      jitApprovalTimeoutMs: 1,
+    });
+    expect(jit.result).toMatchObject({
+      status: "payment_approval_timeout",
+      card_persisted: true,
+    });
+    expect(jitPolls).toBe(2);
+
+    let hasCardPolls = 0;
+    const hasCard = await runJit({
+      cardRefArg: "card_stored",
+      boundCardRef: "card_stored",
+      poll: () => {
+        hasCardPolls += 1;
+        return { status: "pending", card_ref: "card_stored" };
+      },
+      approvalTimeoutMs: 1,
+    });
+    expect(hasCard.result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(hasCardPolls).toBe(1);
+  });
+
   it("waits longer than a has-card approval before giving up (JIT wait budget)", async () => {
     // Approval flips to approved at 330s — past the 5-min has-card budget but
     // inside the ~18-min JIT budget. The only difference between the two runs is
