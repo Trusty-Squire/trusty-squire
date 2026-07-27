@@ -59,10 +59,18 @@ const DECOY_CARD = {
   last4: "9999",
   createdAt: "2026-07-02T00:00:00.000Z",
 };
+const LEGACY_BOUND_CARD = {
+  ...BOUND_CARD,
+  brand: null,
+  last4: null,
+};
 
 let bound = false;
 let cardListFailures = 0;
 let failCardListAfterBind = false;
+let bindFailures = 0;
+let loseBindResponse = false;
+let cardListOverride: unknown[] | null = null;
 
 function approvalBody() {
   return {
@@ -85,6 +93,9 @@ beforeEach(() => {
   bound = false;
   cardListFailures = 0;
   failCardListAfterBind = false;
+  bindFailures = 0;
+  loseBindResponse = false;
+  cardListOverride = null;
   vi.clearAllMocks();
   api.apiGet.mockImplementation((path: string) => {
     if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
@@ -94,12 +105,22 @@ beforeEach(() => {
         cardListFailures -= 1;
         return Promise.reject(new Error("card list unavailable"));
       }
+      if (cardListOverride !== null) return Promise.resolve(cardListOverride);
       return Promise.resolve(bound ? [BOUND_CARD, DECOY_CARD] : [DECOY_CARD]);
     }
     return Promise.reject(new Error(`unexpected GET ${path}`));
   });
   api.apiPost.mockImplementation((path: string) => {
     if (path === "/v1/pay/approvals/appr_1/bind-card") {
+      if (loseBindResponse) {
+        loseBindResponse = false;
+        bound = true;
+        return Promise.reject(new Error("bind response lost"));
+      }
+      if (bindFailures > 0) {
+        bindFailures -= 1;
+        return Promise.reject(new Error("bind unavailable"));
+      }
       bound = true;
       if (failCardListAfterBind) cardListFailures += 1;
       return Promise.resolve({ card_ref: "card_new" });
@@ -151,16 +172,33 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(anchor.textContent).toContain("··4242");
   });
 
-  it("blocks approval when the server-bound card metadata cannot be loaded", async () => {
-    bound = true;
-    cardListFailures = 1;
+  it("blocks JIT approval when the server-bound card metadata cannot be loaded", async () => {
+    failCardListAfterBind = true;
     render(<PaymentApprovalPage />);
+    await waitFor(() => expect(screen.getByTestId("card-entry")).toBeTruthy());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("card-entry"));
 
     const approve = await screen.findByRole("button", { name: /Approve payment/ });
     expect(approve.hasAttribute("disabled")).toBe(true);
     expect(screen.queryByText(/your saved card/i)).toBeNull();
     expect(screen.getByText("card list unavailable")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
+    expect(
+      api.apiPost.mock.calls.some(([path]) => path === "/v1/pay/approvals/appr_1/approve"),
+    ).toBe(false);
+  });
+
+  it("keeps the pre-bound legacy-card approval path enabled", async () => {
+    bound = true;
+    cardListOverride = [LEGACY_BOUND_CARD];
+    render(<PaymentApprovalPage />);
+
+    const approve = await screen.findByRole("button", { name: /Approve payment/ });
+    expect(approve.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("preserves a successful bind when metadata refresh fails and retries only metadata", async () => {
@@ -184,5 +222,50 @@ describe("pay page — JIT add-card ceremony", () => {
       false,
     );
     expect(api.apiPost).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries binding the same saved card without reopening card entry", async () => {
+    bindFailures = 1;
+    render(<PaymentApprovalPage />);
+    await waitFor(() => expect(screen.getByTestId("card-entry")).toBeTruthy());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("card-entry"));
+
+    const retry = await screen.findByRole("button", { name: "Retry attaching card" });
+    expect(screen.queryByTestId("card-entry")).toBeNull();
+    expect(screen.getByText("bind unavailable")).toBeTruthy();
+
+    await user.click(retry);
+    const anchor = await screen.findByText(/Pay with/);
+    expect(anchor.textContent).toContain("··4242");
+    expect(screen.queryByTestId("card-entry")).toBeNull();
+
+    const bindCalls = api.apiPost.mock.calls.filter(
+      ([path]) => path === "/v1/pay/approvals/appr_1/bind-card",
+    );
+    expect(bindCalls).toEqual([
+      ["/v1/pay/approvals/appr_1/bind-card", { card_ref: "card_new" }],
+      ["/v1/pay/approvals/appr_1/bind-card", { card_ref: "card_new" }],
+    ]);
+  });
+
+  it("reconciles an already-committed bind after its response is lost", async () => {
+    loseBindResponse = true;
+    render(<PaymentApprovalPage />);
+    await waitFor(() => expect(screen.getByTestId("card-entry")).toBeTruthy());
+
+    const user = userEvent.setup();
+    await user.click(screen.getByTestId("card-entry"));
+
+    const anchor = await screen.findByText(/Pay with/);
+    expect(anchor.textContent).toContain("··4242");
+    expect(screen.queryByTestId("card-entry")).toBeNull();
+    expect(screen.queryByText("bind response lost")).toBeNull();
+    expect(
+      api.apiGet.mock.calls.filter(
+        ([path]) => path === "/v1/pay/approvals/appr_1",
+      ),
+    ).toHaveLength(2);
   });
 });
