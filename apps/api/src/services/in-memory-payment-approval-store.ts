@@ -83,6 +83,7 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     cardRef: string,
     now: Date,
   ): Promise<BindCardForAccountResult> {
+    // The synchronous check and bind are atomic within one event-loop turn.
     if (!this.e2eCredentialStore.hasForAccount(cardRef, accountId)) {
       return "card_not_found";
     }

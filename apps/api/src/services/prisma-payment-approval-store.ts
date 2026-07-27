@@ -70,10 +70,14 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
     now: Date,
   ): Promise<BindCardForAccountResult> {
     return this.prisma.$transaction(async (tx) => {
-      const card = await tx.e2ECredential.findFirst({
-        where: { id: cardRef, account_id: accountId },
-      });
-      if (card === null) {
+      // FOR KEY SHARE blocks concurrent row deletion with the weakest lock used by FK checks.
+      const cards = await tx.$queryRaw`
+        SELECT id
+        FROM "E2ECredential"
+        WHERE id = ${cardRef} AND account_id = ${accountId}
+        FOR KEY SHARE
+      `;
+      if (cards.length === 0) {
         return "card_not_found";
       }
       const result = await tx.pendingPaymentApproval.updateMany({

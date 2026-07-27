@@ -175,6 +175,7 @@ interface EgressGrantRow {
 
 export interface ApiPrismaClient {
   $transaction<T>(fn: (tx: ApiPrismaClient) => Promise<T>): Promise<T>;
+  $queryRaw(query: TemplateStringsArray, ...values: unknown[]): Promise<unknown[]>;
   machineToken: {
     create(args: { data: Record<string, unknown> }): Promise<MachineTokenRow>;
     findUnique(args: { where: { token: string } }): Promise<MachineTokenRow | null>;
