@@ -148,12 +148,24 @@ const startSchema = z.object({
   require_live_identity: z.boolean().optional(),
 });
 
+const OBSERVE_DELTA_CONTRACT =
+  "Compact observations use stable refs that remain reusable across observes. " +
+  "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
+  "element map and replace it from snapshot_file when present (wire elements may omit collapsed chrome " +
+  "links); if delta:false carries NO snapshot_file the wire elements are already the complete, uncollapsed " +
+  "set (a persistence-fallback response) — reset from them directly. " +
+  "Only when delta:true, upsert emitted elements by ref, delete refs listed in removed, and retain the " +
+  "remaining elements counted by unchanged. text_unchanged:true means reuse the prior text because text " +
+  "is empty. snapshot_file points to the complete current snapshot, including omitted elements and path. " +
+  "An empty delta means nothing changed, not an empty page. ";
+
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
     "Begin an interactive provisioning session: opens a scoped browser on the " +
-    "user's machine at service_url and returns {session_id, url, text, screen, " +
-    "accessibility, elements}. " +
+    "user's machine at service_url and returns the initial compact observation " +
+    "{session_id, url, text, elements, delta, snapshot_file}. " +
+    OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup with " +
     "operate_act, re-read with operate_observe, and call operate_extract " +
     "when you reach the credentials. Always operate_finish when done. The " +
@@ -190,9 +202,9 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
 
 const observeSchema = z.object({
   session_id: z.string().min(1),
-  // Payload verbosity. Default "compact" (text + actionable elements, ~50%
-  // smaller). Pass "full" for the legacy screen+accessibility+full-field payload
-  // on a genuinely ambiguous step.
+  // Payload verbosity. Default "compact" (stable-ref element/text deltas plus a
+  // complete snapshot pointer). Pass "full" for the legacy
+  // screen+accessibility+full-field payload on a genuinely ambiguous step.
   detail: z.enum(["compact", "full"]).optional(),
 });
 
@@ -200,12 +212,13 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
     "Re-read the current page of a provisioning session. DEFAULT is a COMPACT " +
-    "payload: {url, text, elements} where each element has a fresh `ref` (pass as " +
-    "operate_act.target) plus label/role/href/path/value_len — empty fields and " +
-    "the redundant screen/accessibility trees are omitted (~50% smaller). Pass " +
+    "payload where each element has a stable `ref` (pass as operate_act.target) " +
+    "plus compact label/role/href/value_len fields; path is retained only in snapshot_file, " +
+    "and redundant screen/accessibility trees are omitted. " +
+    OBSERVE_DELTA_CONTRACT +
+    "Pass " +
     'detail:"full" for the legacy screen+accessibility+full-field payload on a ' +
-    "genuinely ambiguous step. Refs are scoped to the latest observation; stale " +
-    "refs fail loudly, so re-observe and retry with the new ref.",
+    "genuinely ambiguous step.",
   inputSchema: observeSchema,
   jsonInputSchema: {
     type: "object",
@@ -313,11 +326,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "button/menu-item (or the file <input>), path is an absolute local file " +
     "path. The bot sets the file via the browser's file chooser, so no OS dialog " +
     "is driven and no API credential is needed — it uses the session you're " +
-    "already signed into). If a " +
-    "target ref is stale, call operate_observe and retry with a fresh ref. " +
+    "already signed into). Stable target refs remain reusable while their element " +
+    "exists; if a ref appears in removed or no longer resolves, re-observe before retrying. " +
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
-    '"full" returns the legacy screen+accessibility payload.',
+    '"full" returns the legacy screen+accessibility payload. ' +
+    OBSERVE_DELTA_CONTRACT,
   inputSchema: actSchema,
   jsonInputSchema: {
     type: "object",

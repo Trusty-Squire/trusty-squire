@@ -17,6 +17,9 @@
 //    `finish`/extract path; the vault stays write-only.
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
+import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { BrowserController, type InteractiveElement } from "./browser.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
@@ -74,9 +77,9 @@ const DEFAULT_AUTH_HOSTS: readonly string[] = [
 ];
 
 export interface ObservedElement {
-  // Fresh action handle for this exact observation generation. Prefer this as
-  // operate_act.target; stale generations fail loudly instead of silently
-  // clicking a recycled DOM node.
+  // Stable action handle for this element identity. Prefer this as
+  // operate_act.target; it remains reusable across observations while the
+  // element exists, and a removed or changed identity fails to resolve.
   ref: string;
   // Human label for display/backcompat. operate_act still accepts labels, but
   // generated refs are safer on pages with repeated labels.
@@ -100,6 +103,7 @@ export interface ObservedElement {
   testId?: string | null;
   // DOM-derived screen context for non-vision host agents. `path` is a compact
   // targetable label such as "dialog:finish-account > button:create-account".
+  // Compact wire payloads omit it; the complete snapshot file retains it.
   path?: string | null;
   // `container` is redundant with `path` (path = "<container> > <kind>:<label>")
   // and is OMITTED in compact mode.
@@ -148,11 +152,40 @@ export interface Observation {
   // remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
   elements: ObservedElement[];
-  // Compact-mode bookkeeping so omission is never silent:
-  // the full element count (compact keeps all elements, just lighter), and
-  // whether the page text was capped at the 4000-char limit. Absent in full mode.
+  // Compact-mode bookkeeping so omission is never silent: the complete current
+  // element count (including delta/collapsed omissions), and whether page text
+  // was capped at 4000 characters. Absent in full mode.
   elements_total?: number;
   text_truncated?: boolean;
+  // Per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA emit,
+  // `elements` carries ONLY the elements whose compact form changed vs the
+  // previous observation; `delta` is true and `unchanged` counts the elements
+  // that were identical and therefore omitted (present in the persisted
+  // snapshot_file). `removed` lists refs that were present last observe and are
+  // now gone (usually empty). On a FULL compact emit `delta` is false and
+  // `unchanged`/`removed` are absent; `elements` is the resync set but may omit
+  // collapsed chrome links that remain in snapshot_file. If persistence fails,
+  // snapshot_file is absent and `elements` is instead complete and uncollapsed.
+  // A full snapshot is emitted on the first observe, a URL change, or high churn
+  // (SPA re-render).
+  delta?: boolean;
+  unchanged?: number;
+  removed?: string[];
+  // Set on a DELTA emit when the (normalized, same-cap) page text is identical to
+  // the previous observation's — the `text` field is then emitted EMPTY and the
+  // host reuses the prior text (recoverable in full from snapshot_file).
+  // Corpus-measured: 38% of re-observes have byte-identical text, and the text
+  // blob is a large share of each observe.
+  text_unchanged?: boolean;
+  // FULL compact emit only: count of plain chrome-region <a> links collapsed out
+  // of `elements` (a site-dependent bonus). The collapsed links stay in
+  // snapshot_file. Buttons/inputs/dismiss controls are never collapsed.
+  chrome_links_collapsed?: number;
+  // Every observe writes the COMPLETE current snapshot (all elements, WITH the
+  // verbose `path` field) to this session-scoped file, so the host can re-expand
+  // the full inventory after ITS own context compacts, or grep for an element the
+  // delta didn't re-show. The delta's safety net — without it, delta is unsafe.
+  snapshot_file?: string;
   // Phase 2 — set to "none" on the minimal ack returned by
   // operate_act{observe:"none"} (action ran; no perception emitted — call
   // operate_observe before the next ref-targeted act).
@@ -238,6 +271,13 @@ interface Session {
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
+  // Per-session observe delta baseline: the previous observation's stable-ref →
+  // serialized-compact-element (payload form, so `path` is already EXCLUDED — a
+  // layout-only shift must not read as a change). Each observe diffs the current
+  // compact set against this and emits only what changed. Null until the first
+  // observe. Reset on a URL change so a delta never crosses pages.
+  prevObserve: ObserveDeltaState | null;
+  observeSnapshotFile: string | null;
   // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
   // ordered, TEXT-targeted action trace of this session, so a successful run can
   // be `remember`ed as a replayable rail. Records visible text + non-secret
@@ -346,7 +386,19 @@ async function startBrowserBounded(browser: BrowserController, sessionId: string
 const norm = (s: string | null | undefined): string =>
   (s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 
-const PROVISION_REF_RE = /^@?g(\d+):([a-z0-9_-]+)$/i;
+// Element ref = a STABLE, generation-independent handle: "@e:<hash>_<ordinal>".
+// (Was "@g<generation>:<hash>_<ordinal>".) The generation prefix is gone on
+// purpose: the per-session observe delta does NOT re-emit an element that did not
+// change between observes, so the ref the host already holds must keep resolving —
+// a generation-stamped ref would go "stale" the instant a later observe bumped
+// the counter, even though the element is right there. The `@e:` sigil only
+// disambiguates a ref from a free-text label target (a label may legitimately end
+// in "_<digits>"). Staleness is guarded by IDENTITY, not a counter: a ref whose
+// element is now gone finds no match in resolveTarget → returns null → the caller
+// fails loudly ("no element matched") and the host re-observes. Stable selectors
+// prevent recycled-node retargeting; the accepted positional-only exception is
+// documented at stableElementId.
+const PROVISION_REF_RE = /^@e:([a-z0-9_-]+)$/i;
 const PROVISION_REF_ID_RE = /^(.+)_(\d+)$/;
 
 // The label a host sees + targets by. Prefer the most human, stable signal.
@@ -379,27 +431,42 @@ export function stableElementId(el: InteractiveElement): string {
       elementRef(el),
       el.href ?? "",
       el.type ?? "",
+      // The element's own selector — a per-element discriminator so two controls
+      // that are otherwise identical (same label/path/role, e.g. sibling "Remove"
+      // buttons in a list) get DISTINCT identities. Without it, a stable ref is a
+      // positional ordinal within a same-hash group: remove the first sibling and
+      // the old `_1` silently retargets the survivor. With a STABLE selector
+      // (id/data-attr) folded in, the removed element's identity is unique, so its
+      // old ref finds no match and resolveTarget returns null (the host
+      // re-observes) — no mis-click.
+      //
+      // Mutable state (`checked`, value length, topmost/occlusion) is deliberately
+      // excluded so fills, toggles, and visibility changes keep the same ref.
+      // Accepted UNGUARDED exception: with a purely POSITIONAL selector
+      // (`:nth-child`/`:nth-of-type`) AND non-disambiguating path fields, removing
+      // the first sibling shifts the survivor onto the removed node's old ref.
+      // That recycled ref is NOT in `removed`, so even a contract-following host
+      // can reuse it and target the survivor. Screen paths normally encode the
+      // row/index and prevent this collision. Fully closing it requires a stable
+      // extractor node id or cross-observe generation tracking; the latter is
+      // deliberately omitted because it defeats stable-ref reuse. If sibling
+      // bodies differ, the recycled ref is re-emitted with current state, but the
+      // underlying node swap remains unsignaled.
+      el.selector,
     ].join("\u001f"),
   );
 }
 
-export function provisionElementRef(
-  el: InteractiveElement,
-  generation: number,
-  ordinal = 1,
-): string {
-  return `@g${generation}:${stableElementId(el)}_${ordinal}`;
+export function provisionElementRef(el: InteractiveElement, ordinal = 1): string {
+  return `@e:${stableElementId(el)}_${ordinal}`;
 }
 
-function parseProvisionRef(
-  target: string,
-): { generation: number; id: string; ordinal: number | null } | null {
+function parseProvisionRef(target: string): { id: string; ordinal: number | null } | null {
   const m = target.trim().match(PROVISION_REF_RE);
   if (m === null) return null;
-  const rawId = m[2] as string;
+  const rawId = m[1] as string;
   const idMatch = rawId.match(PROVISION_REF_ID_RE);
   return {
-    generation: Number.parseInt(m[1] as string, 10),
     id: idMatch !== null ? (idMatch[1] as string) : rawId,
     ordinal: idMatch !== null ? Number.parseInt(idMatch[2] as string, 10) : null,
   };
@@ -407,7 +474,6 @@ function parseProvisionRef(
 
 export function provisionElementRefs(
   elements: readonly InteractiveElement[],
-  generation: number,
 ): Map<InteractiveElement, string> {
   const seen = new Map<string, number>();
   const refs = new Map<InteractiveElement, string>();
@@ -415,23 +481,9 @@ export function provisionElementRefs(
     const id = stableElementId(el);
     const ordinal = (seen.get(id) ?? 0) + 1;
     seen.set(id, ordinal);
-    refs.set(el, provisionElementRef(el, generation, ordinal));
+    refs.set(el, provisionElementRef(el, ordinal));
   }
   return refs;
-}
-
-export class StaleProvisionRefError extends Error {
-  readonly code = "stale_ref";
-
-  constructor(
-    readonly refGeneration: number,
-    readonly currentGeneration: number,
-  ) {
-    super(
-      `stale_ref: target is from observation generation ${refGeneration}, ` +
-        `but current generation is ${currentGeneration}. Call operate_observe and retry with a fresh ref.`,
-    );
-  }
 }
 
 export class AmbiguousProvisionTargetError extends Error {
@@ -462,13 +514,19 @@ function elementTargetKeys(el: InteractiveElement): string[] {
 export function resolveTarget(
   elements: readonly InteractiveElement[],
   target: string,
-  currentGeneration?: number,
 ): InteractiveElement | null {
   const parsedRef = parseProvisionRef(target);
   if (parsedRef !== null) {
-    if (currentGeneration !== undefined && parsedRef.generation !== currentGeneration) {
-      throw new StaleProvisionRefError(parsedRef.generation, currentGeneration);
-    }
+    // Staleness guard: a ref whose identity is absent returns null (the caller
+    // re-observes). The unguarded positional identity-recycling exception is
+    // documented at stableElementId.
+    //
+    // Ordinal caveat (same-hash duplicates): the `_<ordinal>` suffix positionally
+    // disambiguates elements that hash IDENTICALLY. Mutable state is intentionally
+    // absent from that hash, so members need not have identical checked/value/
+    // visibility state. If one is removed, an ordinal can resolve to a survivor;
+    // the recycled ordinal is not invalidated by `removed`. An ordinal past the
+    // current group size still returns null.
     const matches = elements.filter((el) => stableElementId(el) === parsedRef.id);
     if (parsedRef.ordinal !== null) {
       const match = matches[parsedRef.ordinal - 1];
@@ -1014,12 +1072,11 @@ function presentLabel(el: InteractiveElement, sealed: ReadonlySet<string>): stri
 
 export function buildAccessibilitySnapshot(
   elements: readonly InteractiveElement[],
-  generation: number,
   limit = 12000,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
 ): AccessibilitySnapshot | undefined {
   if (elements.length === 0) return undefined;
-  const refs = provisionElementRefs(elements, generation);
+  const refs = provisionElementRefs(elements);
   const byRegion = new Map<string, InteractiveElement[]>();
   for (const el of elements) {
     const region = el.container ?? "body:root";
@@ -1047,7 +1104,7 @@ export function buildAccessibilitySnapshot(
         el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
       ].filter((v): v is string => v !== null);
       lines.push(
-        `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el, generation)}` +
+        `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el)}` +
           (flags.length > 0 ? ` ${flags.join(" ")}` : ""),
       );
     }
@@ -1249,6 +1306,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     secretSlots: new Map(),
     sealedFieldKeys: new Set(),
     lastElements: [],
+    prevObserve: null,
+    observeSnapshotFile: null,
     actionTrace: [],
     captureRounds: [],
     startedAt: Date.now(),
@@ -1411,12 +1470,13 @@ export function generatePassword(length = 24): string {
 // Observation verbosity — ONE ordered knob (docs/DESIGN-observe-compact.md), set
 // per call via operate_observe{detail} / operate_act{detail}:
 //   "none"    — bare ack, no perception (operate_act only; for chained fills).
-//   "compact" — text + actionable elements; empty fields omitted, value→value_len,
-//               `container` dropped, no screen/accessibility. The DEFAULT.
+//   "compact" — stable-ref element/text deltas + a complete snapshot pointer;
+//               empty fields omitted, value→value_len, `path`/`container`
+//               dropped from the wire, no screen/accessibility. The DEFAULT.
 //   "full"    — the legacy payload: screen + accessibility + full element fields.
-// Compact is information-equivalent to full (eval + live smoke), ~50% smaller, so
-// it's the default with no global override — the planner escalates to "full" per
-// call on a genuinely ambiguous step.
+// The persisted compact snapshot preserves the complete inventory; see the
+// design doc for reconstruction and measured savings. The planner escalates to
+// "full" per call on a genuinely ambiguous step.
 export type ObserveDetail = "none" | "compact" | "full";
 
 // One element, compacted: ref/label/tag always; every other field omitted when
@@ -1427,6 +1487,12 @@ export function toCompactElement(
   el: InteractiveElement,
   ref: string,
   sealed: ReadonlySet<string>,
+  // `path` is the single most verbose field and agents act by ref, not path — so
+  // it is DROPPED from the default host payload (78% → 85% of the measured cut).
+  // It is retained ONLY in the persisted snapshot file (includePath=true), which
+  // the host can re-expand or grep. It is also excluded from the delta identity,
+  // so a layout-only path shift never forces a re-emit.
+  includePath = false,
 ): ObservedElement {
   const out: ObservedElement = { ref, label: presentLabel(el, sealed), tag: el.tag };
   if (el.role) out.role = el.role;
@@ -1441,10 +1507,282 @@ export function toCompactElement(
   if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
   if (el.href) out.href = el.href;
   if (el.testId) out.testId = el.testId;
-  if (el.screenPath) out.path = el.screenPath;
+  if (includePath && el.screenPath) out.path = el.screenPath;
   if (el.topmost === false) out.topmost = false;
   if (el.occludedBy) out.occluded_by = el.occludedBy;
   return out;
+}
+
+// Session-scoped observe-snapshot persistence (docs/DESIGN-observe-compact.md).
+// Reuses the best-effort writeFileSync pattern of the corpus dump-hook:
+// a write failure must NEVER break an observe. Rolling one file per session (the
+// latest COMPLETE inventory) — that's what the host wants when it re-expands
+// after a context compaction or greps for an element the delta didn't re-show.
+function observeSnapshotDir(sessionId: string): string {
+  const override = (process.env.TRUSTY_SQUIRE_OBSERVE_DIR ?? "").trim();
+  const parent = override.length > 0 ? override : join(tmpdir(), "trusty-squire-observe");
+  return join(parent, sessionId);
+}
+
+function persistObserveSnapshot(
+  session: Session,
+  generation: number,
+  url: string,
+  text: string,
+  textTruncated: boolean,
+  elements: ObservedElement[],
+): string | null {
+  let temporaryFile: string | null = null;
+  const dir = observeSnapshotDir(session.id);
+  const file = join(dir, `observe-${session.id}.json`);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    temporaryFile = join(dir, `.observe-${session.id}-${generation}.tmp`);
+    writeFileSync(
+      temporaryFile,
+      JSON.stringify(
+        {
+          session_id: session.id,
+          generation,
+          url,
+          elements_total: elements.length,
+          text,
+          text_truncated: textTruncated,
+          elements,
+        },
+        null,
+        2,
+      ),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    renameSync(temporaryFile, file);
+    session.observeSnapshotFile = file;
+    return file;
+  } catch {
+    if (temporaryFile !== null) {
+      try {
+        unlinkSync(temporaryFile);
+      } catch {}
+    }
+    for (const staleFile of new Set([session.observeSnapshotFile, file])) {
+      if (staleFile === null) continue;
+      try {
+        unlinkSync(staleFile);
+      } catch {}
+    }
+    session.observeSnapshotFile = null;
+    return null;
+  }
+}
+
+// An actionable control the chrome-link collapse must NEVER drop: any
+// button/input, or an element whose role is button/tab/checkbox/radio/menuitem,
+// or a type=submit. Button-shaped dismiss/consent/gate controls survive by
+// construction even in a chrome region; link-shaped variants are guarded
+// separately by isPlainChromeLink.
+export function isActionableControl(el: InteractiveElement): boolean {
+  const role = (el.role ?? "").toLowerCase();
+  if (
+    role === "button" ||
+    role === "tab" ||
+    role === "checkbox" ||
+    role === "radio" ||
+    role === "menuitem"
+  ) {
+    return true;
+  }
+  if (el.tag === "button" || el.tag === "input") return true;
+  if ((el.type ?? "").toLowerCase() === "submit") return true;
+  return false;
+}
+
+// "Chrome region" per docs/DESIGN-observe-compact.md: the element's path
+// root is a nav/footer/banner/aside-style landmark, OR a `section:` whose name is
+// a known boilerplate block (newsletter/copyright/social/…). Site-dependent
+// (measured 0% on flat DOMs, up to 57% on hoka) — a bonus, never the main win.
+export function isChromeRegionPath(el: InteractiveElement): boolean {
+  const path = el.screenPath ?? el.container ?? "";
+  const root = (path.split(" > ")[0] ?? "").trim();
+  const colon = root.indexOf(":");
+  const role = (colon >= 0 ? root.slice(0, colon) : root).toLowerCase();
+  const name = colon >= 0 ? root.slice(colon + 1).toLowerCase() : "";
+  if (
+    role === "navigation" ||
+    role === "footer" ||
+    role === "contentinfo" ||
+    role === "banner" ||
+    role === "complementary" ||
+    role === "aside"
+  ) {
+    return true;
+  }
+  if (role === "section") {
+    return /newsletter|copyright|trustpilot|accepted-payment|social|footer|shop-the-collection/.test(
+      name,
+    );
+  }
+  return false;
+}
+
+// A label that reads as a dismiss / consent / gate action — the collapse must
+// keep these even when they are shipped as a chrome-region <a>, and even when the
+// consent banner gives them a real fallback URL. Errs toward KEEPING (a false
+// positive keeps a nav link, which is safe; a false negative would drop a
+// dismiss control, which is not) — so it covers the accept/reject vocabulary AND
+// its opposites (decline/agree/allow) and the "preferences/opt out/got it" verbs.
+const DISMISS_CONSENT_LABEL_RE =
+  /close|dismiss|skip|no thanks|accept|reject|decline|agree|allow|cookie|consent|preferences|opt.?out|not now|maybe later|got it/i;
+
+// A PLAIN chrome-region NAVIGATION link — the ONLY thing the collapse removes.
+// Buttons, inputs, and role-controls are never plain links (isActionableControl
+// short-circuits), so they are always kept regardless of region. Beyond that, a
+// link is treated as a NAVIGATION link (collapsible) ONLY when it clearly is one;
+// anything that could be a dismiss/consent control is kept:
+//   - no href, a `#`-fragment href, or a `javascript:` href → an action-link, not
+//     navigation (a "Close banner"/"Manage cookies" anchor) → KEEP.
+//   - inConsentWidget → part of a cookie/consent banner → KEEP.
+//   - label matches a dismiss/consent pattern (close/dismiss/accept/reject/cookie/
+//     …) → KEEP even with a real fallback URL (consent banners often provide one).
+// This closes the "a dismiss control shipped as a bare/consent <a> gets dropped"
+// gap: only true, non-consent navigation links are collapsible.
+export function isPlainChromeLink(el: InteractiveElement): boolean {
+  if (isActionableControl(el)) return false;
+  const isLink = el.tag === "a" || (el.role ?? "").toLowerCase() === "link";
+  if (!isLink) return false;
+  if (!isChromeRegionPath(el)) return false;
+  if (el.inConsentWidget === true) return false;
+  const href = (el.href ?? "").trim();
+  if (href.length === 0 || href.startsWith("#") || href.toLowerCase().startsWith("javascript:")) {
+    return false;
+  }
+  if (DISMISS_CONSENT_LABEL_RE.test(elementRef(el))) return false;
+  return true;
+}
+
+// Fraction of the previous element set that changed (added/changed + removed).
+// Above this an observe emits a FULL snapshot instead of a delta — a big SPA
+// re-render is clearer whole, and a delta that touches most of the page is barely
+// smaller than the full set anyway.
+const OBSERVE_CHURN_FULL_THRESHOLD = 0.6;
+
+// The delta baseline carried between observes: the previous observation's URL,
+// its stable-ref → serialized-compact-element map (payload form, `path`
+// excluded), and its normalized page text (for the text delta).
+export interface ObserveDeltaState {
+  url: string;
+  byRef: Map<string, string>;
+  text: string;
+}
+
+export interface CompactObservationBuild {
+  // The emitted payload. `snapshot_file` is added by the caller after it persists
+  // the complete snapshot (so this pure core stays filesystem-free).
+  observation: Observation;
+  // The COMPLETE compact set (path EXCLUDED) keyed by ref — the reconstruction
+  // ground truth: emitted `elements` is a subset of this on a delta/collapse.
+  fullByRef: Map<string, ObservedElement>;
+  // The COMPLETE snapshot the caller persists to the session file (path INCLUDED).
+  fileElements: ObservedElement[];
+  // The baseline to hand the NEXT observe.
+  nextState: ObserveDeltaState;
+}
+
+// Pure core of the compact/delta observe path — no browser, no filesystem — so
+// the delta invariants (lossless resync, actionable-never-dropped, token budget)
+// are unit-testable over synthetic element sequences. observeSession supplies the
+// live elements/text/url; this decides delta-vs-full, applies the chrome-link
+// collapse, and returns both the emit and the complete ground-truth set.
+export function buildCompactObservation(args: {
+  sessionId: string;
+  url: string;
+  text: string;
+  textTruncated?: boolean;
+  guidance?: string;
+  elements: readonly InteractiveElement[];
+  sealed?: ReadonlySet<string>;
+  prev: ObserveDeltaState | null;
+}): CompactObservationBuild {
+  const { sessionId, url, text, elements, prev } = args;
+  const sealed = args.sealed ?? new Set<string>();
+  const refs = provisionElementRefs(elements);
+  const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
+
+  const fullByRef = new Map<string, ObservedElement>();
+  const serializedByRef = new Map<string, string>();
+  const fileElements: ObservedElement[] = [];
+  for (const el of elements) {
+    const ref = refOf(el);
+    fullByRef.set(ref, toCompactElement(el, ref, sealed, false));
+    serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
+    fileElements.push(toCompactElement(el, ref, sealed, true));
+  }
+  const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
+
+  const base: Observation = {
+    session_id: sessionId,
+    url,
+    text,
+    ...(args.guidance !== undefined ? { guidance: args.guidance } : {}),
+    elements: [],
+    elements_total: elements.length,
+    ...(args.textTruncated === true ? { text_truncated: true } : {}),
+  };
+
+  // Delta path: same URL as last observe, and churn under the threshold.
+  if (prev !== null && prev.url === url) {
+    const changed: ObservedElement[] = [];
+    let unchanged = 0;
+    for (const [ref, ser] of serializedByRef) {
+      if (prev.byRef.get(ref) === ser) unchanged += 1;
+      else changed.push(fullByRef.get(ref) as ObservedElement);
+    }
+    const removed = [...prev.byRef.keys()].filter((ref) => !serializedByRef.has(ref));
+    const churn = changed.length + removed.length;
+    if (churn / Math.max(prev.byRef.size, 1) <= OBSERVE_CHURN_FULL_THRESHOLD) {
+      // Text delta: emit the blob empty + a marker when it's byte-identical to
+      // the previous observe (the host reuses the prior text; the full text is in
+      // snapshot_file). Otherwise emit it in full.
+      const textUnchanged = prev.text === text;
+      return {
+        observation: {
+          ...base,
+          ...(textUnchanged ? { text: "", text_unchanged: true } : {}),
+          elements: changed,
+          delta: true,
+          unchanged,
+          ...(removed.length > 0 ? { removed } : {}),
+        },
+        fullByRef,
+        fileElements,
+        nextState,
+      };
+    }
+  }
+
+  // FULL compact snapshot — first observe / URL change / high churn. Only HERE do
+  // we collapse plain chrome-region links (never a button/input/dismiss control);
+  // the collapsed links stay in the persisted snapshot.
+  const emitted: ObservedElement[] = [];
+  let chromeLinksCollapsed = 0;
+  for (const el of elements) {
+    if (isPlainChromeLink(el)) {
+      chromeLinksCollapsed += 1;
+      continue;
+    }
+    emitted.push(fullByRef.get(refOf(el)) as ObservedElement);
+  }
+  return {
+    observation: {
+      ...base,
+      elements: emitted,
+      delta: false,
+      ...(chromeLinksCollapsed > 0 ? { chrome_links_collapsed: chromeLinksCollapsed } : {}),
+    },
+    fullByRef,
+    fileElements,
+    nextState,
+  };
 }
 
 async function observeSession(
@@ -1461,35 +1799,85 @@ async function observeSession(
   const normalizedFull = text.replace(/\s+/g, " ").trim();
   const normalizedText = normalizedFull.slice(0, 4000);
   const guidance = provisionPerceptionGuidance(normalizedText);
-  const refs = provisionElementRefs(elements, generation);
-  const refOf = (el: InteractiveElement): string =>
-    refs.get(el) ?? provisionElementRef(el, generation);
+  const url = session.browser.currentUrl();
+  const refs = provisionElementRefs(elements);
+  const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
+  const textTruncated = normalizedFull.length > 4000;
 
-  // Compact (default): text + actionable elements only. No screen/accessibility
-  // (the two re-encodings of the same nodes); empty fields omitted. ~50% smaller.
+  // Compact (default): the delta path, computed by the pure core.
   if (detail !== "full") {
-    return {
-      session_id: session.id,
-      url: session.browser.currentUrl(),
+    const built = buildCompactObservation({
+      sessionId: session.id,
+      url,
       text: normalizedText,
+      textTruncated,
       ...(guidance !== undefined ? { guidance } : {}),
-      elements: elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys)),
-      elements_total: elements.length,
-      ...(normalizedFull.length > 4000 ? { text_truncated: true } : {}),
+      elements,
+      sealed: session.sealedFieldKeys,
+      prev: session.prevObserve,
+    });
+    // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
+    // delta safe: the host re-expands the full inventory from here.
+    const snapshotFile = persistObserveSnapshot(
+      session,
+      generation,
+      url,
+      normalizedText,
+      textTruncated,
+      built.fileElements,
+    );
+    if (snapshotFile === null) {
+      // Persistence FAILED, so no recovery file exists. A delta (which omits
+      // unchanged elements) or a collapsed full snapshot (which omits chrome
+      // links) would be UNRECOVERABLE — the host would have no way to re-expand.
+      // Fall back to a FULL, UNCOLLAPSED response (every element inline). And
+      // INVALIDATE the delta baseline (null, not "leave it at the last good
+      // state"): the host's reconstruction is now THIS full set, so the next
+      // observe must emit a fresh FULL snapshot too, never a delta computed
+      // against the last-persisted baseline — that stale-baseline delta would
+      // desync a host that has already moved to this full state (a
+      // remove-then-restore-across-a-failed-persist sequence would silently drop
+      // the restored element otherwise).
+      session.prevObserve = null;
+      return {
+        session_id: session.id,
+        url,
+        text: normalizedText,
+        ...(guidance !== undefined ? { guidance } : {}),
+        elements: [...built.fullByRef.values()],
+        delta: false,
+        elements_total: elements.length,
+        ...(textTruncated ? { text_truncated: true } : {}),
+      };
+    }
+    session.prevObserve = built.nextState;
+    return {
+      ...built.observation,
+      snapshot_file: snapshotFile,
     };
   }
 
-  // Full path — byte-identical to the pre-compact payload.
-  const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
-  const accessibility = buildAccessibilitySnapshot(
-    elements,
+  // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
+  // pre-delta full payload: every element with every field, screen, and
+  // accessibility, never a delta and never a chrome collapse.
+  session.prevObserve = null;
+  // Refresh the persisted snapshot as a SIDE EFFECT so a re-expansion after a
+  // full-only observe can't restore stale state (the previous compact snapshot).
+  // Deliberately NOT surfaced in the payload — the full escape hatch stays
+  // byte-equivalent to the legacy shape (no snapshot_file field added).
+  persistObserveSnapshot(
+    session,
     generation,
-    undefined,
-    session.sealedFieldKeys,
+    url,
+    normalizedText,
+    textTruncated,
+    elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys, true)),
   );
+  const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
+  const accessibility = buildAccessibilitySnapshot(elements, undefined, session.sealedFieldKeys);
   return {
     session_id: session.id,
-    url: session.browser.currentUrl(),
+    url,
     text: normalizedText,
     ...(guidance !== undefined ? { guidance } : {}),
     ...(screen !== undefined ? { screen } : {}),
@@ -1603,7 +1991,7 @@ export async function act(
       }
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
-      const el = resolveTarget(fresh, action.target, session.generation);
+      const el = resolveTarget(fresh, action.target);
       if (el === null) {
         throw new Error(`type_secret: no element matched target "${action.target}".`);
       }
@@ -1634,7 +2022,7 @@ export async function act(
       // Re-resolve against FRESH elements every act — never trust a stale index.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
-      const el = resolveTarget(fresh, action.target, session.generation);
+      const el = resolveTarget(fresh, action.target);
       if (el === null) {
         throw new Error(
           `no element matched target "${action.target}". Visible: ` +
@@ -2023,7 +2411,7 @@ async function snapshotForPostcondition(session: Session): Promise<Postcondition
   const fields = session.lastElements
     .filter((e) => typeof e.value === "string" && e.value.length > 0)
     .map((e) => ({ label: elementRef(e), value_len: (e.value ?? "").length }));
-  return { url: obs.url, text: obs.text, fields };
+  return { url: obs.url, text: session.prevObserve?.text ?? obs.text, fields };
 }
 
 // Verify a recipe's postcondition against the live session — the anti-false-

@@ -759,7 +759,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
 });
 
 describe("observation detail ladder (none < compact < full)", () => {
-  it("default is compact: no screen/accessibility, value_len, elements_total, no container", async () => {
+  it("default is compact: no screen/accessibility, value_len, elements_total, no container, path DROPPED", async () => {
     h.elements = [
       elem({
         tag: "input",
@@ -779,7 +779,10 @@ describe("observation detail ladder (none < compact < full)", () => {
     expect(bag.value).toBeUndefined();
     expect(e.value_len).toBe(4);
     expect(bag.container).toBeUndefined();
-    expect(e.path).toBe("form:x > input:org");
+    // path is now dropped from the default payload (retained only in the
+    // persisted snapshot file, whose path the response carries).
+    expect("path" in e).toBe(false);
+    expect(typeof obs.snapshot_file).toBe("string");
   });
 
   it("operate_observe detail:'full' restores the screen + accessibility views", async () => {

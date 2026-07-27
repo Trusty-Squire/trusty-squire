@@ -148,11 +148,11 @@ describe("extractInteractiveElements — open shadow root occlusion (real Chromi
       expect(cta?.occludedBy).toBeNull();
 
       // (c) clickable by the ref/selector the extractor emitted — the click
-      // must reach the shadow-nested button and fire its handler.
-      const generation = 1;
-      const ref = cta === undefined ? undefined : provisionElementRefs(els, generation).get(cta);
-      expect(ref).toMatch(/^@g1:/);
-      const resolved = resolveTarget(els, ref ?? "", generation);
+      // must reach the shadow-nested button and fire its handler. Refs are the
+      // stable, generation-independent "@e:<hash>_<ordinal>" form.
+      const ref = cta === undefined ? undefined : provisionElementRefs(els).get(cta);
+      expect(ref).toMatch(/^@e:[A-Za-z0-9_-]+_\d+$/);
+      const resolved = resolveTarget(els, ref ?? "");
       expect(resolved).toBe(cta);
       expect(resolved?.visibleText ?? resolved?.ariaLabel).toBe("Add To Cart");
       await ctrl.click(resolved?.selector ?? "");

@@ -205,6 +205,22 @@ describe("TOOLS registry", () => {
       expect(t.description.length).toBeGreaterThan(40);
     }
   });
+
+  it("documents compact observation reconstruction on every operator entry point", () => {
+    for (const name of ["operate_start", "operate_observe", "operate_act"]) {
+      const description = TOOLS.find((tool) => tool.name === name)?.description ?? "";
+      expect(description).toContain("stable refs");
+      expect(description).toContain("delta:true");
+      expect(description).toContain("unchanged");
+      expect(description).toContain("removed");
+      expect(description).toContain("text_unchanged:true");
+      expect(description).toContain("snapshot_file");
+      expect(description).toContain("nothing changed, not an empty page");
+      expect(description).toContain("delta:false as a full resync");
+      expect(description).toContain("discard the prior element map");
+      expect(description).toContain("Only when delta:true");
+    }
+  });
 });
 
 describe("ApiCallError surface", () => {
