@@ -1107,17 +1107,24 @@ describe("observe-delta corpus budget (real multi-observe traces)", () => {
   );
 });
 
-// ── MARGINAL saving of the columnar encoding, ON TOP OF the delta baseline
-//    (Phase 4) ──
+// ── MARGINAL saving of columnar / field-elision / combined, ON TOP OF the delta
+//    baseline (Phase 4) ──
 //
-// The delta baseline is the #398 wire: elements as a JSON array (encode:"json").
-// Columnar (encode:"columnar") is replayed over the SAME real corpus stream as an
-// independent delta run and we sum the emitted-observation bytes. Token-weighted
-// aggregate marginal = 1 - sum(columnar) / sum(baseline). The gate is a
-// CONSERVATIVE floor below the ~37% estimate: columnar ≥ 20%. Per-run
-// p10/median/p90 are printed, not gated (the tail has single-observe / all-
-// unchanged runs whose fixed overhead dominates).
-describe("observe-delta Phase-4 marginal (columnar)", () => {
+// The delta baseline is the #398 wire: elements as a JSON array, no columnar, no
+// elision (encode:"json", elide:false). Each transform is replayed over the SAME
+// real corpus stream as an independent delta run so its own delta decisions are
+// consistent, and we sum the emitted-observation bytes:
+//   columnar     = encode:"columnar", elide:false
+//   field-elision= encode:"json",     elide:true
+//   combined     = encode:"columnar", elide:true   (= production)
+// Token-weighted aggregate marginal = 1 - sum(transform) / sum(baseline). Gates
+// are CONSERVATIVE floors below the ~37%/~13% estimates: columnar ≥ 20%,
+// field-elision ≥ 6%. Per-run p10/median/p90 are printed, not gated (the tail has
+// single-observe / all-unchanged runs whose fixed overhead dominates). NOTE: the
+// corpus does not capture the live `screenPath` (fromCorpus fakes it from
+// `selector`), so href-drop-in-chrome rarely fires here — this UNDER-counts
+// field-elision vs production (a conservative floor, by design).
+describe("observe-delta Phase-4 marginal (columnar / field-elision / combined)", () => {
   const dir = corpusDir();
   const hasCorpus = (() => {
     try {
@@ -1129,7 +1136,7 @@ describe("observe-delta Phase-4 marginal (columnar)", () => {
   const maybe = hasCorpus ? it : it.skip;
 
   maybe(
-    "columnar ≥ 20% marginal over the delta baseline; prints p10/median/p90",
+    "columnar ≥ 20% and field-elision ≥ 6% marginal over the delta baseline; prints p10/median/p90",
     () => {
       const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
       const runs = new Map<string, Array<{ n: number; file: string }>>();
@@ -1145,11 +1152,22 @@ describe("observe-delta Phase-4 marginal (columnar)", () => {
       const runKeys = [...runs.keys()].sort().slice(0, RUN_CAP);
 
       const variants = {
-        baseline: { encode: "json" as const },
-        columnar: { encode: "columnar" as const },
+        baseline: { encode: "json" as const, elide: false },
+        columnar: { encode: "columnar" as const, elide: false },
+        elision: { encode: "json" as const, elide: true },
+        combined: { encode: "columnar" as const, elide: true },
       };
-      const agg: Record<keyof typeof variants, number> = { baseline: 0, columnar: 0 };
-      const perRunColumnar: number[] = [];
+      const agg: Record<keyof typeof variants, number> = {
+        baseline: 0,
+        columnar: 0,
+        elision: 0,
+        combined: 0,
+      };
+      const perRun: Record<"columnar" | "elision" | "combined", number[]> = {
+        columnar: [],
+        elision: [],
+        combined: [],
+      };
       let observesMeasured = 0;
 
       for (const key of runKeys) {
@@ -1171,9 +1189,14 @@ describe("observe-delta Phase-4 marginal (columnar)", () => {
         }
         if (stream.length === 0) continue;
 
-        const runBytes: Record<keyof typeof variants, number> = { baseline: 0, columnar: 0 };
+        const runBytes: Record<keyof typeof variants, number> = {
+          baseline: 0,
+          columnar: 0,
+          elision: 0,
+          combined: 0,
+        };
         for (const [name, opt] of Object.entries(variants) as Array<
-          [keyof typeof variants, { encode: "json" | "columnar" }]
+          [keyof typeof variants, { encode: "json" | "columnar"; elide: boolean }]
         >) {
           let prev: ObserveDeltaState | null = null;
           for (const { elements, url } of stream) {
@@ -1184,31 +1207,48 @@ describe("observe-delta Phase-4 marginal (columnar)", () => {
               elements,
               prev,
               encode: opt.encode,
+              elide: opt.elide,
             });
             prev = built.nextState;
             runBytes[name] += JSON.stringify(built.observation).length;
           }
         }
         observesMeasured += stream.length;
-        agg.baseline += runBytes.baseline;
-        agg.columnar += runBytes.columnar;
-        if (runBytes.baseline > 0) perRunColumnar.push(1 - runBytes.columnar / runBytes.baseline);
+        for (const k of ["baseline", "columnar", "elision", "combined"] as const) {
+          agg[k] += runBytes[k];
+        }
+        if (runBytes.baseline > 0) {
+          perRun.columnar.push(1 - runBytes.columnar / runBytes.baseline);
+          perRun.elision.push(1 - runBytes.elision / runBytes.baseline);
+          perRun.combined.push(1 - runBytes.combined / runBytes.baseline);
+        }
       }
 
-      expect(perRunColumnar.length).toBeGreaterThan(20);
-      const marginal = 1 - agg.columnar / agg.baseline;
-      const s = [...perRunColumnar].sort((a, b) => a - b);
+      expect(perRun.columnar.length).toBeGreaterThan(20);
+      const marginal = {
+        columnar: 1 - agg.columnar / agg.baseline,
+        elision: 1 - agg.elision / agg.baseline,
+        combined: 1 - agg.combined / agg.baseline,
+      };
+      const report = (label: "columnar" | "elision" | "combined"): string => {
+        const s = [...perRun[label]].sort((a, b) => a - b);
+        return (
+          `${label} aggregate ${(marginal[label] * 100).toFixed(1)}% | ` +
+          `per-run p10 ${(quantile(s, 0.1) * 100).toFixed(1)}% ` +
+          `median ${(quantile(s, 0.5) * 100).toFixed(1)}% p90 ${(quantile(s, 0.9) * 100).toFixed(1)}%`
+        );
+      };
       // eslint-disable-next-line no-console
       console.log(
-        `Phase-4 marginal (${perRunColumnar.length} runs / ${observesMeasured} observes | ` +
-          `baseline ${agg.baseline}B) columnar aggregate ${(marginal * 100).toFixed(1)}% | ` +
-          `per-run p10 ${(quantile(s, 0.1) * 100).toFixed(1)}% median ${(quantile(s, 0.5) * 100).toFixed(1)}% ` +
-          `p90 ${(quantile(s, 0.9) * 100).toFixed(1)}%`,
+        `Phase-4 marginal (${perRun.columnar.length} runs / ${observesMeasured} observes | ` +
+          `baseline ${agg.baseline}B)\n  ${report("columnar")}\n  ${report("elision")}\n  ${report("combined")}`,
       );
 
-      // Conservative floor — if columnar underdelivers, the commit is dropped and
+      // Conservative floors — if either underdelivers, its commit is dropped and
       // the real number is reported (per the task), not force-shipped.
-      expect(marginal).toBeGreaterThanOrEqual(0.2);
+      expect(marginal.columnar).toBeGreaterThanOrEqual(0.2);
+      expect(marginal.elision).toBeGreaterThanOrEqual(0.06);
+      expect(marginal.combined).toBeGreaterThanOrEqual(marginal.columnar);
     },
     60_000,
   );
