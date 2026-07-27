@@ -325,6 +325,11 @@ interface Session {
   // gate spend a VAULTED 2Captcha key through the injecting proxy instead of a
   // raw env key. Undefined → the gate falls back to TWOCAPTCHA_API_KEY.
   api?: ApiClient;
+  // Set when a step used the text=/css= locator click fallback. Such a click
+  // resolves off-inventory, so it cannot be synthesized into a portable skill
+  // step — this flag suppresses auto-promotion so no silently-incomplete skill
+  // ships (captureAndPromoteSession).
+  usedLocatorFallback: boolean;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -583,6 +588,33 @@ function parseProvisionRef(target: string): { id: string; ordinal: number | null
     id: idMatch !== null ? (idMatch[1] as string) : rawId,
     ordinal: idMatch !== null ? Number.parseInt(idMatch[2] as string, 10) : null,
   };
+}
+
+// A locator-form target the host supplies when NO `@e:` ref exists for the
+// control it needs to act on — a bare click-handler <div> the inventory never
+// emitted (no role/label/testid, and past the card-scan cap). Two forms:
+//   text="Add To Cart"  (quotes optional) — clickable element whose text matches
+//   css=#some-id                          — a raw CSS selector
+// Resolved directly against the live page by BrowserController.resolvePageTarget,
+// NOT against the extracted-element inventory (which by definition lacks it).
+export type LocatorTarget = { mode: "text" | "css"; value: string };
+
+export function parseLocatorTarget(target: string): LocatorTarget | null {
+  const m = /^\s*(text|css)\s*=\s*([\s\S]+)$/i.exec(target);
+  if (m === null) return null;
+  const mode = (m[1] as string).toLowerCase() === "css" ? "css" : "text";
+  let value = (m[2] as string).trim();
+  // Strip one matching pair of surrounding quotes so `text="Add To Cart"` and
+  // `text=Add To Cart` are equivalent (the quotes only help the host delimit
+  // trailing whitespace / punctuation).
+  if (value.length >= 2) {
+    const q = value[0];
+    if ((q === '"' || q === "'") && value[value.length - 1] === q) {
+      value = value.slice(1, -1);
+    }
+  }
+  if (value.length === 0) return null;
+  return { mode, value };
 }
 
 export function provisionElementRefs(
@@ -1430,6 +1462,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     observeSnapshotFile: null,
     actionTrace: [],
     captureRounds: [],
+    usedLocatorFallback: false,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2181,9 +2214,15 @@ export async function act(
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
+  const auditTarget =
+    "target" in action && parseLocatorTarget(action.target) !== null
+      ? "<mode>=<redacted>"
+      : "target" in action
+        ? action.target
+        : undefined;
   audit(sessionId, "act", {
     kind: action.kind,
-    ...("target" in action ? { target: action.target } : {}),
+    ...(auditTarget !== undefined ? { target: auditTarget } : {}),
     ...("url" in action ? { url: action.url } : {}),
   });
 
@@ -2217,7 +2256,6 @@ export async function act(
   // Captured for the operator-recipe trace: the element a target action
   // resolved to, so we record the VISIBLE text it acted on (not the ref).
   let resolvedEl: InteractiveElement | null = null;
-
   switch (action.kind) {
     case "goto": {
       if (!hostAllowed(action.url, hostStrings(session))) {
@@ -2290,11 +2328,65 @@ export async function act(
     case "type":
     case "upload":
     case "oauth_click": {
-      const blockReason = shouldBlockUnsafeProvisionAction(
-        await browser.extractVisibleText(),
-        action,
-      );
+      const pageText = await browser.extractVisibleText();
+      const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
       if (blockReason !== null) throw new Error(blockReason);
+      // Locator-form target (`text=…` / `css=…`): the host is pointing at a
+      // control that has NO `@e:` ref because the inventory never emitted it (a
+      // bare click-handler <div> with no role/label, e.g. a SPA "Add To Cart"
+      // that falls past the card-scan cap). Resolve it directly against the live
+      // page instead of the extracted-element list.
+      const locator = parseLocatorTarget(action.target);
+      if (locator !== null) {
+        // text=/css= is a CLICK escape hatch only. `type` gates on click
+        // affordance / non-editable text so it can't target a form input, and
+        // upload/oauth_click have bespoke flows — reject them explicitly.
+        if (action.kind !== "click" && action.kind !== "js_click") {
+          throw new Error(
+            `operate_act kind="${action.kind}" does not accept a text=/css= locator target; ` +
+              `text=/css= is for clicking (click / js_click). Use an @e: ref from operate_observe.`,
+          );
+        }
+        const resolved = await browser.resolvePageTarget(locator.mode, locator.value);
+        if (!resolved.ok) {
+          if (resolved.reason === "none") {
+            throw new Error(
+              `no element matched locator "${action.target}". If the control is visible, ` +
+                `try a shorter/exact text= label or a css=<selector>.`,
+            );
+          }
+          throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
+        }
+        // The unsafe-action guard above inspected the RAW target, so an opaque
+        // `css=<selector>` (or any target whose string carries no verb/noun the
+        // guard matches) could resolve to a destructive billing/setup control the
+        // guard couldn't see through — clicking "Save product" in live mode via
+        // css=#submit. Re-run it against the RESOLVED visible text now that we
+        // know what the locator actually points at (no-mistakes review).
+        const resolvedBlock = shouldBlockUnsafeProvisionAction(pageText, {
+          ...action,
+          target: resolved.text,
+        });
+        if (resolvedBlock !== null) throw new Error(resolvedBlock);
+        // Mark the session non-promotable BEFORE the click: a locator click can't
+        // be replayed from the inventory (the element was never in it), so a
+        // skill synthesized from this run would silently omit the step. Setting
+        // it up front means a click that lands but then throws still can't leave
+        // the session promotable (see captureAndPromoteSession) (codex).
+        session.usedLocatorFallback = true;
+        try {
+          if (action.kind === "click") await browser.clickHandle(resolved.handle);
+          else await browser.jsClickHandle(resolved.handle);
+        } finally {
+          await resolved.handle.dispose().catch(() => undefined);
+        }
+        audit(sessionId, action.kind, {
+          locator_mode: locator.mode,
+          host: registrableHost(browser.currentUrl()),
+        });
+        await settleAfterStateChange(browser);
+        break;
+      }
       // Re-resolve against FRESH elements every act — never trust a stale index.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
@@ -2561,6 +2653,12 @@ export async function captureAndPromoteSession(
 ): Promise<PromoteResult | { kind: "skipped"; reason: string }> {
   const session = sessions.get(sessionId);
   if (session === undefined) return { kind: "skipped", reason: "unknown_session" };
+  // A run that used the text=/css= locator click fallback hit a control with no
+  // inventory ref; the synthesizer can't represent that step, so promoting would
+  // ship a skill missing a click. Skip rather than emit a silently-broken skill.
+  if (session.usedLocatorFallback) {
+    return { kind: "skipped", reason: "locator_fallback_unrepresentable" };
+  }
   const dir = resolveCaptureDir();
   if (dir === null) return { kind: "skipped", reason: "capture_disabled" };
   if (!session.captureRounds.some((r) => r.observed.kind === "extract")) {

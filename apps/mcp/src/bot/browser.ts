@@ -23,7 +23,14 @@
 // gate).
 
 import { chromium as baseChromium } from "playwright";
-import type { Browser, BrowserContext, CDPSession, Locator, Page } from "playwright";
+import type {
+  Browser,
+  BrowserContext,
+  CDPSession,
+  ElementHandle,
+  Locator,
+  Page,
+} from "playwright";
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
@@ -2485,6 +2492,278 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const safeIndex = Math.max(0, Math.floor(index));
     await this.page.locator(selector).nth(safeIndex).click({ force: true, timeout: 8000 });
+  }
+
+  // Resolve a locator-form operate_act target (`text=…` / `css=…`) DIRECTLY
+  // against the live page, bypassing the extracted-inventory list. This is the
+  // escape hatch for a control the inventory never emitted: a bare click-handler
+  // <div> with no role/label/testid that the SELECTOR walk skips and that the
+  // card scan drops once its MAX_CARDS budget is spent on earlier cursor:pointer
+  // divs (Casetify's Add-To-Cart is element #45 of the eligible cards; the cap is
+  // 16). Because there is no ref for such an element, `text=`/`css=` is the only
+  // way the host can click it.
+  //
+  // Resolution rules (kept deliberately strict so the click can't land on the
+  // wrong element):
+  //   • text mode — matches an element whose rendered text (innerText, so hidden
+  //     descendants don't leak) equals (or, if nothing equals, contains) the
+  //     query AND that carries a real click affordance (button/a/label/select
+  //     tag, an interactive ARIA role, an onclick / action-type attribute, or
+  //     cursor:pointer). Plain prose that merely contains the words is excluded.
+  //     Open shadow roots are pierced.
+  //   • css mode — the author's selector, restricted to VISIBLE matches.
+  //   • A weak (cursor-only) wrapper that sits inside a strong control, or wraps
+  //     another candidate, collapses away; two GENUINE nested controls stay
+  //     ambiguous rather than being silently merged.
+  //   • 0 matches → {ok:false, reason:"none"}; >1 → {ok:false, reason:"ambiguous"}
+  //     with the candidate texts so the host can disambiguate. Exactly 1 returns
+  //     a live ElementHandle to the winner. The caller acts through the handle
+  //     (never a DOM-visible marker), so a page MutationObserver cannot re-aim
+  //     the click at a decoy between resolution and click, and disposes it after.
+  async resolvePageTarget(
+    mode: "text" | "css",
+    value: string,
+  ): Promise<
+    | { ok: true; handle: ElementHandle<Element>; text: string }
+    | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
+  > {
+    if (!this.page) throw new Error("Browser not started");
+    const resultHandle = await this.page.evaluateHandle(
+      ({ mode, value }) => {
+        const norm = (s: string | null): string =>
+          (s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+        // Rendered text, NOT textContent: innerText reflects what the user
+        // actually sees, excluding display:none / visibility:hidden descendants.
+        // Matching on textContent let a visible "Cancel" button that hides a
+        // "Delete account" span be selected by text="Delete account" (codex).
+        // Display form: whitespace-collapsed but ORIGINAL case (for the trace /
+        // audit / candidate list). `rendered` lowercases it for matching only.
+        const renderedRaw = (el: Element): string => {
+          const it = (el as HTMLElement).innerText;
+          return (typeof it === "string" ? it : (el.textContent ?? "")).replace(/\s+/g, " ").trim();
+        };
+        const rendered = (el: Element): string => renderedRaw(el).toLowerCase();
+        // Visibility walks the ANCESTOR chain (crossing shadow-host boundaries):
+        // opacity does not inherit, so a button under an opacity:0 wrapper keeps
+        // its own computed opacity 1 and a self-only check would wrongly treat it
+        // as visible and click an invisible control (codex).
+        const isVisible = (el: Element): boolean => {
+          const r = el.getBoundingClientRect();
+          if (r.width < 2 || r.height < 2) return false;
+          let node: Element | null = el;
+          while (node !== null) {
+            const s = window.getComputedStyle(node);
+            if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0") return false;
+            const parentEl: Element | null = node.parentElement;
+            if (parentEl !== null) {
+              node = parentEl;
+            } else {
+              const root = node.getRootNode();
+              node = root instanceof ShadowRoot ? root.host : null;
+            }
+          }
+          return true;
+        };
+        // "Strong" = real interactive semantics (a genuine control), as opposed
+        // to an element that merely inherits cursor:pointer from a clickable
+        // ancestor (a decorative wrapper / inner label span).
+        const isStrong = (el: Element): boolean => {
+          const tag = el.tagName.toLowerCase();
+          const role = el.getAttribute("role");
+          if (tag === "button" || tag === "a" || tag === "label" || tag === "select" || tag === "summary")
+            return true;
+          if (
+            role === "button" ||
+            role === "link" ||
+            role === "radio" ||
+            role === "checkbox" ||
+            role === "menuitem" ||
+            role === "menuitemradio" ||
+            role === "option" ||
+            role === "tab" ||
+            role === "switch"
+          )
+            return true;
+          return el.hasAttribute("onclick") || el.hasAttribute("action-type");
+        };
+        const hasClickAffordance = (el: Element): boolean =>
+          isStrong(el) || window.getComputedStyle(el).cursor === "pointer";
+
+        // Gather candidates across the light DOM and every OPEN shadow root.
+        const all: Element[] = [];
+        const collect = (root: Document | ShadowRoot): void => {
+          if (root == null || typeof root.querySelectorAll !== "function") return;
+          let nodes: Element[] = [];
+          if (mode === "css") {
+            try {
+              nodes = Array.from(root.querySelectorAll(value));
+            } catch {
+              nodes = [];
+            }
+          } else {
+            nodes = Array.from(root.querySelectorAll("*"));
+          }
+          for (const n of nodes) all.push(n);
+          for (const el of Array.from(root.querySelectorAll("*"))) {
+            const sr = (el as HTMLElement).shadowRoot;
+            if (sr != null) collect(sr);
+          }
+        };
+        collect(document);
+
+        let pool: Element[];
+        if (mode === "css") {
+          pool = all.filter(isVisible);
+        } else {
+          const want = norm(value);
+          if (want.length === 0) return { count: 0, candidates: [] as string[] };
+          const affordable = all.filter((el) => isVisible(el) && hasClickAffordance(el));
+          const exact = affordable.filter((el) => rendered(el) === want);
+          // Prefer exact-text matches; only fall back to "contains" (with a
+          // length guard so a big wrapper doesn't swallow the query) when no
+          // element's rendered text equals the query.
+          pool =
+            exact.length > 0
+              ? exact
+              : affordable.filter((el) => {
+                  const t = rendered(el);
+                  return t.includes(want) && t.length <= Math.max(80, want.length + 20);
+                });
+        }
+        // Bound the O(n²) nesting-collapse below: a broad selector (css=* /
+        // css=div) can match thousands of nodes, and a pairwise `contains` scan
+        // over all of them would block the page for seconds. A pool this large
+        // is ambiguous by any measure (the caller wants exactly one), so
+        // short-circuit to ambiguous before the quadratic pass (no-mistakes review).
+        const AMBIGUOUS_POOL_CAP = 40;
+        if (pool.length > AMBIGUOUS_POOL_CAP) {
+          return {
+            element: null,
+            count: pool.length,
+            candidates: pool.slice(0, 8).map((el) => renderedRaw(el).slice(0, 60)),
+            text: "",
+          };
+        }
+        // Collapse nesting WITHOUT silently merging two genuine controls. A
+        // STRONG candidate (real interactive semantics) always survives. A WEAK
+        // candidate (only inherits cursor:pointer — a decorative wrapper or the
+        // inner label span of a real control) is dropped ONLY relative to a
+        // STRONG partner: when it sits inside a strong candidate (it's part of
+        // that control's subtree, e.g. Casetify's <span> inside the button
+        // <div>) or when it wraps a strong candidate (a pointer div around the
+        // real button). Two WEAK candidates in a nesting relationship — each a
+        // bare click-handler div with its own listener — are NOT collapsed:
+        // dropping the outer would pick the inner, whose click bubbles to the
+        // outer and fires BOTH handlers (a double add-to-cart). They both
+        // survive → reported ambiguous rather than silently double-clicked (codex).
+        const leaves = pool.filter((el) => {
+          if (isStrong(el)) return true;
+          for (const other of pool) {
+            if (other === el) continue;
+            if (other.contains(el) && isStrong(other)) return false;
+            if (el.contains(other) && isStrong(other)) return false;
+          }
+          return true;
+        });
+        const uniq = Array.from(new Set(leaves));
+        const candidates = uniq.slice(0, 8).map((el) => renderedRaw(el).slice(0, 60));
+        const win = uniq.length === 1 ? (uniq[0] as HTMLElement) : null;
+        return {
+          element: win,
+          count: uniq.length,
+          candidates,
+          text: win !== null ? renderedRaw(win).slice(0, 120) : "",
+        };
+      },
+      { mode, value },
+    );
+    const meta = await resultHandle.evaluate((r) => ({
+      count: r.count,
+      candidates: r.candidates,
+      text: r.text,
+    }));
+    if (meta.count !== 1) {
+      await resultHandle.dispose();
+      return {
+        ok: false,
+        reason: meta.count === 0 ? "none" : "ambiguous",
+        candidates: meta.candidates,
+      };
+    }
+    // Pull out a live ElementHandle to the winning node; dispose the wrapper.
+    const winHandle = await resultHandle.evaluateHandle((r) => r.element);
+    await resultHandle.dispose();
+    const asElement = winHandle.asElement();
+    if (asElement === null) {
+      await winHandle.dispose();
+      return { ok: false, reason: "none", candidates: meta.candidates };
+    }
+    return { ok: true, handle: asElement, text: meta.text ?? "" };
+  }
+
+  private async locatorClickState(
+    handle: ElementHandle<Element>,
+  ): Promise<"detached" | "disabled" | "ok"> {
+    return await handle.evaluate((el) => {
+      if (!el.isConnected) return "detached";
+      if (typeof el.matches === "function" && el.matches(":disabled")) return "disabled";
+      let n: Element | null = el;
+      while (n !== null) {
+        if (n.getAttribute("aria-disabled") === "true") return "disabled";
+        const parentEl: Element | null = n.parentElement;
+        if (parentEl !== null) {
+          n = parentEl;
+        } else {
+          const root = n.getRootNode();
+          n = root instanceof ShadowRoot ? root.host : null;
+        }
+      }
+      return "ok";
+    });
+  }
+
+  async clickHandle(handle: ElementHandle<Element>): Promise<void> {
+    const state = await this.locatorClickState(handle);
+    if (state === "detached") {
+      throw new Error("locator target detached from the page before the click");
+    }
+    if (state === "disabled") {
+      throw new Error("locator target is disabled");
+    }
+    await handle.click({ timeout: 8000, noWaitAfter: true });
+  }
+
+  async jsClickHandle(handle: ElementHandle<Element>): Promise<void> {
+    const state = await this.locatorClickState(handle);
+    if (state === "detached") {
+      throw new Error("locator target detached from the page before the click");
+    }
+    if (state === "disabled") {
+      throw new Error("locator target is disabled");
+    }
+    const dispatchState = await handle.evaluate((el) => {
+      if (!el.isConnected) return "detached";
+      if (typeof el.matches === "function" && el.matches(":disabled")) return "disabled";
+      let n: Element | null = el;
+      while (n !== null) {
+        if (n.getAttribute("aria-disabled") === "true") return "disabled";
+        const parentEl: Element | null = n.parentElement;
+        if (parentEl !== null) {
+          n = parentEl;
+        } else {
+          const root = n.getRootNode();
+          n = root instanceof ShadowRoot ? root.host : null;
+        }
+      }
+      (el as HTMLElement).click();
+      return "ok";
+    });
+    if (dispatchState === "detached") {
+      throw new Error("locator target detached from the page before the click");
+    }
+    if (dispatchState === "disabled") {
+      throw new Error("locator target is disabled");
+    }
   }
 
   // Dispatch a DOM .click() in the page context. Some React copy buttons fire
