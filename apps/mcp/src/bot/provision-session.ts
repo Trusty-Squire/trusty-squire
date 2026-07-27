@@ -148,8 +148,8 @@ export interface Observation {
   // Compact relational view of interactive DOM regions. This is intentionally
   // smaller than raw DOM but preserves hierarchy/occlusion that flat text loses.
   screen?: ScreenOutline;
-  // AXI-style planner scan surface. Additive: the rich elements[] inventory
-  // remains the source of truth for actionability/state.
+  // AXI-style planner scan surface. Additive in full mode: the rich `elements`
+  // inventory remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
   // FULL-mode element inventory (the legacy escape hatch): one JSON object per
   // element with every field. In COMPACT mode `elements` is absent and the
@@ -175,14 +175,14 @@ export interface Observation {
   elements_total?: number;
   text_truncated?: boolean;
   // Per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA emit,
-  // `elements` carries ONLY the elements whose compact form changed vs the
-  // previous observation; `delta` is true and `unchanged` counts the elements
-  // that were identical and therefore omitted (present in the persisted
-  // snapshot_file). `removed` lists refs that were present last observe and are
-  // now gone (usually empty). On a FULL compact emit `delta` is false and
-  // `unchanged`/`removed` are absent; `elements` is the resync set but may omit
+  // `el_table` carries ONLY the rows whose compact form changed vs the previous
+  // observation; `delta` is true and `unchanged` counts the elements that were
+  // identical and therefore omitted (present in the persisted snapshot_file).
+  // `removed` lists refs that were present last observe and are now gone
+  // (usually empty). On a FULL compact emit `delta` is false and
+  // `unchanged`/`removed` are absent; `el_table` is the resync set but may omit
   // collapsed chrome links that remain in snapshot_file. If persistence fails,
-  // snapshot_file is absent and `elements` is instead complete and uncollapsed.
+  // snapshot_file is absent and `el_table` is instead complete and uncollapsed.
   // A full snapshot is emitted on the first observe, a URL change, or high churn
   // (SPA re-render).
   delta?: boolean;
@@ -195,7 +195,7 @@ export interface Observation {
   // blob is a large share of each observe.
   text_unchanged?: boolean;
   // FULL compact emit only: count of plain chrome-region <a> links collapsed out
-  // of `elements` (a site-dependent bonus). The collapsed links stay in
+  // of `el_table` (a site-dependent bonus). The collapsed links stay in
   // snapshot_file. Buttons/inputs/dismiss controls are never collapsed.
   chrome_links_collapsed?: number;
   // Every observe writes the COMPLETE current snapshot (all elements, WITH the
@@ -1496,7 +1496,7 @@ export function generatePassword(length = 24): string {
 // "full" per call on a genuinely ambiguous step.
 export type ObserveDetail = "none" | "compact" | "full";
 
-// Field-elision (docs/DESIGN-observe-compact.md § Phase 4). `text` is always the
+// Type-elision (docs/DESIGN-observe-compact.md § Phase 4). `text` is always the
 // default input type; `button`/`submit` are redundant only when the tag or role
 // already identifies a button. Other types and unmarked input action controls
 // are load-bearing and kept. Applied only to the wire form, never the persisted
@@ -1524,7 +1524,7 @@ export function toCompactElement(
   // the host can re-expand or grep. It is also excluded from the delta identity,
   // so a layout-only path shift never forces a re-emit.
   includePath = false,
-  // Apply field-elision (type — Phase 4) to the WIRE form. The persisted file
+  // Apply type-elision (Phase 4) to the WIRE form. The persisted file
   // form keeps full fidelity for re-expansion, so callers that write the file
   // pass false.
   elide = false,
@@ -1621,9 +1621,7 @@ export function encodeElementsTable(els: readonly ObservedElement[]): string {
       els.some((e) => elementCell(e, c) !== undefined),
   );
   const header = columns.join("\t");
-  const rows = els.map((e) =>
-    columns.map((c) => escapeCell(elementCell(e, c) ?? "")).join("\t"),
-  );
+  const rows = els.map((e) => columns.map((c) => escapeCell(elementCell(e, c) ?? "")).join("\t"));
   return [header, ...rows].join("\n");
 }
 
@@ -1645,7 +1643,8 @@ export function parseElementsTable(table: string): ObservedElement[] {
       if (col === "ref") e.ref = raw;
       else if (col === "label") e.label = raw;
       else if (col === "tag") e.tag = raw;
-      else if (raw === "") return; // absent optional field
+      else if (raw === "")
+        return; // absent optional field
       else if (col === "role") e.role = raw;
       else if (col === "type") e.type = raw;
       else if (col === "value_len") e.value_len = Number(raw);
@@ -1839,7 +1838,7 @@ export interface CompactObservationBuild {
   // the complete snapshot (so this pure core stays filesystem-free).
   observation: Observation;
   // The COMPLETE compact set (path EXCLUDED) keyed by ref — the reconstruction
-  // ground truth: emitted `elements` is a subset of this on a delta/collapse.
+  // ground truth: emitted wire records are a subset on a delta/collapse.
   fullByRef: Map<string, ObservedElement>;
   // The COMPLETE snapshot the caller persists to the session file (path INCLUDED).
   fileElements: ObservedElement[];
@@ -1865,8 +1864,8 @@ export function buildCompactObservation(args: {
   // The eval harness passes "json" to measure the columnar transform's marginal
   // against the pre-columnar payload; production always uses the default.
   encode?: "columnar" | "json";
-  // Apply Phase-4 field-elision to the wire element form. Default true; the eval
-  // harness passes false to isolate the field-elision transform's marginal.
+  // Apply Phase-4 type-elision to the wire element form. Default true; the eval
+  // harness passes false to isolate the type-elision transform's marginal.
   elide?: boolean;
 }): CompactObservationBuild {
   const { sessionId, url, text, elements, prev } = args;
@@ -2576,9 +2575,10 @@ export async function rememberRecipe(
 async function snapshotForPostcondition(session: Session): Promise<PostconditionSnapshot> {
   const obs = await observeSession(session);
   // Read lengths off the RAW elements (session.lastElements, set by
-  // observeSession) — obs.elements masks sealed/password values to a fixed
-  // placeholder, which would corrupt a min_value_len success-signal. Lengths
-  // never expose the value, so this stays leak-free.
+  // observeSession). The compact wire carries only value_len and never the raw
+  // value; deriving from the live elements preserves the real length for a
+  // min_value_len success-signal. Lengths never expose the value, so this stays
+  // leak-free.
   const fields = session.lastElements
     .filter((e) => typeof e.value === "string" && e.value.length > 0)
     .map((e) => ({ label: elementRef(e), value_len: (e.value ?? "").length }));

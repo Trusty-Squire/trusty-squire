@@ -89,7 +89,6 @@ import {
   observe,
   verifyPostcondition,
   closeAllProvisionSessions,
-  encodeElementsTable,
   parseElementsTable,
   type Observation,
   type ObserveDeltaState,
@@ -890,9 +889,7 @@ describe("observe-delta harness", () => {
     expect(b2.observation.delta).toBe(true);
     expect(b2.observation.removed).toEqual([survivorOldRef]);
     expect(b2.observation.removed).not.toContain(removedNodeRef);
-    expect(rows(b2.observation).find((entry) => entry.ref === removedNodeRef)?.checked).toBe(
-      false,
-    );
+    expect(rows(b2.observation).find((entry) => entry.ref === removedNodeRef)?.checked).toBe(false);
     // The changed body exposes the survivor's current state, but neither
     // `removed` nor resolveTarget signals that the underlying node changed.
     expect(resolveTarget(after, removedNodeRef)).toBe(after[0]);

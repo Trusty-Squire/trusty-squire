@@ -34,9 +34,10 @@ Inside `elements`:
    `elements` already carries (same 75 / 88 refs). Pure duplication.
 2. ~30% of the `elements` block is serialized `null`/`""`/`false`.
 3. `container` is 100% redundant with `path` (`path` = `<container> > <kind>:<label>`).
-4. The planner drives off `text` (read state) + `elements` (pick `ref`); the
-   `screen` region-tree and `accessibility` flat-tree are not needed to choose an
-   action. `occluded_by`/`topmost`/`href` ARE load-bearing — keep them (per-element).
+4. The planner drives off `text` (read state) + the element inventory (pick
+   `ref`); the `screen` region-tree and `accessibility` flat-tree are not needed
+   to choose an action. `occluded_by`/`topmost`/`href` ARE load-bearing — keep
+   them (per-element).
 
 ## The one knob — `detail`
 
@@ -61,10 +62,10 @@ When `detail` is `compact` (the default), `observeSession`:
 
 - **Omit `screen` + `accessibility`** (the two re-encodings). Also skip computing
   them (CPU win).
-- **Compact `elements`**: omit empty fields; preserve `checked` for both true and
-  false checkable states, emit `topmost` only when `false` (the informative
-  case), and emit `occluded_by` only when set. Keep `ref`, `label`, `tag`, `role`,
-  `type`, `href`, and `testId`.
+- **Build compact element records**: omit empty fields; preserve `checked` for
+  both true and false checkable states, emit `topmost` only when `false` (the
+  informative case), and emit `occluded_by` only when set. Keep `ref`, `label`,
+  `tag`, `role`, `type`, `href`, and `testId`.
 - **Drop `path` and `container` from the wire payload.** `container` is redundant
   with `path`; the verbose `path` remains in the complete persisted snapshot for
   re-expansion and targeted searches.
@@ -118,11 +119,11 @@ Compact observations minimize repeated context without making the stream lossy:
   reuse this design exists to preserve.
 - **Full resyncs.** The first compact observe, a URL change, or element churn over
   60% emits `delta:false`. Replace the prior element map from `snapshot_file`;
-  the wire `elements` list may omit collapsed chrome links.
+  the wire `el_table` may omit collapsed chrome links.
 - **Incremental updates.** A same-URL, low-churn observe emits `delta:true`.
-  Upsert the emitted `elements` by ref, delete `removed`, and retain the elements
-  represented by `unchanged`. An empty delta means nothing changed, not that the
-  page is empty.
+  Parse and upsert the emitted `el_table` rows by ref, delete `removed`, and
+  retain the elements represented by `unchanged`. An empty delta means nothing
+  changed, not that the page is empty.
 - **Text deltas.** When normalized page text is byte-identical to the prior
   observe, `text` is empty and `text_unchanged:true` tells the host to reuse its
   previous text. Changed text is emitted in full.
@@ -131,7 +132,7 @@ Compact observations minimize repeated context without making the stream lossy:
   inventory, including `path` and `text_truncated`. Its session directory is mode
   `0700` and the file is mode `0600`, so the host can safely re-expand after its
   own context compacts. If persistence fails, the response falls back to
-  `delta:false` with every element uncollapsed on the wire and no `snapshot_file`;
+  `delta:false` with a complete, uncollapsed `el_table` and no `snapshot_file`;
   the delta baseline is invalidated so the next compact observe is another full
   resync.
 - **Safe chrome collapse.** Full compact resyncs may omit only navigational
@@ -147,7 +148,7 @@ payload shape byte-for-byte. As an unsurfaced side effect it replaces the
 persisted snapshot, invalidates the compact baseline so the next compact observe
 is a full resync, and removes the stale snapshot if persistence fails.
 
-## Phase 4 — columnar element encoding + field-elision ✅ shipped
+## Phase 4 — columnar element encoding + type-elision ✅ shipped
 
 Two per-element encoding transforms applied on TOP of the Phase-3 delta. Both
 change only the COMPACT wire; the persisted snapshot file and `detail:"full"`
@@ -171,7 +172,7 @@ keep full fidelity.
   resync it is the resync set minus collapsed chrome links; `removed`/`unchanged`/
   `text_unchanged` are unchanged. `detail:"full"` keeps the `elements` JSON array
   (the escape hatch stays byte-equivalent to the legacy shape).
-- **Field-elision.** On the wire form only, drop a `type` value the planner
+- **Type-elision.** On the wire form only, drop a `type` value the planner
   already infers from tag/role — `button`/`submit` (implied by the tag/role) and
   `text` (the default input type); other types (email, password, checkbox, …) are
   kept. An input action control keeps `button`/`submit` unless its tag or role
