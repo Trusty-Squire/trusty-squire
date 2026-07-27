@@ -5,8 +5,10 @@ import { useParams, useRouter } from "next/navigation";
 import { decryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { sealToRecipient } from "@trusty-squire/vault/hpke";
 import { AppShell } from "../../../components/AppShell";
+import { CardEntry } from "../../../components/CardEntry";
 import { ApiError, apiGet, apiPost } from "../../../lib/api";
 import { getVouchflow } from "../../../lib/vouchflow";
+import { boundCardMeta, type CardMeta } from "../../../lib/wallet";
 
 interface Approval {
   status: string;
@@ -15,7 +17,8 @@ interface Approval {
   amount_cents: number;
   currency: string;
   nonce: string;
-  card_ref: string;
+  // Null for a JIT add-card ceremony until a card is bound.
+  card_ref: string | null;
   operator_pubkey: string;
   expires_at: string;
   item: string;
@@ -68,18 +71,40 @@ export default function PaymentApprovalPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
   const [approval, setApproval] = useState<Approval | null>(null);
+  // The account's cards — the ONLY honest source for the last4 shown before
+  // the passkey ceremony. Keyed by the approval's server-bound card_ref, never
+  // by local page state or a post-passkey blob decrypt.
+  const [cards, setCards] = useState<readonly CardMeta[]>([]);
   const [busy, setBusy] = useState(false);
+  const [binding, setBinding] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const redirectToLogin = useCallback(() => {
     router.replace(`/login?next=/vault/pay/${encodeURIComponent(id)}`);
   }, [id, router]);
 
+  // Fetch the approval + card list together. Pure fetch (no setState) so it
+  // can back both the mount effect and the post-bind refresh without tripping
+  // the set-state-in-effect rule. The card list is best-effort enrichment for
+  // the review anchor — its failure must not block a has-card approval.
+  const fetchState = useCallback(async (): Promise<{
+    approval: Approval;
+    cards: readonly CardMeta[];
+  }> => {
+    const [approval, cards] = await Promise.all([
+      apiGet<Approval>(`/v1/pay/approvals/${encodeURIComponent(id)}`),
+      apiGet<CardMeta[]>("/v1/vault/e2e").catch(() => [] as CardMeta[]),
+    ]);
+    return { approval, cards };
+  }, [id]);
+
   useEffect(() => {
     let cancelled = false;
-    void apiGet<Approval>(`/v1/pay/approvals/${encodeURIComponent(id)}`)
-      .then((result) => {
-        if (!cancelled) setApproval(result);
+    void fetchState()
+      .then((state) => {
+        if (cancelled) return;
+        setApproval(state.approval);
+        setCards(state.cards);
       })
       .catch((err: unknown) => {
         if (cancelled) return;
@@ -92,10 +117,38 @@ export default function PaymentApprovalPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, redirectToLogin]);
+  }, [fetchState, redirectToLogin]);
+
+  // JIT add-card: the freshly stored card is bound to this card-less approval
+  // server-side, then we reload so the review beat renders from the bound
+  // card_ref. Approval stays pending — only card_ref transitions null → set.
+  const bindCard = useCallback(
+    async (cardId: string) => {
+      setBinding(true);
+      setError(null);
+      try {
+        await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/bind-card`, {
+          card_ref: cardId,
+        });
+        const state = await fetchState();
+        setApproval(state.approval);
+        setCards(state.cards);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) {
+          redirectToLogin();
+          return;
+        }
+        setError(err instanceof Error ? err.message : "Failed to attach the card.");
+      } finally {
+        setBinding(false);
+      }
+    },
+    [id, fetchState, redirectToLogin],
+  );
 
   const approve = useCallback(async () => {
-    if (approval === null || approval.status !== "pending") return;
+    if (approval === null || approval.status !== "pending" || approval.card_ref === null) return;
+    const cardRef = approval.card_ref;
 
     setBusy(true);
     setError(null);
@@ -114,14 +167,14 @@ export default function PaymentApprovalPage() {
         amount_cents: approval.amount_cents,
         currency: approval.currency,
         nonce: approval.nonce,
-        card_ref: approval.card_ref,
+        card_ref: cardRef,
         recipient_pubkey_hash: toBase64Url(new Uint8Array(publicKeyHash)),
         item: approval.item,
         reason: approval.reason,
         agent: approval.agent,
       };
       const { blob } = await apiGet<{ blob: string }>(
-        `/v1/vault/e2e/${encodeURIComponent(approval.card_ref)}`,
+        `/v1/vault/e2e/${encodeURIComponent(cardRef)}`,
       );
       const storedCard = JSON.parse(blob) as StoredCard;
       const sign = await getVouchflow().signPayload({
@@ -167,12 +220,28 @@ export default function PaymentApprovalPage() {
         ? "This payment approval has expired."
         : "This payment is no longer pending.";
 
+  const boundCard = approval !== null ? boundCardMeta(approval.card_ref, cards) : null;
+  const amountLabel =
+    approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
+  // "Visa ··1234" when the bound card has stored metadata; a neutral fallback
+  // for a legacy card without metadata (still the account's card, just no
+  // display digits until re-added).
+  const cardLine =
+    boundCard?.last4 != null
+      ? `${boundCard.brand !== null ? `${boundCard.brand} ` : ""}··${boundCard.last4}`
+      : "your saved card";
+  const needsCard = approval?.status === "pending" && approval.card_ref === null;
+
   return (
     <AppShell>
       <div className="app-head">
         <div>
-          <h1 className="app-title">Approve payment</h1>
-          <p className="app-sub">Confirm the purchase with your passkey.</p>
+          <h1 className="app-title">{needsCard ? "Add a card to pay" : "Approve payment"}</h1>
+          <p className="app-sub">
+            {needsCard
+              ? "Add the card you want to pay with, then confirm the purchase."
+              : "Confirm the purchase with your passkey."}
+          </p>
         </div>
       </div>
 
@@ -186,14 +255,32 @@ export default function PaymentApprovalPage() {
         </div>
       )}
 
-      {approval?.status === "pending" && (
+      {/* Beat 1 — add card. Only when the approval was minted card-less. The
+          shared CardEntry stores the card, then we bind it and advance. */}
+      {needsCard && (
+        <section aria-labelledby="add-card-heading">
+          <h2 className="sect-label" id="add-card-heading">
+            Card
+          </h2>
+          <p className="app-sub" style={{ marginBottom: "16px" }}>
+            Paying {amountLabel} to <span className="mono">{approval!.merchant}</span>.
+          </p>
+          {binding ? (
+            <p className="app-sub">Attaching card…</p>
+          ) : (
+            <CardEntry onSaved={({ id: cardId }) => void bindCard(cardId)} />
+          )}
+        </section>
+      )}
+
+      {/* Beat 2 — review + approve. A distinct beat with the bound card's
+          last4 as the visual anchor, so the card is impossible to tap past
+          before the passkey. Approve is the lone action beneath it. */}
+      {approval?.status === "pending" && approval.card_ref !== null && (
         <section className="app-card" aria-labelledby="payment-merchant">
           <h2 className="app-title" id="payment-merchant" style={{ fontSize: "18px" }}>
             {approval.merchant}
           </h2>
-          <p className="app-title mono" style={{ marginTop: "12px" }}>
-            {formatAmount(approval.amount_cents, approval.currency)}
-          </p>
           <p className="app-sub" style={{ marginTop: "12px" }}>
             Paying at{" "}
             <span className="mono" style={{ overflowWrap: "anywhere" }}>
@@ -222,6 +309,12 @@ export default function PaymentApprovalPage() {
               </div>
             ))}
           </dl>
+
+          <p className="pay-anchor">
+            Pay with <span className="mono">{cardLine}</span> · {amountLabel} to{" "}
+            {approval.merchant}
+          </p>
+
           <button
             className="btn-primary"
             type="button"

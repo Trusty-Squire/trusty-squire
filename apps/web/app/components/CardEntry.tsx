@@ -7,18 +7,23 @@ import { ApiError, apiPost } from "../lib/api";
 import { COUNTRIES } from "../lib/countries";
 import { getPairingState, pairDevice } from "../lib/pairing";
 import { evaluatePrf } from "../lib/passkey";
+import { CARD_TRUST_COPY, cardLast4, detectCardBrand } from "../lib/wallet";
 
 function toBase64(bytes: Uint8Array): string {
   return btoa(String.fromCharCode(...bytes));
 }
 
 interface CardEntryProps {
-  onSaved?: () => void;
+  // Receives the id of the just-stored card so a caller (the pay page) can
+  // bind it to a pending approval. Callers that only need to refresh a list
+  // ignore the argument.
+  onSaved?: (result: { id: string }) => void;
 }
 
 // The card ADD experience — device-pairing gate, then the card form itself,
-// with client-side encryption before anything reaches the network. Shared by
-// vault/card (its whole page) and vault/new (the "Card" kind of the toggle).
+// with client-side encryption before anything reaches the network. The single
+// source for the sensitive card flow: shared by /vault/card, vault/new (the
+// "Card" kind of the toggle), and the pay page's JIT add-card mode.
 // Renders no AppShell — callers provide their own chrome.
 export function CardEntry({ onSaved }: CardEntryProps) {
   const router = useRouter();
@@ -112,9 +117,16 @@ export function CardEntry({ onSaved }: CardEntryProps) {
           throw new Error("This device can't use passkeys, or the request was cancelled.");
         }
         const blob = await encryptCard(key, card);
-        await apiPost("/v1/vault/e2e", {
+        // Display-only metadata derived from the PAN in this browser. The full
+        // number stays sealed in `blob`; the server only ever sees brand +
+        // last4 (both validated server-side to hold no full PAN).
+        const brand = detectCardBrand(pan);
+        const last4 = cardLast4(pan);
+        const { id } = await apiPost<{ id: string }>("/v1/vault/e2e", {
           label,
           blob: JSON.stringify({ ...blob, prf_salt: toBase64(prfSalt) }),
+          ...(brand !== null ? { brand } : {}),
+          ...(last4 !== null ? { last4 } : {}),
         });
         setLabel("");
         setPan("");
@@ -127,7 +139,7 @@ export function CardEntry({ onSaved }: CardEntryProps) {
         setState("");
         setPostalCode("");
         setCountry("");
-        onSaved?.();
+        onSaved?.({ id });
       } catch (err) {
         if (err instanceof ApiError && err.status === 401) {
           router.replace(`/login?next=${encodeURIComponent(pathname)}`);
@@ -169,7 +181,8 @@ export function CardEntry({ onSaved }: CardEntryProps) {
             <h2>Set up payments on this device</h2>
             <p className="app-sub">
               A one-time Face ID / Touch ID setup lets this device encrypt and approve card
-              payments. Your card is never readable by our servers.
+              payments. Your full card number is encrypted here and never readable by our
+              servers.
             </p>
             {pairingError !== null && <div className="form-err">{pairingError}</div>}
             <button
@@ -308,6 +321,8 @@ export function CardEntry({ onSaved }: CardEntryProps) {
       </div>
 
       {error !== null && <div className="form-err">{error}</div>}
+
+      <p className="trust-copy">{CARD_TRUST_COPY}</p>
 
       <div className="form-actions">
         <button className="btn-primary" type="submit" disabled={busy}>
