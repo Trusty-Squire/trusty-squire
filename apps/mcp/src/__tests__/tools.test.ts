@@ -9,6 +9,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
 import type { PaymentBrowser } from "../bot/pay-operator.js";
+import type * as ProvisionSession from "../bot/provision-session.js";
 
 // operate_pay's handler reaches into the single active browser session via
 // activeProvisionBrowser(). There is no real session in a unit test, so mock
@@ -16,7 +17,7 @@ import type { PaymentBrowser } from "../bot/pay-operator.js";
 // a stub whose checkout summary the resolution tests can control.
 let mockBrowser: PaymentBrowser;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../bot/provision-session.js")>();
+  const actual = await importOriginal<typeof ProvisionSession>();
   return { ...actual, activeProvisionBrowser: () => mockBrowser };
 });
 
@@ -132,9 +133,12 @@ describe("operate_pay card selection", () => {
     const listPaymentCards = vi.fn().mockResolvedValue([{ id: "card_only", label: "Personal" }]);
     // The approval expires immediately, so the operator terminates without
     // side effects; we only assert what card_ref the handler resolved.
-    const createPaymentApproval = vi
-      .fn()
-      .mockResolvedValue({ id: "appr_1", nonce: "n", agent: "a", expires_at: new Date(0).toISOString() });
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_1",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(0).toISOString(),
+    });
     const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
     const getPaymentApproval = vi
       .fn()
@@ -163,9 +167,12 @@ describe("operate_pay card selection", () => {
   it("no selector + 0 cards mints a CARD-LESS approval (JIT ceremony)", async () => {
     mockBrowser = stubBrowser();
     const listPaymentCards = vi.fn().mockResolvedValue([]);
-    const createPaymentApproval = vi
-      .fn()
-      .mockResolvedValue({ id: "appr_jit", nonce: "n", agent: "a", expires_at: new Date(0).toISOString() });
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_jit",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(0).toISOString(),
+    });
     const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
     const getPaymentApproval = vi
       .fn()

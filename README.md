@@ -37,18 +37,26 @@ Other useful asks:
 - “Pay this checkout with my saved work card and ask me to approve it on my phone.”
 - “That app grant leaked. Revoke it without rotating the provider key.”
 
-For supported card checkouts, add a card in the Vault once from a passkey-capable
-device. Trusty Squire encrypts it in that browser with a passkey-derived key.
+For supported card checkouts, save a card in the Vault from a passkey-capable
+device or let your first `operate_pay` approval link collect one just in time.
+When no card is specified, Trusty Squire uses the only saved card, starts the
+add-card ceremony if none exists, or asks you to choose when several exist. The
+new card is encrypted in your browser with a passkey-derived key and bound to
+that purchase before approval; if you add it but do not approve in time, it
+remains saved for a faster retry.
+
 `operate_pay` reads the checkout total, sends you a short-lived approval link,
 and submits only after you approve the exact purchase. The approval page shows
 the venue, item, amount, requesting agent, and reason; one passkey prompt both
-signs that approval and releases the card to the checkout operator. If the
-issuer requires 3-D Secure, Trusty Squire notifies your linked Telegram chat
-and waits 180 seconds by default for you to complete the challenge in the open
-checkout instead of automating it. It reports a visible success or decline and
-hands an unresolved challenge back on timeout. `three_ds_wait_seconds` accepts
-whole seconds from 0 to 600; set it to `0` on `operate_pay` to skip the
-notification and waiting and receive the handoff immediately.
+signs that approval and releases the card to the checkout operator. A first-time
+payment is refused if the merchant, checkout origin, amount, or currency changes
+between approval and submission. If the issuer requires 3-D Secure, Trusty
+Squire notifies your linked Telegram chat and waits 180 seconds by default for
+you to complete the challenge in the open checkout instead of automating it. It
+reports a visible success or decline and hands an unresolved challenge back on
+timeout. `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to
+`0` on `operate_pay` to skip the notification and waiting and receive the
+handoff immediately.
 
 ## Install
 
@@ -139,8 +147,9 @@ for the system and data flows.
 - `operate_extract` captures a generated credential into a sealed slot or the vault.
 - `operate_remember` and `operate_use` save and replay successful website flows.
 - `list_payment_cards` returns saved-card labels and opaque references;
-  `operate_pay` requests phone approval, fills a checkout, and waits for the
-  user to resolve 3-D Secure before handing back unresolved challenges.
+  `operate_pay` can use a selected card, the only card on file, or a just-in-time
+  add-card approval, then fills the checkout and waits for the user to resolve
+  3-D Secure before handing back unresolved challenges.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.

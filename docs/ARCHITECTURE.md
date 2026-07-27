@@ -158,11 +158,18 @@ and transferred secrets are not returned to the agent.
 ```text
 agent starts operate_pay in the active checkout
   -> operator reads merchant, origin, and total and adds optional item/reason
+  -> an explicit card is used; otherwise one saved card is selected automatically,
+     no saved cards starts add-card, and multiple cards require a user choice
   -> operator creates an ephemeral key; API creates a short-lived approval relay
      and attaches the server-derived requesting-agent label
+  -> for add-card, the user stores an encrypted card and the API binds its
+     server-owned reference to the still-pending approval
   -> user reviews and approves the purchase on a paired phone
   -> phone decrypts the selected card and seals it to that operator key
-  -> operator verifies the signed mandate, opens the card, and fills checkout
+  -> operator verifies the signed mandate using the approval's bound card
+     reference; add-card also re-reads every signed checkout field and refuses
+     if the merchant, origin, amount, or currency changed
+  -> operator opens the card and fills checkout
   -> when 3-D Secure is required, the API nudges a linked Telegram chat and
      the operator waits for success or failure when waiting is enabled
   -> timeout, or a disabled wait, hands the unresolved challenge to the user
