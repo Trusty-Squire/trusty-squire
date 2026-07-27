@@ -392,9 +392,9 @@ const norm = (s: string | null | undefined): string =>
 // disambiguates a ref from a free-text label target (a label may legitimately end
 // in "_<digits>"). Staleness is guarded by IDENTITY, not a counter: a ref whose
 // element is now gone finds no match in resolveTarget → returns null → the caller
-// fails loudly ("no element matched") and the host re-observes. It never
-// mis-clicks a recycled node, because stableElementId (which the ref encodes)
-// changes when the element's structure/label/target changes.
+// fails loudly ("no element matched") and the host re-observes. Stable selectors
+// prevent recycled-node retargeting; the accepted positional-only exception is
+// documented at stableElementId.
 const PROVISION_REF_RE = /^@e:([a-z0-9_-]+)$/i;
 const PROVISION_REF_ID_RE = /^(.+)_(\d+)$/;
 
@@ -437,17 +437,14 @@ export function stableElementId(el: InteractiveElement): string {
       // old ref finds no match and resolveTarget returns null (the host
       // re-observes) — no mis-click.
       //
-      // Residual limitation: if the extractor can only tell two siblings apart by
-      // a POSITIONAL selector (`:nth-child(n)`), removing the first shifts the
-      // survivor's selector onto the removed node's old value, so the removed
-      // node's old ref can resolve to the survivor. This is NOT a regression (the
-      // pre-selector ordinal scheme had the same recycling) and is bounded to
-      // controls distinguishable ONLY by DOM position — which are perceptually
-      // identical to the host anyway (same label/role/path, so it cannot target
-      // one vs the other through this API regardless). It also makes such an
-      // element re-mint on layout shifts (emitted as a change, never a silent
-      // retarget). Measured cost on the corpus: aggregate delta saving is
-      // unaffected (~65%), so folding the selector in is net-positive.
+      // Accepted exception: if siblings differ only by a POSITIONAL selector
+      // (`:nth-child`/`:nth-of-type`), removing the first shifts the survivor onto
+      // the removed node's old selector and therefore reuses the same ref string.
+      // Stateless resolution cannot fail closed in that case without restoring a
+      // per-observe generation epoch, which would break stable-ref delta reuse.
+      // The bound is perceptually identical controls: same label/role/path and
+      // compact body, so the host cannot express row-specific intent through this
+      // API; the delta still reports the other departed positional ref.
       el.selector,
     ].join("\u001f"),
   );
@@ -514,8 +511,9 @@ export function resolveTarget(
   const parsedRef = parseProvisionRef(target);
   if (parsedRef !== null) {
     // Staleness guard: a ref whose element is gone matches nothing here and
-    // returns null (the caller re-observes). No generation counter needed — the
-    // stable hash IS the identity, so it can't mis-resolve to a recycled node.
+    // returns null (the caller re-observes). Stable selectors need no generation
+    // counter; positional-only identity reuse is the bounded exception documented
+    // at stableElementId.
     //
     // Ordinal caveat (same-hash duplicates): the `_<ordinal>` suffix positionally
     // disambiguates elements that hash IDENTICALLY (same screenPath/testId/label/

@@ -717,6 +717,54 @@ describe("observe-delta harness", () => {
     expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
   });
 
+  it("positional-selector siblings: removal reports the departed ref and accepts bounded identity reuse", () => {
+    const remove = (position: number): InteractiveElement =>
+      el({
+        tag: "button",
+        role: "button",
+        visibleText: "Remove",
+        screenPath: "list:cart > button:remove",
+        container: "list:cart",
+        selector: `ul>li:nth-of-type(${position})>button`,
+      });
+    const before = [remove(1), remove(2)];
+    const refsBefore = provisionElementRefs(before);
+    const removedNodeRef = refsBefore.get(before[0]!) as string;
+    const survivorOldRef = refsBefore.get(before[1]!) as string;
+    expect(removedNodeRef).not.toBe(survivorOldRef);
+
+    const b1 = buildCompactObservation({
+      sessionId: "s",
+      url: URL,
+      text: "",
+      elements: before,
+      prev: null,
+    });
+    const after = [remove(1)];
+    const b2 = buildCompactObservation({
+      sessionId: "s",
+      url: URL,
+      text: "",
+      elements: after,
+      prev: b1.nextState,
+    });
+
+    expect(b2.observation.delta).toBe(true);
+    expect(b2.observation.removed).toEqual([survivorOldRef]);
+    expect(b2.observation.unchanged).toBe(1);
+
+    const survivorCurrentRef = provisionElementRefs(after).get(after[0]!) as string;
+    expect(survivorCurrentRef).toBe(removedNodeRef);
+    expect(resolveTarget(after, survivorCurrentRef)).toBe(after[0]);
+    expect(resolveTarget(after, removedNodeRef)).toBe(after[0]);
+    expect(resolveTarget(after, survivorOldRef)).toBeNull();
+
+    const recon = new Map(b1.fullByRef);
+    for (const e of b2.observation.elements) recon.set(e.ref, e);
+    for (const r of b2.observation.removed ?? []) recon.delete(r);
+    expect(refBodies(recon)).toBe(refBodies(b2.fullByRef));
+  });
+
   it("INV-clickable-unchanged: an unchanged, not-re-emitted element still resolves by its stable ref", () => {
     const seq = sequence();
     const builds = driveCore(seq);
