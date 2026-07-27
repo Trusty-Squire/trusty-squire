@@ -1674,10 +1674,10 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
 
   it("#399 remove-then-restore across a failed persist keeps a volatile positional-sibling group in sync", async () => {
     // Same failed-persist desync sequence, but the churning elements are a
-    // VOLATILE positional-selector group (per-row Remove buttons). Their refs
-    // re-mint every observe (issue #399); this proves that re-mint composes with
-    // the failed-persist baseline invalidation — the host never desyncs, and the
-    // restored row reappears.
+    // VOLATILE positional-selector group (per-row Remove buttons). Their group
+    // identities are recomputed every observe (issue #399); this proves that
+    // recomputation composes with the failed-persist baseline invalidation — the
+    // host never desyncs, and the restored row reappears.
     const rowElements = (count: number): unknown[] => {
       const out: unknown[] = [
         el({
@@ -1722,7 +1722,8 @@ describe("observe-delta wiring (real observe() over a mocked browser)", () => {
 
     // C: row restored, persistence RESTORED → a FRESH full re-sync (not an
     // A-relative delta), so the host sees all three rows again — the volatile
-    // group's per-observe re-mint never desyncs across the failure boundary.
+    // group's per-observe identity recomputation never desyncs across the failure
+    // boundary.
     process.env.TRUSTY_SQUIRE_OBSERVE_DIR = dir;
     h.elements = rowElements(3);
     const c = await observe(a.session_id, "compact");

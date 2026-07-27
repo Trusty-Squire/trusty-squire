@@ -110,36 +110,34 @@ Compact observations minimize repeated context without making the stream lossy:
   selector, so same-label siblings with distinct stable selectors get distinct
   refs; after one is removed, its old ref resolves to `null` instead of
   retargeting its sibling.
-- **Volatile positional-groups (issue #399).** The one recycling case — sibling
-  controls distinguishable *only* by a positional `:nth-child`/`:nth-of-type`/
-  `>> nth=` selector, where removing (or reordering) one shifts a survivor onto
-  the removed node's identity — is closed. `volatilePositionalGroups` detects any
-  the ≥2 positional members of any same-base-identity group and gives those
-  members a GROUP FINGERPRINT: a hash of the positional members'
+- **Volatile positional groups (issue #399).** The dangerous recycling case is
+  closed for group-size changes: sibling controls distinguishable *only* by a
+  positional `:nth-child`/`:nth-of-type`/`>> nth=` selector can shift onto a
+  departed member's selector when one is removed. `volatilePositionalGroups`
+  detects the ≥2 positional members of a same-base-identity group and gives those
+  members a group fingerprint: a hash of the positional members'
   `stableElementId`s in extraction order. Stable-anchored members of the same base
-  group keep their plain refs. `elementIdentity` prefixes the positional members'
-  refs with the fingerprint (`<fp>-<hash>`), so a group ref is valid ONLY while
-  its positional membership is byte-identical. A positional-member removal, or
-  any change that alters the positional subset's sequence of distinguishing
-  content, changes the fingerprint except for the bounded residual below. The
-  departed member's old ref therefore appears in `removed` (or a full resync) and
-  resolves to `null` — never to a surviving sibling. Because the identity is
-  derived from composition (not an observe counter), this also holds WITHIN a
-  turn: the act path re-extracts, so a mutation between observe and act changes
-  the fingerprint and forces a re-observe rather than mis-targeting the shifted
-  sibling. A static group's refs stay stable across observes (no wasted churn),
-  and a filled field or toggled checkbox — mutable state is excluded from
-  `stableElementId` — keeps its ref.
+  group keep their plain refs. `elementIdentity` prefixes each positional
+  member's ref with the fingerprint (`<fp>-<hash>`), so a group ref is valid only
+  while that fingerprint matches. Removing or inserting a member changes the
+  group size and fingerprint. Every old group ref therefore appears in `removed`
+  (or a full resync) and resolves to `null` — never to a surviving sibling.
+  Because the identity is derived from composition (not an observe counter), this
+  also holds within a turn: the act path re-extracts, so a group-size change
+  between observe and act changes the fingerprint and forces a re-observe rather
+  than mis-targeting the shifted sibling. A static group's refs stay stable across
+  observes (no wasted churn), and a filled field or toggled checkbox — mutable
+  state is excluded from `stableElementId` — keeps its ref.
   These groups are rare, so the corpus token-weighted aggregate saving is
   unchanged (~66%). Bounded residual: a size-preserving shuffle of TRULY
   indistinguishable members (delete-one-and-insert-one, or a pure reorder, where
-  members carry zero distinguishing signal — identical label/aria/testid/text,
-  only the `nth` differs) leaves the fingerprint unchanged. That observation is
-  byte-identical to "nothing changed," so no string-derived ref scheme can flag
-  it; real per-row controls carry a distinguishing signal and are non-volatile
-  (guarded by the #398 stable-selector identity). Fully closing it needs an
-  extractor-stamped per-node id that survives DOM mutation — deferred because
-  stamping every interactive node with a persistent attribute is
+  members carry zero distinguishing signal — identical label/aria/testid/text/
+  `screenPath`, only the `nth` differs) leaves the fingerprint unchanged. That
+  observation is byte-identical to "nothing changed," so no string-derived ref
+  scheme can flag it; real per-row controls carry a distinguishing signal and are
+  non-volatile (guarded by the #398 stable-selector identity). Fully closing it
+  needs an extractor-stamped per-node id that survives DOM mutation — deferred
+  because stamping every interactive node with a persistent attribute is
   anti-bot-detectable.
 - **Full resyncs.** The first compact observe, a URL change, or element churn over
   60% emits `delta:false`. Replace the prior element map from `snapshot_file`;

@@ -412,14 +412,15 @@ const norm = (s: string | null | undefined): string =>
 // element is now gone finds no match in resolveTarget → returns null → the caller
 // fails loudly ("no element matched") and the host re-observes.
 //
-// The ONE exception (issue #399): same-label siblings distinguished ONLY by a
-// positional selector recycle on removal/reorder. Those "volatile" members get
-// an identity prefixed with their sibling group's composition FINGERPRINT
+// The exceptional identity form (issue #399) applies to same-base-identity
+// siblings distinguished ONLY by positional selectors. Those "volatile" members
+// get an identity prefixed with their sibling group's composition FINGERPRINT
 // ("<fp>-<hash>", see volatilePositionalGroups + elementIdentity), so a ref is
-// valid only while the group is byte-identical — the moment a sibling is
-// removed/inserted/reordered the fingerprint changes and the stale ref resolves
-// to null, never to a survivor. `<fp>-` stays within the id charset below, so no
-// parsing changes are needed.
+// valid only while that fingerprint matches. A membership-count change re-mints
+// the group and makes every old ref resolve to null, never to a survivor.
+// Size-preserving changes among truly indistinguishable members are the bounded
+// residual documented at volatilePositionalGroups. `<fp>-` stays within the id
+// charset below, so no parsing changes are needed.
 const PROVISION_REF_RE = /^@e:([a-z0-9_-]+)$/i;
 const PROVISION_REF_ID_RE = /^(.+)_(\d+)$/;
 
@@ -474,8 +475,8 @@ export function stableElementId(el: InteractiveElement): string {
       // recycles on sibling removal, so this hash alone would let a survivor
       // slide onto a departed node's identity. Closed one layer up (issue #399):
       // volatilePositionalGroups fingerprints such sibling groups and
-      // elementIdentity prefixes their refs with that fingerprint, so a stale
-      // positional ref can never resolve to a surviving sibling.
+      // elementIdentity prefixes their refs with that fingerprint, so a group
+      // size change makes every old positional ref resolve to null.
       el.selector,
     ].join("\u001f"),
   );
@@ -548,7 +549,8 @@ function volatilePositionalGroups(
     // OTHER; a lone positional member (or any stable-anchored member) cannot.
     const positional = group.filter((el) => isPositionalSelector(el.selector));
     if (positional.length < 2) continue;
-    // Extraction-order fingerprint: sensitive to removal, insertion, AND reorder.
+    // Extraction-order fingerprint: sensitive to membership-count and selector-
+    // sequence changes, subject to the size-preserving residual above.
     const fp = shortHash(positional.map((el) => stableElementId(el)).join(""));
     for (const el of positional) fingerprintOf.set(el, fp);
   }
@@ -632,11 +634,10 @@ export function resolveTarget(
     // Staleness guard: a ref whose identity is absent among the LIVE elements
     // returns null (the caller re-observes). Identity is recomputed here from the
     // live set, so a volatile positional-group ref carries the group's fingerprint
-    // at mint time; if the group's composition has since changed (a sibling
-    // removed/inserted/reordered) the live fingerprint differs and the stale ref
+    // at mint time; if the live group has a different fingerprint, the stale ref
     // resolves to null instead of retargeting a survivor (issue #399). This holds
-    // WITHIN a turn too: the act path re-extracts, so a mutation between observe
-    // and act changes the fingerprint and forces a re-observe.
+    // WITHIN a turn too: the act path re-extracts, so a membership-count change
+    // between observe and act changes the fingerprint and forces a re-observe.
     //
     // Ordinal caveat (same-hash duplicates): the `_<ordinal>` suffix positionally
     // disambiguates elements that hash IDENTICALLY (same selector too — NOT the
@@ -2264,7 +2265,7 @@ export async function act(
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
       // resolveTarget recomputes identities (incl. volatile positional-group
-      // fingerprints) from these FRESH elements, so a ref whose sibling group has
+      // fingerprints) from these FRESH elements, so a ref whose group fingerprint
       // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
@@ -2298,7 +2299,7 @@ export async function act(
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
       // resolveTarget recomputes identities (incl. volatile positional-group
-      // fingerprints) from these FRESH elements, so a ref whose sibling group has
+      // fingerprints) from these FRESH elements, so a ref whose group fingerprint
       // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
