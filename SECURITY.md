@@ -86,7 +86,12 @@ still binding the operator's ephemeral public key at creation. The API permits
 one card bind only while the approval is pending and unexpired, verifies that
 the encrypted-card record belongs to the same account, and rejects approval
 until a card is bound. This enforces the seal → bind → approve order on the
-server rather than relying on client convention.
+server rather than relying on client convention. On resume, the operator fails
+closed unless the approval record contains a non-blank server-bound card
+reference, and uses that reference when re-creating the signed purchase payload.
+Immediately before filling a just-in-time checkout, it re-reads the live
+merchant, origin, amount, and currency and refuses submission if any signed
+field changed.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. The signed payload hash
