@@ -4083,22 +4083,36 @@ export class BrowserController {
             el.removeAttribute("data-ts-select-popup");
             el.removeAttribute("data-ts-select-option-tier");
           });
+        trigger.removeAttribute("data-ts-select-popup-resolved");
         const popupSelector =
           '[role="listbox"],[role="menu"],[role="dialog"],[id*="listbox" i],[id*="dropdown" i],[id*="popover" i],[id*="menu" i],[id*="options" i],[class*="listbox" i],[class*="dropdown" i],[class*="popover" i],[class*="menu" i],[class*="options" i]';
-        const popups = new Set<Element>();
-        const addPopup = (el: Element | null): void => {
-          if (el !== null && visible(el)) popups.add(el);
-        };
+        const controlledPopups: Element[] = [];
         for (const attr of ["aria-controls", "aria-owns"]) {
           for (const id of (trigger.getAttribute(attr) ?? "").split(/\s+/).filter(Boolean)) {
-            addPopup(trigger.ownerDocument.getElementById(id));
+            const popup = trigger.ownerDocument.getElementById(id);
+            if (popup !== null && visible(popup) && !controlledPopups.includes(popup)) {
+              controlledPopups.push(popup);
+            }
           }
         }
+        const openedPopups: Element[] = [];
         trigger.ownerDocument.querySelectorAll(popupSelector).forEach((el) => {
-          if (!el.hasAttribute("data-ts-select-preexisting-popup")) addPopup(el);
+          if (
+            !el.hasAttribute("data-ts-select-preexisting-popup") &&
+            visible(el) &&
+            !openedPopups.includes(el)
+          ) {
+            openedPopups.push(el);
+          }
         });
-        popups.forEach((el) => el.setAttribute("data-ts-select-popup", "1"));
-        if (popups.size > 0) trigger.setAttribute("data-ts-select-popup-seen", "1");
+        const popup =
+          controlledPopups.length === 1
+            ? controlledPopups[0]
+            : controlledPopups.length === 0 && openedPopups.length === 1
+              ? openedPopups[0]
+              : undefined;
+        popup?.setAttribute("data-ts-select-popup", "1");
+        if (popup !== undefined) trigger.setAttribute("data-ts-select-popup-resolved", "1");
         const optionSelectors = [
           '[role="option"]',
           '[role="menuitem"]',
@@ -4110,11 +4124,7 @@ export class BrowserController {
         ];
         optionSelectors.forEach((selector, tier) => {
           trigger.ownerDocument.querySelectorAll(selector).forEach((el) => {
-            if (!visible(el)) return;
-            const belongsToPopup = Array.from(popups).some(
-              (popup) => popup === el || popup.contains(el),
-            );
-            if (belongsToPopup || !el.hasAttribute("data-ts-select-preexisting-option")) {
+            if (popup !== undefined && visible(el) && (popup === el || popup.contains(el))) {
               el.setAttribute("data-ts-select-option-tier", String(tier));
             }
           });
@@ -4128,14 +4138,14 @@ export class BrowserController {
       .evaluate(() => {
         document
           .querySelectorAll(
-            "[data-ts-select-preexisting-popup],[data-ts-select-preexisting-option],[data-ts-select-popup],[data-ts-select-option-tier],[data-ts-select-popup-seen],[data-ts-select-commit-target]",
+            "[data-ts-select-preexisting-popup],[data-ts-select-preexisting-option],[data-ts-select-popup],[data-ts-select-option-tier],[data-ts-select-popup-resolved],[data-ts-select-commit-target]",
           )
           .forEach((el) => {
             el.removeAttribute("data-ts-select-preexisting-popup");
             el.removeAttribute("data-ts-select-preexisting-option");
             el.removeAttribute("data-ts-select-popup");
             el.removeAttribute("data-ts-select-option-tier");
-            el.removeAttribute("data-ts-select-popup-seen");
+            el.removeAttribute("data-ts-select-popup-resolved");
             el.removeAttribute("data-ts-select-commit-target");
           });
       })
@@ -4147,7 +4157,11 @@ export class BrowserController {
       node.ownerDocument
         .querySelectorAll("[data-ts-select-commit-target]")
         .forEach((el) => el.removeAttribute("data-ts-select-commit-target"));
-      node.setAttribute("data-ts-select-commit-target", "1");
+      const option =
+        node.closest(
+          '[role="option"],[role="menuitem"],[role="menuitemradio"],mat-option,.mat-mdc-option,[role="listbox"] li',
+        ) ?? node;
+      option.setAttribute("data-ts-select-commit-target", "1");
     });
   }
 
@@ -4156,95 +4170,63 @@ export class BrowserController {
     matcher: string,
   ): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
-    return await this.page
+    const result = await this.page
       .locator(triggerSelector)
       .first()
       .evaluate((trigger, rawMatcher) => {
         const normalize = (value: string): string =>
           value.replace(/\s+/g, " ").trim().toLowerCase();
         const needle = normalize(rawMatcher);
-        if (needle.length === 0) return false;
-        const valuesMatch = (values: Array<string | null | undefined>): boolean =>
-          values.some(
-            (value) =>
-              value !== null &&
-              value !== undefined &&
-              value.length > 0 &&
-              normalize(value).includes(needle),
-          );
-        const selectedSelector =
-          '[aria-selected="true"],[aria-checked="true"],[data-state="checked"],[data-selected="true"]';
+        if (needle.length === 0) {
+          return {
+            committed: false,
+            optionSelected: false,
+            popupResolved: false,
+            popupClosed: false,
+            valueMatches: false,
+          };
+        }
         const target = trigger.ownerDocument.querySelector('[data-ts-select-commit-target="1"]');
-        const selectedTarget =
-          target?.matches(selectedSelector) === true ? target : target?.closest(selectedSelector);
-        if (
-          selectedTarget !== null &&
-          selectedTarget !== undefined &&
-          valuesMatch([
-            target?.textContent,
-            target?.getAttribute("aria-label"),
-            target?.getAttribute("data-value"),
-            selectedTarget.textContent,
-            selectedTarget.getAttribute("aria-label"),
-            selectedTarget.getAttribute("data-value"),
-          ])
-        ) {
-          return true;
-        }
-
-        if (trigger instanceof HTMLInputElement || trigger instanceof HTMLTextAreaElement) {
-          const valueMatches = valuesMatch([trigger.value]);
-          const expandedClosed = trigger.getAttribute("aria-expanded") === "false";
-          const popupWasSeen = trigger.hasAttribute("data-ts-select-popup-seen");
-          const popupStillOpen = Array.from(
-            trigger.ownerDocument.querySelectorAll('[data-ts-select-popup="1"]'),
-          ).some((popup) => {
-            const rect = popup.getBoundingClientRect();
-            if (rect.width < 2 || rect.height < 2) return false;
-            const style = getComputedStyle(popup);
-            return (
-              style.display !== "none" &&
-              style.visibility !== "hidden" &&
-              parseFloat(style.opacity || "1") > 0.01
-            );
-          });
-          if (valueMatches && (expandedClosed || (popupWasSeen && !popupStillOpen))) {
-            return true;
-          }
-        } else if (
-          valuesMatch([
-            trigger.textContent,
-            trigger.getAttribute("aria-label"),
-            trigger.getAttribute("aria-valuetext"),
-            trigger.getAttribute("data-value"),
-            trigger.getAttribute("title"),
-          ])
-        ) {
-          return true;
-        }
-
-        const selectedValueSelector =
-          '[class*="singleValue"],[class*="single-value"],[class*="selectedValue"],[class*="selected-value"]';
-        let wrapper = trigger.parentElement;
-        while (
-          wrapper !== null &&
-          wrapper.tagName !== "BODY" &&
-          wrapper.tagName !== "HTML" &&
-          wrapper.tagName !== "FORM"
-        ) {
-          const selectedValue = wrapper.querySelector(selectedValueSelector);
-          if (selectedValue !== null) {
-            return valuesMatch([
-              selectedValue.textContent,
-              selectedValue.getAttribute("aria-label"),
-              selectedValue.getAttribute("data-value"),
-            ]);
-          }
-          wrapper = wrapper.parentElement;
-        }
-        return false;
-      }, matcher)
-      .catch(() => false);
+        const optionSelected =
+          target?.getAttribute("aria-selected") === "true" ||
+          target?.getAttribute("aria-checked") === "true";
+        const popupResolved = trigger.hasAttribute("data-ts-select-popup-resolved");
+        const popup = trigger.ownerDocument.querySelector('[data-ts-select-popup="1"]');
+        const popupClosed =
+          popupResolved &&
+          (popup === null ||
+            (() => {
+              const rect = popup.getBoundingClientRect();
+              if (rect.width < 2 || rect.height < 2) return true;
+              const style = getComputedStyle(popup);
+              return (
+                style.display === "none" ||
+                style.visibility === "hidden" ||
+                parseFloat(style.opacity || "1") <= 0.01
+              );
+            })());
+        const triggerValue =
+          trigger instanceof HTMLInputElement || trigger instanceof HTMLTextAreaElement
+            ? trigger.value
+            : (trigger.getAttribute("value") ?? trigger.textContent ?? "");
+        const valueMatches = normalize(triggerValue) === needle;
+        return {
+          committed: optionSelected || (valueMatches && popupClosed),
+          optionSelected,
+          popupResolved,
+          popupClosed,
+          valueMatches,
+        };
+      }, matcher);
+    if (!result.committed) {
+      throw new Error(
+        `combobox ${triggerSelector}: clicked option commit could not be verified for ` +
+          `${JSON.stringify(matcher)} (selected=${result.optionSelected}, ` +
+          `popupResolved=${result.popupResolved}, popupClosed=${result.popupClosed}, ` +
+          `valueMatches=${result.valueMatches})`,
+      );
+    }
+    return true;
   }
 
   // F11 (+rc.7 hardening): click a combobox trigger, wait for the
@@ -4336,22 +4318,17 @@ export class BrowserController {
 
       if (optionMatcher !== undefined) {
         await this.refreshComboboxMarkers(normalizedSelector);
-        const popups = this.page.locator('[data-ts-select-popup="1"]');
+        const popup = this.page.locator('[data-ts-select-popup="1"]').first();
         triedDescriptors.push(`scoped text="${optionMatcher}"`);
-        const popupCount = await popups.count();
-        for (let i = 0; i < popupCount; i += 1) {
-          const byText = popups.nth(i).getByText(optionMatcher, { exact: false }).first();
-          if ((await byText.count()) === 0) continue;
-          try {
+        if ((await popup.count()) > 0) {
+          const byText = popup.getByText(optionMatcher, { exact: false }).first();
+          if ((await byText.count()) > 0) {
             await byText.waitFor({ state: "visible", timeout: 2000 });
             await this.markComboboxCommitTarget(byText);
             await this.humanClickLocator(byText);
             await this.wait(0.5);
-            if (await this.comboboxCommittedOptionMatches(normalizedSelector, optionMatcher)) {
-              return;
-            }
-          } catch {
-            continue;
+            await this.comboboxCommittedOptionMatches(normalizedSelector, optionMatcher);
+            return;
           }
         }
       }

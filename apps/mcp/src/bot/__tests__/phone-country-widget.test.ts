@@ -658,18 +658,20 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 
-  it("does not accept a failed target click from an unrelated selected option", async () => {
+  it("does not accept an unrelated selected value in the same wrapper", async () => {
     const { ctrl, page } = await pageFor(
       dataUrl(`
-        <div role="listbox">
-          <div role="option" aria-selected="true">Japan</div>
-        </div>
-        <button id="country" role="combobox" aria-expanded="false" aria-controls="country-options" type="button">
-          Choose a country
-        </button>
-        <ul id="country-options" role="listbox" style="display:none">
-          <li role="option" data-value="JP">Japan</li>
-        </ul>
+        <section id="checkout-country-fields">
+          <div class="other-select">
+            <div class="singleValue">Japan</div>
+          </div>
+          <button id="country" role="combobox" aria-expanded="false" aria-controls="country-options" type="button">
+            Choose a country
+          </button>
+          <ul id="country-options" role="listbox" style="display:none">
+            <li role="option" data-value="JP">Japan</li>
+          </ul>
+        </section>
         <script>
           const trigger = document.getElementById('country');
           const options = document.getElementById('country-options');
@@ -680,9 +682,42 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "Japan")).rejects.toThrow(/no option matched/i);
+      await expect(ctrl.selectOption("#country", "Japan")).rejects.toThrow(
+        /commit could not be verified/i,
+      );
       expect(await picked(page)).toBeUndefined();
       expect(await page.locator("#country").textContent()).toContain("Choose a country");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("rejects matching filter text while its controlled popup remains visible", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <input id="country" role="combobox" aria-expanded="false" aria-controls="country-options">
+        <ul id="country-options" role="listbox" style="display:none">
+          <li id="country-japan" role="option">Japan</li>
+        </ul>
+        <script>
+          const trigger = document.getElementById('country');
+          const options = document.getElementById('country-options');
+          trigger.addEventListener('keydown', (event) => {
+            if (event.altKey && event.key === 'ArrowDown') {
+              options.style.display = 'block';
+            }
+          });
+          trigger.addEventListener('input', () => {
+            trigger.setAttribute('aria-activedescendant', 'country-japan');
+          });
+        </script>`),
+    );
+    try {
+      await expect(ctrl.selectOption("#country", "Japan")).rejects.toThrow(
+        /commit could not be verified/i,
+      );
+      expect(await page.locator("#country").inputValue()).toBe("Japan");
+      expect(await page.locator("#country-options").isVisible()).toBe(true);
     } finally {
       await page.close();
     }
