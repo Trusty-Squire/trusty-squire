@@ -7,8 +7,9 @@ inventory walker, and `setPhoneCountry`), evaluated against
 - Eval: `apps/mcp/src/bot/__tests__/widget-corpus-eval.test.ts`
 - Helper: `apps/mcp/src/bot/__tests__/helpers/corpus.ts`
 - Corpus: `~/.trusty-squire/corpus/onboarding/` (override with
-  `TRUSTY_SQUIRE_CORPUS_DIR`; not in the repo). Each record carries the full
-  page HTML, the walked element inventory, and the observed action.
+  `TRUSTY_SQUIRE_CORPUS_DIR`; not in the repo). Capture files carry walked
+  element inventories and observed actions; replay samples use the records
+  that also carry a non-empty full-page HTML snapshot.
 
 ## Run it
 
@@ -26,11 +27,13 @@ pnpm -F @trusty-squire/mcp test widget-corpus-eval
 - `TRUSTY_SQUIRE_CORPUS_DIR=off` disables the eval entirely on a box that has
   the corpus but doesn't want the scan.
 
-Every run prints a census block (`[widget-corpus-eval] census: …`) — records
-scanned, matches per category (native `<select>`, `input[type=tel]`,
-combobox/listbox roles, phone-country signals), and per-suite counts of
-records replayed and assertions run. Quote those numbers in review threads;
-they are the coverage claim.
+Every corpus-backed run prints a census block
+(`[widget-corpus-eval] census: …`) — records scanned, matches per category
+(native `<select>`, `input[type=tel]`, combobox/listbox roles, phone-country
+signals), and per-suite counts of records replayed, successful drives, and
+loud refusals. Quote those numbers in review threads; they are the coverage
+claim. Corpus-less runs print the explicit zero-count availability message
+instead.
 
 ## What the harness proves
 
@@ -45,26 +48,26 @@ asserts the properties that are
 
 1. **Target detection & locality.** Walked selectors resolve uniquely;
    distinct inventory rows never alias to the same node; driving one native
-   select leaves every sibling select untouched; phone country-code triggers
-   are custom widgets (never a native `<select>`), so a phone-country intent
-   can never legitimately resolve to an address-country / industry / timezone
-   select.
+   select leaves every sibling select untouched; custom phone country-code
+   triggers resolve to non-`<select>` nodes, while supported native
+   phone-country selects are classified separately from address-country /
+   industry / timezone selects.
 2. **Native `<select>` driving.** A matcher chosen to move the value away
    from both the current value and the no-matcher default is passed to
    `selectOption`; the committed value is read back off the DOM node and
    compared against an independently re-derived expectation of the matcher
    contract (case-insensitive substring, first match wins). The
    `data-ts-touched` marker is asserted too.
-3. **Phone-country native driving and refusal.** Real dial-code-backed native
-   selects are driven through `setPhoneCountry` and their committed value is
-   verified. Real custom-trigger captures exercise the primitive's loud
-   unsupported-widget refusal; dynamic custom-widget commit remains live-smoke
-   territory.
-4. **Loud-failure contracts.** A selector matching nothing throws; an
-   option-less `<select>` throws; a supplied native-select matcher with no
-   match throws without changing the value; a custom combobox that cannot
-   open (static DOM, JS off) throws `no options found after click` rather than
-   reporting false success.
+3. **Phone-country native driving and refusal.** Real supported native
+   phone-country selects are driven through `setPhoneCountry` and their
+   committed value is verified. Custom-trigger captures without a supported
+   native target exercise the primitive's loud unsupported-widget refusal;
+   dynamic custom-widget commit remains live-smoke territory.
+4. **Loud-failure contracts.** A selector matching nothing throws; a sampled
+   option-less `<select>` throws when encountered; a supplied native-select
+   matcher with no match throws without changing the value; a custom combobox
+   that cannot open (static DOM, JS off) throws rather than reporting false
+   success.
 5. **Fixed and open gaps are executable**:
    - **FIXED #1** — native-select matchers with no matching option now throw.
      The corpus test asserts the post-#409 contract and verifies the select

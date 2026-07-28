@@ -1,10 +1,12 @@
+/* eslint-disable no-console -- This eval's census and per-suite counts are its review evidence. */
+
 // Widget-driving eval over the REAL captured onboarding corpus.
 //
 // Why this exists: reviews of widget-driving operate_act kinds (select /
 // set_phone_country) kept looping on HYPOTHESES about widget DOM shapes with
-// no executable ground truth. The corpus (~15k captures, each carrying the
-// full page HTML + the walked element inventory) IS that ground truth: this
-// eval replays real captured DOMs in Chromium and runs the real primitives
+// no executable ground truth. The corpus (~15k captures) includes full-page
+// HTML snapshots and walked element inventories; this eval replays records
+// with non-empty HTML in Chromium and runs the real primitives
 // (BrowserController.extractInteractiveElements + selectOption +
 // setPhoneCountry) against them.
 //
@@ -16,10 +18,9 @@
 // question, and is validated here:
 //   (a) target detection & locality — which node a primitive WOULD drive:
 //       inventory selectors resolve uniquely, distinct inventory rows denote
-//       distinct nodes, phone-country triggers are custom widgets DISTINCT
-//       from any native <select> on the page (so a select-driving default
-//       could never silently hit e.g. an address-country select), and
-//       driving one select never disturbs a sibling select.
+//       distinct nodes, custom phone-country triggers resolve to non-select
+//       nodes, supported native phone-country selects stay distinct from
+//       unrelated selects, and driving one select never disturbs a sibling.
 //   (b) native <select> driving — the option value is actually set on the
 //       real DOM node and read back for verification.
 //   (c) loud-failure contracts — a missing target, a matcher with no native
@@ -29,8 +30,9 @@
 // (combobox popovers, phone-country dialogs). That residual gap belongs to
 // live smoke tests, not this harness.
 //
-// The eval doubles as a corpus census — every run prints records scanned /
-// matched per category / assertions run.
+// The eval doubles as a corpus census: corpus-backed runs print records
+// scanned, category matches, and per-suite evidence; corpus-less runs print
+// the explicit zero-count availability message.
 //
 // Skips gracefully (with a logged count) when the corpus directory is absent
 // — CI machines don't have it. Env knobs:
@@ -275,7 +277,10 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
     expect(phoneSelect, `${rec.service}: supported phone select must resolve`).toBeDefined();
     if (phoneSelect === undefined) return;
     const target = phoneCountryTarget(phoneSelect);
-    expect(target, `${rec.service}: supported phone select must offer another country`).not.toBeNull();
+    expect(
+      target,
+      `${rec.service}: supported phone select must offer another country`,
+    ).not.toBeNull();
     if (target === null) return;
     await ctrl.setPhoneCountry(target.query);
     expect(
@@ -674,9 +679,7 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
         await expect(
           ctrl.selectOption(trigger.selector),
           `${rec.service}: static combobox ${trigger.selector} must throw`,
-        ).rejects.toThrow(
-          /no options? (found|matched)|no single opened popup|not|disabled/i,
-        );
+        ).rejects.toThrow(/no options? (found|matched)|no single opened popup|not|disabled/i);
         attempted += 1;
       } finally {
         await page.close();

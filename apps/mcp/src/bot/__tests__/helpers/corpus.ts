@@ -1,8 +1,9 @@
 // Corpus loader/classifier for the widget-driving eval
 // (widget-corpus-eval.test.ts). Reads the REAL captured onboarding corpus
-// (~/.trusty-squire/corpus/onboarding by default — full page HTML + walked
-// element inventory per record) so widget primitives can be evaluated against
-// real-world DOM shapes instead of reviewer-vs-fixer hypotheses.
+// (~/.trusty-squire/corpus/onboarding by default). Capture files carry walked
+// element inventories; replayable records also carry a non-empty full-page
+// HTML snapshot, so widget primitives can be evaluated against real-world DOM
+// shapes instead of reviewer-vs-fixer hypotheses.
 //
 // Kept inside __tests__/ deliberately: this is test scaffolding, not product
 // code. The corpus itself is NOT in the repo — everything here must degrade
