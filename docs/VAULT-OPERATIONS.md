@@ -70,7 +70,6 @@ live under the DEK/KEK and are untouched by a master-key rotation.
 | Method + path | Auth | Purpose |
 |---|---|---|
 | `GET /v1/vault/credentials` | web+agent | Metadata list. Now also `age_days`, `last_changed_at`, `rotated_at`, and a `stale` flag (rotation nudge). |
-| `GET /v1/vault/audit` | web | Who-touched-my-keys timeline — full event trail, newest-first, keyset paginated (`before`), `type`/`reference` filters. No secret values. |
 | `POST /v1/vault/credentials/:id/health` | web | Envelope integrity probe — confirms the row still decrypts under the current keyring. No secret returned, no retrieval counted. `healthy:false` ≠ HTTP error. |
 | `POST /v1/vault/credentials/:id/restore` | web | Undelete a soft-deleted credential. `409` if a live `(service,label)` twin holds the slot. |
 | `POST /v1/vault/credentials/revoke-all` | web | Kill-switch: soft-delete every active credential. Requires `{ confirm: true }`. Recoverable via restore until retention sweeps. |
@@ -92,9 +91,22 @@ retrieve, AND web `reveal` — counts against one per-account ceiling
 
 A **new** credential stored via the agent path (bot signup) fires a
 best-effort "new `<service>` key added" email to the account owner.
-Rotations and manual web pastes do not notify. Mailer failures are
-swallowed — a notification never breaks a signup. The email never
+Rotations and manual web pastes do not trigger this email. Mailer failures
+are swallowed — an email failure never breaks a signup. The message never
 contains the secret.
+
+An account with Telegram linked also receives best-effort, secret-free lifecycle
+alerts for credential store/rotate/delete/restore, card add/remove, payment
+execution, and egress-grant mint/revoke events. These sends decorate the single
+vault audit-store dependency, so every producer shares the same notification
+path. Delivery is fire-and-forget and all Telegram failures are swallowed; a
+Telegram outage never delays or fails a vault operation. Messages use only
+service/label, action, timestamp, and the card's last four digits when relevant.
+
+Credential retrieval and proxy execution/rejection are deliberately excluded
+from per-event Telegram pushes to avoid access spam. They remain visible in the
+Activity trail. The intended future shape is a batched, default-off,
+per-account access digest.
 
 ## Retention
 
@@ -155,5 +167,8 @@ list response — advisory only, not enforced.
 - **Live "key still works" upstream probe.** The `health` endpoint
   checks the *envelope*, not whether the provider still accepts the key
   — that needs per-service live calls (out of this layer's scope).
-- **Leaked-credential detection / proxy_rejected alerting.** The events
-  exist in the audit trail; no alerting consumer is wired yet.
+- **Access-event digest.** Retrieval and proxy events remain in the Activity
+  trail but are intentionally excluded from per-event Telegram pushes. A
+  batched, default-off, per-account digest is not built yet; the operative
+  anti-spam invariant lives in
+  [`vault-notify.ts`](../apps/api/src/services/vault-notify.ts).

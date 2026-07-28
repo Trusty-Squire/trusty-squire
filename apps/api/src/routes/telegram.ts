@@ -55,7 +55,7 @@ export const registerTelegramRoute: FastifyPluginAsync<{
         await opts.deps.accountStore.setTelegramChatId(accountId, message.chatId);
         await sendTelegramMessage(
           message.chatId,
-          "✅ Connected. You'll get payment-approval links here.",
+          "✅ Connected. You'll get payment-approval links and vault activity alerts here.",
         );
       }
     }
@@ -65,7 +65,9 @@ export const registerTelegramRoute: FastifyPluginAsync<{
   });
 };
 
-function extractMessage(body: unknown): { text: string | undefined; chatId: string | undefined } | null {
+function extractMessage(
+  body: unknown,
+): { text: string | undefined; chatId: string | undefined } | null {
   if (typeof body !== "object" || body === null || !("message" in body)) return null;
   const message = (body as { message?: unknown }).message;
   if (typeof message !== "object" || message === null) return null;
@@ -77,7 +79,6 @@ function extractMessage(body: unknown): { text: string | undefined; chatId: stri
       : undefined;
   return {
     text: typeof text === "string" ? text : undefined,
-    chatId:
-      typeof chatId === "number" || typeof chatId === "string" ? String(chatId) : undefined,
+    chatId: typeof chatId === "number" || typeof chatId === "string" ? String(chatId) : undefined,
   };
 }

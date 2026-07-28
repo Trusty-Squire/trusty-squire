@@ -24,12 +24,22 @@ describe("parseAuthShape", () => {
 
 describe("applyAuthShape", () => {
   it("bearer injects Authorization and drops any inbound auth (egress token)", () => {
-    const r = applyAuthShape({ kind: "bearer" }, "sk-real", { authorization: "Bearer sqr_egress_x", "x-keep": "1" }, {});
+    const r = applyAuthShape(
+      { kind: "bearer" },
+      "sk-real",
+      { authorization: "Bearer sqr_egress_x", "x-keep": "1" },
+      {},
+    );
     expect(r.headers["authorization"]).toBe("Bearer sk-real");
     expect(r.headers["x-keep"]).toBe("1");
   });
   it("header shape sets the named header (lowercased)", () => {
-    const r = applyAuthShape({ kind: "header", name: "xi-api-key" }, "sk-real", { authorization: "Bearer t" }, {});
+    const r = applyAuthShape(
+      { kind: "header", name: "xi-api-key" },
+      "sk-real",
+      { authorization: "Bearer t" },
+      {},
+    );
     expect(r.headers["xi-api-key"]).toBe("sk-real");
     expect(r.headers["authorization"]).toBeUndefined(); // inbound auth stripped
   });
@@ -60,7 +70,12 @@ describe("token mint/verify", () => {
     expect(verifyEgressToken(token, grant.token_hash)).toBe(true);
   });
   it("rejects a wrong/garbage/unprefixed token", () => {
-    const { grant } = mintGrant({ account_id: "a", credential_ref: "r", rate_limit_per_hour: 1, now: "t" });
+    const { grant } = mintGrant({
+      account_id: "a",
+      credential_ref: "r",
+      rate_limit_per_hour: 1,
+      now: "t",
+    });
     expect(verifyEgressToken("sqr_egress_wrong", grant.token_hash)).toBe(false);
     expect(verifyEgressToken("not-a-token", grant.token_hash)).toBe(false);
     expect(verifyEgressToken("sqr_egress_x", "zzz")).toBe(false);
@@ -68,9 +83,14 @@ describe("token mint/verify", () => {
 });
 
 describe("InMemoryEgressGrantStore", () => {
-  it("creates, reads, account-scopes, and revokes (idempotently)", async () => {
+  it("creates, reads, account-scopes, and reports only revoke transitions", async () => {
     const store = new InMemoryEgressGrantStore();
-    const { grant } = mintGrant({ account_id: "acct1", credential_ref: "r", rate_limit_per_hour: 10, now: "t" });
+    const { grant } = mintGrant({
+      account_id: "acct1",
+      credential_ref: "r",
+      rate_limit_per_hour: 10,
+      now: "t",
+    });
     await store.create(grant);
     expect((await store.getById(grant.id))?.id).toBe(grant.id);
     expect(await store.listByAccount("acct1")).toHaveLength(1);
@@ -83,6 +103,6 @@ describe("InMemoryEgressGrantStore", () => {
     const revoked = await store.getById(grant.id);
     expect(revoked?.revoked_at).toBe("t2");
     expect(grantIsLive(revoked!)).toBe(false);
-    expect(await store.revoke(grant.id, "acct1", "t3")).toBe(true); // idempotent
+    expect(await store.revoke(grant.id, "acct1", "t3")).toBe(false);
   });
 });

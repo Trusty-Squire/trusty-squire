@@ -32,8 +32,8 @@ export default function SettingsPage() {
 const TG_POLL_INTERVAL_MS = 3000;
 const TG_POLL_TIMEOUT_MS = 30000;
 
-// Payment-approval push notifications via Telegram. Same hairline-ruled
-// section pattern as the danger zone, one row.
+// Payment approvals and vault lifecycle alerts via Telegram. Same
+// hairline-ruled section pattern as the danger zone, one row.
 function TelegramSection() {
   const router = useRouter();
   const [connected, setConnected] = useState<boolean | null>(null);
@@ -106,7 +106,7 @@ function TelegramSection() {
           <div className="dz-sub">
             {connected === true
               ? "Telegram connected ✓"
-              : "Get payment-approval links pushed to your phone via Telegram — no app beyond Telegram."}
+              : "Get payment approvals and vault alerts — new keys, rotations, deletions, card changes — pushed to your phone via Telegram."}
           </div>
           {error !== null && <div className="dz-sub">{error}</div>}
         </div>
@@ -132,7 +132,9 @@ function DangerZone() {
       <div className="dz-row">
         <div>
           <div className="dz-title">Export my data</div>
-          <div className="dz-sub">All credential metadata + the full activity log. No secret values.</div>
+          <div className="dz-sub">
+            All credential metadata + the full activity log. No secret values.
+          </div>
         </div>
         {/* A plain link: the endpoint sets content-disposition: attachment,
             so the browser downloads rather than navigates. */}
@@ -143,7 +145,10 @@ function DangerZone() {
       <div className="dz-row">
         <div>
           <div className="dz-title">Delete my account</div>
-          <div className="dz-sub">Permanently delete your account, every credential, and the activity log, and sign you out. Cannot be undone.</div>
+          <div className="dz-sub">
+            Permanently delete your account, every credential, and the activity log, and sign you
+            out. Cannot be undone.
+          </div>
         </div>
         <button className="dz-btn danger" type="button" onClick={() => setModal("delete")}>
           Delete account

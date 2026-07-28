@@ -17,6 +17,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import {
   AllowlistViolationError,
   CredentialNotFoundError,
+  VAULT_AUDIT_TYPES,
   type CredentialRecord,
 } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
@@ -31,15 +32,21 @@ import {
   type EgressGrantStore,
 } from "../services/egress-grant.js";
 import { isRetryablePrismaConnectionError } from "../services/prisma-egress-grant-store.js";
+import {
+  notifyVaultAuditAfterCommit,
+  recordVaultAuditAfterPersist,
+} from "../services/vault-notify.js";
 
-const mintBody = z.object({
-  reference: z.string().min(1).max(400).optional(),
-  service: z.string().min(1).max(120).optional(),
-  rate_limit_per_hour: z.number().int().min(1).max(100000).optional(),
-  spend_cap_usd: z.number().min(0).optional(),
-}).refine((b) => b.reference !== undefined || b.service !== undefined, {
-  message: "one of reference or service is required",
-});
+const mintBody = z
+  .object({
+    reference: z.string().min(1).max(400).optional(),
+    service: z.string().min(1).max(120).optional(),
+    rate_limit_per_hour: z.number().int().min(1).max(100000).optional(),
+    spend_cap_usd: z.number().min(0).optional(),
+  })
+  .refine((b) => b.reference !== undefined || b.service !== undefined, {
+    message: "one of reference or service is required",
+  });
 
 // Minimal per-grant rolling-hour rate limiter (in-memory). Limits are OPT-IN:
 // a grant minted without a rate carries perHour <= 0, which means UNLIMITED and
@@ -184,7 +191,9 @@ export const registerEgressRoutes: FastifyPluginAsync<{
           c.metadata.service.toLowerCase() === parsed.data.service!.toLowerCase(),
       );
       if (matches.length > 1) {
-        reply.code(409).send({ error: "ambiguous_service", candidates: matches.map((c) => c.reference) });
+        reply
+          .code(409)
+          .send({ error: "ambiguous_service", candidates: matches.map((c) => c.reference) });
         return;
       }
       selected = matches[0];
@@ -209,7 +218,26 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       spend_cap_usd: parsed.data.spend_cap_usd ?? null,
       now: now().toISOString(),
     });
-    await opts.egressGrantStore.create(grant);
+    const auditEvent = {
+      account_id: auth.account_id,
+      type: VAULT_AUDIT_TYPES.grantMinted,
+      payload: {
+        reference: selected.reference,
+        requester: "agent",
+        grant_id: grant.id,
+        label: selected.label,
+        ...(typeof selected.metadata.service === "string"
+          ? { service: selected.metadata.service }
+          : {}),
+      },
+    } as const;
+    if (opts.egressGrantStore.createWithAudit !== undefined) {
+      await opts.egressGrantStore.createWithAudit(grant, auditEvent);
+      notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, auditEvent);
+    } else {
+      await opts.egressGrantStore.create(grant);
+      await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, auditEvent, req.log);
+    }
     // Fly terminates TLS at the edge and forwards HTTP internally, so
     // req.protocol reads "http". Advertising that as base_url makes a backend
     // follow the http→https redirect, and the Authorization header is dropped on
@@ -256,10 +284,43 @@ export const registerEgressRoutes: FastifyPluginAsync<{
     async (req, reply) => {
       const auth = req.auth!;
       if (auth.kind !== "agent") return;
-      const ok = await opts.egressGrantStore.revoke(req.params.id, auth.account_id, now().toISOString());
-      if (!ok) {
+      const existing = await opts.egressGrantStore.getById(req.params.id);
+      if (existing === null || existing.account_id !== auth.account_id) {
         reply.code(404).send({ error: "grant_not_found" });
         return;
+      }
+      const credential = await opts.deps.credentialStore
+        .findActive(existing.credential_ref)
+        .catch(() => null);
+      const auditEvent = {
+        account_id: auth.account_id,
+        type: VAULT_AUDIT_TYPES.grantRevoked,
+        payload: {
+          reference: existing.credential_ref,
+          requester: "agent",
+          grant_id: req.params.id,
+          ...(credential !== null ? { label: credential.label } : {}),
+          ...(typeof credential?.metadata.service === "string"
+            ? { service: credential.metadata.service }
+            : {}),
+        },
+      } as const;
+      const revokedAt = now().toISOString();
+      const usesAtomicAudit = opts.egressGrantStore.revokeWithAudit !== undefined;
+      const changed = usesAtomicAudit
+        ? await opts.egressGrantStore.revokeWithAudit!(
+            req.params.id,
+            auth.account_id,
+            revokedAt,
+            auditEvent,
+          )
+        : await opts.egressGrantStore.revoke(req.params.id, auth.account_id, revokedAt);
+      if (changed) {
+        if (usesAtomicAudit) {
+          notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, auditEvent);
+        } else {
+          await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, auditEvent, req.log);
+        }
       }
       reply.send({ revoked: true, grant_id: req.params.id });
     },
@@ -355,7 +416,8 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       }
       const inboundQuery: Record<string, string> = {};
       const qIdx = req.url.indexOf("?");
-      if (qIdx >= 0) for (const [k, v] of new URLSearchParams(req.url.slice(qIdx + 1))) inboundQuery[k] = v;
+      if (qIdx >= 0)
+        for (const [k, v] of new URLSearchParams(req.url.slice(qIdx + 1))) inboundQuery[k] = v;
 
       const body =
         req.body === undefined || req.body === null

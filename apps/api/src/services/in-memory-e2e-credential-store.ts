@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import type { VaultAuditEventInput } from "@trusty-squire/vault";
 
 export interface E2ECredentialRecord {
   id: string;
@@ -31,11 +32,23 @@ export interface E2ECredentialStore {
     blob: string,
     metadata?: E2ECredentialCardMetadata,
   ): Promise<string>;
+  createWithAudit?(
+    accountId: string,
+    label: string,
+    blob: string,
+    metadata: E2ECredentialCardMetadata,
+    eventForId: (id: string) => VaultAuditEventInput,
+  ): Promise<string>;
   listByAccount(accountId: string): Promise<E2ECredentialSummary[]>;
   exportAll(accountId: string): Promise<E2ECredentialRecord[]>;
   getByIdForAccount(id: string, accountId: string): Promise<E2ECredentialRecord | null>;
   updateLabelForAccount(id: string, accountId: string, label: string): Promise<boolean>;
   deleteForAccount(id: string, accountId: string): Promise<boolean>;
+  deleteForAccountWithAudit?(
+    id: string,
+    accountId: string,
+    event: VaultAuditEventInput,
+  ): Promise<boolean>;
 }
 
 export class InMemoryE2ECredentialStore implements E2ECredentialStore {

@@ -26,10 +26,11 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/mcp/sessions` | web | Issue an MCP agent session token |
 | `POST` | `/v1/vault/use` | agent | Retrieve a vault credential for allowed egress |
 | `POST` | `/v1/vault/browser-fill` | agent | Seal login/password fields for allowed browser sign-in hosts |
-| `GET` | `/v1/vault/credentials` | web | List vault credentials |
+| `GET` | `/v1/vault/credentials` | web/agent | List vault credentials |
+| `GET` | `/v1/vault/audit` | web/agent | List the account's secret-free Activity trail with keyset pagination and optional `type`/`reference` filters |
 | `POST` | `/v1/vault/e2e` | web | Store an opaque, client-encrypted card blob |
 | `GET` | `/v1/vault/e2e` | web/agent | List client-encrypted card metadata without blobs |
-| `GET` | `/v1/vault/e2e/:id` | web/agent | Retrieve an account-owned encrypted card blob |
+| `GET` | `/v1/vault/e2e/:id` | web/agent | Retrieve account-owned card display metadata plus its opaque encrypted blob |
 | `PATCH` | `/v1/vault/e2e/:id/label` | web | Rename an account-owned encrypted card |
 | `DELETE` | `/v1/vault/e2e/:id` | web | Delete an account-owned encrypted card blob |
 | `POST` | `/v1/vault/payments/audit` | agent | Record a payment attempt without PAN or CVV |
@@ -49,7 +50,14 @@ start with a letter, and otherwise contain only letters, spaces, and hyphens;
 encrypted blob. List responses and GDPR vault exports include `brand` and
 `last4` (`null` for legacy rows). `PATCH /v1/vault/e2e/:id/label` accepts
 `{ label }` and changes only the label; the blob and card metadata remain
-unchanged.
+unchanged. The detail response has exactly `id`, `label`, `blob`, `brand`,
+`last4`, and `createdAt`; PAN and CVV never appear as separate response fields.
+
+`GET /v1/vault/audit` includes credential access and lifecycle activity plus
+card, payment, and egress-grant lifecycle events. Its `type` filter is derived
+from the canonical
+[`VAULT_AUDIT_TYPES`](../../packages/vault/src/types.ts) values rather than a
+second hand-maintained enum. Every event payload is display metadata only.
 
 Payment approval creation accepts optional `item` and `reason` strings, storing
 an empty string when either is omitted. The API derives `agent` from the

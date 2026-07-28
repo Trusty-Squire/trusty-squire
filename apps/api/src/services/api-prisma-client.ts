@@ -368,6 +368,10 @@ export interface ApiPrismaClient {
       orderBy?: Record<string, unknown>;
     }): Promise<EgressGrantRow[]>;
     update(args: { where: { id: string }; data: Record<string, unknown> }): Promise<EgressGrantRow>;
+    updateMany(args: {
+      where: Record<string, unknown>;
+      data: Record<string, unknown>;
+    }): Promise<{ count: number }>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
   };
 }
