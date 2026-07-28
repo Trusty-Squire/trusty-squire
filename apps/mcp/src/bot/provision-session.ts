@@ -237,6 +237,19 @@ export type ProvisionAction =
   // stall). Same target resolution; different dispatch.
   | { kind: "js_click"; target: string }
   | { kind: "type"; target: string; text: string }
+  // Choose an option in a native <select> OR a custom listbox/combobox by its
+  // visible text (fuzzy, case-insensitive substring). `type` cannot drive these
+  // — page.fill throws on a <select> and humanized keystrokes break native
+  // type-ahead — so a country/state/etc. dropdown needs this. Routes to
+  // browser.selectOption, which already handles both the native and the
+  // <li role=option> custom shapes. target = the select/combobox (or its label);
+  // text = the option to match (e.g. "South Korea").
+  | { kind: "select"; target: string; text: string }
+  // Set the country on a phone-number field's dial-code picker. No ref/target
+  // — the bot locates a phone-local native <select>, including
+  // react-phone-number-input's opacity:0 select that inventory drops. Other
+  // widget families are unsupported and throw.
+  | { kind: "set_phone_country"; country: string }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }
   // Route an OAuth-provider button through startOAuth so the popup is adopted
@@ -2357,6 +2370,35 @@ export async function act(
       });
       break;
     }
+    case "select": {
+      // Re-resolve against FRESH elements — the target may be the <select> or
+      // its <label>; browser.selectOption walks label→control and handles the
+      // native vs custom-listbox split. text is the fuzzy option matcher.
+      const fresh = await browser.extractInteractiveElements();
+      session.lastElements = fresh;
+      const el = resolveTarget(fresh, action.target);
+      if (el === null) {
+        throw new Error(
+          `select: no element matched target "${action.target}". Visible: ` +
+            fresh
+              .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
+              .slice(0, 20)
+              .join(", "),
+        );
+      }
+      resolvedEl = el;
+      await browser.selectOption(el.selector, action.text);
+      await settleAfterStateChange(browser);
+      break;
+    }
+    case "set_phone_country": {
+      // No captured element — the bot finds the phone-local native <select>.
+      // resolvedEl stays null; the step records without a captured-element
+      // trace (the country is host-replannable, not a replay recipe).
+      await browser.setPhoneCountry(action.country);
+      await settleAfterStateChange(browser);
+      break;
+    }
     case "click":
     case "js_click":
     case "type":
@@ -2535,6 +2577,15 @@ function recordTrace(
   // An upload attaches a machine-local file — not portable, never part of a
   // shared recipe. Skip it here (the action is still in the audit trail).
   if (action.kind === "upload") return;
+  // A native/custom-select pick isn't yet in the portable recipe vocabulary
+  // (TraceAction has no `select` kind). Skip it from the trace like upload — the
+  // action still runs and is audited. Selects were never traceable before this
+  // kind existed, so nothing regresses; wiring select into the replay engine is
+  // a follow-up for when a signup flow needs a replayable dropdown.
+  if (action.kind === "select") return;
+  // set_phone_country has no portable TraceAction kind either — the country is
+  // host-replannable per run, not baked into a shared recipe. Skip like select.
+  if (action.kind === "set_phone_country") return;
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};

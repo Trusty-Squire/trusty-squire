@@ -252,6 +252,8 @@ const actSchema = z.object({
     "click",
     "js_click",
     "type",
+    "select",
+    "set_phone_country",
     "goto",
     "press",
     "oauth_click",
@@ -263,6 +265,8 @@ const actSchema = z.object({
   ]),
   target: z.string().min(1).max(200).optional(),
   text: z.string().max(4096).optional(),
+  // set_phone_country supports phone-local native country <select> controls.
+  country: z.string().min(1).max(60).optional(),
   // upload: absolute path to a LOCAL file to attach to `target` (the upload
   // button/menu-item, or the file <input>).
   path: z.string().min(1).max(4096).optional(),
@@ -297,6 +301,10 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
       return { kind: "oauth_click", target: need(args.target, "target") };
     case "type":
       return { kind: "type", target: need(args.target, "target"), text: args.text ?? "" };
+    case "select":
+      return { kind: "select", target: need(args.target, "target"), text: need(args.text, "text") };
+    case "set_phone_country":
+      return { kind: "set_phone_country", country: need(args.country, "country") };
     case "goto":
       return { kind: "goto", url: need(args.url, "url") };
     case "press":
@@ -341,6 +349,11 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "the explicit direct DOM dispatch that fires through a transparent overlay. " +
     "Prefer a real ref when one exists; reach for " +
     "text=/css= only when none does. " +
+    "select (target + text — pick an option in a native <select> or custom listbox " +
+    "by its visible text, e.g. a country/state dropdown that `type` can't drive), " +
+    "set_phone_country (country — set the dial-code country on a phone field's " +
+    "native <select>, including react-phone-number-input's hidden country select; " +
+    "other phone widget families are not yet supported and throw; no target needed), " +
     "goto (url — domain-scoped), press (key, e.g. Enter), oauth_click (target — " +
     "use for 'Continue with Google/GitHub' so the popup is adopted), " +
     "oauth_settle (return to the product page after the OAuth handshake), " +
@@ -372,6 +385,8 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
           "click",
           "js_click",
           "type",
+          "select",
+          "set_phone_country",
           "goto",
           "press",
           "oauth_click",
@@ -384,6 +399,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       },
       target: { type: "string" },
       text: { type: "string" },
+      country: { type: "string" },
       path: { type: "string" },
       url: { type: "string" },
       key: { type: "string" },
