@@ -249,8 +249,9 @@ export type ProvisionAction =
   // — the bot locates the picker relative to the tel input and feature-detects
   // the widget (react-phone-number-input's opacity:0 native <select> that the
   // inventory walker drops, react-phone-input-2 / react-international-phone /
-  // intl-tel-input flag lists, and a bespoke "+NN" trigger). `country` is one
-  // token: a dial code ("+81"), an ISO2 code ("JP"), or a name ("Japan").
+  // intl-tel-input flag lists, and a bespoke "+NN" trigger). Pass a country
+  // name ("Japan") for reliable matching everywhere. A dial code ("+81") or
+  // ISO2 code ("JP") resolves only on widgets whose options expose that signal.
   | { kind: "set_phone_country"; country: string }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }

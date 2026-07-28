@@ -146,6 +146,41 @@ const ADDRESS_PLUS_PHONE_FIXTURE = dataUrl(`
     sel.addEventListener('change', () => { window.__country = sel.value; });
   </script>`);
 
+const ADDRESS_PLUS_CUSTOM_PHONE_FIXTURE = dataUrl(`
+  <form>
+    <fieldset>
+      <label>Shipping country</label>
+      <select name="country" id="addr-country">
+        ${ISO_ROWS.map((r) => `<option value="${r.iso2}">${r.name}</option>`).join("")}
+      </select>
+    </fieldset>
+    <div class="react-tel-input">
+      <input type="tel" class="form-control">
+      <div class="flag-dropdown">
+        <div class="selected-flag" tabindex="0" style="width:38px;height:26px;display:inline-block">flag</div>
+        <ul class="country-list" style="display:none;margin:0">
+          ${ISO_ROWS.map(
+            (r) =>
+              `<li class="country" data-country-code="${r.iso2.toLowerCase()}">` +
+              `<span class="country-name">${r.name}</span>` +
+              `<span class="dial-code">${r.dial}</span></li>`,
+          ).join("")}
+        </ul>
+      </div>
+    </div>
+  </form>
+  <script>
+    const flag = document.querySelector('.selected-flag');
+    const list = document.querySelector('.country-list');
+    flag.addEventListener('click', () => { list.style.display = 'block'; });
+    list.querySelectorAll('li.country').forEach((li) =>
+      li.addEventListener('click', () => {
+        window.__picked = li.getAttribute('data-country-code');
+        list.style.display = 'none';
+      }),
+    );
+  </script>`);
+
 // react-phone-input-2: a .selected-flag trigger + a .country-list of
 // li.country[data-country-code] each with a .dial-code span.
 const RPI2_FIXTURE = dataUrl(`
@@ -236,6 +271,7 @@ const ITI_FIXTURE = dataUrl(`
 // library class — the generic fallback's target.
 const BESPOKE_FIXTURE = dataUrl(`
   <div class="checkout">
+    <button class="country-link" type="button" onclick="window.__wrong = true">Japan (+81)</button>
     <div class="phone-row">
       <label id="cc" class="cc-label" style="cursor:pointer">+1</label>
       <input type="tel" id="phone">
@@ -324,6 +360,17 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 
+  it("ignores an address country select when the phone picker is custom", async () => {
+    const { ctrl, page } = await pageFor(ADDRESS_PLUS_CUSTOM_PHONE_FIXTURE);
+    try {
+      await ctrl.setPhoneCountry("Japan");
+      expect(await page.locator("#addr-country").inputValue()).toBe("US");
+      expect(await picked(page)).toBe("jp");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
   it("react-phone-input-2: opens the flag list and picks by dial code", async () => {
     const { ctrl, page } = await pageFor(RPI2_FIXTURE);
     try {
@@ -407,13 +454,60 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 
-  it("react-phone-number-input: dial-code query fails loudly (no +NN in its options)", async () => {
+  it("react-phone-number-input: documents the expected dial-code limitation", async () => {
     // react-phone-number-input's native <option>s carry only the country name
     // and an ISO2 value — no dial code — so "+81" can't resolve here. Documents
     // the limitation: pass a name or ISO2 for this widget family.
     const { ctrl, page } = await pageFor(RPNI_FIXTURE);
     try {
       await expect(ctrl.setPhoneCountry("+81")).rejects.toThrow(/no option matched/i);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("does not select the first native option when text matches nothing", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <select id="country">
+          <option value="">Choose a country</option>
+          <option value="JP">Japan</option>
+        </select>`),
+    );
+    try {
+      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(
+        /no option matched/i,
+      );
+      expect(await page.locator("#country").inputValue()).toBe("");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("does not click the first custom option when text matches nothing", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <button id="country" role="combobox" type="button">Choose a country</button>
+        <ul id="options" role="listbox" style="display:none">
+          <li role="option" data-value="JP">Japan</li>
+          <li role="option" data-value="KR">South Korea</li>
+        </ul>
+        <script>
+          document.getElementById('country').addEventListener('click', () => {
+            document.getElementById('options').style.display = 'block';
+          });
+          document.querySelectorAll('[role="option"]').forEach((option) => {
+            option.addEventListener('click', () => {
+              window.__picked = option.getAttribute('data-value');
+            });
+          });
+        </script>`),
+    );
+    try {
+      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(
+        /no option matched/i,
+      );
+      expect(await picked(page)).toBeUndefined();
     } finally {
       await page.close();
     }

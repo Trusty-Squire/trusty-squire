@@ -3598,9 +3598,12 @@ export class BrowserController {
               .find((o) => o.textContent?.toLowerCase().includes(needle));
             return hit !== undefined ? { value: hit.value } : null;
           }, matcherLower);
-        if (matched !== null) {
-          chosenValue = matched.value;
+        if (matched === null) {
+          throw new Error(
+            `<select> ${activeSelector}: no option matched ${JSON.stringify(optionMatcher)}`,
+          );
         }
+        chosenValue = matched.value;
       }
       if (chosenValue === undefined) {
         throw new Error(`<select> ${activeSelector} has no selectable option`);
@@ -3646,12 +3649,14 @@ export class BrowserController {
   //  - a bespoke `+NN` <label> trigger (Casetify) has no native <select> and
   //    no library class at all; a ref click on the label does nothing.
   //
-  // `country` is a single token — a dial code ("+81" / "81"), an ISO2 code
-  // ("JP"), or a country name ("Japan"). Strategy order prefers a governing
-  // native <select> (most reliable), then the known custom libraries, then a
-  // generic "control adjacent to input[type=tel] whose own text is +NN"
-  // fallback. Throws when a picker is located but no option matches the
-  // requested country (loud, with sample options) or when none is found.
+  // Pass a country name ("Japan") for reliable matching across every widget.
+  // A dial code ("+81" / "81") or ISO2 code ("JP") resolves only when that
+  // widget's options expose the corresponding signal. Strategy order prefers
+  // a governing native <select> (most reliable), then the known custom
+  // libraries, then a generic "control adjacent to input[type=tel] whose own
+  // text is +NN" fallback. Throws when a picker is located but no option
+  // matches the requested country (loud, with sample options) or when none is
+  // found.
   async setPhoneCountry(country: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     const query = classifyPhoneCountryQuery(country);
@@ -3707,10 +3712,10 @@ export class BrowserController {
   // widget backed by a real <select>). Detection is deliberately conservative
   // so it does NOT grab the address "country" select that lives elsewhere on
   // the checkout: a select qualifies only when its class/name/id names it a
-  // PHONE control, or its options look like countries AND a tel input sits
-  // within 4 ancestor levels of it (the address country select's tel input is
-  // far away). Returns false when no such select exists; throws when one is
-  // found but the requested country isn't among its options.
+  // PHONE control, or its options look like countries AND it is a direct
+  // sibling of the tel input or lives in an immediately adjacent wrapper.
+  // Returns false when no such select exists; throws when one is found but the
+  // requested country isn't among its options.
   private async trySetPhoneCountryNativeSelect(
     query: PhoneCountryQuery,
     tried: string[],
@@ -3729,11 +3734,24 @@ export class BrowserController {
         const hay = `${sel.className} ${sel.getAttribute("name") ?? ""} ${sel.id}`.toLowerCase();
         const phoneNamed = /phone|dial|calling/.test(hay);
         let telDistance = Number.POSITIVE_INFINITY;
-        let anc: HTMLElement | null = sel.parentElement;
-        for (let d = 0; d < 5 && anc !== null; d += 1, anc = anc.parentElement) {
-          if (anc.querySelector('input[type="tel"]') !== null) {
-            telDistance = d;
-            break;
+        const isTel = (el: Element | null): boolean => el?.matches('input[type="tel"]') === true;
+        const parent = sel.parentElement;
+        if (isTel(sel.previousElementSibling) || isTel(sel.nextElementSibling)) {
+          telDistance = 0;
+        } else if (
+          parent !== null &&
+          parent.tagName !== "FORM" &&
+          Array.from(parent.children).some(isTel)
+        ) {
+          telDistance = 1;
+        } else {
+          const grandparent = parent?.parentElement ?? null;
+          if (
+            grandparent !== null &&
+            grandparent.tagName !== "FORM" &&
+            Array.from(grandparent.children).some(isTel)
+          ) {
+            telDistance = 2;
           }
         }
         const options = Array.from(sel.options).map((o) => ({
@@ -3745,7 +3763,7 @@ export class BrowserController {
           (o) => /\+\d/.test(o.text) || /^\+?\d{1,4}$/.test(o.value),
         ).length;
         const countryish = options.length >= 10 && (isoish >= 5 || dialish >= 5);
-        if (phoneNamed || (countryish && telDistance <= 4)) {
+        if (phoneNamed || (countryish && telDistance <= 2)) {
           sel.setAttribute("data-ts-phone-cc", String(i));
           out.push({
             marker: i,
@@ -3827,7 +3845,7 @@ export class BrowserController {
     if ((await trigger.count()) === 0) return false;
     await trigger.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
     await trigger.click({ timeout: 8000 }).catch(async () => {
-      await trigger.evaluate((el) => (el as HTMLElement).click()).catch(() => {});
+      await trigger.evaluate((el) => (el as HTMLElement).click());
     });
     const options = this.page.locator(fam.option);
     try {
@@ -3873,7 +3891,7 @@ export class BrowserController {
     const chosen = options.nth(idx);
     await chosen.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
     await chosen.click({ timeout: 8000 }).catch(async () => {
-      await chosen.evaluate((el) => (el as HTMLElement).click()).catch(() => {});
+      await chosen.evaluate((el) => (el as HTMLElement).click());
     });
     tried.push(`${fam.name} → "${chosenDesc.text ?? chosenDesc.iso2 ?? ""}"`);
     return true;
@@ -3922,9 +3940,24 @@ export class BrowserController {
     });
     if (!found) return false;
     const trigger = this.page.locator('[data-ts-phone-cc-trigger="1"]').first();
+    await this.page.evaluate(() => {
+      const isVis = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) return false;
+        const s = getComputedStyle(el);
+        return (
+          s.display !== "none" && s.visibility !== "hidden" && parseFloat(s.opacity || "1") > 0.01
+        );
+      };
+      const sel =
+        'li,[role="option"],[role="menuitem"],button,a,[class*="option"],[class*="country"]';
+      Array.from(document.querySelectorAll(sel))
+        .filter(isVis)
+        .forEach((el) => el.setAttribute("data-ts-phone-cc-preexisting", "1"));
+    });
     await trigger.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
     await trigger.click({ timeout: 8000 }).catch(async () => {
-      await trigger.evaluate((el) => (el as HTMLElement).click()).catch(() => {});
+      await trigger.evaluate((el) => (el as HTMLElement).click());
     });
     await this.wait(0.4);
     const descs = await this.page.evaluate(() => {
@@ -3939,7 +3972,7 @@ export class BrowserController {
       const sel =
         'li,[role="option"],[role="menuitem"],button,a,[class*="option"],[class*="country"]';
       return Array.from(document.querySelectorAll(sel))
-        .filter(isVis)
+        .filter((el) => !el.hasAttribute("data-ts-phone-cc-preexisting") && isVis(el))
         .slice(0, 400)
         .map((el, i) => {
           el.setAttribute("data-ts-phone-cc-opt", String(i));
@@ -3964,7 +3997,7 @@ export class BrowserController {
     const chosen = this.page.locator(`[data-ts-phone-cc-opt="${chosenDesc.marker}"]`).first();
     await chosen.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
     await chosen.click({ timeout: 8000 }).catch(async () => {
-      await chosen.evaluate((el) => (el as HTMLElement).click()).catch(() => {});
+      await chosen.evaluate((el) => (el as HTMLElement).click());
     });
     await this.clearPhoneCountryMarkers();
     tried.push(`bespoke +NN trigger → "${chosenDesc.text ?? ""}"`);
@@ -3978,11 +4011,14 @@ export class BrowserController {
     await this.page
       .evaluate(() => {
         document
-          .querySelectorAll("[data-ts-phone-cc],[data-ts-phone-cc-trigger],[data-ts-phone-cc-opt]")
+          .querySelectorAll(
+            "[data-ts-phone-cc],[data-ts-phone-cc-trigger],[data-ts-phone-cc-opt],[data-ts-phone-cc-preexisting]",
+          )
           .forEach((el) => {
             el.removeAttribute("data-ts-phone-cc");
             el.removeAttribute("data-ts-phone-cc-trigger");
             el.removeAttribute("data-ts-phone-cc-opt");
+            el.removeAttribute("data-ts-phone-cc-preexisting");
           });
       })
       .catch(() => {});
@@ -4057,8 +4093,7 @@ export class BrowserController {
       }
       const count = await locator.count();
       if (count === 0) continue;
-      await this.pickComboboxOption(locator, optionMatcher);
-      return;
+      if (await this.pickComboboxOption(locator, optionMatcher)) return;
     }
 
     // 0.8.2-rc.11 — keyboard-driven react-select fallback. Sentry's
@@ -4094,7 +4129,9 @@ export class BrowserController {
     throw new Error(
       `combobox ${triggerSelector}` +
         (normalizedSelector !== triggerSelector ? ` (normalized to ${normalizedSelector})` : "") +
-        `: no options found after click. ` +
+        (optionMatcher !== undefined
+          ? `: no option matched ${JSON.stringify(optionMatcher)} after click. `
+          : ": no options found after click. ") +
         `Tried: ${triedDescriptors.join(", ")}. ` +
         `The trigger may not have opened a popover, or the popover uses ` +
         `an option pattern this executor doesn't recognize.`,
@@ -4250,11 +4287,12 @@ export class BrowserController {
   // F11: pick an option from a Playwright Locator already-narrowed to
   // candidates. Matcher → filter by hasText (case-insensitive by
   // default in Playwright). No matcher → first.
-  private async pickComboboxOption(options: Locator, matcher?: string): Promise<void> {
+  private async pickComboboxOption(options: Locator, matcher?: string): Promise<boolean> {
     let target = options.first();
     if (matcher !== undefined) {
       const filtered = options.filter({ hasText: matcher });
-      if ((await filtered.count()) > 0) target = filtered.first();
+      if ((await filtered.count()) === 0) return false;
+      target = filtered.first();
     }
     // cmdk (the command-menu library) does NOT commit a selection from the
     // bot's humanized page.mouse.click(x, y): cmdk re-renders + re-orders its
@@ -4286,10 +4324,11 @@ export class BrowserController {
         await this.page?.keyboard.press("Enter").catch(() => {});
       });
       await this.wait(0.5);
-      return;
+      return true;
     }
     await this.humanClickLocator(target);
     await this.wait(0.5);
+    return true;
   }
 
   // ───────────── humanization internals ─────────────
