@@ -98,28 +98,38 @@ options (logged as `skipped (option list already visible …)`).
 
 ## Adding captures (growing coverage)
 
-Captures accumulate automatically: every host-driven `operate_*` provision
-writes onboarding rounds to `~/.trusty-squire/corpus/onboarding/` (default-on
-via `TRUSTY_SQUIRE_ONBOARDING_CAPTURE`). The eval picks new records up on the
-next run — no registration step.
+Automatic capture writes the accumulated rounds only when a successful
+credential task reaches capture/promotion. Mid-round `operate_act` captures
+store inventory and the action with `state.html: ""`; `operate_observe`
+persists no corpus round. Only the final extract round stores full HTML.
+To capture a static widget, finish a provision with its final extract round on
+the page where that widget is present.
 
-**To capture a specific problem widget from a live operate session:** drive
-the page to the state where the widget is visible (e.g. the phone-country
-dialog's trigger rendered) using `operate_start` / `operate_act`, then call
-`operate_observe` — each observation round is captured with full HTML +
-inventory. The record lands in the corpus dir named
-`<service>-<runid>-r<N>.json`. If the interesting state is *inside* an open
-popover, observe **while it is open** so the popover's DOM is in the
-snapshot; that is the only way a static replay can ever see it.
+A manually saved DOM can also be added as a corpus-shaped `.json` file. The
+loader requires only a top-level object containing `state.html` as a non-empty
+string:
 
-For a review/no-mistakes crewmate arguing about a widget's DOM shape: capture
-the state once, then point at the census + the failing/passing assertion
-instead of trading hypotheses.
+```json
+{
+  "service": "example",
+  "state": { "url": "https://example.com/signup", "html": "<!doctype html>..." },
+  "inventory": []
+}
+```
+
+`service`, `state.url`, and `inventory` are optional to the loader. The raw
+census uses inventory probes to choose suite candidates, so include a minimal
+matching inventory row such as `{ "tag": "select" }`, `{ "type": "tel" }`, or
+`{ "role": "combobox" }` when the record must enter that category.
+
+There is no targeted capture capability for a mid-flow open-popover state
+today. `operate_observe` cannot create that replay record.
 
 ## `setPhoneCountry` coverage boundary
 
-The native phone suite drives `setPhoneCountry` against real dial-code-shaped
-`<select>` captures and verifies the retained value. The custom-trigger suite
-uses real browserbase-style captures to assert the current unsupported-widget
-error. Opening and committing a dynamic custom phone-country widget still
-requires a live smoke test.
+The native phone suite drives `setPhoneCountry` against supported phone-local
+country `<select>` captures, including ISO2, country-name, and dial-code
+options, and verifies the retained value. The custom-trigger suite uses the
+same replayed-DOM support predicate to drive a supported native target or
+assert the unsupported-widget error. Opening and committing a dynamic custom
+phone-country widget still requires a live smoke test.

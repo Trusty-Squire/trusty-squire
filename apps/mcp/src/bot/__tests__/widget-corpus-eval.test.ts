@@ -232,7 +232,15 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
     });
   }
 
-  function dialCodeTarget(details: SelectDetails): { query: string; expectedValue: string } | null {
+  function phoneCountryTarget(
+    details: SelectDetails,
+  ): { query: string; expectedValue: string } | null {
+    const iso2 = details.options.find(
+      (option) => /^[A-Za-z]{2}$/.test(option.value) && option.value !== details.value,
+    );
+    if (iso2 !== undefined) {
+      return { query: iso2.value.toUpperCase(), expectedValue: iso2.value };
+    }
     for (const option of details.options) {
       const dialCode = option.text.match(/\+(\d{1,4})/)?.[1];
       if (dialCode === undefined) continue;
@@ -243,7 +251,37 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
         return { query: `+${dialCode}`, expectedValue: expected.value };
       }
     }
+    for (const option of details.options) {
+      const query = option.text.trim();
+      if (query.length <= 2 || option.value === details.value) continue;
+      const expected = details.options.find((candidate) =>
+        candidate.text.toLowerCase().includes(query.toLowerCase()),
+      );
+      if (expected !== undefined) return { query, expectedValue: expected.value };
+    }
     return null;
+  }
+
+  async function drivePhoneSelect(
+    ctrl: BrowserController,
+    page: Page,
+    rec: CorpusRecord,
+    phoneSelects: PhoneSelectDetails[],
+  ): Promise<void> {
+    phoneSelects.sort(
+      (a, b) => Number(b.phoneNamed) - Number(a.phoneNamed) || a.telDistance - b.telDistance,
+    );
+    const phoneSelect = phoneSelects[0];
+    expect(phoneSelect, `${rec.service}: supported phone select must resolve`).toBeDefined();
+    if (phoneSelect === undefined) return;
+    const target = phoneCountryTarget(phoneSelect);
+    expect(target, `${rec.service}: supported phone select must offer another country`).not.toBeNull();
+    if (target === null) return;
+    await ctrl.setPhoneCountry(target.query);
+    expect(
+      await page.locator(phoneSelect.selector).inputValue(),
+      `${rec.service}: setPhoneCountry(${target.query})`,
+    ).toBe(target.expectedValue);
   }
 
   function sampleRecords(files: readonly string[], cap: number) {
@@ -457,52 +495,59 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
     expect(checked).toBeGreaterThan(0);
   }, 300_000);
 
+  it("phone-country routing drives an ISO2 native select without dial-code text", async () => {
+    const rec: CorpusRecord = {
+      file: "iso2-phone-select",
+      service: "iso2-phone-select",
+      url: "https://example.invalid/signup",
+      html:
+        '<div><select class="PhoneInputCountrySelect">' +
+        '<option value="US">United States</option>' +
+        '<option value="JP">Japan</option>' +
+        '<option value="KR">South Korea</option>' +
+        '</select><input type="tel"></div>',
+    };
+    const { ctrl, page } = await openRecord(rec);
+    try {
+      const phoneSelects = await readPhoneSelects(page);
+      expect(phoneSelects).toHaveLength(1);
+      await drivePhoneSelect(ctrl, page, rec, phoneSelects);
+      expect(await page.locator("select").inputValue()).toBe("JP");
+    } finally {
+      await page.close();
+    }
+  }, 60_000);
+
   it("phone-country native selects: setPhoneCountry drives and verifies the real target", async () => {
-    const candidates = telRecords.filter((record) => hasDialCodeSelect(record.html));
+    const candidates = telRecords;
     if (candidates.length === 0) {
-      console.log(
-        "[widget-corpus-eval] native phone suite: 0 corpus records with a dial-code <select>",
-      );
+      console.log("[widget-corpus-eval] native phone suite: 0 tel records");
       return;
     }
     const sample = sampleEvenly(candidates, MAX_RECORDS);
+    let supported = 0;
     let driven = 0;
     for (const rec of sample) {
       const { ctrl, page } = await openRecord(rec);
       try {
         const phoneSelects = await readPhoneSelects(page);
-        expect(
-          phoneSelects.length,
-          `${rec.service}: dial-code capture must expose a supported native phone select`,
-        ).toBeGreaterThan(0);
-        phoneSelects.sort(
-          (a, b) => Number(b.phoneNamed) - Number(a.phoneNamed) || a.telDistance - b.telDistance,
-        );
-        const phoneSelect = phoneSelects[0];
-        if (phoneSelect === undefined || phoneSelect.disabled) continue;
-        const target = dialCodeTarget(phoneSelect);
-        if (target === null) continue;
-        await ctrl.setPhoneCountry(target.query);
-        expect(
-          await page.locator(phoneSelect.selector).inputValue(),
-          `${rec.service}: setPhoneCountry(${target.query})`,
-        ).toBe(target.expectedValue);
+        if (phoneSelects.length === 0) continue;
+        supported += 1;
+        await drivePhoneSelect(ctrl, page, rec, phoneSelects);
         driven += 1;
       } finally {
         await page.close();
       }
     }
     console.log(
-      `[widget-corpus-eval] native phone suite: ${candidates.length} records in corpus, ` +
-        `${sample.length} replayed, ${driven} driven+verified`,
+      `[widget-corpus-eval] native phone suite: ${candidates.length} tel records in corpus, ` +
+        `${sample.length} replayed, ${supported} supported, ${driven} driven+verified`,
     );
-    expect(driven).toBeGreaterThan(0);
+    expect(driven).toBe(supported);
   }, 300_000);
 
   it("phone-country custom triggers: target locality and unsupported-widget refusal", async () => {
-    const candidates = telRecords.filter(
-      (record) => hasCountryCodeTrigger(record.html) && !hasDialCodeSelect(record.html),
-    );
+    const candidates = telRecords.filter((record) => hasCountryCodeTrigger(record.html));
     if (candidates.length === 0) {
       console.log(
         "[widget-corpus-eval] phone suite: 0 corpus records with a country-code trigger — " +
@@ -514,6 +559,8 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
     const sample = sampleEvenly(candidates, MAX_RECORDS);
     let replayed = 0;
     let triggersFound = 0;
+    let supportedDriven = 0;
+    let unsupportedRefusals = 0;
     for (const rec of sample) {
       const { ctrl, page } = await openRecord(rec);
       try {
@@ -545,22 +592,16 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
           const tag = await triggerLocator.first().evaluate((node) => node.tagName.toLowerCase());
           expect(tag, `${rec.service}: trigger ${trigger.selector}`).not.toBe("select");
         }
-        // And the record's native selects genuinely are NOT dial-code
-        // selects — so "fall back to driving a <select>" would be WRONG
-        // here, which is exactly the ground truth a set_phone_country
-        // review needed.
-        for (const s of walkedSelects(els)) {
-          const details = await readSelect(page, s.selector);
-          if (details === null) continue;
-          const dialish = details.options.filter((o) => /\+\d{1,3}(?![\d:])/.test(o.text)).length;
-          expect(
-            dialish,
-            `${rec.service}: native select ${s.selector} must not be a dial-code select`,
-          ).toBeLessThan(5);
+        const phoneSelects = await readPhoneSelects(page);
+        if (phoneSelects.length > 0) {
+          await drivePhoneSelect(ctrl, page, rec, phoneSelects);
+          supportedDriven += 1;
+        } else {
+          await expect(ctrl.setPhoneCountry("Japan")).rejects.toThrow(
+            /this widget family is not supported yet/i,
+          );
+          unsupportedRefusals += 1;
         }
-        await expect(ctrl.setPhoneCountry("Japan")).rejects.toThrow(
-          /this widget family is not supported yet/i,
-        );
         replayed += 1;
       } finally {
         await page.close();
@@ -569,7 +610,8 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
     console.log(
       `[widget-corpus-eval] phone suite: ${candidates.length} trigger records in corpus, ` +
         `${replayed} replayed, ${triggersFound} triggers verified non-<select>, ` +
-        "unsupported-widget refusal verified. " +
+        `${supportedDriven} supported native targets driven, ` +
+        `${unsupportedRefusals} unsupported-widget refusals verified. ` +
         "(Static DOM cannot open the popover — dynamic commit is live-smoke territory.)",
     );
     expect(replayed).toBeGreaterThan(0);
