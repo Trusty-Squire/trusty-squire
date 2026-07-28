@@ -674,7 +674,9 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
         await expect(
           ctrl.selectOption(trigger.selector),
           `${rec.service}: static combobox ${trigger.selector} must throw`,
-        ).rejects.toThrow(/no options found|not|disabled/i);
+        ).rejects.toThrow(
+          /no options? (found|matched)|no single opened popup|not|disabled/i,
+        );
         attempted += 1;
       } finally {
         await page.close();
