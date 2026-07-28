@@ -18,7 +18,6 @@ import {
 } from "../services/egress-grant.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
-const CUSTOMER_ID = "ts-test";
 
 const seen: Array<{
   url: string;

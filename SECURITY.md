@@ -71,6 +71,15 @@ display metadata: a no-digit network name (`brand`) and exactly four digits
 Losing the enrolled passkey makes the card unrecoverable; server master-key
 rotation does not affect these blobs.
 
+The Vault detail view keeps the PAN masked until the user explicitly chooses
+`reveal`, which retrieves the opaque blob and runs the passkey ceremony in the
+browser. After client-side decryption, the view retains only the PAN, cardholder
+name, expiry, and billing address in React state. It discards the CVV before
+state is updated, so the CVV is never rendered, even for the card owner. The
+detail API response is limited to the record ID, label, opaque blob, `brand`,
+`last4`, and creation time; PAN and CVV cannot appear as separate response
+fields.
+
 Before card entry or payment approval, the browser requires a one-time Vouchflow
 passkey enrollment and confirms that the platform authenticator supports the
 WebAuthn PRF extension. A payment approval is short-lived and account-scoped.

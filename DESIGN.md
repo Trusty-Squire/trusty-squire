@@ -63,6 +63,8 @@ Layered near-blacks, hairline borders, one indigo accent used sparingly (focus r
 
 ## Components
 - **Service icon (vault rows):** the service's **favicon** (resolved from the credential's `allowed_hosts` host via a favicon service), in a 28px hairline-square tile. **Lettermark fallback** (first letter, mono, muted) when there is no host or the favicon fails — never a generic key glyph.
+- **Card icon (vault rows):** recognized Visa, Mastercard, Amex, Discover, Diners Club, and JCB names — including bank co-brand labels — use compact, self-contained inline network marks while preserving the full label text. Named-but-unknown cards use the mono lettermark; legacy cards with no brand use the generic card glyph.
+- **Card detail:** the row expands inline. The PAN stays masked until an explicit lowercase `reveal` runs the passkey ceremony; the revealed particulars follow the mono secret-line pattern. CVV is never rendered; [`SECURITY.md`](SECURITY.md#client-encrypted-card-data) owns that boundary.
 - **Secret line:** masked `••••` in mono + lowercase `reveal`/`copy` links (accent). Revealed = the value in mono `--fg` + `copy`. Multi-field shows each named field.
 - **Primary action:** outline by default (`+ Add key`), filled accent only for the single focal CTA. Quiet `Delete` pill that reddens on hover.
 - **Keyboard rail:** optional footer hint (`R reveal · C copy · ⌘K search`) — the "fast" signal.

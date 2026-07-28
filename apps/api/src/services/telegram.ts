@@ -1,9 +1,9 @@
-// Telegram Bot API client — payment-approval push notifications.
+// Telegram Bot API client — payment approvals and vault lifecycle alerts.
 //
 // Sends are best-effort: an unset bot token or a failed call must never
-// break the caller (pay-approval creation, the link webhook), so this
-// never throws. Injectable fetch matches the fetchFn pattern used
-// elsewhere (npm-downloads.ts) so tests don't hit the network.
+// break the caller (pay approval, vault audit notification, or link
+// webhook), so this never throws. Injectable fetch matches the fetchFn
+// pattern used elsewhere (npm-downloads.ts) so tests don't hit the network.
 
 export async function sendTelegramMessage(
   chatId: string,

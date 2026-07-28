@@ -127,8 +127,10 @@ The important boundaries are:
 - Client-encrypted card WebAuthn PRF outputs and derived keys remain outside the
   API; [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data) owns the
   server-visible card-data boundary.
-- Plaintext PAN and CVV exist only in the approving browser and the local
-  operator process, never in the API or coding-agent model.
+- The Vault browser can reveal a PAN only after its passkey ceremony and
+  discards the CVV before UI state or rendering. During payment, plaintext card
+  data exists only in the approving browser and local operator process, never
+  in the API or coding-agent model.
 
 This boundary applies even when the agent helped create the credential. A
 successful signup does not make the resulting API key visible to the model.

@@ -53,14 +53,20 @@ function describe(e: AuditEvent): { tone: string; label: string; detail: string 
     case "vault.credential_retrieved": {
       const verb = e.purpose === "user:vault_reveal" ? "Revealed" : "Retrieved";
       if (e.outcome === "rate_limited") return { tone: "err", label: "Rate-limited", detail: svc };
-      if (e.outcome === "missing_credential") return { tone: "warn", label: "Retrieve (missing)", detail: svc };
-      if (e.outcome === "stale_assertion") return { tone: "warn", label: "Retrieve (stale)", detail: svc };
+      if (e.outcome === "missing_credential")
+        return { tone: "warn", label: "Retrieve (missing)", detail: svc };
+      if (e.outcome === "stale_assertion")
+        return { tone: "warn", label: "Retrieve (stale)", detail: svc };
       return { tone: "neutral", label: verb, detail: svc };
     }
     case "vault.proxy_executed":
       return { tone: "ok", label: "Used", detail: e.target_host ?? svc };
     case "vault.proxy_rejected":
-      return { tone: "err", label: "Blocked", detail: `${e.target_host ?? "off-allowlist host"} (not allowed)` };
+      return {
+        tone: "err",
+        label: "Blocked",
+        detail: `${e.target_host ?? "off-allowlist host"} (not allowed)`,
+      };
     case "vault.card_stored":
       return { tone: "ok", label: "Card added", detail: cardDetail(e) };
     case "vault.card_deleted":
@@ -72,7 +78,8 @@ function describe(e: AuditEvent): { tone: string; label: string; detail: string 
           ? `${e.currency} ${(e.amount_cents / 100).toFixed(2)}`
           : null;
       const tail = e.last4 !== undefined ? ` ··${e.last4}` : "";
-      const declined = e.payment_status !== undefined && /declin|fail|reject/i.test(e.payment_status);
+      const declined =
+        e.payment_status !== undefined && /declin|fail|reject/i.test(e.payment_status);
       return {
         tone: declined ? "err" : "ok",
         label: declined ? `Payment ${e.payment_status}` : "Payment",
@@ -208,7 +215,11 @@ export default function ActivityPage() {
                       )}
                     </div>
                   </div>
-                  <time className="tl-time" dateTime={e.emitted_at} title={new Date(e.emitted_at).toLocaleString()}>
+                  <time
+                    className="tl-time"
+                    dateTime={e.emitted_at}
+                    title={new Date(e.emitted_at).toLocaleString()}
+                  >
                     {timeAgo(e.emitted_at)}
                   </time>
                 </div>
@@ -216,7 +227,12 @@ export default function ActivityPage() {
             })}
           </div>
           {cursor !== null && (
-            <button className="head-btn load-more" type="button" onClick={more} disabled={loadingMore}>
+            <button
+              className="head-btn load-more"
+              type="button"
+              onClick={more}
+              disabled={loadingMore}
+            >
               {loadingMore ? "Loading…" : "Load more"}
             </button>
           )}

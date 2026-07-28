@@ -45,6 +45,13 @@ new card is encrypted in your browser with a passkey-derived key and bound to
 that purchase before approval; if you add it but do not approve in time, it
 remains saved for a faster retry.
 
+Recognized Visa, Mastercard, Amex, Discover, Diners Club, and JCB cards show
+their network mark in the Vault while keeping the full bank/network label. Open
+a card row to see its masked number; `reveal` runs the passkey ceremony in your
+browser before showing the number, name, expiry, and billing address. The CVV is
+never shown, even after reveal. The Activity page also records card additions
+and removals, payments, and app-grant changes without storing a PAN or CVV.
+
 `operate_pay` reads the checkout total, sends you a short-lived approval link,
 and submits only after you approve the exact purchase. The approval page shows
 the venue, item, amount, requesting agent, and reason; one passkey prompt both
@@ -57,6 +64,11 @@ reports a visible success or decline and hands an unresolved challenge back on
 timeout. `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to
 `0` on `operate_pay` to skip the notification and waiting and receive the
 handoff immediately.
+
+Connect Telegram under Vault Settings to receive secret-free alerts for
+credential, card, payment, and app-grant lifecycle changes. Routine credential
+retrieval and proxy access stay in Activity instead of sending a push for every
+request.
 
 ## Install
 
