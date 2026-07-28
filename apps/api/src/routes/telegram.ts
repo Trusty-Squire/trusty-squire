@@ -55,7 +55,7 @@ export const registerTelegramRoute: FastifyPluginAsync<{
         await opts.deps.accountStore.setTelegramChatId(accountId, message.chatId);
         await sendTelegramMessage(
           message.chatId,
-          "✅ Connected. You'll get payment-approval links here.",
+          "✅ Connected. You'll get payment-approval links and vault activity alerts here.",
         );
       }
     }

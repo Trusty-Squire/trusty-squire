@@ -17,6 +17,7 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import {
   AllowlistViolationError,
   CredentialNotFoundError,
+  VAULT_AUDIT_TYPES,
   type CredentialRecord,
 } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
@@ -210,6 +211,20 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       now: now().toISOString(),
     });
     await opts.egressGrantStore.create(grant);
+    // Grant lifecycle joins the vault audit trail (and the Telegram
+    // notifier): a standing token on this credential now exists.
+    await opts.deps.vaultAuditStore.record({
+      account_id: auth.account_id,
+      type: VAULT_AUDIT_TYPES.grantMinted,
+      payload: {
+        reference: selected.reference,
+        requester: "agent",
+        grant_id: grant.id,
+        ...(typeof selected.metadata.service === "string"
+          ? { service: selected.metadata.service }
+          : {}),
+      },
+    });
     // Fly terminates TLS at the edge and forwards HTTP internally, so
     // req.protocol reads "http". Advertising that as base_url makes a backend
     // follow the http→https redirect, and the Authorization header is dropped on
@@ -261,6 +276,20 @@ export const registerEgressRoutes: FastifyPluginAsync<{
         reply.code(404).send({ error: "grant_not_found" });
         return;
       }
+      // The revoke above proved account ownership, so getById is safe to
+      // read for the credential reference the audit event points at. A
+      // read blip must not 500 an already-successful revoke — fall back to
+      // the grant id as the reference.
+      const revoked = await opts.egressGrantStore.getById(req.params.id).catch(() => null);
+      await opts.deps.vaultAuditStore.record({
+        account_id: auth.account_id,
+        type: VAULT_AUDIT_TYPES.grantRevoked,
+        payload: {
+          reference: revoked?.credential_ref ?? `grant://${req.params.id}`,
+          requester: "agent",
+          grant_id: req.params.id,
+        },
+      });
       reply.send({ revoked: true, grant_id: req.params.id });
     },
   );

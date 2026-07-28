@@ -28,6 +28,7 @@ import { PrismaAgentSessionStore } from "../auth/prisma-agent-session-store.js";
 import { PrismaAccountStore } from "./prisma-account-store.js";
 import { PrismaCredentialStore } from "./prisma-credential-store.js";
 import { PrismaVaultAuditStore } from "./prisma-vault-audit-store.js";
+import { NotifyingVaultAuditStore } from "./vault-notify.js";
 import { PrismaEgressGrantStore } from "./prisma-egress-grant-store.js";
 import { InMemoryEgressGrantStore, type EgressGrantStore } from "./egress-grant.js";
 import {
@@ -87,6 +88,10 @@ export interface ApiDeps {
   // Credentials + inbound mail
   credentialStore: CredentialStore;
   vault: CredentialVault;
+  // The SAME (Telegram-notifying) audit store the vault writes through —
+  // exposed so the card/payment/grant routes record their lifecycle events
+  // into the one audit trail + notification choke point.
+  vaultAuditStore: VaultAuditStore;
   e2eCredentialStore: E2ECredentialStore;
   paymentAuditStore: PaymentAuditStore;
   pendingPaymentApprovalStore: PendingPaymentApprovalStore;
@@ -258,8 +263,14 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
 
   const credentialStore: CredentialStore =
     authPrisma !== null ? new PrismaCredentialStore(authPrisma) : new InMemoryCredentialStore();
-  const vaultAuditStore: VaultAuditStore =
-    authPrisma !== null ? new PrismaVaultAuditStore(authPrisma) : new InMemoryVaultAuditStore();
+  // Telegram lifecycle notifications ride the audit write (vault-notify.ts):
+  // wrapping here means every audit producer — the vault package AND the
+  // card/payment/grant routes — shares one notification choke point.
+  const vaultAuditStore: VaultAuditStore = new NotifyingVaultAuditStore(
+    authPrisma !== null ? new PrismaVaultAuditStore(authPrisma) : new InMemoryVaultAuditStore(),
+    accountStore,
+    opts.now ?? (() => new Date()),
+  );
   let e2eCredentialStore: E2ECredentialStore;
   let pendingPaymentApprovalStore: PendingPaymentApprovalStore;
   if (authPrisma !== null) {
@@ -375,6 +386,7 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     oauthIdentityStore,
     credentialStore,
     vault,
+    vaultAuditStore,
     e2eCredentialStore,
     paymentAuditStore,
     pendingPaymentApprovalStore,

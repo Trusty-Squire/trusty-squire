@@ -1,5 +1,6 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
 
 const e2eBody = z.object({
@@ -69,6 +70,20 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
       parsed.data.blob,
       { brand: parsed.data.brand ?? null, last4: parsed.data.last4 ?? null },
     );
+    // Card lifecycle lands on the same audit trail as credentials (and
+    // through it, the Telegram notifier). Display metadata only — the
+    // sealed blob never touches an audit payload.
+    await opts.deps.vaultAuditStore.record({
+      account_id: auth.account_id,
+      type: VAULT_AUDIT_TYPES.cardStored,
+      payload: {
+        reference: `card://${id}`,
+        requester: "user",
+        label: parsed.data.label,
+        ...(parsed.data.brand !== undefined ? { brand: parsed.data.brand } : {}),
+        ...(parsed.data.last4 !== undefined ? { last4: parsed.data.last4 } : {}),
+      },
+    });
     return reply.code(201).send({ id });
   });
 
@@ -121,10 +136,16 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         reply.code(404).send({ error: "credential_not_found" });
         return;
       }
+      // Detail = display metadata + the sealed blob. The blob is opaque
+      // ciphertext to the server (PAN/CVV live only inside it, readable
+      // solely by the owner's passkey-derived key) — so a CVV can never
+      // appear as a response field here, on any route, for any caller.
       return reply.code(200).send({
         id: record.id,
         label: record.label,
         blob: record.blob,
+        brand: record.brand,
+        last4: record.last4,
         createdAt: record.createdAt.toISOString(),
       });
     },
@@ -136,6 +157,12 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
     async (req, reply) => {
       const auth = req.auth!;
       if (auth.kind !== "web") return;
+      // Read the display metadata before the row is gone — the audit event
+      // names the card by label + last4.
+      const record = await opts.deps.e2eCredentialStore.getByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
       const deleted = await opts.deps.e2eCredentialStore.deleteForAccount(
         req.params.id,
         auth.account_id,
@@ -144,6 +171,17 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         reply.code(404).send({ error: "credential_not_found" });
         return;
       }
+      await opts.deps.vaultAuditStore.record({
+        account_id: auth.account_id,
+        type: VAULT_AUDIT_TYPES.cardDeleted,
+        payload: {
+          reference: `card://${req.params.id}`,
+          requester: "user",
+          ...(record !== null ? { label: record.label } : {}),
+          ...(record?.brand != null ? { brand: record.brand } : {}),
+          ...(record?.last4 != null ? { last4: record.last4 } : {}),
+        },
+      });
       return reply.code(204).send();
     },
   );
@@ -160,6 +198,22 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         return;
       }
       const id = await opts.deps.paymentAuditStore.create(auth.account_id, parsed.data);
+      // Mirror the payment onto the vault audit trail so the Activity page
+      // shows it alongside credential/card events (and the Telegram notifier
+      // fires). Merchant + amount + last4 only — never a PAN.
+      await opts.deps.vaultAuditStore.record({
+        account_id: auth.account_id,
+        type: VAULT_AUDIT_TYPES.paymentExecuted,
+        payload: {
+          reference: `pay://${id}`,
+          requester: "agent",
+          merchant: parsed.data.merchant,
+          amount_cents: parsed.data.amountCents,
+          currency: parsed.data.currency,
+          last4: parsed.data.last4,
+          payment_status: parsed.data.status,
+        },
+      });
       return reply.code(201).send({ id });
     },
   );
