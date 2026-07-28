@@ -3627,6 +3627,367 @@ export class BrowserController {
     await this.selectFromCombobox(activeSelector, optionMatcher);
   }
 
+  // Set the country on a phone-number field's dial-code picker — the one
+  // control none of the ref-based act paths (type / select / click) can drive
+  // on international checkouts, so it hard-blocks the phone field (Casetify).
+  //
+  // WHY a dedicated primitive:
+  //  - react-phone-number-input backs the picker with an `opacity:0` NATIVE
+  //    <select>. extractInteractiveElements' visibility filter drops opacity:0
+  //    elements (see its `isVisible`), so the host never gets a ref — and even
+  //    with one, Playwright's selectOption refuses an invisible <select>. We
+  //    set it via the native value setter + a dispatched `change`, so React's
+  //    onChange reformats the number without needing visibility OR a ref.
+  //  - react-phone-input-2 / react-international-phone / intl-tel-input render
+  //    a custom flag trigger + a `<li data-country-code>` list. `select`
+  //    routes into selectFromCombobox, which matches by ARIA role and visible
+  //    option TEXT; these lists carry neither the roles it probes nor a clean
+  //    label, and picking by DIAL CODE isn't in its vocabulary.
+  //  - a bespoke `+NN` <label> trigger (Casetify) has no native <select> and
+  //    no library class at all; a ref click on the label does nothing.
+  //
+  // `country` is a single token — a dial code ("+81" / "81"), an ISO2 code
+  // ("JP"), or a country name ("Japan"). Strategy order prefers a governing
+  // native <select> (most reliable), then the known custom libraries, then a
+  // generic "control adjacent to input[type=tel] whose own text is +NN"
+  // fallback. Throws when a picker is located but no option matches the
+  // requested country (loud, with sample options) or when none is found.
+  async setPhoneCountry(country: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const query = classifyPhoneCountryQuery(country);
+    if (query.dialCode === undefined && query.iso2 === undefined && query.name === undefined) {
+      throw new Error("setPhoneCountry: empty country argument");
+    }
+    await this.clearPhoneCountryMarkers();
+    const tried: string[] = [];
+    if (await this.trySetPhoneCountryNativeSelect(query, tried)) return;
+
+    // Known custom-widget families, most-specific selectors first. Each entry
+    // is one library's flag-trigger + option-list convention.
+    const families: readonly CustomPhoneWidget[] = [
+      {
+        // `.selected-flag` is the clickable trigger; do NOT also list its
+        // wrapper `.flag-dropdown` — a comma union resolves `.first()` in DOM
+        // order, which would pick the parent wrapper instead.
+        name: "react-phone-input-2",
+        trigger: ".react-tel-input .selected-flag",
+        option: ".react-tel-input .country-list li.country",
+        iso2Attr: "data-country-code",
+        dialSel: ".dial-code",
+      },
+      {
+        name: "react-international-phone",
+        trigger: ".react-international-phone-country-selector-button",
+        option: ".react-international-phone-country-selector-dropdown__list-item",
+        iso2Attr: "data-country",
+        dialSel: ".react-international-phone-country-selector-dropdown__list-item-dial-code",
+      },
+      {
+        name: "intl-tel-input",
+        trigger: ".iti__selected-flag, .iti__selected-country",
+        option: ".iti__country-list .iti__country, .iti__dropdown-content .iti__country",
+        iso2Attr: "data-country-code",
+        dialSel: ".iti__dial-code",
+      },
+    ];
+    for (const fam of families) {
+      if (await this.trySetPhoneCountryCustom(fam, query, tried)) return;
+    }
+
+    if (await this.trySetPhoneCountryGeneric(query, tried)) return;
+
+    throw new Error(
+      `setPhoneCountry(${JSON.stringify(country)}): no phone-country picker matched. ` +
+        (tried.length > 0 ? `Tried: ${tried.join("; ")}.` : "No candidate control found."),
+    );
+  }
+
+  // Strategy 1 — a native <select> that governs the phone country (react-
+  // phone-number-input's `opacity:0` PhoneInputCountrySelect, or any bespoke
+  // widget backed by a real <select>). Detection is deliberately conservative
+  // so it does NOT grab the address "country" select that lives elsewhere on
+  // the checkout: a select qualifies only when its class/name/id names it a
+  // PHONE control, or its options look like countries AND a tel input sits
+  // within 4 ancestor levels of it (the address country select's tel input is
+  // far away). Returns false when no such select exists; throws when one is
+  // found but the requested country isn't among its options.
+  private async trySetPhoneCountryNativeSelect(
+    query: PhoneCountryQuery,
+    tried: string[],
+  ): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const candidates = await this.page.evaluate(() => {
+      const out: Array<{
+        marker: number;
+        options: Array<{ value: string; text: string }>;
+        phoneNamed: boolean;
+        telDistance: number;
+      }> = [];
+      const selects = Array.from(document.querySelectorAll("select"));
+      selects.forEach((sel, i) => {
+        if (!(sel instanceof HTMLSelectElement)) return;
+        const hay = `${sel.className} ${sel.getAttribute("name") ?? ""} ${sel.id}`.toLowerCase();
+        const phoneNamed = /phone|dial|calling/.test(hay);
+        let telDistance = Number.POSITIVE_INFINITY;
+        let anc: HTMLElement | null = sel.parentElement;
+        for (let d = 0; d < 5 && anc !== null; d += 1, anc = anc.parentElement) {
+          if (anc.querySelector('input[type="tel"]') !== null) {
+            telDistance = d;
+            break;
+          }
+        }
+        const options = Array.from(sel.options).map((o) => ({
+          value: o.value,
+          text: (o.textContent ?? "").replace(/\s+/g, " ").trim(),
+        }));
+        const isoish = options.filter((o) => /^[A-Za-z]{2}$/.test(o.value)).length;
+        const dialish = options.filter(
+          (o) => /\+\d/.test(o.text) || /^\+?\d{1,4}$/.test(o.value),
+        ).length;
+        const countryish = options.length >= 10 && (isoish >= 5 || dialish >= 5);
+        if (phoneNamed || (countryish && telDistance <= 4)) {
+          sel.setAttribute("data-ts-phone-cc", String(i));
+          out.push({
+            marker: i,
+            options,
+            phoneNamed,
+            telDistance: telDistance === Number.POSITIVE_INFINITY ? 99 : telDistance,
+          });
+        }
+      });
+      return out;
+    });
+    if (candidates.length === 0) return false;
+    // Prefer a phone-NAMED select, then the one physically closest to a tel
+    // input — the strongest evidence it's the dial-code control, not address.
+    candidates.sort(
+      (a, b) => Number(b.phoneNamed) - Number(a.phoneNamed) || a.telDistance - b.telDistance,
+    );
+    const best = candidates[0];
+    if (best === undefined) return false;
+    const opts: PhoneCountryOption[] = best.options.map((o) => ({
+      text: o.text.length > 0 ? o.text : undefined,
+      iso2: /^[A-Za-z]{2}$/.test(o.value) ? o.value.toUpperCase() : undefined,
+      dialCode: /^\+?\d{1,4}$/.test(o.value) ? o.value.replace(/\D/g, "") : undefined,
+    }));
+    const idx = pickPhoneCountryOption(query, opts);
+    const chosenOpt = idx === -1 ? undefined : best.options[idx];
+    if (chosenOpt === undefined) {
+      await this.clearPhoneCountryMarkers();
+      const sample = best.options
+        .map((o) => o.text)
+        .filter((t) => t.length > 0)
+        .slice(0, 6)
+        .join(" | ");
+      throw new Error(
+        `setPhoneCountry: native phone <select> found but no option matched ` +
+          `${JSON.stringify(query)} (sample: ${sample})`,
+      );
+    }
+    const value = chosenOpt.value;
+    // Set through the native value setter + a dispatched `change` so a React-
+    // controlled select (react-phone-number-input) sees the update: assigning
+    // .value directly is swallowed by React's value tracker, so we go through
+    // the prototype setter the tracker also patches, then fire the event React
+    // listens on. Works on the opacity:0 select without a visibility check.
+    const ok = await this.page.evaluate(
+      ({ marker, val }) => {
+        const sel = document.querySelector(`select[data-ts-phone-cc="${marker}"]`);
+        if (!(sel instanceof HTMLSelectElement)) return false;
+        const desc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+        if (desc?.set !== undefined) desc.set.call(sel, val);
+        else sel.value = val;
+        sel.dispatchEvent(new Event("input", { bubbles: true }));
+        sel.dispatchEvent(new Event("change", { bubbles: true }));
+        return sel.value === val;
+      },
+      { marker: best.marker, val: value },
+    );
+    await this.clearPhoneCountryMarkers();
+    if (!ok) {
+      tried.push("native <select>: value assignment did not stick");
+      return false;
+    }
+    tried.push(`native <select> → "${chosenOpt.text}"`);
+    return true;
+  }
+
+  // Strategy 2 — a known custom phone-widget library: click its flag trigger,
+  // wait for the country list, read each option's {text, iso2, dialCode}, pick
+  // the match with the shared pure matcher, click that row. Returns false when
+  // the library's trigger isn't on the page; throws when it opens but no
+  // option matches (loud, with sample options).
+  private async trySetPhoneCountryCustom(
+    fam: CustomPhoneWidget,
+    query: PhoneCountryQuery,
+    tried: string[],
+  ): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const trigger = this.page.locator(fam.trigger).first();
+    if ((await trigger.count()) === 0) return false;
+    await trigger.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await trigger.click({ timeout: 8000 }).catch(async () => {
+      await trigger.evaluate((el) => (el as HTMLElement).click()).catch(() => {});
+    });
+    const options = this.page.locator(fam.option);
+    try {
+      await options.first().waitFor({ state: "visible", timeout: 3000 });
+    } catch {
+      tried.push(`${fam.name}: trigger present but list did not open`);
+      return false;
+    }
+    const descs = await options.evaluateAll(
+      (els, cfg: { iso2Attr: string | null; dialSel: string | null }) =>
+        els.map((el) => {
+          let iso2: string | undefined;
+          if (cfg.iso2Attr !== null) {
+            const direct = el.getAttribute(cfg.iso2Attr);
+            const raw =
+              direct !== null
+                ? direct
+                : (el.querySelector(`[${cfg.iso2Attr}]`)?.getAttribute(cfg.iso2Attr) ?? null);
+            iso2 = raw !== null && raw.length > 0 ? raw : undefined;
+          }
+          let dialCode: string | undefined;
+          if (cfg.dialSel !== null) {
+            const t = el.querySelector(cfg.dialSel)?.textContent?.trim();
+            dialCode = t !== undefined && t.length > 0 ? t : undefined;
+          }
+          const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+          return { text: text.length > 0 ? text : undefined, iso2, dialCode };
+        }),
+      { iso2Attr: fam.iso2Attr ?? null, dialSel: fam.dialSel ?? null },
+    );
+    const idx = pickPhoneCountryOption(query, descs);
+    const chosenDesc = idx === -1 ? undefined : descs[idx];
+    if (chosenDesc === undefined) {
+      const sample = descs
+        .map((d) => d.text ?? d.iso2 ?? "?")
+        .slice(0, 6)
+        .join(" | ");
+      throw new Error(
+        `setPhoneCountry: ${fam.name} picker open but no option matched ` +
+          `${JSON.stringify(query)} (sample: ${sample})`,
+      );
+    }
+    const chosen = options.nth(idx);
+    await chosen.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await chosen.click({ timeout: 8000 }).catch(async () => {
+      await chosen.evaluate((el) => (el as HTMLElement).click()).catch(() => {});
+    });
+    tried.push(`${fam.name} → "${chosenDesc.text ?? chosenDesc.iso2 ?? ""}"`);
+    return true;
+  }
+
+  // Strategy 3 — bespoke fallback (Casetify-class): a control adjacent to an
+  // input[type=tel] whose OWN text is a bare "+NN". Open it with a real click,
+  // then match the requested country against any option-like element that
+  // became visible. Best-effort — the option list's shape is unknown, so it
+  // matches on country NAME substring or an embedded dial code (an ISO2 query
+  // won't resolve here). Returns false when no such trigger exists; throws when
+  // it opens but nothing matches.
+  private async trySetPhoneCountryGeneric(
+    query: PhoneCountryQuery,
+    tried: string[],
+  ): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const found = await this.page.evaluate(() => {
+      const ownText = (el: Element): string =>
+        Array.from(el.childNodes)
+          .filter((n) => n.nodeType === 3)
+          .map((n) => n.textContent ?? "")
+          .join("")
+          .replace(/\s+/g, " ")
+          .trim();
+      const tels = Array.from(document.querySelectorAll('input[type="tel"]'));
+      for (const tel of tels) {
+        let anc: HTMLElement | null = tel.parentElement;
+        for (let d = 0; d < 4 && anc !== null; d += 1, anc = anc.parentElement) {
+          for (const c of Array.from(anc.querySelectorAll("*"))) {
+            if (c === tel) continue;
+            // A "+NN" inside an option list is a dial-code label on a ROW, not
+            // the collapsed trigger — skip it so we don't click an option-row
+            // span (react-phone-input-2's `.dial-code`) as if it opened a menu.
+            if (c.closest('ul,ol,[role="listbox"],[class*="list"],[class*="dropdown"]') !== null) {
+              continue;
+            }
+            if (/^\+\d{1,4}$/.test(ownText(c))) {
+              c.setAttribute("data-ts-phone-cc-trigger", "1");
+              return true;
+            }
+          }
+        }
+      }
+      return false;
+    });
+    if (!found) return false;
+    const trigger = this.page.locator('[data-ts-phone-cc-trigger="1"]').first();
+    await trigger.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await trigger.click({ timeout: 8000 }).catch(async () => {
+      await trigger.evaluate((el) => (el as HTMLElement).click()).catch(() => {});
+    });
+    await this.wait(0.4);
+    const descs = await this.page.evaluate(() => {
+      const isVis = (el: Element): boolean => {
+        const r = el.getBoundingClientRect();
+        if (r.width < 2 || r.height < 2) return false;
+        const s = getComputedStyle(el);
+        return (
+          s.display !== "none" && s.visibility !== "hidden" && parseFloat(s.opacity || "1") > 0.01
+        );
+      };
+      const sel =
+        'li,[role="option"],[role="menuitem"],button,a,[class*="option"],[class*="country"]';
+      return Array.from(document.querySelectorAll(sel))
+        .filter(isVis)
+        .slice(0, 400)
+        .map((el, i) => {
+          el.setAttribute("data-ts-phone-cc-opt", String(i));
+          const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+          return { marker: i, text: text.length > 0 ? text : undefined };
+        });
+    });
+    const idx = pickPhoneCountryOption(query, descs);
+    const chosenDesc = idx === -1 ? undefined : descs[idx];
+    if (chosenDesc === undefined) {
+      await this.clearPhoneCountryMarkers();
+      const sample = descs
+        .map((d) => d.text)
+        .filter((t): t is string => t !== undefined)
+        .slice(0, 6)
+        .join(" | ");
+      throw new Error(
+        `setPhoneCountry: bespoke +NN trigger opened but no option matched ` +
+          `${JSON.stringify(query)} (sample: ${sample})`,
+      );
+    }
+    const chosen = this.page.locator(`[data-ts-phone-cc-opt="${chosenDesc.marker}"]`).first();
+    await chosen.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+    await chosen.click({ timeout: 8000 }).catch(async () => {
+      await chosen.evaluate((el) => (el as HTMLElement).click()).catch(() => {});
+    });
+    await this.clearPhoneCountryMarkers();
+    tried.push(`bespoke +NN trigger → "${chosenDesc.text ?? ""}"`);
+    return true;
+  }
+
+  // Remove the transient data-attributes the phone-country strategies stamp on
+  // candidate selects/triggers/options so they don't leak into a later observe.
+  private async clearPhoneCountryMarkers(): Promise<void> {
+    if (!this.page) return;
+    await this.page
+      .evaluate(() => {
+        document
+          .querySelectorAll("[data-ts-phone-cc],[data-ts-phone-cc-trigger],[data-ts-phone-cc-opt]")
+          .forEach((el) => {
+            el.removeAttribute("data-ts-phone-cc");
+            el.removeAttribute("data-ts-phone-cc-trigger");
+            el.removeAttribute("data-ts-phone-cc-opt");
+          });
+      })
+      .catch(() => {});
+  }
+
   // F11 (+rc.7 hardening): click a combobox trigger, wait for the
   // listbox to open, click an option.
   //
@@ -8770,6 +9131,107 @@ export function isBareClickableCardTag(tag: string): boolean {
     t === "label" ||
     t.includes("-")
   );
+}
+
+// ───────────── phone-country widget selection ─────────────
+//
+// International checkouts front the phone field with a country dial-code
+// picker. There is no single implementation: react-phone-number-input drives
+// it from an `opacity:0` NATIVE `<select>` (which the inventory walker's
+// visibility filter drops, so the host never gets a ref for it), while
+// react-phone-input-2 / react-international-phone / intl-tel-input render a
+// custom flag trigger + a list of `<li data-country-code>` options, and some
+// storefronts (Casetify) ship a fully bespoke `+NN` <label> trigger. The
+// operator's `type`/`select`/click paths all fail on these (documented in the
+// setPhoneCountry method). These pure helpers hold the country-matching logic
+// so it is unit-tested without a live page; setPhoneCountry drives the DOM.
+
+// A phone-country request classified into the strongest available signal. The
+// operator passes ONE string; we infer whether it's a dial code ("+81" / "81"),
+// an ISO2 alpha-2 code ("JP"), or a country name ("Japan"). Kept mutually
+// exclusive so the matcher never fuzzy-matches an exact-signal query on text.
+export interface PhoneCountryQuery {
+  // Digits only, no "+". Set when the input parsed as a dial code.
+  dialCode?: string;
+  // Upper-case alpha-2. Set when the input parsed as an ISO2 code.
+  iso2?: string;
+  // Lower-cased free text for substring matching. Set for a country name.
+  name?: string;
+}
+
+// One option surfaced by a picker, normalized. Any subset of fields may be
+// present depending on the widget (a bespoke text-only list carries `text`
+// only; a react-phone-input-2 `<li>` carries all three).
+export interface PhoneCountryOption {
+  // `| undefined` (not just optional) because the page.evaluate reads produce
+  // explicit undefined for absent fields, and the repo runs
+  // exactOptionalPropertyTypes — a bare `text?: string` would reject it.
+  text?: string | undefined;
+  iso2?: string | undefined;
+  dialCode?: string | undefined;
+}
+
+// One custom phone-widget library's DOM convention: the flag trigger to click,
+// the option-row selector, and (when present) where each row keeps its ISO2
+// code + "+NN" dial code. Used by setPhoneCountry's custom-widget strategy.
+interface CustomPhoneWidget {
+  name: string;
+  trigger: string;
+  option: string;
+  iso2Attr?: string;
+  dialSel?: string;
+}
+
+// Classify the operator's single country argument. WHY exact-signal buckets:
+// "+1" is a dial code, "US" an ISO2, "United States" a name — matching each
+// against the wrong DOM attribute (e.g. substring-matching "US" against option
+// text) produces false hits, so we commit to one interpretation per input.
+export function classifyPhoneCountryQuery(raw: string): PhoneCountryQuery {
+  const t = raw.trim();
+  if (t.length === 0) return {};
+  // Dial code: an optional leading "+" then 1-4 digits and nothing else.
+  if (/^\+?\d{1,4}$/.test(t)) return { dialCode: t.replace(/\D/g, "") };
+  // ISO2: exactly two ASCII letters. Almost always an alpha-2 country code
+  // ("JP", "US"); a two-letter country NAME doesn't exist, so this is safe.
+  if (/^[A-Za-z]{2}$/.test(t)) return { iso2: t.toUpperCase() };
+  // Otherwise a free-text country name for case-insensitive substring match.
+  return { name: t.toLowerCase() };
+}
+
+// Decide whether a picker option satisfies the query. Exact-signal queries
+// (iso2/dialCode) match ONLY against the corresponding structured field (with
+// a dial-code fallback to a "+NN" embedded in the option text, since native
+// <option>s and bespoke lists put the code in their label). A name query is a
+// case-insensitive substring test against the option's visible text.
+export function phoneCountryOptionMatches(
+  query: PhoneCountryQuery,
+  opt: PhoneCountryOption,
+): boolean {
+  const digits = (s: string): string => s.replace(/\D/g, "");
+  if (query.iso2 !== undefined) {
+    return opt.iso2 !== undefined && opt.iso2.toUpperCase() === query.iso2;
+  }
+  if (query.dialCode !== undefined) {
+    if (opt.dialCode !== undefined && digits(opt.dialCode) === query.dialCode) return true;
+    if (opt.text !== undefined) {
+      const m = opt.text.match(/\+(\d{1,4})/);
+      if (m !== null && m[1] === query.dialCode) return true;
+    }
+    return false;
+  }
+  if (query.name !== undefined) {
+    return opt.text !== undefined && opt.text.toLowerCase().includes(query.name);
+  }
+  return false;
+}
+
+// Index of the first option matching the query, or -1. Extracted so the
+// pick-a-row decision is unit-tested independently of the DOM read.
+export function pickPhoneCountryOption(
+  query: PhoneCountryQuery,
+  options: readonly PhoneCountryOption[],
+): number {
+  return options.findIndex((o) => phoneCountryOptionMatches(query, o));
 }
 
 //

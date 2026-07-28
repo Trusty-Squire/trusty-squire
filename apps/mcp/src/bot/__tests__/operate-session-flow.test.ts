@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   oauthStatus: "already_valid" as string,
   typed: [] as Array<{ selector: string; text: string }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
+  selected: [] as Array<{ selector: string; matcher: string | undefined }>,
   gotos: [] as string[],
   started: 0,
   currentUrl: "",
@@ -139,6 +140,9 @@ vi.mock("../browser.js", () => ({
     }
     async type(selector: string, text: string): Promise<void> {
       h.typed.push({ selector, text });
+    }
+    async selectOption(selector: string, matcher?: string): Promise<void> {
+      h.selected.push({ selector, matcher });
     }
     async click(): Promise<void> {}
     async clickViaJs(): Promise<void> {}
@@ -265,6 +269,7 @@ beforeEach(() => {
   h.oauthStatus = "already_valid";
   h.typed = [];
   h.uploads = [];
+  h.selected = [];
   h.gotos = [];
   h.consentDismissCalls = 0;
   h.consentCta = null;
@@ -503,6 +508,24 @@ describe("operate session — sealed credential transfer", () => {
     // Target resolved from the inventory → the file is set on that element; the
     // action never touches an OS file picker.
     expect(h.uploads).toEqual([{ selector: "#upload-btn", filePath: "/tmp/clip.mp4" }]);
+  });
+
+  it("select resolves the target and routes the option matcher to browser.selectOption", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ visibleText: "Country", selector: "#country" })];
+    await act(obs.session_id, { kind: "select", target: "Country", text: "South Korea" });
+    // The native/custom dropdown is driven via selectOption (NOT type), with the
+    // resolved element's selector and the visible-text option matcher.
+    expect(h.selected).toEqual([{ selector: "#country", matcher: "South Korea" }]);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("select fails loudly when the target isn't in the inventory", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [];
+    await expect(
+      act(obs.session_id, { kind: "select", target: "Country", text: "South Korea" }),
+    ).rejects.toThrow(/no element matched target/i);
   });
 
   it("upload fails loudly when the target isn't in the inventory", async () => {
