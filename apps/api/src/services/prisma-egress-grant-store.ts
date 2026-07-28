@@ -9,8 +9,9 @@
 // deterministic in tests); Prisma stores DateTime. This store is the single
 // conversion boundary between the two.
 
-import type { ApiPrismaClient } from "./api-prisma-client.js";
+import { randomUUID as cryptoRandomUUID } from "node:crypto";
 import type { VaultAuditEventInput } from "@trusty-squire/vault";
+import type { ApiPrismaClient } from "./api-prisma-client.js";
 import {
   EgressGrantStoreUnavailableError,
   type EgressGrant,
@@ -49,14 +50,21 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
 
   constructor(
     private readonly prisma: ApiPrismaClient,
-    opts: { liveTtlMs?: number; revokedTtlMs?: number; now?: () => number } = {},
+    opts: {
+      liveTtlMs?: number;
+      revokedTtlMs?: number;
+      now?: () => number;
+      randomUUID?: () => string;
+    } = {},
   ) {
     this.liveTtlMs = opts.liveTtlMs ?? 30_000;
     this.revokedTtlMs = opts.revokedTtlMs ?? 1_000;
     this.now = opts.now ?? (() => Date.now());
+    this.randomUUID = opts.randomUUID ?? cryptoRandomUUID;
   }
 
   private readonly now: () => number;
+  private readonly randomUUID: () => string;
 
   async create(grant: EgressGrant): Promise<void> {
     await this.prisma.egressGrant.create({
@@ -183,6 +191,14 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
     at: string,
     event: VaultAuditEventInput,
   ): Promise<boolean> {
+    const attemptNonce = this.randomUUID();
+    const attributedEvent: VaultAuditEventInput = {
+      ...event,
+      payload: {
+        ...event.payload,
+        revoke_attempt_nonce: attemptNonce,
+      },
+    };
     this.cache.delete(id);
     const before = await this.findForReconciliation(
       id,
@@ -199,7 +215,7 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
           data: { revoked_at: new Date(at) },
         });
         if (result.count === 0) return false;
-        await new PrismaVaultAuditStore(tx).record(event);
+        await new PrismaVaultAuditStore(tx).record(attributedEvent);
         return true;
       });
 
@@ -212,7 +228,17 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
         id,
         `reconcile egress grant ${id} after revoke`,
       );
-      if (revokeWasCommitted(before, reconciled, at)) return true;
+      if (
+        await this.revokeWasCommitted(
+          reconciled,
+          id,
+          accountId,
+          attemptNonce,
+          `reconcile egress grant ${id} audit after revoke`,
+        )
+      ) {
+        return true;
+      }
       if (reconciled?.revoked_at !== null && reconciled?.revoked_at !== undefined) return false;
 
       try {
@@ -224,13 +250,49 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
           id,
           `reconcile egress grant ${id} after revoke retry`,
         );
-        if (revokeWasCommitted(before, retried, at)) return true;
+        if (
+          await this.revokeWasCommitted(
+            retried,
+            id,
+            accountId,
+            attemptNonce,
+            `reconcile egress grant ${id} audit after revoke retry`,
+          )
+        ) {
+          return true;
+        }
         if (retried?.revoked_at !== null && retried?.revoked_at !== undefined) return false;
         throw new EgressGrantStoreUnavailableError(
           `revoke egress grant ${id} with audit: ${prismaErrorMessage(retryErr)}`,
         );
       }
     }
+  }
+
+  private async revokeWasCommitted(
+    grant: EgressGrantRow | null,
+    grantId: string,
+    accountId: string,
+    attemptNonce: string,
+    label: string,
+  ): Promise<boolean> {
+    if (grant === null || grant.account_id !== accountId || grant.revoked_at === null) return false;
+    const rows = await this.withConnectionRetry(
+      () =>
+        this.prisma.vaultAuditEvent.findMany({
+          where: {
+            account_id: accountId,
+            type: "vault.grant_revoked",
+            payload: { path: ["revoke_attempt_nonce"], equals: attemptNonce },
+          },
+          take: 1,
+        }),
+      label,
+    );
+    return rows.some((row) => {
+      if (row.payload === null || typeof row.payload !== "object") return false;
+      return (row.payload as Record<string, unknown>).grant_id === grantId;
+    });
   }
 
   private async createWasCommitted(grant: EgressGrant): Promise<boolean> {
@@ -308,19 +370,6 @@ function rowsDescribeSameGrant(row: EgressGrantRow, grant: EgressGrant): boolean
     row.spend_cap_usd === grant.spend_cap_usd &&
     row.created_at.toISOString() === grant.created_at &&
     (row.revoked_at === null ? null : row.revoked_at.toISOString()) === grant.revoked_at
-  );
-}
-
-function revokeWasCommitted(
-  before: EgressGrantRow,
-  after: EgressGrantRow | null,
-  revokedAt: string,
-): boolean {
-  return (
-    before.revoked_at === null &&
-    after !== null &&
-    after.account_id === before.account_id &&
-    after.revoked_at?.toISOString() === revokedAt
   );
 }
 

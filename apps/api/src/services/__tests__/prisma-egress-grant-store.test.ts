@@ -5,7 +5,7 @@
 // account-scoped + idempotent revoke, and the create/get/list roundtrip.
 // DB-layer behaviour is exercised in apps/api integration tests.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { ApiPrismaClient } from "../api-prisma-client.js";
 import { PrismaEgressGrantStore } from "../prisma-egress-grant-store.js";
 import { mintGrant } from "../egress-grant.js";
@@ -19,6 +19,12 @@ interface Row {
   spend_cap_usd: number | null;
   created_at: Date;
   revoked_at: Date | null;
+}
+
+interface AuditRow {
+  account_id: string;
+  type: string;
+  payload: unknown;
 }
 
 function p1017(): Error & { code: string } {
@@ -38,6 +44,7 @@ type TransactionBehavior =
 function fakePrisma(): {
   prisma: ApiPrismaClient & { $disconnect: () => Promise<void> };
   rows: Map<string, Row>;
+  auditRows: AuditRow[];
   calls: {
     findUnique: number;
     disconnect: number;
@@ -49,6 +56,7 @@ function fakePrisma(): {
   };
 } {
   const rows = new Map<string, Row>();
+  const auditRows: AuditRow[] = [];
   const calls = {
     findUnique: 0,
     disconnect: 0,
@@ -59,7 +67,7 @@ function fakePrisma(): {
     transactionBehaviors: [] as TransactionBehavior[],
   };
   let pendingRows: Row[] = [];
-  let pendingAuditCreates = 0;
+  let pendingAuditRows: AuditRow[] = [];
   const egressGrant = {
     async create(args: { data: Record<string, unknown> }) {
       const d = args.data;
@@ -114,13 +122,36 @@ function fakePrisma(): {
   const prisma = {
     egressGrant,
     vaultAuditEvent: {
-      async create() {
+      async create(args: { data: Record<string, unknown> }) {
         if (calls.failAudit > 0) {
           calls.failAudit -= 1;
           throw new Error("synthetic audit outage");
         }
+        auditRows.push({
+          account_id: args.data.account_id as string,
+          type: args.data.type as string,
+          payload: args.data.payload,
+        });
         calls.auditCreates += 1;
         return {};
+      },
+      async findMany(args: { where: Record<string, unknown> }) {
+        const payloadFilter = args.where.payload as
+          | { path?: string[]; equals?: unknown }
+          | undefined;
+        return auditRows.filter((row) => {
+          if (args.where.account_id !== undefined && row.account_id !== args.where.account_id) {
+            return false;
+          }
+          if (args.where.type !== undefined && row.type !== args.where.type) return false;
+          if (payloadFilter?.path === undefined) return true;
+          let value: unknown = row.payload;
+          for (const segment of payloadFilter.path) {
+            if (value === null || typeof value !== "object") return false;
+            value = (value as Record<string, unknown>)[segment];
+          }
+          return value === payloadFilter.equals;
+        });
       },
     },
     async $transaction<T>(fn: (tx: ApiPrismaClient) => Promise<T>): Promise<T> {
@@ -128,12 +159,14 @@ function fakePrisma(): {
       const behavior = calls.transactionBehaviors.shift() ?? "normal";
       if (behavior === "concurrent_commit_then_unique") {
         for (const row of pendingRows) rows.set(row.id, { ...row });
-        calls.auditCreates += pendingAuditCreates;
+        auditRows.push(...pendingAuditRows.map((row) => ({ ...row })));
+        calls.auditCreates += pendingAuditRows.length;
         pendingRows = [];
-        pendingAuditCreates = 0;
+        pendingAuditRows = [];
       }
       const snapshot = new Map([...rows].map(([id, row]) => [id, { ...row }] as const));
       const auditSnapshot = calls.auditCreates;
+      const auditRowsSnapshot = auditRows.map((row) => ({ ...row }));
       let result: T;
       try {
         result = await fn(prisma as unknown as ApiPrismaClient);
@@ -141,6 +174,7 @@ function fakePrisma(): {
         rows.clear();
         for (const [id, row] of snapshot) rows.set(id, row);
         calls.auditCreates = auditSnapshot;
+        auditRows.splice(0, auditRows.length, ...auditRowsSnapshot);
         throw error;
       }
       if (behavior === "commit_then_connection_error") throw p1017();
@@ -148,10 +182,11 @@ function fakePrisma(): {
         pendingRows = [...rows.entries()]
           .filter(([id]) => !snapshot.has(id))
           .map(([, row]) => ({ ...row }));
-        pendingAuditCreates = calls.auditCreates - auditSnapshot;
+        pendingAuditRows = auditRows.slice(auditRowsSnapshot.length).map((row) => ({ ...row }));
         rows.clear();
         for (const [id, row] of snapshot) rows.set(id, row);
         calls.auditCreates = auditSnapshot;
+        auditRows.splice(0, auditRows.length, ...auditRowsSnapshot);
         throw p1017();
       }
       return result;
@@ -160,7 +195,7 @@ function fakePrisma(): {
       calls.disconnect += 1;
     },
   } as unknown as ApiPrismaClient & { $disconnect: () => Promise<void> };
-  return { prisma, rows, calls };
+  return { prisma, rows, auditRows, calls };
 }
 
 const ACCOUNT = "01HACCOUNTAAAAAAAAAAAAAAAA";
@@ -396,6 +431,45 @@ describe("PrismaEgressGrantStore", () => {
     expect(fake.rows.get(grant.id)?.revoked_at?.toISOString()).toBe("2026-06-13T13:00:00.000Z");
     expect(fake.calls.auditCreates).toBe(1);
     expect(fake.calls.transactionAttempts).toBe(1);
+  });
+
+  it("attributes a concurrent ambiguous revoke only to the audit nonce owner", async () => {
+    const fake = fakePrisma();
+    const winner = new PrismaEgressGrantStore(fake.prisma, {
+      randomUUID: () => "winner-attempt",
+    });
+    const loser = new PrismaEgressGrantStore(fake.prisma, {
+      randomUUID: () => "loser-attempt",
+    });
+    const grant = makeGrant();
+    const event = {
+      account_id: ACCOUNT,
+      type: "vault.grant_revoked",
+      payload: {
+        reference: grant.credential_ref,
+        requester: "agent",
+        grant_id: grant.id,
+      },
+    } as const;
+    await winner.create(grant);
+    fake.calls.transactionBehaviors.push("normal", "commit_then_connection_error");
+
+    const results = await Promise.all([
+      winner.revokeWithAudit(grant.id, ACCOUNT, "2026-06-13T13:00:00.000Z", event),
+      loser.revokeWithAudit(grant.id, ACCOUNT, "2026-06-13T13:00:00.000Z", event),
+    ]);
+    const notify = vi.fn();
+    for (const firstTransition of results) {
+      if (firstTransition) notify();
+    }
+
+    expect(results).toEqual([true, false]);
+    expect(fake.auditRows).toHaveLength(1);
+    expect(fake.auditRows[0]?.payload).toMatchObject({
+      grant_id: grant.id,
+      revoke_attempt_nonce: "winner-attempt",
+    });
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 
   it("revoke() of an unknown grant is a miss", async () => {

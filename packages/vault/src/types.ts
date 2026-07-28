@@ -67,10 +67,7 @@ export interface CredentialStore {
   // Every credential the account ever held, soft-deleted included —
   // the complete-history read for GDPR export. Newest first.
   listByAccountIncludingDeleted(accountId: string): Promise<CredentialRecord[]>;
-  findByIdForAccount(
-    id: string,
-    accountId: string,
-  ): Promise<CredentialRecord | null>;
+  findByIdForAccount(id: string, accountId: string): Promise<CredentialRecord | null>;
   // Lookups that ignore deleted_at — for the undelete/restore path.
   findByIdForAccountIncludingDeleted(
     id: string,
@@ -132,6 +129,7 @@ export interface VaultAuditPayload {
   payment_status?: string;
   // Egress-grant lifecycle (grant_minted / grant_revoked events).
   grant_id?: string;
+  revoke_attempt_nonce?: string;
 }
 
 export const VAULT_AUDIT_TYPES = {
