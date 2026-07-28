@@ -4,12 +4,8 @@
 //
 // Two layers:
 //  1. Pure-helper unit tests (classify / match / pick) — no browser.
-//  2. Real-Chromium fixtures, one per widget family the primitive must cover:
-//     react-phone-number-input (opacity:0 native <select> the inventory walker
-//     drops), react-phone-input-2, react-international-phone, intl-tel-input,
-//     and a bespoke "+NN" trigger (the Casetify shape). Each fixture wires a
-//     handler that records the picked country so we assert the RIGHT country
-//     was set — plus the loud-failure and address-select-discrimination cases.
+//  2. Real-Chromium fixtures for the supported opacity:0 native <select>,
+//     loud unsupported-family failure, and address-select discrimination.
 //
 // Synthetic fixtures only — no real credentials, no network.
 
@@ -148,184 +144,25 @@ const ADDRESS_PLUS_PHONE_FIXTURE = dataUrl(`
     sel.addEventListener('change', () => { window.__country = sel.value; });
   </script>`);
 
-const ADDRESS_PLUS_CUSTOM_PHONE_FIXTURE = dataUrl(`
+const ADDRESS_ONLY_WITH_TEL_FIXTURE = dataUrl(`
   <form>
-    <fieldset>
-      <label>Shipping country</label>
-      <select name="country" id="addr-country">
-        ${ISO_ROWS.map((r) => `<option value="${r.iso2}">${r.name}</option>`).join("")}
-      </select>
-    </fieldset>
-    <div class="react-tel-input">
-      <input type="tel" class="form-control">
-      <div class="flag-dropdown">
-        <div class="selected-flag" tabindex="0" style="width:38px;height:26px;display:inline-block">flag</div>
-        <ul class="country-list" style="display:none;margin:0">
-          ${ISO_ROWS.map(
-            (r) =>
-              `<li class="country" data-country-code="${r.iso2.toLowerCase()}">` +
-              `<span class="country-name">${r.name}</span>` +
-              `<span class="dial-code">${r.dial}</span></li>`,
-          ).join("")}
-        </ul>
-      </div>
-    </div>
+    <label>Shipping country</label>
+    <select name="country" id="addr-country">
+      ${ISO_ROWS.map((r) => `<option value="${r.iso2}">${r.name}</option>`).join("")}
+    </select>
+    <input type="tel" class="form-control">
   </form>
-  <script>
-    const flag = document.querySelector('.selected-flag');
-    const list = document.querySelector('.country-list');
-    flag.addEventListener('click', () => { list.style.display = 'block'; });
-    list.querySelectorAll('li.country').forEach((li) =>
-      li.addEventListener('click', () => {
-        window.__picked = li.getAttribute('data-country-code');
-        list.style.display = 'none';
-      }),
-    );
-  </script>`);
+`);
 
-const PHONE_TYPE_PLUS_CUSTOM_PHONE_FIXTURE = dataUrl(`
+const PHONE_TYPE_ONLY_FIXTURE = dataUrl(`
   <form>
     <select name="phone_type" id="phone-type">
       <option value="1">Home</option>
       <option value="2">Mobile</option>
     </select>
-    <div class="react-tel-input">
-      <input type="tel" class="form-control">
-      <div class="flag-dropdown">
-        <div class="selected-flag" tabindex="0" style="width:38px;height:26px;display:inline-block">flag</div>
-        <ul class="country-list" style="display:none;margin:0">
-          ${ISO_ROWS.map(
-            (r) =>
-              `<li class="country" data-country-code="${r.iso2.toLowerCase()}">` +
-              `<span class="country-name">${r.name}</span>` +
-              `<span class="dial-code">${r.dial}</span></li>`,
-          ).join("")}
-        </ul>
-      </div>
-    </div>
-  </form>
-  <script>
-    const flag = document.querySelector('.selected-flag');
-    const list = document.querySelector('.country-list');
-    flag.addEventListener('click', () => { list.style.display = 'block'; });
-    list.querySelectorAll('li.country').forEach((li) =>
-      li.addEventListener('click', () => {
-        window.__picked = li.getAttribute('data-country-code');
-        list.style.display = 'none';
-      }),
-    );
-  </script>`);
-
-// react-phone-input-2: a .selected-flag trigger + a .country-list of
-// li.country[data-country-code] each with a .dial-code span.
-const RPI2_FIXTURE = dataUrl(`
-  <div class="react-tel-input">
     <input type="tel" class="form-control">
-    <div class="flag-dropdown">
-      <div class="selected-flag" tabindex="0" style="width:38px;height:26px;display:inline-block"><div class="flag us"></div></div>
-      <ul class="country-list" style="display:none;margin:0">
-        ${ISO_ROWS.map(
-          (r) =>
-            `<li class="country" data-country-code="${r.iso2.toLowerCase()}">` +
-            `<span class="country-name">${r.name}</span>` +
-            `<span class="dial-code">${r.dial}</span></li>`,
-        ).join("")}
-      </ul>
-    </div>
-  </div>
-  <script>
-    const flag = document.querySelector('.selected-flag');
-    const list = document.querySelector('.country-list');
-    flag.addEventListener('click', () => { list.style.display = 'block'; });
-    list.querySelectorAll('li.country').forEach((li) =>
-      li.addEventListener('click', () => {
-        window.__picked = li.getAttribute('data-country-code');
-        list.style.display = 'none';
-      }),
-    );
-  </script>`);
-
-// react-international-phone: a ...country-selector-button + a
-// ...dropdown__list-item[data-country] list with a dial-code span.
-const RIP_FIXTURE = dataUrl(`
-  <div class="react-international-phone">
-    <button class="react-international-phone-country-selector-button" type="button">flag</button>
-    <ul class="react-international-phone-country-selector-dropdown__list" style="display:none;margin:0">
-      ${ISO_ROWS.map(
-        (r) =>
-          `<li class="react-international-phone-country-selector-dropdown__list-item" data-country="${r.iso2.toLowerCase()}">` +
-          `<span>${r.name}</span>` +
-          `<span class="react-international-phone-country-selector-dropdown__list-item-dial-code">${r.dial}</span></li>`,
-      ).join("")}
-    </ul>
-    <input type="tel">
-  </div>
-  <script>
-    const btn = document.querySelector('.react-international-phone-country-selector-button');
-    const list = document.querySelector('.react-international-phone-country-selector-dropdown__list');
-    btn.addEventListener('click', () => { list.style.display = 'block'; });
-    list.querySelectorAll('li').forEach((li) =>
-      li.addEventListener('click', () => {
-        window.__picked = li.getAttribute('data-country');
-        list.style.display = 'none';
-      }),
-    );
-  </script>`);
-
-// intl-tel-input: a .iti__selected-flag trigger + .iti__country-list of
-// .iti__country[data-country-code] with a .iti__dial-code span.
-const ITI_FIXTURE = dataUrl(`
-  <div class="iti">
-    <div class="iti__flag-container">
-      <div class="iti__selected-flag" role="combobox" tabindex="0" style="width:38px;height:26px;display:inline-block"><div class="iti__flag"></div></div>
-      <ul class="iti__country-list" style="display:none;margin:0">
-        ${ISO_ROWS.map(
-          (r) =>
-            `<li class="iti__country" data-country-code="${r.iso2.toLowerCase()}">` +
-            `<span class="iti__country-name">${r.name}</span>` +
-            `<span class="iti__dial-code">${r.dial}</span></li>`,
-        ).join("")}
-      </ul>
-    </div>
-    <input type="tel" class="iti__tel-input">
-  </div>
-  <script>
-    const flag = document.querySelector('.iti__selected-flag');
-    const list = document.querySelector('.iti__country-list');
-    flag.addEventListener('click', () => { list.style.display = 'block'; });
-    list.querySelectorAll('.iti__country').forEach((li) =>
-      li.addEventListener('click', () => {
-        window.__picked = li.getAttribute('data-country-code');
-        list.style.display = 'none';
-      }),
-    );
-  </script>`);
-
-// Bespoke (Casetify shape): a <label> whose OWN text is "+1" next to a tel
-// input, opening a plain <div> option list on click. No native select, no
-// library class — the generic fallback's target.
-const BESPOKE_FIXTURE = dataUrl(`
-  <div class="checkout">
-    <button class="country-link" type="button" onclick="window.__wrong = true">Japan (+81)</button>
-    <div class="phone-row">
-      <label id="cc" class="cc-label" style="cursor:pointer">+1</label>
-      <input type="tel" id="phone">
-    </div>
-    <div id="cc-list" style="display:none">
-      ${ISO_ROWS.map(
-        (r) =>
-          `<div class="cc-option" data-x="${r.iso2.toLowerCase()}">${r.name} (${r.dial})</div>`,
-      ).join("")}
-    </div>
-  </div>
-  <script>
-    document.getElementById('cc').addEventListener('click', () => {
-      document.getElementById('cc-list').style.display = 'block';
-    });
-    document.querySelectorAll('.cc-option').forEach((o) =>
-      o.addEventListener('click', () => { window.__picked = o.getAttribute('data-x'); }),
-    );
-  </script>`);
+  </form>
+`);
 
 let browser: Browser;
 
@@ -379,6 +216,28 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 
+  it("throws when the native phone-country value does not stick", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <div class="PhoneInput">
+          <select class="PhoneInputCountrySelect" style="opacity:0">
+            ${ISO_ROWS.map((r) => `<option value="${r.iso2}">${r.name}</option>`).join("")}
+          </select>
+          <input type="tel">
+        </div>
+        <script>
+          const select = document.querySelector('.PhoneInputCountrySelect');
+          select.addEventListener('change', () => { select.value = 'US'; });
+        </script>`),
+    );
+    try {
+      await expect(ctrl.setPhoneCountry("Japan")).rejects.toThrow(/did not retain value/i);
+      expect(await page.locator(".PhoneInputCountrySelect").inputValue()).toBe("US");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
   it("prefers the phone-named <select> over the address country <select>", async () => {
     const { ctrl, page } = await pageFor(ADDRESS_PLUS_PHONE_FIXTURE);
     try {
@@ -394,105 +253,50 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 
-  it("ignores an address country select when the phone picker is custom", async () => {
-    const { ctrl, page } = await pageFor(ADDRESS_PLUS_CUSTOM_PHONE_FIXTURE);
+  it("does not drive an address country select when no native phone picker exists", async () => {
+    const { ctrl, page } = await pageFor(ADDRESS_ONLY_WITH_TEL_FIXTURE);
     try {
-      await ctrl.setPhoneCountry("Japan");
+      await expect(ctrl.setPhoneCountry("Japan")).rejects.toThrow(
+        /no supported native phone-country <select> found/i,
+      );
       expect(await page.locator("#addr-country").inputValue()).toBe("US");
-      expect(await picked(page)).toBe("jp");
     } finally {
       await page.close();
     }
   }, 30000);
 
-  it("ignores a phone type select and falls through to the country picker", async () => {
-    const { ctrl, page } = await pageFor(PHONE_TYPE_PLUS_CUSTOM_PHONE_FIXTURE);
+  it("does not mistake a phone type select for a country picker", async () => {
+    const { ctrl, page } = await pageFor(PHONE_TYPE_ONLY_FIXTURE);
     try {
-      await ctrl.setPhoneCountry("Japan");
+      await expect(ctrl.setPhoneCountry("Japan")).rejects.toThrow(
+        /no supported native phone-country <select> found/i,
+      );
       expect(await page.locator("#phone-type").inputValue()).toBe("1");
-      expect(await picked(page)).toBe("jp");
-    } finally {
-      await page.close();
-    }
-  }, 30000);
-
-  it("react-phone-input-2: opens the flag list and picks by dial code", async () => {
-    const { ctrl, page } = await pageFor(RPI2_FIXTURE);
-    try {
-      await ctrl.setPhoneCountry("+81");
-      expect(await picked(page)).toBe("jp");
-    } finally {
-      await page.close();
-    }
-  }, 30000);
-
-  it("react-international-phone: opens the dropdown and picks by name", async () => {
-    const { ctrl, page } = await pageFor(RIP_FIXTURE);
-    try {
-      await ctrl.setPhoneCountry("Japan");
-      expect(await picked(page)).toBe("jp");
-    } finally {
-      await page.close();
-    }
-  }, 30000);
-
-  it("react-international-phone: picks by ISO2 code", async () => {
-    const { ctrl, page } = await pageFor(RIP_FIXTURE);
-    try {
-      await ctrl.setPhoneCountry("KR");
-      expect(await picked(page)).toBe("kr");
-    } finally {
-      await page.close();
-    }
-  }, 30000);
-
-  it("intl-tel-input: opens the country list and picks by dial code", async () => {
-    const { ctrl, page } = await pageFor(ITI_FIXTURE);
-    try {
-      await ctrl.setPhoneCountry("+82");
-      expect(await picked(page)).toBe("kr");
-    } finally {
-      await page.close();
-    }
-  }, 30000);
-
-  it("bespoke +NN trigger: opens the list and picks by country name", async () => {
-    const { ctrl, page } = await pageFor(BESPOKE_FIXTURE);
-    try {
-      await ctrl.setPhoneCountry("Japan");
-      expect(await picked(page)).toBe("jp");
-    } finally {
-      await page.close();
-    }
-  }, 30000);
-
-  it("bespoke +NN trigger: picks by dial code embedded in the option text", async () => {
-    const { ctrl, page } = await pageFor(BESPOKE_FIXTURE);
-    try {
-      await ctrl.setPhoneCountry("+82");
-      expect(await picked(page)).toBe("kr");
     } finally {
       await page.close();
     }
   }, 30000);
 
   it("fails loudly when the requested country is not offered by the picker", async () => {
-    const { ctrl, page } = await pageFor(RPI2_FIXTURE);
+    const { ctrl, page } = await pageFor(RPNI_FIXTURE);
     try {
-      // Antarctica has no row — the picker opens but nothing matches.
       await expect(ctrl.setPhoneCountry("Antarctica")).rejects.toThrow(/no option matched/i);
     } finally {
       await page.close();
     }
   }, 30000);
 
-  it("fails loudly when no phone-country picker exists on the page", async () => {
+  it("fails loudly for unsupported custom phone widgets", async () => {
     const { ctrl, page } = await pageFor(
-      dataUrl('<input type="text" placeholder="just a text field">'),
+      dataUrl(`
+        <div class="react-tel-input">
+          <div class="selected-flag">flag</div>
+          <input type="tel">
+        </div>`),
     );
     try {
       await expect(ctrl.setPhoneCountry("Japan")).rejects.toThrow(
-        /no phone-country picker matched/i,
+        /this widget family is not supported yet/i,
       );
     } finally {
       await page.close();
@@ -522,6 +326,26 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     try {
       await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(/no option matched/i);
       expect(await page.locator("#country").inputValue()).toBe("");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("throws when a native select reverts the chosen value", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <select id="country">
+          <option value="US">United States</option>
+          <option value="JP">Japan</option>
+        </select>
+        <script>
+          const select = document.getElementById('country');
+          select.addEventListener('change', () => { select.value = 'US'; });
+        </script>`),
+    );
+    try {
+      await expect(ctrl.selectOption("#country", "Japan")).rejects.toThrow(/did not stick/i);
+      expect(await page.locator("#country").inputValue()).toBe("US");
     } finally {
       await page.close();
     }
@@ -561,7 +385,7 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 
-  it("does not treat keyboard filtering changes as a committed selection", async () => {
+  it("fails loudly when the trigger opens no popup", async () => {
     const { ctrl, page } = await pageFor(
       dataUrl(`
         <div class="fake-select">
@@ -583,14 +407,16 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(/no option matched/i);
+      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(
+        /no single opened popup/i,
+      );
       expect(await picked(page)).toBeUndefined();
     } finally {
       await page.close();
     }
   }, 30000);
 
-  it("verifies a committed custom option before returning", async () => {
+  it("clicks a matching actionable option from the opened popup", async () => {
     const { ctrl, page } = await pageFor(
       dataUrl(`
         <button id="country" role="combobox" aria-expanded="false" type="button">Choose a country</button>
@@ -619,6 +445,36 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     try {
       await ctrl.selectOption("#country", "Japan");
       expect(await picked(page)).toBe("JP");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("collapses a nested popup wrapper to its semantic listbox", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <button id="country" role="combobox" type="button">Choose a country</button>
+        <div class="dropdown-menu" style="display:none">
+          <ul role="listbox">
+            <li role="option" data-value="JP">Japan</li>
+            <li role="option" data-value="KR">South Korea</li>
+          </ul>
+        </div>
+        <script>
+          const menu = document.querySelector('.dropdown-menu');
+          document.getElementById('country').addEventListener('click', () => {
+            menu.style.display = 'block';
+          });
+          menu.querySelectorAll('[role="option"]').forEach((option) => {
+            option.addEventListener('click', () => {
+              window.__picked = option.getAttribute('data-value');
+            });
+          });
+        </script>`),
+    );
+    try {
+      await ctrl.selectOption("#country", "South Korea");
+      expect(await picked(page)).toBe("KR");
     } finally {
       await page.close();
     }
@@ -658,46 +514,12 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 
-  it("does not accept an unrelated selected value in the same wrapper", async () => {
-    const { ctrl, page } = await pageFor(
-      dataUrl(`
-        <section id="checkout-country-fields">
-          <div class="other-select">
-            <div class="singleValue">Japan</div>
-          </div>
-          <button id="country" role="combobox" aria-expanded="false" aria-controls="country-options" type="button">
-            Choose a country
-          </button>
-          <ul id="country-options" role="listbox" style="display:none">
-            <li role="option" data-value="JP">Japan</li>
-          </ul>
-        </section>
-        <script>
-          const trigger = document.getElementById('country');
-          const options = document.getElementById('country-options');
-          trigger.addEventListener('click', () => {
-            trigger.setAttribute('aria-expanded', 'true');
-            options.style.display = 'block';
-          });
-        </script>`),
-    );
-    try {
-      await expect(ctrl.selectOption("#country", "Japan")).rejects.toThrow(
-        /commit could not be verified/i,
-      );
-      expect(await picked(page)).toBeUndefined();
-      expect(await page.locator("#country").textContent()).toContain("Choose a country");
-    } finally {
-      await page.close();
-    }
-  }, 30000);
-
-  it("rejects matching filter text while its controlled popup remains visible", async () => {
+  it("opens an input combobox by keyboard before matching its rows", async () => {
     const { ctrl, page } = await pageFor(
       dataUrl(`
         <input id="country" role="combobox" aria-expanded="false" aria-controls="country-options">
         <ul id="country-options" role="listbox" style="display:none">
-          <li id="country-japan" role="option">Japan</li>
+          <li role="option" data-value="JP">Japan</li>
         </ul>
         <script>
           const trigger = document.getElementById('country');
@@ -707,23 +529,20 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
               options.style.display = 'block';
             }
           });
-          trigger.addEventListener('input', () => {
-            trigger.setAttribute('aria-activedescendant', 'country-japan');
+          options.querySelector('[role="option"]').addEventListener('click', (event) => {
+            window.__picked = event.currentTarget.getAttribute('data-value');
           });
         </script>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "Japan")).rejects.toThrow(
-        /commit could not be verified/i,
-      );
-      expect(await page.locator("#country").inputValue()).toBe("Japan");
-      expect(await page.locator("#country-options").isVisible()).toBe(true);
+      await ctrl.selectOption("#country", "Japan");
+      expect(await picked(page)).toBe("JP");
     } finally {
       await page.close();
     }
   }, 30000);
 
-  it("uses only the opened popup for text-only custom options", async () => {
+  it("rejects text-only popup content without actionable option rows", async () => {
     const { ctrl, page } = await pageFor(
       dataUrl(`
         <span>South Korea</span>
@@ -750,8 +569,10 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </script>`),
     );
     try {
-      await ctrl.selectOption("#country", "South Korea");
-      expect(await picked(page)).toBe("KR");
+      await expect(ctrl.selectOption("#country", "South Korea")).rejects.toThrow(
+        /no option matched/i,
+      );
+      expect(await picked(page)).toBeUndefined();
     } finally {
       await page.close();
     }

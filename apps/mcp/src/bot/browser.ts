@@ -3609,6 +3609,12 @@ export class BrowserController {
         throw new Error(`<select> ${activeSelector} has no selectable option`);
       }
       await this.page.selectOption(activeSelector, chosenValue);
+      const committedValue = await this.page.locator(activeSelector).first().inputValue();
+      if (committedValue !== chosenValue) {
+        throw new Error(
+          `<select> ${activeSelector}: selected value ${JSON.stringify(chosenValue)} did not stick`,
+        );
+      }
       // rc.17 — mark the element as touched so subsequent inventory
       // reads can suppress the DEFAULTED-dropdown warning for it.
       // Without this, a select whose committed value is "" (Railway's
@@ -3630,33 +3636,12 @@ export class BrowserController {
     await this.selectFromCombobox(activeSelector, optionMatcher);
   }
 
-  // Set the country on a phone-number field's dial-code picker — the one
-  // control none of the ref-based act paths (type / select / click) can drive
-  // on international checkouts, so it hard-blocks the phone field (Casetify).
-  //
-  // WHY a dedicated primitive:
-  //  - react-phone-number-input backs the picker with an `opacity:0` NATIVE
-  //    <select>. extractInteractiveElements' visibility filter drops opacity:0
-  //    elements (see its `isVisible`), so the host never gets a ref — and even
-  //    with one, Playwright's selectOption refuses an invisible <select>. We
-  //    set it via the native value setter + a dispatched `change`, so React's
-  //    onChange reformats the number without needing visibility OR a ref.
-  //  - react-phone-input-2 / react-international-phone / intl-tel-input render
-  //    a custom flag trigger + a `<li data-country-code>` list. `select`
-  //    routes into selectFromCombobox, which matches by ARIA role and visible
-  //    option TEXT; these lists carry neither the roles it probes nor a clean
-  //    label, and picking by DIAL CODE isn't in its vocabulary.
-  //  - a bespoke `+NN` <label> trigger (Casetify) has no native <select> and
-  //    no library class at all; a ref click on the label does nothing.
-  //
-  // Pass a country name ("Japan") for reliable matching across every widget.
-  // A dial code ("+81" / "81") or ISO2 code ("JP") resolves only when that
-  // widget's options expose the corresponding signal. Strategy order prefers
-  // a governing native <select> (most reliable), then the known custom
-  // libraries, then a generic "control adjacent to input[type=tel] whose own
-  // text is +NN" fallback. Throws when a picker is located but no option
-  // matches the requested country (loud, with sample options) or when none is
-  // found.
+  // Set the country on a phone-number field backed by a phone-local native
+  // <select>, including react-phone-number-input's opacity:0 country select.
+  // The inventory walker omits that hidden control and Playwright refuses to
+  // select it, so this path uses the native value setter, dispatches change,
+  // and verifies the selected value. Custom phone widget families are not
+  // supported and fail loudly.
   async setPhoneCountry(country: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     const query = classifyPhoneCountryQuery(country);
@@ -3664,46 +3649,10 @@ export class BrowserController {
       throw new Error("setPhoneCountry: empty country argument");
     }
     await this.clearPhoneCountryMarkers();
-    const tried: string[] = [];
-    if (await this.trySetPhoneCountryNativeSelect(query, tried)) return;
-
-    // Known custom-widget families, most-specific selectors first. Each entry
-    // is one library's flag-trigger + option-list convention.
-    const families: readonly CustomPhoneWidget[] = [
-      {
-        // `.selected-flag` is the clickable trigger; do NOT also list its
-        // wrapper `.flag-dropdown` — a comma union resolves `.first()` in DOM
-        // order, which would pick the parent wrapper instead.
-        name: "react-phone-input-2",
-        trigger: ".react-tel-input .selected-flag",
-        option: ".react-tel-input .country-list li.country",
-        iso2Attr: "data-country-code",
-        dialSel: ".dial-code",
-      },
-      {
-        name: "react-international-phone",
-        trigger: ".react-international-phone-country-selector-button",
-        option: ".react-international-phone-country-selector-dropdown__list-item",
-        iso2Attr: "data-country",
-        dialSel: ".react-international-phone-country-selector-dropdown__list-item-dial-code",
-      },
-      {
-        name: "intl-tel-input",
-        trigger: ".iti__selected-flag, .iti__selected-country",
-        option: ".iti__country-list .iti__country, .iti__dropdown-content .iti__country",
-        iso2Attr: "data-country-code",
-        dialSel: ".iti__dial-code",
-      },
-    ];
-    for (const fam of families) {
-      if (await this.trySetPhoneCountryCustom(fam, query, tried)) return;
-    }
-
-    if (await this.trySetPhoneCountryGeneric(query, tried)) return;
-
+    if (await this.trySetPhoneCountryNativeSelect(query)) return;
     throw new Error(
-      `setPhoneCountry(${JSON.stringify(country)}): no phone-country picker matched. ` +
-        (tried.length > 0 ? `Tried: ${tried.join("; ")}.` : "No candidate control found."),
+      "set_phone_country: no supported native phone-country <select> found " +
+        "(this widget family is not supported yet) — enter a valid contact number instead.",
     );
   }
 
@@ -3717,10 +3666,7 @@ export class BrowserController {
   // immediately adjacent wrapper.
   // Returns false when no such select exists; throws when one is found but the
   // requested country isn't among its options.
-  private async trySetPhoneCountryNativeSelect(
-    query: PhoneCountryQuery,
-    tried: string[],
-  ): Promise<boolean> {
+  private async trySetPhoneCountryNativeSelect(query: PhoneCountryQuery): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
     const candidates = await this.page.evaluate(() => {
       const out: Array<{
@@ -3737,7 +3683,11 @@ export class BrowserController {
         let telDistance = Number.POSITIVE_INFINITY;
         const isTel = (el: Element | null): boolean => el?.matches('input[type="tel"]') === true;
         const parent = sel.parentElement;
-        if (isTel(sel.previousElementSibling) || isTel(sel.nextElementSibling)) {
+        if (
+          parent !== null &&
+          parent.tagName !== "FORM" &&
+          (isTel(sel.previousElementSibling) || isTel(sel.nextElementSibling))
+        ) {
           telDistance = 0;
         } else if (
           parent !== null &&
@@ -3745,15 +3695,6 @@ export class BrowserController {
           Array.from(parent.children).some(isTel)
         ) {
           telDistance = 1;
-        } else {
-          const grandparent = parent?.parentElement ?? null;
-          if (
-            grandparent !== null &&
-            grandparent.tagName !== "FORM" &&
-            Array.from(grandparent.children).some(isTel)
-          ) {
-            telDistance = 2;
-          }
         }
         const options = Array.from(sel.options).map((o) => ({
           value: o.value,
@@ -3774,7 +3715,7 @@ export class BrowserController {
           explicitDialish > 0 ||
           (dialCodeNamed && dialish >= 2) ||
           (countryNamed && isoish >= 2);
-        if ((phoneNamed && phoneCountryish) || (countryish && telDistance <= 2)) {
+        if ((phoneNamed && phoneCountryish) || (countryish && telDistance <= 1)) {
           sel.setAttribute("data-ts-phone-cc", String(i));
           out.push({
             marker: i,
@@ -3819,7 +3760,7 @@ export class BrowserController {
     // .value directly is swallowed by React's value tracker, so we go through
     // the prototype setter the tracker also patches, then fire the event React
     // listens on. Works on the opacity:0 select without a visibility check.
-    const ok = await this.page.evaluate(
+    const assigned = await this.page.evaluate(
       ({ marker, val }) => {
         const sel = document.querySelector(`select[data-ts-phone-cc="${marker}"]`);
         if (!(sel instanceof HTMLSelectElement)) return false;
@@ -3828,209 +3769,32 @@ export class BrowserController {
         else sel.value = val;
         sel.dispatchEvent(new Event("input", { bubbles: true }));
         sel.dispatchEvent(new Event("change", { bubbles: true }));
-        return sel.value === val;
+        return true;
       },
       { marker: best.marker, val: value },
     );
+    const committedValue = assigned
+      ? await this.page
+          .locator(`select[data-ts-phone-cc="${best.marker}"]`)
+          .inputValue()
+          .catch(() => "")
+      : "";
     await this.clearPhoneCountryMarkers();
-    if (!ok) {
-      tried.push("native <select>: value assignment did not stick");
-      return false;
-    }
-    tried.push(`native <select> → "${chosenOpt.text}"`);
-    return true;
-  }
-
-  // Strategy 2 — a known custom phone-widget library: click its flag trigger,
-  // wait for the country list, read each option's {text, iso2, dialCode}, pick
-  // the match with the shared pure matcher, click that row. Returns false when
-  // the library's trigger isn't on the page; throws when it opens but no
-  // option matches (loud, with sample options).
-  private async trySetPhoneCountryCustom(
-    fam: CustomPhoneWidget,
-    query: PhoneCountryQuery,
-    tried: string[],
-  ): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
-    const trigger = this.page.locator(fam.trigger).first();
-    if ((await trigger.count()) === 0) return false;
-    await trigger.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await trigger.click({ timeout: 8000 }).catch(async () => {
-      await trigger.evaluate((el) => (el as HTMLElement).click());
-    });
-    const options = this.page.locator(fam.option);
-    try {
-      await options.first().waitFor({ state: "visible", timeout: 3000 });
-    } catch {
-      tried.push(`${fam.name}: trigger present but list did not open`);
-      return false;
-    }
-    const descs = await options.evaluateAll(
-      (els, cfg: { iso2Attr: string | null; dialSel: string | null }) =>
-        els.map((el) => {
-          let iso2: string | undefined;
-          if (cfg.iso2Attr !== null) {
-            const direct = el.getAttribute(cfg.iso2Attr);
-            const raw =
-              direct !== null
-                ? direct
-                : (el.querySelector(`[${cfg.iso2Attr}]`)?.getAttribute(cfg.iso2Attr) ?? null);
-            iso2 = raw !== null && raw.length > 0 ? raw : undefined;
-          }
-          let dialCode: string | undefined;
-          if (cfg.dialSel !== null) {
-            const t = el.querySelector(cfg.dialSel)?.textContent?.trim();
-            dialCode = t !== undefined && t.length > 0 ? t : undefined;
-          }
-          const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-          return { text: text.length > 0 ? text : undefined, iso2, dialCode };
-        }),
-      { iso2Attr: fam.iso2Attr ?? null, dialSel: fam.dialSel ?? null },
-    );
-    const idx = pickPhoneCountryOption(query, descs);
-    const chosenDesc = idx === -1 ? undefined : descs[idx];
-    if (chosenDesc === undefined) {
-      const sample = descs
-        .map((d) => d.text ?? d.iso2 ?? "?")
-        .slice(0, 6)
-        .join(" | ");
+    if (!assigned || committedValue !== value) {
       throw new Error(
-        `setPhoneCountry: ${fam.name} picker open but no option matched ` +
-          `${JSON.stringify(query)} (sample: ${sample})`,
+        `setPhoneCountry: native phone <select> did not retain value ${JSON.stringify(value)}`,
       );
     }
-    const chosen = options.nth(idx);
-    await chosen.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await chosen.click({ timeout: 8000 }).catch(async () => {
-      await chosen.evaluate((el) => (el as HTMLElement).click());
-    });
-    tried.push(`${fam.name} → "${chosenDesc.text ?? chosenDesc.iso2 ?? ""}"`);
     return true;
   }
 
-  // Strategy 3 — bespoke fallback (Casetify-class): a control adjacent to an
-  // input[type=tel] whose OWN text is a bare "+NN". Open it with a real click,
-  // then match the requested country against any option-like element that
-  // became visible. Best-effort — the option list's shape is unknown, so it
-  // matches on country NAME substring or an embedded dial code (an ISO2 query
-  // won't resolve here). Returns false when no such trigger exists; throws when
-  // it opens but nothing matches.
-  private async trySetPhoneCountryGeneric(
-    query: PhoneCountryQuery,
-    tried: string[],
-  ): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
-    const found = await this.page.evaluate(() => {
-      const ownText = (el: Element): string =>
-        Array.from(el.childNodes)
-          .filter((n) => n.nodeType === 3)
-          .map((n) => n.textContent ?? "")
-          .join("")
-          .replace(/\s+/g, " ")
-          .trim();
-      const tels = Array.from(document.querySelectorAll('input[type="tel"]'));
-      for (const tel of tels) {
-        let anc: HTMLElement | null = tel.parentElement;
-        for (let d = 0; d < 4 && anc !== null; d += 1, anc = anc.parentElement) {
-          for (const c of Array.from(anc.querySelectorAll("*"))) {
-            if (c === tel) continue;
-            // A "+NN" inside an option list is a dial-code label on a ROW, not
-            // the collapsed trigger — skip it so we don't click an option-row
-            // span (react-phone-input-2's `.dial-code`) as if it opened a menu.
-            if (c.closest('ul,ol,[role="listbox"],[class*="list"],[class*="dropdown"]') !== null) {
-              continue;
-            }
-            if (/^\+\d{1,4}$/.test(ownText(c))) {
-              c.setAttribute("data-ts-phone-cc-trigger", "1");
-              return true;
-            }
-          }
-        }
-      }
-      return false;
-    });
-    if (!found) return false;
-    const trigger = this.page.locator('[data-ts-phone-cc-trigger="1"]').first();
-    await this.page.evaluate(() => {
-      const isVis = (el: Element): boolean => {
-        const r = el.getBoundingClientRect();
-        if (r.width < 2 || r.height < 2) return false;
-        const s = getComputedStyle(el);
-        return (
-          s.display !== "none" && s.visibility !== "hidden" && parseFloat(s.opacity || "1") > 0.01
-        );
-      };
-      const sel =
-        'li,[role="option"],[role="menuitem"],button,a,[class*="option"],[class*="country"]';
-      Array.from(document.querySelectorAll(sel))
-        .filter(isVis)
-        .forEach((el) => el.setAttribute("data-ts-phone-cc-preexisting", "1"));
-    });
-    await trigger.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await trigger.click({ timeout: 8000 }).catch(async () => {
-      await trigger.evaluate((el) => (el as HTMLElement).click());
-    });
-    await this.wait(0.4);
-    const descs = await this.page.evaluate(() => {
-      const isVis = (el: Element): boolean => {
-        const r = el.getBoundingClientRect();
-        if (r.width < 2 || r.height < 2) return false;
-        const s = getComputedStyle(el);
-        return (
-          s.display !== "none" && s.visibility !== "hidden" && parseFloat(s.opacity || "1") > 0.01
-        );
-      };
-      const sel =
-        'li,[role="option"],[role="menuitem"],button,a,[class*="option"],[class*="country"]';
-      return Array.from(document.querySelectorAll(sel))
-        .filter((el) => !el.hasAttribute("data-ts-phone-cc-preexisting") && isVis(el))
-        .slice(0, 400)
-        .map((el, i) => {
-          el.setAttribute("data-ts-phone-cc-opt", String(i));
-          const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
-          return { marker: i, text: text.length > 0 ? text : undefined };
-        });
-    });
-    const idx = pickPhoneCountryOption(query, descs);
-    const chosenDesc = idx === -1 ? undefined : descs[idx];
-    if (chosenDesc === undefined) {
-      await this.clearPhoneCountryMarkers();
-      const sample = descs
-        .map((d) => d.text)
-        .filter((t): t is string => t !== undefined)
-        .slice(0, 6)
-        .join(" | ");
-      throw new Error(
-        `setPhoneCountry: bespoke +NN trigger opened but no option matched ` +
-          `${JSON.stringify(query)} (sample: ${sample})`,
-      );
-    }
-    const chosen = this.page.locator(`[data-ts-phone-cc-opt="${chosenDesc.marker}"]`).first();
-    await chosen.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
-    await chosen.click({ timeout: 8000 }).catch(async () => {
-      await chosen.evaluate((el) => (el as HTMLElement).click());
-    });
-    await this.clearPhoneCountryMarkers();
-    tried.push(`bespoke +NN trigger → "${chosenDesc.text ?? ""}"`);
-    return true;
-  }
-
-  // Remove the transient data-attributes the phone-country strategies stamp on
-  // candidate selects/triggers/options so they don't leak into a later observe.
   private async clearPhoneCountryMarkers(): Promise<void> {
     if (!this.page) return;
     await this.page
       .evaluate(() => {
-        document
-          .querySelectorAll(
-            "[data-ts-phone-cc],[data-ts-phone-cc-trigger],[data-ts-phone-cc-opt],[data-ts-phone-cc-preexisting]",
-          )
-          .forEach((el) => {
-            el.removeAttribute("data-ts-phone-cc");
-            el.removeAttribute("data-ts-phone-cc-trigger");
-            el.removeAttribute("data-ts-phone-cc-opt");
-            el.removeAttribute("data-ts-phone-cc-preexisting");
-          });
+        document.querySelectorAll("[data-ts-phone-cc]").forEach((el) => {
+          el.removeAttribute("data-ts-phone-cc");
+        });
       })
       .catch(() => {});
   }
@@ -4050,14 +3814,9 @@ export class BrowserController {
       };
       const popupSelector =
         '[role="listbox"],[role="menu"],[role="dialog"],[id*="listbox" i],[id*="dropdown" i],[id*="popover" i],[id*="menu" i],[id*="options" i],[class*="listbox" i],[class*="dropdown" i],[class*="popover" i],[class*="menu" i],[class*="options" i]';
-      const optionSelector =
-        '[role="option"],[role="menuitem"],[role="menuitemradio"],mat-option,.mat-mdc-option,[id^="react-select-"][role*="menu"],[role="listbox"] li';
       document
         .querySelectorAll(popupSelector)
         .forEach((el) => visible(el) && el.setAttribute("data-ts-select-preexisting-popup", "1"));
-      document
-        .querySelectorAll(optionSelector)
-        .forEach((el) => visible(el) && el.setAttribute("data-ts-select-preexisting-option", "1"));
     });
   }
 
@@ -4083,7 +3842,6 @@ export class BrowserController {
             el.removeAttribute("data-ts-select-popup");
             el.removeAttribute("data-ts-select-option-tier");
           });
-        trigger.removeAttribute("data-ts-select-popup-resolved");
         const popupSelector =
           '[role="listbox"],[role="menu"],[role="dialog"],[id*="listbox" i],[id*="dropdown" i],[id*="popover" i],[id*="menu" i],[id*="options" i],[class*="listbox" i],[class*="dropdown" i],[class*="popover" i],[class*="menu" i],[class*="options" i]';
         const controlledPopups: Element[] = [];
@@ -4105,14 +3863,19 @@ export class BrowserController {
             openedPopups.push(el);
           }
         });
+        const singlePopup = (candidates: Element[]): Element | undefined => {
+          const semantic = candidates.filter((el) =>
+            el.matches('[role="listbox"],[role="dialog"],[role="menu"]'),
+          );
+          const pool = semantic.length > 0 ? semantic : candidates;
+          const innermost = pool.filter(
+            (candidate) => !pool.some((other) => other !== candidate && candidate.contains(other)),
+          );
+          return innermost.length === 1 ? innermost[0] : undefined;
+        };
         const popup =
-          controlledPopups.length === 1
-            ? controlledPopups[0]
-            : controlledPopups.length === 0 && openedPopups.length === 1
-              ? openedPopups[0]
-              : undefined;
+          controlledPopups.length > 0 ? singlePopup(controlledPopups) : singlePopup(openedPopups);
         popup?.setAttribute("data-ts-select-popup", "1");
-        if (popup !== undefined) trigger.setAttribute("data-ts-select-popup-resolved", "1");
         const optionSelectors = [
           '[role="option"]',
           '[role="menuitem"]',
@@ -4138,131 +3901,17 @@ export class BrowserController {
       .evaluate(() => {
         document
           .querySelectorAll(
-            "[data-ts-select-preexisting-popup],[data-ts-select-preexisting-option],[data-ts-select-popup],[data-ts-select-option-tier],[data-ts-select-popup-resolved],[data-ts-select-commit-target]",
+            "[data-ts-select-preexisting-popup],[data-ts-select-popup],[data-ts-select-option-tier]",
           )
           .forEach((el) => {
             el.removeAttribute("data-ts-select-preexisting-popup");
-            el.removeAttribute("data-ts-select-preexisting-option");
             el.removeAttribute("data-ts-select-popup");
             el.removeAttribute("data-ts-select-option-tier");
-            el.removeAttribute("data-ts-select-popup-resolved");
-            el.removeAttribute("data-ts-select-commit-target");
           });
       })
       .catch(() => {});
   }
 
-  private async markComboboxCommitTarget(target: Locator): Promise<void> {
-    await target.evaluate((node) => {
-      node.ownerDocument
-        .querySelectorAll("[data-ts-select-commit-target]")
-        .forEach((el) => el.removeAttribute("data-ts-select-commit-target"));
-      const option =
-        node.closest(
-          '[role="option"],[role="menuitem"],[role="menuitemradio"],mat-option,.mat-mdc-option,[role="listbox"] li',
-        ) ?? node;
-      option.setAttribute("data-ts-select-commit-target", "1");
-    });
-  }
-
-  private async comboboxCommittedOptionMatches(
-    triggerSelector: string,
-    matcher: string,
-  ): Promise<boolean> {
-    if (!this.page) throw new Error("Browser not started");
-    const result = await this.page
-      .locator(triggerSelector)
-      .first()
-      .evaluate((trigger, rawMatcher) => {
-        const normalize = (value: string): string =>
-          value.replace(/\s+/g, " ").trim().toLowerCase();
-        const needle = normalize(rawMatcher);
-        if (needle.length === 0) {
-          return {
-            committed: false,
-            optionSelected: false,
-            popupResolved: false,
-            popupClosed: false,
-            valueMatches: false,
-          };
-        }
-        const target = trigger.ownerDocument.querySelector('[data-ts-select-commit-target="1"]');
-        const optionSelected =
-          target?.getAttribute("aria-selected") === "true" ||
-          target?.getAttribute("aria-checked") === "true";
-        const popupResolved = trigger.hasAttribute("data-ts-select-popup-resolved");
-        const popup = trigger.ownerDocument.querySelector('[data-ts-select-popup="1"]');
-        const popupClosed =
-          popupResolved &&
-          (popup === null ||
-            (() => {
-              const rect = popup.getBoundingClientRect();
-              if (rect.width < 2 || rect.height < 2) return true;
-              const style = getComputedStyle(popup);
-              return (
-                style.display === "none" ||
-                style.visibility === "hidden" ||
-                parseFloat(style.opacity || "1") <= 0.01
-              );
-            })());
-        const triggerValue =
-          trigger instanceof HTMLInputElement || trigger instanceof HTMLTextAreaElement
-            ? trigger.value
-            : (trigger.getAttribute("value") ?? trigger.textContent ?? "");
-        const valueMatches = normalize(triggerValue) === needle;
-        return {
-          committed: optionSelected || (valueMatches && popupClosed),
-          optionSelected,
-          popupResolved,
-          popupClosed,
-          valueMatches,
-        };
-      }, matcher);
-    if (!result.committed) {
-      throw new Error(
-        `combobox ${triggerSelector}: clicked option commit could not be verified for ` +
-          `${JSON.stringify(matcher)} (selected=${result.optionSelected}, ` +
-          `popupResolved=${result.popupResolved}, popupClosed=${result.popupClosed}, ` +
-          `valueMatches=${result.valueMatches})`,
-      );
-    }
-    return true;
-  }
-
-  // F11 (+rc.7 hardening): click a combobox trigger, wait for the
-  // listbox to open, click an option.
-  //
-  // Tries option-selector patterns in priority order — each tier
-  // targets one combobox-library convention. The text-based final
-  // tier catches libraries that ship NO ARIA roles at all.
-  //
-  //   1. [role=option]            — Radix, Headless UI, React Aria, cmdk
-  //   2. [role=menuitem]          — ARIA menu pattern (libs that model
-  //                                 a dropdown as a menu)
-  //   3. [role=menuitemradio]     — react-select's per-row permission
-  //                                 picker shape (rc.15 — Sentry's
-  //                                 token-create grid). Identical shape
-  //                                 to menuitem for selection purposes,
-  //                                 distinct role string. Without this
-  //                                 tier Sentry's "Team permission =
-  //                                 Admin" never resolves and the loop
-  //                                 burns the post-verify budget.
-  //   4. [id^="react-select-"]    — defense-in-depth for any react-
-  //                                 select instance that drops the
-  //                                 role attribute. The id prefix is
-  //                                 baked into the library and is the
-  //                                 most stable signal short of the
-  //                                 role.
-  //   5. [role=listbox] li        — listbox container without role
-  //                                 attribute on its children
-  //   6. text-based (matcher only) — after the trigger click, any newly-
-  //                                 visible element whose text matches
-  //                                 the planner-supplied label is
-  //                                 almost certainly the option. Only
-  //                                 enabled when a matcher exists,
-  //                                 since "first text on the page"
-  //                                 with no matcher would catch
-  //                                 unrelated UI text.
   private async selectFromCombobox(triggerSelector: string, optionMatcher?: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
     // 0.8.2-rc.11 — selector normalization. The planner sometimes
@@ -4280,69 +3929,29 @@ export class BrowserController {
     try {
       await this.humanClick(normalizedSelector);
       await this.refreshComboboxMarkers(normalizedSelector);
-
-      const patternSelectors: readonly string[] = [
-        '[role="option"]:visible',
-        '[role="menuitem"]:visible',
-        '[role="menuitemradio"]:visible',
-        "mat-option:visible",
-        ".mat-mdc-option:visible",
-        '[id^="react-select-"][role*="menu"]:visible',
-        '[role="listbox"]:visible li:visible',
-      ];
-      const triedDescriptors: string[] = [];
-      for (let tier = 0; tier < patternSelectors.length; tier += 1) {
-        const descriptor = patternSelectors[tier];
-        if (descriptor === undefined) continue;
-        triedDescriptors.push(descriptor);
-        const locator = this.page.locator(`[data-ts-select-option-tier="${tier}"]`);
-        if ((await locator.count()) === 0) continue;
-        if (await this.pickComboboxOption(locator, optionMatcher, normalizedSelector)) {
-          return;
-        }
-      }
-
-      // 0.8.2-rc.11 — keyboard-driven react-select fallback. Sentry's
-      // permission-grid combobox (Project--permission, Team--permission,
-      // …) is a react-select 5 instance: clicking the inner <input> only
-      // focuses it; the menu opens on keyboard activity. The standard
-      // pattern is: Alt+Down (or just type a character) to open + filter,
-      // then Enter to commit. Try Alt+Down first so an instance with
-      // visible options but no role="option" still works; then if a
-      // matcher was given, type-to-filter + Enter so a hidden listbox
-      // narrows directly to the right option.
-      if (await this.tryReactSelectKeyboardPick(normalizedSelector, optionMatcher)) {
-        return;
-      }
-      triedDescriptors.push("react-select keyboard (Alt+Down, type-to-filter, Enter)");
-
-      if (optionMatcher !== undefined) {
+      let popup = this.page.locator('[data-ts-select-popup="1"]').first();
+      if ((await popup.count()) === 0) {
+        await this.openComboboxWithKeyboard(normalizedSelector);
         await this.refreshComboboxMarkers(normalizedSelector);
-        const popup = this.page.locator('[data-ts-select-popup="1"]').first();
-        triedDescriptors.push(`scoped text="${optionMatcher}"`);
-        if ((await popup.count()) > 0) {
-          const byText = popup.getByText(optionMatcher, { exact: false }).first();
-          if ((await byText.count()) > 0) {
-            await byText.waitFor({ state: "visible", timeout: 2000 });
-            await this.markComboboxCommitTarget(byText);
-            await this.humanClickLocator(byText);
-            await this.wait(0.5);
-            await this.comboboxCommittedOptionMatches(normalizedSelector, optionMatcher);
-            return;
-          }
-        }
+        popup = this.page.locator('[data-ts-select-popup="1"]').first();
       }
-
-      throw new Error(
-        `combobox ${triggerSelector}` +
-          (normalizedSelector !== triggerSelector ? ` (normalized to ${normalizedSelector})` : "") +
-          (optionMatcher !== undefined
-            ? `: no option matched ${JSON.stringify(optionMatcher)} after click. `
-            : ": no options found after click. ") +
-          `Tried: ${triedDescriptors.join(", ")}. ` +
-          `The trigger may not have opened a popover, or the popover uses ` +
-          `an option pattern this executor doesn't recognize.`,
-      );
+      if ((await popup.count()) === 0) {
+        throw new Error(`combobox ${triggerSelector}: no single opened popup could be resolved`);
+      }
+      const options = this.page.locator("[data-ts-select-option-tier]");
+      let target = options.first();
+      if (optionMatcher !== undefined) {
+        const matching = options.filter({ hasText: optionMatcher });
+        if ((await matching.count()) === 0) {
+          throw new Error(
+            `combobox ${triggerSelector}: no option matched ${JSON.stringify(optionMatcher)}`,
+          );
+        }
+        target = matching.first();
+      } else if ((await options.count()) === 0) {
+        throw new Error(`combobox ${triggerSelector}: opened popup has no actionable options`);
+      }
+      await this.clickComboboxOption(target);
     } finally {
       await this.clearComboboxMarkers();
     }
@@ -4394,162 +4003,20 @@ export class BrowserController {
     }
   }
 
-  // 0.8.2-rc.11 — keyboard-driven react-select interaction. The
-  // trigger is the inner <input>; opening the menu via mouse click
-  // alone isn't reliable on every react-select instance (Sentry's
-  // permission grid). Sequence:
-  //   1. focus the trigger (the click already happened in
-  //      selectFromCombobox, but a defensive .focus() handles the
-  //      case where the click went to a sibling overlay).
-  //   2. press Alt+ArrowDown — react-select binds this to open the
-  //      menu and select the first option.
-  //   3. if a matcher was given, type its first 1-3 letters to filter
-  //      the menu down to the right option, then press Enter to
-  //      commit.
-  //   4. if no matcher, ArrowDown was already issued — press Enter to
-  //      commit the first option.
-  // Verify via the input's aria-activedescendant or value attribute
-  // changing (react-select updates one or the other on selection).
-  // Returns true on success, false when the page didn't react.
-  private async tryReactSelectKeyboardPick(
-    triggerSelector: string,
-    optionMatcher?: string,
-  ): Promise<boolean> {
+  private async openComboboxWithKeyboard(triggerSelector: string): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
-    const triggerLocator = this.page.locator(triggerSelector);
+    const trigger = this.page.locator(triggerSelector).first();
     try {
-      const tagName = await triggerLocator.first().evaluate((node) => node.tagName.toLowerCase());
-      // Limit this path to input-typed triggers; native <select> and
-      // <button role="combobox"> are handled by other tiers. The
-      // selectFromCombobox caller has already returned for matching
-      // [role="option"] tiers, so we only reach here on patterns where
-      // the trigger is an input.
-      if (tagName !== "input") return false;
-    } catch {
-      return false;
-    }
-    try {
-      await triggerLocator.first().focus({ timeout: 1500 });
-    } catch {
-      return false;
-    }
-    // Snapshot the input's relevant attributes BEFORE opening so we
-    // can verify that the pick actually committed.
-    const before = await triggerLocator
-      .first()
-      .evaluate((node) => ({
-        activedescendant: node.getAttribute("aria-activedescendant") ?? "",
-        value: node instanceof HTMLInputElement ? node.value : "",
-        // react-select 5 mirrors the selected value into the closest
-        // .css-{hash}-singleValue node; grab the trigger's surrounding
-        // text so a successful pick produces an observable change.
-        surroundingText: node.parentElement?.parentElement?.parentElement?.textContent ?? "",
-      }))
-      .catch(() => ({ activedescendant: "", value: "", surroundingText: "" }));
-
-    // Press Alt+ArrowDown to open + highlight the first option, then
-    // if a matcher exists, type to filter, then Enter.
-    try {
+      if ((await trigger.evaluate((node) => node.tagName.toLowerCase())) !== "input") return;
+      await trigger.focus({ timeout: 1500 });
       await this.page.keyboard.press("Alt+ArrowDown");
+      await this.wait(0.4);
     } catch {
-      return false;
+      return;
     }
-    // Wait briefly for the menu to render.
-    await this.wait(0.4);
-    if (optionMatcher !== undefined && optionMatcher.length > 0) {
-      // Type a few characters to filter; react-select narrows on each
-      // keystroke. Capping at 6 keeps the input from overshooting on
-      // a long matcher when the first few characters already narrow
-      // to a single option ("Admin" → typing "Adm" is enough).
-      const typed = optionMatcher.slice(0, 6);
-      try {
-        await triggerLocator.first().pressSequentially(typed, { delay: 25 });
-      } catch {
-        return false;
-      }
-      await this.wait(0.35);
-      await this.refreshComboboxMarkers(triggerSelector);
-      const needle = optionMatcher.toLowerCase();
-      const activeMatches = await triggerLocator
-        .first()
-        .evaluate((node, matcher) => {
-          const activeId = node.getAttribute("aria-activedescendant");
-          if (activeId === null || activeId.length === 0) return false;
-          const active = node.ownerDocument.getElementById(activeId);
-          return active?.textContent?.toLowerCase().includes(matcher) === true;
-        }, needle)
-        .catch(() => false);
-      if (!activeMatches) {
-        const matchingOptions = this.page
-          .locator("[data-ts-select-option-tier]")
-          .filter({ hasText: optionMatcher });
-        if ((await matchingOptions.count()) === 0) {
-          await this.page.keyboard.press("Escape").catch(() => {});
-          await triggerLocator
-            .first()
-            .fill(before.value)
-            .catch(() => {});
-          return false;
-        }
-        return await this.pickComboboxOption(matchingOptions, optionMatcher, triggerSelector);
-      }
-      await triggerLocator
-        .first()
-        .evaluate((node) => {
-          node.ownerDocument
-            .querySelectorAll("[data-ts-select-commit-target]")
-            .forEach((el) => el.removeAttribute("data-ts-select-commit-target"));
-          const activeId = node.getAttribute("aria-activedescendant");
-          if (activeId === null || activeId.length === 0) return;
-          node.ownerDocument
-            .getElementById(activeId)
-            ?.setAttribute("data-ts-select-commit-target", "1");
-        })
-        .catch(() => {});
-    }
-    try {
-      await this.page.keyboard.press("Enter");
-    } catch {
-      return false;
-    }
-    await this.wait(0.5);
-
-    if (optionMatcher !== undefined) {
-      return await this.comboboxCommittedOptionMatches(triggerSelector, optionMatcher);
-    }
-
-    const after = await triggerLocator
-      .first()
-      .evaluate((node) => ({
-        activedescendant: node.getAttribute("aria-activedescendant") ?? "",
-        value: node instanceof HTMLInputElement ? node.value : "",
-        surroundingText: node.parentElement?.parentElement?.parentElement?.textContent ?? "",
-      }))
-      .catch(() => ({ activedescendant: "", value: "", surroundingText: "" }));
-    // A successful pick produces at least one observable change.
-    // react-select clears the input's value once a selection commits
-    // (the chosen label moves into a sibling singleValue node), so the
-    // surrounding-text diff is the strongest signal.
-    if (before.surroundingText !== after.surroundingText) return true;
-    if (before.activedescendant !== after.activedescendant) return true;
-    if (before.value !== after.value) return true;
-    return false;
   }
 
-  // F11: pick an option from a Playwright Locator already-narrowed to
-  // candidates. Matcher → filter by hasText (case-insensitive by
-  // default in Playwright). No matcher → first.
-  private async pickComboboxOption(
-    options: Locator,
-    matcher: string | undefined,
-    triggerSelector: string,
-  ): Promise<boolean> {
-    let target = options.first();
-    if (matcher !== undefined) {
-      const filtered = options.filter({ hasText: matcher });
-      if ((await filtered.count()) === 0) return false;
-      target = filtered.first();
-    }
+  private async clickComboboxOption(target: Locator): Promise<void> {
     // cmdk (the command-menu library) does NOT commit a selection from the
     // bot's humanized page.mouse.click(x, y): cmdk re-renders + re-orders its
     // list as the search filters, so the cached click coordinates land on the
@@ -4568,30 +4035,20 @@ export class BrowserController {
       )
       .catch(() => false);
     if (isCmdkItem) {
-      await this.markComboboxCommitTarget(target);
       await target.scrollIntoViewIfNeeded().catch(() => {});
       // Playwright's locator.click() re-resolves geometry and dispatches the
       // full trusted pointer/mouse sequence at the element's center — what
       // cmdk's onSelect actually listens for.
       await target.click({ timeout: 5000 }).catch(async () => {
-        // Backup: dispatch the pointer pair directly, then Enter (the cmdk
-        // input is focused after type-to-filter and highlights this item).
-        await target.dispatchEvent("pointerdown").catch(() => {});
-        await target.dispatchEvent("pointerup").catch(() => {});
-        await this.page?.keyboard.press("Enter").catch(() => {});
+        await target.dispatchEvent("pointerdown");
+        await target.dispatchEvent("pointerup");
+        await target.dispatchEvent("click");
       });
       await this.wait(0.5);
-      return (
-        matcher === undefined ||
-        (await this.comboboxCommittedOptionMatches(triggerSelector, matcher))
-      );
+      return;
     }
-    await this.markComboboxCommitTarget(target);
     await this.humanClickLocator(target);
     await this.wait(0.5);
-    return (
-      matcher === undefined || (await this.comboboxCommittedOptionMatches(triggerSelector, matcher))
-    );
   }
 
   // ───────────── humanization internals ─────────────
@@ -9437,16 +8894,9 @@ export function isBareClickableCardTag(tag: string): boolean {
 
 // ───────────── phone-country widget selection ─────────────
 //
-// International checkouts front the phone field with a country dial-code
-// picker. There is no single implementation: react-phone-number-input drives
-// it from an `opacity:0` NATIVE `<select>` (which the inventory walker's
-// visibility filter drops, so the host never gets a ref for it), while
-// react-phone-input-2 / react-international-phone / intl-tel-input render a
-// custom flag trigger + a list of `<li data-country-code>` options, and some
-// storefronts (Casetify) ship a fully bespoke `+NN` <label> trigger. The
-// operator's `type`/`select`/click paths all fail on these (documented in the
-// setPhoneCountry method). These pure helpers hold the country-matching logic
-// so it is unit-tested without a live page; setPhoneCountry drives the DOM.
+// International checkouts may back their phone-country picker with an
+// opacity:0 native <select> that the inventory walker omits. These helpers
+// classify the requested country and match it against those native options.
 
 // A phone-country request classified into the strongest available signal. The
 // operator passes ONE string; we infer whether it's a dial code ("+81" / "81"),
@@ -9461,9 +8911,7 @@ export interface PhoneCountryQuery {
   name?: string;
 }
 
-// One option surfaced by a picker, normalized. Any subset of fields may be
-// present depending on the widget (a bespoke text-only list carries `text`
-// only; a react-phone-input-2 `<li>` carries all three).
+// One native phone-country option normalized for matching.
 export interface PhoneCountryOption {
   // `| undefined` (not just optional) because the page.evaluate reads produce
   // explicit undefined for absent fields, and the repo runs
@@ -9471,17 +8919,6 @@ export interface PhoneCountryOption {
   text?: string | undefined;
   iso2?: string | undefined;
   dialCode?: string | undefined;
-}
-
-// One custom phone-widget library's DOM convention: the flag trigger to click,
-// the option-row selector, and (when present) where each row keeps its ISO2
-// code + "+NN" dial code. Used by setPhoneCountry's custom-widget strategy.
-interface CustomPhoneWidget {
-  name: string;
-  trigger: string;
-  option: string;
-  iso2Attr?: string;
-  dialSel?: string;
 }
 
 // Classify the operator's single country argument. WHY exact-signal buckets:
@@ -9502,8 +8939,7 @@ export function classifyPhoneCountryQuery(raw: string): PhoneCountryQuery {
 
 // Decide whether a picker option satisfies the query. Exact-signal queries
 // (iso2/dialCode) match ONLY against the corresponding structured field (with
-// a dial-code fallback to a "+NN" embedded in the option text, since native
-// <option>s and bespoke lists put the code in their label). A name query is a
+// a dial-code fallback to a "+NN" embedded in native option text). A name query is a
 // case-insensitive substring test against the option's visible text.
 export function phoneCountryOptionMatches(
   query: PhoneCountryQuery,

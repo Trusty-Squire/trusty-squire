@@ -246,12 +246,9 @@ export type ProvisionAction =
   // text = the option to match (e.g. "South Korea").
   | { kind: "select"; target: string; text: string }
   // Set the country on a phone-number field's dial-code picker. No ref/target
-  // — the bot locates the picker relative to the tel input and feature-detects
-  // the widget (react-phone-number-input's opacity:0 native <select> that the
-  // inventory walker drops, react-phone-input-2 / react-international-phone /
-  // intl-tel-input flag lists, and a bespoke "+NN" trigger). Pass a country
-  // name ("Japan") for reliable matching everywhere. A dial code ("+81") or
-  // ISO2 code ("JP") resolves only on widgets whose options expose that signal.
+  // — the bot locates a phone-local native <select>, including
+  // react-phone-number-input's opacity:0 select that inventory drops. Other
+  // widget families are unsupported and throw.
   | { kind: "set_phone_country"; country: string }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }
@@ -2395,11 +2392,9 @@ export async function act(
       break;
     }
     case "set_phone_country": {
-      // No captured element — the bot finds the dial-code picker relative to
-      // the tel input and drives it by feature detection (native hidden
-      // <select> vs. the custom flag-list libraries vs. a bespoke +NN
-      // trigger). resolvedEl stays null; the step records without a captured-
-      // element trace (the country is host-replannable, not a replay recipe).
+      // No captured element — the bot finds the phone-local native <select>.
+      // resolvedEl stays null; the step records without a captured-element
+      // trace (the country is host-replannable, not a replay recipe).
       await browser.setPhoneCountry(action.country);
       await settleAfterStateChange(browser);
       break;

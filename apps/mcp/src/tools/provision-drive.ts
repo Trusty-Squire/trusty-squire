@@ -265,8 +265,7 @@ const actSchema = z.object({
   ]),
   target: z.string().min(1).max(200).optional(),
   text: z.string().max(4096).optional(),
-  // set_phone_country: pass a country name ("Japan") for reliable matching.
-  // Dial codes ("+81") and ISO2 codes ("JP") require widget option support.
+  // set_phone_country supports phone-local native country <select> controls.
   country: z.string().min(1).max(60).optional(),
   // upload: absolute path to a LOCAL file to attach to `target` (the upload
   // button/menu-item, or the file <input>).
@@ -353,12 +352,8 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "select (target + text — pick an option in a native <select> or custom listbox " +
     "by its visible text, e.g. a country/state dropdown that `type` can't drive), " +
     "set_phone_country (country — set the dial-code country on a phone field's " +
-    "picker when `type`/`select`/click can't: pass a country NAME, e.g. " +
-    '"Japan", for reliable matching everywhere. A dial code ("+81") or ISO2 ' +
-    'code ("JP") resolves only on widgets whose options expose that signal. The bot finds the ' +
-    "picker next to the tel input and feature-detects the widget (hidden native " +
-    "<select>, react-phone-input-2 / react-international-phone / intl-tel-input, or " +
-    "a bespoke +NN trigger); no target needed), " +
+    "native <select>, including react-phone-number-input's hidden country select; " +
+    "other phone widget families are not yet supported and throw; no target needed), " +
     "goto (url — domain-scoped), press (key, e.g. Enter), oauth_click (target — " +
     "use for 'Continue with Google/GitHub' so the popup is adopted), " +
     "oauth_settle (return to the product page after the OAuth handshake), " +
