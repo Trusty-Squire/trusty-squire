@@ -1,7 +1,7 @@
 # Widget Corpus Eval
 
 Executable ground truth for widget-driving primitives (`selectOption`, the
-inventory walker, and — once it lands — `setPhoneCountry`), evaluated against
+inventory walker, and `setPhoneCountry`), evaluated against
 **real captured onboarding DOMs** instead of reviewer-vs-fixer hypotheses.
 
 - Eval: `apps/mcp/src/bot/__tests__/widget-corpus-eval.test.ts`
@@ -18,9 +18,11 @@ pnpm -F @trusty-squire/mcp test widget-corpus-eval
 
 - **No corpus on the machine** (CI): the eval logs "corpus absent … 0 records
   scanned" and skips — the suite stays green.
-- `WIDGET_EVAL_MAX_RECORDS=N` caps the per-category replay sample (default
-  12). The census always scans the whole corpus (a raw byte-probe pass, no
-  JSON parsing; ~4.5GB, expect tens of seconds on first/cold run).
+- `WIDGET_EVAL_MAX_RECORDS=N` caps each suite's total replay sample (default
+  12). Invalid or blank-HTML captures are skipped with deterministic backfill
+  and do not consume the cap. The census always scans the whole corpus (a raw
+  byte-probe pass, no JSON parsing; ~4.5GB, expect tens of seconds on
+  first/cold run).
 - `TRUSTY_SQUIRE_CORPUS_DIR=off` disables the eval entirely on a box that has
   the corpus but doesn't want the scan.
 
@@ -35,9 +37,10 @@ they are the coverage claim.
 Captured HTML is replayed via `page.setContent` in real Chromium with
 **JavaScript disabled and all external resource loads aborted** —
 deterministic and offline. Against that replayed DOM it runs the *real*
-`BrowserController.extractInteractiveElements` and
-`BrowserController.selectOption` (page injected directly, same pattern as
-`shadow-dom-topmost.test.ts`), and asserts the properties that are
+`BrowserController.extractInteractiveElements`,
+`BrowserController.selectOption`, and `BrowserController.setPhoneCountry`
+(page injected directly, same pattern as `shadow-dom-topmost.test.ts`), and
+asserts the properties that are
 **static-DOM questions**:
 
 1. **Target detection & locality.** Walked selectors resolve uniquely;
@@ -52,16 +55,20 @@ deterministic and offline. Against that replayed DOM it runs the *real*
    compared against an independently re-derived expectation of the matcher
    contract (case-insensitive substring, first match wins). The
    `data-ts-touched` marker is asserted too.
-3. **Loud-failure contracts.** A selector matching nothing throws; an
-   option-less `<select>` throws; a custom combobox that cannot open (static
-   DOM, JS off) throws `no options found after click` rather than reporting
-   false success.
-4. **Known gaps are pinned as tests** (both found by running this eval, i.e.
-   exactly the ground truth the review loop was missing):
-   - **KNOWN GAP #1** — native-select matcher with *no* matching option
-     silently falls back to the first real option instead of throwing. Flip
-     the pinned test to `rejects.toThrow` when `selectOption` gains loud
-     no-match handling.
+3. **Phone-country native driving and refusal.** Real dial-code-backed native
+   selects are driven through `setPhoneCountry` and their committed value is
+   verified. Real custom-trigger captures exercise the primitive's loud
+   unsupported-widget refusal; dynamic custom-widget commit remains live-smoke
+   territory.
+4. **Loud-failure contracts.** A selector matching nothing throws; an
+   option-less `<select>` throws; a supplied native-select matcher with no
+   match throws without changing the value; a custom combobox that cannot
+   open (static DOM, JS off) throws `no options found after click` rather than
+   reporting false success.
+5. **Fixed and open gaps are executable**:
+   - **FIXED #1** — native-select matchers with no matching option now throw.
+     The corpus test asserts the post-#409 contract and verifies the select
+     value remains unchanged.
    - **KNOWN GAP #2** — the walker pins ambiguous CSS paths with Playwright
      chain syntax (`div > … > select >> nth=1`), but `selectOption`'s native
      path lists options by composing `${selector} option`, which matches
@@ -109,11 +116,10 @@ For a review/no-mistakes crewmate arguing about a widget's DOM shape: capture
 the state once, then point at the census + the failing/passing assertion
 instead of trading hypotheses.
 
-## Wiring `setPhoneCountry` when it lands
+## `setPhoneCountry` coverage boundary
 
-The phone suite (`phone-country signals …`) already classifies the records a
-`setPhoneCountry` eval needs (tel input + country-code trigger; see
-`hasCountryCodeTrigger` / `isDialCodeTriggerText` in `helpers/corpus.ts`) and
-asserts the static prerequisites. When the primitive is exported from
-`browser.ts`, add its target-resolution call to that suite over the same
-sample — the sampling, census, and locality assertions are already in place.
+The native phone suite drives `setPhoneCountry` against real dial-code-shaped
+`<select>` captures and verifies the retained value. The custom-trigger suite
+uses real browserbase-style captures to assert the current unsupported-widget
+error. Opening and committing a dynamic custom phone-country widget still
+requires a live smoke test.

@@ -42,7 +42,12 @@ export function resolveCorpusDir(): string | null {
 const PROBES = {
   nativeSelect: ['"tag": "select"', '"tag":"select"'],
   telInput: ['"type": "tel"', '"type":"tel"'],
-  comboboxRole: ['"role": "combobox"', '"role":"combobox"', '"role": "listbox"', '"role":"listbox"'],
+  comboboxRole: [
+    '"role": "combobox"',
+    '"role":"combobox"',
+    '"role": "listbox"',
+    '"role":"listbox"',
+  ],
 } as const;
 
 export interface RawSignals {
@@ -66,7 +71,8 @@ function countOccurrences(buf: Buffer, needle: string, cap: number): number {
 
 export function probeBuffer(buf: Buffer): RawSignals {
   const selectHits =
-    countOccurrences(buf, PROBES.nativeSelect[0], 2) + countOccurrences(buf, PROBES.nativeSelect[1], 2);
+    countOccurrences(buf, PROBES.nativeSelect[0], 2) +
+    countOccurrences(buf, PROBES.nativeSelect[1], 2);
   return {
     nativeSelect: selectHits >= 1,
     nativeSelectMulti: selectHits >= 2,
@@ -214,6 +220,43 @@ export function sampleEvenly<T>(items: readonly T[], cap: number): T[] {
     if (item !== undefined) out.push(item);
   }
   return out;
+}
+
+export interface ValidSample<T> {
+  records: T[];
+  skippedInvalid: number;
+}
+
+export function sampleValidEvenly<T, U>(
+  items: readonly T[],
+  cap: number,
+  load: (item: T) => U | null,
+): ValidSample<U> {
+  if (cap <= 0 || items.length === 0) return { records: [], skippedInvalid: 0 };
+  const bucketCount = Math.min(cap, items.length);
+  const buckets = Array.from({ length: bucketCount }, (_, i) => ({
+    start: Math.floor((i * items.length) / bucketCount),
+    end: Math.floor(((i + 1) * items.length) / bucketCount),
+  }));
+  const records: U[] = [];
+  let skippedInvalid = 0;
+  for (let offset = 0; records.length < cap; offset += 1) {
+    let drewCandidate = false;
+    for (const bucket of buckets) {
+      const item = items[bucket.start + offset];
+      if (item === undefined || bucket.start + offset >= bucket.end) continue;
+      drewCandidate = true;
+      const loaded = load(item);
+      if (loaded === null) {
+        skippedInvalid += 1;
+        continue;
+      }
+      records.push(loaded);
+      if (records.length === cap) break;
+    }
+    if (!drewCandidate) break;
+  }
+  return { records, skippedInvalid };
 }
 
 export function parsePositiveInt(raw: string | undefined): number | null {
