@@ -3712,8 +3712,9 @@ export class BrowserController {
   // widget backed by a real <select>). Detection is deliberately conservative
   // so it does NOT grab the address "country" select that lives elsewhere on
   // the checkout: a select qualifies only when its class/name/id names it a
-  // PHONE control, or its options look like countries AND it is a direct
-  // sibling of the tel input or lives in an immediately adjacent wrapper.
+  // PHONE control and its options carry country evidence, or its options look
+  // like countries AND it is a direct sibling of the tel input or lives in an
+  // immediately adjacent wrapper.
   // Returns false when no such select exists; throws when one is found but the
   // requested country isn't among its options.
   private async trySetPhoneCountryNativeSelect(
@@ -3762,8 +3763,18 @@ export class BrowserController {
         const dialish = options.filter(
           (o) => /\+\d/.test(o.text) || /^\+?\d{1,4}$/.test(o.value),
         ).length;
+        const explicitDialish = options.filter(
+          (o) => /\+\d/.test(o.text) || /^\+\d{1,4}$/.test(o.value),
+        ).length;
         const countryish = options.length >= 10 && (isoish >= 5 || dialish >= 5);
-        if (phoneNamed || (countryish && telDistance <= 2)) {
+        const countryNamed = /country|nation|iso/.test(hay);
+        const dialCodeNamed = /dial|calling/.test(hay);
+        const phoneCountryish =
+          countryish ||
+          explicitDialish > 0 ||
+          (dialCodeNamed && dialish >= 2) ||
+          (countryNamed && isoish >= 2);
+        if ((phoneNamed && phoneCountryish) || (countryish && telDistance <= 2)) {
           sel.setAttribute("data-ts-phone-cc", String(i));
           out.push({
             marker: i,
@@ -4024,6 +4035,159 @@ export class BrowserController {
       .catch(() => {});
   }
 
+  private async markComboboxPreexistingElements(): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.page.evaluate(() => {
+      const visible = (el: Element): boolean => {
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 2 || rect.height < 2) return false;
+        const style = getComputedStyle(el);
+        return (
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          parseFloat(style.opacity || "1") > 0.01
+        );
+      };
+      const popupSelector =
+        '[role="listbox"],[role="menu"],[role="dialog"],[id*="listbox" i],[id*="dropdown" i],[id*="popover" i],[id*="menu" i],[id*="options" i],[class*="listbox" i],[class*="dropdown" i],[class*="popover" i],[class*="menu" i],[class*="options" i]';
+      const optionSelector =
+        '[role="option"],[role="menuitem"],[role="menuitemradio"],mat-option,.mat-mdc-option,[id^="react-select-"][role*="menu"],[role="listbox"] li';
+      document
+        .querySelectorAll(popupSelector)
+        .forEach((el) => visible(el) && el.setAttribute("data-ts-select-preexisting-popup", "1"));
+      document
+        .querySelectorAll(optionSelector)
+        .forEach((el) => visible(el) && el.setAttribute("data-ts-select-preexisting-option", "1"));
+    });
+  }
+
+  private async refreshComboboxMarkers(triggerSelector: string): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.page
+      .locator(triggerSelector)
+      .first()
+      .evaluate((trigger) => {
+        const visible = (el: Element): boolean => {
+          const rect = el.getBoundingClientRect();
+          if (rect.width < 2 || rect.height < 2) return false;
+          const style = getComputedStyle(el);
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            parseFloat(style.opacity || "1") > 0.01
+          );
+        };
+        document
+          .querySelectorAll("[data-ts-select-popup],[data-ts-select-option-tier]")
+          .forEach((el) => {
+            el.removeAttribute("data-ts-select-popup");
+            el.removeAttribute("data-ts-select-option-tier");
+          });
+        const popupSelector =
+          '[role="listbox"],[role="menu"],[role="dialog"],[id*="listbox" i],[id*="dropdown" i],[id*="popover" i],[id*="menu" i],[id*="options" i],[class*="listbox" i],[class*="dropdown" i],[class*="popover" i],[class*="menu" i],[class*="options" i]';
+        const popups = new Set<Element>();
+        const addPopup = (el: Element | null): void => {
+          if (el !== null && visible(el)) popups.add(el);
+        };
+        for (const attr of ["aria-controls", "aria-owns"]) {
+          for (const id of (trigger.getAttribute(attr) ?? "").split(/\s+/).filter(Boolean)) {
+            addPopup(trigger.ownerDocument.getElementById(id));
+          }
+        }
+        trigger.ownerDocument.querySelectorAll(popupSelector).forEach((el) => {
+          if (!el.hasAttribute("data-ts-select-preexisting-popup")) addPopup(el);
+        });
+        popups.forEach((el) => el.setAttribute("data-ts-select-popup", "1"));
+        const optionSelectors = [
+          '[role="option"]',
+          '[role="menuitem"]',
+          '[role="menuitemradio"]',
+          "mat-option",
+          ".mat-mdc-option",
+          '[id^="react-select-"][role*="menu"]',
+          '[role="listbox"] li',
+        ];
+        optionSelectors.forEach((selector, tier) => {
+          trigger.ownerDocument.querySelectorAll(selector).forEach((el) => {
+            if (!visible(el)) return;
+            const belongsToPopup = Array.from(popups).some(
+              (popup) => popup === el || popup.contains(el),
+            );
+            if (belongsToPopup || !el.hasAttribute("data-ts-select-preexisting-option")) {
+              el.setAttribute("data-ts-select-option-tier", String(tier));
+            }
+          });
+        });
+      });
+  }
+
+  private async clearComboboxMarkers(): Promise<void> {
+    if (!this.page) return;
+    await this.page
+      .evaluate(() => {
+        document
+          .querySelectorAll(
+            "[data-ts-select-preexisting-popup],[data-ts-select-preexisting-option],[data-ts-select-popup],[data-ts-select-option-tier]",
+          )
+          .forEach((el) => {
+            el.removeAttribute("data-ts-select-preexisting-popup");
+            el.removeAttribute("data-ts-select-preexisting-option");
+            el.removeAttribute("data-ts-select-popup");
+            el.removeAttribute("data-ts-select-option-tier");
+          });
+      })
+      .catch(() => {});
+  }
+
+  private async comboboxCommittedOptionMatches(
+    triggerSelector: string,
+    matcher: string,
+  ): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page
+      .locator(triggerSelector)
+      .first()
+      .evaluate((trigger, rawMatcher) => {
+        const normalize = (value: string): string =>
+          value.replace(/\s+/g, " ").trim().toLowerCase();
+        const needle = normalize(rawMatcher);
+        if (needle.length === 0) return false;
+        const committed: string[] = [];
+        const add = (value: string | null | undefined): void => {
+          if (value !== null && value !== undefined && value.length > 0) committed.push(value);
+        };
+        if (!(trigger instanceof HTMLInputElement || trigger instanceof HTMLTextAreaElement)) {
+          add(trigger.textContent);
+        }
+        for (const attr of ["aria-label", "aria-valuetext", "data-value", "title"]) {
+          add(trigger.getAttribute(attr));
+        }
+        const roots = new Set<Element>();
+        for (const attr of ["aria-controls", "aria-owns"]) {
+          for (const id of (trigger.getAttribute(attr) ?? "").split(/\s+/).filter(Boolean)) {
+            const controlled = trigger.ownerDocument.getElementById(id);
+            if (controlled !== null) roots.add(controlled);
+          }
+        }
+        let ancestor: Element | null = trigger;
+        for (let depth = 0; depth < 4 && ancestor !== null; depth += 1) {
+          roots.add(ancestor);
+          ancestor = ancestor.parentElement;
+        }
+        const selectedSelector =
+          '[aria-selected="true"],[aria-checked="true"],[data-state="checked"],[data-selected="true"],[class*="singleValue"],[class*="single-value"],[class*="selectedValue"],[class*="selected-value"]';
+        roots.forEach((root) => {
+          root.querySelectorAll(selectedSelector).forEach((el) => {
+            add(el.textContent);
+            add(el.getAttribute("aria-label"));
+            add(el.getAttribute("data-value"));
+          });
+        });
+        return committed.some((value) => normalize(value).includes(needle));
+      }, matcher)
+      .catch(() => false);
+  }
+
   // F11 (+rc.7 hardening): click a combobox trigger, wait for the
   // listbox to open, click an option.
   //
@@ -4071,71 +4235,80 @@ export class BrowserController {
     // label to its associated input here so downstream tiers (the
     // keyboard fallback in particular) actually see an input target.
     const normalizedSelector = await this.resolveLabelToInput(triggerSelector);
-    await this.humanClick(normalizedSelector);
+    await this.markComboboxPreexistingElements();
+    try {
+      await this.humanClick(normalizedSelector);
+      await this.refreshComboboxMarkers(normalizedSelector);
 
-    const patternSelectors: readonly string[] = [
-      '[role="option"]:visible',
-      '[role="menuitem"]:visible',
-      '[role="menuitemradio"]:visible',
-      "mat-option:visible",
-      ".mat-mdc-option:visible",
-      '[id^="react-select-"][role*="menu"]:visible',
-      '[role="listbox"]:visible li:visible',
-    ];
-    const triedDescriptors: string[] = [];
-    for (const sel of patternSelectors) {
-      triedDescriptors.push(sel);
-      const locator = this.page.locator(sel);
-      try {
-        await locator.first().waitFor({ state: "visible", timeout: 1500 });
-      } catch {
-        continue;
+      const patternSelectors: readonly string[] = [
+        '[role="option"]:visible',
+        '[role="menuitem"]:visible',
+        '[role="menuitemradio"]:visible',
+        "mat-option:visible",
+        ".mat-mdc-option:visible",
+        '[id^="react-select-"][role*="menu"]:visible',
+        '[role="listbox"]:visible li:visible',
+      ];
+      const triedDescriptors: string[] = [];
+      for (let tier = 0; tier < patternSelectors.length; tier += 1) {
+        const descriptor = patternSelectors[tier];
+        if (descriptor === undefined) continue;
+        triedDescriptors.push(descriptor);
+        const locator = this.page.locator(`[data-ts-select-option-tier="${tier}"]`);
+        if ((await locator.count()) === 0) continue;
+        if (await this.pickComboboxOption(locator, optionMatcher, normalizedSelector)) {
+          return;
+        }
       }
-      const count = await locator.count();
-      if (count === 0) continue;
-      if (await this.pickComboboxOption(locator, optionMatcher)) return;
-    }
 
-    // 0.8.2-rc.11 — keyboard-driven react-select fallback. Sentry's
-    // permission-grid combobox (Project--permission, Team--permission,
-    // …) is a react-select 5 instance: clicking the inner <input> only
-    // focuses it; the menu opens on keyboard activity. The standard
-    // pattern is: Alt+Down (or just type a character) to open + filter,
-    // then Enter to commit. Try Alt+Down first so an instance with
-    // visible options but no role="option" still works; then if a
-    // matcher was given, type-to-filter + Enter so a hidden listbox
-    // narrows directly to the right option.
-    if (await this.tryReactSelectKeyboardPick(normalizedSelector, optionMatcher)) {
-      return;
-    }
-    triedDescriptors.push("react-select keyboard (Alt+Down, type-to-filter, Enter)");
-
-    // ARIA tiers all empty. Text-based fallback, only if the planner
-    // told us WHICH option to pick — without a matcher, "first text
-    // on the page" would click unrelated UI.
-    if (optionMatcher !== undefined) {
-      const byText = this.page.getByText(optionMatcher, { exact: false }).first();
-      triedDescriptors.push(`text="${optionMatcher}"`);
-      try {
-        await byText.waitFor({ state: "visible", timeout: 2000 });
-        await this.humanClickLocator(byText);
-        await this.wait(0.5);
+      // 0.8.2-rc.11 — keyboard-driven react-select fallback. Sentry's
+      // permission-grid combobox (Project--permission, Team--permission,
+      // …) is a react-select 5 instance: clicking the inner <input> only
+      // focuses it; the menu opens on keyboard activity. The standard
+      // pattern is: Alt+Down (or just type a character) to open + filter,
+      // then Enter to commit. Try Alt+Down first so an instance with
+      // visible options but no role="option" still works; then if a
+      // matcher was given, type-to-filter + Enter so a hidden listbox
+      // narrows directly to the right option.
+      if (await this.tryReactSelectKeyboardPick(normalizedSelector, optionMatcher)) {
         return;
-      } catch {
-        // not found — fall through to error
       }
-    }
+      triedDescriptors.push("react-select keyboard (Alt+Down, type-to-filter, Enter)");
 
-    throw new Error(
-      `combobox ${triggerSelector}` +
-        (normalizedSelector !== triggerSelector ? ` (normalized to ${normalizedSelector})` : "") +
-        (optionMatcher !== undefined
-          ? `: no option matched ${JSON.stringify(optionMatcher)} after click. `
-          : ": no options found after click. ") +
-        `Tried: ${triedDescriptors.join(", ")}. ` +
-        `The trigger may not have opened a popover, or the popover uses ` +
-        `an option pattern this executor doesn't recognize.`,
-    );
+      if (optionMatcher !== undefined) {
+        await this.refreshComboboxMarkers(normalizedSelector);
+        const popups = this.page.locator('[data-ts-select-popup="1"]');
+        triedDescriptors.push(`scoped text="${optionMatcher}"`);
+        const popupCount = await popups.count();
+        for (let i = 0; i < popupCount; i += 1) {
+          const byText = popups.nth(i).getByText(optionMatcher, { exact: false }).first();
+          if ((await byText.count()) === 0) continue;
+          try {
+            await byText.waitFor({ state: "visible", timeout: 2000 });
+            await this.humanClickLocator(byText);
+            await this.wait(0.5);
+            if (await this.comboboxCommittedOptionMatches(normalizedSelector, optionMatcher)) {
+              return;
+            }
+          } catch {
+            continue;
+          }
+        }
+      }
+
+      throw new Error(
+        `combobox ${triggerSelector}` +
+          (normalizedSelector !== triggerSelector ? ` (normalized to ${normalizedSelector})` : "") +
+          (optionMatcher !== undefined
+            ? `: no option matched ${JSON.stringify(optionMatcher)} after click. `
+            : ": no options found after click. ") +
+          `Tried: ${triedDescriptors.join(", ")}. ` +
+          `The trigger may not have opened a popover, or the popover uses ` +
+          `an option pattern this executor doesn't recognize.`,
+      );
+    } finally {
+      await this.clearComboboxMarkers();
+    }
   }
 
   // 0.8.2-rc.11 — resolve a `<label for="X">` selector to `#X` so the
@@ -4258,6 +4431,31 @@ export class BrowserController {
         return false;
       }
       await this.wait(0.35);
+      await this.refreshComboboxMarkers(triggerSelector);
+      const needle = optionMatcher.toLowerCase();
+      const activeMatches = await triggerLocator
+        .first()
+        .evaluate((node, matcher) => {
+          const activeId = node.getAttribute("aria-activedescendant");
+          if (activeId === null || activeId.length === 0) return false;
+          const active = node.ownerDocument.getElementById(activeId);
+          return active?.textContent?.toLowerCase().includes(matcher) === true;
+        }, needle)
+        .catch(() => false);
+      if (!activeMatches) {
+        const matchingOptions = this.page
+          .locator("[data-ts-select-option-tier]")
+          .filter({ hasText: optionMatcher });
+        if ((await matchingOptions.count()) === 0) {
+          await this.page.keyboard.press("Escape").catch(() => {});
+          await triggerLocator
+            .first()
+            .fill(before.value)
+            .catch(() => {});
+          return false;
+        }
+        return await this.pickComboboxOption(matchingOptions, optionMatcher, triggerSelector);
+      }
     }
     try {
       await this.page.keyboard.press("Enter");
@@ -4265,6 +4463,10 @@ export class BrowserController {
       return false;
     }
     await this.wait(0.5);
+
+    if (optionMatcher !== undefined) {
+      return await this.comboboxCommittedOptionMatches(triggerSelector, optionMatcher);
+    }
 
     const after = await triggerLocator
       .first()
@@ -4287,7 +4489,11 @@ export class BrowserController {
   // F11: pick an option from a Playwright Locator already-narrowed to
   // candidates. Matcher → filter by hasText (case-insensitive by
   // default in Playwright). No matcher → first.
-  private async pickComboboxOption(options: Locator, matcher?: string): Promise<boolean> {
+  private async pickComboboxOption(
+    options: Locator,
+    matcher: string | undefined,
+    triggerSelector: string,
+  ): Promise<boolean> {
     let target = options.first();
     if (matcher !== undefined) {
       const filtered = options.filter({ hasText: matcher });
@@ -4324,11 +4530,16 @@ export class BrowserController {
         await this.page?.keyboard.press("Enter").catch(() => {});
       });
       await this.wait(0.5);
-      return true;
+      return (
+        matcher === undefined ||
+        (await this.comboboxCommittedOptionMatches(triggerSelector, matcher))
+      );
     }
     await this.humanClickLocator(target);
     await this.wait(0.5);
-    return true;
+    return (
+      matcher === undefined || (await this.comboboxCommittedOptionMatches(triggerSelector, matcher))
+    );
   }
 
   // ───────────── humanization internals ─────────────

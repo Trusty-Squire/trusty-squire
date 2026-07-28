@@ -53,7 +53,9 @@ describe("phoneCountryOptionMatches", () => {
     expect(phoneCountryOptionMatches({ dialCode: "81" }, { dialCode: "+1" })).toBe(false);
   });
   it("falls back to a +NN embedded in the option text for a dial-code query", () => {
-    expect(phoneCountryOptionMatches({ dialCode: "81" }, { text: "Japan (日本) (+81)" })).toBe(true);
+    expect(phoneCountryOptionMatches({ dialCode: "81" }, { text: "Japan (日本) (+81)" })).toBe(
+      true,
+    );
     expect(phoneCountryOptionMatches({ dialCode: "81" }, { text: "United States (+1)" })).toBe(
       false,
     );
@@ -181,6 +183,39 @@ const ADDRESS_PLUS_CUSTOM_PHONE_FIXTURE = dataUrl(`
     );
   </script>`);
 
+const PHONE_TYPE_PLUS_CUSTOM_PHONE_FIXTURE = dataUrl(`
+  <form>
+    <select name="phone_type" id="phone-type">
+      <option value="1">Home</option>
+      <option value="2">Mobile</option>
+    </select>
+    <div class="react-tel-input">
+      <input type="tel" class="form-control">
+      <div class="flag-dropdown">
+        <div class="selected-flag" tabindex="0" style="width:38px;height:26px;display:inline-block">flag</div>
+        <ul class="country-list" style="display:none;margin:0">
+          ${ISO_ROWS.map(
+            (r) =>
+              `<li class="country" data-country-code="${r.iso2.toLowerCase()}">` +
+              `<span class="country-name">${r.name}</span>` +
+              `<span class="dial-code">${r.dial}</span></li>`,
+          ).join("")}
+        </ul>
+      </div>
+    </div>
+  </form>
+  <script>
+    const flag = document.querySelector('.selected-flag');
+    const list = document.querySelector('.country-list');
+    flag.addEventListener('click', () => { list.style.display = 'block'; });
+    list.querySelectorAll('li.country').forEach((li) =>
+      li.addEventListener('click', () => {
+        window.__picked = li.getAttribute('data-country-code');
+        list.style.display = 'none';
+      }),
+    );
+  </script>`);
+
 // react-phone-input-2: a .selected-flag trigger + a .country-list of
 // li.country[data-country-code] each with a .dial-code span.
 const RPI2_FIXTURE = dataUrl(`
@@ -278,7 +313,8 @@ const BESPOKE_FIXTURE = dataUrl(`
     </div>
     <div id="cc-list" style="display:none">
       ${ISO_ROWS.map(
-        (r) => `<div class="cc-option" data-x="${r.iso2.toLowerCase()}">${r.name} (${r.dial})</div>`,
+        (r) =>
+          `<div class="cc-option" data-x="${r.iso2.toLowerCase()}">${r.name} (${r.dial})</div>`,
       ).join("")}
     </div>
   </div>
@@ -305,9 +341,7 @@ async function pageFor(url: string): Promise<{ ctrl: BrowserController; page: Pa
 }
 
 async function picked(page: Page): Promise<string | undefined> {
-  return await page.evaluate(
-    () => (window as unknown as { __picked?: string }).__picked,
-  );
+  return await page.evaluate(() => (window as unknown as { __picked?: string }).__picked);
 }
 
 describe("setPhoneCountry — real Chromium widget fixtures", () => {
@@ -365,6 +399,17 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     try {
       await ctrl.setPhoneCountry("Japan");
       expect(await page.locator("#addr-country").inputValue()).toBe("US");
+      expect(await picked(page)).toBe("jp");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("ignores a phone type select and falls through to the country picker", async () => {
+    const { ctrl, page } = await pageFor(PHONE_TYPE_PLUS_CUSTOM_PHONE_FIXTURE);
+    try {
+      await ctrl.setPhoneCountry("Japan");
+      expect(await page.locator("#phone-type").inputValue()).toBe("1");
       expect(await picked(page)).toBe("jp");
     } finally {
       await page.close();
@@ -435,16 +480,16 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     const { ctrl, page } = await pageFor(RPI2_FIXTURE);
     try {
       // Antarctica has no row — the picker opens but nothing matches.
-      await expect(ctrl.setPhoneCountry("Antarctica")).rejects.toThrow(
-        /no option matched/i,
-      );
+      await expect(ctrl.setPhoneCountry("Antarctica")).rejects.toThrow(/no option matched/i);
     } finally {
       await page.close();
     }
   }, 30000);
 
   it("fails loudly when no phone-country picker exists on the page", async () => {
-    const { ctrl, page } = await pageFor(dataUrl('<input type="text" placeholder="just a text field">'));
+    const { ctrl, page } = await pageFor(
+      dataUrl('<input type="text" placeholder="just a text field">'),
+    );
     try {
       await expect(ctrl.setPhoneCountry("Japan")).rejects.toThrow(
         /no phone-country picker matched/i,
@@ -475,9 +520,7 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
         </select>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(
-        /no option matched/i,
-      );
+      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(/no option matched/i);
       expect(await page.locator("#country").inputValue()).toBe("");
     } finally {
       await page.close();
@@ -487,6 +530,7 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
   it("does not click the first custom option when text matches nothing", async () => {
     const { ctrl, page } = await pageFor(
       dataUrl(`
+        <button id="unrelated" type="button">Atlantis</button>
         <button id="country" role="combobox" type="button">Choose a country</button>
         <ul id="options" role="listbox" style="display:none">
           <li role="option" data-value="JP">Japan</li>
@@ -501,13 +545,114 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
               window.__picked = option.getAttribute('data-value');
             });
           });
+          document.getElementById('unrelated').addEventListener('click', () => {
+            window.__wrong = true;
+          });
         </script>`),
     );
     try {
-      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(
-        /no option matched/i,
-      );
+      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(/no option matched/i);
       expect(await picked(page)).toBeUndefined();
+      expect(
+        await page.evaluate(() => (window as unknown as { __wrong?: boolean }).__wrong),
+      ).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("does not treat keyboard filtering changes as a committed selection", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <div class="fake-select">
+          <input id="country" role="combobox" aria-expanded="false">
+          <div id="status"></div>
+        </div>
+        <script>
+          const input = document.getElementById('country');
+          const status = document.getElementById('status');
+          input.addEventListener('keydown', (event) => {
+            if (event.altKey && event.key === 'ArrowDown') {
+              input.setAttribute('aria-expanded', 'true');
+              status.textContent = 'No options';
+            }
+          });
+          input.addEventListener('input', () => {
+            status.textContent = 'No options';
+          });
+        </script>`),
+    );
+    try {
+      await expect(ctrl.selectOption("#country", "Atlantis")).rejects.toThrow(/no option matched/i);
+      expect(await picked(page)).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("verifies a committed custom option before returning", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <button id="country" role="combobox" aria-expanded="false" type="button">Choose a country</button>
+        <ul id="options" role="listbox" style="display:none">
+          <li role="option" data-value="JP">Japan</li>
+          <li role="option" data-value="KR">South Korea</li>
+        </ul>
+        <script>
+          const trigger = document.getElementById('country');
+          const options = document.getElementById('options');
+          trigger.addEventListener('click', () => {
+            trigger.setAttribute('aria-expanded', 'true');
+            options.style.display = 'block';
+          });
+          options.querySelectorAll('[role="option"]').forEach((option) => {
+            option.addEventListener('click', () => {
+              option.setAttribute('aria-selected', 'true');
+              trigger.textContent = option.textContent;
+              trigger.setAttribute('aria-expanded', 'false');
+              options.style.display = 'none';
+              window.__picked = option.getAttribute('data-value');
+            });
+          });
+        </script>`),
+    );
+    try {
+      await ctrl.selectOption("#country", "Japan");
+      expect(await picked(page)).toBe("JP");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("uses only the opened popup for text-only custom options", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <span>South Korea</span>
+        <button id="country" role="combobox" aria-expanded="false" type="button">Choose a country</button>
+        <div id="country-options" class="dropdown-options" style="display:none">
+          <div class="plain-row" data-value="JP">Japan</div>
+          <div class="plain-row" data-value="KR">South Korea</div>
+        </div>
+        <script>
+          const trigger = document.getElementById('country');
+          const options = document.getElementById('country-options');
+          trigger.addEventListener('click', () => {
+            trigger.setAttribute('aria-expanded', 'true');
+            options.style.display = 'block';
+          });
+          options.querySelectorAll('.plain-row').forEach((option) => {
+            option.addEventListener('click', () => {
+              trigger.textContent = option.textContent;
+              trigger.setAttribute('aria-expanded', 'false');
+              options.style.display = 'none';
+              window.__picked = option.getAttribute('data-value');
+            });
+          });
+        </script>`),
+    );
+    try {
+      await ctrl.selectOption("#country", "South Korea");
+      expect(await picked(page)).toBe("KR");
     } finally {
       await page.close();
     }
