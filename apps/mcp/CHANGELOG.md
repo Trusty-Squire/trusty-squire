@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.5-rc.1 (2026-07-28)
+
+- _summarize the changes_
+
 ## 1.0.49 (2026-07-21)
 
 - **Security: fence the operator browser off Squire's own control plane.** The
