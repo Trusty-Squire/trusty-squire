@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import type { VaultAuditEventInput } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 import type {
   E2ECredentialCardMetadata,
@@ -6,6 +7,7 @@ import type {
   E2ECredentialStore,
   E2ECredentialSummary,
 } from "./in-memory-e2e-credential-store.js";
+import { PrismaVaultAuditStore } from "./prisma-vault-audit-store.js";
 
 export class PrismaE2ECredentialStore implements E2ECredentialStore {
   constructor(private readonly prisma: ApiPrismaClient) {}
@@ -28,6 +30,31 @@ export class PrismaE2ECredentialStore implements E2ECredentialStore {
       select: { id: true },
     });
     return row.id;
+  }
+
+  async createWithAudit(
+    accountId: string,
+    label: string,
+    blob: string,
+    metadata: E2ECredentialCardMetadata,
+    eventForId: (id: string) => VaultAuditEventInput,
+  ): Promise<string> {
+    const id = ulid();
+    await this.prisma.$transaction(async (tx) => {
+      await tx.e2ECredential.create({
+        data: {
+          id,
+          account_id: accountId,
+          label,
+          blob,
+          brand: metadata.brand,
+          last4: metadata.last4,
+        },
+        select: { id: true },
+      });
+      await new PrismaVaultAuditStore(tx).record(eventForId(id));
+    });
+    return id;
   }
 
   async listByAccount(accountId: string): Promise<E2ECredentialSummary[]> {
@@ -93,5 +120,20 @@ export class PrismaE2ECredentialStore implements E2ECredentialStore {
       where: { id, account_id: accountId },
     });
     return result.count > 0;
+  }
+
+  async deleteForAccountWithAudit(
+    id: string,
+    accountId: string,
+    event: Parameters<NonNullable<E2ECredentialStore["deleteForAccountWithAudit"]>>[2],
+  ): Promise<boolean> {
+    return this.prisma.$transaction(async (tx) => {
+      const result = await tx.e2ECredential.deleteMany({
+        where: { id, account_id: accountId },
+      });
+      if (result.count === 0) return false;
+      await new PrismaVaultAuditStore(tx).record(event);
+      return true;
+    });
   }
 }

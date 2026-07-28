@@ -6,12 +6,14 @@
 // carries the sealed blob + display metadata and NO cvv/pan field for any
 // caller — the server cannot read those out of the E2E blob by design.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FastifyInstance } from "fastify";
+import { InMemoryVaultAuditStore, VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import { issueAgentSession } from "../auth/agent.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
+import { NotifyingVaultAuditStore, type TelegramSend } from "../services/vault-notify.js";
 
 const SESSION_SECRET = "synthetic-card-audit-test-secret";
 
@@ -142,6 +144,50 @@ describe("card / payment / grant events on the vault audit trail", () => {
     expect(String(payment!.reference)).toMatch(/^pay:\/\//);
   });
 
+  it("keeps card and payment mutations successful when audit writes fail", async () => {
+    deps.vaultAuditStore.record = async () => {
+      throw new Error("synthetic audit outage");
+    };
+
+    const create = await server.inject({
+      method: "POST",
+      url: "/v1/vault/e2e",
+      headers: { cookie: webCookie },
+      payload: {
+        label: "Offline audit card",
+        blob: "synthetic-sealed",
+        brand: "Visa",
+        last4: "4242",
+      },
+    });
+    expect(create.statusCode).toBe(201);
+    const { id } = create.json() as { id: string };
+    expect(await deps.e2eCredentialStore.getByIdForAccount(id, accountId)).not.toBeNull();
+
+    const payment = await server.inject({
+      method: "POST",
+      url: "/v1/vault/payments/audit",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {
+        merchant: "Synthetic Books",
+        amountCents: 1234,
+        currency: "USD",
+        last4: "4242",
+        status: "approved",
+      },
+    });
+    expect(payment.statusCode).toBe(201);
+    expect(await deps.paymentAuditStore.listByAccount(accountId)).toHaveLength(1);
+
+    const remove = await server.inject({
+      method: "DELETE",
+      url: `/v1/vault/e2e/${id}`,
+      headers: { cookie: webCookie },
+    });
+    expect(remove.statusCode).toBe(204);
+    expect(await deps.e2eCredentialStore.getByIdForAccount(id, accountId)).toBeNull();
+  });
+
   it("records grant_minted and grant_revoked around an egress grant's life", async () => {
     const cred = await server.inject({
       method: "POST",
@@ -182,6 +228,73 @@ describe("card / payment / grant events on the vault audit trail", () => {
     // The grant's bearer token never lands on the audit trail.
     const token = (mint.json() as { token: string }).token;
     expect(JSON.stringify(events)).not.toContain(token);
+  });
+
+  it("emits one subject-rich revoke event and notification across retries", async () => {
+    const audit = new InMemoryVaultAuditStore();
+    const send = vi.fn<Parameters<TelegramSend>, ReturnType<TelegramSend>>(async () => true);
+    await deps.accountStore.setTelegramChatId(accountId, "chat-42");
+    deps.vaultAuditStore = new NotifyingVaultAuditStore(
+      audit,
+      deps.accountStore,
+      () => new Date("2026-07-23T12:00:00.000Z"),
+      send,
+    );
+
+    const cred = await server.inject({
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
+      headers: { cookie: webCookie },
+      payload: {
+        service: "openrouter",
+        label: "production",
+        value: "sk-synthetic",
+        type: "api_key",
+      },
+    });
+    const reference = (cred.json() as { reference: string }).reference;
+    const mint = await server.inject({
+      method: "POST",
+      url: "/v1/egress/grants",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { reference },
+    });
+    const grantId = (mint.json() as { grant_id: string }).grant_id;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const revoke = await server.inject({
+        method: "DELETE",
+        url: `/v1/egress/grants/${grantId}`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      });
+      expect(revoke.statusCode).toBe(200);
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const events = await audit.list(accountId);
+    expect(events.filter((event) => event.type === VAULT_AUDIT_TYPES.grantRevoked)).toHaveLength(1);
+    expect(
+      events.find((event) => event.type === VAULT_AUDIT_TYPES.grantMinted)?.payload,
+    ).toMatchObject({
+      reference,
+      service: "openrouter",
+      label: "production",
+      grant_id: grantId,
+    });
+    expect(
+      events.find((event) => event.type === VAULT_AUDIT_TYPES.grantRevoked)?.payload,
+    ).toMatchObject({
+      reference,
+      service: "openrouter",
+      label: "production",
+      grant_id: grantId,
+    });
+    const revokeMessages = send.mock.calls
+      .map(([, message]) => message)
+      .filter((message) => message.includes("Egress grant revoked"));
+    expect(revokeMessages).toHaveLength(1);
+    expect(revokeMessages[0]).toContain("openrouter (production)");
+    expect(revokeMessages[0]).toContain(grantId);
   });
 
   it("card detail response carries metadata + sealed blob and never a cvv/pan field", async () => {

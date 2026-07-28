@@ -10,6 +10,7 @@
 // works (the "OpenRouter-only" framing was wrong — see docs/ARCHITECTURE.md).
 
 import { randomBytes, createHash, timingSafeEqual } from "node:crypto";
+import type { VaultAuditEventInput } from "@trusty-squire/vault";
 
 // How the upstream provider expects the secret. Default bearer covers most LLM
 // APIs; header/query cover the rest (ElevenLabs `xi-api-key`, Anthropic
@@ -150,9 +151,16 @@ export function mintGrant(input: {
 
 export interface EgressGrantStore {
   create(grant: EgressGrant): Promise<void>;
+  createWithAudit?(grant: EgressGrant, event: VaultAuditEventInput): Promise<void>;
   getById(id: string): Promise<EgressGrant | null>;
   listByAccount(accountId: string): Promise<EgressGrant[]>;
   revoke(id: string, accountId: string, at: string): Promise<boolean>;
+  revokeWithAudit?(
+    id: string,
+    accountId: string,
+    at: string,
+    event: VaultAuditEventInput,
+  ): Promise<boolean>;
 }
 
 export class EgressGrantStoreUnavailableError extends Error {
@@ -177,7 +185,7 @@ export class InMemoryEgressGrantStore implements EgressGrantStore {
   async revoke(id: string, accountId: string, at: string): Promise<boolean> {
     const g = this.grants.get(id);
     if (g === undefined || g.account_id !== accountId) return false;
-    if (g.revoked_at !== null) return true; // idempotent
+    if (g.revoked_at !== null) return false;
     this.grants.set(id, { ...g, revoked_at: at });
     return true;
   }

@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import type { VaultAuditEventInput } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 import type {
   PaymentAuditInput,
@@ -6,6 +7,7 @@ import type {
   PaymentAuditRecord,
   PaymentAuditStore,
 } from "./in-memory-payment-audit-store.js";
+import { PrismaVaultAuditStore } from "./prisma-vault-audit-store.js";
 
 export class PrismaPaymentAuditStore implements PaymentAuditStore {
   constructor(private readonly prisma: ApiPrismaClient) {}
@@ -25,6 +27,31 @@ export class PrismaPaymentAuditStore implements PaymentAuditStore {
       select: { id: true },
     });
     return row.id;
+  }
+
+  async createWithVaultAudit(
+    accountId: string,
+    input: PaymentAuditInput,
+    eventForId: (id: string) => VaultAuditEventInput,
+  ): Promise<string> {
+    const id = ulid();
+    await this.prisma.$transaction(async (tx) => {
+      await tx.paymentAuditEvent.create({
+        data: {
+          id,
+          account_id: accountId,
+          merchant: input.merchant,
+          amount_cents: input.amountCents,
+          currency: input.currency,
+          last4: input.last4,
+          status: input.status,
+          mandate_id: input.mandateId ?? null,
+        },
+        select: { id: true },
+      });
+      await new PrismaVaultAuditStore(tx).record(eventForId(id));
+    });
+    return id;
   }
 
   async listByAccount(

@@ -10,11 +10,13 @@
 // conversion boundary between the two.
 
 import type { ApiPrismaClient } from "./api-prisma-client.js";
+import type { VaultAuditEventInput } from "@trusty-squire/vault";
 import {
   EgressGrantStoreUnavailableError,
   type EgressGrant,
   type EgressGrantStore,
 } from "./egress-grant.js";
+import { PrismaVaultAuditStore } from "./prisma-vault-audit-store.js";
 
 interface EgressGrantRow {
   id: string;
@@ -69,6 +71,33 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
         revoked_at: grant.revoked_at === null ? null : new Date(grant.revoked_at),
       },
     });
+    this.cacheGrant(grant);
+  }
+
+  async createWithAudit(grant: EgressGrant, event: VaultAuditEventInput): Promise<void> {
+    await this.withConnectionRetry(
+      () =>
+        this.prisma.$transaction(async (tx) => {
+          await tx.egressGrant.create({
+            data: {
+              id: grant.id,
+              account_id: grant.account_id,
+              credential_ref: grant.credential_ref,
+              token_hash: grant.token_hash,
+              rate_limit_per_hour: grant.rate_limit_per_hour,
+              spend_cap_usd: grant.spend_cap_usd,
+              created_at: new Date(grant.created_at),
+              revoked_at: grant.revoked_at === null ? null : new Date(grant.revoked_at),
+            },
+          });
+          await new PrismaVaultAuditStore(tx).record(event);
+        }),
+      `create egress grant ${grant.id} with audit`,
+    );
+    this.cacheGrant(grant);
+  }
+
+  private cacheGrant(grant: EgressGrant): void {
     this.cache.set(grant.id, {
       grant,
       expiresAt: this.now() + (grant.revoked_at === null ? this.liveTtlMs : this.revokedTtlMs),
@@ -98,25 +127,40 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
     return rows.map(toGrant);
   }
 
-  // Account-scoped + idempotent: revoking an already-revoked grant returns true
-  // without re-stamping, and a grant owned by another account is a miss (false).
   async revoke(id: string, accountId: string, at: string): Promise<boolean> {
-    const row = await this.withConnectionRetry(
-      () => this.prisma.egressGrant.findUnique({ where: { id } }),
-      `revoke lookup egress grant ${id}`,
-    );
-    if (row === null || row.account_id !== accountId) return false;
-    if (row.revoked_at !== null) return true;
-    await this.withConnectionRetry(
+    const result = await this.withConnectionRetry(
       () =>
-        this.prisma.egressGrant.update({
-          where: { id },
+        this.prisma.egressGrant.updateMany({
+          where: { id, account_id: accountId, revoked_at: null },
           data: { revoked_at: new Date(at) },
         }),
       `revoke egress grant ${id}`,
     );
     this.cache.delete(id);
-    return true;
+    return result.count > 0;
+  }
+
+  async revokeWithAudit(
+    id: string,
+    accountId: string,
+    at: string,
+    event: VaultAuditEventInput,
+  ): Promise<boolean> {
+    const changed = await this.withConnectionRetry(
+      () =>
+        this.prisma.$transaction(async (tx) => {
+          const result = await tx.egressGrant.updateMany({
+            where: { id, account_id: accountId, revoked_at: null },
+            data: { revoked_at: new Date(at) },
+          });
+          if (result.count === 0) return false;
+          await new PrismaVaultAuditStore(tx).record(event);
+          return true;
+        }),
+      `revoke egress grant ${id} with audit`,
+    );
+    this.cache.delete(id);
+    return changed;
   }
 
   private async withConnectionRetry<T>(op: () => Promise<T>, label: string): Promise<T> {

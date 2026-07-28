@@ -28,10 +28,22 @@ function p1017(): Error & { code: string } {
 function fakePrisma(): {
   prisma: ApiPrismaClient & { $disconnect: () => Promise<void> };
   rows: Map<string, Row>;
-  calls: { findUnique: number; disconnect: number; failFindUnique: number };
+  calls: {
+    findUnique: number;
+    disconnect: number;
+    failFindUnique: number;
+    failAudit: number;
+    auditCreates: number;
+  };
 } {
   const rows = new Map<string, Row>();
-  const calls = { findUnique: 0, disconnect: 0, failFindUnique: 0 };
+  const calls = {
+    findUnique: 0,
+    disconnect: 0,
+    failFindUnique: 0,
+    failAudit: 0,
+    auditCreates: 0,
+  };
   const egressGrant = {
     async create(args: { data: Record<string, unknown> }) {
       const d = args.data;
@@ -66,12 +78,44 @@ function fakePrisma(): {
       rows.set(r.id, next);
       return next;
     },
+    async updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }) {
+      const row = rows.get(args.where.id as string);
+      if (
+        row === undefined ||
+        row.account_id !== args.where.account_id ||
+        row.revoked_at !== args.where.revoked_at
+      ) {
+        return { count: 0 };
+      }
+      rows.set(row.id, { ...row, ...(args.data as Partial<Row>) });
+      return { count: 1 };
+    },
     async deleteMany() {
       return { count: 0 };
     },
   };
   const prisma = {
     egressGrant,
+    vaultAuditEvent: {
+      async create() {
+        if (calls.failAudit > 0) {
+          calls.failAudit -= 1;
+          throw new Error("synthetic audit outage");
+        }
+        calls.auditCreates += 1;
+        return {};
+      },
+    },
+    async $transaction<T>(fn: (tx: ApiPrismaClient) => Promise<T>): Promise<T> {
+      const snapshot = new Map([...rows].map(([id, row]) => [id, { ...row }] as const));
+      try {
+        return await fn(prisma as unknown as ApiPrismaClient);
+      } catch (error) {
+        rows.clear();
+        for (const [id, row] of snapshot) rows.set(id, row);
+        throw error;
+      }
+    },
     async $disconnect() {
       calls.disconnect += 1;
     },
@@ -109,6 +153,26 @@ describe("PrismaEgressGrantStore", () => {
     expect(got!.created_at).toBe("2026-06-13T12:00:00.000Z");
     expect(got!.revoked_at).toBeNull();
     expect(got!.credential_ref).toBe(grant.credential_ref);
+  });
+
+  it("createWithAudit() rolls back the grant when the audit insert fails", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaEgressGrantStore(fake.prisma);
+    const grant = makeGrant();
+    fake.calls.failAudit = 1;
+
+    await expect(
+      store.createWithAudit(grant, {
+        account_id: ACCOUNT,
+        type: "vault.grant_minted",
+        payload: {
+          reference: grant.credential_ref,
+          requester: "agent",
+          grant_id: grant.id,
+        },
+      }),
+    ).rejects.toThrow("synthetic audit outage");
+    expect(fake.rows.has(grant.id)).toBe(false);
   });
 
   it("getById() returns null for an unknown id", async () => {
@@ -172,7 +236,7 @@ describe("PrismaEgressGrantStore", () => {
     expect(mine.every((g) => g.account_id === ACCOUNT)).toBe(true);
   });
 
-  it("revoke() stamps revoked_at and is idempotent + account-scoped", async () => {
+  it("revoke() reports only the first account-scoped state transition", async () => {
     const fake = fakePrisma();
     const store = new PrismaEgressGrantStore(fake.prisma);
     const grant = makeGrant();
@@ -186,9 +250,38 @@ describe("PrismaEgressGrantStore", () => {
     expect(await store.revoke(grant.id, ACCOUNT, "2026-06-13T13:00:00.000Z")).toBe(true);
     expect((await store.getById(grant.id))!.revoked_at).toBe("2026-06-13T13:00:00.000Z");
 
-    // Idempotent: second revoke returns true without re-stamping.
-    expect(await store.revoke(grant.id, ACCOUNT, "2026-06-13T14:00:00.000Z")).toBe(true);
+    expect(await store.revoke(grant.id, ACCOUNT, "2026-06-13T14:00:00.000Z")).toBe(false);
     expect((await store.getById(grant.id))!.revoked_at).toBe("2026-06-13T13:00:00.000Z");
+  });
+
+  it("revokeWithAudit() rolls back on audit failure and records one transition", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaEgressGrantStore(fake.prisma);
+    const grant = makeGrant();
+    const event = {
+      account_id: ACCOUNT,
+      type: "vault.grant_revoked",
+      payload: {
+        reference: grant.credential_ref,
+        requester: "agent",
+        grant_id: grant.id,
+      },
+    } as const;
+    await store.create(grant);
+    fake.calls.failAudit = 1;
+
+    await expect(
+      store.revokeWithAudit(grant.id, ACCOUNT, "2026-06-13T13:00:00.000Z", event),
+    ).rejects.toThrow("synthetic audit outage");
+    expect(fake.rows.get(grant.id)?.revoked_at).toBeNull();
+
+    expect(await store.revokeWithAudit(grant.id, ACCOUNT, "2026-06-13T13:00:00.000Z", event)).toBe(
+      true,
+    );
+    expect(await store.revokeWithAudit(grant.id, ACCOUNT, "2026-06-13T14:00:00.000Z", event)).toBe(
+      false,
+    );
+    expect(fake.calls.auditCreates).toBe(1);
   });
 
   it("revoke() of an unknown grant is a miss", async () => {

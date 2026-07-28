@@ -2,6 +2,10 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
+import {
+  notifyVaultAuditAfterCommit,
+  recordVaultAuditAfterPersist,
+} from "../services/vault-notify.js";
 
 const e2eBody = z.object({
   label: z.string().min(1).max(256),
@@ -64,26 +68,38 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
       reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
       return;
     }
-    const id = await opts.deps.e2eCredentialStore.create(
-      auth.account_id,
-      parsed.data.label,
-      parsed.data.blob,
-      { brand: parsed.data.brand ?? null, last4: parsed.data.last4 ?? null },
-    );
-    // Card lifecycle lands on the same audit trail as credentials (and
-    // through it, the Telegram notifier). Display metadata only — the
-    // sealed blob never touches an audit payload.
-    await opts.deps.vaultAuditStore.record({
-      account_id: auth.account_id,
-      type: VAULT_AUDIT_TYPES.cardStored,
-      payload: {
-        reference: `card://${id}`,
-        requester: "user",
-        label: parsed.data.label,
-        ...(parsed.data.brand !== undefined ? { brand: parsed.data.brand } : {}),
-        ...(parsed.data.last4 !== undefined ? { last4: parsed.data.last4 } : {}),
-      },
-    });
+    const metadata = { brand: parsed.data.brand ?? null, last4: parsed.data.last4 ?? null };
+    const eventForId = (id: string) =>
+      ({
+        account_id: auth.account_id,
+        type: VAULT_AUDIT_TYPES.cardStored,
+        payload: {
+          reference: `card://${id}`,
+          requester: "user",
+          label: parsed.data.label,
+          ...(parsed.data.brand !== undefined ? { brand: parsed.data.brand } : {}),
+          ...(parsed.data.last4 !== undefined ? { last4: parsed.data.last4 } : {}),
+        },
+      }) as const;
+    let id: string;
+    if (opts.deps.e2eCredentialStore.createWithAudit !== undefined) {
+      id = await opts.deps.e2eCredentialStore.createWithAudit(
+        auth.account_id,
+        parsed.data.label,
+        parsed.data.blob,
+        metadata,
+        eventForId,
+      );
+      notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, eventForId(id));
+    } else {
+      id = await opts.deps.e2eCredentialStore.create(
+        auth.account_id,
+        parsed.data.label,
+        parsed.data.blob,
+        metadata,
+      );
+      await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, eventForId(id), req.log);
+    }
     return reply.code(201).send({ id });
   });
 
@@ -163,15 +179,7 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         req.params.id,
         auth.account_id,
       );
-      const deleted = await opts.deps.e2eCredentialStore.deleteForAccount(
-        req.params.id,
-        auth.account_id,
-      );
-      if (!deleted) {
-        reply.code(404).send({ error: "credential_not_found" });
-        return;
-      }
-      await opts.deps.vaultAuditStore.record({
+      const auditEvent = {
         account_id: auth.account_id,
         type: VAULT_AUDIT_TYPES.cardDeleted,
         payload: {
@@ -181,7 +189,24 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
           ...(record?.brand != null ? { brand: record.brand } : {}),
           ...(record?.last4 != null ? { last4: record.last4 } : {}),
         },
-      });
+      } as const;
+      const usesAtomicAudit = opts.deps.e2eCredentialStore.deleteForAccountWithAudit !== undefined;
+      const deleted = usesAtomicAudit
+        ? await opts.deps.e2eCredentialStore.deleteForAccountWithAudit!(
+            req.params.id,
+            auth.account_id,
+            auditEvent,
+          )
+        : await opts.deps.e2eCredentialStore.deleteForAccount(req.params.id, auth.account_id);
+      if (!deleted) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      if (usesAtomicAudit) {
+        notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, auditEvent);
+      } else {
+        await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, auditEvent, req.log);
+      }
       return reply.code(204).send();
     },
   );
@@ -197,23 +222,32 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
         return;
       }
-      const id = await opts.deps.paymentAuditStore.create(auth.account_id, parsed.data);
-      // Mirror the payment onto the vault audit trail so the Activity page
-      // shows it alongside credential/card events (and the Telegram notifier
-      // fires). Merchant + amount + last4 only — never a PAN.
-      await opts.deps.vaultAuditStore.record({
-        account_id: auth.account_id,
-        type: VAULT_AUDIT_TYPES.paymentExecuted,
-        payload: {
-          reference: `pay://${id}`,
-          requester: "agent",
-          merchant: parsed.data.merchant,
-          amount_cents: parsed.data.amountCents,
-          currency: parsed.data.currency,
-          last4: parsed.data.last4,
-          payment_status: parsed.data.status,
-        },
-      });
+      const eventForId = (id: string) =>
+        ({
+          account_id: auth.account_id,
+          type: VAULT_AUDIT_TYPES.paymentExecuted,
+          payload: {
+            reference: `pay://${id}`,
+            requester: "agent",
+            merchant: parsed.data.merchant,
+            amount_cents: parsed.data.amountCents,
+            currency: parsed.data.currency,
+            last4: parsed.data.last4,
+            payment_status: parsed.data.status,
+          },
+        }) as const;
+      let id: string;
+      if (opts.deps.paymentAuditStore.createWithVaultAudit !== undefined) {
+        id = await opts.deps.paymentAuditStore.createWithVaultAudit(
+          auth.account_id,
+          parsed.data,
+          eventForId,
+        );
+        notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, eventForId(id));
+      } else {
+        id = await opts.deps.paymentAuditStore.create(auth.account_id, parsed.data);
+        await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, eventForId(id), req.log);
+      }
       return reply.code(201).send({ id });
     },
   );

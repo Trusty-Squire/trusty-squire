@@ -73,7 +73,9 @@ export function formatVaultEventMessage(event: VaultAuditEventInput, at: Date): 
     case VAULT_AUDIT_TYPES.grantMinted:
       return `🔗 Egress grant minted: ${subject} · ${ts}`;
     case VAULT_AUDIT_TYPES.grantRevoked:
-      return `⛔ Egress grant revoked${p.grant_id !== undefined ? ` (${p.grant_id})` : ""} · ${ts}`;
+      return `⛔ Egress grant revoked: ${subject}${
+        p.grant_id !== undefined ? ` (${p.grant_id})` : ""
+      } · ${ts}`;
     default:
       return `Vault event ${event.type}: ${subject} · ${ts}`;
   }
@@ -91,6 +93,39 @@ function cardSubject(p: VaultAuditPayload): string {
 
 export type TelegramSend = (chatId: string, text: string) => Promise<boolean>;
 
+export async function recordVaultAuditAfterPersist(
+  store: VaultAuditStore,
+  event: VaultAuditEventInput,
+  logger: {
+    error(bindings: Record<string, unknown>, message?: string): void;
+  },
+): Promise<void> {
+  try {
+    await store.record(event);
+  } catch (err) {
+    try {
+      logger.error(
+        {
+          marker: "vault-audit-write-failed",
+          type: event.type,
+          reference: event.payload.reference,
+          err,
+        },
+        "vault-audit-write-failed",
+      );
+    } catch {}
+  }
+}
+
+export function notifyVaultAuditAfterCommit(
+  store: VaultAuditStore,
+  event: VaultAuditEventInput,
+): void {
+  if (store instanceof NotifyingVaultAuditStore) {
+    store.notifyRecorded(event);
+  }
+}
+
 export class NotifyingVaultAuditStore implements VaultAuditStore {
   private readonly send: TelegramSend;
 
@@ -105,9 +140,11 @@ export class NotifyingVaultAuditStore implements VaultAuditStore {
 
   async record(event: VaultAuditEventInput): Promise<void> {
     await this.inner.record(event);
+    this.notifyRecorded(event);
+  }
+
+  notifyRecorded(event: VaultAuditEventInput): void {
     if (!NOTIFY_TYPES.has(event.type)) return;
-    // Fire-and-forget from here down — the audit write above already
-    // succeeded, and a notification failure must stay invisible to it.
     void this.notify(event).catch(() => {});
   }
 

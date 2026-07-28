@@ -9,6 +9,7 @@ import { InMemoryAccountStore } from "../in-memory-account-store.js";
 import {
   formatVaultEventMessage,
   NotifyingVaultAuditStore,
+  recordVaultAuditAfterPersist,
   type TelegramSend,
 } from "../vault-notify.js";
 
@@ -126,5 +127,53 @@ describe("NotifyingVaultAuditStore", () => {
     expect(payMsg).toContain("USD 12.34");
     expect(payMsg).toContain("··4242");
     expect(payMsg).toContain("2026-07-23T12:00:00Z");
+  });
+
+  it("logs audit failures without rejecting a completed mutation", async () => {
+    const logger = { error: vi.fn() };
+    await expect(
+      recordVaultAuditAfterPersist(
+        {
+          record: async () => {
+            throw new Error("synthetic audit outage");
+          },
+        } as unknown as InMemoryVaultAuditStore,
+        {
+          account_id: "a",
+          type: VAULT_AUDIT_TYPES.grantMinted,
+          payload: { reference: "vault://x", requester: "agent", grant_id: "g_1" },
+        },
+        logger,
+      ),
+    ).resolves.toBeUndefined();
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        marker: "vault-audit-write-failed",
+        type: VAULT_AUDIT_TYPES.grantMinted,
+        reference: "vault://x",
+      }),
+      "vault-audit-write-failed",
+    );
+  });
+
+  it("formats revoked grants with service, label, id, and timestamp", () => {
+    const message = formatVaultEventMessage(
+      {
+        account_id: "a",
+        type: VAULT_AUDIT_TYPES.grantRevoked,
+        payload: {
+          reference: "vault://x",
+          requester: "agent",
+          service: "openrouter",
+          label: "production",
+          grant_id: "g_1",
+        },
+      },
+      NOW,
+    );
+    expect(message).toContain("Egress grant revoked");
+    expect(message).toContain("openrouter (production)");
+    expect(message).toContain("g_1");
+    expect(message).toContain("2026-07-23T12:00:00Z");
   });
 });
