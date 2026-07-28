@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   boundCardMeta,
   brandMonogram,
+  brandNetwork,
   CARD_TRUST_COPY,
   cardLast4,
   type CardMeta,
@@ -40,6 +41,27 @@ describe("cardLast4", () => {
   it("returns null when there aren't four digits", () => {
     expect(cardLast4("42")).toBeNull();
     expect(cardLast4("")).toBeNull();
+  });
+});
+
+describe("brandNetwork", () => {
+  it("maps every drawn network, case-insensitively", () => {
+    expect(brandNetwork("Visa")).toBe("visa");
+    expect(brandNetwork("Mastercard")).toBe("mastercard");
+    expect(brandNetwork("American Express")).toBe("amex");
+    expect(brandNetwork("amex")).toBe("amex");
+    expect(brandNetwork("Discover")).toBe("discover");
+    expect(brandNetwork("Diners Club")).toBe("diners");
+    expect(brandNetwork("JCB")).toBe("jcb");
+  });
+
+  it("maps a bank co-brand by substring (label text still shows the bank)", () => {
+    expect(brandNetwork("Mastercard DBS")).toBe("mastercard");
+  });
+
+  it("returns null for unknown or absent brands (monogram / glyph fallback)", () => {
+    expect(brandNetwork("Zeta")).toBeNull();
+    expect(brandNetwork(null)).toBeNull();
   });
 });
 

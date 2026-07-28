@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { AppShell } from "../components/AppShell";
+import { CardDetails } from "../components/CardDetails";
 import { CardIcon } from "../components/CardIcon";
 import { Modal } from "../components/Modal";
 import { CredentialFields, type FieldsResult } from "../components/CredentialFields";
@@ -488,6 +489,7 @@ function CardRow({
   const [editing, setEditing] = useState(false);
   const [labelDraft, setLabelDraft] = useState(card.label);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const legacy = isLegacyCard(card);
@@ -538,41 +540,59 @@ function CardRow({
     }
   }, [card.id, onDeleted, onUnauthorized]);
 
+  const meta = (
+    <div className="meta">
+      {legacy ? (
+        <span>Re-add to show ····</span>
+      ) : (
+        <>
+          {card.brand !== null && (
+            <>
+              <span>{card.brand}</span>
+              <span className="dot">·</span>
+            </>
+          )}
+          <span>··{card.last4}</span>
+        </>
+      )}
+    </div>
+  );
+
   return (
     <div className="row">
       <CardIcon brand={card.brand} />
       <div>
         {editing ? (
-          <input
-            className="mono inline-edit"
-            value={labelDraft}
-            autoFocus
-            maxLength={256}
-            aria-label="Card label"
-            onChange={(e) => setLabelDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void saveLabel();
-              if (e.key === "Escape") cancelEdit();
-            }}
-          />
+          <>
+            <input
+              className="mono inline-edit"
+              value={labelDraft}
+              autoFocus
+              maxLength={256}
+              aria-label="Card label"
+              onChange={(e) => setLabelDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void saveLabel();
+                if (e.key === "Escape") cancelEdit();
+              }}
+            />
+            {meta}
+          </>
         ) : (
-          <div className="svc">{card.label}</div>
+          // Clicking the row's head toggles the inline detail view — the
+          // wallet's equivalent of the credential rows' inline reveal.
+          <button
+            type="button"
+            className="card-head"
+            aria-expanded={detailsOpen}
+            aria-label={`Details for ${card.label}`}
+            onClick={() => setDetailsOpen((v) => !v)}
+          >
+            <div className="svc">{card.label}</div>
+            {meta}
+          </button>
         )}
-        <div className="meta">
-          {legacy ? (
-            <span>Re-add to show ····</span>
-          ) : (
-            <>
-              {card.brand !== null && (
-                <>
-                  <span>{card.brand}</span>
-                  <span className="dot">·</span>
-                </>
-              )}
-              <span>··{card.last4}</span>
-            </>
-          )}
-        </div>
+        {!editing && detailsOpen && <CardDetails card={card} />}
         {error !== null && <div className="form-err">{error}</div>}
         {editing && (
           <div className="inline-confirm">
@@ -615,6 +635,14 @@ function CardRow({
       <RowMenu
         label={`Actions for ${card.label}`}
         items={[
+          {
+            key: "details",
+            label: detailsOpen ? "Hide details" : "Details",
+            onClick: () => {
+              setEditing(false);
+              setDetailsOpen((v) => !v);
+            },
+          },
           {
             key: "rename",
             label: "Rename",

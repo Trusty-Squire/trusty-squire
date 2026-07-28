@@ -64,9 +64,28 @@ export function boundCardMeta(cardRef: string | null, cards: readonly CardMeta[]
   return cards.find((card) => card.id === cardRef) ?? null;
 }
 
-// Short monogram for the 28px brand tile. Reuses the vault's lettermark
-// visual language (mono, muted) rather than shipping trademarked network
-// logos into a 17px box. Null brand → caller renders the generic card glyph.
+// Card networks the brand tile has a drawn mark for.
+export type CardNetwork = "visa" | "mastercard" | "amex" | "discover" | "diners" | "jcb";
+
+// Network from a stored brand string. Substring match so a brand that
+// carries extra words (a bank co-brand like "Mastercard DBS") still maps
+// to its network mark. Null/unknown → caller falls back to the monogram
+// or the generic card glyph.
+export function brandNetwork(brand: string | null): CardNetwork | null {
+  if (brand === null) return null;
+  const b = brand.toLowerCase();
+  if (b.includes("visa")) return "visa";
+  if (b.includes("mastercard")) return "mastercard";
+  if (b.includes("american express") || b.includes("amex")) return "amex";
+  if (b.includes("discover")) return "discover";
+  if (b.includes("diners")) return "diners";
+  if (b.includes("jcb")) return "jcb";
+  return null;
+}
+
+// Short monogram fallback for the 28px brand tile when there is no drawn
+// network mark — the vault's lettermark visual language (mono, muted).
+// Null brand → caller renders the generic card glyph.
 export function brandMonogram(brand: string | null): string | null {
   if (brand === null) return null;
   switch (brand) {

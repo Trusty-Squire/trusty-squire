@@ -106,7 +106,7 @@ function TelegramSection() {
           <div className="dz-sub">
             {connected === true
               ? "Telegram connected ✓"
-              : "Get payment-approval links pushed to your phone via Telegram — no app beyond Telegram."}
+              : "Get payment approvals and vault alerts — new keys, rotations, deletions, card changes — pushed to your phone via Telegram."}
           </div>
           {error !== null && <div className="dz-sub">{error}</div>}
         </div>

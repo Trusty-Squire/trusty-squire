@@ -366,6 +366,15 @@ footer{border-top:1px solid var(--line);padding:var(--s-8) 0}
   border:1px solid var(--line2);border-radius:var(--r-sm);padding:7px 13px;
   transition:border-color .12s,color .12s}
 .add-card-btn:hover{border-color:var(--accent);color:var(--accent)}
+/* Clickable card-row head — toggles the inline detail view. An unstyled
+   button so the whole label+meta area is one keyboard-reachable target. */
+.card-head{display:block;width:100%;text-align:left;background:none;border:0;
+  padding:0;margin:0;font:inherit;color:inherit;cursor:pointer}
+.card-head:focus-visible{outline:1px solid var(--accent);outline-offset:3px;
+  border-radius:var(--r-sm)}
+/* Expanded card particulars under the row head. The revealed lines reuse
+   the credential rows' .secret/.vals language; CVV is never rendered. */
+.card-details{margin-top:4px}
 /* Inline rename input + inline confirm row in a card row's main column. */
 .inline-edit{width:100%;max-width:280px;font-family:var(--mono);font-size:14px;
   color:var(--fg);background:var(--surface);border:1px solid var(--accent);
