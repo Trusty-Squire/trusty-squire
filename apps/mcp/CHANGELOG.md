@@ -1,5 +1,32 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.5-rc.1 (2026-07-28)
+
+- **Two new `operate_act` kinds for dropdown-style controls** (#409). `select`
+  drives native `<select>`s and custom listbox/combobox dropdowns by option
+  text via `browser.selectOption`; with a matcher supplied, zero matches now
+  **throws loudly** instead of silently keeping the first option (a typo can
+  no longer pick Afghanistan). `set_phone_country` sets a phone field's
+  dial-code picker — the control that hard-blocked international checkouts
+  (observed live: a +81 recipient on Casetify) — for widgets governed by a
+  native country `<select>` (visible or `opacity:0`, e.g.
+  react-phone-number-input), driven via the native value setter + dispatched
+  `change` and verified through `select.value`. Unsupported custom widget
+  families throw an explicit unsupported-widget error rather than
+  false-succeeding. Custom-combobox commits are verified strictly against the
+  trigger's own controlled popup (`aria-controls`) — uncertainty throws, never
+  assumes.
+- **Widget-corpus eval harness** (#411). Replays real captured onboarding DOMs
+  (~15k records: full page HTML + walked inventory) against the live
+  `selectOption`/`setPhoneCountry` primitives — target detection/locality,
+  native-select driving, and loud-failure contracts now have executable ground
+  truth instead of reviewer hypotheses. On its first runs it confirmed the
+  silent no-match bug fixed in #409 and surfaced #410 (nth-chain ambiguous-path
+  selects undrivable — known gap, tracked). Skips gracefully (logged zero
+  count) when no corpus is present, so CI stays green.
+- Cross-package payment-mandate canonical-form seam test (#408) guarding the
+  web↔mcp 10-field mandate hash agreement.
+
 ## 1.0.49 (2026-07-21)
 
 - **Security: fence the operator browser off Squire's own control plane.** The
