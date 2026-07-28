@@ -25,6 +25,16 @@ function p1017(): Error & { code: string } {
   return Object.assign(new Error("Server has closed the connection."), { code: "P1017" });
 }
 
+function p2002(): Error & { code: string } {
+  return Object.assign(new Error("Unique constraint failed."), { code: "P2002" });
+}
+
+type TransactionBehavior =
+  | "normal"
+  | "commit_then_connection_error"
+  | "rollback_then_connection_error"
+  | "concurrent_commit_then_unique";
+
 function fakePrisma(): {
   prisma: ApiPrismaClient & { $disconnect: () => Promise<void> };
   rows: Map<string, Row>;
@@ -34,6 +44,8 @@ function fakePrisma(): {
     failFindUnique: number;
     failAudit: number;
     auditCreates: number;
+    transactionAttempts: number;
+    transactionBehaviors: TransactionBehavior[];
   };
 } {
   const rows = new Map<string, Row>();
@@ -43,7 +55,11 @@ function fakePrisma(): {
     failFindUnique: 0,
     failAudit: 0,
     auditCreates: 0,
+    transactionAttempts: 0,
+    transactionBehaviors: [] as TransactionBehavior[],
   };
+  let pendingRows: Row[] = [];
+  let pendingAuditCreates = 0;
   const egressGrant = {
     async create(args: { data: Record<string, unknown> }) {
       const d = args.data;
@@ -57,6 +73,7 @@ function fakePrisma(): {
         created_at: d.created_at as Date,
         revoked_at: (d.revoked_at as Date | null) ?? null,
       };
+      if (rows.has(row.id)) throw p2002();
       rows.set(row.id, row);
       return row;
     },
@@ -107,14 +124,37 @@ function fakePrisma(): {
       },
     },
     async $transaction<T>(fn: (tx: ApiPrismaClient) => Promise<T>): Promise<T> {
+      calls.transactionAttempts += 1;
+      const behavior = calls.transactionBehaviors.shift() ?? "normal";
+      if (behavior === "concurrent_commit_then_unique") {
+        for (const row of pendingRows) rows.set(row.id, { ...row });
+        calls.auditCreates += pendingAuditCreates;
+        pendingRows = [];
+        pendingAuditCreates = 0;
+      }
       const snapshot = new Map([...rows].map(([id, row]) => [id, { ...row }] as const));
+      const auditSnapshot = calls.auditCreates;
+      let result: T;
       try {
-        return await fn(prisma as unknown as ApiPrismaClient);
+        result = await fn(prisma as unknown as ApiPrismaClient);
       } catch (error) {
         rows.clear();
         for (const [id, row] of snapshot) rows.set(id, row);
+        calls.auditCreates = auditSnapshot;
         throw error;
       }
+      if (behavior === "commit_then_connection_error") throw p1017();
+      if (behavior === "rollback_then_connection_error") {
+        pendingRows = [...rows.entries()]
+          .filter(([id]) => !snapshot.has(id))
+          .map(([, row]) => ({ ...row }));
+        pendingAuditCreates = calls.auditCreates - auditSnapshot;
+        rows.clear();
+        for (const [id, row] of snapshot) rows.set(id, row);
+        calls.auditCreates = auditSnapshot;
+        throw p1017();
+      }
+      return result;
     },
     async $disconnect() {
       calls.disconnect += 1;
@@ -173,6 +213,53 @@ describe("PrismaEgressGrantStore", () => {
       }),
     ).rejects.toThrow("synthetic audit outage");
     expect(fake.rows.has(grant.id)).toBe(false);
+  });
+
+  it("createWithAudit() reconciles a committed transaction after its acknowledgement is lost", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaEgressGrantStore(fake.prisma);
+    const grant = makeGrant();
+    fake.calls.transactionBehaviors.push("commit_then_connection_error");
+
+    await expect(
+      store.createWithAudit(grant, {
+        account_id: ACCOUNT,
+        type: "vault.grant_minted",
+        payload: {
+          reference: grant.credential_ref,
+          requester: "agent",
+          grant_id: grant.id,
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect(fake.rows).toHaveLength(1);
+    expect(fake.calls.auditCreates).toBe(1);
+    expect(fake.calls.transactionAttempts).toBe(1);
+  });
+
+  it("createWithAudit() reconciles a unique violation after an ambiguous retry", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaEgressGrantStore(fake.prisma);
+    const grant = makeGrant();
+    fake.calls.transactionBehaviors.push(
+      "rollback_then_connection_error",
+      "concurrent_commit_then_unique",
+    );
+
+    await expect(
+      store.createWithAudit(grant, {
+        account_id: ACCOUNT,
+        type: "vault.grant_minted",
+        payload: {
+          reference: grant.credential_ref,
+          requester: "agent",
+          grant_id: grant.id,
+        },
+      }),
+    ).resolves.toBeUndefined();
+    expect(fake.rows).toHaveLength(1);
+    expect(fake.calls.auditCreates).toBe(1);
+    expect(fake.calls.transactionAttempts).toBe(2);
   });
 
   it("getById() returns null for an unknown id", async () => {
@@ -282,6 +369,33 @@ describe("PrismaEgressGrantStore", () => {
       false,
     );
     expect(fake.calls.auditCreates).toBe(1);
+  });
+
+  it("revokeWithAudit() reconciles a committed transition after its acknowledgement is lost", async () => {
+    const fake = fakePrisma();
+    const store = new PrismaEgressGrantStore(fake.prisma);
+    const grant = makeGrant();
+    const event = {
+      account_id: ACCOUNT,
+      type: "vault.grant_revoked",
+      payload: {
+        reference: grant.credential_ref,
+        requester: "agent",
+        grant_id: grant.id,
+      },
+    } as const;
+    await store.create(grant);
+    fake.calls.transactionBehaviors.push("commit_then_connection_error");
+
+    await expect(
+      store.revokeWithAudit(grant.id, ACCOUNT, "2026-06-13T13:00:00.000Z", event),
+    ).resolves.toBe(true);
+    await expect(
+      store.revokeWithAudit(grant.id, ACCOUNT, "2026-06-13T14:00:00.000Z", event),
+    ).resolves.toBe(false);
+    expect(fake.rows.get(grant.id)?.revoked_at?.toISOString()).toBe("2026-06-13T13:00:00.000Z");
+    expect(fake.calls.auditCreates).toBe(1);
+    expect(fake.calls.transactionAttempts).toBe(1);
   });
 
   it("revoke() of an unknown grant is a miss", async () => {

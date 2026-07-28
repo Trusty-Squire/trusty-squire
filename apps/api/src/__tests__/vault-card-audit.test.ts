@@ -13,6 +13,7 @@ import { issueAgentSession } from "../auth/agent.js";
 import { issueSession, signSessionJwt, SESSION_COOKIE_NAME } from "../auth/session.js";
 import { buildInMemoryDeps, type ApiDeps } from "../services/deps.js";
 import { buildServer } from "../server.js";
+import type { EgressGrantStore } from "../services/egress-grant.js";
 import { NotifyingVaultAuditStore, type TelegramSend } from "../services/vault-notify.js";
 
 const SESSION_SECRET = "synthetic-card-audit-test-secret";
@@ -240,6 +241,31 @@ describe("card / payment / grant events on the vault audit trail", () => {
       () => new Date("2026-07-23T12:00:00.000Z"),
       send,
     );
+    const backing = deps.egressGrantStore;
+    let ambiguousCommitReconciliations = 0;
+    const reconciledStore: EgressGrantStore = {
+      create: (grant) => backing.create(grant),
+      getById: (id) => backing.getById(id),
+      listByAccount: (id) => backing.listByAccount(id),
+      revoke: (id, owner, at) => backing.revoke(id, owner, at),
+      revokeWithAudit: async (id, owner, at, event) => {
+        const changed = await backing.revoke(id, owner, at);
+        if (!changed) return false;
+        await audit.record(event);
+        try {
+          throw Object.assign(new Error("lost commit acknowledgement"), { code: "P1017" });
+        } catch {
+          const committed = await backing.getById(id);
+          if (committed?.revoked_at === at) {
+            ambiguousCommitReconciliations += 1;
+            return true;
+          }
+          throw new Error("revoke reconciliation failed");
+        }
+      },
+    };
+    await server.close();
+    server = await buildServer({ deps, egressGrantStore: reconciledStore });
 
     const cred = await server.inject({
       method: "POST",
@@ -295,6 +321,7 @@ describe("card / payment / grant events on the vault audit trail", () => {
     expect(revokeMessages).toHaveLength(1);
     expect(revokeMessages[0]).toContain("openrouter (production)");
     expect(revokeMessages[0]).toContain(grantId);
+    expect(ambiguousCommitReconciliations).toBe(1);
   });
 
   it("card detail response carries metadata + sealed blob and never a cvv/pan field", async () => {

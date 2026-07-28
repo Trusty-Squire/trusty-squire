@@ -75,25 +75,62 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
   }
 
   async createWithAudit(grant: EgressGrant, event: VaultAuditEventInput): Promise<void> {
-    await this.withConnectionRetry(
-      () =>
-        this.prisma.$transaction(async (tx) => {
-          await tx.egressGrant.create({
-            data: {
-              id: grant.id,
-              account_id: grant.account_id,
-              credential_ref: grant.credential_ref,
-              token_hash: grant.token_hash,
-              rate_limit_per_hour: grant.rate_limit_per_hour,
-              spend_cap_usd: grant.spend_cap_usd,
-              created_at: new Date(grant.created_at),
-              revoked_at: grant.revoked_at === null ? null : new Date(grant.revoked_at),
-            },
-          });
-          await new PrismaVaultAuditStore(tx).record(event);
-        }),
-      `create egress grant ${grant.id} with audit`,
-    );
+    const transaction = () =>
+      this.prisma.$transaction(async (tx) => {
+        await tx.egressGrant.create({
+          data: {
+            id: grant.id,
+            account_id: grant.account_id,
+            credential_ref: grant.credential_ref,
+            token_hash: grant.token_hash,
+            rate_limit_per_hour: grant.rate_limit_per_hour,
+            spend_cap_usd: grant.spend_cap_usd,
+            created_at: new Date(grant.created_at),
+            revoked_at: grant.revoked_at === null ? null : new Date(grant.revoked_at),
+          },
+        });
+        await new PrismaVaultAuditStore(tx).record(event);
+      });
+
+    try {
+      await transaction();
+    } catch (err) {
+      if (!isRetryablePrismaConnectionError(err) && !isPrismaUniqueConstraintError(err)) {
+        throw err;
+      }
+      if (isRetryablePrismaConnectionError(err)) {
+        await disconnectPrisma(this.prisma);
+      }
+      if (await this.createWasCommitted(grant)) {
+        this.cacheGrant(grant);
+        return;
+      }
+      if (isPrismaUniqueConstraintError(err)) throw err;
+
+      try {
+        await transaction();
+      } catch (retryErr) {
+        if (
+          !isRetryablePrismaConnectionError(retryErr) &&
+          !isPrismaUniqueConstraintError(retryErr)
+        ) {
+          throw retryErr;
+        }
+        if (isRetryablePrismaConnectionError(retryErr)) {
+          await disconnectPrisma(this.prisma);
+        }
+        if (await this.createWasCommitted(grant)) {
+          this.cacheGrant(grant);
+          return;
+        }
+        if (isRetryablePrismaConnectionError(retryErr)) {
+          throw new EgressGrantStoreUnavailableError(
+            `create egress grant ${grant.id} with audit: ${prismaErrorMessage(retryErr)}`,
+          );
+        }
+        throw retryErr;
+      }
+    }
     this.cacheGrant(grant);
   }
 
@@ -146,21 +183,79 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
     at: string,
     event: VaultAuditEventInput,
   ): Promise<boolean> {
-    const changed = await this.withConnectionRetry(
-      () =>
-        this.prisma.$transaction(async (tx) => {
-          const result = await tx.egressGrant.updateMany({
-            where: { id, account_id: accountId, revoked_at: null },
-            data: { revoked_at: new Date(at) },
-          });
-          if (result.count === 0) return false;
-          await new PrismaVaultAuditStore(tx).record(event);
-          return true;
-        }),
-      `revoke egress grant ${id} with audit`,
-    );
     this.cache.delete(id);
-    return changed;
+    const before = await this.findForReconciliation(
+      id,
+      `reconcile egress grant ${id} before revoke`,
+    );
+    if (before === null || before.account_id !== accountId || before.revoked_at !== null) {
+      return false;
+    }
+
+    const transaction = () =>
+      this.prisma.$transaction(async (tx) => {
+        const result = await tx.egressGrant.updateMany({
+          where: { id, account_id: accountId, revoked_at: null },
+          data: { revoked_at: new Date(at) },
+        });
+        if (result.count === 0) return false;
+        await new PrismaVaultAuditStore(tx).record(event);
+        return true;
+      });
+
+    try {
+      return await transaction();
+    } catch (err) {
+      if (!isRetryablePrismaConnectionError(err)) throw err;
+      await disconnectPrisma(this.prisma);
+      const reconciled = await this.findForReconciliation(
+        id,
+        `reconcile egress grant ${id} after revoke`,
+      );
+      if (revokeWasCommitted(before, reconciled, at)) return true;
+      if (reconciled?.revoked_at !== null && reconciled?.revoked_at !== undefined) return false;
+
+      try {
+        return await transaction();
+      } catch (retryErr) {
+        if (!isRetryablePrismaConnectionError(retryErr)) throw retryErr;
+        await disconnectPrisma(this.prisma);
+        const retried = await this.findForReconciliation(
+          id,
+          `reconcile egress grant ${id} after revoke retry`,
+        );
+        if (revokeWasCommitted(before, retried, at)) return true;
+        if (retried?.revoked_at !== null && retried?.revoked_at !== undefined) return false;
+        throw new EgressGrantStoreUnavailableError(
+          `revoke egress grant ${id} with audit: ${prismaErrorMessage(retryErr)}`,
+        );
+      }
+    }
+  }
+
+  private async createWasCommitted(grant: EgressGrant): Promise<boolean> {
+    const row = await this.findForReconciliation(
+      grant.id,
+      `reconcile egress grant ${grant.id} after create`,
+    );
+    return row !== null && rowsDescribeSameGrant(row, grant);
+  }
+
+  private async findForReconciliation(id: string, label: string): Promise<EgressGrantRow | null> {
+    try {
+      return await this.prisma.egressGrant.findUnique({ where: { id } });
+    } catch (err) {
+      if (!isRetryablePrismaConnectionError(err)) throw err;
+      await disconnectPrisma(this.prisma);
+      try {
+        return await this.prisma.egressGrant.findUnique({ where: { id } });
+      } catch (retryErr) {
+        if (isRetryablePrismaConnectionError(retryErr)) {
+          throw new EgressGrantStoreUnavailableError(`${label}: ${prismaErrorMessage(retryErr)}`);
+        }
+        throw retryErr;
+      }
+    }
   }
 
   private async withConnectionRetry<T>(op: () => Promise<T>, label: string): Promise<T> {
@@ -191,6 +286,41 @@ export function isRetryablePrismaConnectionError(err: unknown): boolean {
     message.includes("connection terminated") ||
     message.includes("connection pool") ||
     message.includes("can't reach database server")
+  );
+}
+
+function isPrismaUniqueConstraintError(err: unknown): boolean {
+  return (
+    err !== null &&
+    typeof err === "object" &&
+    "code" in err &&
+    String((err as { code?: unknown }).code ?? "") === "P2002"
+  );
+}
+
+function rowsDescribeSameGrant(row: EgressGrantRow, grant: EgressGrant): boolean {
+  return (
+    row.id === grant.id &&
+    row.account_id === grant.account_id &&
+    row.credential_ref === grant.credential_ref &&
+    row.token_hash === grant.token_hash &&
+    row.rate_limit_per_hour === grant.rate_limit_per_hour &&
+    row.spend_cap_usd === grant.spend_cap_usd &&
+    row.created_at.toISOString() === grant.created_at &&
+    (row.revoked_at === null ? null : row.revoked_at.toISOString()) === grant.revoked_at
+  );
+}
+
+function revokeWasCommitted(
+  before: EgressGrantRow,
+  after: EgressGrantRow | null,
+  revokedAt: string,
+): boolean {
+  return (
+    before.revoked_at === null &&
+    after !== null &&
+    after.account_id === before.account_id &&
+    after.revoked_at?.toISOString() === revokedAt
   );
 }
 
