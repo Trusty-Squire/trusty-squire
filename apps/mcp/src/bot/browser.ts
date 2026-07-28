@@ -4098,6 +4098,7 @@ export class BrowserController {
           if (!el.hasAttribute("data-ts-select-preexisting-popup")) addPopup(el);
         });
         popups.forEach((el) => el.setAttribute("data-ts-select-popup", "1"));
+        if (popups.size > 0) trigger.setAttribute("data-ts-select-popup-seen", "1");
         const optionSelectors = [
           '[role="option"]',
           '[role="menuitem"]',
@@ -4127,16 +4128,27 @@ export class BrowserController {
       .evaluate(() => {
         document
           .querySelectorAll(
-            "[data-ts-select-preexisting-popup],[data-ts-select-preexisting-option],[data-ts-select-popup],[data-ts-select-option-tier]",
+            "[data-ts-select-preexisting-popup],[data-ts-select-preexisting-option],[data-ts-select-popup],[data-ts-select-option-tier],[data-ts-select-popup-seen],[data-ts-select-commit-target]",
           )
           .forEach((el) => {
             el.removeAttribute("data-ts-select-preexisting-popup");
             el.removeAttribute("data-ts-select-preexisting-option");
             el.removeAttribute("data-ts-select-popup");
             el.removeAttribute("data-ts-select-option-tier");
+            el.removeAttribute("data-ts-select-popup-seen");
+            el.removeAttribute("data-ts-select-commit-target");
           });
       })
       .catch(() => {});
+  }
+
+  private async markComboboxCommitTarget(target: Locator): Promise<void> {
+    await target.evaluate((node) => {
+      node.ownerDocument
+        .querySelectorAll("[data-ts-select-commit-target]")
+        .forEach((el) => el.removeAttribute("data-ts-select-commit-target"));
+      node.setAttribute("data-ts-select-commit-target", "1");
+    });
   }
 
   private async comboboxCommittedOptionMatches(
@@ -4152,38 +4164,85 @@ export class BrowserController {
           value.replace(/\s+/g, " ").trim().toLowerCase();
         const needle = normalize(rawMatcher);
         if (needle.length === 0) return false;
-        const committed: string[] = [];
-        const add = (value: string | null | undefined): void => {
-          if (value !== null && value !== undefined && value.length > 0) committed.push(value);
-        };
-        if (!(trigger instanceof HTMLInputElement || trigger instanceof HTMLTextAreaElement)) {
-          add(trigger.textContent);
-        }
-        for (const attr of ["aria-label", "aria-valuetext", "data-value", "title"]) {
-          add(trigger.getAttribute(attr));
-        }
-        const roots = new Set<Element>();
-        for (const attr of ["aria-controls", "aria-owns"]) {
-          for (const id of (trigger.getAttribute(attr) ?? "").split(/\s+/).filter(Boolean)) {
-            const controlled = trigger.ownerDocument.getElementById(id);
-            if (controlled !== null) roots.add(controlled);
-          }
-        }
-        let ancestor: Element | null = trigger;
-        for (let depth = 0; depth < 4 && ancestor !== null; depth += 1) {
-          roots.add(ancestor);
-          ancestor = ancestor.parentElement;
-        }
+        const valuesMatch = (values: Array<string | null | undefined>): boolean =>
+          values.some(
+            (value) =>
+              value !== null &&
+              value !== undefined &&
+              value.length > 0 &&
+              normalize(value).includes(needle),
+          );
         const selectedSelector =
-          '[aria-selected="true"],[aria-checked="true"],[data-state="checked"],[data-selected="true"],[class*="singleValue"],[class*="single-value"],[class*="selectedValue"],[class*="selected-value"]';
-        roots.forEach((root) => {
-          root.querySelectorAll(selectedSelector).forEach((el) => {
-            add(el.textContent);
-            add(el.getAttribute("aria-label"));
-            add(el.getAttribute("data-value"));
+          '[aria-selected="true"],[aria-checked="true"],[data-state="checked"],[data-selected="true"]';
+        const target = trigger.ownerDocument.querySelector('[data-ts-select-commit-target="1"]');
+        const selectedTarget =
+          target?.matches(selectedSelector) === true ? target : target?.closest(selectedSelector);
+        if (
+          selectedTarget !== null &&
+          selectedTarget !== undefined &&
+          valuesMatch([
+            target?.textContent,
+            target?.getAttribute("aria-label"),
+            target?.getAttribute("data-value"),
+            selectedTarget.textContent,
+            selectedTarget.getAttribute("aria-label"),
+            selectedTarget.getAttribute("data-value"),
+          ])
+        ) {
+          return true;
+        }
+
+        if (trigger instanceof HTMLInputElement || trigger instanceof HTMLTextAreaElement) {
+          const valueMatches = valuesMatch([trigger.value]);
+          const expandedClosed = trigger.getAttribute("aria-expanded") === "false";
+          const popupWasSeen = trigger.hasAttribute("data-ts-select-popup-seen");
+          const popupStillOpen = Array.from(
+            trigger.ownerDocument.querySelectorAll('[data-ts-select-popup="1"]'),
+          ).some((popup) => {
+            const rect = popup.getBoundingClientRect();
+            if (rect.width < 2 || rect.height < 2) return false;
+            const style = getComputedStyle(popup);
+            return (
+              style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              parseFloat(style.opacity || "1") > 0.01
+            );
           });
-        });
-        return committed.some((value) => normalize(value).includes(needle));
+          if (valueMatches && (expandedClosed || (popupWasSeen && !popupStillOpen))) {
+            return true;
+          }
+        } else if (
+          valuesMatch([
+            trigger.textContent,
+            trigger.getAttribute("aria-label"),
+            trigger.getAttribute("aria-valuetext"),
+            trigger.getAttribute("data-value"),
+            trigger.getAttribute("title"),
+          ])
+        ) {
+          return true;
+        }
+
+        const selectedValueSelector =
+          '[class*="singleValue"],[class*="single-value"],[class*="selectedValue"],[class*="selected-value"]';
+        let wrapper = trigger.parentElement;
+        while (
+          wrapper !== null &&
+          wrapper.tagName !== "BODY" &&
+          wrapper.tagName !== "HTML" &&
+          wrapper.tagName !== "FORM"
+        ) {
+          const selectedValue = wrapper.querySelector(selectedValueSelector);
+          if (selectedValue !== null) {
+            return valuesMatch([
+              selectedValue.textContent,
+              selectedValue.getAttribute("aria-label"),
+              selectedValue.getAttribute("data-value"),
+            ]);
+          }
+          wrapper = wrapper.parentElement;
+        }
+        return false;
       }, matcher)
       .catch(() => false);
   }
@@ -4285,6 +4344,7 @@ export class BrowserController {
           if ((await byText.count()) === 0) continue;
           try {
             await byText.waitFor({ state: "visible", timeout: 2000 });
+            await this.markComboboxCommitTarget(byText);
             await this.humanClickLocator(byText);
             await this.wait(0.5);
             if (await this.comboboxCommittedOptionMatches(normalizedSelector, optionMatcher)) {
@@ -4456,6 +4516,19 @@ export class BrowserController {
         }
         return await this.pickComboboxOption(matchingOptions, optionMatcher, triggerSelector);
       }
+      await triggerLocator
+        .first()
+        .evaluate((node) => {
+          node.ownerDocument
+            .querySelectorAll("[data-ts-select-commit-target]")
+            .forEach((el) => el.removeAttribute("data-ts-select-commit-target"));
+          const activeId = node.getAttribute("aria-activedescendant");
+          if (activeId === null || activeId.length === 0) return;
+          node.ownerDocument
+            .getElementById(activeId)
+            ?.setAttribute("data-ts-select-commit-target", "1");
+        })
+        .catch(() => {});
     }
     try {
       await this.page.keyboard.press("Enter");
@@ -4518,6 +4591,7 @@ export class BrowserController {
       )
       .catch(() => false);
     if (isCmdkItem) {
+      await this.markComboboxCommitTarget(target);
       await target.scrollIntoViewIfNeeded().catch(() => {});
       // Playwright's locator.click() re-resolves geometry and dispatches the
       // full trusted pointer/mouse sequence at the element's center — what
@@ -4535,6 +4609,7 @@ export class BrowserController {
         (await this.comboboxCommittedOptionMatches(triggerSelector, matcher))
       );
     }
+    await this.markComboboxCommitTarget(target);
     await this.humanClickLocator(target);
     await this.wait(0.5);
     return (

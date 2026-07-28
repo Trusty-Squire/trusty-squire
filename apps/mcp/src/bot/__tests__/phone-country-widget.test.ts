@@ -624,6 +624,70 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 
+  it("accepts an input combobox commit after its listbox unmounts", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <input id="country" role="combobox" aria-expanded="false" aria-controls="country-options">
+        <ul id="country-options" role="listbox" style="display:none">
+          <li role="option" data-value="JP">Japan</li>
+          <li role="option" data-value="KR">South Korea</li>
+        </ul>
+        <script>
+          const trigger = document.getElementById('country');
+          const options = document.getElementById('country-options');
+          trigger.addEventListener('click', () => {
+            trigger.setAttribute('aria-expanded', 'true');
+            options.style.display = 'block';
+          });
+          options.querySelectorAll('[role="option"]').forEach((option) => {
+            option.addEventListener('click', () => {
+              trigger.value = option.textContent;
+              trigger.setAttribute('aria-expanded', 'false');
+              options.remove();
+              window.__picked = option.getAttribute('data-value');
+            });
+          });
+        </script>`),
+    );
+    try {
+      await ctrl.selectOption("#country", "Japan");
+      expect(await page.locator("#country").inputValue()).toBe("Japan");
+      expect(await picked(page)).toBe("JP");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("does not accept a failed target click from an unrelated selected option", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <div role="listbox">
+          <div role="option" aria-selected="true">Japan</div>
+        </div>
+        <button id="country" role="combobox" aria-expanded="false" aria-controls="country-options" type="button">
+          Choose a country
+        </button>
+        <ul id="country-options" role="listbox" style="display:none">
+          <li role="option" data-value="JP">Japan</li>
+        </ul>
+        <script>
+          const trigger = document.getElementById('country');
+          const options = document.getElementById('country-options');
+          trigger.addEventListener('click', () => {
+            trigger.setAttribute('aria-expanded', 'true');
+            options.style.display = 'block';
+          });
+        </script>`),
+    );
+    try {
+      await expect(ctrl.selectOption("#country", "Japan")).rejects.toThrow(/no option matched/i);
+      expect(await picked(page)).toBeUndefined();
+      expect(await page.locator("#country").textContent()).toContain("Choose a country");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
   it("uses only the opened popup for text-only custom options", async () => {
     const { ctrl, page } = await pageFor(
       dataUrl(`
