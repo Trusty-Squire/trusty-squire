@@ -582,7 +582,9 @@ before the user could complete optional GitHub. Each connect run now carries a
 nonce-scoped loopback completion URL in the install-page fragment; the web
 installer retains it across OAuth returns and invokes it only from **Finish**.
 Forced re-login still completes from claim + seed, but only for the requested
-provider, so a stale cookie from the other provider cannot close the browser.
+provider and only when its cookie evidence changes after launch, so neither a
+stale cookie from that provider nor one from another provider can close the
+browser.
 Regression contracts:
 `apps/mcp/src/__tests__/connect-recovery.test.ts`,
 `apps/mcp/src/bot/__tests__/install-completion.test.ts`, and

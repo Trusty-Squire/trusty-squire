@@ -1121,8 +1121,9 @@ export function isClaimTerminalUrl(url: string): boolean {
 // can still be mid-flow with a second cold-profile challenge). Tearing down on
 // the bare claim killed the noVNC out from under that challenge — the "two
 // number picks with a red-close between them" bug. So force-relogin now waits
-// for the provider session to actually seed (or an explicit terminal page)
-// before it closes; the deadline still bounds the wait.
+// for fresh cookie evidence from the requested provider before it closes;
+// neither a pre-existing cookie nor an explicit terminal page can substitute.
+// The deadline still bounds the wait.
 export function shouldCompleteInstallClaim(
   claimed: boolean,
   completeOnClaim: boolean,

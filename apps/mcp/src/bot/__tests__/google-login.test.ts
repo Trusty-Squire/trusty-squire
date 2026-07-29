@@ -131,11 +131,7 @@ describe("pollUntil phase-aware heartbeat", () => {
     let done = false;
     const stderr = vi.spyOn(console, "error").mockImplementation(() => undefined);
 
-    const waiting = pollUntil(
-      Date.now() + 60_000,
-      async () => done,
-      "fixed install heartbeat",
-    );
+    const waiting = pollUntil(Date.now() + 60_000, async () => done, "fixed install heartbeat");
 
     await vi.advanceTimersByTimeAsync(21_000);
     expect(stderr.mock.calls.at(-1)?.[0]).toContain("fixed install heartbeat");
@@ -154,9 +150,7 @@ describe("pollUntil phase-aware heartbeat", () => {
     const waiting = pollUntil(Date.now() + 60_000, async () => done);
 
     await vi.advanceTimersByTimeAsync(21_000);
-    expect(stderr.mock.calls.at(-1)?.[0]).toContain(
-      "Still waiting for you to finish signing in",
-    );
+    expect(stderr.mock.calls.at(-1)?.[0]).toContain("Still waiting for you to finish signing in");
 
     done = true;
     await vi.advanceTimersByTimeAsync(3_000);
@@ -187,7 +181,7 @@ describe("bot Chrome launch consistency", () => {
     "utf8",
   );
 
-  it("every launchPersistentContext call sets channel:\"chrome\"", () => {
+  it('every launchPersistentContext call sets channel:"chrome"', () => {
     // `.launchPersistentContext(` matches real calls; the bare interface-method
     // declaration (no leading dot) is intentionally excluded.
     const calls = [...source.matchAll(/\.launchPersistentContext\(/g)];
@@ -208,7 +202,9 @@ describe("extractGoogleAccountEmail (PR3 capture-at-login)", () => {
   });
 
   it("falls back to the first email token when no chip is present", () => {
-    expect(extractGoogleAccountEmail("Signed in as user@gmail.com — Manage")).toBe("user@gmail.com");
+    expect(extractGoogleAccountEmail("Signed in as user@gmail.com — Manage")).toBe(
+      "user@gmail.com",
+    );
   });
 
   it("returns null when there is no email in the text", () => {
@@ -337,7 +333,8 @@ describe("google-login env helpers", () => {
       else delete process.env.SSH_CONNECTION;
       if (savedSessionType !== undefined) process.env.XDG_SESSION_TYPE = savedSessionType;
       else delete process.env.XDG_SESSION_TYPE;
-      if (savedForceDisplay !== undefined) process.env.TRUSTY_SQUIRE_FORCE_DISPLAY = savedForceDisplay;
+      if (savedForceDisplay !== undefined)
+        process.env.TRUSTY_SQUIRE_FORCE_DISPLAY = savedForceDisplay;
       else delete process.env.TRUSTY_SQUIRE_FORCE_DISPLAY;
     }
   });
@@ -386,19 +383,15 @@ describe("classifyGoogleAuthState (T5)", () => {
   });
 
   it("defaults an unrecognized accounts.google.com page to needs_login", () => {
-    expect(classifyGoogleAuthState("https://accounts.google.com/odd/page", "")).toBe(
-      "needs_login",
-    );
+    expect(classifyGoogleAuthState("https://accounts.google.com/odd/page", "")).toBe("needs_login");
   });
 });
 
 describe("extractGoogleNumberMatch", () => {
   it("reads the number from the 'tap N on your phone' phrasing", () => {
-    expect(
-      extractGoogleNumberMatch(
-        "Verify it's you — Tap 28 on your phone to sign in",
-      ),
-    ).toBe("28");
+    expect(extractGoogleNumberMatch("Verify it's you — Tap 28 on your phone to sign in")).toBe(
+      "28",
+    );
   });
 
   it("reads the number from the '<N> on your other device' phrasing", () => {
@@ -411,9 +404,7 @@ describe("extractGoogleNumberMatch", () => {
 
   it("falls back to a 2-digit number on a recognized challenge page", () => {
     expect(
-      extractGoogleNumberMatch(
-        "Match the number  Google wants to make sure it's really you  89",
-      ),
+      extractGoogleNumberMatch("Match the number  Google wants to make sure it's really you  89"),
     ).toBe("89");
   });
 
@@ -433,17 +424,13 @@ describe("scrapeGoogleScopePhrases", () => {
   });
 
   it("flags a contacts manage scope", () => {
-    const phrases = scrapeGoogleScopePhrases(
-      "App will be able to: Manage your contacts. Allow",
-    );
+    const phrases = scrapeGoogleScopePhrases("App will be able to: Manage your contacts. Allow");
     expect(phrases.length).toBeGreaterThan(0);
     expect(phrases[0]).toMatch(/manage your contacts/i);
   });
 
   it("flags a send-mail-as-you scope", () => {
-    const phrases = scrapeGoogleScopePhrases(
-      "Send email on your behalf to anyone you choose",
-    );
+    const phrases = scrapeGoogleScopePhrases("Send email on your behalf to anyone you choose");
     expect(phrases.length).toBeGreaterThan(0);
   });
 
@@ -483,7 +470,9 @@ describe("extractOAuthScopes (T7)", () => {
   });
 
   it("returns null when no scope param is present anywhere", () => {
-    expect(extractOAuthScopes("https://accounts.google.com/signin/oauth/consent?client_id=x")).toBeNull();
+    expect(
+      extractOAuthScopes("https://accounts.google.com/signin/oauth/consent?client_id=x"),
+    ).toBeNull();
     expect(extractOAuthScopes("not-a-url")).toBeNull();
   });
 });
@@ -491,18 +480,13 @@ describe("extractOAuthScopes (T7)", () => {
 describe("scopesAreBasic (T7)", () => {
   it("accepts only the basic-identity allowlist", () => {
     expect(scopesAreBasic(["openid", "email", "profile"])).toBe(true);
-    expect(
-      scopesAreBasic([
-        "openid",
-        "https://www.googleapis.com/auth/userinfo.email",
-      ]),
-    ).toBe(true);
+    expect(scopesAreBasic(["openid", "https://www.googleapis.com/auth/userinfo.email"])).toBe(true);
   });
 
   it("rejects any broader scope", () => {
-    expect(
-      scopesAreBasic(["openid", "https://www.googleapis.com/auth/gmail.readonly"]),
-    ).toBe(false);
+    expect(scopesAreBasic(["openid", "https://www.googleapis.com/auth/gmail.readonly"])).toBe(
+      false,
+    );
     expect(scopesAreBasic(["https://www.googleapis.com/auth/drive"])).toBe(false);
   });
 

@@ -15,8 +15,8 @@
 //   2. Headless (no DISPLAY) → run Chrome on a phone-shaped virtual
 //      display (Xvfb), bridge it out with x11vnc + noVNC + a cloudflared
 //      tunnel, and print one URL + a VNC password. The user logs in from
-//      any browser on any network. The whole stack is torn down the
-//      instant the session lands — the public URL lives for one login.
+//      any browser on any network. The public URL lives only until the
+//      active login or install flow reaches its completion gate.
 //
 // Binaries the headless path needs: Xvfb, x11vnc, websockify
 // (with /usr/share/novnc), cloudflared, and Google Chrome. Missing ones
@@ -1400,11 +1400,11 @@ export function extractGoogleAccountEmail(pageText: string): string | null {
 
 // Public entry for the install flow: opens the trustysquire /install
 // confirm URL in the bot's persistent Chrome profile, runs the
-// user-supplied check until the install is claimed (or the deadline
-// passes), then tears down. The user's Google/GitHub sign-in happens
-// inside this Chrome instance — so the bot's profile gets a provider
-// session as a free side effect, and there's no separate "log into
-// Google for the bot" step after install.
+// user-supplied check until the active flow's completion gate passes
+// (or the deadline expires), then tears down. The user's Google/GitHub
+// sign-in happens inside this Chrome instance — so the bot's profile gets
+// a provider session as a free side effect, and there's no separate
+// "log into Google for the bot" step after install.
 export async function openInstallConfirmInBotChrome(opts: {
   confirmUrl: string;
   // Returns true when the install ceremony is done. The login browser runs

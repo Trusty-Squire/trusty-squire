@@ -11,8 +11,8 @@
 //
 // State is derived from /v1/auth/whoami + /v1/mcp/install/<token>/state,
 // polled every 3s after each redirect-return. The bot's Chrome stays
-// on this page until the user clicks Finish (which navigates to
-// /install/done — the bot's poll watches for that URL).
+// on this page until the user clicks Finish, which calls the per-run
+// loopback completion URL and then navigates to /install/done.
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
