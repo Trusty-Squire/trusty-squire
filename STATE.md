@@ -581,10 +581,11 @@ wizard completion.** That fallback closed the plain noVNC browser after Google,
 before the user could complete optional GitHub. Each connect run now carries a
 nonce-scoped loopback completion URL in the install-page fragment; the web
 installer retains it across OAuth returns and invokes it only from **Finish**.
-Forced re-login still completes from claim + seed, but only for the requested
-provider and only when its cookie evidence changes after launch, so neither a
-stale cookie from that provider nor one from another provider can close the
-browser.
+Forced re-login completes only after the requested provider returns through
+that nonce-scoped callback. An older web installer, or a browser that cannot
+retain the callback across OAuth, falls back to claim plus the requested
+provider's cookie only when the preflight verified that provider's old cookies
+were cleared.
 Regression contracts:
 `apps/mcp/src/__tests__/connect-recovery.test.ts`,
 `apps/mcp/src/bot/__tests__/install-completion.test.ts`, and

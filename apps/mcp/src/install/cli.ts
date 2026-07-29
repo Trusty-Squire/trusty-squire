@@ -1127,9 +1127,10 @@ export function isClaimTerminalUrl(url: string): boolean {
 // can still be mid-flow with a second cold-profile challenge). Tearing down on
 // the bare claim killed the noVNC out from under that challenge — the "two
 // number picks with a red-close between them" bug. So force-relogin now waits
-// for fresh cookie evidence from the requested provider before it closes;
-// neither a pre-existing cookie nor an explicit terminal page can substitute.
-// The deadline still bounds the wait.
+// for the requested provider's OAuth return through the per-run callback before
+// it closes. An unacknowledged older installer may instead use that provider's
+// post-clear cookie presence; neither an explicit terminal page nor another
+// provider can substitute. The deadline still bounds the wait.
 export function shouldCompleteInstallClaim(
   claimed: boolean,
   completeOnClaim: boolean,
@@ -1141,9 +1142,9 @@ export function shouldCompleteInstallClaim(
   if (!claimed) return false;
   const terminal =
     wizardCompleted || (installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl));
-  // A forced provider relogin is successful only when that provider's cookie
-  // actually landed in this browser profile. Finish is not an override: the
-  // user may skip optional GitHub and still reach the terminal page.
+  // A forced provider relogin is successful only when its provider-specific
+  // completion evidence arrives. Finish alone is not an override: the user may
+  // skip optional GitHub and still reach the terminal page.
   if (completeOnClaim) return sessionSeeded;
   if (terminal) return true;
   return wizardAcknowledged ? false : sessionSeeded;
@@ -1171,7 +1172,7 @@ async function runInstallClaim(
     // await_verification refused despite the user consenting).
     applyServerPrefs: boolean;
     // Forced re-login is complete when the fresh account claim and requested
-    // provider seed succeed. Normal onboarding stays open for explicit Finish.
+    // provider OAuth return succeed. Normal onboarding stays open for Finish.
     completeOnClaim: boolean;
     // A scoped re-login must wait for the requested provider, not any
     // pre-existing provider cookie left in the shared browser profile.
@@ -1233,12 +1234,11 @@ async function runInstallClaim(
       claimed &&
       (options.completeOnClaim
         ? wizardProviders.includes(options.completionProvider) ||
-          (!wizardAcknowledged &&
-            profileHasProviderCookies(profileDir, options.completionProvider))
+          (!wizardAcknowledged && profileHasProviderCookies(profileDir, options.completionProvider))
         : profileHasProviderCookies(profileDir, options.completionProvider));
     // No browser URL to watch in plain mode. Normal onboarding keys off the
-    // explicit loopback Finish callback; forced re-login may still finish once
-    // its requested provider session is safely seeded.
+    // explicit loopback Finish callback; forced re-login accepts the requested
+    // provider's callback evidence or the unacknowledged legacy fallback above.
     const tearDown = shouldCompleteInstallClaim(
       claimed,
       options.completeOnClaim,

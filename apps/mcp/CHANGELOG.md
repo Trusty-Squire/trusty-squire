@@ -4,13 +4,13 @@
 
 - **Install completion now preserves the full onboarding flow.** Normal
   onboarding keeps its temporary browser/noVNC session open until the user
-  selects **Finish**. Forced relogin instead requires fresh cookie evidence
-  from the requested provider; a terminal page or a cookie that predates the
-  relogin cannot close the browser early.
+  selects **Finish**. Forced relogin instead requires the requested provider's
+  OAuth return through the per-run callback; a terminal page or another
+  provider's return cannot close the browser early.
 - **Install completion remains compatible across separate deployments.** If
   the web installer is older or browser session storage cannot retain the
-  per-run Finish callback across OAuth, the MCP installer falls back to its
-  claimed-and-seeded completion behavior instead of waiting indefinitely.
+  per-run callback across OAuth, the MCP installer falls back to the requested
+  provider's post-clear cookie presence instead of waiting indefinitely.
 - **The curl installer resolves the published package explicitly.** It invokes
   `@trusty-squire/mcp@latest`, preventing an npm workspace package in the
   caller's current directory from shadowing the registry release.

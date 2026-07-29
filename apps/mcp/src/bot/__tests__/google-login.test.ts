@@ -71,7 +71,6 @@ describe("profileHasProviderCookies (plain-login on-disk seed check)", () => {
     expect(profileHasProviderCookies(dir, "google")).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
-
 });
 
 describe("pollUntil phase-aware heartbeat", () => {

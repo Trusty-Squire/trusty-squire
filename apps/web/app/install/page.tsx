@@ -102,7 +102,7 @@ export default function InstallPage() {
       window.location.assign(acknowledgementUrl);
       return;
     }
-    setCompletionUrl(callbackUrl);
+    void Promise.resolve().then(() => setCompletionUrl(callbackUrl));
   }, [token]);
 
   // Returning from the OAuth round-trip — fire the claim if we
@@ -275,18 +275,18 @@ export default function InstallPage() {
       encodeURIComponent(`/install?token=${encodeURIComponent(token)}&gh=1`);
   }, [token]);
 
-  // Once the GitHub OAuth returns here (gh=1) and the account confirms the
-  // link, the bot's github.com cookie is live in this profile — mark the
-  // step done. Sticky: survives the URL-marker cleanup below.
+  // Record provider returns only after the account confirms the corresponding
+  // identity. These flags become provider-specific completion evidence for the
+  // nonce callback. Sticky: survives the URL-marker cleanup below.
   useEffect(() => {
     if (returnedFromAuth && identities.includes("google")) {
-      setGoogleSessionFresh(true);
+      void Promise.resolve().then(() => setGoogleSessionFresh(true));
     }
   }, [returnedFromAuth, identities]);
 
   useEffect(() => {
     if (returnedFromGithub && identities.includes("github")) {
-      setGithubSessionFresh(true);
+      void Promise.resolve().then(() => setGithubSessionFresh(true));
     }
   }, [returnedFromGithub, identities]);
 
