@@ -1096,29 +1096,6 @@ async function writeAgentConfig(
   }
 }
 
-// A confirm-flow page URL that means the claim is finished and the
-// browser (and any headless noVNC tunnel) should be torn down. Matches
-// the explicit Finish target (/install/done) and the app landing pages
-// an already-provisioned account is redirected to (/vault, /agents) —
-// the latter is what left the noVNC hanging for returning users.
-export function isClaimTerminalUrl(url: string): boolean {
-  // Match on the PATH only — a login page like `/login?next=/vault`
-  // must NOT count as terminal just because the query mentions /vault.
-  let path: string;
-  try {
-    path = new URL(url).pathname;
-  } catch {
-    return false;
-  }
-  return (
-    path === "/install/done" ||
-    path === "/vault" ||
-    path === "/agents" ||
-    path.startsWith("/vault/") ||
-    path.startsWith("/agents/")
-  );
-}
-
 // First-time setup stays open after the account claim so the user can finish
 // optional setup. A forced re-login has no remaining onboarding contract — but
 // the account claim (agent token) is NOT the end of the interactive sign-in.
@@ -1134,19 +1111,14 @@ export function shouldCompleteInstallClaim(
   claimed: boolean,
   completeOnClaim: boolean,
   sessionSeeded: boolean,
-  installPageUrl: string | undefined,
   wizardCompleted = false,
-  wizardAcknowledged = false,
 ): boolean {
   if (!claimed) return false;
-  const terminal =
-    wizardCompleted || (installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl));
   // A forced provider relogin is successful only when its provider-specific
   // completion evidence arrives. Finish alone is not an override: the user may
   // skip optional GitHub and still reach the terminal page.
   if (completeOnClaim) return sessionSeeded;
-  if (terminal) return true;
-  return wizardAcknowledged ? false : sessionSeeded;
+  return wizardCompleted;
 }
 
 // During normal onboarding, claim happens before the browser's Finish step.
@@ -1198,7 +1170,6 @@ async function runInstallClaim(
   const pollOnce = async (
     profileDir: string,
     wizardCompleted: boolean,
-    wizardAcknowledged: boolean,
   ): Promise<boolean> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
@@ -1235,9 +1206,7 @@ async function runInstallClaim(
       claimed,
       options.completeOnClaim,
       sessionSeeded,
-      undefined,
       wizardCompleted,
-      wizardAcknowledged,
     );
     if (tearDown) {
       return true;

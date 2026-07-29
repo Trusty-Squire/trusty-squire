@@ -9,7 +9,6 @@ const COMPLETION_PATH_PREFIX = "/.well-known/trusty-squire/install-complete/";
 export interface InstallCompletionListener {
   callbackUrl: string;
   isCompleted: () => boolean;
-  isAcknowledged: () => boolean;
   close: () => Promise<void>;
 }
 
@@ -41,12 +40,10 @@ export async function startInstallCompletionListener(
   const completionPath = `${COMPLETION_PATH_PREFIX}${nonce}`;
   const acknowledgementPath = `${completionPath}/ack`;
   let completed = false;
-  let acknowledged = false;
 
   const server = createServer((req, res) => {
     const path = req.url === undefined ? "" : new URL(req.url, "http://127.0.0.1").pathname;
     if (req.method === "GET" && path === acknowledgementPath) {
-      acknowledged = true;
       const redirect = new URL(confirmUrl);
       const fragment = new URLSearchParams(redirect.hash.slice(1));
       const address = server.address() as AddressInfo;
@@ -103,7 +100,6 @@ export async function startInstallCompletionListener(
   return {
     callbackUrl,
     isCompleted: () => completed,
-    isAcknowledged: () => acknowledged,
     close: async () => {
       if (closed) return;
       closed = true;

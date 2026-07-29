@@ -1385,7 +1385,6 @@ export async function openInstallConfirmInBotChrome(opts: {
   pollUntilClaimed: (
     profileDir: string,
     wizardCompleted: boolean,
-    wizardAcknowledged: boolean,
   ) => Promise<boolean>;
   profileDir?: string;
   timeoutMinutes?: number;
@@ -1419,11 +1418,7 @@ export async function openInstallConfirmInBotChrome(opts: {
       plainProfileLogin: true,
       pollUntilDone: () => Promise.resolve(false),
       plainPollUntilDone: (dir) =>
-        opts.pollUntilClaimed(
-          dir,
-          completion?.isCompleted() === true,
-          completion?.isAcknowledged() === true,
-        ),
+        opts.pollUntilClaimed(dir, completion?.isCompleted() === true),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
       // The user's sign-in inside this Chrome leaves a provider session in the
