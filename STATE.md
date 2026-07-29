@@ -576,6 +576,18 @@ plain-completion). FINAL CHECK STILL OWED: a real `connect --force-relogin` on c
 that reaches `[connect-debug] launcher=plain` and lands the claim (no
 `/signin/rejected`). Do NOT mark this done until that run passes.
 
+**UPDATE (2026-07-29): normal onboarding must not treat claimed + seeded as
+wizard completion.** That fallback closed the plain noVNC browser after Google,
+before the user could complete optional GitHub. Each connect run now carries a
+nonce-scoped loopback completion URL in the install-page fragment; the web
+installer retains it across OAuth returns and invokes it only from **Finish**.
+Forced re-login still completes from claim + seed, but only for the requested
+provider, so a stale cookie from the other provider cannot close the browser.
+Regression contracts:
+`apps/mcp/src/__tests__/connect-recovery.test.ts`,
+`apps/mcp/src/bot/__tests__/install-completion.test.ts`, and
+`apps/web/app/install/completion.test.ts`.
+
 ---
 
 The recurring tar pit. Historical status (pre-fix): **cause NOT yet identified; the

@@ -57,9 +57,7 @@ export function installCompletionAcknowledgementUrl(
   if (typeof window === "undefined") return null;
   const storageKey = `${COMPLETION_ACK_STORAGE_PREFIX}${token}`;
   const acknowledged =
-    new URLSearchParams(window.location.hash.slice(1)).get(
-      COMPLETION_ACK_FRAGMENT_KEY,
-    ) === "1";
+    new URLSearchParams(window.location.hash.slice(1)).get(COMPLETION_ACK_FRAGMENT_KEY) === "1";
   if (acknowledged) {
     try {
       window.sessionStorage.setItem(storageKey, "1");

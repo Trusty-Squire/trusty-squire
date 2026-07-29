@@ -34,8 +34,7 @@ describe("install completion callback validation", () => {
 
   it("retains the per-run callback across Google and GitHub OAuth returns", () => {
     const callback =
-      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" +
-      "b".repeat(48);
+      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "b".repeat(48);
     window.history.replaceState(
       {},
       "",
@@ -54,17 +53,10 @@ describe("install completion callback validation", () => {
 
   it("acknowledges callback support once and retains it across OAuth returns", () => {
     const callback =
-      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" +
-      "c".repeat(48);
-    expect(installCompletionAcknowledgementUrl("setup", callback)).toBe(
-      `${callback}/ack`,
-    );
+      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "c".repeat(48);
+    expect(installCompletionAcknowledgementUrl("setup", callback)).toBe(`${callback}/ack`);
 
-    window.history.replaceState(
-      {},
-      "",
-      "/install?token=setup#ts_install_complete_ack=1",
-    );
+    window.history.replaceState({}, "", "/install?token=setup#ts_install_complete_ack=1");
     expect(installCompletionAcknowledgementUrl("setup", callback)).toBeNull();
 
     window.history.replaceState({}, "", "/install?token=setup&claim=1");

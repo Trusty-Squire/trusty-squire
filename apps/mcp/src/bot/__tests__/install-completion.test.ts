@@ -30,18 +30,12 @@ describe("plain install completion listener", () => {
       redirect: "manual",
     });
     expect(acknowledged.status).toBe(302);
-    const acknowledgementRedirect = new URL(
-      acknowledged.headers.get("location")!,
-    );
-    expect(`${acknowledgementRedirect.origin}${acknowledgementRedirect.pathname}${acknowledgementRedirect.search}`).toBe(
-      confirmUrl,
-    );
-    const acknowledgementFragment = new URLSearchParams(
-      acknowledgementRedirect.hash.slice(1),
-    );
-    expect(acknowledgementFragment.get("ts_install_complete")).toBe(
-      listener.callbackUrl,
-    );
+    const acknowledgementRedirect = new URL(acknowledged.headers.get("location")!);
+    expect(
+      `${acknowledgementRedirect.origin}${acknowledgementRedirect.pathname}${acknowledgementRedirect.search}`,
+    ).toBe(confirmUrl);
+    const acknowledgementFragment = new URLSearchParams(acknowledgementRedirect.hash.slice(1));
+    expect(acknowledgementFragment.get("ts_install_complete")).toBe(listener.callbackUrl);
     expect(acknowledgementFragment.get("ts_install_complete_ack")).toBe("1");
     expect(listener.isAcknowledged()).toBe(true);
     expect(listener.isCompleted()).toBe(false);
