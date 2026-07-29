@@ -188,12 +188,22 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     ).toBe(true);
   });
 
-  it("completes plain-login onboarding on claimed+seeded when there is no URL to watch", () => {
-    // Plain connect browser (no CDP) has no browser URL. Normal onboarding
-    // (completeOnClaim=false) then keys off claimed AND the provider session
-    // seeding, since the /install/done URL signal is unavailable.
-    expect(shouldCompleteInstallClaim(true, false, true, undefined)).toBe(true);
-    // Still waits while the session hasn't seeded yet.
+  it("keeps plain onboarding open through optional GitHub until explicit Finish", () => {
+    // Step 1: Google claimed the install and seeded its provider cookie. This
+    // used to close noVNC before the user could complete optional GitHub.
+    expect(shouldCompleteInstallClaim(true, false, true, undefined)).toBe(false);
+    // Step 2: another provider cookie landing still is not wizard completion.
+    expect(shouldCompleteInstallClaim(true, false, true, undefined)).toBe(false);
+    // Only the per-run loopback signal fired by Finish is terminal.
+    expect(
+      shouldCompleteInstallClaim(true, false, true, undefined, true),
+    ).toBe(true);
+  });
+
+  it("does not accept an explicit Finish signal before the account claim", () => {
+    expect(
+      shouldCompleteInstallClaim(false, false, true, undefined, true),
+    ).toBe(false);
     expect(shouldCompleteInstallClaim(true, false, false, undefined)).toBe(false);
   });
 
@@ -214,10 +224,16 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
       "utf8",
     );
     expect(cliSource).toMatch(/completeOnClaim:\s*args\.forceRelogin/);
+    expect(cliSource).toMatch(
+      /completionProvider:\s*args\.forceReloginProvider\s*\?\?\s*"google"/,
+    );
     // Plain-login mode: the connect claim browser has no CDP context, so the
-    // seed check reads the provider session off the on-disk cookie store and
-    // completion passes an undefined browser URL (keying off claimed+seeded).
-    expect(cliSource).toMatch(/profileHasProviderCookies\(profileDir,/);
+    // seed check reads the provider session off the on-disk cookie store while
+    // normal onboarding receives an explicit per-run Finish signal.
+    expect(cliSource).toMatch(
+      /profileHasProviderCookies\(profileDir,\s*options\.completionProvider\)/,
+    );
+    expect(cliSource).toMatch(/wizardCompleted/);
   });
 });
 

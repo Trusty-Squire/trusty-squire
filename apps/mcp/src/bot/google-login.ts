@@ -47,6 +47,10 @@ import {
   resolveChannelBinary,
   selfLaunchEnabled,
 } from "./browser.js";
+import {
+  startInstallCompletionListener,
+  withInstallCompletionCallback,
+} from "./install-completion.js";
 import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
@@ -1353,10 +1357,12 @@ export async function openInstallConfirmInBotChrome(opts: {
   // Returns true when the install ceremony is done. The login browser runs
   // PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
   // attach), so the predicate gets the profileDir, NOT a live context: it
-  // composes "(install claim cached, via the API) AND (provider session seeded,
-  // via profileHasProviderCookies)". There is no browser-URL signal in plain
-  // mode; completion keys off the API claim + on-disk cookies.
-  pollUntilClaimed: (profileDir: string) => Promise<boolean>;
+  // composes the API claim with either the normal wizard's per-run loopback
+  // Finish callback or forced re-login's on-disk provider-session seed.
+  pollUntilClaimed: (
+    profileDir: string,
+    wizardCompleted: boolean,
+  ) => Promise<boolean>;
   profileDir?: string;
   timeoutMinutes?: number;
   // G15: API base URL used to shorten the headless cloudflared
@@ -1369,11 +1375,20 @@ export async function openInstallConfirmInBotChrome(opts: {
   const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
+  let completion:
+    | Awaited<ReturnType<typeof startInstallCompletionListener>>
+    | undefined;
 
   try {
+    const doneUrl = new URL("/install/done", opts.confirmUrl).toString();
+    completion = await startInstallCompletionListener(doneUrl);
+    const confirmUrl = withInstallCompletionCallback(
+      opts.confirmUrl,
+      completion.callbackUrl,
+    );
     const result = await runInBotChrome({
       profileDir,
-      url: opts.confirmUrl,
+      url: confirmUrl,
       deadline,
       bannerLabel:
         `You'll see a Chrome window with the Trusty Squire install page. ` +
@@ -1384,7 +1399,8 @@ export async function openInstallConfirmInBotChrome(opts: {
       // stub to satisfy the (CDP-path) type.
       plainProfileLogin: true,
       pollUntilDone: () => Promise.resolve(false),
-      plainPollUntilDone: (dir) => opts.pollUntilClaimed(dir),
+      plainPollUntilDone: (dir) =>
+        opts.pollUntilClaimed(dir, completion?.isCompleted() === true),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined
         ? { heartbeatMessage: opts.heartbeatMessage }
@@ -1413,5 +1429,7 @@ export async function openInstallConfirmInBotChrome(opts: {
     return { status: "timeout", detail: "no install completed before the deadline" };
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
+  } finally {
+    await completion?.close().catch(() => undefined);
   }
 }

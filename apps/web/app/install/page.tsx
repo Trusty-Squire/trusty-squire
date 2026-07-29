@@ -19,6 +19,10 @@ import { useRouter } from "next/navigation";
 import { ApiError, apiGet, apiPost } from "../lib/api";
 import { useQueryParam } from "../lib/use-query-param";
 import { Shield } from "../components/Shield";
+import {
+  clearInstallCompletionUrl,
+  readInstallCompletionUrl,
+} from "./completion";
 
 type Provider = "google" | "github";
 type InstallPairingStatus = "pending" | "claimed" | "delivered" | "expired";
@@ -86,12 +90,18 @@ export default function InstallPage() {
   const [skippedGithub, setSkippedGithub] = useState(false);
   const [errorText, setErrorText] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [completionUrl, setCompletionUrl] = useState<string | null>(null);
   const [preferences, setPreferences] = useState<InstallPreferences>(
     readStoredInstallPreferences,
   );
   const registryEnabled = preferences.registry_enabled;
   const otpEnabled = preferences.consent_operator_inbox_otp;
   const proxyUrl = preferences.proxy_url ?? "";
+
+  useEffect(() => {
+    if (token === null) return;
+    setCompletionUrl(readInstallCompletionUrl(token));
+  }, [token]);
 
   // Returning from the OAuth round-trip — fire the claim if we
   // weren't already claimed. The wizard then continues to step 2.
@@ -293,9 +303,14 @@ export default function InstallPage() {
       } catch {
         /* ignore */
       }
+      clearInstallCompletionUrl(token);
+    }
+    if (completionUrl !== null) {
+      window.location.assign(completionUrl);
+      return;
     }
     router.push("/install/done");
-  }, [router, token]);
+  }, [completionUrl, router, token]);
 
   // ---- Render branches -----------------------------------------------
 

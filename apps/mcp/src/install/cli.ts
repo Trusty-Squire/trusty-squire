@@ -676,6 +676,7 @@ async function connect(args: Argv): Promise<void> {
     {
       applyServerPrefs: !wantInteractive,
       completeOnClaim: args.forceRelogin,
+      completionProvider: args.forceReloginProvider ?? "google",
     },
   );
   if (session === null) {
@@ -1143,17 +1144,17 @@ export function shouldCompleteInstallClaim(
   completeOnClaim: boolean,
   sessionSeeded: boolean,
   installPageUrl: string | undefined,
+  wizardCompleted = false,
 ): boolean {
   if (!claimed) return false;
   const terminal =
-    installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl);
+    wizardCompleted ||
+    (installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl));
   if (completeOnClaim) return sessionSeeded || terminal;
-  // Normal onboarding waits for the explicit Finish (terminal URL) when a
-  // browser URL is available to watch. The PLAIN login browser (connect claim,
-  // no CDP) has NO URL signal — installPageUrl is undefined — so fall back to
-  // "claimed AND provider session seeded", which means the account is bound and
-  // the Google/GitHub session landed: functionally done.
-  if (installPageUrl === undefined) return sessionSeeded;
+  // Normal onboarding always waits for the explicit Finish signal. Provider
+  // cookies only prove that one OAuth round-trip landed; Google is required
+  // before the optional GitHub step, so treating that seed as terminal closes
+  // noVNC while the user is still working through the wizard.
   return terminal;
 }
 
@@ -1178,9 +1179,12 @@ async function runInstallClaim(
     // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
     // await_verification refused despite the user consenting).
     applyServerPrefs: boolean;
-    // Forced re-login is complete when the fresh account claim succeeds. Normal
-    // onboarding stays open for its explicit Finish step and optional setup.
+    // Forced re-login is complete when the fresh account claim and requested
+    // provider seed succeed. Normal onboarding stays open for explicit Finish.
     completeOnClaim: boolean;
+    // A scoped re-login must wait for the requested provider, not any
+    // pre-existing provider cookie left in the shared browser profile.
+    completionProvider: OAuthProviderId;
   },
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
@@ -1197,12 +1201,17 @@ async function runInstallClaim(
   const state: { value: ClaimResult | null } = { value: null };
   // 0.8.2 — the normal wizard's "Finish" button navigates to
   // /install/done. First-time onboarding waits for that URL so the user gets a
-  // chance to complete optional setup. Forced re-login instead ends at the API
-  // claim because there is no remaining onboarding contract to wait for.
+  // chance to complete optional setup. Forced re-login instead ends after the
+  // API claim and requested provider seed because no setup remains to wait for.
   // Plain-login predicate: the connect claim browser runs plain (no CDP — a CDP
-  // attach fails Google's OAuth "secure browser" check), so completion is read
-  // from the API (claim) + the on-disk cookie store (seed), NOT a live context.
-  const pollOnce = async (profileDir: string): Promise<boolean> => {
+  // attach fails Google's OAuth "secure browser" check). The API delivers the
+  // account claim, the on-disk cookie store proves a forced re-login landed,
+  // and a per-run loopback callback carries the normal wizard's explicit
+  // Finish signal.
+  const pollOnce = async (
+    profileDir: string,
+    wizardCompleted: boolean,
+  ): Promise<boolean> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
     // user finishes signing in.
@@ -1226,20 +1235,23 @@ async function runInstallClaim(
     // Tear down once the account is claimed AND the provider session has
     // actually seeded — not on the bare claim, which can land while Google is
     // still writing cookies on a cold profile. Read the seed straight off the
-    // profile's on-disk cookie store (no live context in plain mode). Either
-    // provider satisfies it: the binding sign-in seeds whichever the user used.
+    // profile's on-disk cookie store (no live context in plain mode). A scoped
+    // re-login accepts only its requested provider, so an existing optional
+    // provider cannot close the browser mid-login.
     const claimed = state.value !== null;
     const sessionSeeded =
       claimed &&
-      (profileHasProviderCookies(profileDir, "google") ||
-        profileHasProviderCookies(profileDir, "github"));
-    // No browser URL to watch in plain mode — pass undefined so completion keys
-    // off claimed+seeded for BOTH force-relogin and normal onboarding.
+      options.completeOnClaim &&
+      profileHasProviderCookies(profileDir, options.completionProvider);
+    // No browser URL to watch in plain mode. Normal onboarding keys off the
+    // explicit loopback Finish callback; forced re-login may still finish once
+    // its requested provider session is safely seeded.
     const tearDown = shouldCompleteInstallClaim(
       claimed,
       options.completeOnClaim,
       sessionSeeded,
       undefined,
+      wizardCompleted,
     );
     if (tearDown) {
       return true;
