@@ -1224,14 +1224,17 @@ async function runInstallClaim(
     }
     // Tear down once the account is claimed AND the provider session has
     // actually returned — not on the bare claim, which can land while Google is
-    // still handling a cold-profile challenge. A scoped re-login accepts only
-    // its requested provider from the nonce callback, so stale SQLite bytes or
-    // a different optional provider cannot close the browser mid-login.
+    // still handling a cold-profile challenge. Once the nonce callback is
+    // acknowledged, a scoped re-login accepts only its requested provider from
+    // that callback. Older web installers and browsers without callback storage
+    // fall back to the requested provider's post-clear cookie presence.
     const claimed = state.value !== null;
     const sessionSeeded =
       claimed &&
       (options.completeOnClaim
-        ? wizardProviders.includes(options.completionProvider)
+        ? wizardProviders.includes(options.completionProvider) ||
+          (!wizardAcknowledged &&
+            profileHasProviderCookies(profileDir, options.completionProvider))
         : profileHasProviderCookies(profileDir, options.completionProvider));
     // No browser URL to watch in plain mode. Normal onboarding keys off the
     // explicit loopback Finish callback; forced re-login may still finish once

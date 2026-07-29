@@ -210,10 +210,12 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     );
     expect(cliSource).toMatch(/completeOnClaim:\s*args\.forceRelogin/);
     expect(cliSource).toMatch(/completionProvider:\s*args\.forceReloginProvider\s*\?\?\s*"google"/);
-    // Plain-login mode: the connect claim browser has no CDP context. Forced
-    // relogin therefore requires provider-specific evidence carried by the
-    // nonce-scoped Finish callback instead of guessing from SQLite bytes.
+    // Plain-login mode prefers provider-specific callback evidence, but an
+    // unacknowledged older installer can fall back to post-clear cookies.
     expect(cliSource).toMatch(/wizardProviders\.includes\(options\.completionProvider\)/);
+    expect(cliSource).toMatch(
+      /!wizardAcknowledged\s*&&\s*profileHasProviderCookies\(profileDir,\s*options\.completionProvider\)/,
+    );
     expect(cliSource).toMatch(/wizardCompleted/);
   });
 });
