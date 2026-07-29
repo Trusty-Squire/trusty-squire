@@ -1195,7 +1195,9 @@ async function runInstallClaim(
     // fresh evidence without adding another browser/web callback protocol.
     const claimed = state.value !== null;
     const sessionSeeded =
-      claimed && profileHasProviderCookies(profileDir, options.completionProvider);
+      claimed &&
+      options.completeOnClaim &&
+      profileHasProviderCookies(profileDir, options.completionProvider);
     // No browser URL to watch in plain mode. Normal onboarding keys off the
     // explicit loopback Finish callback; forced re-login finishes once its
     // requested provider session is safely seeded.
