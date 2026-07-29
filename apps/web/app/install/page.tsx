@@ -115,6 +115,7 @@ export default function InstallPage() {
   // as done when the OAuth ran here this session, which is what actually
   // (re)establishes the bot's github.com login.
   const returnedFromGithub = useQueryParam("gh") === "1";
+  const [googleSessionFresh, setGoogleSessionFresh] = useState(false);
   const [githubSessionFresh, setGithubSessionFresh] = useState(false);
 
   // Initial load: fetch state + whoami in parallel. A missing token is
@@ -278,6 +279,12 @@ export default function InstallPage() {
   // link, the bot's github.com cookie is live in this profile — mark the
   // step done. Sticky: survives the URL-marker cleanup below.
   useEffect(() => {
+    if (returnedFromAuth && identities.includes("google")) {
+      setGoogleSessionFresh(true);
+    }
+  }, [returnedFromAuth, identities]);
+
+  useEffect(() => {
     if (returnedFromGithub && identities.includes("github")) {
       setGithubSessionFresh(true);
     }
@@ -297,11 +304,14 @@ export default function InstallPage() {
       clearInstallCompletionUrl(token);
     }
     if (completionUrl !== null) {
-      window.location.assign(completionUrl);
+      const callback = new URL(completionUrl);
+      if (googleSessionFresh) callback.searchParams.append("provider", "google");
+      if (githubSessionFresh) callback.searchParams.append("provider", "github");
+      window.location.assign(callback.toString());
       return;
     }
     router.push("/install/done");
-  }, [completionUrl, router, token]);
+  }, [completionUrl, githubSessionFresh, googleSessionFresh, router, token]);
 
   // ---- Render branches -----------------------------------------------
 

@@ -52,8 +52,6 @@ import {
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
   profileHasProviderCookies,
-  profileHasNewProviderCookies,
-  profileProviderCookieFingerprint,
 } from "../bot/google-login.js";
 import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
@@ -64,7 +62,7 @@ import {
   loggedInProviders,
   markProviderLoggedIn,
 } from "../bot/login-state.js";
-import { CHROME_PROFILE_DIR, waitForProfileFree } from "../bot/profile.js";
+import { waitForProfileFree } from "../bot/profile.js";
 import { VERSION } from "../version.js";
 import { ensureLatestVersion } from "./version-check.js";
 import * as ui from "./ui.js";
@@ -1182,9 +1180,6 @@ async function runInstallClaim(
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
   const initiate = await installInitiate(apiBase, target, baseSession.machine_token ?? null);
-  const providerCookieBaseline = options.completeOnClaim
-    ? profileProviderCookieFingerprint(CHROME_PROFILE_DIR, options.completionProvider)
-    : null;
 
   // Track the claimed token outside the poll closure so the in-Chrome
   // flow's pollUntilClaimed can read it once the API reports claimed.
@@ -1194,17 +1189,18 @@ async function runInstallClaim(
   // The normal wizard's Finish button invokes the nonce-scoped loopback
   // callback. First-time onboarding waits for that signal so the user gets a
   // chance to complete optional setup. Forced re-login instead ends after the
-  // API claim and fresh requested-provider cookie evidence because no setup
-  // remains to wait for.
+  // API claim and provider-specific OAuth-return evidence carried by that same
+  // nonce callback because no setup remains to wait for.
   // Plain-login predicate: the connect claim browser runs plain (no CDP — a CDP
   // attach fails Google's OAuth "secure browser" check). The API delivers the
-  // account claim, the on-disk cookie store proves a forced re-login landed,
-  // and a per-run loopback callback carries the normal wizard's explicit
-  // Finish signal.
+  // account claim, and the per-run loopback callback carries both the normal
+  // wizard's explicit Finish signal and the provider OAuth returns completed
+  // in this browser.
   const pollOnce = async (
     profileDir: string,
     wizardCompleted: boolean,
     wizardAcknowledged: boolean,
+    wizardProviders: readonly OAuthProviderId[],
   ): Promise<boolean> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
@@ -1227,20 +1223,15 @@ async function runInstallClaim(
       }
     }
     // Tear down once the account is claimed AND the provider session has
-    // actually seeded — not on the bare claim, which can land while Google is
-    // still writing cookies on a cold profile. Read the seed straight off the
-    // profile's on-disk cookie store (no live context in plain mode). A scoped
-    // re-login accepts only its requested provider, so an existing optional
-    // provider cannot close the browser mid-login.
+    // actually returned — not on the bare claim, which can land while Google is
+    // still handling a cold-profile challenge. A scoped re-login accepts only
+    // its requested provider from the nonce callback, so stale SQLite bytes or
+    // a different optional provider cannot close the browser mid-login.
     const claimed = state.value !== null;
     const sessionSeeded =
       claimed &&
       (options.completeOnClaim
-        ? profileHasNewProviderCookies(
-            profileDir,
-            options.completionProvider,
-            providerCookieBaseline,
-          )
+        ? wizardProviders.includes(options.completionProvider)
         : profileHasProviderCookies(profileDir, options.completionProvider));
     // No browser URL to watch in plain mode. Normal onboarding keys off the
     // explicit loopback Finish callback; forced re-login may still finish once

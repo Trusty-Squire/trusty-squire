@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 
 export const INSTALL_COMPLETION_FRAGMENT_KEY = "ts_install_complete";
 
@@ -10,6 +11,7 @@ export interface InstallCompletionListener {
   callbackUrl: string;
   isCompleted: () => boolean;
   isAcknowledged: () => boolean;
+  completedProviders: () => readonly OAuthProviderId[];
   close: () => Promise<void>;
 }
 
@@ -42,9 +44,11 @@ export async function startInstallCompletionListener(
   const acknowledgementPath = `${completionPath}/ack`;
   let completed = false;
   let acknowledged = false;
+  const providers = new Set<OAuthProviderId>();
 
   const server = createServer((req, res) => {
-    const path = req.url === undefined ? "" : new URL(req.url, "http://127.0.0.1").pathname;
+    const requestUrl = req.url === undefined ? null : new URL(req.url, "http://127.0.0.1");
+    const path = requestUrl?.pathname ?? "";
     if (req.method === "GET" && path === acknowledgementPath) {
       acknowledged = true;
       const redirect = new URL(confirmUrl);
@@ -73,6 +77,20 @@ export async function startInstallCompletionListener(
       return;
     }
 
+    const providerValues = requestUrl?.searchParams.getAll("provider") ?? [];
+    const hasUnexpectedParam =
+      requestUrl !== null && [...requestUrl.searchParams.keys()].some((key) => key !== "provider");
+    if (hasUnexpectedParam || providerValues.some((provider) => !isOAuthProviderId(provider))) {
+      res.writeHead(400, {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/plain; charset=utf-8",
+      });
+      res.end("Invalid completion evidence");
+      return;
+    }
+    for (const provider of providerValues) {
+      if (isOAuthProviderId(provider)) providers.add(provider);
+    }
     completed = true;
     res.writeHead(302, {
       "Cache-Control": "no-store",
@@ -104,6 +122,7 @@ export async function startInstallCompletionListener(
     callbackUrl,
     isCompleted: () => completed,
     isAcknowledged: () => acknowledged,
+    completedProviders: () => [...providers],
     close: async () => {
       if (closed) return;
       closed = true;

@@ -210,13 +210,10 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     );
     expect(cliSource).toMatch(/completeOnClaim:\s*args\.forceRelogin/);
     expect(cliSource).toMatch(/completionProvider:\s*args\.forceReloginProvider\s*\?\?\s*"google"/);
-    // Plain-login mode: the connect claim browser has no CDP context, so the
-    // seed check reads the provider session off the on-disk cookie store while
-    // normal onboarding receives an explicit per-run Finish signal.
-    expect(cliSource).toMatch(/profileProviderCookieFingerprint/);
-    expect(cliSource).toMatch(
-      /profileHasNewProviderCookies\(\s*profileDir,\s*options\.completionProvider/,
-    );
+    // Plain-login mode: the connect claim browser has no CDP context. Forced
+    // relogin therefore requires provider-specific evidence carried by the
+    // nonce-scoped Finish callback instead of guessing from SQLite bytes.
+    expect(cliSource).toMatch(/wizardProviders\.includes\(options\.completionProvider\)/);
     expect(cliSource).toMatch(/wizardCompleted/);
   });
 });
