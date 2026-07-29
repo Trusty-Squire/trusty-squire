@@ -6,15 +6,8 @@
 // (user_session) no longer exists — the bot then auto-prefers that
 // provider's OAuth path and every signup fails. Observed 2026-06-02.
 
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-  type MockInstance,
-} from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import type * as GoogleLogin from "../../bot/google-login.js";
 
 // vi.hoisted so these are initialized before the hoisted vi.mock factories
 // reference them (and so tsc sees plain Mocks, not spread wrappers).
@@ -31,7 +24,7 @@ const m = vi.hoisted(() => ({
 // exports from it transitively) and override only the one call login()
 // makes, so the import graph stays intact.
 vi.mock("../../bot/google-login.js", async (importActual) => {
-  const actual = await importActual<typeof import("../../bot/google-login.js")>();
+  const actual = await importActual<typeof GoogleLogin>();
   return { ...actual, ensureOAuthSession: m.ensureOAuthSession };
 });
 
@@ -62,9 +55,9 @@ describe("login --force-relogin marker honesty", () => {
 
   it("clears the provider marker up front on force-relogin (timed-out login can't leave it lying)", async () => {
     m.ensureOAuthSession.mockResolvedValue({ status: "timeout" });
-    await expect(
-      runCli(["login", "--provider=github", "--force-relogin"]),
-    ).rejects.toThrow("process.exit");
+    await expect(runCli(["login", "--provider=github", "--force-relogin"])).rejects.toThrow(
+      "process.exit",
+    );
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(m.clearProviderLoggedIn).toHaveBeenCalledWith("github");
     // a timed-out login never confirms a cookie, so it must NOT re-mark
@@ -73,9 +66,7 @@ describe("login --force-relogin marker honesty", () => {
 
   it("does NOT touch the marker when --force-relogin is absent", async () => {
     m.ensureOAuthSession.mockResolvedValue({ status: "timeout" });
-    await expect(
-      runCli(["login", "--provider=github"]),
-    ).rejects.toThrow("process.exit");
+    await expect(runCli(["login", "--provider=github"])).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(m.clearProviderLoggedIn).not.toHaveBeenCalled();
   });

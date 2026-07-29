@@ -97,7 +97,6 @@ describe("profileHasProviderCookies (plain-login on-disk seed check)", () => {
     expect(profileHasNewProviderCookies(dir, "github", baseline)).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
-
 });
 
 describe("pollUntil phase-aware heartbeat", () => {

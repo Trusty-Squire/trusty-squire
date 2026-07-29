@@ -80,7 +80,8 @@ export function recordProviderEmail(
     let current: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(readFileSync(emailMarkerPath(profileDir), "utf8"));
-      if (parsed !== null && typeof parsed === "object") current = parsed as Record<string, unknown>;
+      if (parsed !== null && typeof parsed === "object")
+        current = parsed as Record<string, unknown>;
     } catch {
       /* no marker yet */
     }
@@ -94,15 +95,12 @@ export function recordProviderEmail(
 
 // Providers with a confirmed session in the profile. Best-effort: a
 // missing or malformed marker yields []. Never throws.
-export function loggedInProviders(
-  profileDir: string = CHROME_PROFILE_DIR,
-): OAuthProviderId[] {
+export function loggedInProviders(profileDir: string = CHROME_PROFILE_DIR): OAuthProviderId[] {
   try {
     const parsed: unknown = JSON.parse(readFileSync(markerPath(profileDir), "utf8"));
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
-      (v): v is OAuthProviderId =>
-        typeof v === "string" && isOAuthProviderId(v),
+      (v): v is OAuthProviderId => typeof v === "string" && isOAuthProviderId(v),
     );
   } catch {
     return [];
@@ -147,9 +145,7 @@ export function clearProviderLoggedIn(
 // Wipe the marker entirely. Used by `connect --force-relogin` so the
 // step-2/2 prompt reflects THIS run's actual cookie state instead of
 // silently relying on the union of every prior session. Best-effort.
-export function clearAllProviderMarkers(
-  profileDir: string = CHROME_PROFILE_DIR,
-): void {
+export function clearAllProviderMarkers(profileDir: string = CHROME_PROFILE_DIR): void {
   try {
     writeFileSync(markerPath(profileDir), JSON.stringify([]), "utf8");
   } catch {

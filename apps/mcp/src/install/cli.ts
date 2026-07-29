@@ -1191,10 +1191,11 @@ async function runInstallClaim(
   // Wrapper object so TS can narrow `state.value` after a `=== null`
   // check at the call site — bare closure-captured `let` doesn't.
   const state: { value: ClaimResult | null } = { value: null };
-  // 0.8.2 — the normal wizard's "Finish" button navigates to
-  // /install/done. First-time onboarding waits for that URL so the user gets a
+  // The normal wizard's Finish button invokes the nonce-scoped loopback
+  // callback. First-time onboarding waits for that signal so the user gets a
   // chance to complete optional setup. Forced re-login instead ends after the
-  // API claim and requested provider seed because no setup remains to wait for.
+  // API claim and fresh requested-provider cookie evidence because no setup
+  // remains to wait for.
   // Plain-login predicate: the connect claim browser runs plain (no CDP — a CDP
   // attach fails Google's OAuth "secure browser" check). The API delivers the
   // account claim, the on-disk cookie store proves a forced re-login landed,
