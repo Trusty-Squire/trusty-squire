@@ -534,16 +534,15 @@ dropping that flag does NOT help. The tell is the CDP attachment itself.
 
 **THE FIX (validated in principle by the plain-OAuth+claimed run):** the connect /
 `mcp login` browser must run as PLAIN Chrome — NO `--remote-debugging-port`, NO
-`connectOverCDP` — and detect login/seed completion by polling the profile's
-on-disk Cookies SQLite for the auth-cookie NAMES (plaintext; values are encrypted
-but only presence is needed — proven by reading the DB in all 5 rounds). This makes
-the login browser byte-identical to the plain Chrome that passes Google's OAuth
-check. Implementation = replace the CDP `BrowserContext` handed to
-`runInBotChrome`'s `pollUntilDone`/`onSuccess`/`preflight` with a cookie-DB reader;
-launch Chrome without the debug port. (Note: launchPersistentContext — also CDP —
-worked on two OTHER Hetzners, so Google's OAuth CDP-detection is not 100%
-deterministic across IPs/time; removing CDP makes the login robust everywhere
-regardless.)
+`connectOverCDP` — and detect login/seed completion by querying the profile's
+on-disk Cookies SQLite for live provider auth-cookie rows. This makes the login
+browser byte-identical to the plain Chrome that passes Google's OAuth check.
+Implementation = replace the CDP `BrowserContext` handed to
+`runInBotChrome`'s `pollUntilDone`/`onSuccess`/`preflight` with a read-only
+cookie-DB query; launch Chrome without the debug port. (Note:
+launchPersistentContext — also CDP — worked on two OTHER Hetzners, so Google's
+OAuth CDP-detection is not 100% deterministic across IPs/time; removing CDP
+makes the login robust everywhere regardless.)
 
 **✓✓✓✓✓ CONFIRMED FIXED (2026-07-20, real chad `connect --force-relogin`,
 `~/ts-connect3.log`).** `[connect-debug] launcher=plain chrome=/usr/bin/google-chrome`,
@@ -556,19 +555,21 @@ mcp-login CDP path). Plain-login path for the connect claim:
 - `launchPlainLoginBrowser` (browser.ts) — spawns Chrome with NO
   `--remote-debugging-port` and NEVER `connectOverCDP`; returns only `{teardown}`.
 - `profileHasProviderCookies(profileDir, provider)` (google-login.ts) — reads the
-  provider session off the on-disk Cookies file by raw-bytes name substring
-  (dependency-free; engines `>=20` rules out `node:sqlite`). Presence-only.
+  requested provider's live cookie rows from the on-disk Cookies SQLite via
+  `better-sqlite3`, including committed WAL rows. It does not scan raw database
+  bytes or accept deleted-cookie remnants.
 - `RunInBotChromeOpts.plainProfileLogin` + `plainPollUntilDone(profileDir)` +
   `plainOnSuccess(profileDir)` — additive; `runHeadlessChrome`/`runDisplayedChrome`
   branch to the plain launcher and pass profileDir (no context). `mcp login`
   (GitHub liveness needs CDP + it's a DIRECT login, CDP-safe) is UNTOUCHED on the
   CDP path.
 - `openInstallConfirmInBotChrome` sets `plainProfileLogin`; connect `pollOnce`
-  (cli.ts) now takes profileDir, reads seed via `profileHasProviderCookies`, and
-  `shouldCompleteInstallClaim` completes on claimed+seeded when the URL is
-  undefined (plain mode has no browser URL). Eager Google-email capture dropped on
-  the plain path (needed CDP; it was only an optimization — provision scrapes
-  per-run).
+  (cli.ts) now takes profileDir and checks only the requested provider via
+  `profileHasProviderCookies`. Normal onboarding completes only from its
+  nonce-scoped Finish callback; forced relogin completes from claim plus the
+  requested provider's post-clear cookie presence. Eager Google-email capture
+  dropped on the plain path (needed CDP; it was only an optimization — provision
+  scrapes per-run).
 Validated w/o 2FA: `launchPlainLoginBrowser` spawns Chrome with no debug port +
 clean idempotent teardown (no zombie); `profileHasProviderCookies` true/false
 correct incl. missing-file; 984 unit tests green (+4 cookie-probe, +1

@@ -1116,7 +1116,7 @@ export function shouldCompleteInstallClaim(
   if (!claimed) return false;
   // A forced provider relogin is successful only when its provider-specific
   // completion evidence arrives. Finish alone is not an override: the user may
-  // skip optional GitHub and still reach the terminal page.
+  // skip optional GitHub and still send the normal completion callback.
   if (completeOnClaim) return sessionSeeded;
   return wizardCompleted;
 }
