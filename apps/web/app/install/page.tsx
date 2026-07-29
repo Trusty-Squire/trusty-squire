@@ -115,7 +115,6 @@ export default function InstallPage() {
   // as done when the OAuth ran here this session, which is what actually
   // (re)establishes the bot's github.com login.
   const returnedFromGithub = useQueryParam("gh") === "1";
-  const [googleSessionFresh, setGoogleSessionFresh] = useState(false);
   const [githubSessionFresh, setGithubSessionFresh] = useState(false);
 
   // Initial load: fetch state + whoami in parallel. A missing token is
@@ -275,15 +274,6 @@ export default function InstallPage() {
       encodeURIComponent(`/install?token=${encodeURIComponent(token)}&gh=1`);
   }, [token]);
 
-  // Record provider returns only after the account confirms the corresponding
-  // identity. These flags become provider-specific completion evidence for the
-  // nonce callback. Sticky: survives the URL-marker cleanup below.
-  useEffect(() => {
-    if (returnedFromAuth && identities.includes("google")) {
-      void Promise.resolve().then(() => setGoogleSessionFresh(true));
-    }
-  }, [returnedFromAuth, identities]);
-
   useEffect(() => {
     if (returnedFromGithub && identities.includes("github")) {
       void Promise.resolve().then(() => setGithubSessionFresh(true));
@@ -304,14 +294,11 @@ export default function InstallPage() {
       clearInstallCompletionUrl(token);
     }
     if (completionUrl !== null) {
-      const callback = new URL(completionUrl);
-      if (googleSessionFresh) callback.searchParams.append("provider", "google");
-      if (githubSessionFresh) callback.searchParams.append("provider", "github");
-      window.location.assign(callback.toString());
+      window.location.assign(completionUrl);
       return;
     }
     router.push("/install/done");
-  }, [completionUrl, githubSessionFresh, googleSessionFresh, router, token]);
+  }, [completionUrl, router, token]);
 
   // ---- Render branches -----------------------------------------------
 

@@ -210,11 +210,10 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     );
     expect(cliSource).toMatch(/completeOnClaim:\s*args\.forceRelogin/);
     expect(cliSource).toMatch(/completionProvider:\s*args\.forceReloginProvider\s*\?\?\s*"google"/);
-    // Plain-login mode prefers provider-specific callback evidence, but an
-    // unacknowledged older installer can fall back to post-clear cookies.
-    expect(cliSource).toMatch(/wizardProviders\.includes\(options\.completionProvider\)/);
+    // Plain-login mode has no CDP context, so it reads the requested provider
+    // seed from the cookie store after verified preflight clearing.
     expect(cliSource).toMatch(
-      /!wizardAcknowledged\s*&&\s*profileHasProviderCookies\(profileDir,\s*options\.completionProvider\)/,
+      /profileHasProviderCookies\(profileDir,\s*options\.completionProvider\)/,
     );
     expect(cliSource).toMatch(/wizardCompleted/);
   });

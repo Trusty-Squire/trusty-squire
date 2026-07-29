@@ -1381,13 +1381,11 @@ export async function openInstallConfirmInBotChrome(opts: {
   // PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
   // attach), so the predicate gets the profileDir, NOT a live context: it
   // composes the API claim with either the normal wizard's per-run loopback
-  // Finish callback or forced re-login's provider-specific OAuth-return
-  // evidence carried by that callback.
+  // Finish callback or forced re-login's on-disk provider-session seed.
   pollUntilClaimed: (
     profileDir: string,
     wizardCompleted: boolean,
     wizardAcknowledged: boolean,
-    wizardProviders: readonly OAuthProviderId[],
   ) => Promise<boolean>;
   profileDir?: string;
   timeoutMinutes?: number;
@@ -1425,7 +1423,6 @@ export async function openInstallConfirmInBotChrome(opts: {
           dir,
           completion?.isCompleted() === true,
           completion?.isAcknowledged() === true,
-          completion?.completedProviders() ?? [],
         ),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
