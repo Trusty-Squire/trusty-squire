@@ -1167,10 +1167,7 @@ async function runInstallClaim(
   // account claim, the on-disk cookie store proves a forced re-login landed,
   // and a per-run loopback callback carries the normal wizard's explicit
   // Finish signal.
-  const pollOnce = async (
-    profileDir: string,
-    wizardCompleted: boolean,
-  ): Promise<boolean> => {
+  const pollOnce = async (profileDir: string, wizardCompleted: boolean): Promise<boolean> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
     // user finishes signing in.

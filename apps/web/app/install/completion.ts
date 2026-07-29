@@ -42,9 +42,8 @@ export function readInstallCompletionUrl(token: string): string | null {
     } catch {
       // OAuth removes the fragment on its redirect back to this page. Do not
       // acknowledge callback support unless the callback survived into
-      // session storage; the MCP client will retain its legacy seeded-session
-      // fallback instead of waiting forever for a callback we can no longer
-      // deliver.
+      // session storage, because Finish cannot deliver a callback after the
+      // fragment disappears.
       return null;
     }
   }
