@@ -331,6 +331,28 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 
+  it("drives only the native select resolved by an nth-chain selector", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <select class="country">
+          <option value="US">United States</option>
+          <option value="CA">Canada</option>
+        </select>
+        <select class="country">
+          <option value="JP">Japan</option>
+          <option value="KR">South Korea</option>
+        </select>`),
+    );
+    try {
+      await ctrl.selectOption("select.country >> nth=1", "South Korea");
+      expect(await page.locator("select.country").nth(0).inputValue()).toBe("US");
+      expect(await page.locator("select.country").nth(1).inputValue()).toBe("KR");
+      expect(await page.locator("select.country").nth(1).getAttribute("data-ts-touched")).toBe("1");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
   it("throws when a native select reverts the chosen value", async () => {
     const { ctrl, page } = await pageFor(
       dataUrl(`
