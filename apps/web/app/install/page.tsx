@@ -19,6 +19,11 @@ import { useRouter } from "next/navigation";
 import { ApiError, apiGet, apiPost } from "../lib/api";
 import { useQueryParam } from "../lib/use-query-param";
 import { Shield } from "../components/Shield";
+import {
+  clearInstallCompletionUrl,
+  installCompletionAcknowledgementUrl,
+  readInstallCompletionUrl,
+} from "./completion";
 
 type Provider = "google" | "github";
 type InstallPairingStatus = "pending" | "claimed" | "delivered" | "expired";
@@ -66,11 +71,7 @@ function readStoredInstallPreferences(): InstallPreferences {
 // the wizard step states; the rarer ones (loading the page, expired
 // install, server error) get their own branches. The missing-token
 // case is derived from `token` at render, not tracked here.
-type PageState =
-  | "loading"
-  | "wizard"
-  | "expired"
-  | "error";
+type PageState = "loading" | "wizard" | "expired" | "error";
 
 function isInstallConfirmed(status: InstallStatus["status"]): boolean {
   return status === "claimed" || status === "delivered";
@@ -86,12 +87,23 @@ export default function InstallPage() {
   const [skippedGithub, setSkippedGithub] = useState(false);
   const [errorText, setErrorText] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [preferences, setPreferences] = useState<InstallPreferences>(
-    readStoredInstallPreferences,
-  );
+  const [completionUrl, setCompletionUrl] = useState<string | null>(null);
+  const [preferences, setPreferences] = useState<InstallPreferences>(readStoredInstallPreferences);
   const registryEnabled = preferences.registry_enabled;
   const otpEnabled = preferences.consent_operator_inbox_otp;
   const proxyUrl = preferences.proxy_url ?? "";
+
+  useEffect(() => {
+    if (token === null) return;
+    const callbackUrl = readInstallCompletionUrl(token);
+    if (callbackUrl === null) return;
+    const acknowledgementUrl = installCompletionAcknowledgementUrl(token, callbackUrl);
+    if (acknowledgementUrl !== null) {
+      window.location.assign(acknowledgementUrl);
+      return;
+    }
+    setCompletionUrl(callbackUrl);
+  }, [token]);
 
   // Returning from the OAuth round-trip — fire the claim if we
   // weren't already claimed. The wizard then continues to step 2.
@@ -113,9 +125,7 @@ export default function InstallPage() {
     void (async () => {
       try {
         const [state, whoami] = await Promise.all([
-          apiGet<InstallStatus>(
-            `/v1/mcp/install/${encodeURIComponent(token)}/state`,
-          ),
+          apiGet<InstallStatus>(`/v1/mcp/install/${encodeURIComponent(token)}/state`),
           apiGet<WhoamiResponse>(`/v1/auth/whoami`),
         ]);
         if (cancelled) return;
@@ -130,11 +140,7 @@ export default function InstallPage() {
       } catch (err) {
         if (cancelled) return;
         setPage("error");
-        setErrorText(
-          err instanceof Error
-            ? err.message
-            : "Couldn't load this install request.",
-        );
+        setErrorText(err instanceof Error ? err.message : "Couldn't load this install request.");
       }
     })();
     return () => {
@@ -174,15 +180,12 @@ export default function InstallPage() {
     let cancelled = false;
     void (async () => {
       try {
-        await apiPost(
-          `/v1/mcp/install/${encodeURIComponent(token)}/claim`,
-          {
-            ...(agent !== null ? { agent_identity: agent } : {}),
-            registry_enabled: registryEnabled,
-            consent_operator_inbox_otp: otpEnabled,
-            ...(proxyUrl.trim().length > 0 ? { proxy_url: proxyUrl.trim() } : {}),
-          },
-        );
+        await apiPost(`/v1/mcp/install/${encodeURIComponent(token)}/claim`, {
+          ...(agent !== null ? { agent_identity: agent } : {}),
+          registry_enabled: registryEnabled,
+          consent_operator_inbox_otp: otpEnabled,
+          ...(proxyUrl.trim().length > 0 ? { proxy_url: proxyUrl.trim() } : {}),
+        });
         if (cancelled) return;
         setInstallClaimed(true);
         // Strip the claim=1 marker so a page refresh doesn't try to
@@ -213,9 +216,7 @@ export default function InstallPage() {
           }
         }
         setPage("error");
-        setErrorText(
-          err instanceof Error ? err.message : "Install failed. Try again.",
-        );
+        setErrorText(err instanceof Error ? err.message : "Install failed. Try again.");
       }
     })();
     return () => {
@@ -293,9 +294,14 @@ export default function InstallPage() {
       } catch {
         /* ignore */
       }
+      clearInstallCompletionUrl(token);
+    }
+    if (completionUrl !== null) {
+      window.location.assign(completionUrl);
+      return;
     }
     router.push("/install/done");
-  }, [router, token]);
+  }, [completionUrl, router, token]);
 
   // ---- Render branches -----------------------------------------------
 
@@ -306,8 +312,8 @@ export default function InstallPage() {
       <Shell>
         <h1>Invalid install link</h1>
         <p className="auth-sub">
-          This link is missing its setup token. Run{" "}
-          <code>npx @trusty-squire/mcp connect</code> again for a fresh one.
+          This link is missing its setup token. Run <code>npx @trusty-squire/mcp connect</code>{" "}
+          again for a fresh one.
         </p>
       </Shell>
     );
@@ -328,8 +334,8 @@ export default function InstallPage() {
       <Shell>
         <h1>Install link expired</h1>
         <p className="auth-sub">
-          Install links last 10 minutes. Run{" "}
-          <code>npx @trusty-squire/mcp connect</code> again for a fresh one.
+          Install links last 10 minutes. Run <code>npx @trusty-squire/mcp connect</code> again for a
+          fresh one.
         </p>
       </Shell>
     );
@@ -407,11 +413,7 @@ export default function InstallPage() {
           status={step1Done ? "done" : "pending"}
         >
           {!step1Done && (
-            <button
-              className="btn-primary"
-              type="button"
-              onClick={startGoogle}
-            >
+            <button className="btn-primary" type="button" onClick={startGoogle}>
               Continue with Google
             </button>
           )}
@@ -431,37 +433,22 @@ export default function InstallPage() {
                   so a re-sign-in here is what actually lets the bot act. */}
               {githubLinked && (
                 <span className="wizard-step-hint">
-                  GitHub is linked to your account, but the bot needs its own
-                  GitHub sign-in to act on it. Sign in here to establish (or
-                  refresh) that session.
+                  GitHub is linked to your account, but the bot needs its own GitHub sign-in to act
+                  on it. Sign in here to establish (or refresh) that session.
                 </span>
               )}
-              <button
-                className="btn-primary"
-                type="button"
-                onClick={startGithub}
-              >
+              <button className="btn-primary" type="button" onClick={startGithub}>
                 {githubLinked ? "Sign in to GitHub" : "Connect GitHub"}
               </button>
-              <button
-                className="btn-secondary"
-                type="button"
-                onClick={skipGithub}
-              >
+              <button className="btn-secondary" type="button" onClick={skipGithub}>
                 Skip for now
               </button>
             </div>
           )}
           {step1Done && step2Done && (
             <div className="wizard-actions">
-              <span className="wizard-step-hint">
-                The bot has a working GitHub session.
-              </span>
-              <button
-                className="btn-secondary"
-                type="button"
-                onClick={startGithub}
-              >
+              <span className="wizard-step-hint">The bot has a working GitHub session.</span>
+              <button className="btn-secondary" type="button" onClick={startGithub}>
                 Re-sign in to GitHub
               </button>
             </div>
@@ -542,12 +529,7 @@ function AdvancedInstallSettings({
 }) {
   return (
     <section className="install-advanced" aria-label="Advanced install settings">
-      <button
-        type="button"
-        className="advanced-toggle"
-        onClick={onToggle}
-        disabled={disabled}
-      >
+      <button type="button" className="advanced-toggle" onClick={onToggle} disabled={disabled}>
         Advanced settings
         <span>{open ? "Hide" : "Show"}</span>
       </button>
@@ -562,7 +544,8 @@ function AdvancedInstallSettings({
             />
             <span>
               <b>Managed skill registry</b>
-              Reuse shared signup recipes and let successful non-personal recipes improve the registry.
+              Reuse shared signup recipes and let successful non-personal recipes improve the
+              registry.
             </span>
           </label>
           <label className="check-row">

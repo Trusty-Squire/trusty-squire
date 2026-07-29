@@ -40,13 +40,22 @@ import { fileURLToPath } from "node:url";
 import boxen from "boxen";
 import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
-import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError, waitForProfileFree } from "./profile.js";
+import {
+  CHROME_PROFILE_DIR,
+  launchWithProfileGate,
+  ProfileBusyError,
+  waitForProfileFree,
+} from "./profile.js";
 import {
   launchPlainLoginBrowser,
   launchSelfManagedLoginContext,
   resolveChannelBinary,
   selfLaunchEnabled,
 } from "./browser.js";
+import {
+  startInstallCompletionListener,
+  withInstallCompletionCallback,
+} from "./install-completion.js";
 import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
@@ -62,9 +71,7 @@ const require = createRequire(import.meta.url);
 // "logged-in marker lies" failure: the marker records a login whose auth
 // cookie the provider already invalidated. Honors UNIVERSAL_BOT_PROXY_URL;
 // unset (the default for end users) → direct, no change.
-function loginProxyOption():
-  | { server: string; username?: string; password?: string }
-  | undefined {
+function loginProxyOption(): { server: string; username?: string; password?: string } | undefined {
   const raw = process.env.UNIVERSAL_BOT_PROXY_URL;
   if (raw === undefined || raw.trim().length === 0) return undefined;
   try {
@@ -158,10 +165,7 @@ export interface LoginResult {
 }
 
 // --- session detection -------------------------------------------------
-async function hasProviderSession(
-  context: BrowserContext,
-  target: LoginTarget,
-): Promise<boolean> {
+async function hasProviderSession(context: BrowserContext, target: LoginTarget): Promise<boolean> {
   const cookies = await context.cookies(target.cookieOrigin);
   return cookies.some((c) => target.cookies.includes(c.name));
 }
@@ -192,10 +196,7 @@ const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
 // SQLite b-tree pages, so a raw byte search reliably answers "did this
 // session's cookie get written" — dependency-free and Node-version-agnostic
 // (engines >=20; node:sqlite is 22.5+). Presence-only; never decrypts values.
-export function profileHasProviderCookies(
-  profileDir: string,
-  provider: OAuthProviderId,
-): boolean {
+export function profileHasProviderCookies(profileDir: string, provider: OAuthProviderId): boolean {
   const markers = PROVIDER_COOKIE_MARKERS[provider];
   // <profile>/Default/Cookies is the norm; a profile that never opened a window
   // may only have <profile>/Cookies. Include the WAL sidecar — a just-written
@@ -330,8 +331,7 @@ export function classifyGoogleAuthState(url: string, bodyText: string): GoogleAu
     path.includes("/signin/oauth") ||
     text.includes("wants access to your google account") ||
     text.includes("wants to access your google account") ||
-    (text.includes("to continue to") &&
-      (text.includes("allow") || text.includes("continue")))
+    (text.includes("to continue to") && (text.includes("allow") || text.includes("continue")))
   ) {
     return "consent";
   }
@@ -629,7 +629,10 @@ function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildPro
 // and hang until the timeout.
 function awaitTunnelUrl(cf: ChildProcess, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("cloudflared did not produce a URL in time")), timeoutMs);
+    const timer = setTimeout(
+      () => reject(new Error("cloudflared did not produce a URL in time")),
+      timeoutMs,
+    );
     let acc = "";
     const scan = (buf: Buffer): void => {
       acc += buf.toString();
@@ -680,15 +683,31 @@ function printBanner(opts: { tunnelUrl: string; vncPassword: string; label: stri
 
 function teardown(rig: HeadlessRig): void {
   for (const p of rig.procs) {
-    try { p.kill("SIGTERM"); } catch { /* best-effort */ }
+    try {
+      p.kill("SIGTERM");
+    } catch {
+      /* best-effort */
+    }
     // SIGTERM is the polite request; the child may take a moment to
     // exit. Meanwhile the parent's stdio pipes to the child keep
     // Node's event loop alive — destroy them so Node can exit even
     // if the child is mid-shutdown. unref() tells Node "this child
     // doesn't count toward keeping the process alive."
-    try { p.stdout?.destroy(); } catch { /* best-effort */ }
-    try { p.stderr?.destroy(); } catch { /* best-effort */ }
-    try { p.unref(); } catch { /* best-effort */ }
+    try {
+      p.stdout?.destroy();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      p.stderr?.destroy();
+    } catch {
+      /* best-effort */
+    }
+    try {
+      p.unref();
+    } catch {
+      /* best-effort */
+    }
   }
   if (rig.webDir !== undefined) {
     try {
@@ -838,7 +857,8 @@ async function runDisplayedChrome(
       env: process.env,
       // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
       // proxy (direct). Connect from the box is the point anyway.
-      proxyServer: proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
+      proxyServer:
+        proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
       extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
     try {
@@ -849,7 +869,11 @@ async function runDisplayedChrome(
         opts.heartbeatMessage,
       );
       if (ok && opts.plainOnSuccess !== undefined) {
-        try { await opts.plainOnSuccess(opts.profileDir); } catch { /* swallow */ }
+        try {
+          await opts.plainOnSuccess(opts.profileDir);
+        } catch {
+          /* swallow */
+        }
       }
       return { status: ok ? "completed" : "timeout" };
     } finally {
@@ -867,19 +891,21 @@ async function runDisplayedChrome(
       // is itself an automation fingerprint the provider can read during the
       // sign-in (so removing it also helps the session survive).
       ignoreDefaultArgs: ["--enable-automation"],
-      args: ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+      ],
       ...(loginProxyOption() !== undefined ? { proxy: loginProxyOption() } : {}),
     }),
   );
   try {
-    if (opts.preflight !== undefined && await opts.preflight(context)) {
+    if (opts.preflight !== undefined && (await opts.preflight(context))) {
       return { status: "preflight_satisfied" };
     }
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto(opts.url, { waitUntil: "domcontentloaded" });
-    console.error(
-      `\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`,
-    );
+    console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
     const ok = await pollUntil(
       opts.deadline,
       () => opts.pollUntilDone(context),
@@ -889,7 +915,11 @@ async function runDisplayedChrome(
       // Best-effort: a hook failure must not pretend the user's login
       // didn't happen. They did the work; the caller will read the
       // session marker (or not) on the next signup.
-      try { await opts.onSuccess(context); } catch { /* swallow */ }
+      try {
+        await opts.onSuccess(context);
+      } catch {
+        /* swallow */
+      }
     }
     return { status: ok ? "completed" : "timeout" };
   } finally {
@@ -924,9 +954,7 @@ async function runHeadlessChrome(
     namedTunnelPortStr.length > 0;
   const display = pickFreeDisplay();
   const vncPort = await findFreePort();
-  const webPort = usingNamedTunnel
-    ? Number(namedTunnelPortStr)
-    : await findFreePort();
+  const webPort = usingNamedTunnel ? Number(namedTunnelPortStr) : await findFreePort();
   if (usingNamedTunnel && (!Number.isFinite(webPort) || webPort <= 0)) {
     throw new Error(
       `TS_LOGIN_LOCAL_PORT=${JSON.stringify(namedTunnelPortStr)} is not a valid port number`,
@@ -934,10 +962,6 @@ async function runHeadlessChrome(
   }
   const vncPassword = randomBytes(4).toString("hex"); // 8 chars — VNC's limit
   const rig: HeadlessRig = { procs: [], display };
-  // The persistent Chrome context is NOT a member of `rig` — it is a
-  // Playwright handle, closed via context.close(). Tracked here so the
-  // signal handler can release the profile lock before exiting.
-  let activeContext: BrowserContext | undefined;
   // Teardown for the login browser — for the self-launch path this ALSO kills
   // the spawned Chrome child (a bare context.close() over CDP leaves it
   // running), for the persistent fallback it's just context.close(). Tracked
@@ -960,10 +984,7 @@ async function runHeadlessChrome(
       // under Xvfb can hang indefinitely, and the rig MUST still be torn
       // down. Whichever wins (clean teardown, or the 3s cap), `finish` runs.
       const capped = new Promise<void>((r) => setTimeout(r, 3000));
-      Promise.race([activeTeardown().catch(() => undefined), capped]).then(
-        finish,
-        finish,
-      );
+      Promise.race([activeTeardown().catch(() => undefined), capped]).then(finish, finish);
     } else {
       finish();
     }
@@ -974,7 +995,9 @@ async function runHeadlessChrome(
 
   try {
     // 1. Virtual display — phone-shaped.
-    rig.procs.push(spawnBg("Xvfb", [display, "-screen", "0", `${HEADLESS_W}x${HEADLESS_H}x24`, "-ac"]));
+    rig.procs.push(
+      spawnBg("Xvfb", [display, "-screen", "0", `${HEADLESS_W}x${HEADLESS_H}x24`, "-ac"]),
+    );
     await new Promise((r) => setTimeout(r, 1500));
 
     // 2. Chrome on that display, persistent profile, window filling the display.
@@ -1011,7 +1034,6 @@ async function runHeadlessChrome(
     const plain = opts.plainProfileLogin === true;
     let context: BrowserContext | undefined;
     let teardownContext: () => Promise<void>;
-    let launcherMode: "plain" | "self_launch" | "persistent";
     if (plain) {
       if (opts.plainPollUntilDone === undefined) {
         throw new Error("plainProfileLogin set without plainPollUntilDone");
@@ -1019,19 +1041,18 @@ async function runHeadlessChrome(
       if (chromeBinary === null) {
         throw new Error("no Chrome binary found for the plain login browser");
       }
-      launcherMode = "plain";
       const browser = await launchPlainLoginBrowser({
         binary: chromeBinary,
         profileDir: opts.profileDir,
         url: opts.url,
         window: { width: HEADLESS_W, height: HEADLESS_H },
         env: { ...process.env, DISPLAY: display },
-        proxyServer: proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
+        proxyServer:
+          proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
         extraArgs: sharedChromeArgs,
       });
       teardownContext = browser.teardown;
     } else if (useSelfLaunch && chromeBinary !== null) {
-      launcherMode = "self_launch";
       const launched = await launchSelfManagedLoginContext({
         binary: chromeBinary,
         profileDir: opts.profileDir,
@@ -1047,7 +1068,6 @@ async function runHeadlessChrome(
       context = launched.context;
       teardownContext = launched.teardown;
     } else {
-      launcherMode = "persistent";
       const chromium = resolveChromium();
       const persistent = await launchWithProfileGate(opts.profileDir, () =>
         chromium.launchPersistentContext(opts.profileDir, {
@@ -1072,13 +1092,12 @@ async function runHeadlessChrome(
         await persistent.close().catch(() => undefined);
       };
     }
-    activeContext = context;
     activeTeardown = teardownContext;
     try {
       // CDP path only: preflight + drive the first page to the URL. The plain
       // path has no context — plain Chrome's --app already opened opts.url.
       if (context !== undefined) {
-        if (opts.preflight !== undefined && await opts.preflight(context)) {
+        if (opts.preflight !== undefined && (await opts.preflight(context))) {
           return { status: "preflight_satisfied" };
         }
         const page = context.pages()[0] ?? (await context.newPage());
@@ -1096,10 +1115,17 @@ async function runHeadlessChrome(
       rig.passFile = passFile;
       rig.procs.push(
         spawnBg("x11vnc", [
-          "-display", display,
-          "-rfbport", String(vncPort),
-          "-passwdfile", `rm:${passFile}`,
-          "-localhost", "-forever", "-shared", "-noshm", "-quiet",
+          "-display",
+          display,
+          "-rfbport",
+          String(vncPort),
+          "-passwdfile",
+          `rm:${passFile}`,
+          "-localhost",
+          "-forever",
+          "-shared",
+          "-noshm",
+          "-quiet",
         ]),
       );
       await new Promise((r) => setTimeout(r, 1500));
@@ -1136,11 +1162,7 @@ async function runHeadlessChrome(
         // one line on a phone terminal.
         bannerUrl = `https://${namedTunnelHost}/#p=${vncPassword}`;
       } else {
-        const cf = spawnBg("cloudflared", [
-          "tunnel",
-          "--url",
-          `http://127.0.0.1:${webPort}`,
-        ]);
+        const cf = spawnBg("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${webPort}`]);
         rig.procs.push(cf);
         const tunnelUrl = await awaitTunnelUrl(cf, 30000);
         const longVncUrl = `${tunnelUrl}/#p=${vncPassword}`;
@@ -1183,10 +1205,18 @@ async function runHeadlessChrome(
       if (ok) {
         if (context !== undefined) {
           if (opts.onSuccess !== undefined) {
-            try { await opts.onSuccess(context); } catch { /* swallow */ }
+            try {
+              await opts.onSuccess(context);
+            } catch {
+              /* swallow */
+            }
           }
         } else if (opts.plainOnSuccess !== undefined) {
-          try { await opts.plainOnSuccess(opts.profileDir); } catch { /* swallow */ }
+          try {
+            await opts.plainOnSuccess(opts.profileDir);
+          } catch {
+            /* swallow */
+          }
         }
       }
       await teardownContext();
@@ -1197,7 +1227,6 @@ async function runHeadlessChrome(
       // call above and this finally can both fire safely.
       await teardownContext();
       // Torn down — the signal handler must not double-tear it.
-      activeContext = undefined;
       activeTeardown = undefined;
     }
   } finally {
@@ -1219,8 +1248,9 @@ async function runHeadlessChrome(
 export async function pollUntil(
   deadline: number,
   check: () => Promise<boolean>,
-  heartbeatMessage: string | (() => string) =
-    "Still waiting for you to finish signing in — the URL/window above stays live until you do.",
+  heartbeatMessage:
+    | string
+    | (() => string) = "Still waiting for you to finish signing in — the URL/window above stays live until you do.",
 ): Promise<boolean> {
   const beatEveryMs = 20_000;
   let lastBeat = Date.now();
@@ -1353,10 +1383,13 @@ export async function openInstallConfirmInBotChrome(opts: {
   // Returns true when the install ceremony is done. The login browser runs
   // PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
   // attach), so the predicate gets the profileDir, NOT a live context: it
-  // composes "(install claim cached, via the API) AND (provider session seeded,
-  // via profileHasProviderCookies)". There is no browser-URL signal in plain
-  // mode; completion keys off the API claim + on-disk cookies.
-  pollUntilClaimed: (profileDir: string) => Promise<boolean>;
+  // composes the API claim with either the normal wizard's per-run loopback
+  // Finish callback or forced re-login's on-disk provider-session seed.
+  pollUntilClaimed: (
+    profileDir: string,
+    wizardCompleted: boolean,
+    wizardAcknowledged: boolean,
+  ) => Promise<boolean>;
   profileDir?: string;
   timeoutMinutes?: number;
   // G15: API base URL used to shorten the headless cloudflared
@@ -1369,11 +1402,15 @@ export async function openInstallConfirmInBotChrome(opts: {
   const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
+  let completion: Awaited<ReturnType<typeof startInstallCompletionListener>> | undefined;
 
   try {
+    const doneUrl = new URL("/install/done", opts.confirmUrl).toString();
+    completion = await startInstallCompletionListener(doneUrl, opts.confirmUrl);
+    const confirmUrl = withInstallCompletionCallback(opts.confirmUrl, completion.callbackUrl);
     const result = await runInBotChrome({
       profileDir,
-      url: opts.confirmUrl,
+      url: confirmUrl,
       deadline,
       bannerLabel:
         `You'll see a Chrome window with the Trusty Squire install page. ` +
@@ -1384,11 +1421,14 @@ export async function openInstallConfirmInBotChrome(opts: {
       // stub to satisfy the (CDP-path) type.
       plainProfileLogin: true,
       pollUntilDone: () => Promise.resolve(false),
-      plainPollUntilDone: (dir) => opts.pollUntilClaimed(dir),
+      plainPollUntilDone: (dir) =>
+        opts.pollUntilClaimed(
+          dir,
+          completion?.isCompleted() === true,
+          completion?.isAcknowledged() === true,
+        ),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
-      ...(opts.heartbeatMessage !== undefined
-        ? { heartbeatMessage: opts.heartbeatMessage }
-        : {}),
+      ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
       // The user's sign-in inside this Chrome leaves a provider session in the
       // persistent profile. We don't know WHICH provider they used, so probe
       // both cookie sets (from the on-disk store — no live context in plain
@@ -1413,5 +1453,7 @@ export async function openInstallConfirmInBotChrome(opts: {
     return { status: "timeout", detail: "no install completed before the deadline" };
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
+  } finally {
+    await completion?.close().catch(() => undefined);
   }
 }

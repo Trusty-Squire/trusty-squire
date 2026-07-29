@@ -145,9 +145,7 @@ function parseArgs(argv: string[]): Argv {
   // `npx @trusty-squire/mcp` with no args, and that should kick off setup.
   const command = positional[0] ?? "connect";
   if (command === "install") {
-    rejectDeprecatedCli(
-      "`install` has been removed. Use `npx @trusty-squire/mcp connect`.",
-    );
+    rejectDeprecatedCli("`install` has been removed. Use `npx @trusty-squire/mcp connect`.");
   }
   let target: AgentTarget | undefined;
   let apiBase = DEFAULT_API_BASE;
@@ -167,9 +165,7 @@ function parseArgs(argv: string[]): Argv {
         // Silent-drop is the footgun behind the pre-0.4.2 Goose mishap
         // (--target=goose-typo → auto-detect → wrong agent configured).
         // Fail loud with the valid list so the user sees the mismatch.
-        console.error(
-          `unknown --target '${t}'. Valid targets: ${Object.keys(AGENTS).join(", ")}`,
-        );
+        console.error(`unknown --target '${t}'. Valid targets: ${Object.keys(AGENTS).join(", ")}`);
         process.exit(64);
       }
       target = t;
@@ -179,9 +175,7 @@ function parseArgs(argv: string[]): Argv {
       const rawProxyUrl = arg.slice("--proxy-url=".length);
       const normalized = normalizeProxyUrl(rawProxyUrl);
       if (rawProxyUrl.length > 0 && normalized === undefined) {
-        console.error(
-          "invalid --proxy-url. Use http://user:pass@host:port or socks5://host:port.",
-        );
+        console.error("invalid --proxy-url. Use http://user:pass@host:port or socks5://host:port.");
         process.exit(64);
       }
       proxyUrl = normalized;
@@ -329,13 +323,7 @@ function resolveCopiedNpxServerLaunch(binPath: string): { command: string; args:
   const stableNodeModules = join(stableLib, "node_modules");
   const pkgRoot = dirname(dirname(binPath)); // dist/bin.js → @trusty-squire/mcp/
   const cacheNodeModules = dirname(dirname(pkgRoot)); // → node_modules/
-  const stableBin = join(
-    stableNodeModules,
-    "@trusty-squire",
-    "mcp",
-    "dist",
-    "bin.js",
-  );
+  const stableBin = join(stableNodeModules, "@trusty-squire", "mcp", "dist", "bin.js");
   try {
     copyNpxNodeModules(cacheNodeModules, stableNodeModules);
   } catch (err) {
@@ -432,9 +420,7 @@ async function maybeStoreTwoCaptchaKey(args: Argv): Promise<void> {
       ui.warn(`Couldn't vault the 2Captcha key (HTTP ${res.status}). Re-run connect to retry.`);
     }
   } catch (err) {
-    ui.warn(
-      `Couldn't vault the 2Captcha key: ${err instanceof Error ? err.message : String(err)}`,
-    );
+    ui.warn(`Couldn't vault the 2Captcha key: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
@@ -442,7 +428,9 @@ async function settings(args: Argv): Promise<void> {
   const storage = await openSessionStorage();
   const session = await storage.read();
   if (session === null) {
-    ui.fail(`No local Trusty Squire session found. Run ${ui.code("npx @trusty-squire/mcp connect")} first.`);
+    ui.fail(
+      `No local Trusty Squire session found. Run ${ui.code("npx @trusty-squire/mcp connect")} first.`,
+    );
     process.exit(1);
   }
 
@@ -461,7 +449,9 @@ async function settings(args: Argv): Promise<void> {
     if (picker.twoCaptchaKey !== undefined) args.twoCaptchaKey = picker.twoCaptchaKey;
   } else {
     if (args.target === undefined) {
-      ui.fail(`Pass ${ui.code("--target=<agent>")} when running settings outside an interactive terminal.`);
+      ui.fail(
+        `Pass ${ui.code("--target=<agent>")} when running settings outside an interactive terminal.`,
+      );
       process.exit(64);
     }
     if (args.registryConfigured !== true) {
@@ -668,16 +658,11 @@ async function connect(args: Argv): Promise<void> {
     consent_skillify_telemetry: consent.skillifyTelemetry,
     consent_operator_inbox_otp: consent.operatorInboxOtp,
   };
-  const session = await runInstallClaim(
-    args.apiBase,
-    target,
-    baseSession,
-    args.skipBrowser,
-    {
-      applyServerPrefs: !wantInteractive,
-      completeOnClaim: args.forceRelogin,
-    },
-  );
+  const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
+    applyServerPrefs: !wantInteractive,
+    completeOnClaim: args.forceRelogin,
+    completionProvider: args.forceReloginProvider ?? "google",
+  });
   if (session === null) {
     ui.fail(
       `Install didn't complete — browser confirm never finished. ` +
@@ -966,7 +951,8 @@ async function offerGithubReloginIfDead(
     return;
   }
   const answer = await confirm({
-    message: "Your GitHub session looks dead (GitHub-only signups will fail). Reconnect GitHub now?",
+    message:
+      "Your GitHub session looks dead (GitHub-only signups will fail). Reconnect GitHub now?",
     initialValue: true,
   });
   if (isCancel(answer) || answer !== true) {
@@ -1027,10 +1013,7 @@ function consentFromArgs(args: Argv): InstallConsent {
   };
 }
 
-async function ensureConsentRecorded(
-  consent: InstallConsent,
-  overwrite: boolean,
-): Promise<void> {
+async function ensureConsentRecorded(consent: InstallConsent, overwrite: boolean): Promise<void> {
   try {
     const storage = await openSessionStorage();
     const session = await storage.read();
@@ -1143,18 +1126,15 @@ export function shouldCompleteInstallClaim(
   completeOnClaim: boolean,
   sessionSeeded: boolean,
   installPageUrl: string | undefined,
+  wizardCompleted = false,
+  wizardAcknowledged = false,
 ): boolean {
   if (!claimed) return false;
   const terminal =
-    installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl);
+    wizardCompleted || (installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl));
   if (completeOnClaim) return sessionSeeded || terminal;
-  // Normal onboarding waits for the explicit Finish (terminal URL) when a
-  // browser URL is available to watch. The PLAIN login browser (connect claim,
-  // no CDP) has NO URL signal — installPageUrl is undefined — so fall back to
-  // "claimed AND provider session seeded", which means the account is bound and
-  // the Google/GitHub session landed: functionally done.
-  if (installPageUrl === undefined) return sessionSeeded;
-  return terminal;
+  if (terminal) return true;
+  return wizardAcknowledged ? false : sessionSeeded;
 }
 
 // During normal onboarding, claim happens before the browser's Finish step.
@@ -1178,17 +1158,16 @@ async function runInstallClaim(
     // discarded a fresh "yes" to inbox-OTP consent (readInboxConsent → false →
     // await_verification refused despite the user consenting).
     applyServerPrefs: boolean;
-    // Forced re-login is complete when the fresh account claim succeeds. Normal
-    // onboarding stays open for its explicit Finish step and optional setup.
+    // Forced re-login is complete when the fresh account claim and requested
+    // provider seed succeed. Normal onboarding stays open for explicit Finish.
     completeOnClaim: boolean;
+    // A scoped re-login must wait for the requested provider, not any
+    // pre-existing provider cookie left in the shared browser profile.
+    completionProvider: OAuthProviderId;
   },
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
-  const initiate = await installInitiate(
-    apiBase,
-    target,
-    baseSession.machine_token ?? null,
-  );
+  const initiate = await installInitiate(apiBase, target, baseSession.machine_token ?? null);
 
   // Track the claimed token outside the poll closure so the in-Chrome
   // flow's pollUntilClaimed can read it once the API reports claimed.
@@ -1197,12 +1176,18 @@ async function runInstallClaim(
   const state: { value: ClaimResult | null } = { value: null };
   // 0.8.2 — the normal wizard's "Finish" button navigates to
   // /install/done. First-time onboarding waits for that URL so the user gets a
-  // chance to complete optional setup. Forced re-login instead ends at the API
-  // claim because there is no remaining onboarding contract to wait for.
+  // chance to complete optional setup. Forced re-login instead ends after the
+  // API claim and requested provider seed because no setup remains to wait for.
   // Plain-login predicate: the connect claim browser runs plain (no CDP — a CDP
-  // attach fails Google's OAuth "secure browser" check), so completion is read
-  // from the API (claim) + the on-disk cookie store (seed), NOT a live context.
-  const pollOnce = async (profileDir: string): Promise<boolean> => {
+  // attach fails Google's OAuth "secure browser" check). The API delivers the
+  // account claim, the on-disk cookie store proves a forced re-login landed,
+  // and a per-run loopback callback carries the normal wizard's explicit
+  // Finish signal.
+  const pollOnce = async (
+    profileDir: string,
+    wizardCompleted: boolean,
+    wizardAcknowledged: boolean,
+  ): Promise<boolean> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
     // user finishes signing in.
@@ -1226,20 +1211,22 @@ async function runInstallClaim(
     // Tear down once the account is claimed AND the provider session has
     // actually seeded — not on the bare claim, which can land while Google is
     // still writing cookies on a cold profile. Read the seed straight off the
-    // profile's on-disk cookie store (no live context in plain mode). Either
-    // provider satisfies it: the binding sign-in seeds whichever the user used.
+    // profile's on-disk cookie store (no live context in plain mode). A scoped
+    // re-login accepts only its requested provider, so an existing optional
+    // provider cannot close the browser mid-login.
     const claimed = state.value !== null;
     const sessionSeeded =
-      claimed &&
-      (profileHasProviderCookies(profileDir, "google") ||
-        profileHasProviderCookies(profileDir, "github"));
-    // No browser URL to watch in plain mode — pass undefined so completion keys
-    // off claimed+seeded for BOTH force-relogin and normal onboarding.
+      claimed && profileHasProviderCookies(profileDir, options.completionProvider);
+    // No browser URL to watch in plain mode. Normal onboarding keys off the
+    // explicit loopback Finish callback; forced re-login may still finish once
+    // its requested provider session is safely seeded.
     const tearDown = shouldCompleteInstallClaim(
       claimed,
       options.completeOnClaim,
       sessionSeeded,
       undefined,
+      wizardCompleted,
+      wizardAcknowledged,
     );
     if (tearDown) {
       return true;
@@ -1259,10 +1246,10 @@ async function runInstallClaim(
     // would sign in twice (or sign in via their laptop, leaving the
     // bot's Chrome profile empty — no Google session for future OAuth
     // signups).
-    ui.panel(
-      `Open this URL to sign in and confirm:\n\n  ${ui.link(initiate.confirm_url)}`,
-      { color: "wine", title: "sign in" },
-    );
+    ui.panel(`Open this URL to sign in and confirm:\n\n  ${ui.link(initiate.confirm_url)}`, {
+      color: "wine",
+      title: "sign in",
+    });
     try {
       const openMod = await import("open");
       await openMod.default(initiate.confirm_url);
@@ -1272,11 +1259,7 @@ async function runInstallClaim(
     const ok = await pollForClaim(apiBase, initiate.setup_code);
     if (ok === null) return null;
     return {
-      ...applyInstallPreferences(
-        baseSession,
-        ok.preferences,
-        options.applyServerPrefs,
-      ),
+      ...applyInstallPreferences(baseSession, ok.preferences, options.applyServerPrefs),
       api_base_url: apiBase,
       saved_at: new Date().toISOString(),
       agent_session_token: ok.token,
@@ -1312,11 +1295,7 @@ async function runInstallClaim(
   }
 
   return {
-    ...applyInstallPreferences(
-      baseSession,
-      state.value.preferences,
-      options.applyServerPrefs,
-    ),
+    ...applyInstallPreferences(baseSession, state.value.preferences, options.applyServerPrefs),
     api_base_url: apiBase,
     saved_at: new Date().toISOString(),
     agent_session_token: state.value.token,
@@ -1377,8 +1356,7 @@ async function logout(): Promise<void> {
 // Unlike the login stage inside `install`, this command fails loud on
 // timeout/error — it's the explicit retry path.
 async function login(args: Argv): Promise<void> {
-  const provider: OAuthProviderId =
-    args.providerArg ?? args.forceReloginProvider ?? "google";
+  const provider: OAuthProviderId = args.providerArg ?? args.forceReloginProvider ?? "google";
   const label = provider === "github" ? "GitHub" : "Google";
   ui.heading(`Sign in to ${label}`);
   // --force-relogin wipes this provider's cookies (via forceOpen below),
@@ -1429,7 +1407,9 @@ function printHelp(): void {
   console.warn(`${chalk.bold("Commands")}`);
   console.warn(`  ${ui.code("connect")}                       set up this machine (default)`);
   console.warn(`  ${ui.code("login --provider=<p>")}          add a Google or GitHub session`);
-  console.warn(`  ${ui.code("settings")}                      edit registry, OTP, and proxy choices`);
+  console.warn(
+    `  ${ui.code("settings")}                      edit registry, OTP, and proxy choices`,
+  );
   console.warn(`  ${ui.code("logout")}                        clear the local session`);
   console.warn("");
   console.warn(`${chalk.bold("Flags for connect")}`);
@@ -1506,14 +1486,10 @@ function printAsnWarning(asn: AsnInfo): void {
       );
       return;
     case "residential":
-      ui.success(
-        `Detected network: ${orgDisplay} (residential — captchas should pass cleanly)`,
-      );
+      ui.success(`Detected network: ${orgDisplay} (residential — captchas should pass cleanly)`);
       return;
     case "unknown":
-      ui.info(
-        `Detected network: ${orgDisplay} (couldn't classify — proceed and we'll see)`,
-      );
+      ui.info(`Detected network: ${orgDisplay} (couldn't classify — proceed and we'll see)`);
       return;
   }
 }
