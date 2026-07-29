@@ -24,7 +24,7 @@ const m = vi.hoisted(() => ({
   markProviderLoggedIn: vi.fn(),
   loggedInProviders: vi.fn(() => [] as string[]),
   clearAllProviderMarkers: vi.fn(),
-  clearProviderCookies: vi.fn(async () => {}),
+  clearProviderCookies: vi.fn(async () => true),
 }));
 
 // Spread the real module (oauth-providers.ts + agent.ts pull other

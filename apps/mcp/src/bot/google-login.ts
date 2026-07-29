@@ -57,7 +57,7 @@ import {
   withInstallCompletionCallback,
 } from "./install-completion.js";
 import { markProviderLoggedIn } from "./login-state.js";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 
@@ -197,51 +197,21 @@ const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
 // session's cookie get written" — dependency-free and Node-version-agnostic
 // (engines >=20; node:sqlite is 22.5+). Presence-only; never decrypts values.
 export function profileHasProviderCookies(profileDir: string, provider: OAuthProviderId): boolean {
-  return profileProviderCookieFingerprint(profileDir, provider) !== null;
-}
-
-export function profileProviderCookieFingerprint(
-  profileDir: string,
-  provider: OAuthProviderId,
-): string | null {
   const markers = PROVIDER_COOKIE_MARKERS[provider];
   const bases = [join(profileDir, "Default", "Cookies"), join(profileDir, "Cookies")];
-  const evidence: string[] = [];
-  for (const [baseIndex, base] of bases.entries()) {
+  for (const base of bases) {
     for (const path of [base, `${base}-wal`]) {
       if (!existsSync(path)) continue;
-      let bytes: Buffer;
+      let text: string;
       try {
-        bytes = readFileSync(path);
+        text = readFileSync(path).toString("latin1");
       } catch {
         continue;
       }
-      for (const marker of markers) {
-        const needle = Buffer.from(marker, "latin1");
-        let offset = bytes.indexOf(needle);
-        while (offset !== -1) {
-          const start = Math.max(0, offset - 4096);
-          const end = Math.min(bytes.length, offset + needle.length + 4096);
-          evidence.push(
-            `${baseIndex}:${path.endsWith("-wal") ? "wal" : "db"}:${marker}:${offset}:` +
-              createHash("sha256").update(bytes.subarray(start, end)).digest("hex"),
-          );
-          offset = bytes.indexOf(needle, offset + needle.length);
-        }
-      }
+      if (markers.some((marker) => text.includes(marker))) return true;
     }
   }
-  if (evidence.length === 0) return null;
-  return createHash("sha256").update(evidence.sort().join("\n")).digest("hex");
-}
-
-export function profileHasNewProviderCookies(
-  profileDir: string,
-  provider: OAuthProviderId,
-  baseline: string | null,
-): boolean {
-  const current = profileProviderCookieFingerprint(profileDir, provider);
-  return current !== null && current !== baseline;
+  return false;
 }
 
 // VALIDATE a session instead of just spotting a cookie. A provider session that

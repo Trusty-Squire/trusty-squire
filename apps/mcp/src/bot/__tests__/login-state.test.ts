@@ -6,11 +6,51 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  clearProviderCookiesFromContext,
   loggedInProviders,
   markProviderLoggedIn,
   loggedInEmail,
   recordProviderEmail,
 } from "../login-state.js";
+
+describe("provider cookie clearing", () => {
+  it("removes and verifies only the requested provider's actual cookie rows", async () => {
+    let cookies = [
+      { name: "SAPISID", domain: ".google.com", path: "/" },
+      { name: "user_session", domain: "github.com", path: "/" },
+      { name: "app", domain: "trustysquire.ai", path: "/" },
+    ];
+    const context = {
+      cookies: async () => cookies,
+      clearCookies: async (target: { name: string; domain: string; path: string }) => {
+        cookies = cookies.filter(
+          (cookie) =>
+            cookie.name !== target.name ||
+            cookie.domain !== target.domain ||
+            cookie.path !== target.path,
+        );
+      },
+      close: async () => undefined,
+    };
+
+    await expect(clearProviderCookiesFromContext(context, "github")).resolves.toBe(true);
+    expect(cookies).toEqual([
+      { name: "SAPISID", domain: ".google.com", path: "/" },
+      { name: "app", domain: "trustysquire.ai", path: "/" },
+    ]);
+  });
+
+  it("fails closed when the requested provider cookie remains", async () => {
+    const cookies = [{ name: "user_session", domain: ".github.com", path: "/" }];
+    const context = {
+      cookies: async () => cookies,
+      clearCookies: async () => undefined,
+      close: async () => undefined,
+    };
+
+    await expect(clearProviderCookiesFromContext(context, "github")).resolves.toBe(false);
+  });
+});
 
 describe("login-state marker", () => {
   let dir: string;
