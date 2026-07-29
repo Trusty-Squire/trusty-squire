@@ -8,6 +8,7 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import {
   binaryOnPath,
   installHint,
@@ -28,37 +29,42 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("profileHasProviderCookies (plain-login on-disk seed check)", () => {
-  // The connect claim browser runs plain (no CDP — a CDP attach fails Google's
-  // OAuth "secure browser" check), so seeding is read from the profile's raw
-  // Cookies file. Chrome stores cookie NAMES as plaintext in the SQLite pages,
-  // so a byte-substring match answers "did this session's cookie get written".
-  const withProfile = (fileBytes: string | null, sub = "Default"): string => {
+describe("profileHasProviderCookies (plain-login SQLite seed check)", () => {
+  const withProfile = (
+    cookies: Array<{ host: string; name: string }> | null,
+    sub = "Default",
+  ): string => {
     const dir = mkdtempSync(join(tmpdir(), "phpc-"));
-    if (fileBytes !== null) {
+    if (cookies !== null) {
       mkdirSync(join(dir, sub), { recursive: true });
-      writeFileSync(join(dir, sub, "Cookies"), Buffer.from(fileBytes, "latin1"));
+      const db = new Database(join(dir, sub, "Cookies"));
+      db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
+      const insert = db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)");
+      for (const cookie of cookies) insert.run(cookie.host, cookie.name);
+      db.close();
     }
     return dir;
   };
 
-  it("detects a Google session by its cookie name in the Cookies file", () => {
-    const dir = withProfile("SQLite format 3\0 ... SAPISID ... __Secure-1PSID ...");
+  it("detects a Google session from a matching cookie row", () => {
+    const dir = withProfile([
+      { host: ".google.com", name: "SAPISID" },
+      { host: "accounts.google.com", name: "__Secure-1PSID" },
+    ]);
     expect(profileHasProviderCookies(dir, "google")).toBe(true);
-    // Only Google cookies present → github stays false.
     expect(profileHasProviderCookies(dir, "github")).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 
   it("detects a GitHub session by user_session", () => {
-    const dir = withProfile("SQLite format 3\0 ... user_session ...");
+    const dir = withProfile([{ host: ".github.com", name: "user_session" }]);
     expect(profileHasProviderCookies(dir, "github")).toBe(true);
     expect(profileHasProviderCookies(dir, "google")).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
 
   it("returns false for a cookieless profile and never throws on a missing file", () => {
-    const dir = withProfile("SQLite format 3\0 nothing useful here");
+    const dir = withProfile([]);
     expect(profileHasProviderCookies(dir, "google")).toBe(false);
     rmSync(dir, { recursive: true, force: true });
     const missing = withProfile(null);
@@ -67,9 +73,40 @@ describe("profileHasProviderCookies (plain-login on-disk seed check)", () => {
   });
 
   it("also finds cookies in the bare <profile>/Cookies layout", () => {
-    const dir = withProfile("SQLite format 3\0 SAPISID", ".");
+    const dir = withProfile([{ host: ".google.com", name: "SAPISID" }], ".");
     expect(profileHasProviderCookies(dir, "google")).toBe(true);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not accept a deleted cookie whose name remains in SQLite bytes", () => {
+    const dir = withProfile([{ host: ".google.com", name: "__Secure-1PSID" }]);
+    const path = join(dir, "Default", "Cookies");
+    const db = new Database(path);
+    db.pragma("secure_delete = OFF");
+    db.prepare("DELETE FROM cookies").run();
+    db.close();
+
+    expect(readFileSync(path).includes(Buffer.from("__Secure-1PSID"))).toBe(true);
+    expect(profileHasProviderCookies(dir, "google")).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reads a committed cookie from the live WAL", () => {
+    const dir = withProfile([]);
+    const path = join(dir, "Default", "Cookies");
+    const db = new Database(path);
+    db.pragma("journal_mode = WAL");
+    db.pragma("wal_autocheckpoint = 0");
+    db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)").run(
+      ".github.com",
+      "user_session",
+    );
+    try {
+      expect(profileHasProviderCookies(dir, "github")).toBe(true);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

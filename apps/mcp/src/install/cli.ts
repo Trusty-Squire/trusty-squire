@@ -1164,7 +1164,7 @@ async function runInstallClaim(
   // API claim and requested provider seed because no setup remains to wait for.
   // Plain-login predicate: the connect claim browser runs plain (no CDP — a CDP
   // attach fails Google's OAuth "secure browser" check). The API delivers the
-  // account claim, the on-disk cookie store proves a forced re-login landed,
+  // account claim, the SQLite cookie store proves a forced re-login landed,
   // and a per-run loopback callback carries the normal wizard's explicit
   // Finish signal.
   const pollOnce = async (profileDir: string, wizardCompleted: boolean): Promise<boolean> => {
@@ -1190,9 +1190,7 @@ async function runInstallClaim(
     }
     // Tear down once the account is claimed AND the provider session has
     // actually seeded — not on the bare claim, which can land while Google is
-    // still writing cookies on a cold profile. The requested provider's old
-    // cookies were verified absent before launch, so its post-claim presence is
-    // fresh evidence without adding another browser/web callback protocol.
+    // still writing cookies on a cold profile.
     const claimed = state.value !== null;
     const sessionSeeded =
       claimed &&

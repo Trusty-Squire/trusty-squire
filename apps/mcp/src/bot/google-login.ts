@@ -37,6 +37,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import boxen from "boxen";
 import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
@@ -181,34 +182,39 @@ export async function contextHasProviderSession(
   return hasProviderSession(context, LOGIN_TARGETS[provider]);
 }
 
-// Provider session cookie NAMES long/specific enough to detect by substring in
-// the raw on-disk Cookies DB. Bare short names (Google's "SID") are omitted —
-// they substring-collide with other cookie names.
 const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
   google: ["__Secure-1PSID", "SAPISID"],
   github: ["user_session"],
 };
 
-// Read a PLAIN login browser's provider session straight off disk. The connect
-// claim's login browser never attaches CDP (see launchPlainLoginBrowser — a
-// CDP attach fails Google's OAuth "secure browser" check), so there is no live
-// context to query. Chrome stores cookie NAMES as plaintext in the Cookies
-// SQLite b-tree pages, so a raw byte search reliably answers "did this
-// session's cookie get written" — dependency-free and Node-version-agnostic
-// (engines >=20; node:sqlite is 22.5+). Presence-only; never decrypts values.
 export function profileHasProviderCookies(profileDir: string, provider: OAuthProviderId): boolean {
   const markers = PROVIDER_COOKIE_MARKERS[provider];
   const bases = [join(profileDir, "Default", "Cookies"), join(profileDir, "Cookies")];
-  for (const base of bases) {
-    for (const path of [base, `${base}-wal`]) {
-      if (!existsSync(path)) continue;
-      let text: string;
-      try {
-        text = readFileSync(path).toString("latin1");
-      } catch {
-        continue;
-      }
-      if (markers.some((marker) => text.includes(marker))) return true;
+  const root = provider === "google" ? "google.com" : "github.com";
+  for (const path of bases) {
+    if (!existsSync(path)) continue;
+    let db: Database.Database | null = null;
+    try {
+      db = new Database(path, {
+        readonly: true,
+        fileMustExist: true,
+        timeout: 250,
+      });
+      const placeholders = markers.map(() => "?").join(", ");
+      const row = db
+        .prepare(
+          `SELECT 1
+             FROM cookies
+            WHERE (host_key = ? OR host_key = ? OR host_key LIKE ?)
+              AND name IN (${placeholders})
+            LIMIT 1`,
+        )
+        .get(root, `.${root}`, `%.${root}`, ...markers);
+      if (row !== undefined) return true;
+    } catch {
+      continue;
+    } finally {
+      db?.close();
     }
   }
   return false;
@@ -793,7 +799,7 @@ export interface RunInBotChromeOpts {
   // "secure browser" check rejects a CDP-attached Chrome (see
   // launchPlainLoginBrowser). In this mode the browser is never driven: the
   // user signs in over noVNC, and completion is detected via `plainPollUntilDone`
-  // (which reads the API + the on-disk cookie store, not a live context). The
+  // (which reads the API + the SQLite cookie store, not a live context). The
   // context-taking `pollUntilDone`/`onSuccess`/`preflight` above are IGNORED in
   // this mode. `mcp login` does NOT set this (it stays on the CDP path).
   plainProfileLogin?: boolean;
@@ -835,7 +841,7 @@ async function runDisplayedChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
-  // detect completion off the API + on-disk cookie store. See
+  // detect completion off the API + SQLite cookie store. See
   // launchPlainLoginBrowser / RunInBotChromeOpts.plainProfileLogin.
   if (opts.plainProfileLogin === true) {
     if (opts.plainPollUntilDone === undefined) {

@@ -176,8 +176,6 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     );
     expect(cliSource).toMatch(/completeOnClaim:\s*args\.forceRelogin/);
     expect(cliSource).toMatch(/completionProvider:\s*args\.forceReloginProvider\s*\?\?\s*"google"/);
-    // Plain-login mode has no CDP context, so it reads the requested provider
-    // seed from the cookie store after verified preflight clearing.
     expect(cliSource).toMatch(
       /profileHasProviderCookies\(profileDir,\s*options\.completionProvider\)/,
     );
