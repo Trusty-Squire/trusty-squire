@@ -13,15 +13,37 @@ describe("plain install completion listener", () => {
     listener = undefined;
   });
 
-  it("keeps completion false until the exact per-run Finish callback arrives", async () => {
+  it("acknowledges support before accepting the exact Finish callback", async () => {
     const doneUrl = "https://trustysquire.ai/install/done";
-    listener = await startInstallCompletionListener(doneUrl);
+    const confirmUrl = "https://trustysquire.ai/install?token=setup";
+    listener = await startInstallCompletionListener(doneUrl, confirmUrl);
 
     expect(listener.isCompleted()).toBe(false);
+    expect(listener.isAcknowledged()).toBe(false);
     const wrong = await fetch(`${listener.callbackUrl}/wrong`, {
       redirect: "manual",
     });
     expect(wrong.status).toBe(404);
+    expect(listener.isCompleted()).toBe(false);
+
+    const acknowledged = await fetch(`${listener.callbackUrl}/ack`, {
+      redirect: "manual",
+    });
+    expect(acknowledged.status).toBe(302);
+    const acknowledgementRedirect = new URL(
+      acknowledged.headers.get("location")!,
+    );
+    expect(`${acknowledgementRedirect.origin}${acknowledgementRedirect.pathname}${acknowledgementRedirect.search}`).toBe(
+      confirmUrl,
+    );
+    const acknowledgementFragment = new URLSearchParams(
+      acknowledgementRedirect.hash.slice(1),
+    );
+    expect(acknowledgementFragment.get("ts_install_complete")).toBe(
+      listener.callbackUrl,
+    );
+    expect(acknowledgementFragment.get("ts_install_complete_ack")).toBe("1");
+    expect(listener.isAcknowledged()).toBe(true);
     expect(listener.isCompleted()).toBe(false);
 
     const finished = await fetch(listener.callbackUrl, { redirect: "manual" });

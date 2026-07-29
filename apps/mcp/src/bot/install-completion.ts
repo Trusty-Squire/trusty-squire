@@ -9,6 +9,7 @@ const COMPLETION_PATH_PREFIX = "/.well-known/trusty-squire/install-complete/";
 export interface InstallCompletionListener {
   callbackUrl: string;
   isCompleted: () => boolean;
+  isAcknowledged: () => boolean;
   close: () => Promise<void>;
 }
 
@@ -34,13 +35,35 @@ export function withInstallCompletionCallback(confirmUrl: string, callbackUrl: s
  */
 export async function startInstallCompletionListener(
   doneUrl: string,
+  confirmUrl = doneUrl,
 ): Promise<InstallCompletionListener> {
   const nonce = randomBytes(24).toString("hex");
   const completionPath = `${COMPLETION_PATH_PREFIX}${nonce}`;
+  const acknowledgementPath = `${completionPath}/ack`;
   let completed = false;
+  let acknowledged = false;
 
   const server = createServer((req, res) => {
     const path = req.url === undefined ? "" : new URL(req.url, "http://127.0.0.1").pathname;
+    if (req.method === "GET" && path === acknowledgementPath) {
+      acknowledged = true;
+      const redirect = new URL(confirmUrl);
+      const fragment = new URLSearchParams(redirect.hash.slice(1));
+      const address = server.address() as AddressInfo;
+      fragment.set(
+        INSTALL_COMPLETION_FRAGMENT_KEY,
+        `http://127.0.0.1:${address.port}${completionPath}`,
+      );
+      fragment.set("ts_install_complete_ack", "1");
+      redirect.hash = fragment.toString();
+      res.writeHead(302, {
+        "Cache-Control": "no-store",
+        Connection: "close",
+        Location: redirect.toString(),
+      });
+      res.end();
+      return;
+    }
     if (req.method !== "GET" || path !== completionPath) {
       res.writeHead(404, {
         "Cache-Control": "no-store",
@@ -80,6 +103,7 @@ export async function startInstallCompletionListener(
   return {
     callbackUrl,
     isCompleted: () => completed,
+    isAcknowledged: () => acknowledged,
     close: async () => {
       if (closed) return;
       closed = true;

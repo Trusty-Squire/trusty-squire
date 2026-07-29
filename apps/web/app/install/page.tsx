@@ -21,6 +21,7 @@ import { useQueryParam } from "../lib/use-query-param";
 import { Shield } from "../components/Shield";
 import {
   clearInstallCompletionUrl,
+  installCompletionAcknowledgementUrl,
   readInstallCompletionUrl,
 } from "./completion";
 
@@ -100,7 +101,17 @@ export default function InstallPage() {
 
   useEffect(() => {
     if (token === null) return;
-    setCompletionUrl(readInstallCompletionUrl(token));
+    const callbackUrl = readInstallCompletionUrl(token);
+    if (callbackUrl === null) return;
+    const acknowledgementUrl = installCompletionAcknowledgementUrl(
+      token,
+      callbackUrl,
+    );
+    if (acknowledgementUrl !== null) {
+      window.location.assign(acknowledgementUrl);
+      return;
+    }
+    setCompletionUrl(callbackUrl);
   }, [token]);
 
   // Returning from the OAuth round-trip — fire the claim if we

@@ -1362,6 +1362,7 @@ export async function openInstallConfirmInBotChrome(opts: {
   pollUntilClaimed: (
     profileDir: string,
     wizardCompleted: boolean,
+    wizardAcknowledged: boolean,
   ) => Promise<boolean>;
   profileDir?: string;
   timeoutMinutes?: number;
@@ -1381,7 +1382,7 @@ export async function openInstallConfirmInBotChrome(opts: {
 
   try {
     const doneUrl = new URL("/install/done", opts.confirmUrl).toString();
-    completion = await startInstallCompletionListener(doneUrl);
+    completion = await startInstallCompletionListener(doneUrl, opts.confirmUrl);
     const confirmUrl = withInstallCompletionCallback(
       opts.confirmUrl,
       completion.callbackUrl,
@@ -1400,7 +1401,11 @@ export async function openInstallConfirmInBotChrome(opts: {
       plainProfileLogin: true,
       pollUntilDone: () => Promise.resolve(false),
       plainPollUntilDone: (dir) =>
-        opts.pollUntilClaimed(dir, completion?.isCompleted() === true),
+        opts.pollUntilClaimed(
+          dir,
+          completion?.isCompleted() === true,
+          completion?.isAcknowledged() === true,
+        ),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined
         ? { heartbeatMessage: opts.heartbeatMessage }

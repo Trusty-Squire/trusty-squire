@@ -191,13 +191,26 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
   it("keeps plain onboarding open through optional GitHub until explicit Finish", () => {
     // Step 1: Google claimed the install and seeded its provider cookie. This
     // used to close noVNC before the user could complete optional GitHub.
-    expect(shouldCompleteInstallClaim(true, false, true, undefined)).toBe(false);
+    expect(
+      shouldCompleteInstallClaim(true, false, true, undefined, false, true),
+    ).toBe(false);
     // Step 2: another provider cookie landing still is not wizard completion.
-    expect(shouldCompleteInstallClaim(true, false, true, undefined)).toBe(false);
+    expect(
+      shouldCompleteInstallClaim(true, false, true, undefined, false, true),
+    ).toBe(false);
     // Only the per-run loopback signal fired by Finish is terminal.
     expect(
-      shouldCompleteInstallClaim(true, false, true, undefined, true),
+      shouldCompleteInstallClaim(true, false, true, undefined, true, true),
     ).toBe(true);
+  });
+
+  it("uses claimed plus seeded only for a web installer without callback support", () => {
+    expect(
+      shouldCompleteInstallClaim(true, false, true, undefined, false, false),
+    ).toBe(true);
+    expect(
+      shouldCompleteInstallClaim(true, false, true, undefined, false, true),
+    ).toBe(false);
   });
 
   it("does not accept an explicit Finish signal before the account claim", () => {

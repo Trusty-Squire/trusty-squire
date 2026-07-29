@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearInstallCompletionUrl,
+  installCompletionAcknowledgementUrl,
   normalizeInstallCompletionUrl,
   readInstallCompletionUrl,
 } from "./completion";
@@ -49,5 +50,24 @@ describe("install completion callback validation", () => {
 
     clearInstallCompletionUrl("setup");
     expect(readInstallCompletionUrl("setup")).toBeNull();
+  });
+
+  it("acknowledges callback support once and retains it across OAuth returns", () => {
+    const callback =
+      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" +
+      "c".repeat(48);
+    expect(installCompletionAcknowledgementUrl("setup", callback)).toBe(
+      `${callback}/ack`,
+    );
+
+    window.history.replaceState(
+      {},
+      "",
+      "/install?token=setup#ts_install_complete_ack=1",
+    );
+    expect(installCompletionAcknowledgementUrl("setup", callback)).toBeNull();
+
+    window.history.replaceState({}, "", "/install?token=setup&claim=1");
+    expect(installCompletionAcknowledgementUrl("setup", callback)).toBeNull();
   });
 });

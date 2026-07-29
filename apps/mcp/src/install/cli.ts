@@ -1145,17 +1145,15 @@ export function shouldCompleteInstallClaim(
   sessionSeeded: boolean,
   installPageUrl: string | undefined,
   wizardCompleted = false,
+  wizardAcknowledged = false,
 ): boolean {
   if (!claimed) return false;
   const terminal =
     wizardCompleted ||
     (installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl));
   if (completeOnClaim) return sessionSeeded || terminal;
-  // Normal onboarding always waits for the explicit Finish signal. Provider
-  // cookies only prove that one OAuth round-trip landed; Google is required
-  // before the optional GitHub step, so treating that seed as terminal closes
-  // noVNC while the user is still working through the wizard.
-  return terminal;
+  if (terminal) return true;
+  return wizardAcknowledged ? false : sessionSeeded;
 }
 
 // During normal onboarding, claim happens before the browser's Finish step.
@@ -1211,6 +1209,7 @@ async function runInstallClaim(
   const pollOnce = async (
     profileDir: string,
     wizardCompleted: boolean,
+    wizardAcknowledged: boolean,
   ): Promise<boolean> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
@@ -1241,7 +1240,6 @@ async function runInstallClaim(
     const claimed = state.value !== null;
     const sessionSeeded =
       claimed &&
-      options.completeOnClaim &&
       profileHasProviderCookies(profileDir, options.completionProvider);
     // No browser URL to watch in plain mode. Normal onboarding keys off the
     // explicit loopback Finish callback; forced re-login may still finish once
@@ -1252,6 +1250,7 @@ async function runInstallClaim(
       sessionSeeded,
       undefined,
       wizardCompleted,
+      wizardAcknowledged,
     );
     if (tearDown) {
       return true;
