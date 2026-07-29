@@ -213,8 +213,9 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     // Plain-login mode: the connect claim browser has no CDP context, so the
     // seed check reads the provider session off the on-disk cookie store while
     // normal onboarding receives an explicit per-run Finish signal.
+    expect(cliSource).toMatch(/profileProviderCookieFingerprint/);
     expect(cliSource).toMatch(
-      /profileHasProviderCookies\(profileDir,\s*options\.completionProvider\)/,
+      /profileHasNewProviderCookies\(\s*profileDir,\s*options\.completionProvider/,
     );
     expect(cliSource).toMatch(/wizardCompleted/);
   });

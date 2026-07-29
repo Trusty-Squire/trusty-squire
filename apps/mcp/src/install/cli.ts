@@ -52,6 +52,8 @@ import {
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
   profileHasProviderCookies,
+  profileHasNewProviderCookies,
+  profileProviderCookieFingerprint,
 } from "../bot/google-login.js";
 import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
@@ -1180,6 +1182,9 @@ async function runInstallClaim(
 ): Promise<SessionData | null> {
   console.warn(`Connecting this machine to your account…`);
   const initiate = await installInitiate(apiBase, target, baseSession.machine_token ?? null);
+  const providerCookieBaseline = options.completeOnClaim
+    ? profileProviderCookieFingerprint(CHROME_PROFILE_DIR, options.completionProvider)
+    : null;
 
   // Track the claimed token outside the poll closure so the in-Chrome
   // flow's pollUntilClaimed can read it once the API reports claimed.
@@ -1228,7 +1233,14 @@ async function runInstallClaim(
     // provider cannot close the browser mid-login.
     const claimed = state.value !== null;
     const sessionSeeded =
-      claimed && profileHasProviderCookies(profileDir, options.completionProvider);
+      claimed &&
+      (options.completeOnClaim
+        ? profileHasNewProviderCookies(
+            profileDir,
+            options.completionProvider,
+            providerCookieBaseline,
+          )
+        : profileHasProviderCookies(profileDir, options.completionProvider));
     // No browser URL to watch in plain mode. Normal onboarding keys off the
     // explicit loopback Finish callback; forced re-login may still finish once
     // its requested provider session is safely seeded.

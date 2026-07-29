@@ -19,6 +19,8 @@ import {
   hasDisplay,
   pollUntil,
   profileHasProviderCookies,
+  profileHasNewProviderCookies,
+  profileProviderCookieFingerprint,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
 } from "../google-login.js";
@@ -69,6 +71,30 @@ describe("profileHasProviderCookies (plain-login on-disk seed check)", () => {
   it("also finds cookies in the bare <profile>/Cookies layout", () => {
     const dir = withProfile("SQLite format 3\0 SAPISID", ".");
     expect(profileHasProviderCookies(dir, "google")).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("requires forced relogin cookie evidence to change after launch", () => {
+    const dir = withProfile("SQLite format 3\0 ... SAPISID ... stale-value");
+    const baseline = profileProviderCookieFingerprint(dir, "google");
+    expect(baseline).not.toBeNull();
+    expect(profileHasNewProviderCookies(dir, "google", baseline)).toBe(false);
+
+    writeFileSync(
+      join(dir, "Default", "Cookies"),
+      Buffer.from("SQLite format 3\0 ... SAPISID ... fresh-value", "latin1"),
+    );
+    expect(profileHasNewProviderCookies(dir, "google", baseline)).toBe(true);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("accepts a requested provider cookie written into an empty profile", () => {
+    const dir = withProfile(null);
+    const baseline = profileProviderCookieFingerprint(dir, "github");
+    expect(baseline).toBeNull();
+    mkdirSync(join(dir, "Default"), { recursive: true });
+    writeFileSync(join(dir, "Default", "Cookies-wal"), Buffer.from("user_session", "latin1"));
+    expect(profileHasNewProviderCookies(dir, "github", baseline)).toBe(true);
     rmSync(dir, { recursive: true, force: true });
   });
 

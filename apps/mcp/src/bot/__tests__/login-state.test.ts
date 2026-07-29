@@ -1,9 +1,10 @@
 // Tests for the OAuth login-state marker — the signup bot reads this
 // to decide which providers it can auto-prefer for OAuth-first signup.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   clearProviderCookiesFromContext,
@@ -49,6 +50,16 @@ describe("provider cookie clearing", () => {
     };
 
     await expect(clearProviderCookiesFromContext(context, "github")).resolves.toBe(false);
+  });
+
+  it("uses the retrying profile gate for the persistent context launch", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("../login-state.ts", import.meta.url)),
+      "utf8",
+    );
+    expect(source).toMatch(
+      /launchWithProfileGate\(profileDir,\s*\(\) =>\s*chromium\.launchPersistentContext/,
+    );
   });
 });
 

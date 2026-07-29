@@ -6,7 +6,7 @@
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHROME_PROFILE_DIR } from "./profile.js";
+import { CHROME_PROFILE_DIR, launchWithProfileGate } from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 
 interface ProviderCookieContext {
@@ -168,10 +168,12 @@ export async function clearProviderCookies(
   let context: ProviderCookieContext | null = null;
   try {
     const { chromium } = await import("patchright");
-    context = await chromium.launchPersistentContext(profileDir, {
-      channel: "chrome",
-      headless: true,
-    });
+    context = await launchWithProfileGate(profileDir, () =>
+      chromium.launchPersistentContext(profileDir, {
+        channel: "chrome",
+        headless: true,
+      }),
+    );
     return await clearProviderCookiesFromContext(context, provider);
   } catch {
     return false;
