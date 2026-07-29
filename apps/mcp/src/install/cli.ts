@@ -1132,7 +1132,10 @@ export function shouldCompleteInstallClaim(
   if (!claimed) return false;
   const terminal =
     wizardCompleted || (installPageUrl !== undefined && isClaimTerminalUrl(installPageUrl));
-  if (completeOnClaim) return sessionSeeded || terminal;
+  // A forced provider relogin is successful only when that provider's cookie
+  // actually landed in this browser profile. Finish is not an override: the
+  // user may skip optional GitHub and still reach the terminal page.
+  if (completeOnClaim) return sessionSeeded;
   if (terminal) return true;
   return wizardAcknowledged ? false : sessionSeeded;
 }

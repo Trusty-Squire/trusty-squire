@@ -149,15 +149,16 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     ).toBe(false);
   });
 
-  it("completes force-relogin via a terminal page even if the seed check missed", () => {
+  it("does not let Finish override the requested provider seed", () => {
     expect(
       shouldCompleteInstallClaim(
         true,
         true,
         false, // not seeded…
-        "https://trustysquire.ai/install/done", // …but Finish reached
+        "https://trustysquire.ai/install/done", // …and Finish cannot substitute for it
       ),
-    ).toBe(true);
+    ).toBe(false);
+    expect(shouldCompleteInstallClaim(true, true, false, undefined, true, true)).toBe(false);
   });
 
   it("keeps first-time onboarding open for the explicit Finish step", () => {
