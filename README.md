@@ -129,6 +129,11 @@ grant_app_access({
 })
 ```
 
+Rate limits are opt-in. Omitting `rate_limit_per_hour` creates an unlimited
+grant; host scoping, auditing, and revocation still apply. When a grant reaches
+an explicit hourly limit, the proxy returns `429 rate_limited` with
+`scope: "grant"`, `Retry-After`, and window/reset metadata.
+
 The result contains a host-scoped egress `base_url` and a `token`, not the Clerk secret key. The token is returned once through the MCP result and remains valid until revoked. That means the scoped grant token can enter agent context; it is not the provider key. Move it directly into backend-only deployment secret storage, never browser code, logs, or source control. If you need zero grant-token exposure to the model, use `use_credential` for agent-initiated requests instead. Trusty Squire removes the grant authorization at the boundary and injects the vaulted provider credential into the upstream request.
 
 ## Security and threat model

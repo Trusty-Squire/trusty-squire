@@ -7,10 +7,7 @@
 // agent-or-web; GET is the same).
 
 import type { FastifyReply, FastifyRequest } from "fastify";
-import {
-  hashToken,
-  type AgentSessionStore,
-} from "./agent.js";
+import { hashToken, type AgentSessionStore } from "./agent.js";
 import {
   SESSION_COOKIE_NAME,
   signSessionJwt,
@@ -77,12 +74,9 @@ export function makeAuthMiddleware(deps: AuthDeps) {
   // Per-account rolling-hour rate limit on the authed control plane — a DoS
   // backstop so one token can't hammer vault store/list/use, grant mint, etc.
   // Generous (the deployed-app egress PROXY runs on a SEPARATE grant-token path
-  // with its own per-grant cap, so this won't throttle workloads). In-memory /
+  // with an optional per-grant cap, so this won't throttle workloads). In-memory /
   // single-instance, like the grant limiter. `<= 0` disables it.
-  const ACCOUNT_HOURLY_LIMIT = Number.parseInt(
-    process.env.API_ACCOUNT_HOURLY_LIMIT ?? "1000",
-    10,
-  );
+  const ACCOUNT_HOURLY_LIMIT = Number.parseInt(process.env.API_ACCOUNT_HOURLY_LIMIT ?? "1000", 10);
   const accountHits = new Map<string, number[]>();
   function overAccountRate(accountId: string): boolean {
     if (ACCOUNT_HOURLY_LIMIT <= 0) return false;
