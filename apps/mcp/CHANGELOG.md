@@ -1,5 +1,16 @@
 # Changelog — @trusty-squire/mcp
 
+## Unreleased
+
+- **Install completion now preserves the full onboarding flow.** Normal
+  onboarding keeps its temporary browser/noVNC session open until the user
+  selects **Finish**. Forced relogin requires the requested provider's cookie
+  after verifying that provider's old cookies were cleared; a terminal page or
+  another provider's cookie cannot close the browser early.
+- **The curl installer resolves the published package explicitly.** It invokes
+  `@trusty-squire/mcp@latest`, preventing an npm workspace package in the
+  caller's current directory from shadowing the registry release.
+
 ## 1.1.5 (2026-07-28)
 
 - **Promotes 1.1.5-rc.1 to stable.** Two new `operate_act` kinds — `select`

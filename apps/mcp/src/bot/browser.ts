@@ -897,7 +897,7 @@ export interface PlainLoginBrowser {
 // `navigator.webdriver` — all separately ruled out). The connect claim doesn't
 // need to drive the browser: the USER signs in over noVNC, completion is read
 // from the API (`installPoll`), and provider seeding is read from the profile's
-// on-disk cookie store (`profileHasProviderCookies`). So we spawn Chrome and
+// SQLite cookie store (`profileHasProviderCookies`). So we spawn Chrome and
 // only ever kill it — never attach.
 //
 // Persistent profile is preserved (--user-data-dir=profileDir) so the Google/

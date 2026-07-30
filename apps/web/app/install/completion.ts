@@ -38,10 +38,14 @@ export function readInstallCompletionUrl(token: string): string | null {
   if (fromFragment !== null) {
     try {
       window.sessionStorage.setItem(storageKey, fromFragment);
+      return fromFragment;
     } catch {
-      // The live value is still usable when session storage is unavailable.
+      // OAuth removes the fragment on its redirect back to this page. Do not
+      // acknowledge callback support unless the callback survived into
+      // session storage, because Finish cannot deliver a callback after the
+      // fragment disappears.
+      return null;
     }
-    return fromFragment;
   }
   try {
     return normalizeInstallCompletionUrl(window.sessionStorage.getItem(storageKey));

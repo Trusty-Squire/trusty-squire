@@ -6,8 +6,39 @@
 
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHROME_PROFILE_DIR } from "./profile.js";
+import { CHROME_PROFILE_DIR, launchWithProfileGate } from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
+
+interface ProviderCookieContext {
+  cookies(): Promise<Array<{ name: string; domain: string; path: string }>>;
+  clearCookies(options: { name: string; domain: string; path: string }): Promise<void>;
+  close(): Promise<void>;
+}
+
+function cookieBelongsToProvider(domain: string, provider: OAuthProviderId): boolean {
+  const normalized = domain.replace(/^\./, "").toLowerCase();
+  const root = provider === "google" ? "google.com" : "github.com";
+  return normalized === root || normalized.endsWith(`.${root}`);
+}
+
+export async function clearProviderCookiesFromContext(
+  context: ProviderCookieContext,
+  provider?: OAuthProviderId,
+): Promise<boolean> {
+  const belongs = (domain: string): boolean =>
+    provider === undefined
+      ? cookieBelongsToProvider(domain, "google") || cookieBelongsToProvider(domain, "github")
+      : cookieBelongsToProvider(domain, provider);
+  const targets = (await context.cookies()).filter((cookie) => belongs(cookie.domain));
+  for (const cookie of targets) {
+    await context.clearCookies({
+      name: cookie.name,
+      domain: cookie.domain,
+      path: cookie.path,
+    });
+  }
+  return !(await context.cookies()).some((cookie) => belongs(cookie.domain));
+}
 
 function markerPath(profileDir: string): string {
   return join(profileDir, "logged-in-providers.json");
@@ -49,7 +80,8 @@ export function recordProviderEmail(
     let current: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(readFileSync(emailMarkerPath(profileDir), "utf8"));
-      if (parsed !== null && typeof parsed === "object") current = parsed as Record<string, unknown>;
+      if (parsed !== null && typeof parsed === "object")
+        current = parsed as Record<string, unknown>;
     } catch {
       /* no marker yet */
     }
@@ -63,15 +95,12 @@ export function recordProviderEmail(
 
 // Providers with a confirmed session in the profile. Best-effort: a
 // missing or malformed marker yields []. Never throws.
-export function loggedInProviders(
-  profileDir: string = CHROME_PROFILE_DIR,
-): OAuthProviderId[] {
+export function loggedInProviders(profileDir: string = CHROME_PROFILE_DIR): OAuthProviderId[] {
   try {
     const parsed: unknown = JSON.parse(readFileSync(markerPath(profileDir), "utf8"));
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
-      (v): v is OAuthProviderId =>
-        typeof v === "string" && isOAuthProviderId(v),
+      (v): v is OAuthProviderId => typeof v === "string" && isOAuthProviderId(v),
     );
   } catch {
     return [];
@@ -116,9 +145,7 @@ export function clearProviderLoggedIn(
 // Wipe the marker entirely. Used by `connect --force-relogin` so the
 // step-2/2 prompt reflects THIS run's actual cookie state instead of
 // silently relying on the union of every prior session. Best-effort.
-export function clearAllProviderMarkers(
-  profileDir: string = CHROME_PROFILE_DIR,
-): void {
+export function clearAllProviderMarkers(profileDir: string = CHROME_PROFILE_DIR): void {
   try {
     writeFileSync(markerPath(profileDir), JSON.stringify([]), "utf8");
   } catch {
@@ -126,41 +153,28 @@ export function clearAllProviderMarkers(
   }
 }
 
-// Wipe Google + GitHub cookies from the Chrome profile's SQLite
-// Cookies DB. Used by `connect --force-relogin` so the next OAuth
-// flow actually runs (instead of short-circuiting because the
-// provider session is still cached). MUST be called BEFORE Chrome
-// starts — the DB is locked while Chrome is running. Best-effort:
-// any error (no DB yet, locked, sqlite unavailable) is swallowed
-// so the install can still proceed.
+// Wipe Google + GitHub cookies through a short-lived Chrome context. This uses
+// Chrome's own cookie API, so it works on every supported Node version and can
+// verify the targeted rows are actually gone before the plain, non-CDP OAuth
+// browser starts.
 export async function clearProviderCookies(
   profileDir: string = CHROME_PROFILE_DIR,
   provider?: OAuthProviderId,
-): Promise<void> {
-  const dbPath = join(profileDir, "Default", "Cookies");
+): Promise<boolean> {
+  let context: ProviderCookieContext | null = null;
   try {
-    // Use node:sqlite (Node 22+). Falls back to a no-op if the
-    // module isn't available on this Node version.
-    const sqlite = await import("node:sqlite").catch(() => null);
-    if (sqlite === null) return;
-    const db = new sqlite.DatabaseSync(dbPath);
-    const hosts =
-      provider === "google"
-        ? ["%google.com%"]
-        : provider === "github"
-          ? ["%github.com%"]
-          : ["%google.com%", "%github.com%"];
-    try {
-      const where = hosts.map((_, i) => `host_key LIKE ?${i + 1}`).join(" OR ");
-      const stmt = db.prepare(`DELETE FROM cookies WHERE ${where};`);
-      stmt.run(...hosts);
-    } finally {
-      db.close();
-    }
+    const { chromium } = await import("patchright");
+    context = await launchWithProfileGate(profileDir, () =>
+      chromium.launchPersistentContext(profileDir, {
+        channel: "chrome",
+        headless: true,
+      }),
+    );
+    return await clearProviderCookiesFromContext(context, provider);
   } catch {
-    /* best-effort — Chrome might be holding the lock, or the DB
-       doesn't exist yet on first install. The OAuth flow will still
-       work; it just won't be forced this run. */
+    return false;
+  } finally {
+    await context?.close().catch(() => undefined);
   }
 }
 

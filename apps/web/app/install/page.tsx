@@ -11,8 +11,8 @@
 //
 // State is derived from /v1/auth/whoami + /v1/mcp/install/<token>/state,
 // polled every 3s after each redirect-return. The bot's Chrome stays
-// on this page until the user clicks Finish (which navigates to
-// /install/done — the bot's poll watches for that URL).
+// on this page until the user clicks Finish, which calls the per-run
+// loopback completion URL and then navigates to /install/done.
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -102,7 +102,7 @@ export default function InstallPage() {
       window.location.assign(acknowledgementUrl);
       return;
     }
-    setCompletionUrl(callbackUrl);
+    void Promise.resolve().then(() => setCompletionUrl(callbackUrl));
   }, [token]);
 
   // Returning from the OAuth round-trip — fire the claim if we
@@ -274,12 +274,9 @@ export default function InstallPage() {
       encodeURIComponent(`/install?token=${encodeURIComponent(token)}&gh=1`);
   }, [token]);
 
-  // Once the GitHub OAuth returns here (gh=1) and the account confirms the
-  // link, the bot's github.com cookie is live in this profile — mark the
-  // step done. Sticky: survives the URL-marker cleanup below.
   useEffect(() => {
     if (returnedFromGithub && identities.includes("github")) {
-      setGithubSessionFresh(true);
+      void Promise.resolve().then(() => setGithubSessionFresh(true));
     }
   }, [returnedFromGithub, identities]);
 

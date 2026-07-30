@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearInstallCompletionUrl,
   installCompletionAcknowledgementUrl,
@@ -49,6 +49,24 @@ describe("install completion callback validation", () => {
 
     clearInstallCompletionUrl("setup");
     expect(readInstallCompletionUrl("setup")).toBeNull();
+  });
+
+  it("does not advertise callback support when the callback cannot survive OAuth", () => {
+    const callback =
+      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "d".repeat(48);
+    window.history.replaceState(
+      {},
+      "",
+      `/install?token=setup#ts_install_complete=${encodeURIComponent(callback)}`,
+    );
+    const setItem = vi.spyOn(window.sessionStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("storage disabled", "SecurityError");
+    });
+    try {
+      expect(readInstallCompletionUrl("setup")).toBeNull();
+    } finally {
+      setItem.mockRestore();
+    }
   });
 
   it("acknowledges callback support once and retains it across OAuth returns", () => {

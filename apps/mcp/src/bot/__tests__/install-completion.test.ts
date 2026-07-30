@@ -19,7 +19,6 @@ describe("plain install completion listener", () => {
     listener = await startInstallCompletionListener(doneUrl, confirmUrl);
 
     expect(listener.isCompleted()).toBe(false);
-    expect(listener.isAcknowledged()).toBe(false);
     const wrong = await fetch(`${listener.callbackUrl}/wrong`, {
       redirect: "manual",
     });
@@ -37,7 +36,6 @@ describe("plain install completion listener", () => {
     const acknowledgementFragment = new URLSearchParams(acknowledgementRedirect.hash.slice(1));
     expect(acknowledgementFragment.get("ts_install_complete")).toBe(listener.callbackUrl);
     expect(acknowledgementFragment.get("ts_install_complete_ack")).toBe("1");
-    expect(listener.isAcknowledged()).toBe(true);
     expect(listener.isCompleted()).toBe(false);
 
     const finished = await fetch(listener.callbackUrl, { redirect: "manual" });

@@ -15,8 +15,8 @@
 //   2. Headless (no DISPLAY) → run Chrome on a phone-shaped virtual
 //      display (Xvfb), bridge it out with x11vnc + noVNC + a cloudflared
 //      tunnel, and print one URL + a VNC password. The user logs in from
-//      any browser on any network. The whole stack is torn down the
-//      instant the session lands — the public URL lives for one login.
+//      any browser on any network. The public URL lives only until the
+//      active login or install flow reaches its completion gate.
 //
 // Binaries the headless path needs: Xvfb, x11vnc, websockify
 // (with /usr/share/novnc), cloudflared, and Google Chrome. Missing ones
@@ -37,6 +37,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import Database from "better-sqlite3";
 import boxen from "boxen";
 import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
@@ -181,37 +182,39 @@ export async function contextHasProviderSession(
   return hasProviderSession(context, LOGIN_TARGETS[provider]);
 }
 
-// Provider session cookie NAMES long/specific enough to detect by substring in
-// the raw on-disk Cookies DB. Bare short names (Google's "SID") are omitted —
-// they substring-collide with other cookie names.
 const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
   google: ["__Secure-1PSID", "SAPISID"],
   github: ["user_session"],
 };
 
-// Read a PLAIN login browser's provider session straight off disk. The connect
-// claim's login browser never attaches CDP (see launchPlainLoginBrowser — a
-// CDP attach fails Google's OAuth "secure browser" check), so there is no live
-// context to query. Chrome stores cookie NAMES as plaintext in the Cookies
-// SQLite b-tree pages, so a raw byte search reliably answers "did this
-// session's cookie get written" — dependency-free and Node-version-agnostic
-// (engines >=20; node:sqlite is 22.5+). Presence-only; never decrypts values.
 export function profileHasProviderCookies(profileDir: string, provider: OAuthProviderId): boolean {
   const markers = PROVIDER_COOKIE_MARKERS[provider];
-  // <profile>/Default/Cookies is the norm; a profile that never opened a window
-  // may only have <profile>/Cookies. Include the WAL sidecar — a just-written
-  // cookie may not be checkpointed into the main file yet.
   const bases = [join(profileDir, "Default", "Cookies"), join(profileDir, "Cookies")];
-  for (const base of bases) {
-    for (const path of [base, `${base}-wal`]) {
-      if (!existsSync(path)) continue;
-      let text: string;
-      try {
-        text = readFileSync(path).toString("latin1");
-      } catch {
-        continue;
-      }
-      if (markers.some((m) => text.includes(m))) return true;
+  const root = provider === "google" ? "google.com" : "github.com";
+  for (const path of bases) {
+    if (!existsSync(path)) continue;
+    let db: Database.Database | null = null;
+    try {
+      db = new Database(path, {
+        readonly: true,
+        fileMustExist: true,
+        timeout: 250,
+      });
+      const placeholders = markers.map(() => "?").join(", ");
+      const row = db
+        .prepare(
+          `SELECT 1
+             FROM cookies
+            WHERE (host_key = ? OR host_key = ? OR host_key LIKE ?)
+              AND name IN (${placeholders})
+            LIMIT 1`,
+        )
+        .get(root, `.${root}`, `%.${root}`, ...markers);
+      if (row !== undefined) return true;
+    } catch {
+      continue;
+    } finally {
+      db?.close();
     }
   }
   return false;
@@ -796,7 +799,7 @@ export interface RunInBotChromeOpts {
   // "secure browser" check rejects a CDP-attached Chrome (see
   // launchPlainLoginBrowser). In this mode the browser is never driven: the
   // user signs in over noVNC, and completion is detected via `plainPollUntilDone`
-  // (which reads the API + the on-disk cookie store, not a live context). The
+  // (which reads the API + the SQLite cookie store, not a live context). The
   // context-taking `pollUntilDone`/`onSuccess`/`preflight` above are IGNORED in
   // this mode. `mcp login` does NOT set this (it stays on the CDP path).
   plainProfileLogin?: boolean;
@@ -838,7 +841,7 @@ async function runDisplayedChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
-  // detect completion off the API + on-disk cookie store. See
+  // detect completion off the API + SQLite cookie store. See
   // launchPlainLoginBrowser / RunInBotChromeOpts.plainProfileLogin.
   if (opts.plainProfileLogin === true) {
     if (opts.plainPollUntilDone === undefined) {
@@ -1373,11 +1376,11 @@ export function extractGoogleAccountEmail(pageText: string): string | null {
 
 // Public entry for the install flow: opens the trustysquire /install
 // confirm URL in the bot's persistent Chrome profile, runs the
-// user-supplied check until the install is claimed (or the deadline
-// passes), then tears down. The user's Google/GitHub sign-in happens
-// inside this Chrome instance — so the bot's profile gets a provider
-// session as a free side effect, and there's no separate "log into
-// Google for the bot" step after install.
+// user-supplied check until the active flow's completion gate passes
+// (or the deadline expires), then tears down. The user's Google/GitHub
+// sign-in happens inside this Chrome instance — so the bot's profile gets
+// a provider session as a free side effect, and there's no separate
+// "log into Google for the bot" step after install.
 export async function openInstallConfirmInBotChrome(opts: {
   confirmUrl: string;
   // Returns true when the install ceremony is done. The login browser runs
@@ -1385,11 +1388,7 @@ export async function openInstallConfirmInBotChrome(opts: {
   // attach), so the predicate gets the profileDir, NOT a live context: it
   // composes the API claim with either the normal wizard's per-run loopback
   // Finish callback or forced re-login's on-disk provider-session seed.
-  pollUntilClaimed: (
-    profileDir: string,
-    wizardCompleted: boolean,
-    wizardAcknowledged: boolean,
-  ) => Promise<boolean>;
+  pollUntilClaimed: (profileDir: string, wizardCompleted: boolean) => Promise<boolean>;
   profileDir?: string;
   timeoutMinutes?: number;
   // G15: API base URL used to shorten the headless cloudflared
@@ -1421,12 +1420,7 @@ export async function openInstallConfirmInBotChrome(opts: {
       // stub to satisfy the (CDP-path) type.
       plainProfileLogin: true,
       pollUntilDone: () => Promise.resolve(false),
-      plainPollUntilDone: (dir) =>
-        opts.pollUntilClaimed(
-          dir,
-          completion?.isCompleted() === true,
-          completion?.isAcknowledged() === true,
-        ),
+      plainPollUntilDone: (dir) => opts.pollUntilClaimed(dir, completion?.isCompleted() === true),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
       // The user's sign-in inside this Chrome leaves a provider session in the
