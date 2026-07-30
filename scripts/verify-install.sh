@@ -128,16 +128,27 @@ for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt++)); do
   INSTALL_DIR=$(mktemp -d)
   trap 'rm -rf "$INSTALL_DIR"' EXIT
 
-  if (
-    cd "$INSTALL_DIR"
-    npm init -y >/dev/null 2>&1
-    npm install --no-audit --no-fund "$PKG@$TAG" >/dev/null 2>&1
-  ); then
-    PKG_DIR="$INSTALL_DIR/node_modules/$PKG"
-    INSTALLED_VERSION=$(node -p "require('$PKG_DIR/package.json').version" 2>/dev/null || echo "")
-    if [[ "$INSTALLED_VERSION" == "$EXPECTED_VERSION" ]]; then
-      break
-    fi
+  if ! INIT_OUTPUT=$(cd "$INSTALL_DIR" && npm init -y 2>&1); then
+    echo "FAIL: npm init failed"
+    printf '%s\n' "$INIT_OUTPUT"
+    exit 1
+  fi
+
+  if ! INSTALL_OUTPUT=$(cd "$INSTALL_DIR" && npm install --no-audit --no-fund "$PKG@$TAG" 2>&1); then
+    echo "FAIL: npm install $PKG@$TAG failed on attempt $attempt"
+    printf '%s\n' "$INSTALL_OUTPUT"
+    exit 1
+  fi
+
+  PKG_DIR="$INSTALL_DIR/node_modules/$PKG"
+  if ! INSTALLED_VERSION=$(node -p "require('$PKG_DIR/package.json').version" 2>&1); then
+    echo "FAIL: Could not read installed package version"
+    printf '%s\n' "$INSTALLED_VERSION"
+    exit 1
+  fi
+
+  if [[ "$INSTALLED_VERSION" == "$EXPECTED_VERSION" ]]; then
+    break
   fi
 
   rm -rf "$INSTALL_DIR"
