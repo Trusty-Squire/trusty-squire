@@ -19,6 +19,7 @@ export interface MetricsSnapshot {
   egress_grants_active: number;
   captcha_events_total: number;
   vault_audit_events_total: number;
+  vault_audit_events_last_hour: number;
   db_up: number; // 0 or 1
 }
 
@@ -31,12 +32,14 @@ const ZERO_SNAPSHOT: MetricsSnapshot = {
   egress_grants_active: 0,
   captcha_events_total: 0,
   vault_audit_events_total: 0,
+  vault_audit_events_last_hour: 0,
   db_up: 0,
 };
 
 export async function collectMetrics(
   prisma: ApiPrismaClient,
   pingDb: () => Promise<boolean>,
+  now: () => Date = () => new Date(),
 ): Promise<MetricsSnapshot> {
   // Gate the counts on a cheap liveness probe: a wedged DB (the 256MB OOM
   // failure mode) would otherwise make every count() hang until timeout.
@@ -45,6 +48,7 @@ export async function collectMetrics(
   const up = await pingDb();
   if (!up) return { ...ZERO_SNAPSHOT, db_up: 0 };
 
+  const auditHourCutoff = new Date(now().getTime() - 60 * 60 * 1000);
   const [
     accounts_total,
     machine_tokens_total,
@@ -54,6 +58,7 @@ export async function collectMetrics(
     egress_grants_active,
     captcha_events_total,
     vault_audit_events_total,
+    vault_audit_events_last_hour,
   ] = await Promise.all([
     prisma.account.count({ where: {} }),
     prisma.machineToken.count({ where: {} }),
@@ -63,6 +68,7 @@ export async function collectMetrics(
     prisma.egressGrant.count({ where: { revoked_at: null } }),
     prisma.captchaEvent.count(),
     prisma.vaultAuditEvent.count(),
+    prisma.vaultAuditEvent.count({ where: { emitted_at: { gte: auditHourCutoff } } }),
   ]);
 
   return {
@@ -74,6 +80,7 @@ export async function collectMetrics(
     egress_grants_active,
     captcha_events_total,
     vault_audit_events_total,
+    vault_audit_events_last_hour,
     db_up: 1,
   };
 }
@@ -83,12 +90,19 @@ export async function collectMetrics(
 const GAUGES: ReadonlyArray<{ key: keyof MetricsSnapshot; help: string }> = [
   { key: "accounts_total", help: "Total accounts created." },
   { key: "machine_tokens_total", help: "Total machine tokens issued (installs incl. infra/CI)." },
-  { key: "residential_installs_total", help: "Machine tokens from residential ASNs (honest external-install signal)." },
+  {
+    key: "residential_installs_total",
+    help: "Machine tokens from residential ASNs (honest external-install signal).",
+  },
   { key: "credentials_total", help: "Total credentials stored in the vault." },
   { key: "egress_grants_total", help: "Total egress grants ever minted." },
   { key: "egress_grants_active", help: "Egress grants not yet revoked." },
   { key: "captcha_events_total", help: "Total captcha encounters recorded." },
   { key: "vault_audit_events_total", help: "Total vault audit-trail events recorded." },
+  {
+    key: "vault_audit_events_last_hour",
+    help: "Vault audit-trail events recorded in the trailing hour.",
+  },
   { key: "db_up", help: "1 if the database answered the liveness probe, else 0." },
 ];
 
@@ -108,7 +122,9 @@ export function renderPrometheus(m: MetricsSnapshot, version: string): string {
     lines.push(`# TYPE ${name} gauge`);
     lines.push(`${name} ${m[key]}`);
   }
-  lines.push("# HELP squire_build_info Build metadata; value is always 1, version carried as a label.");
+  lines.push(
+    "# HELP squire_build_info Build metadata; value is always 1, version carried as a label.",
+  );
   lines.push("# TYPE squire_build_info gauge");
   lines.push(`squire_build_info{version="${escapeLabelValue(version)}"} 1`);
   // Trailing newline — Prometheus tolerates its absence but the format
