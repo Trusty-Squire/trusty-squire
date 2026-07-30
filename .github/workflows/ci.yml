@@ -31,6 +31,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test secret scanner
+        run: scripts/__tests__/secret-scan.test.sh
       - name: Scan tracked files for credential-shaped values
         run: tools/secret-scan.sh
 

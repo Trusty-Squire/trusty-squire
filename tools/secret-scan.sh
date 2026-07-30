@@ -33,7 +33,7 @@ PATTERNS=(
   'gh[pousr]_[A-Za-z0-9]{36,}'                       # GitHub PAT / OAuth / refresh
   'gsk_[A-Za-z0-9]{40,}'                             # Groq
   'sntrys_[A-Za-z0-9_=]{30,}'                         # Sentry
-  're_[A-Za-z0-9]{20,}'                              # Resend
+  '(^|[^A-Za-z0-9_])re_[A-Za-z0-9_-]{20,}'          # Resend
   'xox[baprs]-[A-Za-z0-9-]{10,}'                     # Slack
   'AKIA[0-9A-Z]{16}'                                 # AWS access key id
   'eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'  # JWT
