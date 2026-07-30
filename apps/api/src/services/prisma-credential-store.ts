@@ -5,7 +5,7 @@
 // encryption envelope is done by CredentialVault — this only persists
 // rows.
 
-import { Buffer } from "node:buffer";
+import type { Buffer } from "node:buffer";
 import type { CredentialRecord, CredentialStore } from "@trusty-squire/vault";
 import type { ApiPrismaClient } from "./api-prisma-client.js";
 
@@ -61,9 +61,18 @@ export class PrismaCredentialStore implements CredentialStore {
   }
 
   async findActive(reference: string): Promise<CredentialRecord | null> {
-    const row = await this.prisma.credential.findFirst({
-      where: { reference, deleted_at: null },
-    });
+    const lookup = () =>
+      this.prisma.credential.findFirst({
+        where: { reference, deleted_at: null },
+      });
+    let row;
+    try {
+      row = await lookup();
+    } catch (err) {
+      if (!isRetryablePrismaConnectionError(err)) throw err;
+      await disconnectPrisma(this.prisma);
+      row = await lookup();
+    }
     return row === null ? null : this.toRecord(row);
   }
 
@@ -123,7 +132,9 @@ export class PrismaCredentialStore implements CredentialStore {
         field_names: payload.field_names,
         rotated_at: payload.rotatedAt,
         ...("type" in payload ? { type: payload.type ?? null } : {}),
-        ...("env_var_suggestion" in payload ? { env_var_suggestion: payload.env_var_suggestion ?? null } : {}),
+        ...("env_var_suggestion" in payload
+          ? { env_var_suggestion: payload.env_var_suggestion ?? null }
+          : {}),
         ...(payload.metadata !== undefined ? { metadata: payload.metadata } : {}),
       },
     });
@@ -165,10 +176,7 @@ export class PrismaCredentialStore implements CredentialStore {
     return r.count;
   }
 
-  async findByIdForAccount(
-    id: string,
-    accountId: string,
-  ): Promise<CredentialRecord | null> {
+  async findByIdForAccount(id: string, accountId: string): Promise<CredentialRecord | null> {
     const row = await this.prisma.credential.findFirst({
       where: { id, account_id: accountId, deleted_at: null },
     });
@@ -261,5 +269,28 @@ export class PrismaCredentialStore implements CredentialStore {
       deleted_at: row.deleted_at,
       created_at: row.created_at,
     };
+  }
+}
+
+function isRetryablePrismaConnectionError(err: unknown): boolean {
+  if (err === null || typeof err !== "object") return false;
+  const code = "code" in err ? String((err as { code?: unknown }).code ?? "") : "";
+  if (code === "P1017" || code === "P1001" || code === "P1002") return true;
+  const message = (err instanceof Error ? err.message : String(err)).toLowerCase();
+  return (
+    message.includes("server has closed the connection") ||
+    message.includes("connection terminated") ||
+    message.includes("connection pool") ||
+    message.includes("can't reach database server")
+  );
+}
+
+async function disconnectPrisma(prisma: ApiPrismaClient): Promise<void> {
+  const maybeDisconnect = (prisma as { $disconnect?: () => Promise<void> }).$disconnect;
+  if (maybeDisconnect === undefined) return;
+  try {
+    await maybeDisconnect.call(prisma);
+  } catch {
+    // Prisma reconnects lazily; a failed cleanup should not suppress the retry.
   }
 }

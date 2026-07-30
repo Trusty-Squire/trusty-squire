@@ -55,17 +55,21 @@ const mintBody = z
 // one. One writer per process, kept local here.
 class GrantRateLimiter {
   private readonly hits = new Map<string, number[]>();
-  allow(grantId: string, perHour: number, now: number): boolean {
-    if (perHour <= 0) return true; // unlimited — no rate cap requested
+  check(
+    grantId: string,
+    perHour: number,
+    now: number,
+  ): { allowed: true } | { allowed: false; resetAt: number } {
+    if (perHour <= 0) return { allowed: true }; // unlimited — no rate cap requested
     const cutoff = now - 3_600_000;
     const arr = (this.hits.get(grantId) ?? []).filter((t) => t > cutoff);
     if (arr.length >= perHour) {
       this.hits.set(grantId, arr);
-      return false;
+      return { allowed: false, resetAt: arr[0]! + 3_600_000 };
     }
     arr.push(now);
     this.hits.set(grantId, arr);
-    return true;
+    return { allowed: true };
   }
 }
 
@@ -153,19 +157,42 @@ export const registerEgressRoutes: FastifyPluginAsync<{
   // window tiny while still collapsing a streaming burst to one DB read. Only
   // positive (active) results are cached; misses fall straight through.
   const credCache = new Map<string, { cred: CredentialRecord; expiresAt: number }>();
+  // A TTL cache alone does not absorb a concurrent cold/expired-cache burst:
+  // every request observes the same miss before the first DB read completes.
+  // Share that one in-flight lookup so the burst cannot stampede Prisma.
+  const pendingCredReads = new Map<string, Promise<CredentialRecord | null>>();
   const CRED_CACHE_TTL_MS = (() => {
     const raw = Number(process.env.EGRESS_CRED_CACHE_TTL_MS);
     return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 15_000;
   })();
   const now = opts.now ?? (() => new Date());
-  // A grant minted WITHOUT an explicit rate now gets a sane DEFAULT cap rather
-  // than unlimited — abuse protection so a leaked/abused token can't run the
-  // egress proxy at unbounded volume. Generous (not a monetization lever); an
-  // explicit rate_limit_per_hour (1..100000) still overrides. Env-tunable.
-  const DEFAULT_RATE_PER_HOUR = Number.parseInt(
-    process.env.EGRESS_DEFAULT_RATE_PER_HOUR ?? "1000",
-    10,
-  );
+  const UNLIMITED_RATE = 0;
+
+  const resolveCredential = async (reference: string): Promise<CredentialRecord | null> => {
+    const cached = credCache.get(reference);
+    if (cached !== undefined && cached.expiresAt > now().getTime()) return cached.cred;
+
+    const pending = pendingCredReads.get(reference);
+    if (pending !== undefined) return pending;
+
+    const read = opts.deps.credentialStore.findActive(reference).then((cred) => {
+      if (cred === null) {
+        credCache.delete(reference);
+      } else {
+        credCache.set(reference, {
+          cred,
+          expiresAt: now().getTime() + CRED_CACHE_TTL_MS,
+        });
+      }
+      return cred;
+    });
+    pendingCredReads.set(reference, read);
+    try {
+      return await read;
+    } finally {
+      if (pendingCredReads.get(reference) === read) pendingCredReads.delete(reference);
+    }
+  };
 
   // ── Mint (agent) ──────────────────────────────────────────────
   fastify.post("/v1/egress/grants", { preHandler: opts.requireAgent }, async (req, reply) => {
@@ -214,7 +241,7 @@ export const registerEgressRoutes: FastifyPluginAsync<{
     const { grant, token } = mintGrant({
       account_id: auth.account_id,
       credential_ref: selected.reference,
-      rate_limit_per_hour: parsed.data.rate_limit_per_hour ?? DEFAULT_RATE_PER_HOUR,
+      rate_limit_per_hour: parsed.data.rate_limit_per_hour ?? UNLIMITED_RATE,
       spend_cap_usd: parsed.data.spend_cap_usd ?? null,
       now: now().toISOString(),
     });
@@ -359,8 +386,19 @@ export const registerEgressRoutes: FastifyPluginAsync<{
         reply.code(403).send({ error: "grant_revoked" });
         return;
       }
-      if (!limiter.allow(grant.id, grant.rate_limit_per_hour, now().getTime())) {
-        reply.code(429).send({ error: "rate_limited", limit_per_hour: grant.rate_limit_per_hour });
+      const requestNow = now().getTime();
+      const rate = limiter.check(grant.id, grant.rate_limit_per_hour, requestNow);
+      if (!rate.allowed) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((rate.resetAt - requestNow) / 1000));
+        reply.header("Retry-After", String(retryAfterSeconds));
+        reply.code(429).send({
+          error: "rate_limited",
+          scope: "grant",
+          limit_per_hour: grant.rate_limit_per_hour,
+          window_seconds: 3600,
+          retry_after_seconds: retryAfterSeconds,
+          reset_at: new Date(rate.resetAt).toISOString(),
+        });
         return;
       }
 
@@ -369,27 +407,14 @@ export const registerEgressRoutes: FastifyPluginAsync<{
       // from the short-TTL cache when warm so a streaming burst doesn't hammer
       // the connection pool (#227/#231).
       let cred: CredentialRecord | null;
-      const cachedCred = credCache.get(grant.credential_ref);
-      if (cachedCred !== undefined && cachedCred.expiresAt > now().getTime()) {
-        cred = cachedCred.cred;
-      } else {
-        try {
-          cred = await opts.deps.credentialStore.findActive(grant.credential_ref);
-        } catch (err) {
-          if (isRetryablePrismaConnectionError(err)) {
-            sendEgressStoreUnavailable(reply);
-            return;
-          }
-          throw err;
+      try {
+        cred = await resolveCredential(grant.credential_ref);
+      } catch (err) {
+        if (isRetryablePrismaConnectionError(err)) {
+          sendEgressStoreUnavailable(reply);
+          return;
         }
-        if (cred !== null) {
-          credCache.set(grant.credential_ref, {
-            cred,
-            expiresAt: now().getTime() + CRED_CACHE_TTL_MS,
-          });
-        } else {
-          credCache.delete(grant.credential_ref);
-        }
+        throw err;
       }
       if (cred !== null && cred.account_id !== grant.account_id) {
         cred = null;

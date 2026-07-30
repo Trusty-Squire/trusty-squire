@@ -321,6 +321,23 @@ describe("PrismaEgressGrantStore", () => {
     expect(fake.calls.findUnique).toBe(1);
   });
 
+  it("getById() coalesces concurrent expired-cache reads into one database lookup", async () => {
+    const fake = fakePrisma();
+    let now = 1_000;
+    const store = new PrismaEgressGrantStore(fake.prisma, {
+      liveTtlMs: 30_000,
+      now: () => now,
+    });
+    const grant = makeGrant();
+    await store.create(grant);
+    now += 30_001;
+
+    const grants = await Promise.all(Array.from({ length: 8 }, () => store.getById(grant.id)));
+
+    expect(grants.every((value) => value?.id === grant.id)).toBe(true);
+    expect(fake.calls.findUnique).toBe(1);
+  });
+
   it("getById() retries once on Prisma P1017 and reconnects before surfacing success", async () => {
     const fake = fakePrisma();
     const store = new PrismaEgressGrantStore(fake.prisma, { liveTtlMs: 0 });
