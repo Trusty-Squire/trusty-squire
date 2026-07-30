@@ -31,9 +31,7 @@ function portOf(s: http.Server): number {
   return addr.port;
 }
 
-async function startOnEphemeral(
-  collect: () => Promise<MetricsSnapshot>,
-): Promise<number> {
+async function startOnEphemeral(collect: () => Promise<MetricsSnapshot>): Promise<number> {
   // port 0 → OS picks a free port; wait for the listener to be bound.
   server = startMetricsServer({ port: 0, collect, version: "9.9.9" });
   await new Promise<void>((resolve) => server?.once("listening", () => resolve()));

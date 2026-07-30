@@ -90,7 +90,10 @@ export async function collectMetrics(
 const GAUGES: ReadonlyArray<{ key: keyof MetricsSnapshot; help: string }> = [
   { key: "accounts_total", help: "Total accounts created." },
   { key: "machine_tokens_total", help: "Total machine tokens issued (installs incl. infra/CI)." },
-  { key: "residential_installs_total", help: "Machine tokens from residential ASNs (honest external-install signal)." },
+  {
+    key: "residential_installs_total",
+    help: "Machine tokens from residential ASNs (honest external-install signal).",
+  },
   { key: "credentials_total", help: "Total credentials stored in the vault." },
   { key: "egress_grants_total", help: "Total egress grants ever minted." },
   { key: "egress_grants_active", help: "Egress grants not yet revoked." },
@@ -119,7 +122,9 @@ export function renderPrometheus(m: MetricsSnapshot, version: string): string {
     lines.push(`# TYPE ${name} gauge`);
     lines.push(`${name} ${m[key]}`);
   }
-  lines.push("# HELP squire_build_info Build metadata; value is always 1, version carried as a label.");
+  lines.push(
+    "# HELP squire_build_info Build metadata; value is always 1, version carried as a label.",
+  );
   lines.push("# TYPE squire_build_info gauge");
   lines.push(`squire_build_info{version="${escapeLabelValue(version)}"} 1`);
   // Trailing newline — Prometheus tolerates its absence but the format

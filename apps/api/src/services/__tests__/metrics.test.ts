@@ -84,34 +84,28 @@ function stubPrisma(): {
     activeWhere: "UNSET",
     auditRecentWhere: "UNSET",
   };
-  const machineTokenCount = vi.fn(
-    (args?: { where?: Record<string, unknown> }): Promise<number> => {
-      // First (no where) = grand total; the asn_class one is the residential filter.
-      if (args?.where?.asn_class !== undefined) {
-        calls.residentialWhere = args.where;
-        return Promise.resolve(7);
-      }
-      return Promise.resolve(40);
-    },
-  );
-  const egressCount = vi.fn(
-    (args?: { where?: Record<string, unknown> }): Promise<number> => {
-      if (args?.where !== undefined && "revoked_at" in args.where) {
-        calls.activeWhere = args.where;
-        return Promise.resolve(5);
-      }
-      return Promise.resolve(9);
-    },
-  );
-  const vaultAuditCount = vi.fn(
-    (args?: { where?: Record<string, unknown> }): Promise<number> => {
-      if (args?.where !== undefined) {
-        calls.auditRecentWhere = args.where;
-        return Promise.resolve(17);
-      }
-      return Promise.resolve(256);
-    },
-  );
+  const machineTokenCount = vi.fn((args?: { where?: Record<string, unknown> }): Promise<number> => {
+    // First (no where) = grand total; the asn_class one is the residential filter.
+    if (args?.where?.asn_class !== undefined) {
+      calls.residentialWhere = args.where;
+      return Promise.resolve(7);
+    }
+    return Promise.resolve(40);
+  });
+  const egressCount = vi.fn((args?: { where?: Record<string, unknown> }): Promise<number> => {
+    if (args?.where !== undefined && "revoked_at" in args.where) {
+      calls.activeWhere = args.where;
+      return Promise.resolve(5);
+    }
+    return Promise.resolve(9);
+  });
+  const vaultAuditCount = vi.fn((args?: { where?: Record<string, unknown> }): Promise<number> => {
+    if (args?.where !== undefined) {
+      calls.auditRecentWhere = args.where;
+      return Promise.resolve(17);
+    }
+    return Promise.resolve(256);
+  });
   // Only the methods collectMetrics touches need to be real; the rest of the
   // ApiPrismaClient surface is unused here. The cast is the standard
   // narrow-stub pattern (commented) — building the full client is infeasible.
@@ -130,7 +124,11 @@ describe("collectMetrics", () => {
   it("maps every count, applies residential + active filters, db_up=1", async () => {
     const { prisma, calls } = stubPrisma();
     const now = new Date("2026-07-29T15:00:00.000Z");
-    const snap = await collectMetrics(prisma, () => Promise.resolve(true), () => now);
+    const snap = await collectMetrics(
+      prisma,
+      () => Promise.resolve(true),
+      () => now,
+    );
     expect(snap).toEqual(SNAPSHOT);
     expect(calls.residentialWhere).toEqual({ asn_class: "residential" });
     expect(calls.activeWhere).toEqual({ revoked_at: null });
