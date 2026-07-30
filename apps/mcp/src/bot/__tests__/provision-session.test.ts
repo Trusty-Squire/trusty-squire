@@ -6,7 +6,6 @@ import {
   provisionElementRef,
   provisionElementRefs,
   stableElementId,
-  StaleProvisionRefError,
   AmbiguousProvisionTargetError,
   hostAllowed,
   isSquireControlPlaneHost,
@@ -39,7 +38,11 @@ import {
   makeTwoCaptchaVaultProxy,
   toCompactElement,
 } from "../provision-session.js";
-import { looksLikeCodeIdentifier, findCredentialTokens, keyFamilyPrefix } from "../credential-shape.js";
+import {
+  looksLikeCodeIdentifier,
+  findCredentialTokens,
+  keyFamilyPrefix,
+} from "../credential-shape.js";
 
 // Minimal InteractiveElement factory — only the fields targeting reads matter;
 // the rest get inert defaults so the fixtures stay readable.
@@ -73,26 +76,28 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     expect(Object.values(c).every((v) => v !== null && v !== undefined)).toBe(true);
   });
 
-  it("keeps role/type/href/testId/path; drops the redundant container", () => {
-    const c = toCompactElement(
-      el({
-        tag: "a",
-        role: "link",
-        type: null,
-        visibleText: "Docs",
-        href: "/docs",
-        testId: "docs-link",
-        screenPath: "nav:main > link:docs",
-        container: "nav:main",
-      }),
-      "@g1:d",
-      NONE,
-    );
+  it("keeps role/type/href/testId; DROPS path from the default payload and the redundant container", () => {
+    const args = el({
+      tag: "a",
+      role: "link",
+      type: null,
+      visibleText: "Docs",
+      href: "/docs",
+      testId: "docs-link",
+      screenPath: "nav:main > link:docs",
+      container: "nav:main",
+    });
+    const c = toCompactElement(args, "@e:d_1", NONE);
     expect(c.href).toBe("/docs");
     expect(c.testId).toBe("docs-link");
-    expect(c.path).toBe("nav:main > link:docs");
+    // path is the single most verbose field and agents act by ref — dropped from
+    // the default payload (85% cut), retained only in the persisted snapshot.
+    expect("path" in c).toBe(false);
     expect("container" in c).toBe(false); // redundant with path
     expect("value" in c).toBe(false);
+    // includePath=true (the persisted snapshot form) DOES carry path.
+    const withPath = toCompactElement(args, "@e:d_1", NONE, true);
+    expect(withPath.path).toBe("nav:main > link:docs");
   });
 
   it("reports the REAL value_len (a length signal, not the value) — even for sealed fields", () => {
@@ -118,9 +123,17 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
   });
 
   it("keeps checked for real checkables (true AND false), omits when null", () => {
-    expect(toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a", NONE).checked).toBe(true);
-    expect(toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b", NONE).checked).toBe(false);
-    expect("checked" in toCompactElement(el({ tag: "button", checked: null }), "@g1:c", NONE)).toBe(false);
+    expect(
+      toCompactElement(el({ tag: "input", type: "checkbox", checked: true }), "@g1:a", NONE)
+        .checked,
+    ).toBe(true);
+    expect(
+      toCompactElement(el({ tag: "input", type: "checkbox", checked: false }), "@g1:b", NONE)
+        .checked,
+    ).toBe(false);
+    expect("checked" in toCompactElement(el({ tag: "button", checked: null }), "@g1:c", NONE)).toBe(
+      false,
+    );
   });
 
   it("emits topmost only when false and occluded_by only when set", () => {
@@ -131,22 +144,39 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     );
     expect(occluded.topmost).toBe(false);
     expect(occluded.occluded_by).toBe("modal:dialog");
-    const top = toCompactElement(el({ tag: "button", visibleText: "Top", topmost: true }), "@g1:t", NONE);
+    const top = toCompactElement(
+      el({ tag: "button", visibleText: "Top", topmost: true }),
+      "@g1:t",
+      NONE,
+    );
     expect("topmost" in top).toBe(false);
     expect("occluded_by" in top).toBe(false);
   });
 
   it("is materially smaller than the full element shape", () => {
     const e = el({
-      tag: "a", role: "link", visibleText: "Pricing", href: "/pricing",
+      tag: "a",
+      role: "link",
+      visibleText: "Pricing",
+      href: "/pricing",
       screenPath: "navigation:skip-to-contentopenroutersearch > link:pricing",
-      container: "navigation:skip-to-contentopenroutersearch", topmost: true,
+      container: "navigation:skip-to-contentopenroutersearch",
+      topmost: true,
     });
     const full = {
-      ref: "@g1:z", label: "Pricing", tag: "a", role: "link", type: null, value: null,
-      checked: null, href: "/pricing", testId: null,
+      ref: "@g1:z",
+      label: "Pricing",
+      tag: "a",
+      role: "link",
+      type: null,
+      value: null,
+      checked: null,
+      href: "/pricing",
+      testId: null,
       path: "navigation:skip-to-contentopenroutersearch > link:pricing",
-      container: "navigation:skip-to-contentopenroutersearch", topmost: true, occluded_by: null,
+      container: "navigation:skip-to-contentopenroutersearch",
+      topmost: true,
+      occluded_by: null,
     };
     const compactBytes = JSON.stringify(toCompactElement(e, "@g1:z", NONE)).length;
     expect(compactBytes).toBeLessThan(JSON.stringify(full).length * 0.6);
@@ -227,20 +257,28 @@ describe("resolveTarget", () => {
     );
   });
 
-  it("resolves a fresh generated ref against live elements", () => {
-    const ref = provisionElementRef(inv[0] as InteractiveElement, 7);
-    expect(ref).toMatch(/^@g7:/);
-    expect(resolveTarget(inv, ref, 7)?.selector).toBe("#g");
+  it("resolves a generation-independent ref against live elements", () => {
+    const ref = provisionElementRef(inv[0] as InteractiveElement);
+    // Stable "@e:<hash>_<ordinal>" — NO generation prefix, so the ref an earlier
+    // observe minted still resolves against a later observe's elements.
+    expect(ref).toMatch(/^@e:[A-Za-z0-9_-]+_1$/);
+    expect(ref).not.toMatch(/@g\d/);
+    expect(resolveTarget(inv, ref)?.selector).toBe("#g");
   });
 
-  it("rejects generated refs from an older observation generation", () => {
-    const ref = provisionElementRef(inv[1] as InteractiveElement, 2);
-    expect(() => resolveTarget(inv, ref, 3)).toThrow(StaleProvisionRefError);
+  it("still resolves a ref minted before an unrelated element list churned", () => {
+    // The ref holds across observations because identity is the stable hash, not
+    // a counter — the whole point of dropping the generation prefix.
+    const ref = provisionElementRef(inv[1] as InteractiveElement);
+    const laterList = [el({ visibleText: "Toast appeared", selector: "#toast" }), ...inv];
+    expect(resolveTarget(laterList, ref)?.selector).toBe("#gh");
   });
 
-  it("returns null when a fresh ref no longer maps to a live element", () => {
-    const ref = provisionElementRef(inv[0] as InteractiveElement, 4);
-    expect(resolveTarget(inv.slice(1), ref, 4)).toBeNull();
+  it("returns null (graceful — host re-observes) when a ref's element is gone", () => {
+    const ref = provisionElementRef(inv[0] as InteractiveElement);
+    // inv[0] removed: identity no longer matches anything → null, never a
+    // mis-click on a recycled node.
+    expect(resolveTarget(inv.slice(1), ref)).toBeNull();
   });
 
   it("fails loudly on ambiguous repeated labels instead of guessing", () => {
@@ -263,18 +301,41 @@ describe("resolveTarget", () => {
     expect(stableElementId(modal)).not.toBe(stableElementId(background));
   });
 
-  it("adds ordinal suffixes so identical elements still get distinct refs", () => {
+  it("distinguishes same-label siblings by their selector (no ordinal collision)", () => {
+    // A realistic list: two "Remove" buttons, same label/path/role but DIFFERENT
+    // selectors. The selector is folded into stableElementId, so they get distinct
+    // ids and each is ordinal _1 — not a positional _1/_2 pair that would retarget.
     const twins = [
-      el({ visibleText: "Continue", selector: "#first" }),
-      el({ visibleText: "Continue", selector: "#second" }),
+      el({ visibleText: "Remove", screenPath: "list:cart > button:remove", selector: "#remove-0" }),
+      el({ visibleText: "Remove", screenPath: "list:cart > button:remove", selector: "#remove-1" }),
     ];
-    const refs = provisionElementRefs(twins, 9);
-    const firstRef = refs.get(twins[0] as InteractiveElement);
-    const secondRef = refs.get(twins[1] as InteractiveElement);
+    expect(stableElementId(twins[0] as InteractiveElement)).not.toBe(
+      stableElementId(twins[1] as InteractiveElement),
+    );
+    const refs = provisionElementRefs(twins);
+    const firstRef = refs.get(twins[0] as InteractiveElement) as string;
+    const secondRef = refs.get(twins[1] as InteractiveElement) as string;
+    expect(firstRef).toMatch(/_1$/);
+    expect(secondRef).toMatch(/_1$/);
+    expect(firstRef).not.toBe(secondRef);
+    expect(resolveTarget(twins, secondRef)?.selector).toBe("#remove-1");
+    expect(resolveTarget(twins, firstRef)?.selector).toBe("#remove-0");
+  });
+
+  it("falls back to ordinal suffixes only for TRULY identical elements (same selector too)", () => {
+    // When the extractor can't even distinguish siblings by selector, ordinals
+    // remain the last resort. `id` (not part of stableElementId) tells them apart.
+    const twins = [
+      el({ visibleText: "Continue", selector: "button.cta", id: "first" }),
+      el({ visibleText: "Continue", selector: "button.cta", id: "second" }),
+    ];
+    const refs = provisionElementRefs(twins);
+    const firstRef = refs.get(twins[0] as InteractiveElement) as string;
+    const secondRef = refs.get(twins[1] as InteractiveElement) as string;
     expect(firstRef).toMatch(/_1$/);
     expect(secondRef).toMatch(/_2$/);
     expect(firstRef).not.toBe(secondRef);
-    expect(resolveTarget(twins, secondRef as string, 9)?.selector).toBe("#second");
+    expect(resolveTarget(twins, secondRef)?.id).toBe("second");
   });
 });
 
@@ -297,12 +358,12 @@ describe("buildAccessibilitySnapshot", () => {
         selector: "#email",
       }),
     ];
-    const snap = buildAccessibilitySnapshot(elements, 5);
+    const snap = buildAccessibilitySnapshot(elements);
     expect(snap?.source).toBe("interactive_dom");
     expect(snap?.refs).toBe(2);
     expect(snap?.tree).toContain('region "dialog:finish-account"');
-    expect(snap?.tree).toContain('button "Create account" ref=@g5:');
-    expect(snap?.tree).toContain('textbox "Email" ref=@g5:');
+    expect(snap?.tree).toContain('button "Create account" ref=@e:');
+    expect(snap?.tree).toContain('textbox "Email" ref=@e:');
   });
 
   it("masks a password-type field value, never leaking the cleartext", () => {
@@ -315,7 +376,7 @@ describe("buildAccessibilitySnapshot", () => {
         selector: "#pw",
       }),
     ];
-    const snap = buildAccessibilitySnapshot(elements, 1);
+    const snap = buildAccessibilitySnapshot(elements);
     expect(snap?.tree).not.toContain("nG^6+HsnfVCcXp8");
     expect(snap?.tree).toContain('value="[sealed]"');
   });
@@ -338,7 +399,7 @@ describe("buildAccessibilitySnapshot", () => {
         selector: "#org",
       }),
     ];
-    const snap = buildAccessibilitySnapshot(elements, 1, undefined, sealed);
+    const snap = buildAccessibilitySnapshot(elements, undefined, sealed);
     expect(snap?.tree).not.toContain("methoxine@gmail.com");
     expect(snap?.tree).toContain('value="[sealed]"');
     // a non-sealed, non-password field keeps its real value
@@ -355,7 +416,7 @@ describe("buildAccessibilitySnapshot", () => {
         selector: "#org",
       }),
     ];
-    const snap = buildAccessibilitySnapshot(elements, 1);
+    const snap = buildAccessibilitySnapshot(elements);
     expect(snap?.tree).toContain('value="Acme Inc"');
   });
 });
@@ -368,7 +429,9 @@ describe("isInboxReadHost", () => {
   });
 
   it("does NOT flag the service or identity-provider hosts (those stay in the recipe)", () => {
-    expect(isInboxReadHost("https://next-app.useplunk.com/auth/verify-email?token=abc")).toBe(false);
+    expect(isInboxReadHost("https://next-app.useplunk.com/auth/verify-email?token=abc")).toBe(
+      false,
+    );
     expect(isInboxReadHost("https://accounts.google.com/o/oauth2/v2/auth")).toBe(false);
     expect(isInboxReadHost("https://github.com/login/oauth/authorize")).toBe(false);
     expect(isInboxReadHost("not a url")).toBe(false);
@@ -382,7 +445,7 @@ describe("isInboxReadHost", () => {
         screenPath: `main:dashboard > button:${i}`,
       }),
     );
-    const snap = buildAccessibilitySnapshot(elements, 1, 160);
+    const snap = buildAccessibilitySnapshot(elements, 160);
     expect(snap?.truncated).toBe(true);
     expect(snap?.total_chars).toBeGreaterThan(160);
     expect(snap?.tree.endsWith("\n")).toBe(false);
@@ -462,9 +525,9 @@ describe("extractSenderEmail (source_from provenance — wrong-sender guard)", (
   });
 
   it("buildVerificationResult surfaces source_from when provided, omits it otherwise", () => {
-    expect(buildVerificationResult("sk_1", "492013", null, "search-api@brave.com").source_from).toBe(
-      "search-api@brave.com",
-    );
+    expect(
+      buildVerificationResult("sk_1", "492013", null, "search-api@brave.com").source_from,
+    ).toBe("search-api@brave.com");
     expect(buildVerificationResult("sk_1", "492013", null).source_from).toBeUndefined();
   });
 });
@@ -496,8 +559,12 @@ describe("redactEmailForTrace (PR3 — user email never lands in a recipe)", () 
 
 describe("scrubKnownEmail (PR3d — exact known-email scrub in trace text)", () => {
   it("replaces every occurrence of the known email with the slot token", () => {
-    expect(scrubKnownEmail("signed in as ada@x.com", "ada@x.com")).toBe("signed in as ${EMAIL_ALIAS}");
-    expect(scrubKnownEmail("ada@x.com / ada@x.com", "ada@x.com")).toBe("${EMAIL_ALIAS} / ${EMAIL_ALIAS}");
+    expect(scrubKnownEmail("signed in as ada@x.com", "ada@x.com")).toBe(
+      "signed in as ${EMAIL_ALIAS}",
+    );
+    expect(scrubKnownEmail("ada@x.com / ada@x.com", "ada@x.com")).toBe(
+      "${EMAIL_ALIAS} / ${EMAIL_ALIAS}",
+    );
   });
 
   it("is a no-op when the email is null, empty, or absent", () => {
@@ -684,9 +751,9 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
 
   it("allows tenant sibling hosts once they are added after organic redirect", () => {
     expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com"])).toBe(false);
-    expect(hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com", "tsagent.kinde.com"])).toBe(
-      true,
-    );
+    expect(
+      hostAllowed("https://tsagent.kinde.com/admin", ["app.kinde.com", "tsagent.kinde.com"]),
+    ).toBe(true);
   });
 
   it("HARD-blocks Squire's own control plane even when the agent added it to the allow-set", () => {
@@ -699,9 +766,9 @@ describe("hostAllowed (gates only agent-initiated goto)", () => {
       "https://trusty-squire-api.fly.dev/v1/vault/credentials",
       "https://trustysquire.com/vault",
     ]) {
-      expect(hostAllowed(url, ["trustysquire.ai", "trusty-squire-api.fly.dev", "trustysquire.com"])).toBe(
-        false,
-      );
+      expect(
+        hostAllowed(url, ["trustysquire.ai", "trusty-squire-api.fly.dev", "trustysquire.com"]),
+      ).toBe(false);
     }
   });
 });
@@ -938,7 +1005,9 @@ describe("isOnboardingOrOrgForm (setup forms are not walls)", () => {
     expect(isOnboardingOrOrgForm("Tell us about yourself to finish setup")).toBe(true);
   });
   it("detects growthbook's 'you aren't part of an organization yet'", () => {
-    expect(isOnboardingOrOrgForm("You aren't part of an organization yet. Create one to continue.")).toBe(true);
+    expect(
+      isOnboardingOrOrgForm("You aren't part of an organization yet. Create one to continue."),
+    ).toBe(true);
   });
   it("detects an anyscale-style create-org/workspace form", () => {
     expect(isOnboardingOrOrgForm("Create your organization Name your team")).toBe(true);
@@ -950,13 +1019,19 @@ describe("isOnboardingOrOrgForm (setup forms are not walls)", () => {
 
 describe("hasOneTimeSecretModal (Luma one-time reveal)", () => {
   it("detects 'you won't be able to see this again'", () => {
-    expect(hasOneTimeSecretModal("Copy your API key. You won't be able to view it again.")).toBe(true);
+    expect(hasOneTimeSecretModal("Copy your API key. You won't be able to view it again.")).toBe(
+      true,
+    );
   });
   it("detects 'make sure to copy your secret now'", () => {
-    expect(hasOneTimeSecretModal("Make sure to copy your secret key now and store it securely.")).toBe(true);
+    expect(
+      hasOneTimeSecretModal("Make sure to copy your secret key now and store it securely."),
+    ).toBe(true);
   });
   it("does NOT fire on an ordinary always-visible key field", () => {
-    expect(hasOneTimeSecretModal("Your API key: sk-live-abc123 (always available here)")).toBe(false);
+    expect(hasOneTimeSecretModal("Your API key: sk-live-abc123 (always available here)")).toBe(
+      false,
+    );
   });
 });
 
@@ -965,13 +1040,17 @@ describe("hasExistingAccountSignal (real-identity already registered — OpenRou
     expect(hasExistingAccountSignal("Sign in to continue. Invalid credentials.")).toBe(true);
   });
   it("detects 'an account with this email already exists'", () => {
-    expect(hasExistingAccountSignal("An account with this email already exists. Sign in instead.")).toBe(true);
+    expect(
+      hasExistingAccountSignal("An account with this email already exists. Sign in instead."),
+    ).toBe(true);
   });
   it("detects 'email is already registered'", () => {
     expect(hasExistingAccountSignal("That email is already registered.")).toBe(true);
   });
   it("does NOT fire on a clean fresh signup form", () => {
-    expect(hasExistingAccountSignal("Create your account — enter your email to get started")).toBe(false);
+    expect(hasExistingAccountSignal("Create your account — enter your email to get started")).toBe(
+      false,
+    );
   });
   it("does NOT fire on a bare 'Already have an account? Sign in' link", () => {
     expect(hasExistingAccountSignal("Sign up. Already have an account? Sign in")).toBe(false);
@@ -1031,12 +1110,16 @@ describe("looksLikeLoginChooser (auth wall, not the app surface)", () => {
 
 describe("hasNotFoundPageSignal (stale/404 signup URL)", () => {
   it("detects a sparse 404 page (the Loops /signup case)", () => {
-    expect(hasNotFoundPageSignal("404 L'oops! The page you're looking for doesn't exist. Home")).toBe(true);
+    expect(
+      hasNotFoundPageSignal("404 L'oops! The page you're looking for doesn't exist. Home"),
+    ).toBe(true);
     expect(hasNotFoundPageSignal("Page not found")).toBe(true);
     expect(hasNotFoundPageSignal("Sorry, that page couldn't be found.")).toBe(true);
   });
   it("does NOT fire on a real signup form", () => {
-    expect(hasNotFoundPageSignal("Sign up for Loops Work Email First Name Company Sign up")).toBe(false);
+    expect(hasNotFoundPageSignal("Sign up for Loops Work Email First Name Company Sign up")).toBe(
+      false,
+    );
   });
   it("does NOT fire on a long app page that merely mentions 404", () => {
     const longPage = "Dashboard ".repeat(80) + "HTTP 404 errors this week: 3";
@@ -1153,7 +1236,12 @@ describe("googleSessionGate (Change 5 — fail-closed precondition gate)", () =>
 describe("makeTwoCaptchaVaultProxy (2Captcha through the injecting vault proxy)", () => {
   it("injects the key as a ${SECRET} query param (in.php/res.php) — never raw", async () => {
     const useCredential = vi.fn().mockResolvedValue({
-      response: { status: 200, headers: {}, body: JSON.stringify({ status: 1, request: "id" }), truncated: false },
+      response: {
+        status: 200,
+        headers: {},
+        body: JSON.stringify({ status: 1, request: "id" }),
+        truncated: false,
+      },
     });
     const proxy = makeTwoCaptchaVaultProxy({ useCredential } as unknown as ApiClient);
     const r = await proxy.request({

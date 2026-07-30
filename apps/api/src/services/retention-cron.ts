@@ -6,6 +6,7 @@
 //     - Delete VaultAuditEvent older than 365d
 //     - Delete PaymentAuditEvent older than 365d
 //     - Delete PendingPaymentApproval rows past expires_at
+//     - Delete TelegramLinkToken rows past expires_at
 //
 // Running this in-process is fine for v1: one machine, one schedule.
 // When we shard the API, move this to a separate worker or use
@@ -30,6 +31,7 @@ export interface RetentionCronStats {
   vault_audit_deleted: number;
   payment_audit_deleted: number;
   payment_approvals_deleted: number;
+  telegram_link_tokens_deleted: number;
   duration_ms: number;
   errors: string[];
 }
@@ -105,6 +107,7 @@ export class RetentionCron {
       vault_audit_deleted: 0,
       payment_audit_deleted: 0,
       payment_approvals_deleted: 0,
+      telegram_link_tokens_deleted: 0,
       duration_ms: 0,
       errors: [],
     };
@@ -158,6 +161,17 @@ export class RetentionCron {
       } catch (err) {
         stats.errors.push(
           `payment approval delete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      try {
+        const r = await this.deps.authPrisma.telegramLinkToken.deleteMany({
+          where: { expires_at: { lt: startedAt } },
+        });
+        stats.telegram_link_tokens_deleted = r.count;
+      } catch (err) {
+        stats.errors.push(
+          `telegram link token delete: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }

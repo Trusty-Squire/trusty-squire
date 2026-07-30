@@ -28,6 +28,7 @@ import { PrismaAgentSessionStore } from "../auth/prisma-agent-session-store.js";
 import { PrismaAccountStore } from "./prisma-account-store.js";
 import { PrismaCredentialStore } from "./prisma-credential-store.js";
 import { PrismaVaultAuditStore } from "./prisma-vault-audit-store.js";
+import { NotifyingVaultAuditStore } from "./vault-notify.js";
 import { PrismaEgressGrantStore } from "./prisma-egress-grant-store.js";
 import { InMemoryEgressGrantStore, type EgressGrantStore } from "./egress-grant.js";
 import {
@@ -67,6 +68,11 @@ import {
   type PendingPaymentApprovalStore,
 } from "./in-memory-payment-approval-store.js";
 import { PrismaPendingPaymentApprovalStore } from "./prisma-payment-approval-store.js";
+import {
+  InMemoryTelegramLinkTokenStore,
+  type TelegramLinkTokenStore,
+} from "./in-memory-telegram-link-token-store.js";
+import { PrismaTelegramLinkTokenStore } from "./prisma-telegram-link-token-store.js";
 
 export interface ApiDeps {
   // Identity / auth
@@ -82,9 +88,14 @@ export interface ApiDeps {
   // Credentials + inbound mail
   credentialStore: CredentialStore;
   vault: CredentialVault;
+  // The SAME (Telegram-notifying) audit store the vault writes through —
+  // exposed so the card/payment/grant routes record their lifecycle events
+  // into the one audit trail + notification choke point.
+  vaultAuditStore: VaultAuditStore;
   e2eCredentialStore: E2ECredentialStore;
   paymentAuditStore: PaymentAuditStore;
   pendingPaymentApprovalStore: PendingPaymentApprovalStore;
+  telegramLinkTokenStore: TelegramLinkTokenStore;
   egressGrantStore: EgressGrantStore;
   machineTokenStore: MachineTokenStore;
   captchaEventStore: CaptchaEventStore;
@@ -252,20 +263,35 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
 
   const credentialStore: CredentialStore =
     authPrisma !== null ? new PrismaCredentialStore(authPrisma) : new InMemoryCredentialStore();
-  const vaultAuditStore: VaultAuditStore =
-    authPrisma !== null ? new PrismaVaultAuditStore(authPrisma) : new InMemoryVaultAuditStore();
-  const e2eCredentialStore: E2ECredentialStore =
-    authPrisma !== null
-      ? new PrismaE2ECredentialStore(authPrisma)
-      : new InMemoryE2ECredentialStore(opts.now);
+  // Telegram lifecycle notifications ride the audit write (vault-notify.ts):
+  // wrapping here means every audit producer — the vault package AND the
+  // card/payment/grant routes — shares one notification choke point.
+  const vaultAuditStore: VaultAuditStore = new NotifyingVaultAuditStore(
+    authPrisma !== null ? new PrismaVaultAuditStore(authPrisma) : new InMemoryVaultAuditStore(),
+    accountStore,
+    opts.now ?? (() => new Date()),
+  );
+  let e2eCredentialStore: E2ECredentialStore;
+  let pendingPaymentApprovalStore: PendingPaymentApprovalStore;
+  if (authPrisma !== null) {
+    e2eCredentialStore = new PrismaE2ECredentialStore(authPrisma);
+    pendingPaymentApprovalStore = new PrismaPendingPaymentApprovalStore(authPrisma);
+  } else {
+    const inMemoryE2ECredentialStore = new InMemoryE2ECredentialStore(opts.now);
+    e2eCredentialStore = inMemoryE2ECredentialStore;
+    pendingPaymentApprovalStore = new InMemoryPendingPaymentApprovalStore(
+      inMemoryE2ECredentialStore,
+      opts.now,
+    );
+  }
   const paymentAuditStore: PaymentAuditStore =
     authPrisma !== null
       ? new PrismaPaymentAuditStore(authPrisma)
       : new InMemoryPaymentAuditStore(opts.now);
-  const pendingPaymentApprovalStore: PendingPaymentApprovalStore =
+  const telegramLinkTokenStore: TelegramLinkTokenStore =
     authPrisma !== null
-      ? new PrismaPendingPaymentApprovalStore(authPrisma)
-      : new InMemoryPendingPaymentApprovalStore(opts.now);
+      ? new PrismaTelegramLinkTokenStore(authPrisma)
+      : new InMemoryTelegramLinkTokenStore(opts.now);
   // Panel 1 funnel: Prisma-backed when the auth DB is wired, else a
   // zero store (the funnel is a prod operator feature).
   const funnelStatsStore: FunnelStatsStore =
@@ -360,9 +386,11 @@ export function buildInMemoryDeps(opts: BuildInMemoryDepsOpts): ApiDeps {
     oauthIdentityStore,
     credentialStore,
     vault,
+    vaultAuditStore,
     e2eCredentialStore,
     paymentAuditStore,
     pendingPaymentApprovalStore,
+    telegramLinkTokenStore,
     egressGrantStore,
     machineTokenStore,
     captchaEventStore,

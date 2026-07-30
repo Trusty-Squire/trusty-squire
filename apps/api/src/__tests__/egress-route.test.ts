@@ -18,9 +18,13 @@ import {
 } from "../services/egress-grant.js";
 
 const SESSION_SECRET = "dev-test-secret-do-not-use-anywhere-else";
-const CUSTOMER_ID = "ts-test";
 
-const seen: Array<{ url: string; auth: string | undefined; method: string; headers: Record<string, string> }> = [];
+const seen: Array<{
+  url: string;
+  auth: string | undefined;
+  method: string;
+  headers: Record<string, string>;
+}> = [];
 function fakeExecutor(): HttpProxyExecutor {
   return new HttpProxyExecutor({
     lookup: async () => ({ address: "203.0.113.9", family: 4 }),
@@ -31,14 +35,22 @@ function fakeExecutor(): HttpProxyExecutor {
         method: input.method,
         headers: { ...input.headers },
       });
-      return { status: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ ok: true }), truncated: false };
+      return {
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ok: true }),
+        truncated: false,
+      };
     },
   });
 }
 
-interface Harness { server: FastifyInstance; deps: ApiDeps }
+interface Harness {
+  server: FastifyInstance;
+  deps: ApiDeps;
+}
 async function setup(opts: { egressGrantStore?: EgressGrantStore } = {}): Promise<Harness> {
-  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET});
+  const deps = buildInMemoryDeps({ sessionSecret: SESSION_SECRET });
   const server = await buildServer({
     deps,
     proxyExecutor: fakeExecutor(),
@@ -47,26 +59,42 @@ async function setup(opts: { egressGrantStore?: EgressGrantStore } = {}): Promis
   return { server, deps };
 }
 async function webCookie(deps: ApiDeps, accountId: string): Promise<string> {
-  const { record, jwt } = issueSession({ account_id: accountId, ip: null, user_agent: null, now: new Date() });
+  const { record, jwt } = issueSession({
+    account_id: accountId,
+    ip: null,
+    user_agent: null,
+    now: new Date(),
+  });
   await deps.sessionStore.insert(record);
   return `${SESSION_COOKIE_NAME}=${signSessionJwt(jwt, SESSION_SECRET)}`;
 }
 async function agentToken(deps: ApiDeps, accountId: string): Promise<string> {
-  const { raw_token, record } = issueAgentSession({ account_id: accountId, agent_identity: "claude-code", agent_version: "test", now: new Date() });
+  const { raw_token, record } = issueAgentSession({
+    account_id: accountId,
+    agent_identity: "claude-code",
+    agent_version: "test",
+    now: new Date(),
+  });
   await deps.agentSessionStore.insert(record);
   return raw_token;
 }
 async function storeCred(h: Harness, cookie: string, service: string): Promise<string> {
   const res = await h.server.inject({
-    method: "POST", url: "/v1/vault/credentials/manual",
+    method: "POST",
+    url: "/v1/vault/credentials/manual",
     headers: { cookie, "content-type": "application/json" },
     payload: { service, value: "sk-the-real-secret", type: "api_key" },
   });
   return (res.json() as { reference: string }).reference;
 }
-async function mintGrantHttp(h: Harness, token: string, body: object): Promise<{ grant_id: string; base_url: string; egressToken: string }> {
+async function mintGrantHttp(
+  h: Harness,
+  token: string,
+  body: object,
+): Promise<{ grant_id: string; base_url: string; egressToken: string }> {
   const res = await h.server.inject({
-    method: "POST", url: "/v1/egress/grants",
+    method: "POST",
+    url: "/v1/egress/grants",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     payload: body,
   });
@@ -76,8 +104,13 @@ async function mintGrantHttp(h: Harness, token: string, body: object): Promise<{
 
 describe("Egress Grants — /v1/egress", () => {
   let h: Harness;
-  beforeEach(async () => { seen.length = 0; h = await setup(); });
-  afterEach(async () => { await h.server.close(); });
+  beforeEach(async () => {
+    seen.length = 0;
+    h = await setup();
+  });
+  afterEach(async () => {
+    await h.server.close();
+  });
 
   it("mints a grant and proxies: egress token swapped for the real secret server-side", async () => {
     const account = await h.deps.accountStore.createAccount("u@example.test", "U");
@@ -85,13 +118,16 @@ describe("Egress Grants — /v1/egress", () => {
     const token = await agentToken(h.deps, account.id);
     await storeCred(h, cookie, "OpenAI"); // → api.openai.com
 
-    const { grant_id, base_url, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+    const { grant_id, base_url, egressToken } = await mintGrantHttp(h, token, {
+      service: "OpenAI",
+    });
     expect(grant_id.startsWith("g_")).toBe(true);
     expect(base_url).toContain(`/v1/egress/${grant_id}`);
     expect(egressToken.startsWith("sqr_egress_")).toBe(true);
 
     const res = await h.server.inject({
-      method: "POST", url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
       headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
       payload: { model: "gpt-4o", messages: [] },
     });
@@ -100,6 +136,35 @@ describe("Egress Grants — /v1/egress", () => {
     expect(seen.at(-1)?.url).toBe("https://api.openai.com/v1/chat/completions");
     expect(seen.at(-1)?.auth).toBe("Bearer sk-the-real-secret");
     expect(seen.at(-1)?.method).toBe("POST");
+  });
+
+  it("returns and revokes a persisted grant when lifecycle audit writes fail", async () => {
+    const account = await h.deps.accountStore.createAccount("audit-down@example.test", "A");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    h.deps.vaultAuditStore.record = async () => {
+      throw new Error("synthetic audit outage");
+    };
+
+    const mint = await h.server.inject({
+      method: "POST",
+      url: "/v1/egress/grants",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      payload: { service: "OpenAI" },
+    });
+    expect(mint.statusCode).toBe(201);
+    const body = mint.json() as { grant_id: string; token: string };
+    expect(body.token).toMatch(/^sqr_egress_/);
+    expect(await h.deps.egressGrantStore.getById(body.grant_id)).not.toBeNull();
+
+    const revoke = await h.server.inject({
+      method: "DELETE",
+      url: `/v1/egress/grants/${body.grant_id}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
+    expect(revoke.statusCode).toBe(200);
+    expect((await h.deps.egressGrantStore.getById(body.grant_id))?.revoked_at).not.toBeNull();
   });
 
   it("base_url advertises the forwarded (https) scheme so the Authorization header survives the edge", async () => {
@@ -132,7 +197,8 @@ describe("Egress Grants — /v1/egress", () => {
     const { grant_id } = await mintGrantHttp(h, token, { service: "OpenAI" });
 
     const bad = await h.server.inject({
-      method: "POST", url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
       headers: { authorization: "Bearer sqr_egress_wrong", "content-type": "application/json" },
       payload: {},
     });
@@ -147,11 +213,17 @@ describe("Egress Grants — /v1/egress", () => {
     await storeCred(h, cookie, "OpenAI");
     const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
 
-    const del = await h.server.inject({ method: "DELETE", url: `/v1/egress/grants/${grant_id}`, headers: { authorization: `Bearer ${token}` } });
+    const del = await h.server.inject({
+      method: "DELETE",
+      url: `/v1/egress/grants/${grant_id}`,
+      headers: { authorization: `Bearer ${token}` },
+    });
     expect(del.statusCode).toBe(200);
     const res = await h.server.inject({
-      method: "POST", url: `/v1/egress/${grant_id}/v1/chat/completions`,
-      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" }, payload: {},
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/chat/completions`,
+      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+      payload: {},
     });
     expect(res.statusCode).toBe(403);
   });
@@ -161,12 +233,18 @@ describe("Egress Grants — /v1/egress", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     await storeCred(h, cookie, "OpenAI");
-    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI", rate_limit_per_hour: 1 });
-
-    const call = () => h.server.inject({
-      method: "POST", url: `/v1/egress/${grant_id}/v1/chat/completions`,
-      headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" }, payload: {},
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, {
+      service: "OpenAI",
+      rate_limit_per_hour: 1,
     });
+
+    const call = () =>
+      h.server.inject({
+        method: "POST",
+        url: `/v1/egress/${grant_id}/v1/chat/completions`,
+        headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
+        payload: {},
+      });
     expect((await call()).statusCode).toBe(200);
     expect((await call()).statusCode).toBe(429);
   });
@@ -177,11 +255,17 @@ describe("Egress Grants — /v1/egress", () => {
     const token = await agentToken(h.deps, account.id);
     await storeCred(h, cookie, "OpenAI");
     const res = await h.server.inject({
-      method: "POST", url: "/v1/egress/grants",
+      method: "POST",
+      url: "/v1/egress/grants",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
       payload: { service: "OpenAI" }, // no rate_limit_per_hour, no spend_cap_usd
     });
-    const j = res.json() as { grant_id: string; token: string; rate_limit_per_hour: number | null; spend_cap_usd: number | null };
+    const j = res.json() as {
+      grant_id: string;
+      token: string;
+      rate_limit_per_hour: number | null;
+      spend_cap_usd: number | null;
+    };
     // No explicit rate → the server applies the default cap (1000/hr), NOT unlimited.
     expect(j.rate_limit_per_hour).toBe(1000);
     expect(j.spend_cap_usd).toBeNull(); // spend cap stays opt-in
@@ -208,7 +292,7 @@ describe("Egress Grants — /v1/egress", () => {
 
   it("maps grant-store connection collapse to retryable 503 instead of raw 500", async () => {
     await h.server.close();
-    const backing = buildInMemoryDeps({ sessionSecret: SESSION_SECRET}).egressGrantStore;
+    const backing = buildInMemoryDeps({ sessionSecret: SESSION_SECRET }).egressGrantStore;
     let failReads = false;
     const flakyStore: EgressGrantStore = {
       create: (grant: EgressGrant) => backing.create(grant),
@@ -307,7 +391,8 @@ describe("Egress Grants — /v1/egress", () => {
     const token = await agentToken(h.deps, account.id);
     // A non-bearer provider: the key rides in x-api-key, NOT Authorization.
     const store = await h.server.inject({
-      method: "POST", url: "/v1/vault/credentials/manual",
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
       headers: { cookie, "content-type": "application/json" },
       payload: {
         service: "Anthropic",
@@ -321,7 +406,8 @@ describe("Egress Grants — /v1/egress", () => {
 
     const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "Anthropic" });
     const res = await h.server.inject({
-      method: "POST", url: `/v1/egress/${grant_id}/v1/messages`,
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v1/messages`,
       headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
       payload: { model: "claude", messages: [] },
     });
@@ -340,7 +426,8 @@ describe("Egress Grants — /v1/egress", () => {
     // the proxy would stamp `Authorization: Bearer <secret>`, which an xi-api-key
     // provider (ElevenLabs) rejects — the real bug this fixes.
     const store = await h.server.inject({
-      method: "POST", url: "/v1/vault/credentials/manual",
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
       headers: { cookie, "content-type": "application/json" },
       payload: {
         service: "elevenlabs",
@@ -371,22 +458,29 @@ describe("Egress Grants — /v1/egress", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     const store = await h.server.inject({
-      method: "POST", url: "/v1/vault/credentials/manual",
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
       headers: { cookie, "content-type": "application/json" },
       payload: {
-        service: "StripeBasic", value: "sk-the-real-secret", type: "api_key",
-        auth_shape: "basic", observed_hosts: ["api.stripe.com"],
+        service: "StripeBasic",
+        value: "sk-the-real-secret",
+        type: "api_key",
+        auth_shape: "basic",
+        observed_hosts: ["api.stripe.com"],
       },
     });
     expect(store.statusCode).toBe(201);
     const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "StripeBasic" });
     const res = await h.server.inject({
-      method: "GET", url: `/v1/egress/${grant_id}/v1/charges`,
+      method: "GET",
+      url: `/v1/egress/${grant_id}/v1/charges`,
       headers: { authorization: `Bearer ${egressToken}` },
     });
     expect(res.statusCode).toBe(200);
     // base64("sk-the-real-secret:") — encoded AFTER substitution, not the placeholder.
-    expect(seen.at(-1)!.auth).toBe(`Basic ${Buffer.from("sk-the-real-secret:").toString("base64")}`);
+    expect(seen.at(-1)!.auth).toBe(
+      `Basic ${Buffer.from("sk-the-real-secret:").toString("base64")}`,
+    );
   });
 
   it("injects Basic auth with a fixed username (Mailgun api:<key>)", async () => {
@@ -394,17 +488,22 @@ describe("Egress Grants — /v1/egress", () => {
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
     const store = await h.server.inject({
-      method: "POST", url: "/v1/vault/credentials/manual",
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
       headers: { cookie, "content-type": "application/json" },
       payload: {
-        service: "Mailgun", value: "key-123", type: "api_key",
-        auth_shape: "basic:api", observed_hosts: ["api.mailgun.net"],
+        service: "Mailgun",
+        value: "key-123",
+        type: "api_key",
+        auth_shape: "basic:api",
+        observed_hosts: ["api.mailgun.net"],
       },
     });
     expect(store.statusCode).toBe(201);
     const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "Mailgun" });
     const res = await h.server.inject({
-      method: "POST", url: `/v1/egress/${grant_id}/v3/messages`,
+      method: "POST",
+      url: `/v1/egress/${grant_id}/v3/messages`,
       headers: { authorization: `Bearer ${egressToken}`, "content-type": "application/json" },
       payload: {},
     });
@@ -416,7 +515,8 @@ describe("Egress Grants — /v1/egress", () => {
     const account = await h.deps.accountStore.createAccount("sig@example.test", "S");
     const cookie = await webCookie(h.deps, account.id);
     const res = await h.server.inject({
-      method: "POST", url: "/v1/vault/credentials/manual",
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
       headers: { cookie, "content-type": "application/json" },
       payload: { service: "AWS", value: "AKIAEXAMPLE", auth_shape: "sigv4" },
     });
@@ -427,7 +527,8 @@ describe("Egress Grants — /v1/egress", () => {
     const account = await h.deps.accountStore.createAccount("bad@example.test", "B");
     const cookie = await webCookie(h.deps, account.id);
     const res = await h.server.inject({
-      method: "POST", url: "/v1/vault/credentials/manual",
+      method: "POST",
+      url: "/v1/vault/credentials/manual",
       headers: { cookie, "content-type": "application/json" },
       payload: { service: "OpenAI", value: "sk-x", auth_shape: "cookie:foo" },
     });
@@ -440,7 +541,11 @@ describe("Egress Grants — /v1/egress", () => {
     const token = await agentToken(h.deps, account.id);
     await storeCred(h, cookie, "OpenAI");
     await mintGrantHttp(h, token, { service: "OpenAI" });
-    const res = await h.server.inject({ method: "GET", url: "/v1/egress/grants", headers: { authorization: `Bearer ${token}` } });
+    const res = await h.server.inject({
+      method: "GET",
+      url: "/v1/egress/grants",
+      headers: { authorization: `Bearer ${token}` },
+    });
     const body = res.json() as { grants: Array<Record<string, unknown>> };
     expect(body.grants).toHaveLength(1);
     expect(JSON.stringify(body)).not.toContain("token_hash");

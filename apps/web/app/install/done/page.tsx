@@ -1,8 +1,8 @@
-// /install/done — the bot's "OK to close the browser now" signal.
+// /install/done — the install wizard's standalone success view.
 //
-// The install wizard navigates here when the user clicks Finish.
-// The bot's openInstallConfirmInBotChrome polls the page URL; when
-// it sees /install/done it tears down Chrome and the CLI continues.
+// A current web installer reaches this page through the nonce-scoped loopback
+// completion callback. Direct navigation remains a terminal signal only for
+// legacy/CDP completion paths; it cannot complete a forced provider relogin.
 //
 // The page also stands alone as a normal success view for users who
 // hit it directly (e.g. via browser history): a friendly confirmation
@@ -22,8 +22,7 @@ export default function InstallDonePage() {
           <span className="pair-ok">✓</span> Connected
         </h1>
         <p className="auth-sub">
-          Your CLI is connected. Head back to your terminal — or open your
-          vault.
+          Your CLI is connected. Head back to your terminal — or open your vault.
         </p>
         <div className="auth-actions">
           <Link className="oauth-btn" href="/vault">

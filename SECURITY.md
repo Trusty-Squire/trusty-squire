@@ -59,20 +59,48 @@ Card data uses a separate end-to-end encrypted path
 (`packages/vault/src/e2e.ts`). The client derives an AES-256-GCM key from a
 passkey through the WebAuthn PRF extension with a fresh 32-byte salt, then
 encrypts with a fresh 12-byte IV and a 128-bit authentication tag. The PRF
-output and derived key remain on the client; the API receives and stores only
-the serialized encrypted blob and therefore cannot decrypt or inspect the card.
+output and derived key remain on the client. The API receives the serialized
+encrypted blob plus optional constrained display metadata (`brand` and
+`last4`), but cannot decrypt the blob or inspect the full card.
 
 The account-scoped API can return that opaque blob to an authenticated web or
-agent session so a trusted client can decrypt it. List responses expose only
-the record ID, label, and creation time. Losing the enrolled passkey makes the
-card unrecoverable; server master-key rotation does not affect these blobs.
+agent session so a trusted client can decrypt it. List responses omit the blob
+and expose only the record ID, label, creation time, and optional plaintext card
+display metadata: a no-digit network name (`brand`) and exactly four digits
+(`last4`). These fields cannot carry a full PAN; legacy rows return `null`.
+Losing the enrolled passkey makes the card unrecoverable; server master-key
+rotation does not affect these blobs.
+
+The Vault detail view keeps the PAN masked until the user explicitly chooses
+`reveal`, which retrieves the opaque blob and runs the passkey ceremony in the
+browser. After client-side decryption, the view retains only the PAN, cardholder
+name, expiry, and billing address in React state. It discards the CVV before
+state is updated, so the CVV is never rendered, even for the card owner. The
+detail API response is limited to the record ID, label, opaque blob, `brand`,
+`last4`, and creation time; PAN and CVV cannot appear as separate response
+fields.
 
 Before card entry or payment approval, the browser requires a one-time Vouchflow
 passkey enrollment and confirms that the platform authenticator supports the
 WebAuthn PRF extension. A payment approval is short-lived and account-scoped.
 The phone signs a canonical purchase payload that binds the merchant, checkout
-origin, amount, currency, nonce, card reference, and the SHA-256 hash of the
-operator's ephemeral public key.
+origin, amount, currency, single-use nonce, card reference, the SHA-256 hash of
+the operator's ephemeral public key, item description, purchase reason, and
+server-derived requesting-agent label. The API uses the install's authenticated
+agent identity when present and otherwise signs `unknown-agent`; the client
+cannot supply the label.
+
+Just-in-time add-card approvals may be created without a card reference, while
+still binding the operator's ephemeral public key at creation. The API permits
+one card bind only while the approval is pending and unexpired, verifies that
+the encrypted-card record belongs to the same account, and rejects approval
+until a card is bound. This enforces the seal → bind → approve order on the
+server rather than relying on client convention. On resume, the operator fails
+closed unless the approval record contains a non-blank server-bound card
+reference, and uses that reference when re-creating the signed purchase payload.
+Immediately before filling a just-in-time checkout, it re-reads the live
+merchant, origin, amount, and currency and refuses submission if any signed
+field changed.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. The signed payload hash
@@ -81,12 +109,16 @@ different purchase or operator. The API relays only the signed mandate and
 sealed card.
 
 The MCP operator fetches Vouchflow's JWKS and fails closed unless signature,
-issuer, audience, purchase context, high-or-better confidence, and payload hash
-all verify. Only then does that local operator process open the envelope and
-fill the checkout. Plaintext card fields are not returned through MCP to the
-coding-agent model, sent to the Trusty Squire API, logged, or stored in payment
-audit events. Issuer 3-D Secure is handed back to the user rather than
-automated.
+issuer, audience, purchase context, and payload hash all verify and user
+presence is established. Browser passkeys are capped at low confidence in
+Vouchflow regardless of biometric, so mandate assurance rests on user presence,
+the single-use nonce, and amount, recipient, origin, and item binding rather
+than a high confidence tier. Only then does that local operator process open
+the envelope and fill the checkout. Plaintext PAN and CVV are not returned
+through MCP to the coding-agent model, sent to the Trusty Squire API, logged,
+or stored in payment audit events. Issuer 3-D Secure is handed back to the user
+rather than automated; the operator may wait for the user to resolve the
+challenge, but it never completes the challenge itself.
 
 Payment audit events are deliberately metadata-only: merchant, amount,
 currency, card last four digits, status, and an optional mandate ID. The API
@@ -106,10 +138,11 @@ audit retention window, which defaults to 365 days.
   allowed hosts and configured auth shapes.
 - **Audit logs** record operations and metadata, not secret values.
 - For client-encrypted cards, the trusted client alone evaluates the passkey PRF
-  and decrypts the blob; the API stores opaque ciphertext it cannot decrypt.
+  and decrypts the blob; the API stores opaque ciphertext it cannot decrypt,
+  plus the constrained `brand` and `last4` display metadata.
 - During payment, the phone releases card data only to the ephemeral local
-  operator key after signing the purchase; the API and coding-agent model see
-  no plaintext card fields.
+  operator key after signing the purchase; the API and coding-agent model never
+  see plaintext PAN or CVV.
 
 ### Using a credential without exposing the key: egress grants
 

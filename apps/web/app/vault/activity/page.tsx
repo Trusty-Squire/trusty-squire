@@ -20,6 +20,15 @@ interface AuditEvent {
   label?: string;
   target_host?: string;
   response_status?: number;
+  // Card + payment events — display metadata only, never a PAN/CVV.
+  brand?: string;
+  last4?: string;
+  merchant?: string;
+  amount_cents?: number;
+  currency?: string;
+  payment_status?: string;
+  // Egress-grant lifecycle.
+  grant_id?: string;
 }
 
 const PAGE = 50;
@@ -44,17 +53,53 @@ function describe(e: AuditEvent): { tone: string; label: string; detail: string 
     case "vault.credential_retrieved": {
       const verb = e.purpose === "user:vault_reveal" ? "Revealed" : "Retrieved";
       if (e.outcome === "rate_limited") return { tone: "err", label: "Rate-limited", detail: svc };
-      if (e.outcome === "missing_credential") return { tone: "warn", label: "Retrieve (missing)", detail: svc };
-      if (e.outcome === "stale_assertion") return { tone: "warn", label: "Retrieve (stale)", detail: svc };
+      if (e.outcome === "missing_credential")
+        return { tone: "warn", label: "Retrieve (missing)", detail: svc };
+      if (e.outcome === "stale_assertion")
+        return { tone: "warn", label: "Retrieve (stale)", detail: svc };
       return { tone: "neutral", label: verb, detail: svc };
     }
     case "vault.proxy_executed":
       return { tone: "ok", label: "Used", detail: e.target_host ?? svc };
     case "vault.proxy_rejected":
-      return { tone: "err", label: "Blocked", detail: `${e.target_host ?? "off-allowlist host"} (not allowed)` };
+      return {
+        tone: "err",
+        label: "Blocked",
+        detail: `${e.target_host ?? "off-allowlist host"} (not allowed)`,
+      };
+    case "vault.card_stored":
+      return { tone: "ok", label: "Card added", detail: cardDetail(e) };
+    case "vault.card_deleted":
+      return { tone: "warn", label: "Card removed", detail: cardDetail(e) };
+    case "vault.payment_executed": {
+      // Merchant + amount + last4 only — a full PAN never reaches the trail.
+      const amount =
+        e.amount_cents !== undefined && e.currency !== undefined
+          ? `${e.currency} ${(e.amount_cents / 100).toFixed(2)}`
+          : null;
+      const tail = e.last4 !== undefined ? ` ··${e.last4}` : "";
+      const declined =
+        e.payment_status !== undefined && /declin|fail|reject/i.test(e.payment_status);
+      return {
+        tone: declined ? "err" : "ok",
+        label: declined ? `Payment ${e.payment_status}` : "Payment",
+        detail: `${e.merchant ?? "unknown merchant"}${amount !== null ? ` — ${amount}` : ""}${tail}`,
+      };
+    }
+    case "vault.grant_minted":
+      return { tone: "ok", label: "Grant minted", detail: svc };
+    case "vault.grant_revoked":
+      return { tone: "warn", label: "Grant revoked", detail: svc };
     default:
       return { tone: "neutral", label: e.type.replace("vault.", ""), detail: svc };
   }
+}
+
+// "label ··last4" for a card event — the same display shape as the
+// wallet row. Falls back through label / last4 / the reference tail.
+function cardDetail(e: AuditEvent): string {
+  const name = e.label ?? "card";
+  return e.last4 !== undefined ? `${name} ··${e.last4}` : name;
 }
 
 // vault://account/sub/ULID → the trailing ULID, the only human-stable
@@ -170,7 +215,11 @@ export default function ActivityPage() {
                       )}
                     </div>
                   </div>
-                  <time className="tl-time" dateTime={e.emitted_at} title={new Date(e.emitted_at).toLocaleString()}>
+                  <time
+                    className="tl-time"
+                    dateTime={e.emitted_at}
+                    title={new Date(e.emitted_at).toLocaleString()}
+                  >
                     {timeAgo(e.emitted_at)}
                   </time>
                 </div>
@@ -178,7 +227,12 @@ export default function ActivityPage() {
             })}
           </div>
           {cursor !== null && (
-            <button className="head-btn load-more" type="button" onClick={more} disabled={loadingMore}>
+            <button
+              className="head-btn load-more"
+              type="button"
+              onClick={more}
+              disabled={loadingMore}
+            >
               {loadingMore ? "Loading…" : "Load more"}
             </button>
           )}

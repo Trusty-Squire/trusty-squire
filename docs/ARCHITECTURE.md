@@ -42,9 +42,9 @@ events, never exposing raw values back to the agent.
 **Client-encrypted card**
 
 A card record encrypted and decrypted by a trusted client with a key produced
-by the enrolled passkey's WebAuthn PRF. The API stores and returns only the
-opaque ciphertext and records metadata-only payment audit events. The
-cryptographic and data-handling contract is owned by
+by the enrolled passkey's WebAuthn PRF. The API stores the protected payload,
+serves constrained display metadata, and records metadata-only payment audit
+events. The precise cryptographic and server-visible data contract is owned by
 [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Operate session**
@@ -56,9 +56,11 @@ captcha handling, and extraction.
 **Payment approval**
 
 A short-lived handoff from an active operate session to the user's phone. The
-phone approves the exact purchase and seals the selected card to an ephemeral
-operator key; the API is only an opaque relay. The security contract is owned
-by [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
+phone can add and bind a card when needed, reviews the server-bound card and
+exact purchase, and then seals that card to an ephemeral operator key. The
+API enforces the approval state and relays the opaque card release. The security
+contract is owned by
+[`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Sealed slot**
 
@@ -102,7 +104,6 @@ apps/
 
 packages/
   vault/        Encrypted credential storage primitives.
-  inbox/        Inbound email parsing and verification-code helpers.
   skill-schema/ Shared Zod schemas for signed skills, replay steps, and failure
                 taxonomy.
 ```
@@ -124,9 +125,12 @@ The important boundaries are:
   and configured auth shapes.
 - Audit logs record operations and metadata, not secret values.
 - Client-encrypted card WebAuthn PRF outputs and derived keys remain outside the
-  API; the server stores only opaque ciphertext.
-- Payment card plaintext exists only in the approving browser and the local
-  operator process, never in the API or coding-agent model.
+  API; [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data) owns the
+  server-visible card-data boundary.
+- The Vault browser can reveal a PAN only after its passkey ceremony and
+  discards the CVV before UI state or rendering. During payment, plaintext card
+  data exists only in the approving browser and local operator process, never
+  in the API or coding-agent model.
 
 This boundary applies even when the agent helped create the credential. A
 successful signup does not make the resulting API key visible to the model.
@@ -155,13 +159,24 @@ and transferred secrets are not returned to the agent.
 
 ```text
 agent starts operate_pay in the active checkout
-  -> operator reads merchant, origin, and total
-  -> API creates a short-lived approval relay with an ephemeral operator key
-  -> user reviews and approves the purchase on a paired phone
+  -> operator reads merchant, origin, and total and adds optional item/reason
+  -> an explicit card is used; otherwise one saved card is selected automatically,
+     no saved cards starts add-card, and multiple cards require a user choice
+  -> operator creates an ephemeral key; API creates a short-lived approval relay
+     and attaches the server-derived requesting-agent label
+  -> if the approval has no card, the user adds one and the API binds that saved
+     card to the still-pending approval
+  -> user reviews the purchase and server-bound card on a paired phone
+  -> user approves the purchase
   -> phone decrypts the selected card and seals it to that operator key
-  -> operator verifies the signed mandate, opens the card, and fills checkout
-  -> 3-D Secure, when required, is handed back to the user
-  -> metadata-only payment outcome is audited
+  -> operator verifies the signed mandate using the approval's bound card
+     reference; add-card also re-reads every signed checkout field and refuses
+     if the merchant, origin, amount, or currency changed
+  -> operator opens the card and fills checkout
+  -> when 3-D Secure is required, the API nudges a linked Telegram chat and
+     the operator waits for success or failure when waiting is enabled
+  -> timeout, or a disabled wait, hands the unresolved challenge to the user
+  -> the post-wait metadata-only payment status is audited
 ```
 
 The detailed cryptographic checks and card-data boundary live in
@@ -183,6 +198,12 @@ capture -> synthesize -> sign -> publish -> verify -> active
 - Publishing sends the signed skill to the registry.
 - Verification replays the flow before it becomes active.
 - Active skills serve future provisions faster and with less exploration.
+
+Only inventory-backed actions are promotable. A session can still complete by
+using `operate_act` with a live `text=…` or `css=…` locator when a visible
+control has no observed ref, but that off-inventory click cannot be synthesized
+into a portable skill step. Such a session is therefore skipped by
+auto-promotion and cannot be saved as an operator recipe.
 
 The same captures must produce byte-identical skills. Promotion must not depend
 on clocks, random numbers, or plaintext credentials.
@@ -252,7 +273,6 @@ The public docs set is intentionally small:
 - `docs/ARCHITECTURE.md`: canonical system overview and data flows.
 - `docs/VAULT-OPERATIONS.md`: vault operator runbook.
 - `docs/DEPLOY-registry.md`: registry deployment notes.
-- `docs/BUSINESS-MODEL.md`: pricing and positioning model.
 
 Design memos, spike notes, stale implementation plans, and E2E scratchpads
 belong in git history or private planning material, not in the public launch

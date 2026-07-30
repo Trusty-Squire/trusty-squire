@@ -10,12 +10,20 @@ export interface OperatePayArgs {
   merchant?: string;
   amount_cents?: number;
   currency?: string;
-  card_ref: string;
+  // Absent = JIT add-card ceremony: the approval is minted card-less and the
+  // card the user adds is bound SERVER-SIDE. On resume the operator reads that
+  // bound card_ref back from the approval — never args.card_ref, which does not
+  // exist in the JIT branch.
+  card_ref?: string;
+  item?: string;
+  reason?: string;
+  three_ds_wait_seconds?: number;
 }
 
 export interface PaymentBrowser {
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
+  waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout">;
   currentUrl(): string;
 }
 
@@ -27,6 +35,11 @@ interface PayDependencies {
   vouchflowApiBase: string;
   vouchflowExpectedAudience: string | undefined;
   approvalTimeoutMs: number;
+  // JIT add-card ceremony wait budget. Longer than the normal has-card wait:
+  // the first purchase is a first-time card+billing form plus one or more
+  // WebAuthn prompts, so the operator waits ~15-20 min (bounded by the server
+  // approval TTL). Only used when args.card_ref is absent.
+  jitApprovalTimeoutMs: number;
   pollIntervalMs: number;
   surfaceApprovalUrl: (url: string) => void | Promise<void>;
 }
@@ -97,8 +110,14 @@ function normalizeCard(value: unknown): CheckoutCard {
   };
 }
 
-function confidenceAtLeastHigh(value: unknown): boolean {
-  return value === "high" || value === "very_high";
+// Web passkeys are inherently rated "low" in Vouchflow (platform:"web" is
+// capped low regardless of biometric), so a web-based approval can never
+// reach medium. The mandate's assurance therefore rests on user-presence +
+// single-use nonce + amount/recipient/origin/item binding, not the confidence
+// tier — so the floor accepts any of the three tiers. Must match the phone's
+// signPayload minConfidence (apps/web/app/vault/pay/[id]/page.tsx).
+function confidenceAtLeastLow(value: unknown): boolean {
+  return value === "low" || value === "medium" || value === "high";
 }
 
 async function verifyMandate(
@@ -139,7 +158,7 @@ async function verifyMandate(
     throw new Error("payload_hash_mismatch");
   }
   if (payload.context !== "purchase") throw new Error("invalid_mandate_context");
-  if (!confidenceAtLeastHigh(payload.confidence)) {
+  if (!confidenceAtLeastLow(payload.confidence)) {
     throw new Error("insufficient_mandate_confidence");
   }
   return payload;
@@ -163,6 +182,36 @@ function safeFailureReason(error: unknown): string {
   return known.includes(message) ? message : "mandate_verification_failed";
 }
 
+// A card_ref counts as "bound" only when it is a non-blank string. Used for
+// both the timeout classification (no card → card_required) and the resume
+// guard (never canonicalize over an empty/whitespace ref), so the two agree.
+function hasBoundCard(ref: string | null | undefined): ref is string {
+  return typeof ref === "string" && ref.trim().length > 0;
+}
+
+// Terminal for every JIT path that ends without a card on file (link expired
+// before a card was added, add-card failed, or abandoned before card entry).
+// Extends the host-facing needs_user.wall vocabulary with "card_required".
+function cardRequiredResult(
+  approvalUrl: string,
+  checkout: CheckoutSummary,
+  reason: string,
+): Record<string, unknown> {
+  return {
+    status: "payment_card_required",
+    approval_url: approvalUrl,
+    merchant: checkout.merchant,
+    amount_cents: checkout.amount_cents,
+    currency: checkout.currency,
+    needs_user: {
+      wall: "card_required",
+      reason,
+      message: `No payment card is on file — ${reason}. Re-run the payment to get a fresh add-card link.`,
+      resume: "operate_pay",
+    },
+  };
+}
+
 function defaultDependencies(): PayDependencies {
   return {
     fetch,
@@ -172,6 +221,7 @@ function defaultDependencies(): PayDependencies {
     vouchflowApiBase: process.env.VOUCHFLOW_API_BASE ?? "https://api.vouchflow.dev",
     vouchflowExpectedAudience: process.env.VOUCHFLOW_EXPECTED_AUDIENCE?.trim() || undefined,
     approvalTimeoutMs: 5 * 60 * 1000,
+    jitApprovalTimeoutMs: 18 * 60 * 1000,
     pollIntervalMs: 3_000,
     surfaceApprovalUrl: (url) => {
       process.stderr.write(
@@ -188,6 +238,7 @@ export async function executeOperatePay(
   overrides: Partial<PayDependencies> = {},
 ): Promise<Record<string, unknown>> {
   const deps = { ...defaultDependencies(), ...overrides };
+  const threeDsWaitMs = Math.min(Math.max(args.three_ds_wait_seconds ?? 180, 0), 600) * 1000;
   let keypair = await generateOperatorKeypair();
   let cardBytes: Uint8Array | undefined;
   let card: CheckoutCard | undefined;
@@ -226,38 +277,76 @@ export async function executeOperatePay(
       };
     }
 
+    const item = args.item ?? "";
+    const reason = args.reason ?? "";
+    // JIT add-card ceremony: no card on file, so mint the approval card-less
+    // and read the SERVER-BOUND card_ref back on resume. The has-card path
+    // (args.card_ref present) is entirely untouched by this flag.
+    const jit = args.card_ref === undefined;
+
     const created = await api.createPaymentApproval({
       ...checkout,
-      card_ref: args.card_ref,
+      ...(args.card_ref !== undefined ? { card_ref: args.card_ref } : {}),
       operator_pubkey: keypair.publicKey,
+      item,
+      reason,
     });
     const approvalUrl = `${deps.webBase.replace(/\/+$/, "")}/vault/pay/${encodeURIComponent(created.id)}`;
     await deps.surfaceApprovalUrl(approvalUrl);
 
+    // A JIT ceremony (first-time card form + passkey) needs a longer wait than
+    // a tap-to-approve on a card already on file. Both are still bounded by the
+    // server-issued approval TTL (expires_at) below.
+    const waitBudgetMs = jit ? deps.jitApprovalTimeoutMs : deps.approvalTimeoutMs;
     const deadline = Math.min(
-      deps.now() + deps.approvalTimeoutMs,
+      deps.now() + waitBudgetMs,
       Number.isFinite(Date.parse(created.expires_at))
         ? Date.parse(created.expires_at)
         : Number.POSITIVE_INFINITY,
     );
-    let approved: { jws: string; sealed_card: string } | undefined;
+
+    // In the JIT branch, the approval starts card-less; the card is bound
+    // server-side mid-ceremony. Track the latest binding so a timeout/expiry
+    // can distinguish "no card was ever added" (card_required) from "card was
+    // stored but never approved" (payment_approval_timeout, card persists).
+    let boundCardRef: string | null = args.card_ref ?? null;
+    const timeoutResult = (): Record<string, unknown> => {
+      if (jit && !hasBoundCard(boundCardRef)) {
+        return cardRequiredResult(
+          approvalUrl,
+          checkout,
+          "the add-card link expired before a card was added",
+        );
+      }
+      const base: Record<string, unknown> = {
+        status: "payment_approval_timeout",
+        approval_url: approvalUrl,
+        merchant: checkout.merchant,
+        amount_cents: checkout.amount_cents,
+        currency: checkout.currency,
+      };
+      // JIT + a bound card = the user added a card but never approved. The card
+      // stays in the vault, so the retry is a fast has-card approval.
+      return jit ? { ...base, card_persisted: true } : base;
+    };
+
+    let approved: { jws: string; sealed_card: string; card_ref: string | null } | undefined;
     while (deps.now() < deadline) {
       const approval = await api.getPaymentApproval(created.id);
+      boundCardRef = approval.card_ref;
       if (approval.status === "expired") {
-        return {
-          status: "payment_approval_timeout",
-          approval_url: approvalUrl,
-          merchant: checkout.merchant,
-          amount_cents: checkout.amount_cents,
-          currency: checkout.currency,
-        };
+        return timeoutResult();
       }
       if (
         approval.status === "approved" &&
         typeof approval.jws === "string" &&
         typeof approval.sealed_card === "string"
       ) {
-        approved = { jws: approval.jws, sealed_card: approval.sealed_card };
+        approved = {
+          jws: approval.jws,
+          sealed_card: approval.sealed_card,
+          card_ref: approval.card_ref,
+        };
         break;
       }
       if (approval.status === "approved") {
@@ -270,12 +359,30 @@ export async function executeOperatePay(
       await deps.sleep(deps.pollIntervalMs);
     }
     if (approved === undefined) {
+      if (jit) {
+        try {
+          const final = await api.getPaymentApproval(created.id);
+          boundCardRef = final.card_ref;
+        } catch {}
+      }
+      return timeoutResult();
+    }
+
+    // [P1] Canonicalize with the SERVER-BOUND card_ref. In the has-card path
+    // args.card_ref is present and identical to the echoed binding, so the
+    // canonical bytes are byte-for-byte what they were before this branch
+    // existed. In the JIT path args.card_ref is absent, so the operator MUST
+    // use the card_ref the ceremony bound — anything else hash-mismatches
+    // verifyMandate and silently rejects every JIT payment.
+    const cardRef = args.card_ref ?? approved.card_ref;
+    if (!hasBoundCard(cardRef)) {
+      // The server 409s an approve on a null card_ref, so a JIT approval can
+      // only reach "approved" with a bound card. Fail closed if that invariant
+      // is ever violated rather than canonicalize with an empty ref.
       return {
-        status: "payment_approval_timeout",
+        status: "payment_mandate_rejected",
+        reason: "card_ref_unbound",
         approval_url: approvalUrl,
-        merchant: checkout.merchant,
-        amount_cents: checkout.amount_cents,
-        currency: checkout.currency,
       };
     }
 
@@ -287,8 +394,11 @@ export async function executeOperatePay(
       amount_cents: checkout.amount_cents,
       currency: checkout.currency,
       nonce: created.nonce,
-      card_ref: args.card_ref,
+      card_ref: cardRef,
       recipient_pubkey_hash: toBase64Url(recipientHash),
+      item,
+      reason,
+      agent: created.agent,
     });
     if (canonical === undefined) {
       return {
@@ -335,6 +445,46 @@ export async function executeOperatePay(
           : typeof claims.jti === "string"
             ? claims.jti
             : undefined;
+    // [#13][P1] JIT nearly doubles the window between reading the checkout and
+    // filling it, so a mid-ceremony navigation could swap the merchant, origin,
+    // or total out from under the signed mandate. Re-read the live checkout
+    // immediately before filling (smallest possible time-of-check→time-of-use
+    // gap) and refuse if ANY signed field the mandate binds — merchant, origin,
+    // amount, currency — drifted. The card was opened above but is never
+    // submitted on a mismatch; the outer finally zeroes it. The has-card path
+    // (jit === false) skips this entirely — its behavior is unchanged.
+    if (jit) {
+      let live: CheckoutSummary | undefined;
+      try {
+        live = await browser.readCheckoutSummary(args.currency);
+      } catch {
+        live = undefined;
+      }
+      if (
+        live === undefined ||
+        live.amount_cents !== checkout.amount_cents ||
+        live.currency !== checkout.currency ||
+        live.merchant !== checkout.merchant ||
+        live.checkout_origin !== checkout.checkout_origin
+      ) {
+        return {
+          status: "payment_amount_mismatch",
+          approval_url: approvalUrl,
+          merchant: checkout.merchant,
+          mandate_amount_cents: checkout.amount_cents,
+          mandate_currency: checkout.currency,
+          ...(live !== undefined
+            ? {
+                live_amount_cents: live.amount_cents,
+                live_currency: live.currency,
+                live_merchant: live.merchant,
+                live_checkout_origin: live.checkout_origin,
+              }
+            : {}),
+        };
+      }
+    }
+
     let paymentStatus = "payment_submitted";
     let submitResult: CheckoutSubmitResult = { three_ds_required: false };
     try {
@@ -368,6 +518,13 @@ export async function executeOperatePay(
       card = undefined;
     }
 
+    if (submitResult.three_ds_required && threeDsWaitMs > 0) {
+      void api.notifyThreeDs(created.id).catch(() => undefined);
+      const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
+      if (resolution === "succeeded") paymentStatus = "payment_submitted";
+      if (resolution === "failed") paymentStatus = "payment_declined";
+    }
+
     let auditRecorded = true;
     try {
       await api.auditPayment({
@@ -394,6 +551,13 @@ export async function executeOperatePay(
           resume: "checkout",
           ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
         },
+      };
+    }
+    if (paymentStatus === "payment_declined") {
+      return {
+        status: paymentStatus,
+        audit_recorded: auditRecorded,
+        approval_url: approvalUrl,
       };
     }
     return {

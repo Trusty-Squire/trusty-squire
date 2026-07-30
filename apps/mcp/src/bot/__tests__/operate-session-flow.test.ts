@@ -16,6 +16,7 @@ const h = vi.hoisted(() => ({
   oauthStatus: "already_valid" as string,
   typed: [] as Array<{ selector: string; text: string }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
+  selected: [] as Array<{ selector: string; matcher: string | undefined }>,
   gotos: [] as string[],
   started: 0,
   currentUrl: "",
@@ -40,6 +41,19 @@ const h = vi.hoisted(() => ({
   twoCaptchaCalls: [] as string[],
   consentDismissCalls: 0,
   consentCta: null as string | null,
+  locatorResolve: {
+    ok: true,
+    text: "Add To Cart",
+    safetySignals: { billingObject: false, accountSetup: false },
+  } as
+    | {
+        ok: true;
+        text: string;
+        safetySignals: { billingObject: boolean; accountSetup: boolean };
+      }
+    | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
+  locatorClickCalls: 0,
+  locatorDisposeCalls: 0,
 }));
 
 vi.mock("../browser.js", () => ({
@@ -127,8 +141,43 @@ vi.mock("../browser.js", () => ({
     async type(selector: string, text: string): Promise<void> {
       h.typed.push({ selector, text });
     }
+    async selectOption(selector: string, matcher?: string): Promise<void> {
+      h.selected.push({ selector, matcher });
+    }
     async click(): Promise<void> {}
     async clickViaJs(): Promise<void> {}
+    async resolvePageTarget(
+      _mode: string,
+      _value: string,
+    ): Promise<
+      | {
+          ok: true;
+          handle: { dispose: () => Promise<void> };
+          text: string;
+          safetySignals: { billingObject: boolean; accountSetup: boolean };
+        }
+      | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
+    > {
+      if (h.locatorResolve.ok) {
+        return {
+          ok: true,
+          handle: {
+            dispose: async () => {
+              h.locatorDisposeCalls += 1;
+            },
+          },
+          text: h.locatorResolve.text,
+          safetySignals: h.locatorResolve.safetySignals,
+        };
+      }
+      return h.locatorResolve;
+    }
+    async clickHandle(): Promise<void> {
+      h.locatorClickCalls += 1;
+    }
+    async jsClickHandle(): Promise<void> {
+      h.locatorClickCalls += 1;
+    }
     async uploadFile(selector: string, filePath: string): Promise<void> {
       h.uploads.push({ selector, filePath });
     }
@@ -183,8 +232,10 @@ import {
   captchaGate,
   finishProvisionSession,
   closeAllProvisionSessions,
+  parseElementsTable,
 } from "../provision-session.js";
 import {
+  provisionRememberTool,
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
   provisionStoreLoginTool,
@@ -218,6 +269,7 @@ beforeEach(() => {
   h.oauthStatus = "already_valid";
   h.typed = [];
   h.uploads = [];
+  h.selected = [];
   h.gotos = [];
   h.consentDismissCalls = 0;
   h.consentCta = null;
@@ -237,6 +289,13 @@ beforeEach(() => {
   h.twoCaptchaAvailable = false;
   h.twoCaptchaResult = { kind: "ok", token: "captcha-token", durationMs: 1 };
   h.twoCaptchaCalls = [];
+  h.locatorResolve = {
+    ok: true,
+    text: "Add To Cart",
+    safetySignals: { billingObject: false, accountSetup: false },
+  };
+  h.locatorClickCalls = 0;
+  h.locatorDisposeCalls = 0;
 });
 afterEach(async () => {
   await closeAllProvisionSessions();
@@ -257,6 +316,102 @@ describe("operate_start — consent-overlay auto-dismiss", () => {
     await startProvisionSession({ serviceUrl: "https://faucet.example.com/" });
     // Dismissed on the first attempt → the second (retry) attempt is skipped.
     expect(h.consentDismissCalls).toBe(1);
+  });
+});
+
+describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
+  // The raw-target unsafe guard can't see through an opaque css= selector: the
+  // target string carries no verb/noun, so a css=#save that resolves to
+  // "Save product" on a LIVE-mode page slips past the first check. act() must
+  // re-run the guard against the RESOLVED visible text before clicking.
+  it("blocks a css= locator that resolves to a billing-object control in live mode", async () => {
+    h.visibleText = "Dashboard Products Live mode";
+    h.locatorResolve = {
+      ok: true,
+      text: "Save product",
+      safetySignals: { billingObject: true, accountSetup: false },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
+    await expect(act(obs.session_id, { kind: "click", target: "css=#save" })).rejects.toThrow(
+      /Mode safety guard/,
+    );
+    // The click must NOT have been dispatched.
+    expect(h.locatorClickCalls).toBe(0);
+  });
+
+  it("blocks an icon-only css= target using its accessible label", async () => {
+    const token = "tokensecretvalue123";
+    h.visibleText = "Dashboard Products Live mode";
+    h.locatorResolve = {
+      ok: true,
+      text: token,
+      safetySignals: { billingObject: true, accountSetup: false },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
+    const error = await act(obs.session_id, {
+      kind: "click",
+      target: "css=#save-icon",
+    }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/Mode safety guard/);
+    expect((error as Error).message).not.toContain(token);
+    expect(h.locatorClickCalls).toBe(0);
+    expect(h.locatorDisposeCalls).toBe(1);
+  });
+
+  it("blocks a locator resolving to an account-setup control over authenticated UI", async () => {
+    h.visibleText =
+      "Finish creating your account Create account CP Cactus Practice Test mode Products";
+    h.locatorResolve = {
+      ok: true,
+      text: "",
+      safetySignals: { billingObject: false, accountSetup: true },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
+    await expect(
+      act(obs.session_id, { kind: "click", target: "css=#finish-account" }),
+    ).rejects.toThrow(/Perception guard/);
+    expect(h.locatorClickCalls).toBe(0);
+    expect(h.locatorDisposeCalls).toBe(1);
+  });
+
+  it("allows a css= locator resolving to a safe control (guard is not over-eager)", async () => {
+    h.visibleText = "Product configurator";
+    h.locatorResolve = {
+      ok: true,
+      text: "Add To Cart",
+      safetySignals: { billingObject: false, accountSetup: false },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
+    await act(obs.session_id, { kind: "click", target: "css=#atc" });
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("refuses to remember a session that used a locator fallback", async () => {
+    h.visibleText = "Product configurator";
+    h.locatorResolve = {
+      ok: true,
+      text: "Add To Cart",
+      safetySignals: { billingObject: false, accountSetup: false },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
+    await act(obs.session_id, { kind: "click", target: "css=#atc" });
+
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: obs.session_id,
+          name: "locator-session",
+          goal: "Add a product to the cart",
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Cart contains the product",
+            success_signal: { text_present: "Cart" },
+          },
+        },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/locator fallback.*cannot represent/i);
   });
 });
 
@@ -353,6 +508,24 @@ describe("operate session — sealed credential transfer", () => {
     // Target resolved from the inventory → the file is set on that element; the
     // action never touches an OS file picker.
     expect(h.uploads).toEqual([{ selector: "#upload-btn", filePath: "/tmp/clip.mp4" }]);
+  });
+
+  it("select resolves the target and routes the option matcher to browser.selectOption", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ visibleText: "Country", selector: "#country" })];
+    await act(obs.session_id, { kind: "select", target: "Country", text: "South Korea" });
+    // The native/custom dropdown is driven via selectOption (NOT type), with the
+    // resolved element's selector and the visible-text option matcher.
+    expect(h.selected).toEqual([{ selector: "#country", matcher: "South Korea" }]);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("select fails loudly when the target isn't in the inventory", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [];
+    await expect(
+      act(obs.session_id, { kind: "select", target: "Country", text: "South Korea" }),
+    ).rejects.toThrow(/no element matched target/i);
   });
 
   it("upload fails loudly when the target isn't in the inventory", async () => {
@@ -759,7 +932,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
 });
 
 describe("observation detail ladder (none < compact < full)", () => {
-  it("default is compact: no screen/accessibility, value_len, elements_total, no container", async () => {
+  it("default is compact: no screen/accessibility, value_len, elements_total, no container, path DROPPED", async () => {
     h.elements = [
       elem({
         tag: "input",
@@ -774,12 +947,16 @@ describe("observation detail ladder (none < compact < full)", () => {
     expect(obs.screen).toBeUndefined();
     expect(obs.accessibility).toBeUndefined();
     expect(obs.elements_total).toBe(1);
-    const e = obs.elements[0]!;
+    // Compact wire carries the element set as the columnar el_table (Phase 4).
+    const e = parseElementsTable(obs.el_table!)[0]!;
     const bag = e as unknown as Record<string, unknown>;
     expect(bag.value).toBeUndefined();
     expect(e.value_len).toBe(4);
     expect(bag.container).toBeUndefined();
-    expect(e.path).toBe("form:x > input:org");
+    // path is now dropped from the default payload (retained only in the
+    // persisted snapshot file, whose path the response carries).
+    expect("path" in e).toBe(false);
+    expect(typeof obs.snapshot_file).toBe("string");
   });
 
   it("operate_observe detail:'full' restores the screen + accessibility views", async () => {

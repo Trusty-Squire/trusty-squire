@@ -58,7 +58,14 @@ interface Export {
   account_id: string;
   credentials: { service: string | null; deleted_at: string | null; field_names: string[] }[];
   audit_events: { type: string }[];
-  e2e_credentials: { id: string; label: string; blob: string; created_at: string }[];
+  e2e_credentials: {
+    id: string;
+    label: string;
+    blob: string;
+    brand: string | null;
+    last4: string | null;
+    created_at: string;
+  }[];
   payment_audit_events: {
     id: string;
     merchant: string;
@@ -119,6 +126,7 @@ describe("GDPR export + erasure", () => {
       account.id,
       "Primary card",
       "opaque-card-blob",
+      { brand: "testcard", last4: "0007" },
     );
     const paymentId = await h.deps.paymentAuditStore.create(account.id, {
       merchant: "Example Store",
@@ -150,6 +158,8 @@ describe("GDPR export + erasure", () => {
         id: e2eId,
         label: "Primary card",
         blob: "opaque-card-blob",
+        brand: "testcard",
+        last4: "0007",
         created_at: expect.any(String),
       },
     ]);

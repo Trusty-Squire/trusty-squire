@@ -268,15 +268,15 @@ export const registerVaultRoute: FastifyPluginAsync<{
     });
   });
 
-  // ── audit timeline (web only): who-touched-my-keys ───────────
-  // The full event trail for the account — stored/retrieved/rotated/
-  // deleted/proxy_executed/proxy_rejected — newest first, paginated by
-  // the `before` keyset cursor. Payloads carry NO secret values.
-  // Account-scoped, no secret values (references / requesters / outcomes /
-  // proxy forensics only). Readable by the human in the web UI AND by the
-  // account's own agent ("show me everything that touched my keys"), since
-  // both are bound to the same account and the agent already lists creds +
-  // mints grants on it — the audit trail exposes strictly less.
+  // ── audit timeline: who-touched-my-vault ──────────────────────
+  // The full account trail, newest first and keyset-paginated. The filter
+  // enum derives from VAULT_AUDIT_TYPES so credential, card, payment, and
+  // grant lifecycle additions are queryable without updating a second list.
+  // Payloads contain references, requesters, outcomes, proxy forensics, and
+  // display-only lifecycle metadata — never a key value, PAN, or CVV.
+  // Both web users and the account's agent may read it: each is already
+  // account-bound, and the trail exposes less than the operations they can
+  // perform.
   fastify.get("/v1/vault/audit", { preHandler: opts.requireAny }, async (req, reply) => {
     const auth = req.auth!;
     const parsed = auditQuery.safeParse(req.query);
@@ -297,8 +297,9 @@ export const registerVaultRoute: FastifyPluginAsync<{
         id: e.id,
         type: e.type,
         emitted_at: e.emitted_at.toISOString(),
-        // Whole payload is non-secret by construction (references,
-        // requesters, outcomes, proxy forensics — never a key value).
+        // Whole payload is non-secret by construction: references,
+        // requesters, outcomes, proxy forensics, and lifecycle display
+        // metadata — never a key value, PAN, or CVV.
         ...e.payload,
       })),
       // Keyset cursor for the next page; null when this page wasn't full.
@@ -343,9 +344,9 @@ export const registerVaultRoute: FastifyPluginAsync<{
   fastify.post("/v1/vault/credentials", { preHandler: opts.requireAgent }, async (req, reply) => {
     const auth = req.auth!;
     if (auth.kind !== "agent") return;
-    // Bot stores happen with no human watching, so a new key gets a
-    // "key added" notification. Re-stores (rotation) don't — they're
-    // expected churn, not a surprise the user needs flagged.
+    // Bot stores happen with no human watching, so a fresh key gets the
+    // legacy "key added" email. Re-stores skip that email; Telegram
+    // lifecycle notifications ride the audit event for both paths.
     return storeUpsert(opts, auth.account_id, req, reply, "squire", forwarder, true);
   });
 
@@ -356,7 +357,8 @@ export const registerVaultRoute: FastifyPluginAsync<{
     async (req, reply) => {
       const auth = req.auth!;
       if (auth.kind !== "web") return;
-      // The user is in the UI doing this by hand — no notification.
+      // Manual stores skip the unattended-create email. The shared audit
+      // decorator still sends the linked account's Telegram lifecycle alert.
       return storeUpsert(opts, auth.account_id, req, reply, "manual", forwarder, false);
     },
   );
@@ -438,6 +440,8 @@ export const registerVaultRoute: FastifyPluginAsync<{
           id: credential.id,
           label: credential.label,
           blob: credential.blob,
+          brand: credential.brand,
+          last4: credential.last4,
           created_at: credential.createdAt.toISOString(),
         })),
         payment_audit_events: paymentAuditEvents.map((event) => ({
@@ -750,9 +754,9 @@ async function storeUpsert(
       ...(loginHosts !== undefined ? { login_hosts: loginHosts } : {}),
     },
   });
-  // Notify the user that a key landed in their vault unattended. Only on
-  // a fresh create (not a rotation), and never fatal to the store —
-  // failures are swallowed so a misconfigured mailer can't break signups.
+  // Send the legacy email when a key lands unattended. Only on a fresh
+  // create (not a rotation), and never fatal to the store. Telegram
+  // lifecycle alerts are separate and already follow the audit write.
   if (notifyOnCreate && !entry.updated) {
     await notifyNewKey(opts.deps, forwarder, accountId, entry.service, entry.label);
   }

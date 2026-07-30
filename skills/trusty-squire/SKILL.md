@@ -36,8 +36,8 @@ especially when the secret must stay out of the conversation, the repo, and
 - Finishing authenticated setup — OAuth apps, webhooks, project/region config.
 - Using an already-vaulted key to call a provider **without** the raw value
   returning to the agent's context.
-- Paying a supported checkout with a saved card after the user approves the
-  exact purchase on their phone.
+- Paying a supported checkout with a saved or just-in-time card after the user
+  approves the exact purchase on their phone.
 
 Do **not** reach for it when:
 
@@ -84,9 +84,17 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   a revocable token, not the raw key.
 - `audit_log` — review what touched a credential; never exposes secret values.
 - `list_payment_cards`, `operate_pay` — select a saved card by label or opaque
-  reference, request phone approval for the exact purchase, fill the checkout,
-  and hand any 3-D Secure challenge back to the user. Card fields never return
-  through MCP.
+  reference, or omit both selectors: one saved card is used automatically, no
+  saved cards starts a just-in-time add-card approval, and multiple cards return
+  their labels so the user can choose. Never guess among several cards. The tool
+  requests phone approval for the exact purchase, fills the checkout, nudges
+  the user's linked Telegram chat when configured and 3-D Secure is required,
+  and waits for them to resolve it before handing back an unresolved challenge.
+  If add-card returns `needs_user.wall: "card_required"`, re-run for a fresh
+  link; if `payment_approval_timeout` includes `card_persisted: true`, the added
+  card remains available for the retry. Set `three_ds_wait_seconds` to `0` only
+  when the user wants the immediate handoff without notification or waiting.
+  Card fields never return through MCP.
 
 **Safety rules the agent must follow:**
 

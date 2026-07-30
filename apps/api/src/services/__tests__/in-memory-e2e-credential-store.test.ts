@@ -17,10 +17,37 @@ describe("InMemoryE2ECredentialStore", () => {
       {
         id,
         label: "Test card",
+        brand: null,
+        last4: null,
         createdAt: new Date("2026-07-23T12:00:00.000Z"),
       },
     ]);
     expect(list[0]).not.toHaveProperty("blob");
+  });
+
+  it("stores and lists card brand/last4 display metadata", async () => {
+    const store = new InMemoryE2ECredentialStore(() => new Date("2026-07-23T12:00:00.000Z"));
+    const id = await store.create(ACCOUNT, "Visa", '{"ciphertext":"x"}', {
+      brand: "visa",
+      last4: "4242",
+    });
+    const [row] = await store.listByAccount(ACCOUNT);
+    expect(row).toMatchObject({ id, brand: "visa", last4: "4242" });
+  });
+
+  it("edits a label in place without touching card metadata", async () => {
+    const store = new InMemoryE2ECredentialStore();
+    const id = await store.create(ACCOUNT, "Old", '{"ciphertext":"x"}', {
+      brand: "mc",
+      last4: "1111",
+    });
+    expect(await store.updateLabelForAccount(id, OTHER_ACCOUNT, "Hijack")).toBe(false);
+    expect(await store.updateLabelForAccount(id, ACCOUNT, "New")).toBe(true);
+    expect(await store.getByIdForAccount(id, ACCOUNT)).toMatchObject({
+      label: "New",
+      brand: "mc",
+      last4: "1111",
+    });
   });
 
   it("denies cross-account access and delete, then lets the owner delete", async () => {
