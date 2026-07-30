@@ -246,10 +246,20 @@ describe("Egress Grants — /v1/egress", () => {
         payload: {},
       });
     expect((await call()).statusCode).toBe(200);
-    expect((await call()).statusCode).toBe(429);
+    const limited = await call();
+    expect(limited.statusCode).toBe(429);
+    expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
+    expect(Number(limited.headers["retry-after"])).toBeLessThanOrEqual(3600);
+    expect(limited.json()).toMatchObject({
+      error: "rate_limited",
+      scope: "grant",
+      limit_per_hour: 1,
+      window_seconds: 3600,
+    });
+    expect((limited.json() as { reset_at: string }).reset_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   });
 
-  it("a grant minted WITHOUT a rate gets the DEFAULT cap (not unlimited) — abuse protection", async () => {
+  it("limits are opt-in: a grant minted without a rate is unlimited", async () => {
     const account = await h.deps.accountStore.createAccount("ul@example.test", "U");
     const cookie = await webCookie(h.deps, account.id);
     const token = await agentToken(h.deps, account.id);
@@ -266,9 +276,17 @@ describe("Egress Grants — /v1/egress", () => {
       rate_limit_per_hour: number | null;
       spend_cap_usd: number | null;
     };
-    // No explicit rate → the server applies the default cap (1000/hr), NOT unlimited.
-    expect(j.rate_limit_per_hour).toBe(1000);
+    expect(j.rate_limit_per_hour).toBeNull();
     expect(j.spend_cap_usd).toBeNull(); // spend cap stays opt-in
+
+    const call = () =>
+      h.server.inject({
+        method: "POST",
+        url: `/v1/egress/${j.grant_id}/v1/chat/completions`,
+        headers: { authorization: `Bearer ${j.token}`, "content-type": "application/json" },
+        payload: {},
+      });
+    for (let i = 0; i < 5; i++) expect((await call()).statusCode).toBe(200);
   });
 
   it("refuses to mint a grant for a credential with an empty host allowlist", async () => {
@@ -354,6 +372,38 @@ describe("Egress Grants — /v1/egress", () => {
       expect(res.statusCode).toBe(200);
     }
     // Three proxied requests, one credential DB read — the rest are cache hits.
+    expect(findActiveCalls).toBe(1);
+  });
+
+  it("coalesces concurrent cold credential-cache misses into one DB read (#227/#231 recurrence)", async () => {
+    const account = await h.deps.accountStore.createAccount("stampede@example.test", "S");
+    const cookie = await webCookie(h.deps, account.id);
+    const token = await agentToken(h.deps, account.id);
+    await storeCred(h, cookie, "OpenAI");
+    const originalFindActive = h.deps.credentialStore.findActive.bind(h.deps.credentialStore);
+    let findActiveCalls = 0;
+    h.deps.credentialStore.findActive = async (reference: string) => {
+      findActiveCalls += 1;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return originalFindActive(reference);
+    };
+    const { grant_id, egressToken } = await mintGrantHttp(h, token, { service: "OpenAI" });
+
+    const responses = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        h.server.inject({
+          method: "POST",
+          url: `/v1/egress/${grant_id}/v1/chat/completions`,
+          headers: {
+            authorization: `Bearer ${egressToken}`,
+            "content-type": "application/json",
+          },
+          payload: {},
+        }),
+      ),
+    );
+
+    expect(responses.every((response) => response.statusCode === 200)).toBe(true);
     expect(findActiveCalls).toBe(1);
   });
 

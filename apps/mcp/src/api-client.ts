@@ -266,7 +266,7 @@ export class ApiClient {
     grant_id: string;
     base_url: string;
     token: string;
-    rate_limit_per_hour: number;
+    rate_limit_per_hour: number | null;
     spend_cap_usd: number | null;
     hint: string;
   }> {
@@ -277,7 +277,7 @@ export class ApiClient {
     grants: Array<{
       grant_id: string;
       credential_ref: string;
-      rate_limit_per_hour: number;
+      rate_limit_per_hour: number | null;
       spend_cap_usd: number | null;
       created_at: string;
       revoked_at: string | null;

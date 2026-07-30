@@ -33,7 +33,7 @@ export interface EgressGrant {
   account_id: string; // inherits the vault credential's account scoping
   credential_ref: string; // the vault credential whose secret is injected
   token_hash: string; // sha256 of the egress token; the token itself is never stored
-  rate_limit_per_hour: number; // mandatory — bounds a leaked token to an annoyance
+  rate_limit_per_hour: number; // 0 = unlimited; a positive value opts into a cap
   spend_cap_usd: number | null; // optional hard ceiling
   created_at: string;
   revoked_at: string | null; // set = instant kill, no key rotation needed

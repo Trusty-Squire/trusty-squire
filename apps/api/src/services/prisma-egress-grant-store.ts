@@ -45,6 +45,7 @@ function toGrant(row: EgressGrantRow): EgressGrant {
 
 export class PrismaEgressGrantStore implements EgressGrantStore {
   private readonly cache = new Map<string, { grant: EgressGrant | null; expiresAt: number }>();
+  private readonly pendingReads = new Map<string, Promise<EgressGrant | null>>();
   private readonly liveTtlMs: number;
   private readonly revokedTtlMs: number;
 
@@ -152,6 +153,20 @@ export class PrismaEgressGrantStore implements EgressGrantStore {
   async getById(id: string): Promise<EgressGrant | null> {
     const cached = this.cache.get(id);
     if (cached !== undefined && cached.expiresAt > this.now()) return cached.grant;
+
+    const pending = this.pendingReads.get(id);
+    if (pending !== undefined) return pending;
+
+    const read = this.readById(id);
+    this.pendingReads.set(id, read);
+    try {
+      return await read;
+    } finally {
+      if (this.pendingReads.get(id) === read) this.pendingReads.delete(id);
+    }
+  }
+
+  private async readById(id: string): Promise<EgressGrant | null> {
     const row = await this.withConnectionRetry(
       () => this.prisma.egressGrant.findUnique({ where: { id } }),
       `get egress grant ${id}`,

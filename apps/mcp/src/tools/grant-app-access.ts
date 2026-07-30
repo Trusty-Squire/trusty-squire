@@ -5,7 +5,7 @@ import { ALWAYS_LOAD_META } from "./always-load.js";
 // Egress Grants — mint a standing, revocable token so a DEPLOYED app (a server
 // the agent provisioned, a loop runtime) can call a provider through Squire's
 // injecting proxy. The raw vault key never leaves Squire; the app holds only a
-// downgraded, rate-limited, revocable token. This is use_credential generalized
+// downgraded, rate-limitable, revocable token. This is use_credential generalized
 // from "the agent makes a call" to "a workload makes calls, forever."
 const inputSchema = z
   .object({
