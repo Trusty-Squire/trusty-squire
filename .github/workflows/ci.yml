@@ -22,21 +22,152 @@ on:
   pull_request:
     branches: [main, staging]
 
+# A newer commit makes an in-flight PR validation obsolete. Cancelling it avoids
+# paying for the old test/build jobs while preserving the latest merge-ref gate.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # Block real captured credentials from entering the repo. On 2026-06-08 a
   # live Pusher key+secret got pasted into a test fixture and GitGuardian
   # flagged it within hours; this is the mechanical guard against a repeat.
   # Dependency-free (bash + grep) so it's a fast, always-green-or-real-red gate.
   secret-scan:
+    outputs:
+      api: ${{ steps.scope.outputs.api }}
+      build_any: ${{ steps.scope.outputs.build_any }}
+      mcp: ${{ steps.scope.outputs.mcp }}
+      registry: ${{ steps.scope.outputs.registry }}
+      schema: ${{ steps.scope.outputs.schema }}
+      shell_tests: ${{ steps.scope.outputs.shell_tests }}
+      test_any: ${{ steps.scope.outputs.test_any }}
+      typecheck_any: ${{ steps.scope.outputs.typecheck_any }}
+      vault: ${{ steps.scope.outputs.vault }}
+      web: ${{ steps.scope.outputs.web }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Test secret scanner
         run: scripts/__tests__/secret-scan.test.sh
       - name: Scan tracked files for credential-shaped values
         run: tools/secret-scan.sh
+      - name: Select affected validation scopes
+        id: scope
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          api=false
+          mcp=false
+          registry=false
+          schema=false
+          shell_tests=false
+          vault=false
+          web=false
+
+          mark_all() {
+            api=true
+            mcp=true
+            registry=true
+            schema=true
+            shell_tests=true
+            vault=true
+            web=true
+          }
+
+          while IFS= read -r path; do
+            case "$path" in
+              apps/api/*)
+                api=true
+                ;;
+              apps/mcp/*)
+                mcp=true
+                ;;
+              apps/registry/*)
+                registry=true
+                ;;
+              apps/web/*)
+                web=true
+                ;;
+              packages/skill-schema/*)
+                schema=true
+                ;;
+              packages/vault/*)
+                vault=true
+                ;;
+              scripts/*|tools/*)
+                mark_all
+                ;;
+              .github/workflows/*)
+                if [[ "$path" == ".github/workflows/ci.yml" ]]; then
+                  mark_all
+                fi
+                ;;
+              docs/*|*.md|LICENSE|LICENSE.*)
+                ;;
+              *)
+                # Root config, lockfiles, migrations, and new directories can
+                # affect every workspace package. Unknown paths fail closed.
+                mark_all
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          # Include workspace consumers when a shared package changes.
+          if [[ "$schema" == "true" ]]; then
+            api=true
+            mcp=true
+            registry=true
+          fi
+          if [[ "$vault" == "true" ]]; then
+            api=true
+            web=true
+          fi
+
+          typecheck_any=false
+          if [[ "$mcp" == "true" || "$schema" == "true" || "$web" == "true" ]]; then
+            typecheck_any=true
+          fi
+
+          build_any=false
+          if [[ "$mcp" == "true" || "$web" == "true" ]]; then
+            build_any=true
+          fi
+
+          test_any=false
+          if [[ "$api" == "true" || "$mcp" == "true" || "$registry" == "true" \
+            || "$schema" == "true" || "$shell_tests" == "true" \
+            || "$vault" == "true" || "$web" == "true" ]]; then
+            test_any=true
+          fi
+
+          {
+            echo "api=$api"
+            echo "build_any=$build_any"
+            echo "mcp=$mcp"
+            echo "registry=$registry"
+            echo "schema=$schema"
+            echo "shell_tests=$shell_tests"
+            echo "test_any=$test_any"
+            echo "typecheck_any=$typecheck_any"
+            echo "vault=$vault"
+            echo "web=$web"
+          } >> "$GITHUB_OUTPUT"
 
   typecheck:
+    # Pull requests already run against GitHub's synthetic merge ref. On the
+    # resulting main/staging push, package release workflows provide any
+    # component-specific gate; rerunning this workspace check is duplicate cost.
+    needs: secret-scan
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.secret-scan.outputs.typecheck_any == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -56,13 +187,22 @@ jobs:
       # typecheck includes apps/api + apps/registry which have
       # pre-existing type errors tracked separately.
       - name: Typecheck (green packages)
+        env:
+          RUN_MCP: ${{ needs.secret-scan.outputs.mcp }}
+          RUN_SCHEMA: ${{ needs.secret-scan.outputs.schema }}
+          RUN_WEB: ${{ needs.secret-scan.outputs.web }}
         run: |
           set -euo pipefail
-          PKGS=(
-            "@trusty-squire/mcp"
-            "@trusty-squire/web"
-            "@trusty-squire/skill-schema"
-          )
+          PKGS=()
+          if [[ "$RUN_MCP" == "true" ]]; then
+            PKGS+=("@trusty-squire/mcp")
+          fi
+          if [[ "$RUN_WEB" == "true" ]]; then
+            PKGS+=("@trusty-squire/web")
+          fi
+          if [[ "$RUN_SCHEMA" == "true" ]]; then
+            PKGS+=("@trusty-squire/skill-schema")
+          fi
           for p in "${PKGS[@]}"; do
             echo "::group::$p"
             pnpm --filter "$p" typecheck
@@ -77,6 +217,10 @@ jobs:
   # break a PR red. Dep order matters: skill-schema's dist must exist before
   # mcp's production build — the workspace-dep-dist step below builds it first.
   build:
+    needs: secret-scan
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.secret-scan.outputs.build_any == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -94,23 +238,31 @@ jobs:
       # The mcp production build (tsc -p tsconfig.build.json) over the freshly
       # built skill-schema dist — the exact path that broke at 0.9.14 release.
       - name: Build mcp (production)
+        if: needs.secret-scan.outputs.mcp == 'true'
         run: pnpm -F @trusty-squire/mcp build
       # Discovery pages must exist in the initial HTML. A Next production build
       # exercises static params, metadata routes, JSON-LD, sitemap, llms files,
       # and the Open Graph image instead of relying on no-emit typechecking.
       - name: Build web (production)
+        if: needs.secret-scan.outputs.web == 'true'
         run: pnpm -F @trusty-squire/web build
       # The live active registry is the eligibility source for service content.
       # Fail closed when a service disappears, appears, or changes skill ID so a
       # stale public catalog cannot merge unnoticed.
       - name: Verify service catalog against active registry
+        if: needs.secret-scan.outputs.web == 'true'
         run: pnpm seo:verify-services
 
   test:
+    needs: secret-scan
+    if: >-
+      github.event_name == 'pull_request' &&
+      needs.secret-scan.outputs.test_any == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Test release verifier failure handling
+        if: needs.secret-scan.outputs.shell_tests == 'true'
         run: bash scripts/__tests__/verify-install.test.sh
       - uses: pnpm/action-setup@v4
         with:
@@ -121,11 +273,13 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - name: Install Chromium for browser-backed MCP tests
+        if: needs.secret-scan.outputs.mcp == 'true'
         run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
       # Registry's Prisma client must be generated before its tests. NOT vault
       # (apps/api owns an isolated client; vault's src/tests don't import one)
       # and NOT api (its tests use the in-memory store fallback).
       - name: Prisma generate (registry)
+        if: needs.secret-scan.outputs.registry == 'true'
         run: pnpm --filter '@trusty-squire/registry' prisma:generate
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
@@ -133,16 +287,34 @@ jobs:
       # (registry + vault were historically excluded; the registry "prisma
       # drift" failures are resolved — both are green and now run here.)
       - name: Test (green packages)
+        env:
+          RUN_API: ${{ needs.secret-scan.outputs.api }}
+          RUN_MCP: ${{ needs.secret-scan.outputs.mcp }}
+          RUN_REGISTRY: ${{ needs.secret-scan.outputs.registry }}
+          RUN_SCHEMA: ${{ needs.secret-scan.outputs.schema }}
+          RUN_VAULT: ${{ needs.secret-scan.outputs.vault }}
+          RUN_WEB: ${{ needs.secret-scan.outputs.web }}
         run: |
           set -euo pipefail
-          PKGS=(
-            "@trusty-squire/mcp"
-            "@trusty-squire/api"
-            "@trusty-squire/skill-schema"
-            "@trusty-squire/registry"
-            "@trusty-squire/vault"
-            "@trusty-squire/web"
-          )
+          PKGS=()
+          if [[ "$RUN_MCP" == "true" ]]; then
+            PKGS+=("@trusty-squire/mcp")
+          fi
+          if [[ "$RUN_API" == "true" ]]; then
+            PKGS+=("@trusty-squire/api")
+          fi
+          if [[ "$RUN_SCHEMA" == "true" ]]; then
+            PKGS+=("@trusty-squire/skill-schema")
+          fi
+          if [[ "$RUN_REGISTRY" == "true" ]]; then
+            PKGS+=("@trusty-squire/registry")
+          fi
+          if [[ "$RUN_VAULT" == "true" ]]; then
+            PKGS+=("@trusty-squire/vault")
+          fi
+          if [[ "$RUN_WEB" == "true" ]]; then
+            PKGS+=("@trusty-squire/web")
+          fi
           for p in "${PKGS[@]}"; do
             echo "::group::$p"
             pnpm --filter "$p" test
