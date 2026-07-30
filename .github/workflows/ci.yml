@@ -108,6 +108,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test release verifier failure handling
+        run: bash scripts/__tests__/verify-install.test.sh
       - uses: pnpm/action-setup@v4
         with:
           version: 8.15.0
