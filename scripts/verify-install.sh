@@ -116,26 +116,43 @@ else
   echo "STEP 5: Tarball grep ... SKIPPED (no sentinel provided)"
 fi
 
-# STEP 6: End-to-end clean install
+# STEP 6: End-to-end clean install. Registry edge caches can briefly serve the
+# previous dist-tag after the authoritative checks above have converged.
 echo -n "STEP 6: Clean tmpdir install (npm install $PKG@$TAG) ... "
-INSTALL_DIR=$(mktemp -d)
-trap "rm -rf $INSTALL_DIR" EXIT
+INSTALL_DIR=""
+INSTALLED_VERSION=""
+INSTALL_ATTEMPTS=6
 
-(
-  cd "$INSTALL_DIR"
-  npm init -y >/dev/null 2>&1
-  npm install --no-audit --no-fund "$PKG@$TAG" >/dev/null 2>&1
-  
-  # Read installed version (handle scoped packages correctly)
-  PKG_DIR="./node_modules/$PKG"
-  INSTALLED_VERSION=$(node -p "require('$PKG_DIR/package.json').version" 2>/dev/null || echo "")
-  if [[ "$INSTALLED_VERSION" != "$EXPECTED_VERSION" ]]; then
-    echo "FAIL: Installed version=$INSTALLED_VERSION, expected $EXPECTED_VERSION"
-    exit 1
+for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt++)); do
+  INSTALLED_VERSION=""
+  INSTALL_DIR=$(mktemp -d)
+  trap 'rm -rf "$INSTALL_DIR"' EXIT
+
+  if (
+    cd "$INSTALL_DIR"
+    npm init -y >/dev/null 2>&1
+    npm install --no-audit --no-fund "$PKG@$TAG" >/dev/null 2>&1
+  ); then
+    PKG_DIR="$INSTALL_DIR/node_modules/$PKG"
+    INSTALLED_VERSION=$(node -p "require('$PKG_DIR/package.json').version" 2>/dev/null || echo "")
+    if [[ "$INSTALLED_VERSION" == "$EXPECTED_VERSION" ]]; then
+      break
+    fi
   fi
-)
 
-if [[ $? -ne 0 ]]; then
+  rm -rf "$INSTALL_DIR"
+  trap - EXIT
+  INSTALL_DIR=""
+
+  if [[ $attempt -lt $INSTALL_ATTEMPTS ]]; then
+    echo
+    echo -n "  Attempt $attempt installed '${INSTALLED_VERSION:-nothing}'; retrying in 5s ... "
+    sleep 5
+  fi
+done
+
+if [[ "$INSTALLED_VERSION" != "$EXPECTED_VERSION" || -z "$INSTALL_DIR" ]]; then
+  echo "FAIL: Installed version=${INSTALLED_VERSION:-nothing}, expected $EXPECTED_VERSION after $INSTALL_ATTEMPTS attempts"
   exit 1
 fi
 echo "OK"
