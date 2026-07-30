@@ -26,4 +26,16 @@ if [[ "$OUTPUT" != *"credential-shaped value(s) found"* ]]; then
   exit 1
 fi
 
+printf 're_authentication_required_for_account\n' >"$FIXTURE"
+
+set +e
+OUTPUT=$(bash "$ROOT_DIR/tools/secret-scan.sh" "$FIXTURE" 2>&1)
+STATUS=$?
+set -e
+
+if [[ $STATUS -ne 0 ]]; then
+  echo "Expected an ordinary re_ identifier to be accepted"
+  exit 1
+fi
+
 echo "secret-scan Resend key handling: OK"
