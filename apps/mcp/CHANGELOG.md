@@ -1,6 +1,6 @@
 # Changelog — @trusty-squire/mcp
 
-## Unreleased
+## 1.1.6 (2026-07-29)
 
 - **Install completion now preserves the full onboarding flow.** Normal
   onboarding keeps its temporary browser/noVNC session open until the user
