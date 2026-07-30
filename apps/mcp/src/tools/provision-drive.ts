@@ -148,12 +148,36 @@ const startSchema = z.object({
   require_live_identity: z.boolean().optional(),
 });
 
+const OBSERVE_DELTA_CONTRACT =
+  "Compact observations carry their elements in `el_table`: a TAB-delimited table whose FIRST line is the " +
+  "header (tab-joined column names, a subset of ref,label,tag,role,type,value_len,checked,href,testId," +
+  "topmost,occluded_by, always starting ref,label,tag) and each following line is ONE element (tab-joined " +
+  "cells in header order). An empty cell = that field is absent for that element; value_len is a number, " +
+  "checked/topmost are true/false; a tab, newline, carriage-return or backslash inside a cell is " +
+  "backslash-escaped (\\t \\n \\r \\\\). el_table is absent when the emit has no element rows. " +
+  "The stable refs remain reusable across observes. " +
+  "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
+  "element map and rebuild it from this el_table (or from snapshot_file — the table may omit collapsed " +
+  "chrome links, which the file keeps); a delta:false with NO snapshot_file already has the complete, " +
+  "uncollapsed set in el_table (a persistence-fallback response) — reset from it directly. " +
+  "Only when delta:true, el_table lists ONLY the changed elements: upsert them by ref, delete refs listed " +
+  "in removed, and retain the remaining elements counted by unchanged. text_unchanged:true means reuse the " +
+  "prior text because text is empty. snapshot_file points to the complete current snapshot (all elements, " +
+  "with path). An empty delta (no el_table) means nothing changed, not an empty page. " +
+  'detail:"full" instead returns the legacy `elements` JSON array (every field), never el_table. ' +
+  "If a control you can see in `text`/the screenshot has NO row in el_table (a bare unlabeled clickable " +
+  'div — e.g. some SPA "Add To Cart" buttons), it has no ref: click it with operate_act click/js_click ' +
+  'target=`text="…"` or `css=…` (see operate_act). `click` respects actionability and throws if an overlay ' +
+  "intercepts; dismiss the overlay or deliberately use `js_click`, which directly dispatches through a " +
+  "transparent overlay. ";
+
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
     "Begin an interactive provisioning session: opens a scoped browser on the " +
-    "user's machine at service_url and returns {session_id, url, text, screen, " +
-    "accessibility, elements}. " +
+    "user's machine at service_url and returns the initial compact observation " +
+    "{session_id, url, text, el_table, delta, snapshot_file}. " +
+    OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup with " +
     "operate_act, re-read with operate_observe, and call operate_extract " +
     "when you reach the credentials. Always operate_finish when done. The " +
@@ -190,9 +214,9 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
 
 const observeSchema = z.object({
   session_id: z.string().min(1),
-  // Payload verbosity. Default "compact" (text + actionable elements, ~50%
-  // smaller). Pass "full" for the legacy screen+accessibility+full-field payload
-  // on a genuinely ambiguous step.
+  // Payload verbosity. Default "compact" (stable-ref element/text deltas plus a
+  // complete snapshot pointer). Pass "full" for the legacy
+  // screen+accessibility+full-field payload on a genuinely ambiguous step.
   detail: z.enum(["compact", "full"]).optional(),
 });
 
@@ -200,12 +224,14 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
     "Re-read the current page of a provisioning session. DEFAULT is a COMPACT " +
-    "payload: {url, text, elements} where each element has a fresh `ref` (pass as " +
-    "operate_act.target) plus label/role/href/path/value_len — empty fields and " +
-    "the redundant screen/accessibility trees are omitted (~50% smaller). Pass " +
-    "detail:\"full\" for the legacy screen+accessibility+full-field payload on a " +
-    "genuinely ambiguous step. Refs are scoped to the latest observation; stale " +
-    "refs fail loudly, so re-observe and retry with the new ref.",
+    "payload whose elements ride in `el_table` (a tab-delimited table; each row's " +
+    "stable `ref` is the operate_act.target) with compact label/role/href/value_len " +
+    "columns; path is retained only in snapshot_file, " +
+    "and redundant screen/accessibility trees are omitted. " +
+    OBSERVE_DELTA_CONTRACT +
+    "Pass " +
+    'detail:"full" for the legacy screen+accessibility+full-field payload on a ' +
+    "genuinely ambiguous step.",
   inputSchema: observeSchema,
   jsonInputSchema: {
     type: "object",
@@ -223,11 +249,24 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
 const actSchema = z.object({
   session_id: z.string().min(1),
   kind: z.enum([
-    "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
-    "allow_host", "type_secret", "scroll", "upload",
+    "click",
+    "js_click",
+    "type",
+    "select",
+    "set_phone_country",
+    "goto",
+    "press",
+    "oauth_click",
+    "oauth_settle",
+    "allow_host",
+    "type_secret",
+    "scroll",
+    "upload",
   ]),
   target: z.string().min(1).max(200).optional(),
   text: z.string().max(4096).optional(),
+  // set_phone_country supports phone-local native country <select> controls.
+  country: z.string().min(1).max(60).optional(),
   // upload: absolute path to a LOCAL file to attach to `target` (the upload
   // button/menu-item, or the file <input>).
   path: z.string().min(1).max(4096).optional(),
@@ -262,6 +301,10 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
       return { kind: "oauth_click", target: need(args.target, "target") };
     case "type":
       return { kind: "type", target: need(args.target, "target"), text: args.text ?? "" };
+    case "select":
+      return { kind: "select", target: need(args.target, "target"), text: need(args.text, "text") };
+    case "set_phone_country":
+      return { kind: "set_phone_country", country: need(args.country, "country") };
     case "goto":
       return { kind: "goto", url: need(args.url, "url") };
     case "press":
@@ -271,9 +314,16 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     case "allow_host":
       return { kind: "allow_host", host: need(args.host, "host") };
     case "type_secret":
-      return { kind: "type_secret", slot: need(args.slot, "slot"), target: need(args.target, "target") };
+      return {
+        kind: "type_secret",
+        slot: need(args.slot, "slot"),
+        target: need(args.target, "target"),
+      };
     case "scroll":
-      return { kind: "scroll", ...(args.direction !== undefined ? { direction: args.direction } : {}) };
+      return {
+        kind: "scroll",
+        ...(args.direction !== undefined ? { direction: args.direction } : {}),
+      };
     case "upload":
       return { kind: "upload", target: need(args.target, "target"), path: need(args.path, "path") };
   }
@@ -283,7 +333,27 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   name: "operate_act",
   description:
     "Take one action in a provisioning session, then return the resulting " +
-    "observation. kinds: click (target=element ref, preferably elements[].ref), type (target + text), " +
+    "observation. kinds: click (target=element ref, preferably an el_table row's ref), type (target + text), " +
+    "" +
+    "TARGET FALLBACK (clicking only) — when a control you can SEE (in the " +
+    "observation text or screenshot) has NO ref in el_table (a bare click-handler " +
+    '<div> with no role/label, e.g. a SPA "Add To Cart"), pass target as a locator ' +
+    'instead of a ref: `text="Add To Cart"` (a CLICKABLE element whose visible ' +
+    "text matches, case-insensitive, hidden descendants ignored, open shadow roots " +
+    "pierced) or `css=<selector>` (a raw CSS selector). Only for click / js_click " +
+    "(a form field to type into has a ref — use it). Resolved against the LIVE " +
+    "page, not el_table, so it reaches controls the inventory never emitted. It " +
+    "refuses an ambiguous match (returns the candidate texts — narrow with an " +
+    "exact text= or a css= selector). `click` is actionability-checked and throws " +
+    "if an overlay intercepts; dismiss the overlay or deliberately use `js_click`, " +
+    "the explicit direct DOM dispatch that fires through a transparent overlay. " +
+    "Prefer a real ref when one exists; reach for " +
+    "text=/css= only when none does. " +
+    "select (target + text — pick an option in a native <select> or custom listbox " +
+    "by its visible text, e.g. a country/state dropdown that `type` can't drive), " +
+    "set_phone_country (country — set the dial-code country on a phone field's " +
+    "native <select>, including react-phone-number-input's hidden country select; " +
+    "other phone widget families are not yet supported and throw; no target needed), " +
     "goto (url — domain-scoped), press (key, e.g. Enter), oauth_click (target — " +
     "use for 'Continue with Google/GitHub' so the popup is adopted), " +
     "oauth_settle (return to the product page after the OAuth handshake), " +
@@ -297,11 +367,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "button/menu-item (or the file <input>), path is an absolute local file " +
     "path. The bot sets the file via the browser's file chooser, so no OS dialog " +
     "is driven and no API credential is needed — it uses the session you're " +
-    "already signed into). If a " +
-    "target ref is stale, call operate_observe and retry with a fresh ref. " +
-    "detail (default \"compact\") controls the returned payload: \"none\" skips it " +
+    "already signed into). Stable target refs remain reusable while their element " +
+    "exists; if a ref appears in removed or no longer resolves, re-observe before retrying. " +
+    'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
-    "\"full\" returns the legacy screen+accessibility payload.",
+    '"full" returns the legacy screen+accessibility payload. ' +
+    OBSERVE_DELTA_CONTRACT,
   inputSchema: actSchema,
   jsonInputSchema: {
     type: "object",
@@ -311,12 +382,24 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       kind: {
         type: "string",
         enum: [
-          "click", "js_click", "type", "goto", "press", "oauth_click", "oauth_settle",
-          "allow_host", "type_secret", "scroll", "upload",
+          "click",
+          "js_click",
+          "type",
+          "select",
+          "set_phone_country",
+          "goto",
+          "press",
+          "oauth_click",
+          "oauth_settle",
+          "allow_host",
+          "type_secret",
+          "scroll",
+          "upload",
         ],
       },
       target: { type: "string" },
       text: { type: "string" },
+      country: { type: "string" },
       path: { type: "string" },
       url: { type: "string" },
       key: { type: "string" },
@@ -389,7 +472,9 @@ async function persistExtracted(
     service: store.service,
     ...(store.label !== undefined ? { label: store.label } : {}),
     ...storeInput,
-    ...(store.env_var_suggestion !== undefined ? { env_var_suggestion: store.env_var_suggestion } : {}),
+    ...(store.env_var_suggestion !== undefined
+      ? { env_var_suggestion: store.env_var_suggestion }
+      : {}),
     ...(store.type !== undefined ? { type: store.type } : { type: "api_key" }),
     ...(store.auth_shape !== undefined ? { auth_shape: store.auth_shape } : {}),
     ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
@@ -411,17 +496,12 @@ async function persistExtracted(
  * stored extraction must never spread that object back into the MCP response:
  * the host/model receives only non-secret extraction and vault metadata.
  */
-export function storedExtractResult(
-  extracted: ExtractResult,
-  stored: StoredCredentialMetadata,
-) {
+export function storedExtractResult(extracted: ExtractResult, stored: StoredCredentialMetadata) {
   return {
     session_id: extracted.session_id,
     url: extracted.url,
     candidate_count: extracted.candidate_count,
-    ...(extracted.blocked_reason !== undefined
-      ? { blocked_reason: extracted.blocked_reason }
-      : {}),
+    ...(extracted.blocked_reason !== undefined ? { blocked_reason: extracted.blocked_reason } : {}),
     stored_credential: stored,
   };
 }
@@ -454,7 +534,7 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
     "(do not treat the empty result as a real key) — drive an interactive login " +
     "or hand back to the user. Call when you have navigated to the keys page. " +
     "With `into_slot`, a still-masked value is refused (reveal it first); pass " +
-    "`secret_label` (e.g. \"client secret\") to pick the right one when the page " +
+    '`secret_label` (e.g. "client secret") to pick the right one when the page ' +
     "shows several credentials.",
   inputSchema: extractSchema,
   jsonInputSchema: {
@@ -494,7 +574,10 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
       const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
       const candidates = Object.entries(values).filter(
         ([k, v]) =>
-          !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !isMaskedDisplay(v),
+          !k.endsWith("_truncated") &&
+          typeof v === "string" &&
+          v.length >= 8 &&
+          !isMaskedDisplay(v),
       );
       // When the page shows several credentials (Google's client ID + secret),
       // a secret_label picks the right one by field name; otherwise take the
@@ -523,7 +606,9 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
         candidate_count: extracted.candidate_count,
         sealed: true,
         slot: handle,
-        ...(extracted.blocked_reason !== undefined ? { blocked_reason: extracted.blocked_reason } : {}),
+        ...(extracted.blocked_reason !== undefined
+          ? { blocked_reason: extracted.blocked_reason }
+          : {}),
       };
     }
 
@@ -647,7 +732,12 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
     "operate_extract's store), for signups/key-provisioning. kind='result' " +
     "reports a `summary` (+ optional `data` map) for any other task — a design " +
     "review's findings, extracted data, or 'task done' (put confirmed:true in " +
-    "data). Use operate_finish instead to abort without an outcome.",
+    "data). Use operate_finish instead to abort without an outcome. For a soft " +
+    "no-match with kind='result' (for example, no exact or authentic item in " +
+    "stock), first relay the closest candidates and why they were rejected, then " +
+    "let the user choose a substitute, broader search, or another site before " +
+    "finishing. Hard blockers such as anti-bot, CAPTCHA, 3-D Secure, or unsupported " +
+    "payment should still be surfaced to the user immediately rather than worked around.",
   inputSchema: finishTaskSchema,
   jsonInputSchema: {
     type: "object",
@@ -702,7 +792,10 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
     // anti-false-green gate) against the live session BEFORE closing, then close.
     const verified =
       args.verify_recipe !== undefined
-        ? await verifyPostcondition(args.session_id, (await readRecipe(args.verify_recipe)).postcondition)
+        ? await verifyPostcondition(
+            args.session_id,
+            (await readRecipe(args.verify_recipe)).postcondition,
+          )
         : undefined;
     emitProvisionMeasurement(
       args.session_id,
@@ -888,7 +981,11 @@ export const provisionPrepareLoginTool: Tool<z.infer<typeof prepareLoginSchema>>
       args.password_slot ?? "password",
       generatePassword(args.password_length ?? 24),
     );
-    return { session_id: args.session_id, slots: { login, password }, email_preview: login.preview };
+    return {
+      session_id: args.session_id,
+      slots: { login, password },
+      email_preview: login.preview,
+    };
   },
 };
 

@@ -2,9 +2,8 @@
 //  #1 — `connect` must not short-circuit on a present-but-EXPIRED agent
 //       token (agent sessions have a 24h absolute cap). agentTokenStillValid
 //       probes the server; only an auth rejection counts as invalid.
-//  #3 — the confirm browser / headless noVNC tunnel must tear down when
-//       an already-provisioned account redirects to /vault, not only on
-//       the explicit /install/done. isClaimTerminalUrl encodes that.
+//  #3 — the confirm browser / headless noVNC tunnel must stay open until
+//       explicit Finish during normal onboarding.
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -13,7 +12,6 @@ import {
   agentTokenStillValid,
   claimHeartbeatMessage,
   decideProvisioned,
-  isClaimTerminalUrl,
   shouldCompleteInstallClaim,
 } from "../install/cli.js";
 import type { SessionData } from "../session.js";
@@ -104,25 +102,6 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
   });
 });
 
-describe("isClaimTerminalUrl (fix #3: noVNC teardown)", () => {
-  it("matches the explicit Finish target", () => {
-    expect(isClaimTerminalUrl("https://trustysquire.ai/install/done")).toBe(true);
-    expect(isClaimTerminalUrl("https://trustysquire.ai/install/done?x=1")).toBe(true);
-  });
-
-  it("matches /vault — the redirect an already-provisioned account lands on", () => {
-    expect(isClaimTerminalUrl("https://trustysquire.ai/vault")).toBe(true);
-    expect(isClaimTerminalUrl("https://trustysquire.ai/vault/approvals")).toBe(true);
-    expect(isClaimTerminalUrl("https://trustysquire.ai/agents")).toBe(true);
-  });
-
-  it("does NOT match the confirm/login pages still mid-flow", () => {
-    expect(isClaimTerminalUrl("https://trustysquire.ai/install?token=abc")).toBe(false);
-    expect(isClaimTerminalUrl("https://trustysquire.ai/login?next=/vault")).toBe(false);
-    expect(isClaimTerminalUrl("https://accounts.google.com/o/oauth2/v2/auth")).toBe(false);
-  });
-});
-
 describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
   it("completes force-relogin once the provider session has seeded", () => {
     expect(
@@ -130,7 +109,6 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
         true, // claimed
         true, // completeOnClaim (force-relogin)
         true, // sessionSeeded
-        "https://trustysquire.ai/install?token=abc",
       ),
     ).toBe(true);
   });
@@ -144,68 +122,51 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
         true, // claimed
         true, // completeOnClaim
         false, // sessionSeeded — sign-in still in flight
-        "https://trustysquire.ai/install?token=abc",
       ),
     ).toBe(false);
   });
 
-  it("completes force-relogin via a terminal page even if the seed check missed", () => {
+  it("does not let Finish override the requested provider seed", () => {
     expect(
       shouldCompleteInstallClaim(
         true,
         true,
         false, // not seeded…
-        "https://trustysquire.ai/install/done", // …but Finish reached
+        true, // …and Finish cannot substitute for it
       ),
-    ).toBe(true);
+    ).toBe(false);
+    expect(shouldCompleteInstallClaim(true, true, false, true)).toBe(false);
   });
 
   it("keeps first-time onboarding open for the explicit Finish step", () => {
-    expect(
-      shouldCompleteInstallClaim(
-        true,
-        false,
-        false,
-        "https://trustysquire.ai/install?token=abc",
-      ),
-    ).toBe(false);
+    expect(shouldCompleteInstallClaim(true, false, false)).toBe(false);
   });
 
-  it("keeps first-time onboarding open until its primary page is available", () => {
-    expect(shouldCompleteInstallClaim(true, false, false, undefined)).toBe(
-      false,
-    );
+  it("completes first-time onboarding only after explicit Finish", () => {
+    expect(shouldCompleteInstallClaim(true, false, false, true)).toBe(true);
   });
 
-  it("completes first-time onboarding after Finish reaches a terminal page", () => {
-    expect(
-      shouldCompleteInstallClaim(
-        true,
-        false,
-        false,
-        "https://trustysquire.ai/install/done",
-      ),
-    ).toBe(true);
+  it("keeps plain onboarding open through optional GitHub until explicit Finish", () => {
+    // Step 1: Google claimed the install and seeded its provider cookie. This
+    // used to close noVNC before the user could complete optional GitHub.
+    expect(shouldCompleteInstallClaim(true, false, true, false)).toBe(false);
+    // Step 2: another provider cookie landing still is not wizard completion.
+    expect(shouldCompleteInstallClaim(true, false, true, false)).toBe(false);
+    // Only the per-run loopback signal fired by Finish is terminal.
+    expect(shouldCompleteInstallClaim(true, false, true, true)).toBe(true);
   });
 
-  it("completes plain-login onboarding on claimed+seeded when there is no URL to watch", () => {
-    // Plain connect browser (no CDP) has no browser URL. Normal onboarding
-    // (completeOnClaim=false) then keys off claimed AND the provider session
-    // seeding, since the /install/done URL signal is unavailable.
-    expect(shouldCompleteInstallClaim(true, false, true, undefined)).toBe(true);
-    // Still waits while the session hasn't seeded yet.
-    expect(shouldCompleteInstallClaim(true, false, false, undefined)).toBe(false);
+  it("does not substitute provider cookies when callback storage is unavailable", () => {
+    expect(shouldCompleteInstallClaim(true, false, true, false)).toBe(false);
+  });
+
+  it("does not accept an explicit Finish signal before the account claim", () => {
+    expect(shouldCompleteInstallClaim(false, false, true, true)).toBe(false);
+    expect(shouldCompleteInstallClaim(true, false, false)).toBe(false);
   });
 
   it("never completes before the account claim succeeds", () => {
-    expect(
-      shouldCompleteInstallClaim(
-        false,
-        true,
-        true,
-        "https://trustysquire.ai/install/done",
-      ),
-    ).toBe(false);
+    expect(shouldCompleteInstallClaim(false, true, true, true)).toBe(false);
   });
 
   it("is wired to the parsed --force-relogin flag in connect", () => {
@@ -214,10 +175,11 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
       "utf8",
     );
     expect(cliSource).toMatch(/completeOnClaim:\s*args\.forceRelogin/);
-    // Plain-login mode: the connect claim browser has no CDP context, so the
-    // seed check reads the provider session off the on-disk cookie store and
-    // completion passes an undefined browser URL (keying off claimed+seeded).
-    expect(cliSource).toMatch(/profileHasProviderCookies\(profileDir,/);
+    expect(cliSource).toMatch(/completionProvider:\s*args\.forceReloginProvider\s*\?\?\s*"google"/);
+    expect(cliSource).toMatch(
+      /profileHasProviderCookies\(profileDir,\s*options\.completionProvider\)/,
+    );
+    expect(cliSource).toMatch(/wizardCompleted/);
   });
 });
 

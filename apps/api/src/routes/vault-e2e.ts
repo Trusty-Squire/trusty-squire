@@ -1,10 +1,32 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import type { ApiDeps } from "../services/deps.js";
+import {
+  notifyVaultAuditAfterCommit,
+  recordVaultAuditAfterPersist,
+} from "../services/vault-notify.js";
 
 const e2eBody = z.object({
   label: z.string().min(1).max(256),
   blob: z.string().min(1).max(8192),
+  // Display-only card metadata. Never a full PAN — brand + last 4 digits
+  // only; the full number stays inside the passkey-sealed `blob`. `brand`
+  // is a network name (Visa, Mastercard, Amex, …) and must contain NO
+  // digits, so a PAN can never be smuggled into it. `last4` is exactly 4
+  // digits.
+  brand: z
+    .string()
+    .regex(/^[A-Za-z][A-Za-z \-]{0,31}$/)
+    .optional(),
+  last4: z
+    .string()
+    .regex(/^\d{4}$/)
+    .optional(),
+});
+
+const labelBody = z.object({
+  label: z.string().min(1).max(256),
 });
 
 const paymentAuditBody = z.object({
@@ -46,11 +68,38 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
       reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
       return;
     }
-    const id = await opts.deps.e2eCredentialStore.create(
-      auth.account_id,
-      parsed.data.label,
-      parsed.data.blob,
-    );
+    const metadata = { brand: parsed.data.brand ?? null, last4: parsed.data.last4 ?? null };
+    const eventForId = (id: string) =>
+      ({
+        account_id: auth.account_id,
+        type: VAULT_AUDIT_TYPES.cardStored,
+        payload: {
+          reference: `card://${id}`,
+          requester: "user",
+          label: parsed.data.label,
+          ...(parsed.data.brand !== undefined ? { brand: parsed.data.brand } : {}),
+          ...(parsed.data.last4 !== undefined ? { last4: parsed.data.last4 } : {}),
+        },
+      }) as const;
+    let id: string;
+    if (opts.deps.e2eCredentialStore.createWithAudit !== undefined) {
+      id = await opts.deps.e2eCredentialStore.createWithAudit(
+        auth.account_id,
+        parsed.data.label,
+        parsed.data.blob,
+        metadata,
+        eventForId,
+      );
+      notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, eventForId(id));
+    } else {
+      id = await opts.deps.e2eCredentialStore.create(
+        auth.account_id,
+        parsed.data.label,
+        parsed.data.blob,
+        metadata,
+      );
+      await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, eventForId(id), req.log);
+    }
     return reply.code(201).send({ id });
   });
 
@@ -60,10 +109,36 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
       records.map((record) => ({
         id: record.id,
         label: record.label,
+        brand: record.brand,
+        last4: record.last4,
         createdAt: record.createdAt.toISOString(),
       })),
     );
   });
+
+  fastify.patch<{ Params: { id: string } }>(
+    "/v1/vault/e2e/:id/label",
+    { preHandler: opts.requireWeb },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "web") return;
+      const parsed = labelBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const updated = await opts.deps.e2eCredentialStore.updateLabelForAccount(
+        req.params.id,
+        auth.account_id,
+        parsed.data.label,
+      );
+      if (!updated) {
+        reply.code(404).send({ error: "credential_not_found" });
+        return;
+      }
+      return reply.code(200).send({ id: req.params.id, label: parsed.data.label });
+    },
+  );
 
   fastify.get<{ Params: { id: string } }>(
     "/v1/vault/e2e/:id",
@@ -77,10 +152,16 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         reply.code(404).send({ error: "credential_not_found" });
         return;
       }
+      // Detail = display metadata + the sealed blob. The blob is opaque
+      // ciphertext to the server (PAN/CVV live only inside it, readable
+      // solely by the owner's passkey-derived key) — so a CVV can never
+      // appear as a response field here, on any route, for any caller.
       return reply.code(200).send({
         id: record.id,
         label: record.label,
         blob: record.blob,
+        brand: record.brand,
+        last4: record.last4,
         createdAt: record.createdAt.toISOString(),
       });
     },
@@ -92,13 +173,39 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
     async (req, reply) => {
       const auth = req.auth!;
       if (auth.kind !== "web") return;
-      const deleted = await opts.deps.e2eCredentialStore.deleteForAccount(
+      // Read the display metadata before the row is gone — the audit event
+      // names the card by label + last4.
+      const record = await opts.deps.e2eCredentialStore.getByIdForAccount(
         req.params.id,
         auth.account_id,
       );
+      const auditEvent = {
+        account_id: auth.account_id,
+        type: VAULT_AUDIT_TYPES.cardDeleted,
+        payload: {
+          reference: `card://${req.params.id}`,
+          requester: "user",
+          ...(record !== null ? { label: record.label } : {}),
+          ...(record?.brand != null ? { brand: record.brand } : {}),
+          ...(record?.last4 != null ? { last4: record.last4 } : {}),
+        },
+      } as const;
+      const usesAtomicAudit = opts.deps.e2eCredentialStore.deleteForAccountWithAudit !== undefined;
+      const deleted = usesAtomicAudit
+        ? await opts.deps.e2eCredentialStore.deleteForAccountWithAudit!(
+            req.params.id,
+            auth.account_id,
+            auditEvent,
+          )
+        : await opts.deps.e2eCredentialStore.deleteForAccount(req.params.id, auth.account_id);
       if (!deleted) {
         reply.code(404).send({ error: "credential_not_found" });
         return;
+      }
+      if (usesAtomicAudit) {
+        notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, auditEvent);
+      } else {
+        await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, auditEvent, req.log);
       }
       return reply.code(204).send();
     },
@@ -115,7 +222,32 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
         return;
       }
-      const id = await opts.deps.paymentAuditStore.create(auth.account_id, parsed.data);
+      const eventForId = (id: string) =>
+        ({
+          account_id: auth.account_id,
+          type: VAULT_AUDIT_TYPES.paymentExecuted,
+          payload: {
+            reference: `pay://${id}`,
+            requester: "agent",
+            merchant: parsed.data.merchant,
+            amount_cents: parsed.data.amountCents,
+            currency: parsed.data.currency,
+            last4: parsed.data.last4,
+            payment_status: parsed.data.status,
+          },
+        }) as const;
+      let id: string;
+      if (opts.deps.paymentAuditStore.createWithVaultAudit !== undefined) {
+        id = await opts.deps.paymentAuditStore.createWithVaultAudit(
+          auth.account_id,
+          parsed.data,
+          eventForId,
+        );
+        notifyVaultAuditAfterCommit(opts.deps.vaultAuditStore, eventForId(id));
+      } else {
+        id = await opts.deps.paymentAuditStore.create(auth.account_id, parsed.data);
+        await recordVaultAuditAfterPersist(opts.deps.vaultAuditStore, eventForId(id), req.log);
+      }
       return reply.code(201).send({ id });
     },
   );

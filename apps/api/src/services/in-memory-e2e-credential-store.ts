@@ -1,10 +1,13 @@
 import { ulid } from "ulid";
+import type { VaultAuditEventInput } from "@trusty-squire/vault";
 
 export interface E2ECredentialRecord {
   id: string;
   accountId: string;
   label: string;
   blob: string;
+  brand: string | null;
+  last4: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -12,15 +15,40 @@ export interface E2ECredentialRecord {
 export interface E2ECredentialSummary {
   id: string;
   label: string;
+  brand: string | null;
+  last4: string | null;
   createdAt: Date;
 }
 
+export interface E2ECredentialCardMetadata {
+  brand: string | null;
+  last4: string | null;
+}
+
 export interface E2ECredentialStore {
-  create(accountId: string, label: string, blob: string): Promise<string>;
+  create(
+    accountId: string,
+    label: string,
+    blob: string,
+    metadata?: E2ECredentialCardMetadata,
+  ): Promise<string>;
+  createWithAudit?(
+    accountId: string,
+    label: string,
+    blob: string,
+    metadata: E2ECredentialCardMetadata,
+    eventForId: (id: string) => VaultAuditEventInput,
+  ): Promise<string>;
   listByAccount(accountId: string): Promise<E2ECredentialSummary[]>;
   exportAll(accountId: string): Promise<E2ECredentialRecord[]>;
   getByIdForAccount(id: string, accountId: string): Promise<E2ECredentialRecord | null>;
+  updateLabelForAccount(id: string, accountId: string, label: string): Promise<boolean>;
   deleteForAccount(id: string, accountId: string): Promise<boolean>;
+  deleteForAccountWithAudit?(
+    id: string,
+    accountId: string,
+    event: VaultAuditEventInput,
+  ): Promise<boolean>;
 }
 
 export class InMemoryE2ECredentialStore implements E2ECredentialStore {
@@ -31,13 +59,20 @@ export class InMemoryE2ECredentialStore implements E2ECredentialStore {
     this.now = now ?? (() => new Date());
   }
 
-  async create(accountId: string, label: string, blob: string): Promise<string> {
+  async create(
+    accountId: string,
+    label: string,
+    blob: string,
+    metadata?: E2ECredentialCardMetadata,
+  ): Promise<string> {
     const at = this.now();
     const record: E2ECredentialRecord = {
       id: ulid(),
       accountId,
       label,
       blob,
+      brand: metadata?.brand ?? null,
+      last4: metadata?.last4 ?? null,
       createdAt: at,
       updatedAt: at,
     };
@@ -53,7 +88,7 @@ export class InMemoryE2ECredentialStore implements E2ECredentialStore {
         if (createdAtOrder !== 0) return createdAtOrder;
         return a.id === b.id ? 0 : a.id < b.id ? 1 : -1;
       })
-      .map(({ id, label, createdAt }) => ({ id, label, createdAt }));
+      .map(({ id, label, brand, last4, createdAt }) => ({ id, label, brand, last4, createdAt }));
   }
 
   async exportAll(accountId: string): Promise<E2ECredentialRecord[]> {
@@ -70,6 +105,18 @@ export class InMemoryE2ECredentialStore implements E2ECredentialStore {
   async getByIdForAccount(id: string, accountId: string): Promise<E2ECredentialRecord | null> {
     const record = this.records.get(id);
     return record === undefined || record.accountId !== accountId ? null : { ...record };
+  }
+
+  hasForAccount(id: string, accountId: string): boolean {
+    return this.records.get(id)?.accountId === accountId;
+  }
+
+  async updateLabelForAccount(id: string, accountId: string, label: string): Promise<boolean> {
+    const record = this.records.get(id);
+    if (record === undefined || record.accountId !== accountId) return false;
+    record.label = label;
+    record.updatedAt = this.now();
+    return true;
   }
 
   async deleteForAccount(id: string, accountId: string): Promise<boolean> {

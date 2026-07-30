@@ -21,6 +21,9 @@ export interface AccountRecord {
   current_period_end: Date | null;
   // Scheduled cancellation date (cancel-at-period-end); null = not cancelling.
   cancel_at: Date | null;
+  // Telegram chat linked via /v1/telegram/link + the bot's /start deep
+  // link. null = not linked.
+  telegram_chat_id: string | null;
 }
 
 // The subset of billing fields the Stripe webhook updates. `subscription_status`
@@ -44,6 +47,9 @@ export interface AccountStore {
   // writes the new billing state.
   findAccountByStripeCustomerId(customerId: string): Promise<AccountRecord | null>;
   setSubscription(accountId: string, patch: SubscriptionPatch): Promise<void>;
+  // Telegram linking — the webhook sets this once the /start deep link
+  // is consumed. Idempotent: setting the same id again is a no-op re-set.
+  setTelegramChatId(accountId: string, chatId: string): Promise<void>;
   // Irreversibly delete the account identity. In Postgres this cascades to
   // OAuth identities and web/agent sessions (FK onDelete: Cascade).
   // Idempotent — deleting a missing account is a no-op.
@@ -71,6 +77,7 @@ export class InMemoryAccountStore implements AccountStore {
       subscription_id: null,
       current_period_end: null,
       cancel_at: null,
+      telegram_chat_id: null,
     };
     this.accounts.set(acc.id, acc);
     this.accountsByEmail.set(email.toLowerCase(), acc.id);
@@ -104,6 +111,12 @@ export class InMemoryAccountStore implements AccountStore {
     if (patch.subscription_id !== undefined) acc.subscription_id = patch.subscription_id;
     if (patch.current_period_end !== undefined) acc.current_period_end = patch.current_period_end;
     if (patch.cancel_at !== undefined) acc.cancel_at = patch.cancel_at;
+  }
+
+  async setTelegramChatId(accountId: string, chatId: string): Promise<void> {
+    const acc = this.accounts.get(accountId);
+    if (acc === undefined) return;
+    acc.telegram_chat_id = chatId;
   }
 
   async deleteAccount(accountId: string): Promise<void> {

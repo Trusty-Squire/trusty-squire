@@ -113,7 +113,8 @@ export interface PaymentApproval {
   amount_cents: number;
   currency: string;
   nonce: string;
-  card_ref: string;
+  // null for a card-less JIT approval until the add-card ceremony binds one.
+  card_ref: string | null;
   operator_pubkey: string;
   jws: string | null;
   sealed_card: string | null;
@@ -142,9 +143,14 @@ export class ApiClient {
     checkout_origin: string;
     amount_cents: number;
     currency: string;
-    card_ref: string;
+    // Absent = card-less JIT approval; the card is bound later via
+    // POST /v1/pay/approvals/:id/bind-card. JSON.stringify drops the key when
+    // it is undefined, so the server sees no card_ref.
+    card_ref?: string;
     operator_pubkey: string;
-  }): Promise<{ id: string; nonce: string; expires_at: string }> {
+    item: string;
+    reason: string;
+  }): Promise<{ id: string; nonce: string; agent: string; expires_at: string }> {
     return this.post("/v1/pay/approvals", input);
   }
 
@@ -159,6 +165,13 @@ export class ApiClient {
   async listPaymentCards(): Promise<Array<{ id: string; label: string }>> {
     const records = await this.get<Array<{ id: string; label: string }>>("/v1/vault/e2e");
     return records.map(({ id, label }) => ({ id, label }));
+  }
+
+  async notifyThreeDs(approvalId: string): Promise<{ sent: boolean }> {
+    // Empty object, NOT undefined: post() always sends Content-Type: application/json,
+    // and an empty body with that header trips Fastify's FST_ERR_CTP_EMPTY_JSON_BODY (400).
+    // The route ignores the body, so {} satisfies the JSON parser harmlessly.
+    return this.post(`/v1/pay/approvals/${encodeURIComponent(approvalId)}/notify-3ds`, {});
   }
 
   async auditPayment(input: {

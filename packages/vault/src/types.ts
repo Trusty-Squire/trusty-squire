@@ -67,10 +67,7 @@ export interface CredentialStore {
   // Every credential the account ever held, soft-deleted included —
   // the complete-history read for GDPR export. Newest first.
   listByAccountIncludingDeleted(accountId: string): Promise<CredentialRecord[]>;
-  findByIdForAccount(
-    id: string,
-    accountId: string,
-  ): Promise<CredentialRecord | null>;
+  findByIdForAccount(id: string, accountId: string): Promise<CredentialRecord | null>;
   // Lookups that ignore deleted_at — for the undelete/restore path.
   findByIdForAccountIncludingDeleted(
     id: string,
@@ -118,6 +115,21 @@ export interface VaultAuditPayload {
   // its duplicates were merged into. Set together by the one-time
   // dedup-credentials migration so the collapse is auditable + reversible.
   collapsed_into?: string;
+  // Payment-card + payment forensics (card_* / payment_executed events).
+  // Display metadata only — `last4` is exactly the four digits the E2E
+  // card row stores for display; a full PAN or CVV never reaches an
+  // audit payload (the server can't read them out of the sealed blob).
+  brand?: string;
+  last4?: string;
+  merchant?: string;
+  amount_cents?: number;
+  currency?: string;
+  // Free-form processor status ("approved" / "declined" / …) — distinct
+  // from `outcome`, whose union is the vault's own retrieval outcomes.
+  payment_status?: string;
+  // Egress-grant lifecycle (grant_minted / grant_revoked events).
+  grant_id?: string;
+  revoke_attempt_nonce?: string;
 }
 
 export const VAULT_AUDIT_TYPES = {
@@ -141,6 +153,18 @@ export const VAULT_AUDIT_TYPES = {
   // payload is re-encrypted to merge the field; distinct from `rotated`
   // (full replace) so an additive edit is queryable on its own.
   fieldAdded: "vault.credential_field_added",
+  // Payment-card lifecycle (the E2E wallet). The payload carries only
+  // display metadata (label/brand/last4) — the sealed blob is opaque to
+  // the server, so nothing sensitive can land here by construction.
+  cardStored: "vault.card_stored",
+  cardDeleted: "vault.card_deleted",
+  // A payment executed with a stored card (operate_pay's audit report).
+  // Merchant + amount + last4 only — never a PAN.
+  paymentExecuted: "vault.payment_executed",
+  // Egress-grant lifecycle — a standing token that lets a deployed app
+  // spend the referenced credential through the injecting proxy.
+  grantMinted: "vault.grant_minted",
+  grantRevoked: "vault.grant_revoked",
 } as const;
 export type VaultAuditType = (typeof VAULT_AUDIT_TYPES)[keyof typeof VAULT_AUDIT_TYPES];
 

@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { AppShell } from "../../components/AppShell";
 import { Modal } from "../../components/Modal";
-import { apiDelete } from "../../lib/api";
+import { ApiError, apiDelete, apiGet, apiPost } from "../../lib/api";
 
 export default function SettingsPage() {
   return (
@@ -20,8 +21,102 @@ export default function SettingsPage() {
           </Link>
         </div>
       </div>
+      <TelegramSection />
       <DangerZone />
     </AppShell>
+  );
+}
+
+// Poll cadence while waiting for the user to tap /start in Telegram after
+// opening the deep link — light enough to not matter, fast enough to feel live.
+const TG_POLL_INTERVAL_MS = 3000;
+const TG_POLL_TIMEOUT_MS = 30000;
+
+// Payment approvals and vault lifecycle alerts via Telegram. Same
+// hairline-ruled section pattern as the danger zone, one row.
+function TelegramSection() {
+  const router = useRouter();
+  const [connected, setConnected] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  const checkStatus = useCallback(async (): Promise<boolean> => {
+    const res = await apiGet<{ connected: boolean }>("/v1/telegram/status");
+    setConnected(res.connected);
+    return res.connected;
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        await checkStatus();
+      } catch (err) {
+        if (cancelled) return;
+        if (err instanceof ApiError && err.status === 401) {
+          router.replace("/login?next=/vault/settings");
+          return;
+        }
+        setError(err instanceof Error ? err.message : "Failed to load Telegram status.");
+      }
+    })();
+    return () => {
+      cancelled = true;
+      clearTimeout(pollTimer.current);
+    };
+  }, [checkStatus, router]);
+
+  const connect = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await apiPost<{ url: string }>("/v1/telegram/link");
+      window.open(res.url, "_blank");
+
+      const startedAt = Date.now();
+      const poll = async (): Promise<void> => {
+        try {
+          const isConnected = await checkStatus();
+          if (isConnected || Date.now() - startedAt >= TG_POLL_TIMEOUT_MS) return;
+          pollTimer.current = setTimeout(() => void poll(), TG_POLL_INTERVAL_MS);
+        } catch {
+          // Transient poll failure — the initial load already surfaced auth
+          // errors; just stop polling silently.
+        }
+      };
+      pollTimer.current = setTimeout(() => void poll(), TG_POLL_INTERVAL_MS);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        router.replace("/login?next=/vault/settings");
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Something went wrong. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }, [checkStatus, router]);
+
+  return (
+    <section className="danger-zone">
+      <div className="dz-head">Notifications</div>
+      <div className="dz-row">
+        <div>
+          <div className="dz-title">Telegram</div>
+          <div className="dz-sub">
+            {connected === true
+              ? "Telegram connected ✓"
+              : "Get payment approvals and vault alerts — new keys, rotations, deletions, card changes — pushed to your phone via Telegram."}
+          </div>
+          {error !== null && <div className="dz-sub">{error}</div>}
+        </div>
+        {connected === false && (
+          <button className="dz-btn" type="button" onClick={connect} disabled={busy}>
+            {busy ? "Opening…" : "Connect Telegram"}
+          </button>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -37,7 +132,9 @@ function DangerZone() {
       <div className="dz-row">
         <div>
           <div className="dz-title">Export my data</div>
-          <div className="dz-sub">All credential metadata + the full activity log. No secret values.</div>
+          <div className="dz-sub">
+            All credential metadata + the full activity log. No secret values.
+          </div>
         </div>
         {/* A plain link: the endpoint sets content-disposition: attachment,
             so the browser downloads rather than navigates. */}
@@ -48,7 +145,10 @@ function DangerZone() {
       <div className="dz-row">
         <div>
           <div className="dz-title">Delete my account</div>
-          <div className="dz-sub">Permanently delete your account, every credential, and the activity log, and sign you out. Cannot be undone.</div>
+          <div className="dz-sub">
+            Permanently delete your account, every credential, and the activity log, and sign you
+            out. Cannot be undone.
+          </div>
         </div>
         <button className="dz-btn danger" type="button" onClick={() => setModal("delete")}>
           Delete account

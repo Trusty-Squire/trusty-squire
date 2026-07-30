@@ -22,6 +22,7 @@ import { registerOAuthRoute } from "./routes/oauth.js";
 import { registerVaultRoute } from "./routes/vault.js";
 import { registerVaultE2ERoute } from "./routes/vault-e2e.js";
 import { registerPayApprovalsRoute } from "./routes/pay-approvals.js";
+import { registerTelegramRoute } from "./routes/telegram.js";
 import { registerVaultAccessRoute } from "./routes/vault-access.js";
 import { registerEgressRoutes } from "./routes/egress.js";
 import type { EgressGrantStore } from "./services/egress-grant.js";
@@ -282,6 +283,11 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<FastifyIn
     deps,
     requireWeb: auth.requireWeb,
     requireAgent: auth.requireAgent,
+    requireAny: auth.requireAny,
+  });
+  await fastify.register(registerTelegramRoute, {
+    deps,
+    requireWeb: auth.requireWeb,
     requireAny: auth.requireAny,
   });
   await fastify.register(registerVaultAccessRoute, {

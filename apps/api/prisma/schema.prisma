@@ -166,12 +166,17 @@ model Account {
   // so a cancellation is visibly registered while access continues to term.
   cancel_at           DateTime?
 
+  // Telegram chat the account linked via /v1/telegram/link + the bot's
+  // /start deep link. null = not linked; payment-approval push is skipped.
+  telegram_chat_id String? @map("telegram_chat_id")
+
   oauth_identities     OAuthIdentity[]
   web_sessions         WebSession[]
   agent_sessions       AgentSession[]
   e2e_credentials      E2ECredential[]
   payment_audit_events PaymentAuditEvent[]
   payment_approvals    PendingPaymentApproval[]
+  telegram_link_tokens TelegramLinkToken[]
 
   @@index([stripe_customer_id])
 }
@@ -295,6 +300,12 @@ model E2ECredential {
   account_id String   @db.VarChar(26)
   label      String
   blob       String
+  // Plaintext display-only metadata for payment cards. The server cannot
+  // derive these from the passkey-sealed blob, so they are written at store
+  // time. Never a full PAN — brand + last 4 digits only. Nullable: legacy
+  // cards (and non-card credentials) render label-only.
+  brand      String?
+  last4      String?
   created_at DateTime @default(now())
   updated_at DateTime @updatedAt
 
@@ -329,8 +340,13 @@ model PendingPaymentApproval {
   amount_cents    Int
   currency        String
   nonce           String
-  card_ref        String
+  // Nullable: a JIT add-card approval is minted card-less and bound to a
+  // stored card later via POST /v1/pay/approvals/:id/bind-card (write-once).
+  card_ref        String?
   operator_pubkey String
+  item            String   @default("")
+  reason          String   @default("")
+  agent           String   @default("")
   status          String
   jws             String?
   sealed_card     String?
@@ -341,6 +357,20 @@ model PendingPaymentApproval {
 
   @@index([account_id])
   @@map("pending_payment_approvals")
+}
+
+// Telegram account-linking token. Minted by POST /v1/telegram/link,
+// consumed by the webhook when the user taps the bot's /start deep link.
+// 15-minute TTL, single-use. Mirrors PairingToken's shape.
+model TelegramLinkToken {
+  token      String   @id
+  account_id String   @db.VarChar(26)
+  created_at DateTime @default(now())
+  expires_at DateTime
+
+  account Account @relation(fields: [account_id], references: [id], onDelete: Cascade)
+
+  @@index([account_id])
 }
 
 // Egress grant — a standing, revocable token a deployed workload holds to

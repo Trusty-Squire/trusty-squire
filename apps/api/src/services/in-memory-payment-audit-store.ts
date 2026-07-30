@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import type { VaultAuditEventInput } from "@trusty-squire/vault";
 
 export interface PaymentAuditInput {
   merchant: string;
@@ -28,6 +29,11 @@ export interface PaymentAuditListOptions {
 
 export interface PaymentAuditStore {
   create(accountId: string, input: PaymentAuditInput): Promise<string>;
+  createWithVaultAudit?(
+    accountId: string,
+    input: PaymentAuditInput,
+    eventForId: (id: string) => VaultAuditEventInput,
+  ): Promise<string>;
   listByAccount(accountId: string, opts?: PaymentAuditListOptions): Promise<PaymentAuditRecord[]>;
   exportAll(accountId: string): Promise<PaymentAuditRecord[]>;
 }

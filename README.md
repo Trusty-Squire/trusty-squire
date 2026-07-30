@@ -37,12 +37,38 @@ Other useful asks:
 - “Pay this checkout with my saved work card and ask me to approve it on my phone.”
 - “That app grant leaked. Revoke it without rotating the provider key.”
 
-For supported card checkouts, add a card in the Vault once from a passkey-capable
-device. Trusty Squire encrypts it in that browser with a passkey-derived key.
+For supported card checkouts, save a card in the Vault from a passkey-capable
+device or let your first `operate_pay` approval link collect one just in time.
+When no card is specified, Trusty Squire uses the only saved card, starts the
+add-card ceremony if none exists, or asks you to choose when several exist. The
+new card is encrypted in your browser with a passkey-derived key and bound to
+that purchase before approval; if you add it but do not approve in time, it
+remains saved for a faster retry.
+
+Recognized Visa, Mastercard, Amex, Discover, Diners Club, and JCB cards show
+their network mark in the Vault while keeping the full bank/network label. Open
+a card row to see its masked number; `reveal` runs the passkey ceremony in your
+browser before showing the number, name, expiry, and billing address. The CVV is
+never shown, even after reveal. The Activity page also records card additions
+and removals, payments, and app-grant changes without storing a PAN or CVV.
+
 `operate_pay` reads the checkout total, sends you a short-lived approval link,
-and submits only after you approve the exact purchase. If the issuer requires
-3-D Secure, Trusty Squire hands the challenge back to you instead of automating
-it.
+and submits only after you approve the exact purchase. The approval page shows
+the venue, item, amount, requesting agent, and reason; one passkey prompt both
+signs that approval and releases the card to the checkout operator. A first-time
+payment is refused if the merchant, checkout origin, amount, or currency changes
+between approval and submission. If the issuer requires 3-D Secure, Trusty
+Squire notifies your linked Telegram chat and waits 180 seconds by default for
+you to complete the challenge in the open checkout instead of automating it. It
+reports a visible success or decline and hands an unresolved challenge back on
+timeout. `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to
+`0` on `operate_pay` to skip the notification and waiting and receive the
+handoff immediately.
+
+Connect Telegram under Vault Settings to receive secret-free alerts for
+credential, card, payment, and app-grant lifecycle changes. Routine credential
+retrieval and proxy access stay in Activity instead of sending a push for every
+request.
 
 ## Install
 
@@ -66,7 +92,7 @@ Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline
 2. Trusty Squire opens a real browser and works through the service flow one step at a time. It can use a Google or GitHub session that you explicitly connect.
 3. When the site reveals an API key or client secret, Trusty Squire captures it into the vault without returning the raw value through its credential tools.
 4. The agent can make an authenticated request through Trusty Squire or create a host-scoped, rate-limited app grant.
-5. Successful flows can become signed registry skills, so later runs can replay verified steps instead of rediscovering every click.
+5. Eligible successful flows can become signed registry skills, so later runs can replay verified steps instead of rediscovering every click.
 
 If a site requires phone verification, a hard CAPTCHA, an unsupported payment,
 3-D Secure, or another human decision, the run stops and tells you. It does not
@@ -113,9 +139,10 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
   payment, your phone releases the card only to that checkout operator after
-  you approve the merchant, origin, amount, currency, and one-time request.
-  Trusty Squire's API and the coding-agent model never receive plaintext card
-  data.
+  you approve the exact details shown on the approval page. Trusty Squire's API
+  and the coding-agent model never receive plaintext PAN or CVV. See the
+  [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)
+  for the signed mandate's binding contract.
 - Browser screenshots and diagnostics can contain whatever a website visibly rendered. Treat diagnostic artifacts as sensitive and do not ask an agent to re-observe a page after a secret is shown.
 - Trusty Squire does not bypass phone verification, hard CAPTCHAs, 3-D Secure,
   payment authorization, or decisions that belong to a person. It stops for
@@ -128,12 +155,17 @@ for the system and data flows.
 
 ## MCP tools
 
-- `operate_start`, `operate_observe`, and `operate_act` open a website, inspect the current state, and perform one browser action at a time.
+- `operate_start`, `operate_observe`, and `operate_act` open a website, inspect
+  the current state, and perform one browser action at a time. If a visible
+  control has no observed ref, `click` and `js_click` can target its live
+  `text=…` or `css=…` locator; that one-off fallback is not replayable.
 - `operate_extract` captures a generated credential into a sealed slot or the vault.
-- `operate_remember` and `operate_use` save and replay successful website flows.
+- `operate_remember` and `operate_use` save and replay eligible successful flows
+  built from observed refs.
 - `list_payment_cards` returns saved-card labels and opaque references;
-  `operate_pay` requests phone approval, fills a checkout, and hands off 3-D
-  Secure.
+  `operate_pay` can use a selected card, the only card on file, or a just-in-time
+  add-card approval, then fills the checkout and waits for the user to resolve
+  3-D Secure before handing back unresolved challenges.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.
@@ -165,7 +197,6 @@ trusty-squire/
 │   └── web/        Marketing site and vault UI
 └── packages/
     ├── vault/        Encrypted credential storage and audit log
-    ├── inbox/        Email verification code and link extraction
     └── skill-schema/ Shared schema for replayable website skills
 ```
 

@@ -92,6 +92,14 @@ jobs:
         # Explicitly list mcp's workspace deps (keep in sync with apps/mcp/package.json).
         run: pnpm --filter '@trusty-squire/skill-schema' build
 
+      # The mcp suite includes real-Chromium tests (locator-fallback,
+      # phone-country-widget, widget-corpus-eval) that chromium.launch() at
+      # collect time — without a browser install the verify gate fails with
+      # "Executable doesn't exist" and publish is skipped (bit 1.1.5; the rc
+      # publish only survived on a warm runner cache). Mirrors ci.yml.
+      - name: Install Chromium for browser-backed MCP tests
+        run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
+
       # NOTE: lint + typecheck are intentionally NOT gating this pipeline yet.
       # The repo has pre-existing lint/typecheck debt (see ci.yml signal).
       # Tests are the real safety net — once cleanup lands, re-enable the

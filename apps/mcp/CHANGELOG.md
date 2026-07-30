@@ -1,5 +1,27 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.6-rc.1 (2026-07-29)
+
+- **Install completion now preserves the full onboarding flow.** Normal
+  onboarding keeps its temporary browser/noVNC session open until the user
+  selects **Finish**. Forced relogin requires the requested provider's cookie
+  after verifying that provider's old cookies were cleared; a terminal page or
+  another provider's cookie cannot close the browser early.
+- **The curl installer resolves the published package explicitly.** It invokes
+  `@trusty-squire/mcp@latest`, preventing an npm workspace package in the
+  caller's current directory from shadowing the registry release.
+
+## 1.1.5 (2026-07-28)
+
+- **Promotes 1.1.5-rc.1 to stable.** Two new `operate_act` kinds — `select`
+  (native `<select>` + custom listbox/combobox by option text, throws loudly on
+  zero matches) and `set_phone_country` (native-select-governed dial-code
+  pickers, e.g. react-phone-number-input; unsupported custom families throw
+  instead of false-succeeding) — plus the widget-corpus eval harness replaying
+  ~15k real captured DOMs against the live primitives, and the web↔mcp
+  payment-mandate canonical-form seam test. See the rc.1 entry below for the
+  full writeups. (#408, #409, #411; known gap #410 tracked.)
+
 ## 1.1.5-rc.1 (2026-07-28)
 
 - **Two new `operate_act` kinds for dropdown-style controls** (#409). `select`
@@ -26,6 +48,38 @@
   count) when no corpus is present, so CI stays green.
 - Cross-package payment-mandate canonical-form seam test (#408) guarding the
   web↔mcp 10-field mandate hash agreement.
+
+## 1.1.4 (2026-07-25)
+
+- **Operator: surface-and-ask on a soft no-match instead of closing silently.**
+  `operate_finish_task` now guides the host agent, when a `kind='result'` task
+  ends because no exact/authentic item was found (e.g. a shopping search where the
+  genuine listing wasn't in stock), to first relay the closest candidates and why
+  they were rejected and let the user choose a substitute / broaden the search /
+  try another site — rather than quietly ending the session. Hard blockers
+  (anti-bot, CAPTCHA, 3-D Secure, unsupported payment) still hand off immediately.
+
+## 1.1.3 (2026-07-24)
+
+- **3-D Secure challenges now wait for the user before handing back.**
+  `operate_pay` nudges the user's linked Telegram chat, when configured, and
+  waits for the challenge to resolve to submitted or declined, falling back to
+  the existing `needs_user` handback on timeout. The new
+  `three_ds_wait_seconds` argument defaults to 180 seconds; set it to `0` to
+  skip notification and waiting.
+
+## 1.1.2 (2026-07-24)
+
+- **Payment approval now needs one passkey tap.** `@vouchflow/web` 0.3.1 signs
+  the mandate and derives the card-decryption key in the same WebAuthn ceremony
+  with `signPayload({ prfSalt })`.
+- **Browser passkeys can approve payments at low confidence.** Vouchflow caps
+  web passkeys at low confidence, so assurance instead rests on user presence,
+  a single-use nonce, and the amount, recipient, origin, and item bindings.
+- **Approvals bind and display the complete purchase context.** The signed
+  mandate and approval page carry the item, reason, and requesting agent. The
+  API derives that agent from the authenticated install identity so clients
+  cannot spoof “Requested by.”
 
 ## 1.0.49 (2026-07-21)
 

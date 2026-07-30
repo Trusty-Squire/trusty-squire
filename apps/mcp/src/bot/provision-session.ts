@@ -17,7 +17,14 @@
 //    `finish`/extract path; the vault stays write-only.
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
-import { BrowserController, type InteractiveElement } from "./browser.js";
+import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  BrowserController,
+  type InteractiveElement,
+  type PageTargetSafetySignals,
+} from "./browser.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
@@ -74,9 +81,9 @@ const DEFAULT_AUTH_HOSTS: readonly string[] = [
 ];
 
 export interface ObservedElement {
-  // Fresh action handle for this exact observation generation. Prefer this as
-  // operate_act.target; stale generations fail loudly instead of silently
-  // clicking a recycled DOM node.
+  // Stable action handle for this element identity. Prefer this as
+  // operate_act.target; it remains reusable across observations while the
+  // element exists, and a removed or changed identity fails to resolve.
   ref: string;
   // Human label for display/backcompat. operate_act still accepts labels, but
   // generated refs are safer on pages with repeated labels.
@@ -100,6 +107,7 @@ export interface ObservedElement {
   testId?: string | null;
   // DOM-derived screen context for non-vision host agents. `path` is a compact
   // targetable label such as "dialog:finish-account > button:create-account".
+  // Compact wire payloads omit it; the complete snapshot file retains it.
   path?: string | null;
   // `container` is redundant with `path` (path = "<container> > <kind>:<label>")
   // and is OMITTED in compact mode.
@@ -144,15 +152,61 @@ export interface Observation {
   // Compact relational view of interactive DOM regions. This is intentionally
   // smaller than raw DOM but preserves hierarchy/occlusion that flat text loses.
   screen?: ScreenOutline;
-  // AXI-style planner scan surface. Additive: the rich elements[] inventory
-  // remains the source of truth for actionability/state.
+  // AXI-style planner scan surface. Additive in full mode: the rich `elements`
+  // inventory remains the source of truth for actionability/state.
   accessibility?: AccessibilitySnapshot;
-  elements: ObservedElement[];
-  // Compact-mode bookkeeping so omission is never silent:
-  // the full element count (compact keeps all elements, just lighter), and
-  // whether the page text was capped at the 4000-char limit. Absent in full mode.
+  // FULL-mode element inventory (the legacy escape hatch): one JSON object per
+  // element with every field. In COMPACT mode `elements` is absent and the
+  // element set rides on `el_table` instead (see below).
+  elements?: ObservedElement[];
+  // COMPACT-mode element inventory as a tab-delimited table (docs/DESIGN-observe-
+  // compact.md § Phase 4). The first line is a tab-joined HEADER naming the
+  // columns present in this emit (a subset of ref,label,tag,role,type,value_len,
+  // checked,href,testId,topmost,occluded_by, always starting ref,label,tag);
+  // each following line is ONE element, tab-joined cells in header order. An
+  // empty cell means the field is absent for that element. Tab, newline,
+  // carriage-return and backslash inside a cell are backslash-escaped (\t \n \r
+  // \\). Numeric (value_len) and boolean (checked,topmost) cells are their plain
+  // text form. On a DELTA emit `el_table` carries ONLY the changed elements (same
+  // upsert-by-ref/`removed`/`unchanged` semantics as before); it is ABSENT when
+  // no element changed. On a FULL emit it is the resync set (minus collapsed
+  // chrome links, which stay in snapshot_file). `detail:"full"` uses `elements`
+  // (JSON), never this.
+  el_table?: string;
+  // Compact-mode bookkeeping so omission is never silent: the complete current
+  // element count (including delta/collapsed omissions), and whether page text
+  // was capped at 4000 characters. Absent in full mode.
   elements_total?: number;
   text_truncated?: boolean;
+  // Per-session observe delta (docs/DESIGN-observe-compact.md). On a DELTA emit,
+  // `el_table` carries ONLY the rows whose compact form changed vs the previous
+  // observation; `delta` is true and `unchanged` counts the elements that were
+  // identical and therefore omitted (present in the persisted snapshot_file).
+  // `removed` lists refs that were present last observe and are now gone
+  // (usually empty). On a FULL compact emit `delta` is false and
+  // `unchanged`/`removed` are absent; `el_table` is the resync set but may omit
+  // collapsed chrome links that remain in snapshot_file. If persistence fails,
+  // snapshot_file is absent and `el_table` is instead complete and uncollapsed.
+  // A full snapshot is emitted on the first observe, a URL change, or high churn
+  // (SPA re-render).
+  delta?: boolean;
+  unchanged?: number;
+  removed?: string[];
+  // Set on a DELTA emit when the (normalized, same-cap) page text is identical to
+  // the previous observation's — the `text` field is then emitted EMPTY and the
+  // host reuses the prior text (recoverable in full from snapshot_file).
+  // Corpus-measured: 38% of re-observes have byte-identical text, and the text
+  // blob is a large share of each observe.
+  text_unchanged?: boolean;
+  // FULL compact emit only: count of plain chrome-region <a> links collapsed out
+  // of `el_table` (a site-dependent bonus). The collapsed links stay in
+  // snapshot_file. Buttons/inputs/dismiss controls are never collapsed.
+  chrome_links_collapsed?: number;
+  // Every observe writes the COMPLETE current snapshot (all elements, WITH the
+  // verbose `path` field) to this session-scoped file, so the host can re-expand
+  // the full inventory after ITS own context compacts, or grep for an element the
+  // delta didn't re-show. The delta's safety net — without it, delta is unsafe.
+  snapshot_file?: string;
   // Phase 2 — set to "none" on the minimal ack returned by
   // operate_act{observe:"none"} (action ran; no perception emitted — call
   // operate_observe before the next ref-targeted act).
@@ -183,6 +237,19 @@ export type ProvisionAction =
   // stall). Same target resolution; different dispatch.
   | { kind: "js_click"; target: string }
   | { kind: "type"; target: string; text: string }
+  // Choose an option in a native <select> OR a custom listbox/combobox by its
+  // visible text (fuzzy, case-insensitive substring). `type` cannot drive these
+  // — page.fill throws on a <select> and humanized keystrokes break native
+  // type-ahead — so a country/state/etc. dropdown needs this. Routes to
+  // browser.selectOption, which already handles both the native and the
+  // <li role=option> custom shapes. target = the select/combobox (or its label);
+  // text = the option to match (e.g. "South Korea").
+  | { kind: "select"; target: string; text: string }
+  // Set the country on a phone-number field's dial-code picker. No ref/target
+  // — the bot locates a phone-local native <select>, including
+  // react-phone-number-input's opacity:0 select that inventory drops. Other
+  // widget families are unsupported and throw.
+  | { kind: "set_phone_country"; country: string }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }
   // Route an OAuth-provider button through startOAuth so the popup is adopted
@@ -238,6 +305,13 @@ interface Session {
   // The last extracted elements, kept so resolveTarget can be unit-tested
   // against a snapshot, but act() always RE-extracts first (re-resolution).
   lastElements: InteractiveElement[];
+  // Per-session observe delta baseline: the previous observation's stable-ref →
+  // serialized-compact-element (payload form, so `path` is already EXCLUDED — a
+  // layout-only shift must not read as a change). Each observe diffs the current
+  // compact set against this and emits only what changed. Null until the first
+  // observe. Reset on a URL change so a delta never crosses pages.
+  prevObserve: ObserveDeltaState | null;
+  observeSnapshotFile: string | null;
   // Phase A operator-recipe capture (docs/ARCHITECTURE.md): the
   // ordered, TEXT-targeted action trace of this session, so a successful run can
   // be `remember`ed as a replayable rail. Records visible text + non-secret
@@ -268,6 +342,11 @@ interface Session {
   // gate spend a VAULTED 2Captcha key through the injecting proxy instead of a
   // raw env key. Undefined → the gate falls back to TWOCAPTCHA_API_KEY.
   api?: ApiClient;
+  // Set when a step used the text=/css= locator click fallback. Such a click
+  // resolves off-inventory, so it cannot be synthesized into a portable skill
+  // step — this flag suppresses auto-promotion so no silently-incomplete skill
+  // ships (captureAndPromoteSession).
+  usedLocatorFallback: boolean;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -346,7 +425,25 @@ async function startBrowserBounded(browser: BrowserController, sessionId: string
 const norm = (s: string | null | undefined): string =>
   (s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 
-const PROVISION_REF_RE = /^@?g(\d+):([a-z0-9_-]+)$/i;
+// Element ref = a STABLE-by-default handle: "@e:<identity>_<ordinal>". For a
+// normal control `<identity>` is its generation-independent stableElementId, so
+// the per-session observe delta can leave an unchanged element un-re-emitted and
+// the ref the host already holds keeps resolving. The `@e:` sigil only
+// disambiguates a ref from a free-text label target (a label may legitimately end
+// in "_<digits>"). Staleness is guarded by IDENTITY, not a counter: a ref whose
+// element is now gone finds no match in resolveTarget → returns null → the caller
+// fails loudly ("no element matched") and the host re-observes.
+//
+// The exceptional identity form (issue #399) applies to same-base-identity
+// siblings distinguished ONLY by positional selectors. Those "volatile" members
+// get an identity prefixed with their sibling group's composition FINGERPRINT
+// ("<fp>-<hash>", see volatilePositionalGroups + elementIdentity), so a ref is
+// valid only while that fingerprint matches. A membership-count change re-mints
+// the group and makes every old ref resolve to null, never to a survivor.
+// Size-preserving changes among truly indistinguishable members are the bounded
+// residual documented at volatilePositionalGroups. `<fp>-` stays within the id
+// charset below, so no parsing changes are needed.
+const PROVISION_REF_RE = /^@e:([a-z0-9_-]+)$/i;
 const PROVISION_REF_ID_RE = /^(.+)_(\d+)$/;
 
 // The label a host sees + targets by. Prefer the most human, stable signal.
@@ -368,70 +465,188 @@ function shortHash(s: string): string {
   return createHash("sha256").update(s).digest("base64url").slice(0, 12);
 }
 
+function baseIdentityFields(el: InteractiveElement): string[] {
+  return [
+    el.screenPath ?? "",
+    el.testId ?? "",
+    el.container ?? "",
+    el.role ?? "",
+    el.tag,
+    elementRef(el),
+    el.href ?? "",
+    el.type ?? "",
+  ];
+}
+
 export function stableElementId(el: InteractiveElement): string {
   return shortHash(
     [
-      el.screenPath ?? "",
-      el.testId ?? "",
-      el.container ?? "",
-      el.role ?? "",
-      el.tag,
-      elementRef(el),
-      el.href ?? "",
-      el.type ?? "",
+      ...baseIdentityFields(el),
+      // The element's own selector — a per-element discriminator so two controls
+      // that are otherwise identical (same label/path/role, e.g. sibling "Remove"
+      // buttons in a list) get DISTINCT identities. Without it, a stable ref is a
+      // positional ordinal within a same-hash group: remove the first sibling and
+      // the old `_1` silently retargets the survivor. With a STABLE selector
+      // (id/data-attr) folded in, the removed element's identity is unique, so its
+      // old ref finds no match and resolveTarget returns null (the host
+      // re-observes) — no mis-click.
+      //
+      // Mutable state (`checked`, value length, topmost/occlusion) is deliberately
+      // excluded so fills, toggles, and visibility changes keep the same ref.
+      // A purely POSITIONAL selector (`:nth-of-type`/`:nth-child`/`>> nth=`)
+      // recycles on sibling removal, so this hash alone would let a survivor
+      // slide onto a departed node's identity. Closed one layer up (issue #399):
+      // volatilePositionalGroups fingerprints such sibling groups and
+      // elementIdentity prefixes their refs with that fingerprint, so a group
+      // size change makes every old positional ref resolve to null.
+      el.selector,
     ].join("\u001f"),
   );
 }
 
-export function provisionElementRef(
-  el: InteractiveElement,
-  generation: number,
-  ordinal = 1,
-): string {
-  return `@g${generation}:${stableElementId(el)}_${ordinal}`;
+// The base identity WITHOUT the selector — the grouping key for same-label
+// sibling detection.
+function baseElementKey(el: InteractiveElement): string {
+  return baseIdentityFields(el).join("\u001f");
 }
 
-function parseProvisionRef(
-  target: string,
-): { generation: number; id: string; ordinal: number | null } | null {
+// A selector that pins an element only by its POSITION among siblings
+// (`:nth-of-type`/`:nth-child`, or Playwright's `>> nth=` index). Such selectors
+// RECYCLE: remove an earlier sibling and a later one slides into the vacated
+// position, so the identical selector string then designates a DIFFERENT node.
+// Stable anchors (#id, [data-testid], [name=…]) never recycle this way. Quoted
+// attribute VALUES (incl. backslash-escaped quotes) are blanked first so a stable
+// `[data-key="x:nth-child(1)"]` — the value merely CONTAINS the syntax — is not
+// misread as a positional combinator; only real structural syntax counts.
+const POSITIONAL_SELECTOR_RE = /:nth-of-type\(|:nth-child\(|>>\s*nth=/i;
+const QUOTED_VALUE_RE = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g;
+function isPositionalSelector(selector: string): boolean {
+  return POSITIONAL_SELECTOR_RE.test(selector.replace(QUOTED_VALUE_RE, '""'));
+}
+
+// A "volatile positional group": the ≥2 POSITIONAL members of a same-base-identity
+// group (any stable-anchored siblings in the same base group keep their plain,
+// non-volatile refs). Removing one shifts a survivor's positional selector onto a
+// departed node's identity, so a purely structural ref would silently retarget
+// the survivor (issue #399). Returns each such member mapped to a GROUP
+// FINGERPRINT — a hash of the positional members' stableElementIds in extraction
+// order. elementIdentity prefixes the member's ref with that fingerprint, so the
+// ref is valid ONLY while the positional membership matches.
+//
+// Guarantees (the #399 invariant): after a member is REMOVED (group size N→N-1),
+// the fingerprint changes, so the departed member's old ref appears in `removed`
+// (or a full resync) and resolves to null — never a survivor — including WITHIN a
+// turn (the act path re-extracts, so a mid-turn removal changes the fingerprint
+// and forces a re-observe rather than mis-targeting a shifted sibling). Because
+// the identity is composition-derived (not an observe counter), a static group's
+// refs stay stable across observes (no wasted churn) and a toggled checkbox /
+// filled field keeps its ref (mutable state is excluded from stableElementId).
+//
+// Bounded residual: the fingerprint is built from the members' own
+// position-derived hashes, so a SIZE-PRESERVING shuffle of TRULY INDISTINGUISHABLE
+// members — delete-one-and-insert-one, or a pure reorder, where the members carry
+// ZERO distinguishing signal (identical label/aria/testid/text/screenPath, only
+// the nth differs) — leaves the fingerprint unchanged and is not detected. This
+// is information-theoretically unavoidable for a string-derived identity: such an
+// observation is byte-identical to "nothing changed," so no ref scheme can flag
+// it. Real per-row controls carry a distinguishing signal (row text / aria-label
+// / a data-id), which lands them in DISTINCT base groups (non-volatile) where the
+// #398 stable-selector identity already guards them. Fully closing the residual
+// needs an extractor-stamped per-node id that survives DOM mutation — deferred
+// because stamping every interactive node with a persistent attribute is
+// anti-bot-detectable (a worse regression than the residual it removes).
+function volatilePositionalGroups(
+  elements: readonly InteractiveElement[],
+): Map<InteractiveElement, string> {
+  const groups = new Map<string, InteractiveElement[]>();
+  for (const el of elements) {
+    const key = baseElementKey(el);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, [el]);
+    else group.push(el);
+  }
+  const fingerprintOf = new Map<InteractiveElement, string>();
+  for (const group of groups.values()) {
+    // ≥2 positional siblings sharing a base identity can recycle onto EACH
+    // OTHER; a lone positional member (or any stable-anchored member) cannot.
+    const positional = group.filter((el) => isPositionalSelector(el.selector));
+    if (positional.length < 2) continue;
+    // Extraction-order fingerprint: sensitive to membership-count and selector-
+    // sequence changes, subject to the size-preserving residual above.
+    const fp = shortHash(positional.map((el) => stableElementId(el)).join(""));
+    for (const el of positional) fingerprintOf.set(el, fp);
+  }
+  return fingerprintOf;
+}
+
+// The ref identity of one element. A volatile positional-group member is
+// prefixed with its group fingerprint (`<fp>-<hash>`) so its ref survives only
+// while the group's composition is unchanged; everything else uses its plain,
+// composition-independent stableElementId (byte-identical to the pre-#399 ref).
+function elementIdentity(
+  el: InteractiveElement,
+  fingerprintOf: ReadonlyMap<InteractiveElement, string>,
+): string {
+  const base = stableElementId(el);
+  const fp = fingerprintOf.get(el);
+  return fp === undefined ? base : `${fp}-${base}`;
+}
+
+export function provisionElementRef(el: InteractiveElement, ordinal = 1): string {
+  return `@e:${stableElementId(el)}_${ordinal}`;
+}
+
+function parseProvisionRef(target: string): { id: string; ordinal: number | null } | null {
   const m = target.trim().match(PROVISION_REF_RE);
   if (m === null) return null;
-  const rawId = m[2] as string;
+  const rawId = m[1] as string;
   const idMatch = rawId.match(PROVISION_REF_ID_RE);
   return {
-    generation: Number.parseInt(m[1] as string, 10),
     id: idMatch !== null ? (idMatch[1] as string) : rawId,
     ordinal: idMatch !== null ? Number.parseInt(idMatch[2] as string, 10) : null,
   };
 }
 
+// A locator-form target the host supplies when NO `@e:` ref exists for the
+// control it needs to act on — a bare click-handler <div> the inventory never
+// emitted (no role/label/testid, and past the card-scan cap). Two forms:
+//   text="Add To Cart"  (quotes optional) — clickable element whose text matches
+//   css=#some-id                          — a raw CSS selector
+// Resolved directly against the live page by BrowserController.resolvePageTarget,
+// NOT against the extracted-element inventory (which by definition lacks it).
+export type LocatorTarget = { mode: "text" | "css"; value: string };
+
+export function parseLocatorTarget(target: string): LocatorTarget | null {
+  const m = /^\s*(text|css)\s*=\s*([\s\S]+)$/i.exec(target);
+  if (m === null) return null;
+  const mode = (m[1] as string).toLowerCase() === "css" ? "css" : "text";
+  let value = (m[2] as string).trim();
+  // Strip one matching pair of surrounding quotes so `text="Add To Cart"` and
+  // `text=Add To Cart` are equivalent (the quotes only help the host delimit
+  // trailing whitespace / punctuation).
+  if (value.length >= 2) {
+    const q = value[0];
+    if ((q === '"' || q === "'") && value[value.length - 1] === q) {
+      value = value.slice(1, -1);
+    }
+  }
+  if (value.length === 0) return null;
+  return { mode, value };
+}
+
 export function provisionElementRefs(
   elements: readonly InteractiveElement[],
-  generation: number,
 ): Map<InteractiveElement, string> {
+  const fingerprintOf = volatilePositionalGroups(elements);
   const seen = new Map<string, number>();
   const refs = new Map<InteractiveElement, string>();
   for (const el of elements) {
-    const id = stableElementId(el);
+    const id = elementIdentity(el, fingerprintOf);
     const ordinal = (seen.get(id) ?? 0) + 1;
     seen.set(id, ordinal);
-    refs.set(el, provisionElementRef(el, generation, ordinal));
+    refs.set(el, `@e:${id}_${ordinal}`);
   }
   return refs;
-}
-
-export class StaleProvisionRefError extends Error {
-  readonly code = "stale_ref";
-
-  constructor(
-    readonly refGeneration: number,
-    readonly currentGeneration: number,
-  ) {
-    super(
-      `stale_ref: target is from observation generation ${refGeneration}, ` +
-        `but current generation is ${currentGeneration}. Call operate_observe and retry with a fresh ref.`,
-    );
-  }
 }
 
 export class AmbiguousProvisionTargetError extends Error {
@@ -462,14 +677,26 @@ function elementTargetKeys(el: InteractiveElement): string[] {
 export function resolveTarget(
   elements: readonly InteractiveElement[],
   target: string,
-  currentGeneration?: number,
 ): InteractiveElement | null {
   const parsedRef = parseProvisionRef(target);
   if (parsedRef !== null) {
-    if (currentGeneration !== undefined && parsedRef.generation !== currentGeneration) {
-      throw new StaleProvisionRefError(parsedRef.generation, currentGeneration);
-    }
-    const matches = elements.filter((el) => stableElementId(el) === parsedRef.id);
+    // Staleness guard: a ref whose identity is absent among the LIVE elements
+    // returns null (the caller re-observes). Identity is recomputed here from the
+    // live set, so a volatile positional-group ref carries the group's fingerprint
+    // at mint time; if the live group has a different fingerprint, the stale ref
+    // resolves to null instead of retargeting a survivor (issue #399). This holds
+    // WITHIN a turn too: the act path re-extracts, so a membership-count change
+    // between observe and act changes the fingerprint and forces a re-observe.
+    //
+    // Ordinal caveat (same-hash duplicates): the `_<ordinal>` suffix positionally
+    // disambiguates elements that hash IDENTICALLY (same selector too — NOT the
+    // positional-sibling case, which the fingerprint covers). Mutable state is
+    // intentionally absent from that hash, so members need not have identical
+    // checked/value/visibility state. If one is removed, an ordinal can resolve to
+    // a survivor; the recycled ordinal is not invalidated by `removed`. An ordinal
+    // past the current group size still returns null.
+    const fingerprintOf = volatilePositionalGroups(elements);
+    const matches = elements.filter((el) => elementIdentity(el, fingerprintOf) === parsedRef.id);
     if (parsedRef.ordinal !== null) {
       const match = matches[parsedRef.ordinal - 1];
       return match ?? null;
@@ -894,34 +1121,64 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
   return parts.length > 0 ? parts.join(" ") : undefined;
 }
 
-export function shouldBlockUnsafeProvisionAction(
+function unsafeProvisionBlockReason(
   pageText: string,
-  action: ProvisionAction,
+  safetySignals: PageTargetSafetySignals,
+  target: string | null,
 ): string | null {
-  if (!("target" in action)) return null;
   const appMarkers = authenticatedAppSurfaceMarkers(pageText);
-  if (
-    appMarkers.length > 0 &&
-    isAccountSetupActionTarget(action.target) &&
-    hasAccountSetupOverlay(pageText)
-  ) {
+  if (appMarkers.length > 0 && safetySignals.accountSetup && hasAccountSetupOverlay(pageText)) {
+    if (target === null) {
+      return (
+        "Perception guard: this control looks like an account/setup overlay action, " +
+        "but authenticated app markers are already visible. Do not retry OAuth or " +
+        "repeatedly press this overlay; use app navigation/direct same-origin URLs " +
+        "or complete only the minimal required setup."
+      );
+    }
     return (
-      `Perception guard: "${action.target}" looks like an account/setup overlay action, ` +
+      `Perception guard: "${target}" looks like an account/setup overlay action, ` +
       `but authenticated app markers are already visible (${appMarkers.join(", ")}). ` +
       `Do not retry OAuth or repeatedly press this overlay; use app navigation/direct ` +
       `same-origin URLs or complete only the minimal required setup.`
     );
   }
-  if (
-    isBillingObjectActionTarget(action.target) &&
-    /\b(?:live|production)\s+mode\b/i.test(pageText)
-  ) {
+  if (safetySignals.billingObject && /\b(?:live|production)\s+mode\b/i.test(pageText)) {
+    if (target === null) {
+      return (
+        "Mode safety guard: this control can create or save billing objects, " +
+        "but live/production mode is visible. Switch to the required test/sandbox mode before acting."
+      );
+    }
     return (
-      `Mode safety guard: "${action.target}" can create or save billing objects, ` +
+      `Mode safety guard: "${target}" can create or save billing objects, ` +
       `but live/production mode is visible. Switch to the required test/sandbox mode before acting.`
     );
   }
   return null;
+}
+
+export function shouldBlockUnsafeProvisionSignals(
+  pageText: string,
+  safetySignals: PageTargetSafetySignals,
+): string | null {
+  return unsafeProvisionBlockReason(pageText, safetySignals, null);
+}
+
+export function shouldBlockUnsafeProvisionAction(
+  pageText: string,
+  action: ProvisionAction,
+  options: { redactTarget?: boolean } = {},
+): string | null {
+  if (!("target" in action)) return null;
+  return unsafeProvisionBlockReason(
+    pageText,
+    {
+      accountSetup: isAccountSetupActionTarget(action.target),
+      billingObject: isBillingObjectActionTarget(action.target),
+    },
+    options.redactTarget === true ? null : action.target,
+  );
 }
 
 export function buildScreenOutline(
@@ -1014,12 +1271,11 @@ function presentLabel(el: InteractiveElement, sealed: ReadonlySet<string>): stri
 
 export function buildAccessibilitySnapshot(
   elements: readonly InteractiveElement[],
-  generation: number,
   limit = 12000,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
 ): AccessibilitySnapshot | undefined {
   if (elements.length === 0) return undefined;
-  const refs = provisionElementRefs(elements, generation);
+  const refs = provisionElementRefs(elements);
   const byRegion = new Map<string, InteractiveElement[]>();
   for (const el of elements) {
     const region = el.container ?? "body:root";
@@ -1047,7 +1303,7 @@ export function buildAccessibilitySnapshot(
         el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
       ].filter((v): v is string => v !== null);
       lines.push(
-        `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el, generation)}` +
+        `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el)}` +
           (flags.length > 0 ? ` ${flags.join(" ")}` : ""),
       );
     }
@@ -1249,8 +1505,11 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     secretSlots: new Map(),
     sealedFieldKeys: new Set(),
     lastElements: [],
+    prevObserve: null,
+    observeSnapshotFile: null,
     actionTrace: [],
     captureRounds: [],
+    usedLocatorFallback: false,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -1411,13 +1670,28 @@ export function generatePassword(length = 24): string {
 // Observation verbosity — ONE ordered knob (docs/DESIGN-observe-compact.md), set
 // per call via operate_observe{detail} / operate_act{detail}:
 //   "none"    — bare ack, no perception (operate_act only; for chained fills).
-//   "compact" — text + actionable elements; empty fields omitted, value→value_len,
-//               `container` dropped, no screen/accessibility. The DEFAULT.
+//   "compact" — stable-ref element/text deltas + a complete snapshot pointer;
+//               empty fields omitted, value→value_len, `path`/`container`
+//               dropped from the wire, no screen/accessibility. The DEFAULT.
 //   "full"    — the legacy payload: screen + accessibility + full element fields.
-// Compact is information-equivalent to full (eval + live smoke), ~50% smaller, so
-// it's the default with no global override — the planner escalates to "full" per
-// call on a genuinely ambiguous step.
+// The persisted compact snapshot preserves the complete inventory; see the
+// design doc for reconstruction and measured savings. The planner escalates to
+// "full" per call on a genuinely ambiguous step.
 export type ObserveDetail = "none" | "compact" | "full";
+
+// Type-elision (docs/DESIGN-observe-compact.md § Phase 4). `text` is always the
+// default input type; `button`/`submit` are redundant only when the tag or role
+// already identifies a button. Other types and unmarked input action controls
+// are load-bearing and kept. Applied only to the wire form, never the persisted
+// file.
+const ELIDED_TYPES = new Set(["button", "submit", "text"]);
+
+function shouldElideType(el: InteractiveElement): boolean {
+  const type = (el.type ?? "").toLowerCase();
+  if (!ELIDED_TYPES.has(type)) return false;
+  if (type === "text") return true;
+  return el.tag === "button" || (el.role ?? "").toLowerCase() === "button";
+}
 
 // One element, compacted: ref/label/tag always; every other field omitted when
 // empty. `value`→`value_len` (never the raw value — keeps the sealed-field moat);
@@ -1427,10 +1701,20 @@ export function toCompactElement(
   el: InteractiveElement,
   ref: string,
   sealed: ReadonlySet<string>,
+  // `path` is the single most verbose field and agents act by ref, not path — so
+  // it is DROPPED from the default host payload (78% → 85% of the measured cut).
+  // It is retained ONLY in the persisted snapshot file (includePath=true), which
+  // the host can re-expand or grep. It is also excluded from the delta identity,
+  // so a layout-only path shift never forces a re-emit.
+  includePath = false,
+  // Apply type-elision (Phase 4) to the WIRE form. The persisted file
+  // form keeps full fidelity for re-expansion, so callers that write the file
+  // pass false.
+  elide = false,
 ): ObservedElement {
   const out: ObservedElement = { ref, label: presentLabel(el, sealed), tag: el.tag };
   if (el.role) out.role = el.role;
-  if (el.type) out.type = el.type;
+  if (el.type && !(elide && shouldElideType(el))) out.type = el.type;
   // value_len is a LENGTH signal, not the value — report the REAL character count.
   // presentFieldValue masks a sealed field to "[sealed]" (8 chars), so using its
   // length made a correctly-filled 19-char email read as value_len:8 and misled
@@ -1441,10 +1725,415 @@ export function toCompactElement(
   if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
   if (el.href) out.href = el.href;
   if (el.testId) out.testId = el.testId;
-  if (el.screenPath) out.path = el.screenPath;
+  if (includePath && el.screenPath) out.path = el.screenPath;
   if (el.topmost === false) out.topmost = false;
   if (el.occludedBy) out.occluded_by = el.occludedBy;
   return out;
+}
+
+// Columnar wire encoding (docs/DESIGN-observe-compact.md § Phase 4). The compact
+// `elements` array repeated every field NAME on every element; a tab-delimited
+// table names each column ONCE in a header line, then one terse row per element.
+// Column order is CANONICAL (matches toCompactElement's field order) so a parsed
+// row reconstructs byte-identically. `ref`/`label`/`tag` are always present;
+// other columns appear only when at least one emitted element carries them.
+const ELEMENT_TABLE_COLUMNS = [
+  "ref",
+  "label",
+  "tag",
+  "role",
+  "type",
+  "value_len",
+  "checked",
+  "href",
+  "testId",
+  "topmost",
+  "occluded_by",
+] as const;
+type ElementColumn = (typeof ELEMENT_TABLE_COLUMNS)[number];
+
+// The string cell for one column of one element, or undefined when absent.
+// Booleans/numbers render as plain text; the parser coerces them back.
+function elementCell(e: ObservedElement, col: ElementColumn): string | undefined {
+  switch (col) {
+    case "ref":
+      return e.ref;
+    case "label":
+      return e.label;
+    case "tag":
+      return e.tag;
+    case "role":
+      return e.role ?? undefined;
+    case "type":
+      return e.type ?? undefined;
+    case "value_len":
+      return e.value_len !== undefined ? String(e.value_len) : undefined;
+    case "checked":
+      return e.checked === true ? "true" : e.checked === false ? "false" : undefined;
+    case "href":
+      return e.href ?? undefined;
+    case "testId":
+      return e.testId ?? undefined;
+    case "topmost":
+      return e.topmost === false ? "false" : undefined;
+    case "occluded_by":
+      return e.occluded_by ?? undefined;
+  }
+}
+
+// Escape the only bytes that break the tab/newline framing. Backslash FIRST so
+// the decoder's single pass is unambiguous.
+function escapeCell(v: string): string {
+  return v.replace(/\\/g, "\\\\").replace(/\t/g, "\\t").replace(/\n/g, "\\n").replace(/\r/g, "\\r");
+}
+function unescapeCell(v: string): string {
+  return v.replace(/\\(.)/g, (_m, c: string) =>
+    c === "t" ? "\t" : c === "n" ? "\n" : c === "r" ? "\r" : c,
+  );
+}
+
+// Encode a set of compact elements as the tab table. Returns "" for an empty set
+// (the caller then omits `el_table` — an empty table costs a header for nothing).
+export function encodeElementsTable(els: readonly ObservedElement[]): string {
+  if (els.length === 0) return "";
+  const columns = ELEMENT_TABLE_COLUMNS.filter(
+    (c) =>
+      c === "ref" ||
+      c === "label" ||
+      c === "tag" ||
+      els.some((e) => elementCell(e, c) !== undefined),
+  );
+  const header = columns.join("\t");
+  const rows = els.map((e) => columns.map((c) => escapeCell(elementCell(e, c) ?? "")).join("\t"));
+  return [header, ...rows].join("\n");
+}
+
+// Inverse of encodeElementsTable — reconstruct the compact elements from the wire
+// table. The delta stream's losslessness gate (INV-lossless-resync) round-trips
+// through this, and it documents the EXACT parse the host performs. An empty
+// cell (or a header column absent for a row) means the field is absent; only the
+// three mandatory columns are always assigned.
+export function parseElementsTable(table: string): ObservedElement[] {
+  if (table.length === 0) return [];
+  const lines = table.split("\n");
+  const columns = (lines[0] ?? "").split("\t");
+  const out: ObservedElement[] = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cells = (lines[i] ?? "").split("\t").map(unescapeCell);
+    const e: ObservedElement = { ref: "", label: "", tag: "" };
+    columns.forEach((col, idx) => {
+      const raw = cells[idx] ?? "";
+      if (col === "ref") e.ref = raw;
+      else if (col === "label") e.label = raw;
+      else if (col === "tag") e.tag = raw;
+      else if (raw === "")
+        return; // absent optional field
+      else if (col === "role") e.role = raw;
+      else if (col === "type") e.type = raw;
+      else if (col === "value_len") e.value_len = Number(raw);
+      else if (col === "checked") e.checked = raw === "true";
+      else if (col === "href") e.href = raw;
+      else if (col === "testId") e.testId = raw;
+      else if (col === "topmost") e.topmost = false;
+      else if (col === "occluded_by") e.occluded_by = raw;
+    });
+    out.push(e);
+  }
+  return out;
+}
+
+// The compact wire carries its element set as `el_table` (columnar); an empty set
+// omits the field entirely. FULL mode keeps `elements` (JSON). One helper so both
+// buildCompactObservation branches and the persist-fallback stay consistent.
+function emitElements(
+  els: readonly ObservedElement[],
+  encode: "columnar" | "json",
+): Pick<Observation, "elements" | "el_table"> {
+  if (encode === "json") return { elements: [...els] };
+  const table = encodeElementsTable(els);
+  return table.length > 0 ? { el_table: table } : {};
+}
+
+// Session-scoped observe-snapshot persistence (docs/DESIGN-observe-compact.md).
+// Reuses the best-effort writeFileSync pattern of the corpus dump-hook:
+// a write failure must NEVER break an observe. Rolling one file per session (the
+// latest COMPLETE inventory) — that's what the host wants when it re-expands
+// after a context compaction or greps for an element the delta didn't re-show.
+function observeSnapshotDir(sessionId: string): string {
+  const override = (process.env.TRUSTY_SQUIRE_OBSERVE_DIR ?? "").trim();
+  const parent = override.length > 0 ? override : join(tmpdir(), "trusty-squire-observe");
+  return join(parent, sessionId);
+}
+
+function persistObserveSnapshot(
+  session: Session,
+  generation: number,
+  url: string,
+  text: string,
+  textTruncated: boolean,
+  elements: ObservedElement[],
+): string | null {
+  let temporaryFile: string | null = null;
+  const dir = observeSnapshotDir(session.id);
+  const file = join(dir, `observe-${session.id}.json`);
+  try {
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    chmodSync(dir, 0o700);
+    temporaryFile = join(dir, `.observe-${session.id}-${generation}.tmp`);
+    writeFileSync(
+      temporaryFile,
+      JSON.stringify(
+        {
+          session_id: session.id,
+          generation,
+          url,
+          elements_total: elements.length,
+          text,
+          text_truncated: textTruncated,
+          elements,
+        },
+        null,
+        2,
+      ),
+      { encoding: "utf8", mode: 0o600 },
+    );
+    renameSync(temporaryFile, file);
+    session.observeSnapshotFile = file;
+    return file;
+  } catch {
+    if (temporaryFile !== null) {
+      try {
+        unlinkSync(temporaryFile);
+      } catch {}
+    }
+    for (const staleFile of new Set([session.observeSnapshotFile, file])) {
+      if (staleFile === null) continue;
+      try {
+        unlinkSync(staleFile);
+      } catch {}
+    }
+    session.observeSnapshotFile = null;
+    return null;
+  }
+}
+
+// An actionable control the chrome-link collapse must NEVER drop: any
+// button/input, or an element whose role is button/tab/checkbox/radio/menuitem,
+// or a type=submit. Button-shaped dismiss/consent/gate controls survive by
+// construction even in a chrome region; link-shaped variants are guarded
+// separately by isPlainChromeLink.
+export function isActionableControl(el: InteractiveElement): boolean {
+  const role = (el.role ?? "").toLowerCase();
+  if (
+    role === "button" ||
+    role === "tab" ||
+    role === "checkbox" ||
+    role === "radio" ||
+    role === "menuitem"
+  ) {
+    return true;
+  }
+  if (el.tag === "button" || el.tag === "input") return true;
+  if ((el.type ?? "").toLowerCase() === "submit") return true;
+  return false;
+}
+
+// "Chrome region" per docs/DESIGN-observe-compact.md: the element's path
+// root is a nav/footer/banner/aside-style landmark, OR a `section:` whose name is
+// a known boilerplate block (newsletter/copyright/social/…). Site-dependent
+// (measured 0% on flat DOMs, up to 57% on hoka) — a bonus, never the main win.
+export function isChromeRegionPath(el: InteractiveElement): boolean {
+  const path = el.screenPath ?? el.container ?? "";
+  const root = (path.split(" > ")[0] ?? "").trim();
+  const colon = root.indexOf(":");
+  const role = (colon >= 0 ? root.slice(0, colon) : root).toLowerCase();
+  const name = colon >= 0 ? root.slice(colon + 1).toLowerCase() : "";
+  if (
+    role === "navigation" ||
+    role === "footer" ||
+    role === "contentinfo" ||
+    role === "banner" ||
+    role === "complementary" ||
+    role === "aside"
+  ) {
+    return true;
+  }
+  if (role === "section") {
+    return /newsletter|copyright|trustpilot|accepted-payment|social|footer|shop-the-collection/.test(
+      name,
+    );
+  }
+  return false;
+}
+
+// A label that reads as a dismiss / consent / gate action — the collapse must
+// keep these even when they are shipped as a chrome-region <a>, and even when the
+// consent banner gives them a real fallback URL. Errs toward KEEPING (a false
+// positive keeps a nav link, which is safe; a false negative would drop a
+// dismiss control, which is not) — so it covers the accept/reject vocabulary AND
+// its opposites (decline/agree/allow) and the "preferences/opt out/got it" verbs.
+const DISMISS_CONSENT_LABEL_RE =
+  /close|dismiss|skip|no thanks|accept|reject|decline|agree|allow|cookie|consent|preferences|opt.?out|not now|maybe later|got it/i;
+
+// A PLAIN chrome-region NAVIGATION link — the ONLY thing the collapse removes.
+// Buttons, inputs, and role-controls are never plain links (isActionableControl
+// short-circuits), so they are always kept regardless of region. Beyond that, a
+// link is treated as a NAVIGATION link (collapsible) ONLY when it clearly is one;
+// anything that could be a dismiss/consent control is kept:
+//   - no href, a `#`-fragment href, or a `javascript:` href → an action-link, not
+//     navigation (a "Close banner"/"Manage cookies" anchor) → KEEP.
+//   - inConsentWidget → part of a cookie/consent banner → KEEP.
+//   - label matches a dismiss/consent pattern (close/dismiss/accept/reject/cookie/
+//     …) → KEEP even with a real fallback URL (consent banners often provide one).
+// This closes the "a dismiss control shipped as a bare/consent <a> gets dropped"
+// gap: only true, non-consent navigation links are collapsible.
+export function isPlainChromeLink(el: InteractiveElement): boolean {
+  if (isActionableControl(el)) return false;
+  const isLink = el.tag === "a" || (el.role ?? "").toLowerCase() === "link";
+  if (!isLink) return false;
+  if (!isChromeRegionPath(el)) return false;
+  if (el.inConsentWidget === true) return false;
+  const href = (el.href ?? "").trim();
+  if (href.length === 0 || href.startsWith("#") || href.toLowerCase().startsWith("javascript:")) {
+    return false;
+  }
+  if (DISMISS_CONSENT_LABEL_RE.test(elementRef(el))) return false;
+  return true;
+}
+
+// Fraction of the previous element set that changed (added/changed + removed).
+// Above this an observe emits a FULL snapshot instead of a delta — a big SPA
+// re-render is clearer whole, and a delta that touches most of the page is barely
+// smaller than the full set anyway.
+const OBSERVE_CHURN_FULL_THRESHOLD = 0.6;
+
+// The delta baseline carried between observes: the previous observation's URL,
+// its stable-ref → serialized-compact-element map (payload form, `path`
+// excluded), and its normalized page text (for the text delta).
+export interface ObserveDeltaState {
+  url: string;
+  byRef: Map<string, string>;
+  text: string;
+}
+
+export interface CompactObservationBuild {
+  // The emitted payload. `snapshot_file` is added by the caller after it persists
+  // the complete snapshot (so this pure core stays filesystem-free).
+  observation: Observation;
+  // The COMPLETE compact set (path EXCLUDED) keyed by ref — the reconstruction
+  // ground truth: emitted wire records are a subset on a delta/collapse.
+  fullByRef: Map<string, ObservedElement>;
+  // The COMPLETE snapshot the caller persists to the session file (path INCLUDED).
+  fileElements: ObservedElement[];
+  // The baseline to hand the NEXT observe.
+  nextState: ObserveDeltaState;
+}
+
+// Pure core of the compact/delta observe path — no browser, no filesystem — so
+// the delta invariants (lossless resync, actionable-never-dropped, token budget)
+// are unit-testable over synthetic element sequences. observeSession supplies the
+// live elements/text/url; this decides delta-vs-full, applies the chrome-link
+// collapse, and returns both the emit and the complete ground-truth set.
+export function buildCompactObservation(args: {
+  sessionId: string;
+  url: string;
+  text: string;
+  textTruncated?: boolean;
+  guidance?: string;
+  elements: readonly InteractiveElement[];
+  sealed?: ReadonlySet<string>;
+  prev: ObserveDeltaState | null;
+  // Wire encoding of the emitted element set. Default "columnar" (the tab table).
+  // The eval harness passes "json" to measure the columnar transform's marginal
+  // against the pre-columnar payload; production always uses the default.
+  encode?: "columnar" | "json";
+  // Apply Phase-4 type-elision to the wire element form. Default true; the eval
+  // harness passes false to isolate the type-elision transform's marginal.
+  elide?: boolean;
+}): CompactObservationBuild {
+  const { sessionId, url, text, elements, prev } = args;
+  const sealed = args.sealed ?? new Set<string>();
+  const encode = args.encode ?? "columnar";
+  const elide = args.elide ?? true;
+  const refs = provisionElementRefs(elements);
+  const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
+
+  const fullByRef = new Map<string, ObservedElement>();
+  const serializedByRef = new Map<string, string>();
+  const fileElements: ObservedElement[] = [];
+  for (const el of elements) {
+    const ref = refOf(el);
+    fullByRef.set(ref, toCompactElement(el, ref, sealed, false, elide));
+    serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
+    // The persisted file keeps FULL fidelity (path included, no elision) so a
+    // re-expansion after a host compaction loses nothing.
+    fileElements.push(toCompactElement(el, ref, sealed, true, false));
+  }
+  const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
+
+  const base: Observation = {
+    session_id: sessionId,
+    url,
+    text,
+    ...(args.guidance !== undefined ? { guidance: args.guidance } : {}),
+    elements_total: elements.length,
+    ...(args.textTruncated === true ? { text_truncated: true } : {}),
+  };
+
+  // Delta path: same URL as last observe, and churn under the threshold.
+  if (prev !== null && prev.url === url) {
+    const changed: ObservedElement[] = [];
+    let unchanged = 0;
+    for (const [ref, ser] of serializedByRef) {
+      if (prev.byRef.get(ref) === ser) unchanged += 1;
+      else changed.push(fullByRef.get(ref) as ObservedElement);
+    }
+    const removed = [...prev.byRef.keys()].filter((ref) => !serializedByRef.has(ref));
+    const churn = changed.length + removed.length;
+    if (churn / Math.max(prev.byRef.size, 1) <= OBSERVE_CHURN_FULL_THRESHOLD) {
+      // Text delta: emit the blob empty + a marker when it's byte-identical to
+      // the previous observe (the host reuses the prior text; the full text is in
+      // snapshot_file). Otherwise emit it in full.
+      const textUnchanged = prev.text === text;
+      return {
+        observation: {
+          ...base,
+          ...(textUnchanged ? { text: "", text_unchanged: true } : {}),
+          ...emitElements(changed, encode),
+          delta: true,
+          unchanged,
+          ...(removed.length > 0 ? { removed } : {}),
+        },
+        fullByRef,
+        fileElements,
+        nextState,
+      };
+    }
+  }
+
+  // FULL compact snapshot — first observe / URL change / high churn. Only HERE do
+  // we collapse plain chrome-region links (never a button/input/dismiss control);
+  // the collapsed links stay in the persisted snapshot.
+  const emitted: ObservedElement[] = [];
+  let chromeLinksCollapsed = 0;
+  for (const el of elements) {
+    if (isPlainChromeLink(el)) {
+      chromeLinksCollapsed += 1;
+      continue;
+    }
+    emitted.push(fullByRef.get(refOf(el)) as ObservedElement);
+  }
+  return {
+    observation: {
+      ...base,
+      ...emitElements(emitted, encode),
+      delta: false,
+      ...(chromeLinksCollapsed > 0 ? { chrome_links_collapsed: chromeLinksCollapsed } : {}),
+    },
+    fullByRef,
+    fileElements,
+    nextState,
+  };
 }
 
 async function observeSession(
@@ -1461,35 +2150,87 @@ async function observeSession(
   const normalizedFull = text.replace(/\s+/g, " ").trim();
   const normalizedText = normalizedFull.slice(0, 4000);
   const guidance = provisionPerceptionGuidance(normalizedText);
-  const refs = provisionElementRefs(elements, generation);
-  const refOf = (el: InteractiveElement): string =>
-    refs.get(el) ?? provisionElementRef(el, generation);
+  const url = session.browser.currentUrl();
+  const refs = provisionElementRefs(elements);
+  const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
+  const textTruncated = normalizedFull.length > 4000;
 
-  // Compact (default): text + actionable elements only. No screen/accessibility
-  // (the two re-encodings of the same nodes); empty fields omitted. ~50% smaller.
+  // Compact (default): the delta path, computed by the pure core.
   if (detail !== "full") {
-    return {
-      session_id: session.id,
-      url: session.browser.currentUrl(),
+    const built = buildCompactObservation({
+      sessionId: session.id,
+      url,
       text: normalizedText,
+      textTruncated,
       ...(guidance !== undefined ? { guidance } : {}),
-      elements: elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys)),
-      elements_total: elements.length,
-      ...(normalizedFull.length > 4000 ? { text_truncated: true } : {}),
+      elements,
+      sealed: session.sealedFieldKeys,
+      prev: session.prevObserve,
+    });
+    // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
+    // delta safe: the host re-expands the full inventory from here.
+    const snapshotFile = persistObserveSnapshot(
+      session,
+      generation,
+      url,
+      normalizedText,
+      textTruncated,
+      built.fileElements,
+    );
+    if (snapshotFile === null) {
+      // Persistence FAILED, so no recovery file exists. A delta (which omits
+      // unchanged elements) or a collapsed full snapshot (which omits chrome
+      // links) would be UNRECOVERABLE — the host would have no way to re-expand.
+      // Fall back to a FULL, UNCOLLAPSED response (every element inline). And
+      // INVALIDATE the delta baseline (null, not "leave it at the last good
+      // state"): the host's reconstruction is now THIS full set, so the next
+      // observe must emit a fresh FULL snapshot too, never a delta computed
+      // against the last-persisted baseline — that stale-baseline delta would
+      // desync a host that has already moved to this full state (a
+      // remove-then-restore-across-a-failed-persist sequence would silently drop
+      // the restored element otherwise).
+      session.prevObserve = null;
+      return {
+        session_id: session.id,
+        url,
+        text: normalizedText,
+        ...(guidance !== undefined ? { guidance } : {}),
+        // Still a COMPACT response — carry the (uncollapsed) set as the columnar
+        // table so the host parses it the same way as any other compact observe.
+        ...emitElements([...built.fullByRef.values()], "columnar"),
+        delta: false,
+        elements_total: elements.length,
+        ...(textTruncated ? { text_truncated: true } : {}),
+      };
+    }
+    session.prevObserve = built.nextState;
+    return {
+      ...built.observation,
+      snapshot_file: snapshotFile,
     };
   }
 
-  // Full path — byte-identical to the pre-compact payload.
-  const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
-  const accessibility = buildAccessibilitySnapshot(
-    elements,
+  // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
+  // pre-delta full payload: every element with every field, screen, and
+  // accessibility, never a delta and never a chrome collapse.
+  session.prevObserve = null;
+  // Refresh the persisted snapshot as a SIDE EFFECT so a re-expansion after a
+  // full-only observe can't restore stale state (the previous compact snapshot).
+  // Deliberately NOT surfaced in the payload — the full escape hatch stays
+  // byte-equivalent to the legacy shape (no snapshot_file field added).
+  persistObserveSnapshot(
+    session,
     generation,
-    undefined,
-    session.sealedFieldKeys,
+    url,
+    normalizedText,
+    textTruncated,
+    elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys, true)),
   );
+  const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
+  const accessibility = buildAccessibilitySnapshot(elements, undefined, session.sealedFieldKeys);
   return {
     session_id: session.id,
-    url: session.browser.currentUrl(),
+    url,
     text: normalizedText,
     ...(guidance !== undefined ? { guidance } : {}),
     ...(screen !== undefined ? { screen } : {}),
@@ -1520,9 +2261,15 @@ export async function act(
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
+  const auditTarget =
+    "target" in action && parseLocatorTarget(action.target) !== null
+      ? "<mode>=<redacted>"
+      : "target" in action
+        ? action.target
+        : undefined;
   audit(sessionId, "act", {
     kind: action.kind,
-    ...("target" in action ? { target: action.target } : {}),
+    ...(auditTarget !== undefined ? { target: auditTarget } : {}),
     ...("url" in action ? { url: action.url } : {}),
   });
 
@@ -1556,7 +2303,6 @@ export async function act(
   // Captured for the operator-recipe trace: the element a target action
   // resolved to, so we record the VISIBLE text it acted on (not the ref).
   let resolvedEl: InteractiveElement | null = null;
-
   switch (action.kind) {
     case "goto": {
       if (!hostAllowed(action.url, hostStrings(session))) {
@@ -1603,7 +2349,10 @@ export async function act(
       }
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
-      const el = resolveTarget(fresh, action.target, session.generation);
+      // resolveTarget recomputes identities (incl. volatile positional-group
+      // fingerprints) from these FRESH elements, so a ref whose group fingerprint
+      // changed since the last observe resolves to null, not a survivor (#399).
+      const el = resolveTarget(fresh, action.target);
       if (el === null) {
         throw new Error(`type_secret: no element matched target "${action.target}".`);
       }
@@ -1621,20 +2370,103 @@ export async function act(
       });
       break;
     }
+    case "select": {
+      // Re-resolve against FRESH elements — the target may be the <select> or
+      // its <label>; browser.selectOption walks label→control and handles the
+      // native vs custom-listbox split. text is the fuzzy option matcher.
+      const fresh = await browser.extractInteractiveElements();
+      session.lastElements = fresh;
+      const el = resolveTarget(fresh, action.target);
+      if (el === null) {
+        throw new Error(
+          `select: no element matched target "${action.target}". Visible: ` +
+            fresh
+              .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
+              .slice(0, 20)
+              .join(", "),
+        );
+      }
+      resolvedEl = el;
+      await browser.selectOption(el.selector, action.text);
+      await settleAfterStateChange(browser);
+      break;
+    }
+    case "set_phone_country": {
+      // No captured element — the bot finds the phone-local native <select>.
+      // resolvedEl stays null; the step records without a captured-element
+      // trace (the country is host-replannable, not a replay recipe).
+      await browser.setPhoneCountry(action.country);
+      await settleAfterStateChange(browser);
+      break;
+    }
     case "click":
     case "js_click":
     case "type":
     case "upload":
     case "oauth_click": {
-      const blockReason = shouldBlockUnsafeProvisionAction(
-        await browser.extractVisibleText(),
-        action,
-      );
+      const pageText = await browser.extractVisibleText();
+      const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
       if (blockReason !== null) throw new Error(blockReason);
+      // Locator-form target (`text=…` / `css=…`): the host is pointing at a
+      // control that has NO `@e:` ref because the inventory never emitted it (a
+      // bare click-handler <div> with no role/label, e.g. a SPA "Add To Cart"
+      // that falls past the card-scan cap). Resolve it directly against the live
+      // page instead of the extracted-element list.
+      const locator = parseLocatorTarget(action.target);
+      if (locator !== null) {
+        // text=/css= is a CLICK escape hatch only. `type` gates on click
+        // affordance / non-editable text so it can't target a form input, and
+        // upload/oauth_click have bespoke flows — reject them explicitly.
+        if (action.kind !== "click" && action.kind !== "js_click") {
+          throw new Error(
+            `operate_act kind="${action.kind}" does not accept a text=/css= locator target; ` +
+              `text=/css= is for clicking (click / js_click). Use an @e: ref from operate_observe.`,
+          );
+        }
+        const resolved = await browser.resolvePageTarget(locator.mode, locator.value);
+        if (!resolved.ok) {
+          if (resolved.reason === "none") {
+            throw new Error(
+              `no element matched locator "${action.target}". If the control is visible, ` +
+                `try a shorter/exact text= label or a css=<selector>.`,
+            );
+          }
+          throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
+        }
+        // The unsafe-action guard above inspected the RAW target, so an opaque
+        // `css=<selector>` (or any target whose string carries no verb/noun the
+        // guard matches) could resolve to a destructive billing/setup control the
+        // guard couldn't see through — clicking "Save product" in live mode via
+        // css=#submit. Re-run it against compact safety signals computed from the
+        // resolved control now that we know what the locator actually points at.
+        // Mark the session non-promotable BEFORE the click: a locator click can't
+        // be replayed from the inventory (the element was never in it), so a
+        // skill synthesized from this run would silently omit the step. Setting
+        // it up front means a click that lands but then throws still can't leave
+        // the session promotable (see captureAndPromoteSession) (codex).
+        try {
+          const resolvedBlock = shouldBlockUnsafeProvisionSignals(pageText, resolved.safetySignals);
+          if (resolvedBlock !== null) throw new Error(resolvedBlock);
+          session.usedLocatorFallback = true;
+          if (action.kind === "click") await browser.clickHandle(resolved.handle);
+          else await browser.jsClickHandle(resolved.handle);
+        } finally {
+          await resolved.handle.dispose().catch(() => undefined);
+        }
+        audit(sessionId, action.kind, {
+          locator_mode: locator.mode,
+          host: registrableHost(browser.currentUrl()),
+        });
+        await settleAfterStateChange(browser);
+        break;
+      }
       // Re-resolve against FRESH elements every act — never trust a stale index.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
-      const el = resolveTarget(fresh, action.target, session.generation);
+      // resolveTarget recomputes identities (incl. volatile positional-group
+      // fingerprints) from these FRESH elements, so a ref whose group fingerprint
+      // changed since the last observe resolves to null, not a survivor (#399).
+      const el = resolveTarget(fresh, action.target);
       if (el === null) {
         throw new Error(
           `no element matched target "${action.target}". Visible: ` +
@@ -1745,6 +2577,15 @@ function recordTrace(
   // An upload attaches a machine-local file — not portable, never part of a
   // shared recipe. Skip it here (the action is still in the audit trail).
   if (action.kind === "upload") return;
+  // A native/custom-select pick isn't yet in the portable recipe vocabulary
+  // (TraceAction has no `select` kind). Skip it from the trace like upload — the
+  // action still runs and is audited. Selects were never traceable before this
+  // kind existed, so nothing regresses; wiring select into the replay engine is
+  // a follow-up for when a signup flow needs a replayable dropdown.
+  if (action.kind === "select") return;
+  // set_phone_country has no portable TraceAction kind either — the country is
+  // host-replannable per run, not baked into a shared recipe. Skip like select.
+  if (action.kind === "set_phone_country") return;
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
@@ -1894,6 +2735,12 @@ export async function captureAndPromoteSession(
 ): Promise<PromoteResult | { kind: "skipped"; reason: string }> {
   const session = sessions.get(sessionId);
   if (session === undefined) return { kind: "skipped", reason: "unknown_session" };
+  // A run that used the text=/css= locator click fallback hit a control with no
+  // inventory ref; the synthesizer can't represent that step, so promoting would
+  // ship a skill missing a click. Skip rather than emit a silently-broken skill.
+  if (session.usedLocatorFallback) {
+    return { kind: "skipped", reason: "locator_fallback_unrepresentable" };
+  }
   const dir = resolveCaptureDir();
   if (dir === null) return { kind: "skipped", reason: "capture_disabled" };
   if (!session.captureRounds.some((r) => r.observed.kind === "extract")) {
@@ -1989,6 +2836,11 @@ export async function rememberRecipe(
 ): Promise<{ file: string; name: string; steps: number; secrets: string[] }> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (session.usedLocatorFallback) {
+    throw new Error(
+      "operate_remember refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
+    );
+  }
   const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
   const recipe: OperatorRecipe = {
     name: opts.name,
@@ -2017,13 +2869,14 @@ export async function rememberRecipe(
 async function snapshotForPostcondition(session: Session): Promise<PostconditionSnapshot> {
   const obs = await observeSession(session);
   // Read lengths off the RAW elements (session.lastElements, set by
-  // observeSession) — obs.elements masks sealed/password values to a fixed
-  // placeholder, which would corrupt a min_value_len success-signal. Lengths
-  // never expose the value, so this stays leak-free.
+  // observeSession). The compact wire carries only value_len and never the raw
+  // value; deriving from the live elements preserves the real length for a
+  // min_value_len success-signal. Lengths never expose the value, so this stays
+  // leak-free.
   const fields = session.lastElements
     .filter((e) => typeof e.value === "string" && e.value.length > 0)
     .map((e) => ({ label: elementRef(e), value_len: (e.value ?? "").length }));
-  return { url: obs.url, text: obs.text, fields };
+  return { url: obs.url, text: session.prevObserve?.text ?? obs.text, fields };
 }
 
 // Verify a recipe's postcondition against the live session — the anti-false-
