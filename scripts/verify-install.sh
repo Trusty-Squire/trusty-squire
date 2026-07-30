@@ -83,7 +83,7 @@ echo "OK"
 if [[ -n "$SENTINEL" ]]; then
   echo -n "STEP 5: Download tarball and grep for sentinel '$SENTINEL' ... "
   TMPTAR=$(mktemp)
-  trap "rm -f $TMPTAR" EXIT
+  trap 'rm -f "$TMPTAR"' EXIT
   curl -sS "$TARBALL_URL" -o "$TMPTAR"
   
   # First try the known file for @trusty-squire/mcp
@@ -97,7 +97,7 @@ if [[ -n "$SENTINEL" ]]; then
   # Fallback: grep all .js files under package/dist/
   if [[ $FOUND -eq 0 ]]; then
     TMPDIR=$(mktemp -d)
-    trap "rm -rf $TMPDIR $TMPTAR" EXIT
+    trap 'rm -rf "$TMPDIR" "$TMPTAR"' EXIT
     tar -xzf "$TMPTAR" -C "$TMPDIR" 2>/dev/null
     if grep -r --include="*.js" -F "$SENTINEL" "$TMPDIR/package/dist/" >/dev/null 2>&1; then
       FOUND=1
@@ -116,8 +116,9 @@ else
   echo "STEP 5: Tarball grep ... SKIPPED (no sentinel provided)"
 fi
 
-# STEP 6: End-to-end clean install. Registry edge caches can briefly serve the
-# previous dist-tag after the authoritative checks above have converged.
+# STEP 6: End-to-end clean install. Retry only when a successful install resolves
+# to the wrong version (the stale-registry-edge case); command and read failures
+# remain immediate because they do not prove cache staleness.
 echo -n "STEP 6: Clean tmpdir install (npm install $PKG@$TAG) ... "
 INSTALL_DIR=""
 INSTALLED_VERSION=""
