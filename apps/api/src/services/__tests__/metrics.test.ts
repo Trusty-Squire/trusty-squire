@@ -16,6 +16,7 @@ const SNAPSHOT: MetricsSnapshot = {
   egress_grants_active: 5,
   captcha_events_total: 8,
   vault_audit_events_total: 256,
+  vault_audit_events_last_hour: 17,
   db_up: 1,
 };
 
@@ -48,6 +49,9 @@ describe("renderPrometheus", () => {
         "# HELP squire_vault_audit_events_total Total vault audit-trail events recorded.",
         "# TYPE squire_vault_audit_events_total gauge",
         "squire_vault_audit_events_total 256",
+        "# HELP squire_vault_audit_events_last_hour Vault audit-trail events recorded in the trailing hour.",
+        "# TYPE squire_vault_audit_events_last_hour gauge",
+        "squire_vault_audit_events_last_hour 17",
         "# HELP squire_db_up 1 if the database answered the liveness probe, else 0.",
         "# TYPE squire_db_up gauge",
         "squire_db_up 1",
@@ -73,11 +77,12 @@ describe("renderPrometheus", () => {
 // record their `where` args so we can assert the residential + active filters.
 function stubPrisma(): {
   prisma: ApiPrismaClient;
-  calls: { residentialWhere: unknown; activeWhere: unknown };
+  calls: { residentialWhere: unknown; activeWhere: unknown; auditRecentWhere: unknown };
 } {
-  const calls: { residentialWhere: unknown; activeWhere: unknown } = {
+  const calls: { residentialWhere: unknown; activeWhere: unknown; auditRecentWhere: unknown } = {
     residentialWhere: "UNSET",
     activeWhere: "UNSET",
+    auditRecentWhere: "UNSET",
   };
   const machineTokenCount = vi.fn(
     (args?: { where?: Record<string, unknown> }): Promise<number> => {
@@ -98,6 +103,15 @@ function stubPrisma(): {
       return Promise.resolve(9);
     },
   );
+  const vaultAuditCount = vi.fn(
+    (args?: { where?: Record<string, unknown> }): Promise<number> => {
+      if (args?.where !== undefined) {
+        calls.auditRecentWhere = args.where;
+        return Promise.resolve(17);
+      }
+      return Promise.resolve(256);
+    },
+  );
   // Only the methods collectMetrics touches need to be real; the rest of the
   // ApiPrismaClient surface is unused here. The cast is the standard
   // narrow-stub pattern (commented) — building the full client is infeasible.
@@ -107,7 +121,7 @@ function stubPrisma(): {
     credential: { count: vi.fn(() => Promise.resolve(31)) },
     egressGrant: { count: egressCount },
     captchaEvent: { count: vi.fn(() => Promise.resolve(8)) },
-    vaultAuditEvent: { count: vi.fn(() => Promise.resolve(256)) },
+    vaultAuditEvent: { count: vaultAuditCount },
   } as unknown as ApiPrismaClient;
   return { prisma, calls };
 }
@@ -115,10 +129,14 @@ function stubPrisma(): {
 describe("collectMetrics", () => {
   it("maps every count, applies residential + active filters, db_up=1", async () => {
     const { prisma, calls } = stubPrisma();
-    const snap = await collectMetrics(prisma, () => Promise.resolve(true));
+    const now = new Date("2026-07-29T15:00:00.000Z");
+    const snap = await collectMetrics(prisma, () => Promise.resolve(true), () => now);
     expect(snap).toEqual(SNAPSHOT);
     expect(calls.residentialWhere).toEqual({ asn_class: "residential" });
     expect(calls.activeWhere).toEqual({ revoked_at: null });
+    expect(calls.auditRecentWhere).toEqual({
+      emitted_at: { gte: new Date("2026-07-29T14:00:00.000Z") },
+    });
   });
 
   it("short-circuits to zeros + db_up=0 when the DB ping fails", async () => {
