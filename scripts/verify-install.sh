@@ -122,7 +122,8 @@ fi
 echo -n "STEP 6: Clean tmpdir install (npm install $PKG@$TAG) ... "
 INSTALL_DIR=""
 INSTALLED_VERSION=""
-INSTALL_ATTEMPTS=6
+INSTALL_ATTEMPTS=30
+INSTALL_RETRY_DELAY_SECONDS=10
 
 for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt++)); do
   INSTALLED_VERSION=""
@@ -135,7 +136,7 @@ for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt++)); do
     exit 1
   fi
 
-  if ! INSTALL_OUTPUT=$(cd "$INSTALL_DIR" && npm install --no-audit --no-fund "$PKG@$TAG" 2>&1); then
+  if ! INSTALL_OUTPUT=$(cd "$INSTALL_DIR" && npm install --no-audit --no-fund --prefer-online "$PKG@$TAG" 2>&1); then
     echo "FAIL: npm install $PKG@$TAG failed on attempt $attempt"
     printf '%s\n' "$INSTALL_OUTPUT"
     exit 1
@@ -158,8 +159,8 @@ for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt++)); do
 
   if [[ $attempt -lt $INSTALL_ATTEMPTS ]]; then
     echo
-    echo -n "  Attempt $attempt installed '${INSTALLED_VERSION:-nothing}'; retrying in 5s ... "
-    sleep 5
+    echo -n "  Attempt $attempt installed '${INSTALLED_VERSION:-nothing}'; retrying in ${INSTALL_RETRY_DELAY_SECONDS}s ... "
+    sleep "$INSTALL_RETRY_DELAY_SECONDS"
   fi
 done
 
