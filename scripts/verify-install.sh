@@ -83,7 +83,7 @@ echo "OK"
 if [[ -n "$SENTINEL" ]]; then
   echo -n "STEP 5: Download tarball and grep for sentinel '$SENTINEL' ... "
   TMPTAR=$(mktemp)
-  trap "rm -f $TMPTAR" EXIT
+  trap 'rm -f "$TMPTAR"' EXIT
   curl -sS "$TARBALL_URL" -o "$TMPTAR"
   
   # First try the known file for @trusty-squire/mcp
@@ -97,7 +97,7 @@ if [[ -n "$SENTINEL" ]]; then
   # Fallback: grep all .js files under package/dist/
   if [[ $FOUND -eq 0 ]]; then
     TMPDIR=$(mktemp -d)
-    trap "rm -rf $TMPDIR $TMPTAR" EXIT
+    trap 'rm -rf "$TMPDIR" "$TMPTAR"' EXIT
     tar -xzf "$TMPTAR" -C "$TMPDIR" 2>/dev/null
     if grep -r --include="*.js" -F "$SENTINEL" "$TMPDIR/package/dist/" >/dev/null 2>&1; then
       FOUND=1
@@ -116,26 +116,56 @@ else
   echo "STEP 5: Tarball grep ... SKIPPED (no sentinel provided)"
 fi
 
-# STEP 6: End-to-end clean install
+# STEP 6: End-to-end clean install. Retry only when a successful install resolves
+# to the wrong version (the stale-registry-edge case); command and read failures
+# remain immediate because they do not prove cache staleness.
 echo -n "STEP 6: Clean tmpdir install (npm install $PKG@$TAG) ... "
-INSTALL_DIR=$(mktemp -d)
-trap "rm -rf $INSTALL_DIR" EXIT
+INSTALL_DIR=""
+INSTALLED_VERSION=""
+INSTALL_ATTEMPTS=30
+INSTALL_RETRY_DELAY_SECONDS=10
 
-(
-  cd "$INSTALL_DIR"
-  npm init -y >/dev/null 2>&1
-  npm install --no-audit --no-fund "$PKG@$TAG" >/dev/null 2>&1
-  
-  # Read installed version (handle scoped packages correctly)
-  PKG_DIR="./node_modules/$PKG"
-  INSTALLED_VERSION=$(node -p "require('$PKG_DIR/package.json').version" 2>/dev/null || echo "")
-  if [[ "$INSTALLED_VERSION" != "$EXPECTED_VERSION" ]]; then
-    echo "FAIL: Installed version=$INSTALLED_VERSION, expected $EXPECTED_VERSION"
+for ((attempt = 1; attempt <= INSTALL_ATTEMPTS; attempt++)); do
+  INSTALLED_VERSION=""
+  INSTALL_DIR=$(mktemp -d)
+  trap 'rm -rf "$INSTALL_DIR"' EXIT
+
+  if ! INIT_OUTPUT=$(cd "$INSTALL_DIR" && npm init -y 2>&1); then
+    echo "FAIL: npm init failed"
+    printf '%s\n' "$INIT_OUTPUT"
     exit 1
   fi
-)
 
-if [[ $? -ne 0 ]]; then
+  if ! INSTALL_OUTPUT=$(cd "$INSTALL_DIR" && npm install --no-audit --no-fund --prefer-online "$PKG@$TAG" 2>&1); then
+    echo "FAIL: npm install $PKG@$TAG failed on attempt $attempt"
+    printf '%s\n' "$INSTALL_OUTPUT"
+    exit 1
+  fi
+
+  PKG_DIR="$INSTALL_DIR/node_modules/$PKG"
+  if ! INSTALLED_VERSION=$(node -p "require('$PKG_DIR/package.json').version" 2>&1); then
+    echo "FAIL: Could not read installed package version"
+    printf '%s\n' "$INSTALLED_VERSION"
+    exit 1
+  fi
+
+  if [[ "$INSTALLED_VERSION" == "$EXPECTED_VERSION" ]]; then
+    break
+  fi
+
+  rm -rf "$INSTALL_DIR"
+  trap - EXIT
+  INSTALL_DIR=""
+
+  if [[ $attempt -lt $INSTALL_ATTEMPTS ]]; then
+    echo
+    echo -n "  Attempt $attempt installed '${INSTALLED_VERSION:-nothing}'; retrying in ${INSTALL_RETRY_DELAY_SECONDS}s ... "
+    sleep "$INSTALL_RETRY_DELAY_SECONDS"
+  fi
+done
+
+if [[ "$INSTALLED_VERSION" != "$EXPECTED_VERSION" || -z "$INSTALL_DIR" ]]; then
+  echo "FAIL: Installed version=${INSTALLED_VERSION:-nothing}, expected $EXPECTED_VERSION after $INSTALL_ATTEMPTS attempts"
   exit 1
 fi
 echo "OK"
