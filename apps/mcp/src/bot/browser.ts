@@ -3566,6 +3566,13 @@ export class BrowserController {
     }
 
     if (tagName === "select") {
+      // Keep the resolved target as a Locator. Walker selectors can include
+      // Playwright chains such as `select.foo >> nth=1`; appending CSS text to
+      // those strings changes the chain's meaning (`... >> nth=1 option`) and
+      // makes a full select appear option-less. Descendant lookup, selection,
+      // and verification must all stay anchored to the same resolved element.
+      const selectLocator = this.page.locator(activeSelector).first();
+      const optionLocator = selectLocator.locator("option");
       // Native path. rc.15 — keep value="" options selectable. The
       // Railway workspace dropdown's "No workspace" option is value=""
       // and it IS the right pick for an account-scoped token. The
@@ -3574,9 +3581,9 @@ export class BrowserController {
       // never reach that option. Now: fallback list keeps every option
       // (with the first option's value, even if empty), and a matched
       // text-based pick is honored verbatim — including empty values.
-      const allValues = await this.page
-        .locator(`${activeSelector} option`)
-        .evaluateAll((opts) => opts.map((o) => (o instanceof HTMLOptionElement ? o.value : "")));
+      const allValues = await optionLocator.evaluateAll((opts) =>
+        opts.map((o) => (o instanceof HTMLOptionElement ? o.value : "")),
+      );
       if (allValues.length === 0) {
         throw new Error(`<select> ${activeSelector} has no selectable option`);
       }
@@ -3590,14 +3597,12 @@ export class BrowserController {
         // Returns either a matched value (may be "") or null when no
         // option's text matches. Wrap in an object so we can
         // distinguish "matched to empty value" from "no match".
-        const matched = await this.page
-          .locator(`${activeSelector} option`)
-          .evaluateAll((opts, needle) => {
-            const hit = opts
-              .filter((o): o is HTMLOptionElement => o instanceof HTMLOptionElement)
-              .find((o) => o.textContent?.toLowerCase().includes(needle));
-            return hit !== undefined ? { value: hit.value } : null;
-          }, matcherLower);
+        const matched = await optionLocator.evaluateAll((opts, needle) => {
+          const hit = opts
+            .filter((o): o is HTMLOptionElement => o instanceof HTMLOptionElement)
+            .find((o) => o.textContent?.toLowerCase().includes(needle));
+          return hit !== undefined ? { value: hit.value } : null;
+        }, matcherLower);
         if (matched === null) {
           throw new Error(
             `<select> ${activeSelector}: no option matched ${JSON.stringify(optionMatcher)}`,
@@ -3608,8 +3613,8 @@ export class BrowserController {
       if (chosenValue === undefined) {
         throw new Error(`<select> ${activeSelector} has no selectable option`);
       }
-      await this.page.selectOption(activeSelector, chosenValue);
-      const committedValue = await this.page.locator(activeSelector).first().inputValue();
+      await selectLocator.selectOption(chosenValue);
+      const committedValue = await selectLocator.inputValue();
       if (committedValue !== chosenValue) {
         throw new Error(
           `<select> ${activeSelector}: selected value ${JSON.stringify(chosenValue)} did not stick`,
@@ -3621,9 +3626,7 @@ export class BrowserController {
       // "No workspace") keeps tripping the warning every round, and
       // the planner gets stuck in a select→select→… loop trying to
       // satisfy a warning the form has already satisfied.
-      await this.page
-        .locator(activeSelector)
-        .first()
+      await selectLocator
         .evaluate((el) => {
           if (el instanceof HTMLElement) el.setAttribute("data-ts-touched", "1");
         })

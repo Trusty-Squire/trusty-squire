@@ -307,13 +307,9 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
     return els.filter((e) => e.tag === "select" && e.visible);
   }
 
-  // KNOWN GAP #2 (surfaced by this eval's first run): when the walker's CSS
-  // path is ambiguous it emits a Playwright-chain selector ("div > … > select
-  // >> nth=1"). selectOption's native path composes `${selector} option` to
-  // list options — that string matches NOTHING for a chained selector, so the
-  // primitive throws "has no selectable option" even when the select is full.
-  // Such selects are currently UNDRIVABLE by selectOption; the driving suites
-  // skip + count them, and a pinned test below asserts the throw.
+  // Track paths the walker pins with Playwright's nth-chain syntax. These
+  // selectors must remain drivable even though they cannot be extended by
+  // concatenating CSS text.
   function isNthChainSelector(selector: string): boolean {
     return selector.includes(" >> ");
   }
@@ -363,7 +359,6 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
         for (const [ix, s] of selects.entries()) {
           if (isNthChainSelector(s.selector)) {
             stats.nthChainSelectors += 1;
-            continue; // undrivable by selectOption today — see KNOWN GAP #2
           }
           const count = await page.locator(s.selector).count();
           if (count !== 1) {
@@ -430,7 +425,7 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
     console.log(
       `[widget-corpus-eval] native-select suite: replayed ${stats.replayed} records, ` +
         `walked ${stats.selectsWalked} selects (ambiguous: ${stats.ambiguousSelectors}, ` +
-        `nth-chain (undrivable, KNOWN GAP #2): ${stats.nthChainSelectors}), ` +
+        `nth-chain: ${stats.nthChainSelectors}), ` +
         `driven+verified ${stats.driven}, empty-select loud failures: ${stats.emptySelectThrows}, ` +
         `skipped invalid: ${sample.skippedInvalid}`,
     );
@@ -452,7 +447,6 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
         if (selects.length < 2) continue;
         const detailed: Array<{ el: InteractiveElement; details: SelectDetails }> = [];
         for (const s of selects) {
-          if (isNthChainSelector(s.selector)) continue; // KNOWN GAP #2 — undrivable
           if ((await page.locator(s.selector).count()) !== 1) {
             ambiguousSelectors += 1;
             continue;
@@ -709,7 +703,6 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
         for (const candidate of walkedSelects(els)) {
           if (
             candidate.selector.length > 0 &&
-            !isNthChainSelector(candidate.selector) &&
             (await page.locator(candidate.selector).count()) === 1
           ) {
             s = candidate;
@@ -732,20 +725,13 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
         await page.close();
       }
     }
-    throw new Error("no non-nth-chain drivable select found to verify the no-match contract");
+    throw new Error("no drivable select found to verify the no-match contract");
   }, 120_000);
 
-  it("KNOWN GAP #2: a walker nth-chain selector makes selectOption throw 'no selectable option' on a FULL select", async () => {
-    // Surfaced by this eval's first run. The walker pins ambiguous CSS
-    // paths with Playwright chain syntax ("div > … > select >> nth=1");
-    // selectOption's native path lists options by composing
-    // `${selector} option`, which matches nothing for a chained selector —
-    // so a select FULL of options reads as empty and the primitive throws
-    // "has no selectable option". Every ambiguous-path native select in an
-    // inventory is therefore undrivable today. This pins that behavior;
-    // when selectOption composes chain selectors correctly (e.g.
-    // `locator(sel).locator("option")`), flip this to assert the drive
-    // SUCCEEDS and un-skip nth-chain selectors in the suites above.
+  it("a walker nth-chain selector drives and verifies the resolved native select", async () => {
+    // The walker pins ambiguous CSS paths with Playwright chain syntax
+    // ("div > … > select >> nth=1"). This exercises that full selector
+    // through option enumeration, selection, and committed-value verification.
     const candidateFiles = [
       ...new Set([...scan.nativeSelectMultiFiles, ...scan.nativeSelectFiles]),
     ];
@@ -758,13 +744,20 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
           if (!isNthChainSelector(s.selector)) continue;
           const details = await readSelect(page, s.selector);
           if (details === null || details.options.length === 0) continue;
-          await expect(
-            ctrl.selectOption(s.selector),
-            `${rec.service}: ${s.selector} has ${details.options.length} options yet reads empty`,
-          ).rejects.toThrow(/no selectable option/);
+          const target = [...details.options]
+            .reverse()
+            .find((option) => option.text.trim().length > 0 && option.value !== details.value);
+          if (target === undefined) continue;
+          const matcher = target.text.trim();
+          const expected = expectedValueForMatcher(details, matcher);
+          if (expected === null) continue;
+          await ctrl.selectOption(s.selector, matcher);
+          const after = await readSelect(page, s.selector);
+          expect(after?.value, `${rec.service}: ${s.selector} matcher "${matcher}"`).toBe(expected);
+          expect(await page.locator(s.selector).first().getAttribute("data-ts-touched")).toBe("1");
           console.log(
-            `[widget-corpus-eval] KNOWN GAP #2 confirmed on ${rec.service}: ` +
-              `"${s.selector}" carries ${details.options.length} options but selectOption threw`,
+            `[widget-corpus-eval] nth-chain select verified on ${rec.service}: ` +
+              `"${s.selector}" drove ${JSON.stringify(expected)}`,
           );
           return;
         }
@@ -775,7 +768,7 @@ describe.skipIf(corpusDir === null)("widget corpus eval (real captured DOMs)", (
     // Corpus-dependent: no ambiguous-path select in the sample. Not a
     // failure — but say so, since the gap then went unexercised this run.
     console.log(
-      "[widget-corpus-eval] KNOWN GAP #2: no nth-chain select selector in this sample — gap not exercised",
+      "[widget-corpus-eval] no nth-chain select selector in this sample — path not exercised",
     );
   }, 300_000);
 });
