@@ -10,14 +10,15 @@ name: Release skill-schema
 # Tag scheme: `skill-schema@<version>` (avoids collision with mcp's `v<version>` tags).
 # If the tag already exists OR npm already has that version, the job is a no-op.
 #
-# This workflow ONLY triggers when packages/skill-schema/** or this file changes
-# — pushes that only touch unrelated parts of the monorepo skip it entirely.
+# Publishing is version-driven. Source-only changes wait for the package version
+# bump instead of spending a runner on a release that can only be skipped.
 
 on:
   push:
     branches: [main, staging]
     paths:
-      - "packages/skill-schema/**"
+      - "packages/skill-schema/package.json"
+      - "pnpm-lock.yaml"
       - ".github/workflows/release-skill-schema.yml"
 
 concurrency:
@@ -41,19 +42,38 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Fast-path already released versions
+        id: fast_path
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./packages/skill-schema/package.json').version")
+          TAG="skill-schema@$VERSION"
+          if git rev-parse --quiet --verify "refs/tags/$TAG" >/dev/null \
+            || npm view "@trusty-squire/skill-schema@$VERSION" version >/dev/null 2>&1; then
+            echo "already_released=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping expensive verification: skill-schema $VERSION is already released."
+          else
+            echo "already_released=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: pnpm/action-setup@v4
+        if: steps.fast_path.outputs.already_released != 'true'
         with:
           version: 8.15.0
       - uses: actions/setup-node@v4
+        if: steps.fast_path.outputs.already_released != 'true'
         with:
           node-version: 20.11.0
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
       - name: Install
+        if: steps.fast_path.outputs.already_released != 'true'
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/skill-schema'
 
       - name: Test skill-schema
+        if: steps.fast_path.outputs.already_released != 'true'
         run: pnpm --filter '@trusty-squire/skill-schema' test
 
       - name: Read package version + decide

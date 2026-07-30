@@ -10,16 +10,15 @@ name: Release mcp
 # If a git tag v<version> already exists, the job is a no-op (idempotent).
 # This means re-pushing main without bumping the version does NOT republish.
 #
-# Path filter: only fires on changes that could affect the mcp tarball
-# (apps/mcp, packages/skill-schema, root lockfile, this file).
-# Unrelated commits to other parts of the monorepo skip CI entirely.
+# Publishing is version-driven, so source-only changes do not need a release
+# runner. A release commit must bump apps/mcp/package.json; lockfile/workflow
+# changes remain triggers so a failed unpublished release can be repaired.
 
 on:
   push:
     branches: [main, staging]
     paths:
-      - "apps/mcp/**"
-      - "packages/skill-schema/**"
+      - "apps/mcp/package.json"
       - "pnpm-lock.yaml"
       - ".github/workflows/release.yml"
 
@@ -52,11 +51,28 @@ jobs:
         with:
           fetch-depth: 0   # need full history to see existing tags
 
+      # Most matching pushes are lockfile/workflow edits or retries of a version
+      # that is already live. Decide before installs, builds, or Chromium setup;
+      # the final read step still runs and supplies the normal publish outputs.
+      - name: Fast-path already released versions
+        id: fast_path
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./apps/mcp/package.json').version")
+          if git rev-parse --quiet --verify "refs/tags/v$VERSION" >/dev/null \
+            || npm view "@trusty-squire/mcp@$VERSION" version >/dev/null 2>&1; then
+            echo "already_released=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Skipping expensive verification: mcp $VERSION is already released."
+          else
+            echo "already_released=false" >> "$GITHUB_OUTPUT"
+          fi
+
       # The monorepo contains a Next.js app (apps/web) whose
       # node_modules and .next caches blow past the default runner disk
       # quota (14GB free of 75GB). pnpm install + tests fail with ENOSPC.
       # Free ~25GB by removing preinstalled toolchains we don't use.
       - name: Free disk space on runner
+        if: steps.fast_path.outputs.already_released != 'true'
         run: |
           set -euo pipefail
           echo "Disk before cleanup:"
@@ -67,9 +83,11 @@ jobs:
           df -h /
 
       - uses: pnpm/action-setup@v4
+        if: steps.fast_path.outputs.already_released != 'true'
         with:
           version: 8.15.0   # match packageManager in root package.json
       - uses: actions/setup-node@v4
+        if: steps.fast_path.outputs.already_released != 'true'
         with:
           node-version: 20.11.0
           cache: pnpm
@@ -78,6 +96,7 @@ jobs:
       # Install ONLY mcp's dep tree, not the entire monorepo (which has
       # Next.js apps whose ~4M symlinks exhaust the runner's inode quota).
       - name: Install (mcp dep tree only)
+        if: steps.fast_path.outputs.already_released != 'true'
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
 
       # Workspace deps (e.g. @trusty-squire/skill-schema) ship as TypeScript
@@ -87,6 +106,7 @@ jobs:
       # We exclude the MCP package itself — its own dist gets built fresh
       # in the publish job right before npm publish.
       - name: Build mcp's workspace deps (for test resolution)
+        if: steps.fast_path.outputs.already_released != 'true'
         # Vitest follows the `main` of @trusty-squire/skill-schema to its dist/ —
         # that must exist before mcp tests can import it.
         # Explicitly list mcp's workspace deps (keep in sync with apps/mcp/package.json).
@@ -98,6 +118,7 @@ jobs:
       # "Executable doesn't exist" and publish is skipped (bit 1.1.5; the rc
       # publish only survived on a warm runner cache). Mirrors ci.yml.
       - name: Install Chromium for browser-backed MCP tests
+        if: steps.fast_path.outputs.already_released != 'true'
         run: pnpm --filter '@trusty-squire/mcp' exec playwright install --with-deps chromium
 
       # NOTE: lint + typecheck are intentionally NOT gating this pipeline yet.
@@ -110,6 +131,7 @@ jobs:
       # MCP we're publishing here. Workspace-wide tests still run in ci.yml
       # for signal — they just don't block publishes.
       - name: Test (MCP package only)
+        if: steps.fast_path.outputs.already_released != 'true'
         # Skip the pnpm-pack smoke test — it exhausts inodes on GH runners,
         # and the publish job's own tarball-content verification covers the
         # same ground from real registry bytes.
@@ -125,6 +147,7 @@ jobs:
       # `workspace:` spec — that means we're in a state where mcp isn't
       # being bumped right now (path filter probably tripped accidentally).
       - name: Preflight — skill-schema dep resolvable on npm
+        if: steps.fast_path.outputs.already_released != 'true'
         run: |
           set -euo pipefail
           DEP_SPEC=$(node -p "require('./apps/mcp/package.json').dependencies['@trusty-squire/skill-schema'] || ''")
@@ -480,7 +503,7 @@ jobs:
         working-directory: apps/mcp
         run: |
           npm pack
-          ls -la *.tgz
+          ls -la -- ./*.tgz
 
       - name: Create GitHub release
         env:
