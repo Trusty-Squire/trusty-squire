@@ -170,12 +170,12 @@
       "id": 17,
       "type": "timeseries",
       "title": "Vault & egress activity",
-      "description": "Credentials, audit-trail events and active grants over time — the 'is the vault being used' picture.",
+      "description": "Credentials, hourly audit-trail activity and active grants over time — the 'is the vault being used' picture.",
       "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "targets": [
         { "refId": "A", "expr": "max(squire_credentials_total)", "legendFormat": "credentials", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } },
-        { "refId": "B", "expr": "max(squire_vault_audit_events_total)", "legendFormat": "audit events", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } },
+        { "refId": "B", "expr": "clamp_min(max(delta(squire_vault_audit_events_total[1h])), 0)", "legendFormat": "audit events / hour", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } },
         { "refId": "C", "expr": "max(squire_egress_grants_active)", "legendFormat": "active grants", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } },
         { "refId": "D", "expr": "max(squire_captcha_events_total)", "legendFormat": "captcha events", "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" } }
       ],
