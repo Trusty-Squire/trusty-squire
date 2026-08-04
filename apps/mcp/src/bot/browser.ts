@@ -5498,6 +5498,7 @@ export class BrowserController {
       field: string,
       value: string | undefined,
       selectors: string,
+      typePerKey = false,
     ): Promise<boolean> => {
       if (value === undefined || value.length === 0) return false;
       for (const frame of frames) {
@@ -5520,11 +5521,26 @@ export class BrowserController {
                 .then(() => true)
                 .catch(() => false));
             if (!selected) continue;
+          } else if (typePerKey) {
+            await input.fill("");
+            await input.pressSequentially(value, { delay: this.humanize ? rand(40, 110) : 0 });
           } else {
             await input.fill(value);
           }
           filled.add(field);
           return true;
+        }
+      }
+      return false;
+    };
+    const hasFillable = async (selectors: string): Promise<boolean> => {
+      for (const frame of frames) {
+        const matches = frame.locator(selectors);
+        const count = Math.min(await matches.count().catch(() => 0), 10);
+        for (let i = 0; i < count; i += 1) {
+          const input = matches.nth(i);
+          if (!(await input.isVisible().catch(() => false))) continue;
+          if (await input.isEnabled().catch(() => false)) return true;
         }
       }
       return false;
@@ -5536,23 +5552,29 @@ export class BrowserController {
         card.pan,
         'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]',
       );
-      const combinedExpiry = `${card.exp_month.padStart(2, "0")}/${card.exp_year.slice(-2)}`;
-      const combined = await fillFirst(
-        "expiry",
-        combinedExpiry,
-        'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i]',
-      );
-      if (!combined) {
-        await fillFirst(
-          "exp_month",
-          card.exp_month.padStart(2, "0"),
-          '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i]',
+      const expiryMonthSelectors =
+        '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i]';
+      const expiryYearSelectors =
+        '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i]';
+      const hasSplitExpiry =
+        (await hasFillable(expiryMonthSelectors)) && (await hasFillable(expiryYearSelectors));
+      if (hasSplitExpiry) {
+        await fillFirst("exp_month", card.exp_month.padStart(2, "0"), expiryMonthSelectors);
+        await fillFirst("exp_year", card.exp_year, expiryYearSelectors);
+      } else {
+        // A combined expiry field's formatter owns the slash. Send only the four
+        // digits as real key events so numeric-only fields accept them and the
+        // site's key/input handlers can turn e.g. "1230" into "12/30".
+        const combined = await fillFirst(
+          "expiry",
+          `${card.exp_month.padStart(2, "0")}${card.exp_year.slice(-2)}`,
+          'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder*="/"],input[aria-label*="/"],label:has-text("/") input',
+          true,
         );
-        await fillFirst(
-          "exp_year",
-          card.exp_year,
-          '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i]',
-        );
+        if (!combined) {
+          await fillFirst("exp_month", card.exp_month.padStart(2, "0"), expiryMonthSelectors);
+          await fillFirst("exp_year", card.exp_year, expiryYearSelectors);
+        }
       }
       const fields: Array<[string, string | undefined, string]> = [
         [
