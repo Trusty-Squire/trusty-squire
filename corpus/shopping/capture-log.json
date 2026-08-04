@@ -1,0 +1,24 @@
+{
+  "captured_at": "2026-08-04T19:58:00Z",
+  "target": { "repeat": 20, "novel": 10 },
+  "captured": {
+    "repeat": ["deathwish-purchase-r0", "allbirds-purchase-r0", "brooklinen-purchase-r0"],
+    "novel": ["colourpop-purchase-n0", "tentree-purchase-n0"]
+  },
+  "skipped": [
+    {
+      "bucket": "repeat",
+      "count": 17,
+      "reason": "v1 captures one stable product page per confirmed seed store; cross-param expansion remains after the instrument lands"
+    },
+    {
+      "bucket": "novel",
+      "count": 8,
+      "reason": "v1 live capture stopped after two stable unseen-store product pages; remaining target is logged rather than silently synthesized"
+    }
+  ],
+  "substrate": {
+    "har": "stable storefront/product pages only, captured with Playwright recordHar and replayed with notFound=abort",
+    "checkout": "live whitejade.xyz Shopify test mode only; never written to HAR"
+  }
+}

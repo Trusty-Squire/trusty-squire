@@ -1,0 +1,29 @@
+{
+  "task_id": "allbirds-purchase-r0",
+  "verb": "purchase",
+  "domain": "allbirds.com",
+  "entry_url": "https://www.allbirds.com/products/mens-tree-runner-nz-medium-grey",
+  "params": {
+    "product_query": "Men's Tree Runner NZ, medium grey, size 8",
+    "address": { "country": "US", "region": "NY", "postal_code": "10001" },
+    "card_ref": "whitejade-test-card"
+  },
+  "expected_end_state": {
+    "line_items": [{ "title_contains": "Men's Tree Runner NZ", "qty": 1 }],
+    "total_cents": 10000,
+    "reached": "product_page"
+  },
+  "har": "allbirds-purchase-r0.har",
+  "bucket": "repeat",
+  "cold_baseline": {
+    "turns": 10,
+    "tokens": 7112,
+    "wall_clock_ms": 3294,
+    "end_state": {
+      "line_items": [{ "title_contains": "Men's Tree Runner NZ", "qty": 1 }],
+      "total_cents": 10000,
+      "reached": "product_page"
+    }
+  },
+  "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }
+}
