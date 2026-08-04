@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { activeProvisionBrowser } from "../bot/provision-session.js";
+import { acquirePaymentSession } from "../bot/provision-session.js";
 import { executeOperatePay } from "../bot/pay-operator.js";
 import { assertApi, type Tool } from "./index.js";
 
@@ -23,6 +23,14 @@ const inputSchema = z
       .optional()
       .describe(
         "How long to wait for the user to complete a 3-D Secure challenge before handing back (default 180s, 0 = don't wait).",
+      ),
+    session_id: z
+      .string()
+      .min(1)
+      .max(200)
+      .optional()
+      .describe(
+        "Which operate_start session's checkout to charge. Optional with one active session; REQUIRED when several are active — operate_pay refuses to guess which checkout to charge.",
       ),
   })
   // At most one card selector. Neither is allowed: the handler then resolves
@@ -76,6 +84,11 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         description:
           "How long to wait for the user to complete a 3-D Secure challenge before handing back (default 180s, 0 = don't wait).",
       },
+      session_id: {
+        type: "string",
+        description:
+          "Which operate_start session's checkout to charge. Optional with one active session; required when several are active.",
+      },
     },
   },
   annotations: {
@@ -85,60 +98,69 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   },
   async handler(args, api, context) {
     assertApi(api);
-    // Resolve which card to charge. An explicit card_ref wins. Otherwise:
-    //  - card_label given  → resolve it (0 → error, >1 same-label → error)
-    //  - neither given      → resolve against the cards on file:
-    //      0 cards  → cardRef stays undefined → JIT add-card ceremony
-    //      1 card   → use it
-    //      >1 cards → error listing the labels (never silently guess)
-    let cardRef = args.card_ref;
-    if (cardRef === undefined) {
-      const cards = await api.listPaymentCards();
-      if (args.card_label !== undefined) {
-        const matches = cards.filter((card) => card.label === args.card_label);
-        if (matches.length === 0) {
-          throw new Error(`No saved payment card has label "${args.card_label}".`);
-        }
-        if (matches.length > 1) {
+    // Acquire the payment lease BEFORE resolving cards (listPaymentCards awaits):
+    // the resolved session then can't change under us (TOCTOU), and a second
+    // concurrent pay on the same session is rejected instead of double-charging.
+    // Released in the finally, on success OR throw.
+    const lease = acquirePaymentSession(args.session_id);
+    try {
+      // Resolve which card to charge. An explicit card_ref wins. Otherwise:
+      //  - card_label given  → resolve it (0 → error, >1 same-label → error)
+      //  - neither given      → resolve against the cards on file:
+      //      0 cards  → cardRef stays undefined → JIT add-card ceremony
+      //      1 card   → use it
+      //      >1 cards → error listing the labels (never silently guess)
+      let cardRef = args.card_ref;
+      if (cardRef === undefined) {
+        const cards = await api.listPaymentCards();
+        if (args.card_label !== undefined) {
+          const matches = cards.filter((card) => card.label === args.card_label);
+          if (matches.length === 0) {
+            throw new Error(`No saved payment card has label "${args.card_label}".`);
+          }
+          if (matches.length > 1) {
+            throw new Error(
+              `Multiple saved payment cards have label "${args.card_label}"; use card_ref instead.`,
+            );
+          }
+          cardRef = matches[0]!.id;
+        } else if (cards.length === 1) {
+          cardRef = cards[0]!.id;
+        } else if (cards.length > 1) {
+          const labels = cards.map((card) => `"${card.label}"`).join(", ");
           throw new Error(
-            `Multiple saved payment cards have label "${args.card_label}"; use card_ref instead.`,
+            `Multiple saved payment cards on file (${labels}); specify card_ref or card_label.`,
           );
         }
-        cardRef = matches[0]!.id;
-      } else if (cards.length === 1) {
-        cardRef = cards[0]!.id;
-      } else if (cards.length > 1) {
-        const labels = cards.map((card) => `"${card.label}"`).join(", ");
-        throw new Error(
-          `Multiple saved payment cards on file (${labels}); specify card_ref or card_label.`,
-        );
+        // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
+        // the JIT add-card ceremony.
       }
-      // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
-      // the JIT add-card ceremony.
+      return await executeOperatePay(
+        {
+          ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
+          ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
+          ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
+          ...(args.currency !== undefined ? { currency: args.currency } : {}),
+          ...(args.item !== undefined ? { item: args.item } : {}),
+          ...(args.reason !== undefined ? { reason: args.reason } : {}),
+          ...(args.three_ds_wait_seconds !== undefined
+            ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
+            : {}),
+        },
+        api,
+        lease.browser,
+        context !== undefined
+          ? {
+              surfaceApprovalUrl: async (url) => {
+                await context.notifyUser(`Approve this payment on your phone: ${url}`, {
+                  approval_url: url,
+                });
+              },
+            }
+          : {},
+      );
+    } finally {
+      lease.release();
     }
-    return await executeOperatePay(
-      {
-        ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
-        ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
-        ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
-        ...(args.currency !== undefined ? { currency: args.currency } : {}),
-        ...(args.item !== undefined ? { item: args.item } : {}),
-        ...(args.reason !== undefined ? { reason: args.reason } : {}),
-        ...(args.three_ds_wait_seconds !== undefined
-          ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
-          : {}),
-      },
-      api,
-      activeProvisionBrowser(),
-      context !== undefined
-        ? {
-            surfaceApprovalUrl: async (url) => {
-              await context.notifyUser(`Approve this payment on your phone: ${url}`, {
-                approval_url: url,
-              });
-            },
-          }
-        : {},
-    );
   },
 };
