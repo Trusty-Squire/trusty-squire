@@ -176,6 +176,9 @@ vi.mock("../browser.js", () => ({
     }
     async type(selector: string, text: string): Promise<void> {
       h.typed.push({ selector, text });
+      for (const element of h.elements as Array<Record<string, unknown>>) {
+        if (element.selector === selector) element.value = text;
+      }
     }
     async selectOption(selector: string, matcher?: string): Promise<void> {
       h.selected.push({ selector, matcher });
@@ -260,7 +263,7 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -274,7 +277,9 @@ import {
   finishProvisionSession,
   closeAllProvisionSessions,
   parseElementsTable,
+  replayOperatorRecipe,
 } from "../provision-session.js";
+import type { OperatorRecipe } from "../operator-recipe.js";
 import {
   provisionRememberTool,
   provisionPrepareLoginTool,
@@ -344,6 +349,220 @@ beforeEach(() => {
   };
   h.locatorClickCalls = 0;
   h.locatorDisposeCalls = 0;
+});
+
+const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
+  name: "checkout-coffee",
+  schema_version: 1,
+  goal: "Buy the selected coffee",
+  verb: "purchase",
+  domain: "example.com",
+  entry_url: "https://shop.example.com/checkout",
+  allowed_hosts: ["shop.example.com"],
+  trace: [],
+  secrets: [],
+  postcondition: {
+    kind: "execute_capability",
+    describe: "Order is ready for approval",
+    success_signal: { text_present: "Review order" },
+  },
+  ...overrides,
+});
+
+describe("prepared-statement replay", () => {
+  it("resolves, binds, and acts without putting the host in the hot path", async () => {
+    h.elements = [
+      elem({
+        testId: "shipping-city",
+        name: "city",
+        labelText: "City",
+        selector: "#city",
+        value: "",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "type",
+              target: {
+                dom_hint: { testid: "shipping-city", name: "city" },
+                accessible_name: "City",
+                css: "#city",
+              },
+              value: { hole: "address.city" },
+            },
+          },
+        ],
+      }),
+      { "address.city": "Queens" },
+    );
+    expect(result.status).toBe("complete");
+    expect(result.status === "complete" && result.field_values_verified).toBe(true);
+    expect(h.typed).toEqual([{ selector: "#city", text: "Queens" }]);
+  });
+
+  it("hands one missed step to the host and provides a continuation index", async () => {
+    h.elements = [];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "click",
+              target: {
+                dom_hint: { testid: "review-order" },
+                visible_text: "Review order",
+              },
+            },
+          },
+          { action: { kind: "press", key: "Enter" } },
+        ],
+      }),
+      {},
+    );
+    expect(result.status).toBe("fallback_required");
+    expect(result.status === "fallback_required" && result.step_index).toBe(0);
+    expect(result.status === "fallback_required" && result.next_index).toBe(1);
+  });
+
+  it("aborts a money replay to the human when a skipped fallback mis-filled a field", async () => {
+    h.elements = [
+      elem({
+        testId: "shipping-city",
+        labelText: "City",
+        selector: "#city",
+        value: "Wrong city",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "type",
+              target: {
+                dom_hint: { testid: "shipping-city" },
+                accessible_name: "City",
+                css: "#city",
+              },
+              value: { hole: "address.city" },
+            },
+          },
+        ],
+      }),
+      { "address.city": "Queens" },
+      1,
+    );
+    expect(result).toMatchObject({
+      status: "human_required",
+      reason: "field_value_mismatch",
+      field: "address.city",
+    });
+  });
+});
+
+describe("verified recipe recording", () => {
+  it("never writes a recipe when the machine postcondition fails", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-fail-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.visibleText = "Still editing";
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "buy-coffee",
+          goal: "Buy coffee",
+          verb: "purchase",
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Ready to approve",
+            success_signal: { text_present: "Review order" },
+          },
+        },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/postcondition not confirmed/i);
+    expect(readdirSync(dir)).toEqual([]);
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("records stable targets and provenance holes only after verification", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-ok-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [
+      elem({
+        testId: "product-search",
+        id: "query",
+        name: "query",
+        role: "textbox",
+        ariaLabel: "Search products",
+        visibleText: "Search",
+        selector: "#query",
+        value: "",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Search", text: "dark roast" });
+    h.visibleText = "Review order";
+    const saved = await provisionRememberTool.handler(
+      {
+        session_id: started.session_id,
+        name: "buy-coffee",
+        goal: "Buy coffee",
+        verb: "purchase",
+        inputs: { product_query: "dark roast" },
+        postcondition: {
+          kind: "execute_capability",
+          describe: "Ready to approve",
+          success_signal: { text_present: "Review order" },
+        },
+      },
+      null as unknown as ApiClient,
+    );
+    expect(saved).toMatchObject({ verified: { confirmed: true } });
+    expect(readdirSync(dir)).toEqual(["purchase--example.com.json"]);
+    const raw = JSON.parse(readFileSync(join(dir, "purchase--example.com.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(raw).toMatchObject({
+      verb: "purchase",
+      domain: "example.com",
+      trace: [
+        {
+          action: {
+            kind: "type",
+            value: { hole: "product_query" },
+            target: {
+              dom_hint: { testid: "product-search", id: "query", name: "query" },
+              role_hint: "textbox",
+              accessible_name: "Search products",
+              css: "#query",
+              visible_text: "Search",
+            },
+          },
+        },
+      ],
+    });
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
 });
 afterEach(async () => {
   await closeAllProvisionSessions();
@@ -451,6 +670,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
           session_id: obs.session_id,
           name: "locator-session",
           goal: "Add a product to the cart",
+          verb: "add_to_cart",
           postcondition: {
             kind: "execute_capability",
             describe: "Cart contains the product",

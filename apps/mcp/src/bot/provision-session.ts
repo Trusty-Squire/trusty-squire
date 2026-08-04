@@ -36,11 +36,20 @@ import {
   type OperatorRecipe,
   type TraceEntry,
   type TraceAction,
+  type RecipeTarget,
+  type OperatorVerb,
+  type KnownRecipeInputs,
   type Postcondition,
   type PostconditionResult,
   type PostconditionSnapshot,
   checkSuccessSignal,
+  bindRecipeValue,
+  fillTemplate,
   isSingleUseUrl,
+  operatorRecipeDomain,
+  resolveRecipeTarget,
+  tagTraceProvenance,
+  verifyFilledFieldValues,
   writeRecipe,
 } from "./operator-recipe.js";
 import {
@@ -50,7 +59,13 @@ import {
   resolveCaptureDir,
   type OnboardingRoundCapture,
 } from "./onboarding-capture.js";
-import { promoteToSkill, type PromoteResult } from "./promote-to-skill.js";
+import {
+  promoteToSkill,
+  pickRowDisambiguator,
+  pickStableDomHint,
+  pickHrefHint,
+  type PromoteResult,
+} from "./promote-to-skill.js";
 import { serviceSlugFromHost } from "@trusty-squire/skill-schema";
 import type { PostVerifyStep } from "./provision-types.js";
 import {
@@ -2723,14 +2738,76 @@ export function scrubKnownEmail(s: string, userEmail: string | null): string {
   return s.split(userEmail).join(EMAIL_SLOT_TEMPLATE);
 }
 
-// Append a TEXT-targeted entry to the session's operator-recipe trace. Stores
-// the visible text the action hit (never a ref/coordinate) + non-secret params.
+// Append a stable-attribute-targeted entry to the session's operator-recipe
+// trace. Stores no ref/coordinate; visible text remains a unique-only fallback.
 // `extract` (the seal) is recorded separately in stashSecretSlot.
 function traceTextFor(el: InteractiveElement | null): string | undefined {
   if (el === null) return undefined;
   const keys = elementTargetKeys(el);
   const first = keys[0];
   return typeof first === "string" && first.length > 0 ? first.slice(0, 120) : undefined;
+}
+
+// Stable attributes already present in the inventory and consumed by the
+// skill synthesizer. Keep all of them; replay chooses in a fixed order.
+export function recipeTargetFor(
+  el: InteractiveElement | null,
+  inventory: readonly InteractiveElement[] = [],
+): RecipeTarget | undefined {
+  if (el === null) return undefined;
+  const role =
+    el.role ??
+    (el.tag === "button"
+      ? "button"
+      : el.tag === "a"
+        ? "link"
+        : el.tag === "input" || el.tag === "textarea"
+          ? "textbox"
+          : undefined);
+  const accessibleName =
+    el.ariaLabel ??
+    el.labelText ??
+    el.visibleText ??
+    el.iconLabel ??
+    el.placeholder ??
+    el.title ??
+    el.name ??
+    undefined;
+  const siblings = inventory.filter((candidate) => {
+    if (candidate === el || candidate.selector === el.selector) return false;
+    const candidateName =
+      candidate.ariaLabel ??
+      candidate.labelText ??
+      candidate.visibleText ??
+      candidate.iconLabel ??
+      candidate.placeholder ??
+      candidate.title ??
+      candidate.name ??
+      undefined;
+    return (
+      (el.testId !== null && el.testId !== undefined && candidate.testId === el.testId) ||
+      (el.id !== null && candidate.id === el.id) ||
+      (el.name !== null && candidate.name === el.name) ||
+      (accessibleName !== undefined && candidateName === accessibleName) ||
+      (el.href !== null && el.href !== undefined && candidate.href === el.href)
+    );
+  });
+  const nearText = siblings.length > 0 ? pickRowDisambiguator(el, siblings, inventory) : null;
+  const domHint = pickStableDomHint(el);
+  const hrefHint = pickHrefHint(el);
+  return {
+    ...(domHint !== undefined ? { dom_hint: domHint } : {}),
+    ...(role !== undefined && role.length > 0 ? { role_hint: role } : {}),
+    ...(accessibleName !== undefined && accessibleName.length > 0
+      ? { accessible_name: accessibleName }
+      : {}),
+    ...(nearText !== null ? { near_text_hint: nearText } : {}),
+    ...(hrefHint !== null && !isSingleUseUrl(el.href ?? "") ? { href_hint: hrefHint } : {}),
+    ...(el.selector.length > 0 ? { css: el.selector } : {}),
+    ...(el.visibleText !== null && el.visibleText.length > 0
+      ? { visible_text: el.visibleText }
+      : {}),
+  };
 }
 
 function recordTrace(
@@ -2768,6 +2845,8 @@ function recordTrace(
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
+  const target = recipeTargetFor(el, session.lastElements);
+  const withTarget = target !== undefined ? { target } : {};
   let a: TraceAction;
   switch (action.kind) {
     case "goto":
@@ -2792,20 +2871,21 @@ function recordTrace(
       a = {
         kind: "type",
         ...withText,
+        ...withTarget,
         value: scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail),
       };
       break;
     case "type_secret":
-      a = { kind: "type_secret", slot: action.slot, ...withText };
+      a = { kind: "type_secret", slot: action.slot, ...withText, ...withTarget };
       break;
     case "click":
-      a = { kind: "click", ...withText };
+      a = { kind: "click", ...withText, ...withTarget };
       break;
     case "js_click":
-      a = { kind: "js_click", ...withText };
+      a = { kind: "js_click", ...withText, ...withTarget };
       break;
     case "oauth_click":
-      a = { kind: "oauth_click", ...withText };
+      a = { kind: "oauth_click", ...withText, ...withTarget };
       break;
   }
   session.actionTrace.push({ action: a });
@@ -3005,14 +3085,26 @@ async function settleAfterStateChange(browser: BrowserController): Promise<void>
 
 // ── operator-recipe: remember a successful run, verify a postcondition ──
 
-// Persist the session's action trace as a named, replayable operator-recipe.
+// Persist the session's action trace as a keyed, replayable operator-recipe.
 // Sealed secrets become SLOT references (stored:false) — never values. The
 // recipe's scope = start + auto_widen hosts (mid_session crossings replay via
 // the trace's own allow_host steps).
 export async function rememberRecipe(
   sessionId: string,
-  opts: { name: string; goal: string; postcondition: Postcondition },
-): Promise<{ file: string; name: string; steps: number; secrets: string[] }> {
+  opts: {
+    name: string;
+    goal: string;
+    postcondition: Postcondition;
+    verb?: OperatorVerb;
+    inputs?: KnownRecipeInputs;
+  },
+): Promise<{
+  file: string;
+  name: string;
+  steps: number;
+  secrets: string[];
+  verified: PostconditionResult;
+}> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.usedLocatorFallback) {
@@ -3020,16 +3112,26 @@ export async function rememberRecipe(
       "operate_remember refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
     );
   }
+  // Record only through the existing machine-checkable success gate. Previously
+  // operate_remember wrote first and operate_finish_task verified later, leaving
+  // an unverified recipe on disk when the postcondition failed.
+  const verified = await verifyPostcondition(sessionId, opts.postcondition);
+  if (!verified.confirmed) {
+    throw new Error(`operate_remember refused: postcondition not confirmed (${verified.reason})`);
+  }
   const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
   const recipe: OperatorRecipe = {
     name: opts.name,
     schema_version: 1,
     goal: opts.goal,
+    ...(opts.verb !== undefined
+      ? { verb: opts.verb, domain: operatorRecipeDomain(session.startUrl) }
+      : {}),
     // Canonical, stable replay entry — the page the session started at, never a
     // mid-flow single-use link inferred from the trace.
     entry_url: session.startUrl,
     allowed_hosts: [...new Set(egressSeedHosts(session))],
-    trace: session.actionTrace,
+    trace: tagTraceProvenance(session.actionTrace, opts.inputs ?? {}),
     secrets,
     postcondition: opts.postcondition,
   };
@@ -3040,7 +3142,13 @@ export async function rememberRecipe(
     secrets: secrets.length,
     file,
   });
-  return { file, name: opts.name, steps: recipe.trace.length, secrets: secrets.map((s) => s.slot) };
+  return {
+    file,
+    name: opts.name,
+    steps: recipe.trace.length,
+    secrets: secrets.map((s) => s.slot),
+    verified,
+  };
 }
 
 // Read a single page snapshot for postcondition checking. Field VALUES are
@@ -3083,6 +3191,248 @@ export async function verifyPostcondition(
     reason: result.reason,
   });
   return result;
+}
+
+const MONEY_REPLAY_VERBS = new Set<OperatorVerb>([
+  "purchase",
+  "subscribe",
+  "checkout",
+  "renew",
+  "upgrade",
+  "book",
+  "reserve",
+]);
+
+export type OperatorReplayResult =
+  | {
+      status: "complete";
+      observation: Observation;
+      replayed_steps: number;
+      field_values_verified: boolean;
+    }
+  | {
+      status: "fallback_required";
+      observation: Observation;
+      step_index: number;
+      next_index: number;
+      step: TraceEntry;
+      reason: string;
+    }
+  | {
+      status: "human_required";
+      observation: Observation;
+      reason: "field_missing" | "field_value_mismatch";
+      field: string;
+    };
+
+function replayTarget(action: TraceAction): RecipeTarget | null {
+  if (action.target !== undefined) return action.target;
+  return action.text_match !== undefined ? { visible_text: action.text_match } : null;
+}
+
+function fallbackResult(
+  observation: Observation,
+  step: TraceEntry,
+  stepIndex: number,
+  reason: string,
+): OperatorReplayResult {
+  return {
+    status: "fallback_required",
+    observation,
+    step_index: stepIndex,
+    next_index: stepIndex + 1,
+    step,
+    reason,
+  };
+}
+
+/**
+ * Execute deterministic recipe steps until completion or one local miss.
+ * A miss is returned to the host with a continuation index; after the host
+ * repairs that one step, calling again with `fromIndex=next_index` continues.
+ */
+export async function replayOperatorRecipe(
+  sessionId: string,
+  recipe: OperatorRecipe,
+  bindings: Readonly<Record<string, string>>,
+  fromIndex = 0,
+): Promise<OperatorReplayResult> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  let replayed = 0;
+
+  for (let i = fromIndex; i < recipe.trace.length; i += 1) {
+    const step = recipe.trace[i] as TraceEntry;
+    const recorded = step.action;
+    let action: ProvisionAction;
+
+    if (recorded.kind === "extract") {
+      return fallbackResult(
+        await observe(sessionId),
+        step,
+        i,
+        "credential extraction requires host planning on the live page",
+      );
+    }
+
+    if (recorded.kind === "goto") {
+      if (recorded.url_template === undefined) {
+        return fallbackResult(await observe(sessionId), step, i, "goto step has no URL");
+      }
+      const filled = fillTemplate(recorded.url_template, bindings as Record<string, string>);
+      if (filled.missing.length > 0) {
+        return fallbackResult(
+          await observe(sessionId),
+          step,
+          i,
+          `missing bindings: ${filled.missing.join(", ")}`,
+        );
+      }
+      action = { kind: "goto", url: filled.url };
+    } else if (recorded.kind === "allow_host") {
+      if (recorded.host === undefined) {
+        return fallbackResult(await observe(sessionId), step, i, "allow_host step has no host");
+      }
+      action = { kind: "allow_host", host: recorded.host };
+    } else if (recorded.kind === "press") {
+      if (recorded.key === undefined) {
+        return fallbackResult(await observe(sessionId), step, i, "press step has no key");
+      }
+      action = { kind: "press", key: recorded.key };
+    } else if (recorded.kind === "oauth_settle") {
+      action = { kind: "oauth_settle" };
+    } else if (recorded.kind === "scroll") {
+      action = {
+        kind: "scroll",
+        ...(recorded.direction !== undefined ? { direction: recorded.direction } : {}),
+      };
+    } else {
+      const target = replayTarget(recorded);
+      if (target === null) {
+        return fallbackResult(await observe(sessionId), step, i, "step has no replay target");
+      }
+      // Structural pre-check: resolve against the live inventory before every
+      // deterministic act. This is especially load-bearing on money paths.
+      const fresh = await session.browser.extractInteractiveElements();
+      session.lastElements = fresh;
+      const resolution = resolveRecipeTarget(fresh, target);
+      if (resolution === null) {
+        return fallbackResult(await observe(sessionId), step, i, "ordered target resolver missed");
+      }
+      const ref = provisionElementRefs(fresh).get(resolution.element);
+      if (ref === undefined) {
+        return fallbackResult(await observe(sessionId), step, i, "resolved target has no live ref");
+      }
+      if (recorded.kind === "type") {
+        if (recorded.value === undefined) {
+          return fallbackResult(await observe(sessionId), step, i, "type step has no value");
+        }
+        let text: string;
+        try {
+          text = bindRecipeValue(recorded.value, bindings);
+        } catch (error) {
+          return fallbackResult(
+            await observe(sessionId),
+            step,
+            i,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        action = { kind: "type", target: ref, text };
+      } else if (recorded.kind === "type_secret") {
+        if (recorded.slot === undefined) {
+          return fallbackResult(await observe(sessionId), step, i, "type_secret step has no slot");
+        }
+        action = { kind: "type_secret", target: ref, slot: recorded.slot };
+      } else if (recorded.kind === "click") {
+        action = { kind: "click", target: ref };
+      } else if (recorded.kind === "js_click") {
+        action = { kind: "js_click", target: ref };
+      } else {
+        action = { kind: "oauth_click", target: ref };
+      }
+    }
+
+    try {
+      await act(sessionId, action, "none");
+      replayed += 1;
+    } catch (error) {
+      return fallbackResult(
+        await observe(sessionId),
+        step,
+        i,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  const isMoneyPath = recipe.verb !== undefined && MONEY_REPLAY_VERBS.has(recipe.verb);
+  if (isMoneyPath) {
+    const missingMoneyBinding = recipe.trace.find((step) => {
+      const value = step.action.value;
+      return (
+        step.action.kind === "type" &&
+        value !== undefined &&
+        typeof value !== "string" &&
+        /^(?:address|contact)(?:\.|$)|^quantity$/.test(value.hole) &&
+        bindings[value.hole] === undefined
+      );
+    });
+    if (missingMoneyBinding !== undefined) {
+      const value = missingMoneyBinding.action.value;
+      const field = typeof value === "string" || value === undefined ? "field" : value.hole;
+      audit(sessionId, "replay_field_value_guard", {
+        ok: false,
+        reason: "field_missing",
+        field,
+      });
+      return {
+        status: "human_required",
+        observation: await observe(sessionId),
+        reason: "field_missing",
+        field,
+      };
+    }
+    const expectedFields = recipe.trace.flatMap((step) => {
+      const { action } = step;
+      if (
+        action.kind !== "type" ||
+        action.value === undefined ||
+        typeof action.value === "string" ||
+        !/^(?:address|contact)(?:\.|$)|^quantity$/.test(action.value.hole)
+      ) {
+        return [];
+      }
+      const target = replayTarget(action);
+      if (target === null) return [];
+      const bound = bindings[action.value.hole];
+      return bound === undefined ? [] : [{ target, expected: bound, hole: action.value.hole }];
+    });
+    const fresh = await session.browser.extractInteractiveElements();
+    session.lastElements = fresh;
+    const guard = verifyFilledFieldValues(fresh, expectedFields);
+    if (!guard.ok) {
+      audit(sessionId, "replay_field_value_guard", {
+        ok: false,
+        reason: guard.reason,
+        field: guard.field,
+      });
+      return {
+        status: "human_required",
+        observation: await observe(sessionId),
+        reason: guard.reason,
+        field: guard.field,
+      };
+    }
+    audit(sessionId, "replay_field_value_guard", { ok: true, fields: expectedFields.length });
+  }
+
+  return {
+    status: "complete",
+    observation: await observe(sessionId),
+    replayed_steps: replayed,
+    field_values_verified: isMoneyPath,
+  };
 }
 
 // ── extraction (the `extract` thick tool) ──

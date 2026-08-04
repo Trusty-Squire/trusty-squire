@@ -1728,7 +1728,7 @@ function resolveLabelHint(
 // target (the typical row-header position), then checking they don't
 // also appear before any sibling. Returns null when no such snippet
 // exists.
-function pickRowDisambiguator(
+export function pickRowDisambiguator(
   target: InteractiveElement,
   siblings: readonly InteractiveElement[],
   inventory: readonly InteractiveElement[],

@@ -13,6 +13,14 @@ import {
   recipeEntryUrl,
   isSingleUseUrl,
   operatorRecipeDir,
+  operatorRecipeDomain,
+  operatorRecipeKey,
+  readRecipeForTask,
+  resolveRecipeTarget,
+  tagProvenanceValue,
+  tagTraceProvenance,
+  bindRecipeValue,
+  verifyFilledFieldValues,
   type OperatorRecipe,
 } from "../operator-recipe.js";
 
@@ -22,7 +30,12 @@ const RECIPE: OperatorRecipe = {
   goal: "Create a Google OAuth web client and prove it issues a token",
   allowed_hosts: ["console.cloud.google.com", "developers.google.com"],
   trace: [
-    { action: { kind: "goto", url_template: "https://console.cloud.google.com/auth/clients/create?project=${PROJECT}" } },
+    {
+      action: {
+        kind: "goto",
+        url_template: "https://console.cloud.google.com/auth/clients/create?project=${PROJECT}",
+      },
+    },
     { action: { kind: "click", text_match: "Web application" } },
     { action: { kind: "extract", slot: "oauth_secret" } },
     { action: { kind: "allow_host", host: "developers.google.com" } },
@@ -61,6 +74,177 @@ describe("operator-recipe IO round-trip", () => {
   it("honors the env-overridden recipe dir", () => {
     expect(operatorRecipeDir()).toBe(dir);
   });
+
+  it("stores and reads new recipes by (verb, eTLD+1)", async () => {
+    const keyed: OperatorRecipe = {
+      ...RECIPE,
+      name: "buy-coffee",
+      verb: "purchase",
+      domain: "example.co.uk",
+      entry_url: "https://checkout.shop.example.co.uk/cart?session=discarded",
+    };
+    const file = await writeRecipe(keyed);
+    expect(path.basename(file)).toBe("purchase--example.co.uk.json");
+    expect(
+      await readRecipeForTask("purchase", "https://www.example.co.uk/another/path?q=1"),
+    ).toEqual(keyed);
+  });
+});
+
+describe("prepared-statement recipe key", () => {
+  it("uses PSL eTLD+1 and drops subdomain, path, and query", () => {
+    expect(operatorRecipeDomain("https://checkout.shop.example.co.uk/a?x=1")).toBe("example.co.uk");
+    expect(operatorRecipeKey("purchase", "https://www.example.com/p/42?q=beans")).toBe(
+      "purchase--example.com",
+    );
+  });
+
+  it("keeps tenant subdomains on allowlisted hosts", () => {
+    expect(operatorRecipeDomain("https://acme.myshopify.com/products/coffee")).toBe(
+      "acme.myshopify.com",
+    );
+    expect(operatorRecipeDomain("https://team.notion.site/project?q=1")).toBe("team.notion.site");
+    expect(operatorRecipeDomain("https://team.github.io/project?q=1")).toBe("github.io");
+  });
+});
+
+describe("ordered target fallback", () => {
+  const elements = [
+    {
+      testId: "primary",
+      id: "old-id",
+      name: "submit",
+      role: "button",
+      ariaLabel: "Buy now",
+      visibleText: "Continue",
+      href: "/checkout",
+      selector: "#primary",
+      value: null,
+    },
+    {
+      testId: "secondary",
+      id: "target-id",
+      name: "other",
+      role: "button",
+      ariaLabel: "Buy now",
+      visibleText: "Continue",
+      href: "/other",
+      selector: "#secondary",
+      value: null,
+    },
+  ];
+
+  it("takes the first successful tier, not a weighted score", () => {
+    const result = resolveRecipeTarget(elements, {
+      dom_hint: { testid: "primary", id: "target-id" },
+      role_hint: "button",
+      accessible_name: "Buy now",
+    });
+    expect(result?.via).toBe("testid");
+    expect(result?.element.selector).toBe("#primary");
+  });
+
+  it("falls through testid to id/name, role+name, href, then css", () => {
+    expect(
+      resolveRecipeTarget(elements, { dom_hint: { testid: "gone", id: "target-id" } })?.via,
+    ).toBe("id");
+    expect(
+      resolveRecipeTarget(elements, {
+        dom_hint: { testid: "gone", id: "gone" },
+        role_hint: "button",
+        accessible_name: "Buy now",
+      })?.via,
+    ).toBe("role+accessible-name");
+    expect(resolveRecipeTarget(elements, { href_hint: "/other" })?.via).toBe("href");
+    expect(resolveRecipeTarget(elements, { css: "#secondary" })?.via).toBe("css");
+  });
+
+  it("uses visible text last and only when exactly one element matches", () => {
+    expect(resolveRecipeTarget(elements, { visible_text: "Continue" })).toBeNull();
+    expect(
+      resolveRecipeTarget([{ ...elements[0]!, visibleText: "Unique" }], {
+        visible_text: "Unique",
+      })?.via,
+    ).toBe("visible-text");
+  });
+
+  it("uses the synthesizer-compatible near-text hint to disambiguate a tier", () => {
+    const inventory = [
+      { selector: "#billing-label", visibleText: "Billing", role: null },
+      {
+        selector: "#billing",
+        visibleText: "Continue",
+        role: "button",
+        ariaLabel: "Continue",
+      },
+      { selector: "#shipping-label", visibleText: "Shipping", role: null },
+      {
+        selector: "#shipping",
+        visibleText: "Continue",
+        role: "button",
+        ariaLabel: "Continue",
+      },
+    ];
+    const result = resolveRecipeTarget(inventory, {
+      role_hint: "button",
+      accessible_name: "Continue",
+      near_text_hint: "Shipping",
+    });
+    expect(result?.element.selector).toBe("#shipping");
+  });
+});
+
+describe("provenance holes", () => {
+  const inputs = {
+    product_query: "dark roast",
+    address: { city: "Brooklyn", postal_code: "11201" },
+    contact: { email: "ada@example.com" },
+    credential: "vault-secret",
+    card: { last4: "4242" },
+    quantity: 3,
+  };
+
+  it("tags exact known inputs and leaves unknown literals alone", () => {
+    expect(tagProvenanceValue("dark roast", inputs)).toEqual({ hole: "product_query" });
+    expect(tagProvenanceValue("Brooklyn", inputs)).toEqual({ hole: "address.city" });
+    expect(tagProvenanceValue("3", inputs)).toEqual({ hole: "quantity" });
+    expect(tagProvenanceValue("${EMAIL_ALIAS}", inputs)).toEqual({ hole: "contact.email" });
+    expect(tagProvenanceValue("Create account", inputs)).toBe("Create account");
+  });
+
+  it("tags trace values without changing non-value fields and binds on replay", () => {
+    const trace = tagTraceProvenance(
+      [{ action: { kind: "type", value: "Brooklyn", text_match: "City" } }],
+      inputs,
+    );
+    expect(trace[0]?.action.value).toEqual({ hole: "address.city" });
+    expect(bindRecipeValue(trace[0]!.action.value!, { "address.city": "Queens" })).toBe("Queens");
+  });
+});
+
+describe("money-path field-value guard", () => {
+  const target = { dom_hint: { testid: "shipping-city" }, visible_text: "City" };
+  const element = {
+    testId: "shipping-city",
+    selector: "#city",
+    value: "Queens",
+    visibleText: null,
+  };
+
+  it("passes only on exact injected values", () => {
+    expect(
+      verifyFilledFieldValues([element], [{ target, expected: "Queens", hole: "address.city" }]),
+    ).toEqual({ ok: true });
+  });
+
+  it("aborts on mismatch or a missing field", () => {
+    expect(
+      verifyFilledFieldValues([element], [{ target, expected: "Brooklyn", hole: "address.city" }]),
+    ).toEqual({ ok: false, reason: "field_value_mismatch", field: "address.city" });
+    expect(
+      verifyFilledFieldValues([], [{ target, expected: "Queens", hole: "address.city" }]),
+    ).toEqual({ ok: false, reason: "field_missing", field: "address.city" });
+  });
 });
 
 describe("iron invariant: a recipe never stores a secret VALUE", () => {
@@ -70,7 +254,10 @@ describe("iron invariant: a recipe never stores a secret VALUE", () => {
   });
 
   it("schema rejects a value-bearing field on a secret (strict)", () => {
-    const bad = { ...RECIPE, secrets: [{ slot: "oauth_secret", stored: false, value: "GOCSPX-leak" }] };
+    const bad = {
+      ...RECIPE,
+      secrets: [{ slot: "oauth_secret", stored: false, value: "GOCSPX-leak" }],
+    };
     expect(OperatorRecipeSchema.safeParse(bad).success).toBe(false);
   });
 
@@ -111,10 +298,16 @@ describe("renderOperatorRecipeHint (a MAP, not a script)", () => {
 });
 
 describe("checkSuccessSignal (the anti-false-green gate)", () => {
-  const tokenSnap = { url: "https://developers.google.com/oauthplayground/", text: "", fields: [{ label: "Access token:", value_len: 253 }] };
+  const tokenSnap = {
+    url: "https://developers.google.com/oauthplayground/",
+    text: "",
+    fields: [{ label: "Access token:", value_len: 253 }],
+  };
 
   it("field_text confirms only when a matching field is long enough", () => {
-    expect(checkSuccessSignal({ field_text: "Access token", min_value_len: 40 }, tokenSnap).confirmed).toBe(true);
+    expect(
+      checkSuccessSignal({ field_text: "Access token", min_value_len: 40 }, tokenSnap).confirmed,
+    ).toBe(true);
   });
 
   it("field_text fails when the value is too short", () => {
@@ -126,7 +319,9 @@ describe("checkSuccessSignal (the anti-false-green gate)", () => {
 
   it("field_text fails when no field matches", () => {
     const snap = { ...tokenSnap, fields: [{ label: "Email", value_len: 99 }] };
-    expect(checkSuccessSignal({ field_text: "Access token", min_value_len: 40 }, snap).confirmed).toBe(false);
+    expect(
+      checkSuccessSignal({ field_text: "Access token", min_value_len: 40 }, snap).confirmed,
+    ).toBe(false);
   });
 
   it("evidence carries the LENGTH, never the value", () => {
@@ -135,7 +330,11 @@ describe("checkSuccessSignal (the anti-false-green gate)", () => {
   });
 
   it("text_present and url_contains both work", () => {
-    const snap = { url: "https://app.example.com/dashboard", text: "Welcome back, you are signed in", fields: [] };
+    const snap = {
+      url: "https://app.example.com/dashboard",
+      text: "Welcome back, you are signed in",
+      fields: [],
+    };
     expect(checkSuccessSignal({ text_present: "Welcome back" }, snap).confirmed).toBe(true);
     expect(checkSuccessSignal({ url_contains: "/dashboard" }, snap).confirmed).toBe(true);
     expect(checkSuccessSignal({ url_contains: "/login" }, snap).confirmed).toBe(false);
@@ -153,7 +352,9 @@ describe("fillTemplate + recipeEntryUrl", () => {
   });
 
   it("recipeEntryUrl is null when no goto exists", () => {
-    expect(recipeEntryUrl({ ...RECIPE, trace: [{ action: { kind: "click", text_match: "x" } }] })).toBeNull();
+    expect(
+      recipeEntryUrl({ ...RECIPE, trace: [{ action: { kind: "click", text_match: "x" } }] }),
+    ).toBeNull();
   });
 });
 
@@ -169,10 +370,11 @@ describe("single-use link handling (replay-entry safety)", () => {
       ),
     ).toBe(true);
     expect(isSingleUseUrl("https://app.example.com/magic?code=ab12cd34ef56gh78ij90")).toBe(true);
-    expect(
-      isSingleUseUrl("https://example.com/password-reset/Xy7Kp2Qm9Tw4Rs6Lf0Bn3"),
-    ).toBe(true);
-    expect(isSingleUseUrl("https://id.example.com/confirm?oobCode=AB12cd34EF56gh78IJ90kl")).toBe(true);
+    expect(isSingleUseUrl("/magic?code=ab12cd34ef56gh78ij90")).toBe(true);
+    expect(isSingleUseUrl("https://example.com/password-reset/Xy7Kp2Qm9Tw4Rs6Lf0Bn3")).toBe(true);
+    expect(isSingleUseUrl("https://id.example.com/confirm?oobCode=AB12cd34EF56gh78IJ90kl")).toBe(
+      true,
+    );
   });
 
   it("isSingleUseUrl does NOT flag stable app URLs", () => {
@@ -200,7 +402,12 @@ describe("single-use link handling (replay-entry safety)", () => {
       ...RECIPE,
       entry_url: undefined,
       trace: [
-        { action: { kind: "goto", url_template: "https://svc.example.com/verify-email?token=ab12cd34ef56gh78ij90kl" } },
+        {
+          action: {
+            kind: "goto",
+            url_template: "https://svc.example.com/verify-email?token=ab12cd34ef56gh78ij90kl",
+          },
+        },
         { action: { kind: "goto", url_template: "https://svc.example.com/login" } },
       ],
     };
@@ -212,15 +419,26 @@ describe("single-use link handling (replay-entry safety)", () => {
       ...RECIPE,
       entry_url: undefined,
       trace: [
-        { action: { kind: "goto", url_template: "https://svc.example.com/verify-email?token=ab12cd34ef56gh78ij90kl" } },
+        {
+          action: {
+            kind: "goto",
+            url_template: "https://svc.example.com/verify-email?token=ab12cd34ef56gh78ij90kl",
+          },
+        },
       ],
     };
     expect(recipeEntryUrl(r)).toBeNull();
   });
 
   it("entry_url round-trips through the schema (write/read)", async () => {
-    const r: OperatorRecipe = { ...RECIPE, name: "entry-url-roundtrip", entry_url: "https://svc.example.com/start" };
+    const r: OperatorRecipe = {
+      ...RECIPE,
+      name: "entry-url-roundtrip",
+      entry_url: "https://svc.example.com/start",
+    };
     await writeRecipe(r);
-    expect((await readRecipe("entry-url-roundtrip")).entry_url).toBe("https://svc.example.com/start");
+    expect((await readRecipe("entry-url-roundtrip")).entry_url).toBe(
+      "https://svc.example.com/start",
+    );
   });
 });

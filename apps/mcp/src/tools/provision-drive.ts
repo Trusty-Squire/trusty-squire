@@ -26,6 +26,7 @@ import {
   rememberRecipe,
   verifyPostcondition,
   captureAndPromoteSession,
+  replayOperatorRecipe,
   emitProvisionMeasurement,
   type ProvisionAction,
   type ExtractResult,
@@ -33,9 +34,11 @@ import {
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
   readRecipe,
+  readRecipeForTask,
   renderOperatorRecipeHint,
   recipeEntryUrl,
   fillTemplate,
+  OperatorVerbSchema,
   PostconditionSchema,
 } from "../bot/operator-recipe.js";
 import { isMaskedDisplay } from "../bot/credential-shape.js";
@@ -836,28 +839,41 @@ const rememberSchema = z.object({
   session_id: z.string().min(1),
   name: z.string().min(1).max(80),
   goal: z.string().min(1).max(300),
+  verb: OperatorVerbSchema,
+  inputs: z
+    .object({
+      address: z.record(z.string().max(2000)).optional(),
+      contact: z.record(z.string().max(2000)).optional(),
+      product_query: z.string().max(2000).optional(),
+      quantity: z.union([z.string().max(100), z.number()]).optional(),
+    })
+    .strict()
+    .optional(),
   postcondition: PostconditionSchema,
 });
 
 export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
   name: "operate_remember",
   description:
-    "Save the CURRENT successful operate session as a replayable operator-recipe " +
-    "(local, named). Pass `name`, a one-line `goal`, and a `postcondition` — the " +
+    "Save the CURRENT successful operate session as a replayable local recipe. " +
+    "Pass the host-classified closed-enum `verb`, known injected `inputs`, a name, goal, and " +
+    "`postcondition`. The postcondition is checked BEFORE anything is written — the " +
     "machine-checkable success signal: kind 'execute_capability' observes the " +
     "end-state now; `success_signal` is {field_text,min_value_len} (a field whose " +
     "value is at least N chars — checked by LENGTH, never the value), {text_present}, " +
     "or {url_contains}. The recipe stores the session's TEXT-targeted action trace " +
     "as a rail; sealed secrets become slot references, NEVER values. Call AFTER the " +
-    "task succeeded; replay later with operate_use{name}.",
+    "task succeeded; replay later by (verb, service URL), or by legacy name.",
   inputSchema: rememberSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["session_id", "name", "goal", "postcondition"],
+    required: ["session_id", "name", "goal", "verb", "postcondition"],
     properties: {
       session_id: { type: "string" },
       name: { type: "string" },
       goal: { type: "string" },
+      verb: { type: "string", enum: OperatorVerbSchema.options },
+      inputs: { type: "object" },
       postcondition: {
         type: "object",
         required: ["kind", "describe", "success_signal"],
@@ -875,58 +891,116 @@ export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
       name: args.name,
       goal: args.goal,
       postcondition: args.postcondition,
+      verb: args.verb,
+      ...(args.inputs !== undefined ? { inputs: args.inputs } : {}),
     });
   },
 };
 
-const useSchema = z.object({
-  name: z.string().min(1).max(80),
-  params: z.record(z.string().max(2000)).optional(),
-  require_live_identity: z.boolean().optional(),
-});
+const useSchema = z
+  .object({
+    // Legacy selector; new calls use verb + service_url.
+    name: z.string().min(1).max(80).optional(),
+    verb: OperatorVerbSchema.optional(),
+    service_url: z.string().url().optional(),
+    params: z.record(z.string().max(2000)).optional(),
+    require_live_identity: z.boolean().optional(),
+    // After the host repairs one missed step, resume the same live session at
+    // replay.next_index instead of starting over.
+    session_id: z.string().min(1).optional(),
+    resume_from: z.number().int().min(0).max(200).optional(),
+  })
+  .refine(
+    (value) =>
+      value.name !== undefined || (value.verb !== undefined && value.service_url !== undefined),
+    { message: "provide legacy name, or both verb and service_url" },
+  );
 
 export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
   name: "operate_use",
   description:
-    "Replay a saved operator-recipe by name: opens a scoped browser at the recipe's " +
-    "entry and returns the start observation with the recipe's route as a `hint` — a " +
-    "MAP to drive toward, NOT a literal script (re-plan if the live page diverges). " +
-    "Fill ${VAR} entry templates via `params` (e.g. {PROJECT:'my-proj'}). Sealed " +
-    "steps must be re-sealed + typed yourself (operate_extract{into_slot} → " +
-    "type_secret) — the recipe never holds secret values. Drive the task, then " +
-    "operate_finish_task{kind:'result', verify_recipe:<name>} to verify the " +
-    "postcondition (the anti-false-green gate).",
+    "Replay a local prepared-statement recipe selected by the host-classified closed-enum " +
+    "verb plus service_url (eTLD+1 keyed; path/query ignored), or by legacy name. Binds " +
+    "hole values and executes each step through ordered target fallback. A single miss " +
+    "returns replay.status='fallback_required' with that step and next_index; repair only " +
+    "that step, then call operate_use again with the same params plus session_id + " +
+    "resume_from=next_index. " +
+    "Money-path completion deterministically verifies every injected address/contact/qty field.",
   inputSchema: useSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["name"],
     properties: {
       name: { type: "string" },
+      verb: { type: "string", enum: OperatorVerbSchema.options },
+      service_url: { type: "string" },
       params: { type: "object" },
       require_live_identity: { type: "boolean" },
+      session_id: { type: "string" },
+      resume_from: { type: "integer" },
     },
   },
   async handler(args) {
-    const recipe = await readRecipe(args.name);
+    let recipe: Awaited<ReturnType<typeof readRecipe>>;
+    try {
+      recipe =
+        args.name !== undefined
+          ? await readRecipe(args.name)
+          : await readRecipeForTask(args.verb!, args.service_url!);
+    } catch (error) {
+      // A keyed cache miss is the expected cold path, not a task failure.
+      if (
+        args.name !== undefined ||
+        args.service_url === undefined ||
+        args.session_id !== undefined
+      ) {
+        throw error;
+      }
+      const cold = await startProvisionSession({
+        serviceUrl: args.service_url,
+        consentInboxRead: await readInboxConsent(),
+        ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
+      });
+      if (cold.needs_user !== undefined) return cold;
+      return {
+        ...cold,
+        replay: {
+          status: "cache_miss" as const,
+          reason: "no local recipe for this (verb, eTLD+1); continue cold",
+        },
+      };
+    }
     const entry = recipeEntryUrl(recipe);
     if (entry === null) {
-      throw new Error(`operator-recipe "${args.name}" has no entry (goto) step to start from`);
+      throw new Error(`operator-recipe "${recipe.name}" has no entry (goto) step to start from`);
     }
     const { url, missing } = fillTemplate(entry, args.params ?? {});
     if (missing.length > 0) {
       throw new Error(
-        `operator-recipe "${args.name}" needs params: ${missing.join(", ")} — ` +
+        `operator-recipe "${recipe.name}" needs params: ${missing.join(", ")} — ` +
           `pass them as operate_use{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
       );
     }
-    const consentInboxRead = await readInboxConsent();
-    return await startProvisionSession({
-      serviceUrl: url,
-      consentInboxRead,
-      ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
-      hint: renderOperatorRecipeHint(recipe),
-      ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
-    });
+    let sessionId = args.session_id;
+    if (sessionId === undefined) {
+      const consentInboxRead = await readInboxConsent();
+      const started = await startProvisionSession({
+        serviceUrl: url,
+        consentInboxRead,
+        ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
+        hint: renderOperatorRecipeHint(recipe),
+        ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
+      });
+      if (started.needs_user !== undefined) return started;
+      sessionId = started.session_id;
+    }
+    const replay = await replayOperatorRecipe(
+      sessionId,
+      recipe,
+      args.params ?? {},
+      args.resume_from ?? 0,
+    );
+    const { observation, ...replayState } = replay;
+    return { ...observation, replay: replayState };
   },
 };
 
