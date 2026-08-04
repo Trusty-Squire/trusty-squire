@@ -17,6 +17,7 @@ import {
   captchaGate,
   awaitVerification,
   finishProvisionSession,
+  closeAllIdleProvisionSessions,
   observedHostsForSession,
   currentProvisionUrl,
   stashSecretSlot,
@@ -253,6 +254,7 @@ const actSchema = z.object({
     "js_click",
     "type",
     "select",
+    "set_field",
     "set_phone_country",
     "goto",
     "press",
@@ -303,6 +305,8 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
       return { kind: "type", target: need(args.target, "target"), text: args.text ?? "" };
     case "select":
       return { kind: "select", target: need(args.target, "target"), text: need(args.text, "text") };
+    case "set_field":
+      return { kind: "set_field", target: need(args.target, "target"), text: need(args.text, "text") };
     case "set_phone_country":
       return { kind: "set_phone_country", country: need(args.country, "country") };
     case "goto":
@@ -351,6 +355,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "text=/css= only when none does. " +
     "select (target + text — pick an option in a native <select> or custom listbox " +
     "by its visible text, e.g. a country/state dropdown that `type` can't drive), " +
+    "set_field (target + text — high-level fill: put text into the field named by " +
+    "target, choosing the primitive from the field's type (native <select> → pick " +
+    "the matching option; anything else → type). Use it when you're unsure whether " +
+    "a control is a dropdown or a text box — it does what `select` does on a <select> " +
+    "and what `type` does on an input. (A plain `type` aimed at a native <select> is " +
+    "also auto-coerced to a select, so a dropdown never silently no-ops.), " +
     "set_phone_country (country — set the dial-code country on a phone field's " +
     "native <select>, including react-phone-number-input's hidden country select; " +
     "other phone widget families are not yet supported and throw; no target needed), " +
@@ -386,6 +396,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
           "js_click",
           "type",
           "select",
+          "set_field",
           "set_phone_country",
           "goto",
           "press",
@@ -812,21 +823,34 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
   },
 };
 
-const finishSchema = z.object({ session_id: z.string().min(1) });
+const finishSchema = z.object({ session_id: z.string().min(1).optional() });
 
 export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   name: "operate_finish",
   description:
     "Close a provisioning session and tear down its browser. Always call this " +
-    "when the run is complete (success or give-up) to release the browser.",
+    "when the run is complete (success or give-up) to release the browser. Omit " +
+    "session_id to close ALL active sessions — a recovery escape hatch when a " +
+    "context compaction lost the IDs and a leftover session is blocking operate_pay.",
   inputSchema: finishSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["session_id"],
     properties: { session_id: { type: "string" } },
   },
   async handler(args) {
-    return await finishProvisionSession(args.session_id);
+    if (args.session_id !== undefined) {
+      return await finishProvisionSession(args.session_id);
+    }
+    // No id → close every IDLE session, but NEVER one with a payment in flight
+    // (that would tear down a live charge, possibly another agent's). Report the
+    // truth — closed vs in-flight-skipped vs failed — not a blanket "closed all".
+    const { closed, skippedInFlight, failed } = await closeAllIdleProvisionSessions();
+    return {
+      closed_all: skippedInFlight.length === 0 && failed.length === 0,
+      sessions_closed: closed.length,
+      ...(skippedInFlight.length > 0 ? { sessions_skipped_in_flight: skippedInFlight.length } : {}),
+      ...(failed.length > 0 ? { sessions_failed_to_close: failed.length } : {}),
+    };
   },
 };
 

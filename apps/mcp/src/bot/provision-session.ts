@@ -245,6 +245,12 @@ export type ProvisionAction =
   // <li role=option> custom shapes. target = the select/combobox (or its label);
   // text = the option to match (e.g. "South Korea").
   | { kind: "select"; target: string; text: string }
+  // High-level "put this value in this field": resolves the field, then picks
+  // the primitive from its element type (native <select> → choose the option by
+  // text; anything else → type). Lets a weak host fill a form without
+  // classifying each widget itself — mirrors set_phone_country's hide-the-
+  // mechanics contract. target = the field (or its label), text = the value.
+  | { kind: "set_field"; target: string; text: string }
   // Set the country on a phone-number field's dial-code picker. No ref/target
   // — the bot locates a phone-local native <select>, including
   // react-phone-number-input's opacity:0 select that inventory drops. Other
@@ -326,6 +332,12 @@ interface Session {
   // started and whether a registry hint was served this run, so finish emits the
   // hint-on vs hint-off lift signal (success rate + time, bucketed).
   startedAt: number;
+  // Idle-reaper bookkeeping. lastActivityAt is bumped on every operate_* access;
+  // inFlight is held for the duration of a long call (a payment wait) so the
+  // reaper skips it. Together they let leaked / compaction-orphaned sessions be
+  // collected without ever touching one that is mid-operation.
+  lastActivityAt: number;
+  inFlight: boolean;
   hintServed: boolean;
   // The session's START url (service_url at operate_start, or the resolved
   // entry on an operate_use replay). Persisted as the recipe's canonical
@@ -364,6 +376,36 @@ function egressSeedHosts(session: Session): string[] {
 }
 
 const sessions = new Map<string, Session>();
+
+// Idle-session reaper. A session leaks whenever the host never operate_finishes
+// it — most often because a context compaction dropped its ID, so it can never
+// be closed by name. Leaked sessions accumulate and wedge operate_pay (which
+// needs exactly one). On every operate_* access we sweep sessions idle past this
+// TTL, but NEVER one with an operation in flight: a payment / 3-D Secure /
+// email-verification wait legitimately idles for many minutes inside a single
+// call and must not be collected mid-flight. The TTL therefore bounds the gap
+// BETWEEN calls, not the duration of one.
+const SESSION_IDLE_TTL_MS = 10 * 60_000;
+
+function reapIdleSessions(): void {
+  const now = Date.now();
+  for (const [id, s] of [...sessions.entries()]) {
+    if (s.inFlight || now - s.lastActivityAt <= SESSION_IDLE_TTL_MS) continue;
+    // Fire-and-forget close; deleting from the map is what clears the count
+    // guard, and a half-closed browser is harmless (the process owns it).
+    void s.browser.close().catch(() => undefined);
+    sessions.delete(id);
+    audit(id, "reap_idle", { idle_ms: now - s.lastActivityAt });
+  }
+}
+
+// Mark a session as freshly used, then reap the others. Bump BEFORE the sweep so
+// the session the host is actively driving is never the one collected. Called at
+// the top of every operate_* entry point.
+function touchSession(session: Session): void {
+  session.lastActivityAt = Date.now();
+  reapIdleSessions();
+}
 
 const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -1511,12 +1553,18 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     captureRounds: [],
     usedLocatorFallback: false,
     startedAt: Date.now(),
+    lastActivityAt: Date.now(),
+    inFlight: false,
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
     userEmail: loggedInEmail("google", opts.profileDir),
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
+  // Starting fresh work is a natural point to collect sessions the host
+  // abandoned (e.g. IDs lost to a compaction) so they don't pile up and wedge
+  // a later operate_pay.
+  reapIdleSessions();
   sessions.set(id, session);
   audit(id, "start", {
     service_url: opts.serviceUrl,
@@ -1561,6 +1609,7 @@ export async function observe(
 ): Promise<Observation> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  touchSession(session);
   return await observeSession(session, detail);
 }
 
@@ -1625,15 +1674,63 @@ export function currentProvisionUrl(sessionId: string): string {
 // operate_pay has a deliberately small input contract with no session id: it
 // acts on the one live operator checkout. Fail closed rather than guessing if
 // zero or multiple browser sessions exist.
-export function activeProvisionBrowser(): BrowserController {
-  if (sessions.size !== 1) {
+export interface PaymentLease {
+  browser: BrowserController;
+  // Release the lease (clears in-flight + bumps activity). Bound to the exact
+  // session acquired — call once, in a finally, on success OR throw.
+  release(): void;
+}
+
+// Acquire an EXCLUSIVE payment lease on a checkout session — the sole entry into
+// operate_pay's browser. It never guesses which checkout to charge (real money):
+// an explicit session_id wins; else exactly one session is used; else it refuses
+// and lists the ids so the caller names one; with none it refuses. It REJECTS a
+// second concurrent payment on the same session (no double-charge), marks the
+// session in-flight so the idle reaper can't collect it during the approval /
+// 3-D Secure wait, and returns a release() bound to THAT exact session id (so a
+// later release can't clear a different session that has taken its place in the
+// map). Acquire this BEFORE any await in the pay handler so the resolved session
+// can't change under it (TOCTOU).
+export function acquirePaymentSession(sessionId?: string): PaymentLease {
+  reapIdleSessions();
+  let session: Session | undefined;
+  if (sessionId !== undefined) {
+    session = sessions.get(sessionId);
+    if (session === undefined) {
+      throw new Error(`operate_pay: no active browser session "${sessionId}"`);
+    }
+  } else if (sessions.size === 1) {
+    session = sessions.values().next().value!;
+  } else if (sessions.size === 0) {
+    throw new Error("operate_pay requires one active operate_start browser session");
+  } else {
+    const ids = [...sessions.keys()].map((k) => `"${k}"`).join(", ");
     throw new Error(
-      sessions.size === 0
-        ? "operate_pay requires one active operate_start browser session"
-        : "operate_pay refused: multiple active browser sessions",
+      `operate_pay refused: multiple active browser sessions (${ids}) — ` +
+        "pass session_id to name the checkout to charge",
     );
   }
-  return sessions.values().next().value!.browser;
+  if (session.inFlight) {
+    throw new Error("operate_pay refused: a payment is already in progress on this session");
+  }
+  session.inFlight = true;
+  session.lastActivityAt = Date.now();
+  const leasedId = session.id;
+  let released = false;
+  return {
+    browser: session.browser,
+    release(): void {
+      // Idempotent: a double-release must not clear a NEWER lease that reacquired
+      // this session id after the first release.
+      if (released) return;
+      released = true;
+      const s = sessions.get(leasedId);
+      if (s !== undefined) {
+        s.inFlight = false;
+        s.lastActivityAt = Date.now();
+      }
+    },
+  };
 }
 
 // PR3c — the user's own email captured at login (the authoritative signup
@@ -2260,6 +2357,7 @@ export async function act(
 ): Promise<Observation> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  touchSession(session);
   const { browser } = session;
   const auditTarget =
     "target" in action && parseLocatorTarget(action.target) !== null
@@ -2399,6 +2497,31 @@ export async function act(
       await settleAfterStateChange(browser);
       break;
     }
+    case "set_field": {
+      // Resolve the field, then dispatch by element type: a native <select>
+      // needs selectOption (page.fill throws on it), everything else takes a
+      // normal type. Same fix the type-coercion path applies inline, exposed as
+      // an explicit verb so a weak host can just say "put this value here"
+      // without picking the primitive. Settle after — a select may reveal
+      // dependent fields (e.g. a prefecture that unlocks a delivery date).
+      const fresh = await browser.extractInteractiveElements();
+      session.lastElements = fresh;
+      const el = resolveTarget(fresh, action.target);
+      if (el === null) {
+        throw new Error(
+          `set_field: no element matched target "${action.target}". Visible: ` +
+            fresh
+              .map((e) => `"${e.screenPath ?? elementRef(e)}"`)
+              .slice(0, 20)
+              .join(", "),
+        );
+      }
+      resolvedEl = el;
+      if (el.tag === "select") await browser.selectOption(el.selector, action.text);
+      else await browser.type(el.selector, action.text);
+      await settleAfterStateChange(browser);
+      break;
+    }
     case "click":
     case "js_click":
     case "type":
@@ -2477,10 +2600,23 @@ export async function act(
         );
       }
       resolvedEl = el;
+      // A `type` aimed at a native <select> can't work — page.fill throws and
+      // humanized keystrokes break native type-ahead — so a weak host that
+      // reaches for `type` on a dropdown would silently fail. Coerce it into the
+      // right primitive: route the text to selectOption (which fires
+      // input/change), exactly as an explicit `select` would. A coerced select
+      // then needs a settle (it can reveal dependent fields), unlike a plain type.
+      let coercedSelect = false;
       if (action.kind === "click") await browser.click(el.selector);
       else if (action.kind === "js_click") await browser.clickViaJs(el.selector);
-      else if (action.kind === "type") await browser.type(el.selector, action.text);
-      else if (action.kind === "upload") {
+      else if (action.kind === "type") {
+        if (el.tag === "select") {
+          await browser.selectOption(el.selector, action.text);
+          coercedSelect = true;
+        } else {
+          await browser.type(el.selector, action.text);
+        }
+      } else if (action.kind === "upload") {
         await browser.uploadFile(el.selector, action.path);
         audit(sessionId, "upload", {
           target: action.target,
@@ -2488,7 +2624,7 @@ export async function act(
           host: registrableHost(browser.currentUrl()),
         });
       } else await browser.startOAuth(el.selector);
-      if (action.kind !== "type") await settleAfterStateChange(browser);
+      if (action.kind !== "type" || coercedSelect) await settleAfterStateChange(browser);
       break;
     }
   }
@@ -2586,6 +2722,10 @@ function recordTrace(
   // set_phone_country has no portable TraceAction kind either — the country is
   // host-replannable per run, not baked into a shared recipe. Skip like select.
   if (action.kind === "set_phone_country") return;
+  // set_field has no portable TraceAction kind (its native-select branch routes
+  // to selectOption, which isn't in the recipe vocabulary). Skip like the two
+  // above — the action still runs and is audited.
+  if (action.kind === "set_field") return;
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
@@ -3678,6 +3818,35 @@ export async function closeAllProvisionSessions(): Promise<void> {
       /* best-effort */
     }
   }
+}
+
+// The operate_finish{} escape hatch: close every IDLE session but NEVER one with
+// a payment in flight — skipping those protects a concurrent (or other-agent)
+// charge from being torn down. Returns what it actually closed vs skipped so the
+// tool reports the truth instead of a blanket "closed all".
+export async function closeAllIdleProvisionSessions(): Promise<{
+  closed: string[];
+  skippedInFlight: string[];
+  failed: string[];
+}> {
+  const closed: string[] = [];
+  const skippedInFlight: string[] = [];
+  const failed: string[] = [];
+  for (const [id, s] of [...sessions.entries()]) {
+    if (s.inFlight) {
+      skippedInFlight.push(id);
+      continue;
+    }
+    try {
+      await finishProvisionSession(id);
+      closed.push(id);
+    } catch {
+      // Distinct from an in-flight skip — the session wasn't paying, it just
+      // failed to tear down. Report it separately so the reason isn't misstated.
+      failed.push(id);
+    }
+  }
+  return { closed, skippedInFlight, failed };
 }
 
 export function activeSessionCount(): number {

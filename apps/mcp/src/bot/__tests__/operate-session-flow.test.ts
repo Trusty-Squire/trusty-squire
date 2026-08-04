@@ -232,6 +232,8 @@ import {
   captchaGate,
   finishProvisionSession,
   closeAllProvisionSessions,
+  acquirePaymentSession,
+  activeSessionCount,
   parseElementsTable,
 } from "../provision-session.js";
 import {
@@ -239,6 +241,7 @@ import {
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
   provisionStoreLoginTool,
+  provisionFinishTool,
   storedExtractResult,
   withSigninHost,
 } from "../../tools/provision-drive.js";
@@ -526,6 +529,123 @@ describe("operate session — sealed credential transfer", () => {
     await expect(
       act(obs.session_id, { kind: "select", target: "Country", text: "South Korea" }),
     ).rejects.toThrow(/no element matched target/i);
+  });
+
+  it("coerces a `type` aimed at a native <select> into a selectOption (weak-host safety)", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ tag: "select", visibleText: "Prefecture", selector: "#pref" })];
+    // A weak host that reaches for `type` on a dropdown must NOT silently no-op
+    // (page.fill throws on a <select>): the text is routed to selectOption.
+    await act(obs.session_id, { kind: "type", target: "Prefecture", text: "Tokyo" });
+    expect(h.selected).toEqual([{ selector: "#pref", matcher: "Tokyo" }]);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("`type` on a real text input still types (coercion only fires on <select>)", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ tag: "input", type: "text", visibleText: "Name", selector: "#name" })];
+    await act(obs.session_id, { kind: "type", target: "Name", text: "Ada" });
+    expect(h.typed).toEqual([{ selector: "#name", text: "Ada" }]);
+    expect(h.selected).toEqual([]);
+  });
+
+  it("set_field dispatches by element type: <select> → selectOption, text input → type", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ tag: "select", visibleText: "Prefecture", selector: "#pref" })];
+    await act(obs.session_id, { kind: "set_field", target: "Prefecture", text: "Tokyo" });
+    expect(h.selected).toEqual([{ selector: "#pref", matcher: "Tokyo" }]);
+    expect(h.typed).toEqual([]);
+
+    h.selected = [];
+    h.elements = [elem({ tag: "input", type: "text", visibleText: "City", selector: "#city" })];
+    await act(obs.session_id, { kind: "set_field", target: "City", text: "Shibuya" });
+    expect(h.typed).toEqual([{ selector: "#city", text: "Shibuya" }]);
+    expect(h.selected).toEqual([]);
+  });
+
+  it("set_field fails loudly when the target isn't in the inventory", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [];
+    await expect(
+      act(obs.session_id, { kind: "set_field", target: "Prefecture", text: "Tokyo" }),
+    ).rejects.toThrow(/no element matched target/i);
+  });
+
+  it("operate_pay lease: sole ok; double-pay rejected; multiple refuses+names ids; session_id disambiguates", async () => {
+    // no session → refuse
+    expect(() => acquirePaymentSession()).toThrow(/requires one active/i);
+    // exactly one → leases without a session_id
+    const a = await startProvisionSession({ serviceUrl: "https://a.example.com/" });
+    const lease = acquirePaymentSession();
+    // a second concurrent pay on the same session is rejected (no double-charge)
+    expect(() => acquirePaymentSession()).toThrow(/already in progress/i);
+    lease.release();
+    acquirePaymentSession().release(); // released → available again
+    // two → refuse to GUESS which checkout to charge; error lists the ids + hint
+    await startProvisionSession({ serviceUrl: "https://b.example.com/" });
+    expect(() => acquirePaymentSession()).toThrow(/multiple active browser sessions/i);
+    expect(() => acquirePaymentSession()).toThrow(new RegExp(a.session_id));
+    expect(() => acquirePaymentSession()).toThrow(/session_id/);
+    // naming one leases it; a bogus id throws
+    acquirePaymentSession(a.session_id).release();
+    expect(() => acquirePaymentSession("no-such-session")).toThrow(/no active browser session/i);
+  });
+
+  it("release() clears ONLY the leased session, by exact id (no mis-target after the map changes)", async () => {
+    const a = await startProvisionSession({ serviceUrl: "https://a.example.com/" });
+    const lease = acquirePaymentSession(a.session_id); // A in-flight
+    // a second session appears mid-payment; releasing A must not touch B
+    const b = await startProvisionSession({ serviceUrl: "https://b.example.com/" });
+    lease.release();
+    // both are now free to lease (B was never leased; A was released cleanly)
+    acquirePaymentSession(b.session_id).release();
+    acquirePaymentSession(a.session_id).release();
+  });
+
+  it("reaps a session idle past the TTL but keeps a freshly-started one", async () => {
+    await startProvisionSession({ serviceUrl: "https://a.example.com/" });
+    const base = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(base + 11 * 60_000);
+    // starting B triggers the reaper: A (idle ~11m) collected, B (fresh) kept
+    await startProvisionSession({ serviceUrl: "https://b.example.com/" });
+    nowSpy.mockRestore();
+    expect(activeSessionCount()).toBe(1);
+  });
+
+  it("never reaps an in-flight (mid-payment) session, even when idle past the TTL", async () => {
+    const a = await startProvisionSession({ serviceUrl: "https://a.example.com/" });
+    const lease = acquirePaymentSession(a.session_id); // marks A in-flight, as operate_pay does
+    const base = Date.now();
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(base + 30 * 60_000);
+    await startProvisionSession({ serviceUrl: "https://b.example.com/" }); // triggers reaper
+    nowSpy.mockRestore();
+    expect(activeSessionCount()).toBe(2); // A protected by inFlight; B added
+    lease.release();
+  });
+
+  it("operate_finish{} closes idle sessions but NEVER an in-flight payment", async () => {
+    // two idle → both close
+    await startProvisionSession({ serviceUrl: "https://a.example.com/" });
+    await startProvisionSession({ serviceUrl: "https://b.example.com/" });
+    const res = (await provisionFinishTool.handler({}, null as unknown as ApiClient)) as {
+      closed_all: boolean;
+      sessions_closed: number;
+    };
+    expect(res).toEqual({ closed_all: true, sessions_closed: 2 });
+    expect(activeSessionCount()).toBe(0);
+
+    // one idle + one mid-payment → closes the idle, SKIPS the payment
+    const c = await startProvisionSession({ serviceUrl: "https://c.example.com/" });
+    await startProvisionSession({ serviceUrl: "https://d.example.com/" });
+    const lease = acquirePaymentSession(c.session_id); // C mid-payment
+    const res2 = (await provisionFinishTool.handler({}, null as unknown as ApiClient)) as {
+      closed_all: boolean;
+      sessions_closed: number;
+      sessions_skipped_in_flight?: number;
+    };
+    expect(res2).toEqual({ closed_all: false, sessions_closed: 1, sessions_skipped_in_flight: 1 });
+    expect(activeSessionCount()).toBe(1); // C (paying) survives
+    lease.release();
   });
 
   it("upload fails loudly when the target isn't in the inventory", async () => {

@@ -11,14 +11,18 @@ import { ApiCallError, type ApiClient } from "../api-client.js";
 import type { PaymentBrowser } from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
-// operate_pay's handler reaches into the single active browser session via
-// activeProvisionBrowser(). There is no real session in a unit test, so mock
-// just that getter (everything else in the module is preserved) and hand back
-// a stub whose checkout summary the resolution tests can control.
+// operate_pay's handler acquires a payment lease via acquirePaymentSession().
+// There is no real session in a unit test, so mock just that (everything else in
+// the module is preserved) and hand back a lease over a stub whose checkout
+// summary the resolution tests can control. release() is a no-op here.
 let mockBrowser: PaymentBrowser;
+const mockRelease = vi.fn();
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
-  return { ...actual, activeProvisionBrowser: () => mockBrowser };
+  return {
+    ...actual,
+    acquirePaymentSession: () => ({ browser: mockBrowser, release: mockRelease }),
+  };
 });
 
 import {
@@ -126,6 +130,21 @@ describe("operate_pay card selection", () => {
     await expect(operatePayTool.handler(args, api)).rejects.toThrow(
       /Multiple saved payment cards on file.*"Personal".*"Work".*specify card_ref or card_label/,
     );
+  });
+
+  it("releases the payment lease even when the handler throws before paying", async () => {
+    mockRelease.mockClear();
+    const listPaymentCards = vi.fn().mockResolvedValue([
+      { id: "card_1", label: "Personal" },
+      { id: "card_2", label: "Work" },
+    ]);
+    const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse({});
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(/Multiple saved payment cards/);
+    // The lease acquired at the top of the handler is released in the finally,
+    // even though card resolution threw before the payment ran. (Same finally
+    // covers a throw from executeOperatePay.)
+    expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 
   it("no selector + exactly 1 card on file uses that card (has-card, not JIT)", async () => {
