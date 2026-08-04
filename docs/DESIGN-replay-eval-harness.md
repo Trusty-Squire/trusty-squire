@@ -72,17 +72,17 @@ One task record per file (JSON), same directory convention as onboarding capture
 
 ```jsonc
 {
-  "task_id": "deathwish-purchase-r0",
+  "task_id": "whitejade-purchase-r0",
   "verb": "purchase",
-  "domain": "deathwishcoffee.com",           // canonicalized key domain
-  "entry_url": "https://www.deathwishcoffee.com",
-  "params": { "product_query": "dark roast coffee", "address": {…}, "card_ref": "…" },
+  "domain": "whitejade.xyz",                 // canonicalized key domain
+  "entry_url": "https://whitejade.xyz/products/the-glow-serum",
+  "params": { "product_query": "The Glow Serum", "address": {…}, "card_ref": "…" },
   "expected_end_state": {                     // GROUND TRUTH, programmatically checkable
-    "line_items": [{ "title_contains": "Dark Roast", "qty": 1 }],
-    "total_cents": 1999,
+    "line_items": [{ "title_contains": "The Glow Serum", "qty": 1 }],
+    "total_cents": 7600,
     "reached": "checkout_review"              // stop before pay
   },
-  "har": "deathwish-purchase-r0.har",         // frozen network capture (see §6)
+  "har": "whitejade-purchase-r0.har",         // stable product-page capture (see §6)
   "bucket": "repeat"
 }
 ```
@@ -113,8 +113,9 @@ password-protected). **Shopify test mode is ON**, so checkout COMPLETES end-to-e
   proxy — never in source/logs/worktree. Setup need: a test card (`4242…`) available to operate_pay
   for whitejade runs.
 
-Seed the `repeat`/`novel` corpus from whitejade's real products (Glow Serum, Recovery Crème, etc.).
-Cross-store is out of scope, so one operator-owned store is the correct v1 substrate, not a limit.
+Seed the `repeat` and money-path corpus from whitejade's real products (Glow Serum, Recovery Crème,
+etc.). Third-party stores belong only in the `novel` MISS bucket. Cross-store replay is out of scope,
+so one operator-owned repeat store is the correct v1 substrate, not a limit.
 
 ## 6. Split substrate: stable HAR replay + live whitejade checkout
 
@@ -196,8 +197,8 @@ Report is a single JSON + a rendered markdown summary (reuse the WIDGET-CORPUS-E
 ## 10. Build order + location
 
 1. `apps/mcp/src/eval/replay-harness/` — runner + reporter (vitest-driven, reuse corpus-eval scaffolding).
-2. `corpus/shopping/` — seed the 20 `repeat` + 10 `novel` tasks from live captures (the E1/E2 stores
-   are the seed: deathwish, allbirds, brooklinen + novel set).
+2. `corpus/shopping/` — seed the `repeat` + money-path tasks from operator-owned whitejade's real
+   products; deathwish, allbirds, brooklinen, and other external stores are `novel` MISS cases only.
 3. `har-mutate.ts` — the §6 mutation set.
 4. Wire the CI gate to run the frozen corpus on any change under the engine's paths.
 

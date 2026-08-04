@@ -19,6 +19,7 @@ export interface HarFile {
 export interface MutationOptions {
   expectedTotalCents?: number;
   changedTotalCents?: number;
+  displayedPriceCents?: number;
 }
 
 export interface MutationResult {
@@ -106,13 +107,15 @@ function mutateBody(
     if (options.expectedTotalCents === undefined) {
       throw new Error("change-price requires expectedTotalCents");
     }
-    const changed = options.changedTotalCents ?? options.expectedTotalCents + 100;
+    const displayed = options.displayedPriceCents ?? options.expectedTotalCents;
+    const changedDisplayed = displayed + 100;
+    const changedTotal = options.changedTotalCents ?? options.expectedTotalCents + 100;
     let next = body;
     let replacements = 0;
-    const oldForms = moneyForms(options.expectedTotalCents);
-    const newForms = moneyForms(changed);
+    const oldForms = moneyForms(displayed);
+    const newForms = moneyForms(changedDisplayed);
     for (const [index, oldForm] of oldForms.entries()) {
-      const replacement = newForms[index] ?? newForms[0] ?? String(changed);
+      const replacement = newForms[index] ?? newForms[0] ?? String(changedDisplayed);
       const result = replaceFirst(next, new RegExp(`${escapeRegExp(oldForm)}(?!\\d)`), replacement);
       next = result.body;
       replacements += result.replacements;
@@ -121,15 +124,13 @@ function mutateBody(
     if (replacements === 0) {
       const centsResult = replaceFirst(
         next,
-        new RegExp(
-          `((?:total_price|totalPrice|price)\\s*[\":=]+\\s*)${options.expectedTotalCents}(?!\\d)`,
-        ),
-        `$1${changed}`,
+        new RegExp(`((?:total_price|totalPrice|price)\\s*[\":=]+\\s*)${displayed}(?!\\d)`),
+        `$1${changedDisplayed}`,
       );
       next = centsResult.body;
       replacements += centsResult.replacements;
     }
-    return { body: next, replacements, observedTotalCents: changed };
+    return { body: next, replacements, observedTotalCents: changedTotal };
   }
 
   if (mutation === "out-of-stock") {

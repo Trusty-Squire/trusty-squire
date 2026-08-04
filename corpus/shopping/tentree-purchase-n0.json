@@ -6,7 +6,7 @@
   "params": {
     "product_query": "Ruxton Packable Backpack, mauve stone",
     "address": { "country": "US", "region": "NY", "postal_code": "10001" },
-    "card_ref": "whitejade-test-card"
+    "card_ref": "not-used-novel-miss"
   },
   "expected_end_state": {
     "line_items": [{ "title_contains": "Ruxton Packable Backpack", "qty": 1 }],

@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 import { chromium, type Page } from "playwright";
-import type { ExpectedEndState } from "./types.js";
+import type { ExpectedEndState, ShoppingTaskRecord } from "./types.js";
 
 export interface ColdDriverResult {
   turns: number;
@@ -12,6 +12,13 @@ export interface ColdDriverResult {
 
 export interface LiveCheckoutResult extends ColdDriverResult {
   wall_clock_ms: number;
+}
+
+export function whitejadeCartPermalink(task: ShoppingTaskRecord): string {
+  if (task.domain !== "whitejade.xyz" || task.params.product_variant_id === undefined) {
+    throw new Error(`${task.task_id}: live checkout requires a whitejade product variant`);
+  }
+  return `https://whitejade.xyz/cart/${encodeURIComponent(task.params.product_variant_id)}:1`;
 }
 
 function assertStableHarEntry(entryUrl: string): void {
@@ -57,6 +64,7 @@ export async function recordFrozenDocumentHar(entryUrl: string, harPath: string)
 // notFound="abort"). The supplied driver is the existing guarded operator/LLM
 // path; the harness only measures it and checks its returned end state.
 export async function runLiveWhitejadeCheckout(
+  task: ShoppingTaskRecord,
   drive: (page: Page) => Promise<ColdDriverResult>,
 ): Promise<LiveCheckoutResult> {
   const browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
@@ -64,10 +72,13 @@ export async function runLiveWhitejadeCheckout(
   const page = await context.newPage();
   const started = performance.now();
   try {
-    await page.goto("https://whitejade.xyz", {
+    await page.goto(whitejadeCartPermalink(task), {
       waitUntil: "domcontentloaded",
       timeout: 60_000,
     });
+    if (!new URL(page.url()).pathname.startsWith("/checkouts/")) {
+      throw new Error(`${task.task_id}: whitejade did not enter live checkout`);
+    }
     const result = await drive(page);
     return {
       ...result,

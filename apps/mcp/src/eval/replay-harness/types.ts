@@ -29,6 +29,8 @@ export interface ShoppingTaskRecord {
   entry_url: string;
   params: {
     product_query: string;
+    product_variant_id?: string;
+    product_price_cents?: number;
     address: ShoppingAddress;
     card_ref: string;
   };

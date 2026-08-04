@@ -1,20 +1,20 @@
 {
-  "task_id": "deathwish-purchase-r0",
+  "task_id": "deathwish-purchase-n0",
   "verb": "purchase",
   "domain": "deathwishcoffee.com",
   "entry_url": "https://www.deathwishcoffee.com/products/chocolate-hazelnut-coffee",
   "params": {
     "product_query": "Chocolate Hazelnut Coffee, one bag",
     "address": { "country": "US", "region": "NY", "postal_code": "10001" },
-    "card_ref": "whitejade-test-card"
+    "card_ref": "not-used-novel-miss"
   },
   "expected_end_state": {
     "line_items": [{ "title_contains": "Chocolate Hazelnut Coffee", "qty": 1 }],
     "total_cents": 1999,
     "reached": "product_page"
   },
-  "har": "deathwish-purchase-r0.har",
-  "bucket": "repeat",
+  "har": "deathwish-purchase-n0.har",
+  "bucket": "novel",
   "cold_baseline": {
     "turns": 9,
     "tokens": 6420,

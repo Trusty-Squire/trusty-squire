@@ -6,7 +6,7 @@
   "params": {
     "product_query": "Infinite Possibilities full collection",
     "address": { "country": "US", "region": "NY", "postal_code": "10001" },
-    "card_ref": "whitejade-test-card"
+    "card_ref": "not-used-novel-miss"
   },
   "expected_end_state": {
     "line_items": [{ "title_contains": "Infinite Possibilities", "qty": 1 }],

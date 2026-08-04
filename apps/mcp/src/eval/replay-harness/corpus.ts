@@ -114,6 +114,13 @@ export function parseTaskRecord(value: unknown, file: string): ShoppingTaskRecor
     entry_url: value.entry_url as string,
     params: {
       product_query: params.product_query,
+      ...(typeof params.product_variant_id === "string"
+        ? { product_variant_id: params.product_variant_id }
+        : {}),
+      ...(Number.isInteger(params.product_price_cents) &&
+      (params.product_price_cents as number) >= 0
+        ? { product_price_cents: params.product_price_cents as number }
+        : {}),
       address: {
         country: address.country,
         postal_code: address.postal_code,

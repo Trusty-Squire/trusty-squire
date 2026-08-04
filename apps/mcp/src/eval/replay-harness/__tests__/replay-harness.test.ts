@@ -4,7 +4,12 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { loadShoppingCorpus, resolveHarPath, resolveShoppingCorpusDir } from "../corpus.js";
 import { mutateHar, type HarFile } from "../har-mutate.js";
-import { recordFrozenDocumentHar, replayFrozenHar } from "../har-substrate.js";
+import {
+  recordFrozenDocumentHar,
+  replayFrozenHar,
+  runLiveWhitejadeCheckout,
+  whitejadeCartPermalink,
+} from "../har-substrate.js";
 import { buildHarnessReport } from "../metrics.js";
 import { renderReportJson, renderReportMarkdown } from "../reporter.js";
 import { moneyDriftObservation, runAllColdHarness } from "../runner.js";
@@ -42,6 +47,9 @@ function driftBattery(repeatTasks: ShoppingTaskRecord[]): DriftObservation[] {
     ] satisfies DriftMutationName[]) {
       const result = mutateHar(har, mutation, {
         expectedTotalCents: task.expected_end_state.total_cents,
+        ...(task.params.product_price_cents === undefined
+          ? {}
+          : { displayedPriceCents: task.params.product_price_cents }),
       });
       expect(result.replacements, `${task.task_id}: ${mutation} must mutate a response`).toBe(1);
       if (mutation === "change-price") {
@@ -64,15 +72,17 @@ function driftBattery(repeatTasks: ShoppingTaskRecord[]): DriftObservation[] {
 
 it("loads the explicitly under-seeded shopping corpus", () => {
   expect(corpusDir).not.toBeNull();
-  expect(tasks.filter((task) => task.bucket === "repeat").map((task) => task.domain)).toEqual([
-    "allbirds.com",
-    "brooklinen.com",
-    "deathwishcoffee.com",
-  ]);
-  expect(tasks.filter((task) => task.bucket === "novel")).toHaveLength(2);
+  const repeat = tasks.filter((task) => task.bucket === "repeat");
+  const novel = tasks.filter((task) => task.bucket === "novel");
+  expect(repeat).toHaveLength(4);
+  expect(repeat.every((task) => task.domain === "whitejade.xyz")).toBe(true);
+  expect(repeat.every((task) => task.params.product_variant_id !== undefined)).toBe(true);
+  expect(novel).toHaveLength(5);
+  expect(novel.map((task) => task.domain)).toContain("deathwishcoffee.com");
+  expect(novel.map((task) => task.domain)).toContain("tentree.com");
   console.log(
-    "[replay-harness] captured 3/20 repeat and 2/10 novel; " +
-      "skipped 17 repeat and 8 novel (see corpus/shopping/capture-log.json)",
+    "[replay-harness] captured 4/20 repeat and 5/10 novel; " +
+      "skipped 16 repeat and 5 novel (see corpus/shopping/capture-log.json)",
   );
 });
 
@@ -96,7 +106,7 @@ describe("stable-page native HAR substrate", () => {
   }
 
   it("routes a mutated HAR without touching the live checkout chain", async () => {
-    const task = tasks.find((candidate) => candidate.task_id === "deathwish-purchase-r0");
+    const task = tasks.find((candidate) => candidate.task_id === "whitejade-purchase-r0");
     expect(task).toBeDefined();
     if (task === undefined || corpusDir === null) return;
     const result = mutateHar(readHar(task), "overlay");
@@ -113,6 +123,33 @@ describe("stable-page native HAR substrate", () => {
       .filter(Boolean);
     expect(requestUrls.some((url) => url.includes("/checkouts/"))).toBe(false);
   }, 60_000);
+});
+
+describe("live whitejade checkout substrate", () => {
+  const task = tasks.find((candidate) => candidate.task_id === "whitejade-purchase-r0");
+
+  it("builds the live cart entry from the repeat task's real variant", () => {
+    expect(task).toBeDefined();
+    if (task === undefined) return;
+    expect(whitejadeCartPermalink(task)).toBe("https://whitejade.xyz/cart/53575613546607:1");
+  });
+
+  it.skipIf(process.env.REPLAY_EVAL_LIVE_CHECKOUT !== "1")(
+    "reaches session-keyed checkout without a HAR route",
+    async () => {
+      expect(task).toBeDefined();
+      if (task === undefined) return;
+      const observation = await runLiveWhitejadeCheckout(task, async (page) => {
+        const body = await page.locator("body").innerText();
+        expect(page.url()).toContain("/checkouts/");
+        expect(body).toContain("The Glow Serum");
+        expect(body).toContain("$68.00");
+        return { turns: 1, tokens: 0, end_state: task.expected_end_state };
+      });
+      expect(observation.wall_clock_ms).toBeGreaterThan(0);
+    },
+    60_000,
+  );
 });
 
 it("runs all six drift mutations and total-verify vetoes every changed price", () => {
@@ -132,9 +169,9 @@ it("emits the all-cold JSON + metrics table and a single NO-SHIP line", () => {
   const markdown = renderReportMarkdown(report);
   expect(report.mode).toBe("all-cold-baseline");
   expect(report.cold_baseline).toEqual({
-    tasks: 5,
-    median: { turns: 9, tokens: 6420, wall_clock_ms: 3294 },
-    total: { turns: 46, tokens: 33000, wall_clock_ms: 24972 },
+    tasks: 9,
+    median: { turns: 8, tokens: 5800, wall_clock_ms: 3100 },
+    total: { turns: 75, tokens: 54030, wall_clock_ms: 36272 },
   });
   expect(report.decision).toBe("NO-SHIP");
   expect(markdown).toContain("| `net_speedup` |");

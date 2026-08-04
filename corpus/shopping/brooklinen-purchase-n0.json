@@ -1,20 +1,20 @@
 {
-  "task_id": "brooklinen-purchase-r0",
+  "task_id": "brooklinen-purchase-n0",
   "verb": "purchase",
   "domain": "brooklinen.com",
   "entry_url": "https://www.brooklinen.com/products/classic-core-sheet-set?variant=41405018112090",
   "params": {
     "product_query": "Classic Percale Core Sheet Set, solid white, twin",
     "address": { "country": "US", "region": "NY", "postal_code": "10001" },
-    "card_ref": "whitejade-test-card"
+    "card_ref": "not-used-novel-miss"
   },
   "expected_end_state": {
     "line_items": [{ "title_contains": "Classic Percale Core Sheet Set", "qty": 1 }],
     "total_cents": 15900,
     "reached": "product_page"
   },
-  "har": "brooklinen-purchase-r0.har",
-  "bucket": "repeat",
+  "har": "brooklinen-purchase-n0.har",
+  "bucket": "novel",
   "cold_baseline": {
     "turns": 11,
     "tokens": 7834,

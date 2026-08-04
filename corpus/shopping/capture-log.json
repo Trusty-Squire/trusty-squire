@@ -1,24 +1,45 @@
 {
-  "captured_at": "2026-08-04T19:58:00Z",
+  "captured_at": "2026-08-04T21:05:00Z",
   "target": { "repeat": 20, "novel": 10 },
   "captured": {
-    "repeat": ["deathwish-purchase-r0", "allbirds-purchase-r0", "brooklinen-purchase-r0"],
-    "novel": ["colourpop-purchase-n0", "tentree-purchase-n0"]
+    "repeat": [
+      "whitejade-purchase-r0",
+      "whitejade-purchase-r1",
+      "whitejade-purchase-r2",
+      "whitejade-purchase-r3"
+    ],
+    "novel": [
+      "allbirds-purchase-n0",
+      "brooklinen-purchase-n0",
+      "colourpop-purchase-n0",
+      "deathwish-purchase-n0",
+      "tentree-purchase-n0"
+    ]
   },
   "skipped": [
     {
       "bucket": "repeat",
-      "count": 17,
-      "reason": "v1 captures one stable product page per confirmed seed store; cross-param expansion remains after the instrument lands"
+      "count": 16,
+      "reason": "v1 captures all four real whitejade products; remaining cross-param variations are logged rather than synthesized"
     },
     {
       "bucket": "novel",
-      "count": 8,
-      "reason": "v1 live capture stopped after two stable unseen-store product pages; remaining target is logged rather than silently synthesized"
+      "count": 5,
+      "reason": "v1 live capture stopped after five stable unseen-store product pages; remaining target is logged rather than silently synthesized"
     }
   ],
   "substrate": {
     "har": "stable storefront/product pages only, captured with Playwright recordHar and replayed with notFound=abort",
     "checkout": "live whitejade.xyz Shopify test mode only; never written to HAR"
+  },
+  "live_checkout": {
+    "task_id": "whitejade-purchase-r0",
+    "status": "checkout_review_verified",
+    "line_item": "The Glow Serum",
+    "subtotal_cents": 6800,
+    "shipping_cents": 800,
+    "total_cents": 7600,
+    "order_completion": "known gap: final submission is not asserted until the whitejade Admin API order-readback token is vaulted",
+    "har_recorded": false
   }
 }
