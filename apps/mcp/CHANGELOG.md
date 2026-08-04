@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.6-rc.2 (2026-08-03)
+
+- **Weak-host widget coercion + `set_field`.** `operate_act` coerces a `type` aimed at a native `<select>` into a proper option select (fires input/change), and adds a `set_field` verb that dispatches by element type — so a weaker host driver can fill dropdowns/forms without classifying widgets. (A Haiku driver completed a checkout a weaker model had failed.)
+- **Payment-safe session lifecycle.** `operate_pay` uses an exclusive payment lease: resolve-before-await (no TOCTOU), reject a second concurrent pay (no double-charge), release by the exact leased id, and never guess which checkout to charge (`session_id` required when >1). An idle-session reaper (10-min TTL, skips in-flight payments) plus an `operate_finish{}` close-all escape hatch (skips in-flight) keep leaked / compaction-orphaned sessions from wedging `operate_pay`. Codex-reviewed (payment-path).
+
 ## 1.1.6-rc.1 (2026-07-29)
 
 - **Install completion now preserves the full onboarding flow.** Normal
