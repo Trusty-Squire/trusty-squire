@@ -11,6 +11,8 @@ launch reader.
 - [DEPLOY-registry.md](DEPLOY-registry.md) covers deploying the skill registry.
 - [PROMPT-opencode-support.md](PROMPT-opencode-support.md) records the implementation brief for
   first-class OpenCode MCP support.
+- [DESIGN-replay-eval-harness.md](DESIGN-replay-eval-harness.md) owns the replay-engine evaluation
+  predicate, frozen-corpus contract, all-cold baseline, and current known gaps.
 - [opencode-ecosystem-entry.md](opencode-ecosystem-entry.md) contains prepared upstream discovery
   copy for review after the OpenCode target is released.
 - [BUSINESS-MODEL.md](BUSINESS-MODEL.md) records the current pricing and

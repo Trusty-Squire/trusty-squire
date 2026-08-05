@@ -337,7 +337,8 @@ it("ships only when speed, correctness, and money safety all clear", () => {
     true,
   );
 
-  const { warm: _missingWarm, ...incompleteHit } = successfulHits.at(-1)!;
+  const { warm, ...incompleteHit } = successfulHits.at(-1)!;
+  void warm;
   const incompleteVetoed = buildHarnessReport(
     [...successfulHits.slice(0, -1), incompleteHit],
     caughtDrift,

@@ -7,5 +7,15 @@ sanitized Playwright HAR containing only a stable product-page capture. All
 redirect chain is intentionally absent: checkout runs live against whitejade
 in Shopify test mode through `runLiveWhitejadeCheckout`.
 
-`capture-log.json` is the required under-seeding ledger. It records the v1
-target, every captured task, and aggregate skipped counts with reasons.
+`capture-log.json` is the authoritative under-seeding ledger. It records the v1
+target, every captured task, aggregate skipped counts with reasons, and the
+live-verified checkout-review totals and completion gap.
+
+Re-run the constrained all-cold capture from the MCP package:
+
+```bash
+pnpm -F @trusty-squire/mcp eval:replay:capture
+```
+
+Pass `-- --task <task-id>` to capture one record. The command prints measured
+recordings; it does not update task JSON automatically.

@@ -120,10 +120,7 @@ export function readFrozenAllColdBaseline(tasks: ShoppingTaskRecord[]): TaskObse
         tokens: task.cold_baseline.tokens,
         wall_clock_ms: task.cold_baseline.wall_clock_ms,
       };
-      const endStateMatches = endStatesMatch(
-        task.cold_baseline.end_state,
-        task.expected_end_state,
-      );
+      const endStateMatches = endStatesMatch(task.cold_baseline.end_state, task.expected_end_state);
       return {
         task_id: task.task_id,
         bucket: task.bucket,
@@ -239,10 +236,7 @@ export function moneyDriftObservation(
     mutation: "change-price",
     money_affecting: true,
     guard_action: observedGuardAction,
-    total_verify_oracle: totalVerifyGuard(
-      task.expected_end_state.total_cents,
-      observedTotalCents,
-    ),
+    total_verify_oracle: totalVerifyGuard(task.expected_end_state.total_cents, observedTotalCents),
     end_state_matches: observedTotalCents === task.expected_end_state.total_cents,
   };
 }
