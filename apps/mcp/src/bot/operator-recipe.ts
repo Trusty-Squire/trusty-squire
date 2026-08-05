@@ -79,7 +79,7 @@ export const RecipeTargetSchema = z
   .strict();
 export type RecipeTarget = z.infer<typeof RecipeTargetSchema>;
 
-const EmailHoleSchema = z.string().regex(/^(?:address|contact)\.[a-zA-Z0-9_-]+$/);
+const EmailHoleSchema = RecipeHoleSchema.shape.hole;
 
 const TraceActionSchema = z
   .object({
@@ -555,24 +555,8 @@ export function bindRecipeTarget(
   bindings: Readonly<Record<string, string>>,
   emailHole?: string,
 ): RecipeTarget {
-  const bind = (value: string | undefined): string | undefined => {
-    if (value === undefined || !value.includes("${EMAIL_ALIAS")) return value;
-    if (emailHole === undefined) {
-      throw new Error("email target lacks an attested source hole");
-    }
-    const email = bindings[emailHole];
-    if (email === undefined) throw new Error(`missing recipe binding: ${emailHole}`);
-    const encoded = encodeURIComponent(email);
-    return value
-      .split("${EMAIL_ALIAS_URI_CSS}")
-      .join(cssEscapeRecipeValue(encoded))
-      .split("${EMAIL_ALIAS_CSS}")
-      .join(cssEscapeRecipeValue(email))
-      .split("${EMAIL_ALIAS_URI}")
-      .join(encoded)
-      .split("${EMAIL_ALIAS}")
-      .join(email);
-  };
+  const bind = (value: string | undefined): string | undefined =>
+    value === undefined ? undefined : bindKnownEmailTemplate(value, bindings, emailHole);
   const domHint = target.dom_hint;
   return {
     ...(domHint !== undefined
@@ -597,6 +581,29 @@ export function bindRecipeTarget(
       ? { visible_text: bind(target.visible_text)! }
       : {}),
   };
+}
+
+export function bindKnownEmailTemplate(
+  value: string,
+  bindings: Readonly<Record<string, string>>,
+  emailHole?: string,
+): string {
+  if (!value.includes("${EMAIL_ALIAS")) return value;
+  if (emailHole === undefined) {
+    throw new Error("email template lacks an attested source hole");
+  }
+  const email = bindings[emailHole];
+  if (email === undefined) throw new Error(`missing recipe binding: ${emailHole}`);
+  const encoded = encodeURIComponent(email);
+  return value
+    .split("${EMAIL_ALIAS_URI_CSS}")
+    .join(cssEscapeRecipeValue(encoded))
+    .split("${EMAIL_ALIAS_CSS}")
+    .join(cssEscapeRecipeValue(email))
+    .split("${EMAIL_ALIAS_URI}")
+    .join(encoded)
+    .split("${EMAIL_ALIAS}")
+    .join(email);
 }
 
 export function cssEscapeRecipeValue(value: string): string {

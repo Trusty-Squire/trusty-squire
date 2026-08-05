@@ -1013,6 +1013,46 @@ describe("verified recipe recording", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it("never writes a cold trace after a checkout transition loses attestation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-transition-fail-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "City",
+      text: "Queens",
+      provenance: { hole: "address.city" },
+    });
+    h.clearElementsOnClick = true;
+    h.clickValueMutation = { selector: "#city", value: "Brooklyn" };
+    await act(started.session_id, { kind: "click", target: "Continue" });
+    h.visibleText = "Review order";
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "failed-transition",
+          goal: "Buy coffee",
+          verb: "purchase",
+          inputs: { address: { city: "Queens" } },
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Ready to approve",
+            success_signal: { text_present: "Review order" },
+          },
+        },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/checkout transition could not be attested/i);
+    expect(readdirSync(dir)).toEqual([]);
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("refuses to save an unprovenanced value action", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-unbound-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
@@ -1190,6 +1230,103 @@ describe("verified recipe recording", () => {
     expect(raw).toContain("${EMAIL_ALIAS_CSS}");
     expect(raw).not.toContain("buyer@example.com");
     expect(raw).not.toContain("buyer\\\\@example\\\\.com");
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(profileDir, { recursive: true, force: true });
+  });
+
+  it("preserves a credential-backed known-email transform as an attested hole", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-credential-email-"));
+    const profileDir = mkdtempSync(join(tmpdir(), "verified-recipe-credential-profile-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    writeFileSync(
+      join(profileDir, "provider-emails.json"),
+      JSON.stringify({ google: "buyer@example.com" }),
+    );
+    h.elements = [
+      elem({
+        testId: "email-buyer@example.com",
+        labelText: "buyer@example.com",
+        selector: '[data-testid="email-buyer\\@example\\.com"]',
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/cart",
+      profileDir,
+    });
+    stashSecretSlot(started.session_id, "login", "buyer@example.com");
+    await act(started.session_id, {
+      kind: "type_secret",
+      slot: "login",
+      target: "buyer@example.com",
+    });
+    h.visibleText = "Review order";
+    await provisionRememberTool.handler(
+      {
+        session_id: started.session_id,
+        name: "credential-email",
+        goal: "Create account",
+        verb: "signup",
+        inputs: { credential: { login: "buyer@example.com" } },
+        postcondition: {
+          kind: "execute_capability",
+          describe: "Account created",
+          success_signal: { text_present: "Review order" },
+        },
+      },
+      null as unknown as ApiClient,
+    );
+    const raw = readFileSync(join(dir, "signup--example.com.json"), "utf8");
+    expect(raw).toContain('"email_hole": "credential.login"');
+    expect(raw).not.toContain("buyer@example.com");
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(profileDir, { recursive: true, force: true });
+  });
+
+  it("scrubs known-email variants from every persisted URL", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-email-url-"));
+    const profileDir = mkdtempSync(join(tmpdir(), "verified-recipe-email-url-profile-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    writeFileSync(
+      join(profileDir, "provider-emails.json"),
+      JSON.stringify({ google: "buyer@example.com" }),
+    );
+    h.elements = [elem({ testId: "email", labelText: "Email", selector: "#email", value: "" })];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/cart?email=buyer%40example%2Ecom",
+      profileDir,
+    });
+    await act(started.session_id, {
+      kind: "type",
+      target: "Email",
+      text: "buyer@example.com",
+      provenance: { hole: "address.email" },
+    });
+    await act(started.session_id, {
+      kind: "goto",
+      url: "https://shop.example.com/account/buyer%40example%2Ecom",
+    });
+    h.visibleText = "Review order";
+    await provisionRememberTool.handler(
+      {
+        session_id: started.session_id,
+        name: "email-url",
+        goal: "Create account",
+        verb: "signup",
+        inputs: { address: { email: "buyer@example.com" } },
+        postcondition: {
+          kind: "execute_capability",
+          describe: "Account created",
+          success_signal: { text_present: "Review order" },
+        },
+      },
+      null as unknown as ApiClient,
+    );
+    const raw = readFileSync(join(dir, "signup--example.com.json"), "utf8");
+    expect(raw).toContain('"entry_mode": "runtime_service_url"');
+    expect(raw).toContain("${EMAIL_ALIAS_URI}");
+    expect(raw).not.toMatch(/buyer(?:@|%40)example(?:\.|%2e)com/i);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
     rmSync(profileDir, { recursive: true, force: true });

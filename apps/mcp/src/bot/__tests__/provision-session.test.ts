@@ -580,6 +580,12 @@ describe("scrubKnownEmail (PR3d — exact known-email scrub in trace text)", () 
     expect(scrubKnownEmail("/account/ada%40x.com", "ada@x.com")).toBe(
       "/account/${EMAIL_ALIAS_URI}",
     );
+    expect(scrubKnownEmail("/account/ada%40x%2Ecom", "ada@x.com")).toBe(
+      "/account/${EMAIL_ALIAS_URI}",
+    );
+    expect(scrubKnownEmail("/account/%61%64%61%40%78%2e%63%6f%6d", "ada@x.com")).toBe(
+      "/account/${EMAIL_ALIAS_URI}",
+    );
   });
 });
 

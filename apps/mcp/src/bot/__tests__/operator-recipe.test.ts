@@ -20,6 +20,7 @@ import {
   resolveRecipeTarget,
   tagProvenanceValue,
   tagTraceProvenance,
+  bindKnownEmailTemplate,
   bindRecipeTarget,
   bindRecipeValue,
   cssEscapeRecipeValue,
@@ -324,6 +325,30 @@ describe("provenance holes", () => {
     expect(target.css).toBe(`[data-testid="${cssEscapeRecipeValue(email)}"]`);
     expect(target.href_hint).toBe(`/account/${encodeURIComponent(email)}`);
     expect(target.visible_text).toBe(email);
+  });
+
+  it("binds credential-backed known-email URL transforms", () => {
+    expect(
+      bindKnownEmailTemplate(
+        "https://service.test/account/${EMAIL_ALIAS_URI}",
+        { "credential.login": "buyer@example.com" },
+        "credential.login",
+      ),
+    ).toBe("https://service.test/account/buyer%40example.com");
+    expect(
+      OperatorRecipeSchema.parse({
+        ...RECIPE,
+        trace: [
+          {
+            action: {
+              kind: "goto",
+              url_template: "https://service.test/account/${EMAIL_ALIAS_URI}",
+              email_hole: "credential.login",
+            },
+          },
+        ],
+      }).trace[0]?.action.email_hole,
+    ).toBe("credential.login");
   });
 
   it("rejects ambiguous exact-value provenance instead of choosing the first hole", () => {

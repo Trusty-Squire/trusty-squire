@@ -17,6 +17,7 @@
 //    `finish`/extract path; the vault stays write-only.
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -44,6 +45,7 @@ import {
   type PostconditionResult,
   type PostconditionSnapshot,
   checkSuccessSignal,
+  bindKnownEmailTemplate,
   bindRecipeTarget,
   bindRecipeValue,
   cssEscapeRecipeValue,
@@ -417,6 +419,7 @@ interface Session {
   // step — this flag suppresses auto-promotion so no silently-incomplete skill
   // ships (captureAndPromoteSession).
   usedLocatorFallback: boolean;
+  recipeRejectionReason: string | null;
   replayState: ReplayState | null;
 }
 
@@ -1752,6 +1755,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     committedSelectValues: new Map(),
     captureRounds: [],
     usedLocatorFallback: false,
+    recipeRejectionReason: null,
     replayState: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
@@ -2609,6 +2613,8 @@ export async function act(
     }
   }
 
+  const recordingTransitionFields = await attestRecordedFieldsBeforeTransition(session, action);
+
   // Captured for the operator-recipe trace: the element a target action
   // resolved to, so we record the VISIBLE text it acted on (not the ref).
   let resolvedEl: InteractiveElement | null = null;
@@ -2810,6 +2816,7 @@ export async function act(
       break;
     }
   }
+  await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
   await captureReplayRepairVerification(session, completedAction, resolvedEl);
   await refreshReplayVerificationAfterAction(session, completedAction, resolvedEl);
   // Don't fold inbox-provider steps into the replayable recipe (see
@@ -2865,16 +2872,33 @@ export function redactEmailForTrace(value: string): string {
 // not wired into operate_*.) Exported for unit tests.
 export function scrubKnownEmail(s: string, userEmail: string | null): string {
   if (userEmail === null || userEmail.length === 0) return s;
-  const encoded = encodeURIComponent(userEmail);
-  return s
-    .split(cssEscapeRecipeValue(encoded))
-    .join(EMAIL_SLOT_URI_CSS_TEMPLATE)
-    .split(cssEscapeRecipeValue(userEmail))
-    .join(EMAIL_SLOT_CSS_TEMPLATE)
-    .split(encoded)
-    .join(EMAIL_SLOT_URI_TEMPLATE)
-    .split(userEmail)
-    .join(EMAIL_SLOT_TEMPLATE);
+  const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = [...userEmail]
+    .map((char) => {
+      const raw = escapeRegex(char);
+      const percent = [...Buffer.from(char)]
+        .map((byte) => `%${byte.toString(16).padStart(2, "0")}`)
+        .join("");
+      const cssHex = `\\\\${char.codePointAt(0)!.toString(16)}(?:\\s)?`;
+      const cssSimple = /[a-zA-Z0-9_-]/.test(char) ? null : `\\\\${raw}`;
+      return `(?:${[raw, percent, cssHex, cssSimple].filter(Boolean).join("|")})`;
+    })
+    .join("");
+  return s.replace(new RegExp(pattern, "gi"), (matched) => {
+    const escaped = matched.includes("\\");
+    const encoded = /%[0-9a-f]{2}/i.test(matched);
+    if (escaped && encoded) return EMAIL_SLOT_URI_CSS_TEMPLATE;
+    if (escaped) return EMAIL_SLOT_CSS_TEMPLATE;
+    if (encoded) return EMAIL_SLOT_URI_TEMPLATE;
+    return EMAIL_SLOT_TEMPLATE;
+  });
+}
+
+function assertRecipeEmailScrubbed(recipe: OperatorRecipe, userEmail: string | null): void {
+  const serialized = JSON.stringify(recipe);
+  if (scrubKnownEmail(serialized, userEmail) !== serialized) {
+    throw new Error("operate_remember refused: known email remains in serialized recipe data");
+  }
 }
 
 // Append a stable-attribute-targeted entry to the session's operator-recipe
@@ -3002,7 +3026,7 @@ function recordTrace(
   let a: TraceAction;
   switch (action.kind) {
     case "goto":
-      a = { kind: "goto", url_template: action.url };
+      a = { kind: "goto", url_template: scrubKnownEmail(action.url, session.userEmail) };
       break;
     case "allow_host":
       a = { kind: "allow_host", host: action.host };
@@ -3329,6 +3353,7 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
     const targetText = JSON.stringify({
       text_match: entry.action.text_match,
       target: entry.action.target,
+      url_template: entry.action.url_template,
     });
     if (!targetText.includes("${EMAIL_ALIAS")) continue;
     const directEmailHole = emailSources.find((source) => source.traceIndex === traceIndex)?.hole;
@@ -3336,9 +3361,6 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
       throw new Error("known-email target lacks one unambiguous action-time source hole");
     }
     const emailHole = directEmailHole ?? [...emailHoles][0]!;
-    if (!/^(?:address|contact)\.[a-zA-Z0-9_-]+$/.test(emailHole)) {
-      throw new Error(`known-email target source ${emailHole} is not an address/contact field`);
-    }
     entry.action.email_hole = emailHole;
   }
   for (const [traceIndex, entry] of trace.entries()) {
@@ -3374,6 +3396,9 @@ export async function rememberRecipe(
       "operate_remember refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
     );
   }
+  if (session.recipeRejectionReason !== null) {
+    throw new Error(`operate_remember refused: ${session.recipeRejectionReason}`);
+  }
   if (opts.inputs === undefined) {
     throw new Error("operate_remember refused: complete provenance inputs are required");
   }
@@ -3385,6 +3410,7 @@ export async function rememberRecipe(
     throw new Error(`operate_remember refused: postcondition not confirmed (${verified.reason})`);
   }
   const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
+  const scrubbedStartUrl = scrubKnownEmail(session.startUrl, session.userEmail);
   const recipe: OperatorRecipe = {
     name: opts.name,
     schema_version: 1,
@@ -3394,7 +3420,7 @@ export async function rememberRecipe(
       : {}),
     // Canonical, stable replay entry — the page the session started at, never a
     // mid-flow single-use link inferred from the trace.
-    ...(isSingleUseUrl(session.startUrl)
+    ...(isSingleUseUrl(session.startUrl) || scrubbedStartUrl !== session.startUrl
       ? { entry_mode: "runtime_service_url" as const }
       : { entry_url: session.startUrl }),
     allowed_hosts: [...new Set(egressSeedHosts(session))],
@@ -3402,6 +3428,7 @@ export async function rememberRecipe(
     secrets,
     postcondition: opts.postcondition,
   };
+  assertRecipeEmailScrubbed(recipe, session.userEmail);
   const unprovenancedMoneyField = findUnprovenancedMoneyField(recipe);
   if (unprovenancedMoneyField !== null) {
     throw new Error(
@@ -3604,6 +3631,7 @@ function markReplayFailure(
   reason: "field_missing" | "field_value_mismatch",
   field: string,
 ): void {
+  rejectRecipeRecording(session, `replay transition failed (${field}: ${reason})`);
   if (session.replayState === null) return;
   session.replayState.paymentGuard = "failed";
   session.replayState.failure = { reason, field };
@@ -3810,6 +3838,94 @@ function isReplayTransitionAction(action: ProvisionAction): boolean {
   );
 }
 
+function rejectRecipeRecording(session: Session, reason: string): void {
+  session.recipeRejectionReason ??= reason;
+}
+
+function recordedMoneyFields(session: Session): ReplayExpectedField[] {
+  const fields: ReplayExpectedField[] = [];
+  for (const source of session.recordedValues) {
+    if (source.hole === undefined || !REPLAY_VERIFIED_HOLE.test(source.hole)) continue;
+    const action = session.actionTrace[source.traceIndex]?.action;
+    if (
+      action === undefined ||
+      (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country")
+    ) {
+      continue;
+    }
+    let target: RecipeTarget | null = null;
+    if (action.kind !== "set_phone_country") {
+      try {
+        target = boundReplayTarget(
+          { ...action, email_hole: source.hole },
+          { [source.hole]: source.literal },
+        );
+      } catch {
+        target = null;
+      }
+    }
+    fields.push({
+      stepIndex: source.traceIndex,
+      hole: source.hole,
+      expected: source.literal,
+      target,
+      kind: action.kind,
+    });
+  }
+  return fields;
+}
+
+async function attestRecordedFieldsBeforeTransition(
+  session: Session,
+  action: ProvisionAction,
+): Promise<ReplayExpectedField[]> {
+  if (session.replayState !== null || !isReplayTransitionAction(action)) return [];
+  const fields = recordedMoneyFields(session);
+  if (fields.length === 0) return fields;
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  for (const expected of fields) {
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    if (!guard.ok) {
+      rejectRecipeRecording(
+        session,
+        `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
+      );
+      return [];
+    }
+  }
+  return fields;
+}
+
+async function verifyRecordedFieldsAfterTransition(
+  session: Session,
+  action: ProvisionAction,
+  fields: readonly ReplayExpectedField[],
+): Promise<void> {
+  if (session.replayState !== null || !isReplayTransitionAction(action) || fields.length === 0) {
+    return;
+  }
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  for (const expected of fields) {
+    if (!(await isReplayFieldMounted(session, expected, fresh))) {
+      rejectRecipeRecording(
+        session,
+        `checkout transition could not be attested (${expected.hole}: field_missing)`,
+      );
+      return;
+    }
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    if (!guard.ok) {
+      rejectRecipeRecording(
+        session,
+        `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
+      );
+      return;
+    }
+  }
+}
+
 async function attestReplayFieldsBeforeTransition(
   session: Session,
   action: ProvisionAction,
@@ -3979,7 +4095,13 @@ export async function replayOperatorRecipe(
       if (recorded.url_template === undefined) {
         return await fallback(step, i, "goto step has no URL");
       }
-      const filled = fillTemplate(recorded.url_template, bindings as Record<string, string>);
+      let urlTemplate: string;
+      try {
+        urlTemplate = bindKnownEmailTemplate(recorded.url_template, bindings, recorded.email_hole);
+      } catch (error) {
+        return await fallback(step, i, error instanceof Error ? error.message : String(error));
+      }
+      const filled = fillTemplate(urlTemplate, bindings as Record<string, string>);
       if (filled.missing.length > 0) {
         return await fallback(step, i, `missing bindings: ${filled.missing.join(", ")}`);
       }
