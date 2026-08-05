@@ -1018,7 +1018,8 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
   name: "operate_use",
   description:
     "Replay a local prepared-statement recipe selected by the host-classified closed-enum " +
-    "verb plus service_url (eTLD+1 keyed; path/query ignored), or by legacy name. Binds " +
+    "verb plus service_url (eTLD+1 keyed; path/query ignored). A legacy name opens the " +
+    "saved workflow as a planning hint without deterministic replay. Binds " +
     "hole values and executes each step through ordered target fallback. A single miss " +
     "returns replay.status='fallback_required' with that step and next_index; repair only " +
     "that step, then call operate_use again with the same params plus session_id + " +
@@ -1083,6 +1084,10 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
       );
     }
     let sessionId = args.session_id;
+    const legacyHintOnly = recipe.verb === undefined || recipe.domain === undefined;
+    if (legacyHintOnly && sessionId !== undefined) {
+      throw new Error("legacy named recipes are hint-only and do not support replay continuation");
+    }
     if (sessionId === undefined) {
       const consentInboxRead = await readInboxConsent();
       const started = await startProvisionSession({
@@ -1093,6 +1098,15 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
         ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
       });
       if (started.needs_user !== undefined) return started;
+      if (legacyHintOnly) {
+        return {
+          ...started,
+          replay: {
+            status: "legacy_hint_only" as const,
+            reason: "legacy named recipe has no closed-enum verb/domain classification",
+          },
+        };
+      }
       sessionId = started.session_id;
     }
     const replay = await replayOperatorRecipe(

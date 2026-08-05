@@ -3777,6 +3777,11 @@ export class BrowserController {
     return phoneCountryOptionMatches(query, option);
   }
 
+  async hasPhoneCountryControl(): Promise<boolean> {
+    if (!this.page) return false;
+    return (await this.page.locator('select[data-ts-phone-country-control="1"]').count()) === 1;
+  }
+
   // Strategy 1 — a native <select> that governs the phone country (react-
   // phone-number-input's `opacity:0` PhoneInputCountrySelect, or any bespoke
   // widget backed by a real <select>). Detection is deliberately conservative

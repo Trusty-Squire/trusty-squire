@@ -209,6 +209,9 @@ vi.mock("../browser.js", () => ({
     async verifyPhoneCountry(country: string): Promise<boolean> {
       return h.phoneCountry === country;
     }
+    async hasPhoneCountryControl(): Promise<boolean> {
+      return h.phoneCountry !== null;
+    }
     async click(): Promise<void> {
       if (h.clickValueMutation !== null) {
         for (const element of h.elements as Array<Record<string, unknown>>) {
@@ -513,7 +516,7 @@ describe("prepared-statement replay", () => {
     );
   });
 
-  it("requires a human when a transition removes an unverifiable field", async () => {
+  it("retains action-time attestation when a transition unmounts the field", async () => {
     h.elements = [
       elem({
         testId: "shipping-city",
@@ -555,13 +558,22 @@ describe("prepared-statement replay", () => {
       }),
       { "address.city": "Queens" },
     );
-    expect(result).toMatchObject({
-      status: "human_required",
-      reason: "field_missing",
-      field: "address.city",
-    });
+    expect(result).toMatchObject({ status: "complete", field_values_verified: true });
     expect(h.elements).toEqual([]);
-    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
+  });
+
+  it("rejects unclassified legacy recipes from deterministic replay", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await expect(
+      replayOperatorRecipe(
+        started.session_id,
+        replayRecipe({ verb: undefined, domain: undefined }),
+        {},
+      ),
+    ).rejects.toThrow(/legacy named recipes are hint-only/i);
   });
 
   it("does not resolve a vanished shipping field to a unique billing sibling", async () => {
@@ -1127,14 +1139,25 @@ describe("verified recipe recording", () => {
       join(profileDir, "provider-emails.json"),
       JSON.stringify({ google: "buyer@example.com" }),
     );
-    h.elements = [elem({ testId: "email", labelText: "Email", selector: "#email" })];
+    h.elements = [
+      elem({
+        testId: "email-buyer@example.com",
+        id: "buyer@example.com",
+        name: "buyer@example.com",
+        labelText: "buyer@example.com",
+        ariaLabel: "buyer@example.com",
+        visibleText: "buyer@example.com",
+        href: "https://shop.example.com/account/buyer@example.com",
+        selector: '[aria-label="buyer@example.com"]',
+      }),
+    ];
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/cart",
       profileDir,
     });
     await act(started.session_id, {
       kind: "type",
-      target: "Email",
+      target: "buyer@example.com",
       text: "buyer@example.com",
     });
     h.visibleText = "Review order";
@@ -1155,6 +1178,7 @@ describe("verified recipe recording", () => {
     );
     const raw = readFileSync(join(dir, "purchase--example.com.json"), "utf8");
     expect(raw).toContain('"hole": "contact.email"');
+    expect(raw).toContain("${EMAIL_ALIAS}");
     expect(raw).not.toContain("buyer@example.com");
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });

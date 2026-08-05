@@ -44,8 +44,10 @@ import {
   type PostconditionResult,
   type PostconditionSnapshot,
   checkSuccessSignal,
+  bindRecipeTarget,
   bindRecipeValue,
   fillTemplate,
+  hasRecipeTargetCandidate,
   isSingleUseUrl,
   knownRecipeInputValue,
   operatorRecipeDomain,
@@ -342,6 +344,7 @@ interface ReplayState {
   nextIndex: number | null;
   expectedFields: Map<number, ReplayExpectedField>;
   verifiedFields: Set<number>;
+  unmountedFields: Set<number>;
   paymentGuard: "pending" | "verified" | "failed";
   failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
 }
@@ -1904,6 +1907,14 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
   session.lastElements = fresh;
   for (const expected of state.expectedFields.values()) {
     if (!state.verifiedFields.has(expected.stepIndex)) continue;
+    if (!(await isReplayFieldMounted(session, expected, fresh))) {
+      if (state.unmountedFields.has(expected.stepIndex)) continue;
+      markReplayFailure(session, "field_missing", expected.hole);
+      throw new Error(
+        "operate_pay refused: replay address/contact/quantity verification is not satisfied",
+      );
+    }
+    state.unmountedFields.delete(expected.stepIndex);
     const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
       markReplayFailure(session, guard.reason, expected.hole);
@@ -2870,6 +2881,7 @@ function traceTextFor(el: InteractiveElement | null): string | undefined {
 export function recipeTargetFor(
   el: InteractiveElement | null,
   inventory: readonly InteractiveElement[] = [],
+  userEmail: string | null = null,
 ): RecipeTarget | undefined {
   if (el === null) return undefined;
   const role =
@@ -2912,17 +2924,26 @@ export function recipeTargetFor(
   const nearText = siblings.length > 0 ? pickRowDisambiguator(el, siblings, inventory) : null;
   const domHint = pickStableDomHint(el);
   const hrefHint = pickHrefHint(el);
+  const scrub = (value: string): string => scrubKnownEmail(value, userEmail);
   return {
-    ...(domHint !== undefined ? { dom_hint: domHint } : {}),
-    ...(role !== undefined && role.length > 0 ? { role_hint: role } : {}),
-    ...(accessibleName !== undefined && accessibleName.length > 0
-      ? { accessible_name: accessibleName }
+    ...(domHint !== undefined
+      ? {
+          dom_hint: {
+            ...(domHint.testid !== undefined ? { testid: scrub(domHint.testid) } : {}),
+            ...(domHint.id !== undefined ? { id: scrub(domHint.id) } : {}),
+            ...(domHint.name !== undefined ? { name: scrub(domHint.name) } : {}),
+          },
+        }
       : {}),
-    ...(nearText !== null ? { near_text_hint: nearText } : {}),
-    ...(hrefHint !== null && !isSingleUseUrl(el.href ?? "") ? { href_hint: hrefHint } : {}),
-    ...(el.selector.length > 0 ? { css: el.selector } : {}),
+    ...(role !== undefined && role.length > 0 ? { role_hint: scrub(role) } : {}),
+    ...(accessibleName !== undefined && accessibleName.length > 0
+      ? { accessible_name: scrub(accessibleName) }
+      : {}),
+    ...(nearText !== null ? { near_text_hint: scrub(nearText) } : {}),
+    ...(hrefHint !== null && !isSingleUseUrl(el.href ?? "") ? { href_hint: scrub(hrefHint) } : {}),
+    ...(el.selector.length > 0 ? { css: scrub(el.selector) } : {}),
     ...(el.visibleText !== null && el.visibleText.length > 0
-      ? { visible_text: el.visibleText }
+      ? { visible_text: scrub(el.visibleText) }
       : {}),
   };
 }
@@ -2954,7 +2975,7 @@ function recordTrace(
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
-  const target = recipeTargetFor(el, session.lastElements);
+  const target = recipeTargetFor(el, session.lastElements, session.userEmail);
   const withTarget = target !== undefined ? { target } : {};
   let a: TraceAction;
   switch (action.kind) {
@@ -3443,8 +3464,24 @@ export type OperatorReplayResult =
     };
 
 function replayTarget(action: TraceAction): RecipeTarget | null {
-  if (action.target !== undefined) return action.target;
-  return action.text_match !== undefined ? { visible_text: action.text_match } : null;
+  return action.target !== undefined
+    ? action.target
+    : action.text_match !== undefined
+      ? { visible_text: action.text_match }
+      : null;
+}
+
+function boundReplayTarget(
+  action: TraceAction,
+  bindings: Readonly<Record<string, string>>,
+): RecipeTarget | null {
+  const target =
+    action.target !== undefined
+      ? action.target
+      : action.text_match !== undefined
+        ? { visible_text: action.text_match }
+        : null;
+  return target === null ? null : bindRecipeTarget(target, bindings);
 }
 
 const REPLAY_VERIFIED_HOLE = /^(?:address|contact)(?:\.|$)|^quantity$/;
@@ -3511,11 +3548,17 @@ function expectedReplayFields(
     }
     const expected = bindings[action.value.hole];
     if (expected === undefined) return { fields, missing: action.value.hole };
+    let target: RecipeTarget | null;
+    try {
+      target = boundReplayTarget(action, bindings);
+    } catch {
+      return { fields, missing: "contact.email" };
+    }
     fields.set(stepIndex, {
       stepIndex,
       hole: action.value.hole,
       expected,
-      target: replayTarget(action),
+      target,
       kind: action.kind,
     });
   }
@@ -3603,6 +3646,17 @@ async function verifyReplayFieldWithElements(
   return verifyReplayFieldInElements(session, expected, elements, allowCommittedSelect);
 }
 
+async function isReplayFieldMounted(
+  session: Session,
+  expected: ReplayExpectedField,
+  elements: readonly InteractiveElement[],
+): Promise<boolean> {
+  if (expected.kind === "set_phone_country") {
+    return await session.browser.hasPhoneCountryControl();
+  }
+  return expected.target !== null && hasRecipeTargetCandidate(elements, expected.target);
+}
+
 async function captureReplayRepairVerification(
   session: Session,
   action: ProvisionAction,
@@ -3659,7 +3713,7 @@ async function captureReplayRepairVerification(
   if (!recordedTargetMatches && !replacementSemanticsMatch) {
     throw new Error(`replay repair target mismatch for ${expected.hole}`);
   }
-  const replacementTarget = recipeTargetFor(resolvedEl, session.lastElements);
+  const replacementTarget = recipeTargetFor(resolvedEl, session.lastElements, session.userEmail);
   if (replacementTarget === undefined) {
     throw new Error(`replay repair target could not be attested for ${expected.hole}`);
   }
@@ -3670,6 +3724,7 @@ async function captureReplayRepairVerification(
     throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
   }
   state.verifiedFields.add(stepIndex);
+  state.unmountedFields.delete(stepIndex);
 }
 
 async function refreshReplayVerificationAfterAction(
@@ -3709,6 +3764,7 @@ async function refreshReplayVerificationAfterAction(
       throw new Error(`replay field verification failed for ${expected.hole}: ${guard.reason}`);
     }
     state.verifiedFields.add(expected.stepIndex);
+    state.unmountedFields.delete(expected.stepIndex);
   }
   if (state.verifiedFields.size === state.expectedFields.size) state.paymentGuard = "verified";
 }
@@ -3743,6 +3799,10 @@ async function attestReplayFieldsBeforeTransition(
     ) {
       continue;
     }
+    if (state.unmountedFields.has(expected.stepIndex)) {
+      if (!(await isReplayFieldMounted(session, expected, fresh))) continue;
+      state.unmountedFields.delete(expected.stepIndex);
+    }
     const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
       return { ok: false, reason: guard.reason, field: expected.hole };
@@ -3768,6 +3828,11 @@ async function verifyReplayFieldsAfterTransition(
   for (const stepIndex of attestedFields) {
     const expected = state.expectedFields.get(stepIndex);
     if (expected === undefined) continue;
+    if (!(await isReplayFieldMounted(session, expected, fresh))) {
+      state.unmountedFields.add(stepIndex);
+      continue;
+    }
+    state.unmountedFields.delete(stepIndex);
     const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
       return { ok: false, reason: guard.reason, field: expected.hole };
@@ -3791,7 +3856,10 @@ export async function replayOperatorRecipe(
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const recipeHash = replayDigest(recipe);
   const bindingsHash = bindingDigest(bindings);
-  const isMoneyPath = recipe.verb !== undefined && MONEY_REPLAY_VERBS.has(recipe.verb);
+  if (recipe.verb === undefined || recipe.domain === undefined) {
+    throw new Error("legacy named recipes are hint-only and cannot replay deterministically");
+  }
+  const isMoneyPath = MONEY_REPLAY_VERBS.has(recipe.verb);
   let state: ReplayState;
 
   const humanRequired = async (
@@ -3814,6 +3882,7 @@ export async function replayOperatorRecipe(
       nextIndex: null,
       expectedFields: expected.fields,
       verifiedFields: new Set(),
+      unmountedFields: new Set(),
       paymentGuard: isMoneyPath ? "pending" : "verified",
     };
     session.replayState = state;
@@ -3836,6 +3905,7 @@ export async function replayOperatorRecipe(
       const guard = await verifyReplayField(session, repairedField);
       if (!guard.ok) return await humanRequired(guard.reason, repairedField.hole);
       state.verifiedFields.add(fromIndex - 1);
+      state.unmountedFields.delete(fromIndex - 1);
     }
     state.nextIndex = null;
   }
@@ -3921,7 +3991,12 @@ export async function replayOperatorRecipe(
         return await fallback(step, i, error instanceof Error ? error.message : String(error));
       }
     } else {
-      const target = replayTarget(recorded);
+      let target: RecipeTarget | null;
+      try {
+        target = boundReplayTarget(recorded, bindings);
+      } catch (error) {
+        return await fallback(step, i, error instanceof Error ? error.message : String(error));
+      }
       if (target === null) {
         return await fallback(step, i, "step has no replay target");
       }
@@ -3991,6 +4066,7 @@ export async function replayOperatorRecipe(
         const guard = await verifyReplayField(session, expected, expected.kind === "select");
         if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
         state.verifiedFields.add(i);
+        state.unmountedFields.delete(i);
       }
       const transitionGuard = await verifyReplayFieldsAfterTransition(
         session,

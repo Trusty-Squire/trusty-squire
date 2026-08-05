@@ -547,6 +547,42 @@ export function bindRecipeValue(
   return bound;
 }
 
+export function bindRecipeTarget(
+  target: RecipeTarget,
+  bindings: Readonly<Record<string, string>>,
+): RecipeTarget {
+  const bind = (value: string | undefined): string | undefined => {
+    if (value === undefined || !value.includes("${EMAIL_ALIAS}")) return value;
+    const email = bindings["contact.email"];
+    if (email === undefined) throw new Error("missing recipe binding: contact.email");
+    return value.split("${EMAIL_ALIAS}").join(email);
+  };
+  const domHint = target.dom_hint;
+  return {
+    ...(domHint !== undefined
+      ? {
+          dom_hint: {
+            ...(bind(domHint.testid) !== undefined ? { testid: bind(domHint.testid)! } : {}),
+            ...(bind(domHint.id) !== undefined ? { id: bind(domHint.id)! } : {}),
+            ...(bind(domHint.name) !== undefined ? { name: bind(domHint.name)! } : {}),
+          },
+        }
+      : {}),
+    ...(bind(target.role_hint) !== undefined ? { role_hint: bind(target.role_hint)! } : {}),
+    ...(bind(target.accessible_name) !== undefined
+      ? { accessible_name: bind(target.accessible_name)! }
+      : {}),
+    ...(bind(target.near_text_hint) !== undefined
+      ? { near_text_hint: bind(target.near_text_hint)! }
+      : {}),
+    ...(bind(target.href_hint) !== undefined ? { href_hint: bind(target.href_hint)! } : {}),
+    ...(bind(target.css) !== undefined ? { css: bind(target.css)! } : {}),
+    ...(bind(target.visible_text) !== undefined
+      ? { visible_text: bind(target.visible_text)! }
+      : {}),
+  };
+}
+
 export interface RecipeTargetElement {
   tag?: string;
   testId?: string | null;
@@ -666,10 +702,7 @@ export function resolveRecipeFieldTarget<T extends RecipeTargetElement>(
 ): RecipeTargetResolution<T> | null {
   const resolution = resolveRecipeTarget(elements, target);
   if (resolution === null) return null;
-  const fellPastStrongIdentity =
-    (target.dom_hint?.testid !== undefined || target.dom_hint?.id !== undefined) &&
-    resolution.via !== "testid" &&
-    resolution.via !== "id";
+  const fellPastStrongIdentity = resolution.via !== "testid" && resolution.via !== "id";
   if (
     fellPastStrongIdentity &&
     (target.near_text_hint === undefined ||
@@ -810,7 +843,13 @@ export function isSingleUseUrl(rawUrl: string): boolean {
 }
 
 export function recipeEntryUrl(recipe: OperatorRecipe, runtimeServiceUrl?: string): string | null {
-  if (recipe.entry_mode === "runtime_service_url") return runtimeServiceUrl ?? null;
+  if (recipe.entry_mode === "runtime_service_url") {
+    if (runtimeServiceUrl === undefined) return null;
+    if (recipe.domain === undefined || operatorRecipeDomain(runtimeServiceUrl) !== recipe.domain) {
+      throw new Error(`runtime service URL domain does not match operator-recipe "${recipe.name}"`);
+    }
+    return runtimeServiceUrl;
+  }
   // Prefer the recipe's canonical entry (the session's start URL). Recipes
   // synthesized before entry_url existed fall back to the first STABLE trace
   // goto — skipping single-use verification/magic links, which must never be a

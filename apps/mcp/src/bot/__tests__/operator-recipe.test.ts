@@ -20,6 +20,7 @@ import {
   resolveRecipeTarget,
   tagProvenanceValue,
   tagTraceProvenance,
+  bindRecipeTarget,
   bindRecipeValue,
   verifyFilledFieldValues,
   type OperatorRecipe,
@@ -222,6 +223,12 @@ describe("ordered target fallback", () => {
       }),
     ).toBeNull();
     expect(
+      resolveRecipeFieldTarget([billing], {
+        dom_hint: { name: "city" },
+        accessible_name: "City",
+      }),
+    ).toBeNull();
+    expect(
       resolveRecipeFieldTarget([{ ...billing, name: null }], {
         dom_hint: { testid: "shipping-city" },
         role_hint: "textbox",
@@ -267,6 +274,30 @@ describe("provenance holes", () => {
     );
     expect(trace[0]?.action.value).toEqual({ hole: "address.city" });
     expect(bindRecipeValue(trace[0]!.action.value!, { "address.city": "Queens" })).toBe("Queens");
+  });
+
+  it("binds known-email transforms across every serialized target hint", () => {
+    const target = bindRecipeTarget(
+      {
+        dom_hint: {
+          testid: "email-${EMAIL_ALIAS}",
+          id: "${EMAIL_ALIAS}",
+          name: "${EMAIL_ALIAS}",
+        },
+        role_hint: "textbox-${EMAIL_ALIAS}",
+        accessible_name: "Account ${EMAIL_ALIAS}",
+        near_text_hint: "Signed in as ${EMAIL_ALIAS}",
+        href_hint: "/accounts/${EMAIL_ALIAS}",
+        css: '[aria-label="${EMAIL_ALIAS}"]',
+        visible_text: "${EMAIL_ALIAS}",
+      },
+      { "contact.email": "buyer@example.com" },
+    );
+    expect(JSON.stringify(target)).not.toContain("${EMAIL_ALIAS}");
+    expect(JSON.stringify(target)).toContain("buyer@example.com");
+    expect(() => bindRecipeTarget({ visible_text: "${EMAIL_ALIAS}" }, {})).toThrow(
+      /missing recipe binding: contact\.email/i,
+    );
   });
 
   it("rejects ambiguous exact-value provenance instead of choosing the first hole", () => {
@@ -546,12 +577,17 @@ describe("single-use link handling (replay-entry safety)", () => {
   it("recipeEntryUrl resolves runtime entries from the current service URL", () => {
     const r: OperatorRecipe = {
       ...RECIPE,
+      verb: "purchase",
+      domain: "example.com",
       entry_url: undefined,
       entry_mode: "runtime_service_url",
     };
     expect(recipeEntryUrl(r)).toBeNull();
     expect(recipeEntryUrl(r, "https://svc.example.com/signup")).toBe(
       "https://svc.example.com/signup",
+    );
+    expect(() => recipeEntryUrl(r, "https://attacker.test/signup")).toThrow(
+      /domain does not match/i,
     );
   });
 
