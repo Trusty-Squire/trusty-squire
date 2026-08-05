@@ -89,7 +89,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   },
   async handler(args, api, context) {
     assertApi(api);
-    const browser = activeProvisionBrowser();
+    const browser = await activeProvisionBrowserForPayment();
     if (await browser.isPayPalHostedCheckout()) {
       return {
         status: "paypal_checkout",

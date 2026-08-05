@@ -508,6 +508,7 @@ describe("prepared-statement replay", () => {
     await expect(
       replayOperatorRecipe(started.session_id, recipe, { quantity: "2" }, 1),
     ).rejects.toThrow(/invalid replay continuation/i);
+    await finishProvisionSession(started.session_id);
 
     const fresh = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
@@ -1333,6 +1334,7 @@ describe("verified recipe recording", () => {
     expect(raw).not.toMatch(/buyer(?:@|%40)example(?:\.|%2e)com/i);
     expect(raw).not.toContain("buyer%2540example.com");
     const recipe = await readRecipeForTask("signup", "https://shop.example.com/cart");
+    await finishProvisionSession(started.session_id);
     const replayStarted = await startProvisionSession({
       serviceUrl: "https://shop.example.com/cart",
     });
