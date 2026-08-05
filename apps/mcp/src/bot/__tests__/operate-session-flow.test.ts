@@ -22,6 +22,8 @@ const h = vi.hoisted(() => ({
   startCalls: 0,
   closeCalls: 0,
   resetCalls: 0,
+  profileProbeCalls: 0,
+  controllerProviderProbeCalls: 0,
   connections: [] as boolean[],
   currentUrl: "",
   elements: [] as unknown[],
@@ -86,6 +88,10 @@ vi.mock("../browser.js", () => ({
     async resetPageForReuse(): Promise<void> {
       h.resetCalls += 1;
       h.currentUrl = "about:blank";
+    }
+    async detectSessionProviders(): Promise<string[]> {
+      h.controllerProviderProbeCalls += 1;
+      return h.providers;
     }
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
@@ -241,7 +247,10 @@ vi.mock("../google-login.js", async (importOriginal) => {
   const actual = await importOriginal<typeof GoogleLoginModule>();
   return {
     ...actual,
-    detectActiveProviderSessions: async () => h.providers,
+    detectActiveProviderSessions: async () => {
+      h.profileProbeCalls += 1;
+      return h.providers;
+    },
     ensureOAuthSession: async () => ({ status: h.oauthStatus }),
   };
 });
@@ -304,6 +313,8 @@ beforeEach(() => {
   h.startCalls = 0;
   h.closeCalls = 0;
   h.resetCalls = 0;
+  h.profileProbeCalls = 0;
+  h.controllerProviderProbeCalls = 0;
   h.connections = [];
   h.currentUrl = "";
   h.elements = [];
@@ -639,6 +650,8 @@ describe("operate session — warm browser lifecycle", () => {
 
     expect(h.startCalls).toBe(1);
     expect(h.resetCalls).toBeGreaterThanOrEqual(2);
+    expect(h.profileProbeCalls).toBe(1);
+    expect(h.controllerProviderProbeCalls).toBe(1);
     await finishProvisionSession(second.session_id);
   });
 

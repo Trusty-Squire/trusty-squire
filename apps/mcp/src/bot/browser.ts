@@ -627,7 +627,7 @@ async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
 
 const selfManagedChromePids = new Set<number>();
 let selfManagedCleanupInstalled = false;
-let orphanVerifyReapRan = false;
+let orphanBrowserReapRan = false;
 
 function killPid(pid: number, signal: NodeJS.Signals): void {
   try {
@@ -670,9 +670,25 @@ function registerSelfManagedChrome(child: ChildProcess): void {
 // burns memory, and may leave defunct helper children. A live verifier should
 // never be parented to init, so these are safe to reap at the next browser
 // startup. Best-effort and Linux-only; failure must not block signups.
-function reapOrphanedVerifyBrowsersOnce(): void {
-  if (orphanVerifyReapRan) return;
-  orphanVerifyReapRan = true;
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function matchesReapableBrowserArgs(args: string, profileDir: string): boolean {
+  if (!/(?:chrome|chromium)/i.test(args)) return false;
+  const verifyProfile = String.raw`[^\s"']*\.trusty-squire\/profiles\/verify-[^\/\s"']+`;
+  const operatorProfiles = [...new Set([CHROME_PROFILE_DIR, profileDir])]
+    .map(escapeRegExp)
+    .join("|");
+  const profile = `(?:${verifyProfile}|${operatorProfiles})`;
+  return new RegExp(
+    `--user-data-dir=(?:"${profile}"|'${profile}'|${profile})(?=\\s|$)`,
+  ).test(args);
+}
+
+function reapOrphanedBrowsersOnce(profileDir: string): void {
+  if (orphanBrowserReapRan) return;
+  orphanBrowserReapRan = true;
   if (process.platform !== "linux") return;
   let rows = "";
   try {
@@ -692,16 +708,13 @@ function reapOrphanedVerifyBrowsersOnce(): void {
     if (
       Number.isFinite(pid) &&
       ppid === 1 &&
-      /(?:chrome|chromium)/i.test(args) &&
-      /--user-data-dir=.*\.trusty-squire\/(?:profiles\/verify-[^/\s]+|chrome-profile)(?:[\s"']|$)/.test(
-        args,
-      )
+      matchesReapableBrowserArgs(args, profileDir)
     ) {
       pids.push(pid);
     }
   }
   if (pids.length === 0) return;
-  console.error(`[operator] reaping ${pids.length} orphaned verify Chrome process(es)`);
+  console.error(`[operator] reaping ${pids.length} orphaned Chrome process(es)`);
   for (const pid of pids) killPid(pid, "SIGTERM");
   setTimeout(() => {
     for (const pid of pids) killPid(pid, "SIGKILL");
@@ -1294,7 +1307,7 @@ export class BrowserController {
   }
 
   async start(): Promise<void> {
-    reapOrphanedVerifyBrowsersOnce();
+    reapOrphanedBrowsersOnce(this.profileDir);
     const channel = await detectChromiumChannel();
     this.launchedChannel = channel;
     const proxy = await this.resolveProxy();
@@ -8800,8 +8813,25 @@ export class BrowserController {
 
     for (const page of context.pages()) {
       if (page !== primaryPage && !page.isClosed()) {
-        await page.close().catch(() => undefined);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            page.close(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("timed out closing warm browser popup")),
+                5_000,
+              );
+              timer.unref();
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
       }
+    }
+    if (context.pages().some((page) => page !== primaryPage && !page.isClosed())) {
+      throw new Error("warm browser reset left a non-primary page open");
     }
     await primaryPage.goto("about:blank", {
       waitUntil: "domcontentloaded",

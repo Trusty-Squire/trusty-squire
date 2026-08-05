@@ -1581,22 +1581,52 @@ export function googleSessionGate(
 }
 
 async function ensureProvisionPrimaryProviderSession(
-  profileDir: string | undefined,
+  opts: StartOptions,
+  sessionId: string,
 ): Promise<OAuthProviderId[]> {
-  const initial = await detectActiveProviderSessions(profileDir).catch(
+  const slot = warmBrowser;
+  if (slot !== null) {
+    const expired = warmBrowserExpired(slot);
+    const eligible = slot.controller.matchesLaunchOptions(opts);
+    const healthy = slot.controller.isConnected();
+    if (expired === null && eligible && healthy) {
+      const warmProviders = await slot.controller.detectSessionProviders();
+      if (warmProviders.includes("google")) {
+        touchWarmBrowser();
+        return warmProviders;
+      }
+    }
+
+    warmBrowser = null;
+    clearWarmBrowserIdleTimer();
+    await slot.controller.close().catch(() => undefined);
+    audit(sessionId, "browser_recycle", {
+      reason:
+        expired ??
+        (!eligible
+          ? "launch_config_mismatch"
+          : !healthy
+            ? "disconnected"
+            : "identity_probe_requires_cold_boot"),
+    });
+  }
+
+  const initial = await detectActiveProviderSessions(opts.profileDir).catch(
     () => [] as OAuthProviderId[],
   );
   if (initial.includes("google")) return initial;
 
   const result = await ensureOAuthSession({
     provider: "google",
-    ...(profileDir !== undefined ? { profileDir } : {}),
+    ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
   });
   if (result.status !== "already_valid" && result.status !== "logged_in") {
     return initial;
   }
 
-  const after = await detectActiveProviderSessions(profileDir).catch(() => [] as OAuthProviderId[]);
+  const after = await detectActiveProviderSessions(opts.profileDir).catch(
+    () => [] as OAuthProviderId[],
+  );
   return after.includes("google") ? after : ["google", ...after];
 }
 
@@ -1606,26 +1636,21 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   if (starting || inFlight) {
     throw new Error("operate_start refused: another operator session is already in flight");
   }
-  const liveProviders = await ensureProvisionPrimaryProviderSession(opts.profileDir);
-  // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
-  // needs to act as the user and there's no live Google session, hand back now;
-  // do not start the browser or the task. No autonomous login is attempted.
-  if (opts.requireLiveIdentity === true) {
-    const gate = googleSessionGate(liveProviders);
-    if (!gate.ok) {
-      audit(id, "connect_gate", { ok: false, wall: "google_session" });
-      return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
-    }
-  }
-  // The identity probe above is asynchronous, so another start may have taken
-  // the single-page lease while this call was waiting. Re-check immediately
-  // before claiming the boot/reuse slot.
-  if (starting || inFlight) {
-    throw new Error("operate_start refused: another operator session is already in flight");
-  }
   starting = true;
   let browser: BrowserController;
+  let liveProviders: OAuthProviderId[];
   try {
+    liveProviders = await ensureProvisionPrimaryProviderSession(opts, id);
+    // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
+    // needs to act as the user and there's no live Google session, hand back now;
+    // do not start the browser or the task. No autonomous login is attempted.
+    if (opts.requireLiveIdentity === true) {
+      const gate = googleSessionGate(liveProviders);
+      if (!gate.ok) {
+        audit(id, "connect_gate", { ok: false, wall: "google_session" });
+        return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
+      }
+    }
     browser = await acquireWarmBrowser(opts, id);
   } finally {
     starting = false;

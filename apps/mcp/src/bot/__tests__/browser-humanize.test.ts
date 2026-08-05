@@ -5,7 +5,7 @@
 // by end-to-end signup tests against real services.
 
 import { describe, expect, it, vi } from "vitest";
-import { BrowserController } from "../browser.js";
+import { BrowserController, matchesReapableBrowserArgs } from "../browser.js";
 
 describe("BrowserController humanize option", () => {
   it("defaults humanize to true", () => {
@@ -42,14 +42,17 @@ describe("BrowserController humanize option", () => {
 
 describe("BrowserController warm page reset", () => {
   it("keeps the handler-bound primary page, closes popups, and clears task state", async () => {
+    let popupClosed = false;
     const primary = {
       isClosed: () => false,
       close: vi.fn(async () => undefined),
       goto: vi.fn(async () => undefined),
     };
     const popup = {
-      isClosed: () => false,
-      close: vi.fn(async () => undefined),
+      isClosed: () => popupClosed,
+      close: vi.fn(async () => {
+        popupClosed = true;
+      }),
     };
     const controller = new BrowserController({ humanize: false });
     const internals = controller as unknown as {
@@ -87,5 +90,68 @@ describe("BrowserController warm page reset", () => {
     expect(internals.oauthProductPage).toBeNull();
     expect(internals.oauthNetLog).toEqual([]);
     expect([internals.mouseX, internals.mouseY]).toEqual([100, 100]);
+  });
+
+  it("rejects a reset when popup closure hangs", async () => {
+    vi.useFakeTimers();
+    try {
+      const primary = {
+        isClosed: () => false,
+        goto: vi.fn(async () => undefined),
+      };
+      const popup = {
+        isClosed: () => false,
+        close: vi.fn(() => new Promise<void>(() => undefined)),
+      };
+      const controller = new BrowserController({ humanize: false });
+      const internals = controller as unknown as {
+        context: {
+          browser: () => { isConnected: () => boolean };
+          pages: () => unknown[];
+        };
+        primaryPage: unknown;
+      };
+      internals.context = {
+        browser: () => ({ isConnected: () => true }),
+        pages: () => [primary, popup],
+      };
+      internals.primaryPage = primary;
+
+      const reset = controller.resetPageForReuse();
+      const rejected = expect(reset).rejects.toThrow(/timed out closing warm browser popup/);
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await rejected;
+      expect(primary.goto).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("orphan browser profile matching", () => {
+  it("matches an exact configured profile with regex metacharacters", () => {
+    const profileDir = "/tmp/operator+[team]/profile (primary)";
+    expect(
+      matchesReapableBrowserArgs(
+        `google-chrome --user-data-dir=${profileDir} --remote-debugging-port=9222`,
+        profileDir,
+      ),
+    ).toBe(true);
+    expect(
+      matchesReapableBrowserArgs(
+        "google-chrome --user-data-dir=/tmp/operatorXteam/profile primary",
+        profileDir,
+      ),
+    ).toBe(false);
+  });
+
+  it("continues to match verifier profiles", () => {
+    expect(
+      matchesReapableBrowserArgs(
+        "chromium --user-data-dir=/home/test/.trusty-squire/profiles/verify-worker-1",
+        "/tmp/operator-profile",
+      ),
+    ).toBe(true);
   });
 });
