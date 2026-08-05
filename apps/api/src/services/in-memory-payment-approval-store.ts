@@ -28,6 +28,7 @@ export type BindCardForAccountResult = "card_not_found" | "not_bindable" | "ok";
 
 export interface PendingPaymentApprovalStore {
   create(accountId: string, input: PendingPaymentApprovalInput): Promise<string>;
+  getById(id: string): Promise<PendingPaymentApprovalRecord | null>;
   getByIdForAccount(id: string, accountId: string): Promise<PendingPaymentApprovalRecord | null>;
   bindCardForAccount(
     id: string,
@@ -77,6 +78,11 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     return record === undefined || record.accountId !== accountId ? null : { ...record };
   }
 
+  async getById(id: string): Promise<PendingPaymentApprovalRecord | null> {
+    const record = this.records.get(id);
+    return record === undefined ? null : { ...record };
+  }
+
   async bindCardForAccount(
     id: string,
     accountId: string,
@@ -109,14 +115,13 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     now: Date,
   ): Promise<boolean> {
     const record = this.records.get(id);
-    if (
-      record === undefined ||
-      record.accountId !== accountId ||
-      record.status !== "pending" ||
-      record.expiresAt <= now
-    ) {
+    if (record === undefined || record.accountId !== accountId) {
       return false;
     }
+    if (record.status === "approved") {
+      return record.jws === jws && record.sealedCard === sealedCard;
+    }
+    if (record.status !== "pending" || record.expiresAt <= now) return false;
     record.jws = jws;
     record.sealedCard = sealedCard;
     record.status = "approved";

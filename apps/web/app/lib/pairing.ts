@@ -9,6 +9,23 @@ function errorCode(error: unknown): string | undefined {
   return error instanceof Error ? (error as ErrorWithCode).code : undefined;
 }
 
+export function isPaymentPasskeyUnavailable(error: unknown): boolean {
+  const code = errorCode(error);
+  if (
+    code === "platform_authenticator_unavailable" ||
+    code === "prf_unsupported" ||
+    code === "credential_not_found"
+  ) {
+    return true;
+  }
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  return (
+    message.includes("prf result") ||
+    message.includes("no passkey") ||
+    message.includes("not configured")
+  );
+}
+
 export async function getPairingState(): Promise<{ enrolled: boolean }> {
   try {
     const { enrolled } = await getVouchflow().getEnrollmentState();

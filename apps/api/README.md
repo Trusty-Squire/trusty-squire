@@ -39,8 +39,10 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send a Telegram 3-D Secure nudge to the account's linked chat and return `{ sent }` |
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Poll an account-owned payment approval |
+| `GET` | `/v1/pay/approvals/:id/ceremony` | none | Return only the opaque PRF/HPKE ceremony inputs for a pending approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
-| `POST` | `/v1/pay/approvals/:id/approve` | web | Relay a signed mandate and HPKE-sealed card to the operator |
+| `POST` | `/v1/pay/approvals/:id/approve` | none | Relay an opaque review or final approval seal to the waiting account operator without persisting it |
+| `POST` | `/v1/pay/approvals/:id/confirm` | agent | Release review details or persist a final approval after operator verification |
 | `GET` | `/health` | none | Liveness |
 
 Client-encrypted card creation accepts optional plaintext `brand` and `last4`
@@ -73,7 +75,14 @@ approval follows the server-enforced seal → bind → approve order. Binding is
 pending-only, write-once, rejects an expired approval, and accepts only an
 `E2ECredential` owned by the same account; an unknown or foreign card returns
 `404`. Approving before a card is bound returns
-`409 { "error": "card_required" }`.
+`409 { "error": "card_required" }`. The unauthenticated ceremony response
+contains only the approval id, status, bound card reference, operator public key,
+an opaque approval payload digest, and the encrypted card blob. An enrolled
+passkey holder submits a review seal without a web session; payment details and
+card display metadata are returned only after the authenticated operator verifies
+that approval-bound PRF/HPKE seal. Neither review nor final submissions are staged
+on the approval row. Review confirmation releases details without mutation; final
+confirmation persists the verified mandate, sealed card, and approved status.
 
 ## Auth model
 

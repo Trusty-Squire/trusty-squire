@@ -160,8 +160,16 @@ export class ApiClient {
     return this.post("/v1/pay/approvals", input);
   }
 
-  async getPaymentApproval(id: string): Promise<PaymentApproval> {
-    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}`);
+  async getPaymentApproval(id: string, waitForSubmission = false): Promise<PaymentApproval> {
+    const query = waitForSubmission ? "?wait_for_submission=1" : "";
+    return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}`);
+  }
+
+  async confirmPaymentApproval(
+    id: string,
+    submission: { jws: string; sealed_card: string },
+  ): Promise<{ status: "verified" | "approved" }> {
+    return this.post(`/v1/pay/approvals/${encodeURIComponent(id)}/confirm`, submission);
   }
 
   async getPaymentConfig(): Promise<{ vouchflow_audience?: string }> {

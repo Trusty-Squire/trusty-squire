@@ -63,6 +63,31 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
         };
   }
 
+  async getById(id: string): Promise<PendingPaymentApprovalRecord | null> {
+    const row = await this.prisma.pendingPaymentApproval.findFirst({ where: { id } });
+    return row === null
+      ? null
+      : {
+          id: row.id,
+          accountId: row.account_id,
+          merchant: row.merchant,
+          checkoutOrigin: row.checkout_origin,
+          amountCents: row.amount_cents,
+          currency: row.currency,
+          nonce: row.nonce,
+          cardRef: row.card_ref,
+          operatorPubkey: row.operator_pubkey,
+          item: row.item,
+          reason: row.reason,
+          agent: row.agent,
+          status: row.status as PendingPaymentApprovalRecord["status"],
+          jws: row.jws,
+          sealedCard: row.sealed_card,
+          createdAt: row.created_at,
+          expiresAt: row.expires_at,
+        };
+  }
+
   async bindCardForAccount(
     id: string,
     accountId: string,
@@ -108,8 +133,19 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
         status: "pending",
         expires_at: { gt: now },
       },
-      data: { jws, sealed_card: sealedCard, status: "approved" },
+      data: { status: "approved", jws, sealed_card: sealedCard },
     });
-    return result.count > 0;
+    if (result.count > 0) return true;
+    const approved = await this.prisma.pendingPaymentApproval.findFirst({
+      where: {
+        id,
+        account_id: accountId,
+        status: "approved",
+        jws,
+        sealed_card: sealedCard,
+      },
+      select: { id: true },
+    });
+    return approved !== null;
   }
 }

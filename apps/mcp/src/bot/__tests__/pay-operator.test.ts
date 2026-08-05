@@ -32,6 +32,10 @@ const SYNTHETIC_CARD = {
 
 type Mode =
   | "happy"
+  | "review_then_happy"
+  | "confirm_response_lost"
+  | "confirm_response_lost_changed"
+  | "junk_then_happy"
   | "tampered_amount"
   | "tampered_origin"
   | "wrong_recipient"
@@ -59,8 +63,11 @@ async function harness(
   const filledCards: CheckoutCard[] = [];
   const notifyCalls: string[] = [];
   const resolvedCardRefs: string[] = [];
+  const confirmationBodies: Array<Record<string, unknown>> = [];
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
+  let approvalPolls = 0;
+  let confirmedCandidate: Record<string, unknown> | undefined;
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -83,13 +90,32 @@ async function harness(
         { status: 201 },
       );
     }
-    if (url.endsWith("/v1/pay/approvals/approval_test") && init?.method === "GET") {
+    if (
+      (url.endsWith("/v1/pay/approvals/approval_test") ||
+        url.endsWith("/v1/pay/approvals/approval_test?wait_for_submission=1")) &&
+      init?.method === "GET"
+    ) {
+      approvalPolls += 1;
       const approval = approvalBodies[0]!;
       const operatorPublicKey = String(approval.operator_pubkey);
+      if (confirmedCandidate !== undefined) {
+        return Response.json({
+          id: "approval_test",
+          status: "approved",
+          ...CHECKOUT,
+          nonce,
+          card_ref: "card_test",
+          operator_pubkey: operatorPublicKey,
+          jws: confirmedCandidate.jws,
+          sealed_card: confirmedCandidate.sealed_card,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        });
+      }
       const recipientHash = createHash("sha256")
         .update(Buffer.from(operatorPublicKey, "base64url"))
         .digest("base64url");
       const payload = {
+        approval_id: "approval_test",
         merchant: CHECKOUT.merchant,
         checkout_origin:
           mode === "tampered_origin" ? "https://evil.synthetic.test" : CHECKOUT.checkout_origin,
@@ -105,8 +131,17 @@ async function harness(
       };
       const canonical = canonicalize(payload)!;
       const aad = createHash("sha256").update(canonical, "utf8").digest();
+      const reviewCandidate = mode === "review_then_happy" && approvalPolls === 1;
+      const reviewCanonical = canonicalize({
+        approval_id: "approval_test",
+        approval_payload_sha256: aad.toString("base64url"),
+        card_ref: "card_test",
+        recipient_pubkey_hash: recipientHash,
+      })!;
+      const reviewAad = createHash("sha256").update(reviewCanonical, "utf8").digest();
+      const candidateAad = reviewCandidate ? reviewAad : aad;
       const assertion = await new SignJWT({
-        payload_sha256: aad.toString("base64url"),
+        payload_sha256: candidateAad.toString("base64url"),
         context: "purchase",
         confidence: mode === "low_confidence" ? "low" : "high",
         mandate_id: "mandate_test",
@@ -124,19 +159,41 @@ async function harness(
       const sealedCard = await sealToRecipient(
         recipient,
         new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
-        aad,
+        candidateAad,
       );
       return Response.json({
         id: "approval_test",
-        status: "approved",
+        status:
+          mode === "happy" ||
+          mode === "review_then_happy" ||
+          mode === "confirm_response_lost" ||
+          mode === "confirm_response_lost_changed" ||
+          mode === "junk_then_happy"
+            ? "pending"
+            : "approved",
         ...CHECKOUT,
         nonce,
         card_ref: "card_test",
         operator_pubkey: operatorPublicKey,
         jws: assertion,
-        sealed_card: sealedCard,
+        sealed_card: mode === "junk_then_happy" && approvalPolls === 1 ? "junk" : sealedCard,
         expires_at: new Date(Date.now() + 60_000).toISOString(),
       });
+    }
+    if (url.endsWith("/v1/pay/approvals/approval_test/confirm") && init?.method === "POST") {
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      confirmationBodies.push(body);
+      if (mode === "review_then_happy" && confirmationBodies.length === 1) {
+        return Response.json({ status: "verified" });
+      }
+      confirmedCandidate =
+        mode === "confirm_response_lost_changed"
+          ? { ...body, sealed_card: "different-candidate" }
+          : body;
+      if (mode === "confirm_response_lost" || mode === "confirm_response_lost_changed") {
+        throw new TypeError("confirm response lost");
+      }
+      return Response.json({ status: "approved" });
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/notify-3ds") && init?.method === "POST") {
       notifyCalls.push(url);
@@ -207,14 +264,21 @@ async function harness(
     filledCards,
     notifyCalls,
     resolvedCardRefs,
+    confirmationBodies,
     browser,
   };
 }
 
 describe("operate_pay", () => {
   it("verifies the mandate, opens the card, fills the checkout, and audits last4 only", async () => {
-    const { result, approvalBodies, auditBodies, filledCards, resolvedCardRefs } =
-      await harness("happy");
+    const {
+      result,
+      approvalBodies,
+      auditBodies,
+      filledCards,
+      resolvedCardRefs,
+      confirmationBodies,
+    } = await harness("happy");
 
     expect(result).toMatchObject({
       status: "payment_submitted",
@@ -231,6 +295,7 @@ describe("operate_pay", () => {
     expect(approvalBodies[0]).not.toHaveProperty("agent");
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
     expect(resolvedCardRefs).toEqual(["card_test"]);
+    expect(confirmationBodies).toHaveLength(1);
     expect(auditBodies).toEqual([
       {
         merchant: CHECKOUT.merchant,
@@ -244,6 +309,35 @@ describe("operate_pay", () => {
     const auditJson = JSON.stringify(auditBodies);
     expect(auditJson).not.toContain(SYNTHETIC_CARD.pan);
     expect(auditJson).not.toContain(SYNTHETIC_CARD.cvv);
+  });
+
+  it("verifies an opaque review seal before accepting the final approval", async () => {
+    const { result, confirmationBodies, filledCards } = await harness("review_then_happy");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(confirmationBodies).toHaveLength(2);
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+  });
+
+  it("ignores a junk pending seal and confirms a valid replacement", async () => {
+    const { result, filledCards, confirmationBodies } = await harness("junk_then_happy");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(confirmationBodies).toHaveLength(1);
+    expect(confirmationBodies[0]).not.toMatchObject({ sealed_card: "junk" });
+  });
+
+  it("reconciles a lost confirm response before submitting payment", async () => {
+    const { result, filledCards, confirmationBodies } = await harness("confirm_response_lost");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(confirmationBodies).toHaveLength(1);
+  });
+
+  it("does not reconcile a lost response to a different approved candidate", async () => {
+    await expect(harness("confirm_response_lost_changed")).rejects.toThrow("confirm response lost");
   });
 
   it("rejects a validly-signed mandate whose amount differs from the live checkout", async () => {
@@ -442,6 +536,7 @@ async function buildApprovedMandate(params: {
     .update(Buffer.from(params.operatorPubkey, "base64url"))
     .digest("base64url");
   const canonical = canonicalize({
+    approval_id: "appr_jit",
     merchant: JIT_CHECKOUT.merchant,
     checkout_origin: JIT_CHECKOUT.checkout_origin,
     amount_cents: JIT_CHECKOUT.amount_cents,
@@ -516,7 +611,11 @@ async function runJit(cfg: {
         { status: 201 },
       );
     }
-    if (url.endsWith("/v1/pay/approvals/appr_jit") && init?.method === "GET") {
+    if (
+      (url.endsWith("/v1/pay/approvals/appr_jit") ||
+        url.endsWith("/v1/pay/approvals/appr_jit?wait_for_submission=1")) &&
+      init?.method === "GET"
+    ) {
       const state = cfg.poll(clock);
       const operatorPubkey = String(approvalBodies[0]!.operator_pubkey);
       if (state.status === "approved") {

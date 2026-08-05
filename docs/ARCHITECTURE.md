@@ -56,10 +56,10 @@ captcha handling, and extraction.
 **Payment approval**
 
 A short-lived handoff from an active operate session to the user's phone. The
-phone can add and bind a card when needed, reviews the server-bound card and
-exact purchase, and then seals that card to an ephemeral operator key. The
-API enforces the approval state and relays the opaque card release. The security
-contract is owned by
+phone can add and bind a card when needed. It first proves passkey access to the
+waiting operator without receiving purchase details, then reviews and approves
+the released details. The API relays the two opaque seals and mutates approval
+state only after operator verification. The security contract is owned by
 [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Sealed slot**
@@ -169,12 +169,17 @@ agent starts operate_pay in the active checkout
      and attaches the requesting MCP host's initialize clientInfo.name
   -> if the approval has no card, the user adds one and the API binds that saved
      card to the still-pending approval
-  -> user reviews the purchase and server-bound card on a paired phone
-  -> user approves the purchase
-  -> phone decrypts the selected card and seals it to that operator key
-  -> operator verifies the signed mandate using the approval's bound card
-     reference; add-card also re-reads every signed checkout field and refuses
-     if the merchant, origin, amount, or currency changed
+  -> the approval page receives only opaque ceremony inputs; purchase details and
+     card display metadata remain hidden
+  -> a first passkey ceremony unlocks the card and creates an approval-bound review
+     seal for the ephemeral operator
+  -> the operator verifies the review seal and confirms it through its authenticated
+     agent session; the API then releases the exact purchase and card display details
+  -> a second passkey ceremony signs the exact purchase and prepares the final seal
+  -> the user reviews the released details and approves sending that final seal
+  -> the operator verifies and confirms the final candidate; add-card also re-reads
+     every signed checkout field and refuses if the merchant, origin, amount, or
+     currency changed
   -> operator opens the card and fills checkout
   -> when 3-D Secure is required, the API nudges a linked Telegram chat and
      the operator waits for success or failure when waiting is enabled

@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import canonicalize from "canonicalize";
-import { createLocalJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
+import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
 import type { ApiClient } from "../api-client.js";
 import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
@@ -334,30 +334,192 @@ export async function executeOperatePay(
     };
 
     let approved: { jws: string; sealed_card: string; card_ref: string | null } | undefined;
+    let claims: JWTPayload | undefined;
+    const rejectedCandidates = new Set<string>();
     while (deps.now() < deadline) {
-      const approval = await api.getPaymentApproval(created.id);
+      const approval = await api.getPaymentApproval(created.id, true);
       boundCardRef = approval.card_ref;
       if (approval.status === "expired") {
         return timeoutResult();
       }
-      if (
-        approval.status === "approved" &&
-        typeof approval.jws === "string" &&
-        typeof approval.sealed_card === "string"
-      ) {
-        approved = {
-          jws: approval.jws,
-          sealed_card: approval.sealed_card,
-          card_ref: approval.card_ref,
-        };
-        break;
-      }
-      if (approval.status === "approved") {
+      const hasCandidate =
+        typeof approval.jws === "string" && typeof approval.sealed_card === "string";
+      if (approval.status === "approved" && !hasCandidate) {
         return {
           status: "payment_mandate_rejected",
           reason: "invalid_approval_payload",
           approval_url: approvalUrl,
         };
+      }
+      if (typeof approval.jws === "string" && typeof approval.sealed_card === "string") {
+        const candidate = {
+          jws: approval.jws,
+          sealed_card: approval.sealed_card,
+          card_ref: approval.card_ref,
+        };
+        const candidateKey = createHash("sha256")
+          .update(JSON.stringify([candidate.jws, candidate.sealed_card]))
+          .digest("base64url");
+        if (!rejectedCandidates.has(candidateKey)) {
+          rejectedCandidates.add(candidateKey);
+          const cardRef = args.card_ref ?? candidate.card_ref;
+          if (!hasBoundCard(cardRef)) {
+            if (approval.status === "approved") {
+              return {
+                status: "payment_mandate_rejected",
+                reason: "card_ref_unbound",
+                approval_url: approvalUrl,
+              };
+            }
+          } else {
+            const publicKeyBytes = fromBase64Url(keypair.publicKey);
+            const recipientHash = createHash("sha256").update(publicKeyBytes).digest();
+            const canonical = canonicalize({
+              approval_id: created.id,
+              merchant: checkout.merchant,
+              checkout_origin: checkout.checkout_origin,
+              amount_cents: checkout.amount_cents,
+              currency: checkout.currency,
+              nonce: created.nonce,
+              card_ref: cardRef,
+              recipient_pubkey_hash: toBase64Url(recipientHash),
+              item,
+              reason,
+              agent: created.agent,
+            });
+            if (canonical === undefined) {
+              if (approval.status === "approved") {
+                return {
+                  status: "payment_mandate_rejected",
+                  reason: "canonicalization_failed",
+                  approval_url: approvalUrl,
+                };
+              }
+            } else {
+              const approvalAad = new Uint8Array(
+                createHash("sha256").update(canonical, "utf8").digest(),
+              );
+              const reviewCanonical = canonicalize({
+                approval_id: created.id,
+                approval_payload_sha256: toBase64Url(approvalAad),
+                card_ref: cardRef,
+                recipient_pubkey_hash: toBase64Url(recipientHash),
+              });
+              if (reviewCanonical === undefined) {
+                return {
+                  status: "payment_mandate_rejected",
+                  reason: "canonicalization_failed",
+                  approval_url: approvalUrl,
+                };
+              }
+              const reviewAad = new Uint8Array(
+                createHash("sha256").update(reviewCanonical, "utf8").digest(),
+              );
+              let verifiedClaims: JWTPayload | undefined;
+              let reviewCandidate = false;
+              let candidateAad: Uint8Array | undefined;
+              try {
+                const claimedHash = decodePayloadHash(decodeJwt(candidate.jws).payload_sha256);
+                if (timingSafeEqual(Buffer.from(claimedHash), Buffer.from(approvalAad))) {
+                  candidateAad = approvalAad;
+                } else if (timingSafeEqual(Buffer.from(claimedHash), Buffer.from(reviewAad))) {
+                  candidateAad = reviewAad;
+                  reviewCandidate = true;
+                } else {
+                  throw new Error("payload_hash_mismatch");
+                }
+                verifiedClaims = await verifyMandate(
+                  candidate.jws,
+                  candidateAad,
+                  deps.vouchflowApiBase,
+                  expectedAudience,
+                  deps.fetch,
+                );
+              } catch (error) {
+                const failureReason = safeFailureReason(error);
+                if (approval.status === "approved") {
+                  return {
+                    status: "payment_mandate_rejected",
+                    reason: failureReason,
+                    approval_url: approvalUrl,
+                  };
+                }
+                if (
+                  failureReason === "jwks_fetch_failed" ||
+                  failureReason === "jwks_fetch_timeout"
+                ) {
+                  rejectedCandidates.delete(candidateKey);
+                }
+              }
+              if (verifiedClaims !== undefined) {
+                let candidateCardBytes: Uint8Array | undefined;
+                let candidateCard: CheckoutCard | undefined;
+                try {
+                  candidateCardBytes = await openSealed(
+                    keypair.privateKey,
+                    candidate.sealed_card,
+                    candidateAad!,
+                  );
+                  candidateCard = normalizeCard(
+                    JSON.parse(new TextDecoder().decode(candidateCardBytes)) as unknown,
+                  );
+                } catch {
+                  candidateCardBytes?.fill(0);
+                  if (approval.status === "approved") {
+                    return { status: "payment_card_open_failed", approval_url: approvalUrl };
+                  }
+                }
+                if (candidateCardBytes !== undefined && candidateCard !== undefined) {
+                  if (reviewCandidate) {
+                    try {
+                      const confirmation = await api.confirmPaymentApproval(created.id, candidate);
+                      if (confirmation.status !== "verified") {
+                        throw new Error("review_confirmation_failed");
+                      }
+                    } catch {
+                      candidateCardBytes.fill(0);
+                      await deps.sleep(deps.pollIntervalMs);
+                      continue;
+                    }
+                    candidateCardBytes.fill(0);
+                    await deps.sleep(deps.pollIntervalMs);
+                    continue;
+                  }
+                  if (approval.status === "pending") {
+                    try {
+                      await api.confirmPaymentApproval(created.id, candidate);
+                    } catch (error) {
+                      let current: Awaited<ReturnType<ApiClient["getPaymentApproval"]>>;
+                      try {
+                        current = await api.getPaymentApproval(created.id);
+                      } catch {
+                        candidateCardBytes.fill(0);
+                        throw error;
+                      }
+                      const exactCandidateApproved =
+                        current.status === "approved" &&
+                        current.jws === candidate.jws &&
+                        current.sealed_card === candidate.sealed_card &&
+                        current.card_ref === candidate.card_ref;
+                      if (!exactCandidateApproved) {
+                        candidateCardBytes.fill(0);
+                        if (current.status !== "pending") throw error;
+                        rejectedCandidates.delete(candidateKey);
+                        await deps.sleep(deps.pollIntervalMs);
+                        continue;
+                      }
+                    }
+                  }
+                  cardBytes = candidateCardBytes;
+                  card = candidateCard;
+                  claims = verifiedClaims;
+                  approved = candidate;
+                  break;
+                }
+              }
+            }
+          }
+        }
       }
       await deps.sleep(deps.pollIntervalMs);
     }
@@ -371,17 +533,10 @@ export async function executeOperatePay(
       return timeoutResult();
     }
 
-    // [P1] Canonicalize with the SERVER-BOUND card_ref. In the has-card path
-    // args.card_ref is present and identical to the echoed binding, so the
-    // canonical bytes are byte-for-byte what they were before this branch
-    // existed. In the JIT path args.card_ref is absent, so the operator MUST
-    // use the card_ref the ceremony bound — anything else hash-mismatches
-    // verifyMandate and silently rejects every JIT payment.
+    if (claims === undefined || card === undefined) return timeoutResult();
+
     const cardRef = args.card_ref ?? approved.card_ref;
     if (!hasBoundCard(cardRef)) {
-      // The server 409s an approve on a null card_ref, so a JIT approval can
-      // only reach "approved" with a bound card. Fail closed if that invariant
-      // is ever violated rather than canonicalize with an empty ref.
       return {
         status: "payment_mandate_rejected",
         reason: "card_ref_unbound",
@@ -389,56 +544,6 @@ export async function executeOperatePay(
       };
     }
     deps.onCardResolved(cardRef);
-
-    const publicKeyBytes = fromBase64Url(keypair.publicKey);
-    const recipientHash = createHash("sha256").update(publicKeyBytes).digest();
-    const canonical = canonicalize({
-      merchant: checkout.merchant,
-      checkout_origin: checkout.checkout_origin,
-      amount_cents: checkout.amount_cents,
-      currency: checkout.currency,
-      nonce: created.nonce,
-      card_ref: cardRef,
-      recipient_pubkey_hash: toBase64Url(recipientHash),
-      item,
-      reason,
-      agent: created.agent,
-    });
-    if (canonical === undefined) {
-      return {
-        status: "payment_mandate_rejected",
-        reason: "canonicalization_failed",
-        approval_url: approvalUrl,
-      };
-    }
-    const aad = new Uint8Array(createHash("sha256").update(canonical, "utf8").digest());
-
-    let claims: JWTPayload;
-    try {
-      claims = await verifyMandate(
-        approved.jws,
-        aad,
-        deps.vouchflowApiBase,
-        expectedAudience,
-        deps.fetch,
-      );
-    } catch (error) {
-      return {
-        status: "payment_mandate_rejected",
-        reason: safeFailureReason(error),
-        approval_url: approvalUrl,
-      };
-    }
-
-    try {
-      cardBytes = await openSealed(keypair.privateKey, approved.sealed_card, aad);
-      card = normalizeCard(JSON.parse(new TextDecoder().decode(cardBytes)) as unknown);
-    } catch {
-      return {
-        status: "payment_card_open_failed",
-        approval_url: approvalUrl,
-      };
-    }
 
     const last4 = card.pan.slice(-4);
     const mandateId =
