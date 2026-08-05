@@ -282,6 +282,8 @@ const actSchema = z
     // type_secret: the sealed slot whose value to type into `target`.
     slot: z.string().min(1).max(60).optional(),
     provenance: RecipeHoleSchema.shape.hole.optional(),
+    replay_step_index: z.number().int().min(0).optional(),
+    replay_hole: RecipeHoleSchema.shape.hole.optional(),
     // scroll: which way to move the viewport (default "down").
     direction: z.enum(["down", "up", "bottom", "top"]).optional(),
     // How much perception to return AFTER the action (the same ladder as
@@ -291,6 +293,23 @@ const actSchema = z
     detail: z.enum(["none", "compact", "full"]).optional(),
   })
   .superRefine((value, ctx) => {
+    if ((value.replay_step_index === undefined) !== (value.replay_hole === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "replay_step_index and replay_hole must be provided together",
+      });
+    }
+    if (
+      value.replay_step_index !== undefined &&
+      value.kind !== "type" &&
+      value.kind !== "select" &&
+      value.kind !== "set_phone_country"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "replay repair binding requires a value action",
+      });
+    }
     if (value.provenance === undefined) return;
     if (
       value.kind !== "type" &&
@@ -322,6 +341,10 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     }
     return v;
   };
+  const replayRepair =
+    args.replay_step_index !== undefined && args.replay_hole !== undefined
+      ? { replayRepair: { stepIndex: args.replay_step_index, hole: args.replay_hole } }
+      : {};
   switch (args.kind) {
     case "click":
       return { kind: "click", target: need(args.target, "target") };
@@ -335,6 +358,7 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
         target: need(args.target, "target"),
         text: args.text ?? "",
         ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
+        ...replayRepair,
       };
     case "select":
       return {
@@ -342,12 +366,14 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
         target: need(args.target, "target"),
         text: need(args.text, "text"),
         ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
+        ...replayRepair,
       };
     case "set_phone_country":
       return {
         kind: "set_phone_country",
         country: need(args.country, "country"),
         ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
+        ...replayRepair,
       };
     case "goto":
       return { kind: "goto", url: need(args.url, "url") };
@@ -414,7 +440,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "is driven and no API credential is needed — it uses the session you're " +
     "already signed into). " +
     "For type/select/set_phone_country, pass provenance when the value came from a " +
-    "Squire-known address, contact, product_query, credential, card, or quantity input. " +
+    "Squire-known address, contact, product_query, or quantity input; type_secret and " +
+    "operate_pay record credential and card provenance from their sealed sources. " +
+    "When repairing a replay fallback field, pass its replay_step_index and replay_hole. " +
     "Stable target refs remain reusable while their element exists; if a ref appears in " +
     "removed or no longer resolves, re-observe before retrying. " +
     'detail (default "compact") controls the returned payload: "none" skips it ' +
@@ -454,6 +482,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       host: { type: "string" },
       slot: { type: "string" },
       provenance: {
+        type: "string",
+        pattern:
+          "^(?:address|contact|credential|card)(?:\\.[a-zA-Z0-9_-]+)?$|^(?:product_query|quantity)$",
+      },
+      replay_step_index: { type: "integer", minimum: 0 },
+      replay_hole: {
         type: "string",
         pattern:
           "^(?:address|contact|credential|card)(?:\\.[a-zA-Z0-9_-]+)?$|^(?:product_query|quantity)$",

@@ -182,11 +182,24 @@ vi.mock("../browser.js", () => ({
         if (element.selector === selector) element.value = text;
       }
     }
-    async selectOption(selector: string, matcher?: string): Promise<void> {
+    async selectOption(selector: string, matcher?: string): Promise<string> {
       h.selected.push({ selector, matcher });
       for (const element of h.elements as Array<Record<string, unknown>>) {
-        if (element.selector === selector) element.value = matcher ?? "";
+        if (element.selector !== selector) continue;
+        const options = element.selectOptions as Array<{ value: string; text: string }> | undefined;
+        const selected = options?.find((option) =>
+          option.text.toLowerCase().includes((matcher ?? "").toLowerCase()),
+        );
+        element.value = selected?.value ?? matcher ?? "";
+        element.selectedOptionText = selected?.text ?? matcher ?? "";
       }
+      return (
+        ((h.elements as Array<Record<string, unknown>>).find(
+          (element) => element.selector === selector,
+        )?.selectedOptionText as string | undefined) ??
+        matcher ??
+        ""
+      );
     }
     async setPhoneCountry(country: string): Promise<void> {
       h.phoneCountries.push(country);
@@ -289,6 +302,7 @@ import {
   parseElementsTable,
   replayOperatorRecipe,
   activeProvisionBrowser,
+  activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
 } from "../provision-session.js";
 import type { OperatorRecipe } from "../operator-recipe.js";
@@ -551,13 +565,18 @@ describe("prepared-statement replay", () => {
 
     h.elements = [
       elem({
-        testId: "live-city",
+        testId: "shipping-city",
         labelText: "Shipping city",
         selector: "#live-city",
         value: "",
       }),
     ];
-    await act(started.session_id, { kind: "type", target: "Shipping city", text: "Queens" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "shipping-city",
+      text: "Queens",
+      replayRepair: { stepIndex: 0, hole: "address.city" },
+    });
     const complete = await replayOperatorRecipe(
       started.session_id,
       recipe,
@@ -585,10 +604,116 @@ describe("prepared-statement replay", () => {
       serviceUrl: "https://shop.example.com/checkout",
     });
     await replayOperatorRecipe(started.session_id, recipe, { "address.city": "Queens" });
-    h.elements = [elem({ labelText: "Shipping city", selector: "#live-city", value: "" })];
+    h.elements = [
+      elem({
+        testId: "shipping-city",
+        labelText: "Shipping city",
+        selector: "#live-city",
+        value: "",
+      }),
+    ];
     await expect(
-      act(started.session_id, { kind: "type", target: "Shipping city", text: "Brooklyn" }),
+      act(started.session_id, {
+        kind: "type",
+        target: "shipping-city",
+        text: "Brooklyn",
+        replayRepair: { stepIndex: 0, hole: "address.city" },
+      }),
     ).rejects.toThrow(/replay repair value mismatch/i);
+    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
+  });
+
+  it("rejects a repair that fills a different field with the expected value", async () => {
+    h.elements = [];
+    const recipe = replayRecipe({
+      trace: [
+        {
+          action: {
+            kind: "type",
+            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+            value: { hole: "address.city" },
+          },
+        },
+      ],
+    });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await replayOperatorRecipe(started.session_id, recipe, { "address.city": "Queens" });
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#shipping", value: "" }),
+      elem({ testId: "billing-city", labelText: "Billing city", selector: "#billing", value: "" }),
+    ];
+    await expect(
+      act(started.session_id, {
+        kind: "type",
+        target: "billing-city",
+        text: "Queens",
+        replayRepair: { stepIndex: 0, hole: "address.city" },
+      }),
+    ).rejects.toThrow(/repair target mismatch/i);
+    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
+  });
+
+  it("rechecks mounted verified fields at the payment boundary", async () => {
+    h.elements = [
+      elem({
+        testId: "shipping-city",
+        labelText: "City",
+        selector: "#city",
+        value: "",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "type",
+              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+              value: { hole: "address.city" },
+            },
+          },
+        ],
+      }),
+      { "address.city": "Queens" },
+    );
+    expect(result.status).toBe("complete");
+    (h.elements[0] as Record<string, unknown>).value = "Brooklyn";
+    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
+      /verification is not satisfied/i,
+    );
+  });
+
+  it("invalidates a verified field when a later value action changes it", async () => {
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "type",
+              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+              value: { hole: "address.city" },
+            },
+          },
+        ],
+      }),
+      { "address.city": "Queens" },
+    );
+    await expect(
+      act(started.session_id, { kind: "type", target: "shipping-city", text: "Brooklyn" }),
+    ).rejects.toThrow(/field value mismatch/i);
     expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
   });
 
@@ -702,7 +827,12 @@ describe("verified recipe recording", () => {
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, { kind: "type", target: "Search", text: "dark roast" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "Search",
+      text: "dark roast",
+      provenance: { hole: "product_query" },
+    });
     h.visibleText = "Review order";
     const saved = await provisionRememberTool.handler(
       {
@@ -744,6 +874,40 @@ describe("verified recipe recording", () => {
         },
       ],
     });
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("rejects a provenance label that disagrees with the injected source", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-wrong-source-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [elem({ testId: "shipping-city", labelText: "City", selector: "#city" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "City",
+      text: "Queens",
+      provenance: { hole: "contact.email" },
+    });
+    h.visibleText = "Review order";
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "wrong-source",
+          goal: "Buy coffee",
+          verb: "purchase",
+          inputs: { address: { city: "Queens" }, contact: { email: "buyer@example.com" } },
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Ready to approve",
+            success_signal: { text_present: "Review order" },
+          },
+        },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/provenance contact\.email does not match/i);
+    expect(readdirSync(dir)).toEqual([]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
   });

@@ -294,6 +294,21 @@ describe("money-path field-value guard", () => {
     ).toEqual({ ok: true });
   });
 
+  it("verifies selects by their committed option label", () => {
+    expect(
+      verifyFilledFieldValues(
+        [{ ...element, value: "US", selectedOptionText: "United States" }],
+        [{ target, expected: "United States", hole: "address.country", kind: "select" }],
+      ),
+    ).toEqual({ ok: true });
+    expect(
+      verifyFilledFieldValues(
+        [{ ...element, value: null, visibleText: "United States" }],
+        [{ target, expected: "United States", hole: "address.country", kind: "select" }],
+      ),
+    ).toEqual({ ok: true });
+  });
+
   it("aborts on mismatch or a missing field", () => {
     expect(
       verifyFilledFieldValues([element], [{ target, expected: "Brooklyn", hole: "address.city" }]),

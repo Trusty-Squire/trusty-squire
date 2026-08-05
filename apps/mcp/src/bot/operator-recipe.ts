@@ -479,6 +479,10 @@ function flattenKnownInputs(inputs: KnownRecipeInputs): Array<[string, string]> 
   return out;
 }
 
+export function knownRecipeInputValue(inputs: KnownRecipeInputs, hole: string): string | undefined {
+  return flattenKnownInputs(inputs).find(([candidate]) => candidate === hole)?.[1];
+}
+
 /** Tag only exact, caller-proven values. Unknown literals deliberately remain literals. */
 export function tagProvenanceValue(value: string, inputs: KnownRecipeInputs): RecipeValue {
   const knownInputs = flattenKnownInputs(inputs);
@@ -544,6 +548,7 @@ export interface RecipeTargetElement {
   href?: string | null;
   selector: string;
   value?: string | null;
+  selectedOptionText?: string | null;
 }
 
 export type RecipeTargetResolution<T extends RecipeTargetElement> = {
@@ -644,6 +649,7 @@ export interface FilledFieldExpectation {
   target: RecipeTarget;
   expected: string;
   hole?: string;
+  kind?: "type" | "select";
 }
 
 export type FieldValueVerification =
@@ -660,7 +666,14 @@ export function verifyFilledFieldValues(
     const field =
       expected.hole ?? expected.target.accessible_name ?? expected.target.dom_hint?.name ?? "field";
     if (resolved === null) return { ok: false, reason: "field_missing", field };
-    if ((resolved.element.value ?? "") !== expected.expected) {
+    const actual =
+      expected.kind === "select"
+        ? (resolved.element.selectedOptionText ??
+          resolved.element.value ??
+          resolved.element.visibleText ??
+          "")
+        : (resolved.element.value ?? "");
+    if (actual !== expected.expected) {
       return { ok: false, reason: "field_value_mismatch", field };
     }
   }

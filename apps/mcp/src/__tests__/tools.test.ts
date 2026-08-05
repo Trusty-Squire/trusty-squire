@@ -12,13 +12,13 @@ import type { PaymentBrowser } from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
 // operate_pay's handler reaches into the single active browser session via
-// activeProvisionBrowser(). There is no real session in a unit test, so mock
+// activeProvisionBrowserForPayment(). There is no real session in a unit test, so mock
 // just that getter (everything else in the module is preserved) and hand back
 // a stub whose checkout summary the resolution tests can control.
 let mockBrowser: PaymentBrowser;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
-  return { ...actual, activeProvisionBrowser: () => mockBrowser };
+  return { ...actual, activeProvisionBrowserForPayment: async () => mockBrowser };
 });
 
 import {

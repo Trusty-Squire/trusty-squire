@@ -3580,7 +3580,7 @@ export class BrowserController {
   // against the option's visible text. When undefined, picks the
   // first option — preserves the existing behavior for native
   // selects whose contents are interchangeable (country pickers).
-  async selectOption(selector: string, optionMatcher?: string): Promise<void> {
+  async selectOption(selector: string, optionMatcher?: string): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
     await this.page.waitForSelector(selector, { state: "attached", timeout: 10000 });
     let activeSelector = selector;
@@ -3713,12 +3713,16 @@ export class BrowserController {
           if (el instanceof HTMLElement) el.setAttribute("data-ts-touched", "1");
         })
         .catch(() => {});
-      return;
+      return await selectLocator.evaluate((select) =>
+        select instanceof HTMLSelectElement
+          ? (select.selectedOptions[0]?.textContent ?? "").replace(/\s+/g, " ").trim()
+          : "",
+      );
     }
 
     // Custom combobox path. Sentry, Radix, Headless UI, React Aria
     // — every modern React picker emits role=option on its items.
-    await this.selectFromCombobox(activeSelector, optionMatcher);
+    return await this.selectFromCombobox(activeSelector, optionMatcher);
   }
 
   // Set the country on a phone-number field backed by a phone-local native
@@ -3997,7 +4001,10 @@ export class BrowserController {
       .catch(() => {});
   }
 
-  private async selectFromCombobox(triggerSelector: string, optionMatcher?: string): Promise<void> {
+  private async selectFromCombobox(
+    triggerSelector: string,
+    optionMatcher?: string,
+  ): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
     // 0.8.2-rc.11 — selector normalization. The planner sometimes
     // emits a selector pointing at a `<label for="X">` instead of the
@@ -4036,7 +4043,9 @@ export class BrowserController {
       } else if ((await options.count()) === 0) {
         throw new Error(`combobox ${triggerSelector}: opened popup has no actionable options`);
       }
+      const committedText = (await target.innerText()).replace(/\s+/g, " ").trim();
       await this.clickComboboxOption(target);
+      return committedText;
     } finally {
       await this.clearComboboxMarkers();
     }

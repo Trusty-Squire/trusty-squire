@@ -47,9 +47,9 @@ import {
   bindRecipeValue,
   fillTemplate,
   isSingleUseUrl,
+  knownRecipeInputValue,
   operatorRecipeDomain,
   resolveRecipeTarget,
-  tagTraceProvenance,
   verifyFilledFieldValues,
   writeRecipe,
 } from "./operator-recipe.js";
@@ -252,7 +252,13 @@ export type ProvisionAction =
   // React card/widget didn't register its onClick (the stochastic radio-card
   // stall). Same target resolution; different dispatch.
   | { kind: "js_click"; target: string }
-  | { kind: "type"; target: string; text: string; provenance?: RecipeHole }
+  | {
+      kind: "type";
+      target: string;
+      text: string;
+      provenance?: RecipeHole;
+      replayRepair?: ReplayRepairBinding;
+    }
   // Choose an option in a native <select> OR a custom listbox/combobox by its
   // visible text (fuzzy, case-insensitive substring). `type` cannot drive these
   // — page.fill throws on a <select> and humanized keystrokes break native
@@ -260,12 +266,23 @@ export type ProvisionAction =
   // browser.selectOption, which already handles both the native and the
   // <li role=option> custom shapes. target = the select/combobox (or its label);
   // text = the option to match (e.g. "South Korea").
-  | { kind: "select"; target: string; text: string; provenance?: RecipeHole }
+  | {
+      kind: "select";
+      target: string;
+      text: string;
+      provenance?: RecipeHole;
+      replayRepair?: ReplayRepairBinding;
+    }
   // Set the country on a phone-number field's dial-code picker. No ref/target
   // — the bot locates a phone-local native <select>, including
   // react-phone-number-input's opacity:0 select that inventory drops. Other
   // widget families are unsupported and throw.
-  | { kind: "set_phone_country"; country: string; provenance?: RecipeHole }
+  | {
+      kind: "set_phone_country";
+      country: string;
+      provenance?: RecipeHole;
+      replayRepair?: ReplayRepairBinding;
+    }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }
   // Route an OAuth-provider button through startOAuth so the popup is adopted
@@ -289,6 +306,11 @@ export type ProvisionAction =
   // Playwright (filechooser/setInputFiles), so the OS dialog is never driven.
   // Not recorded in skill recipes — a machine-local path isn't portable.
   | { kind: "upload"; target: string; path: string };
+
+export interface ReplayRepairBinding {
+  stepIndex: number;
+  hole: string;
+}
 
 // Where a host on the allow-set came from. start = declared at operate_start;
 // mid_session = added via an allow_host action; auto_widen = an organic
@@ -322,6 +344,12 @@ interface ReplayState {
   failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
 }
 
+interface RecordedProvenanceClaim {
+  traceIndex: number;
+  hole: string;
+  literal: string;
+}
+
 interface Session {
   id: string;
   browser: BrowserController;
@@ -352,6 +380,7 @@ interface Session {
   // be `remember`ed as a replayable rail. Records visible text + non-secret
   // params only — sealed secret values stay in secretSlots, never the trace.
   actionTrace: TraceEntry[];
+  provenanceClaims: RecordedProvenanceClaim[];
   // MEDIUM capture rounds for skill synthesis at verified success (docs/DESIGN-
   // operator-hints.md): inventory + action + url per step, no screenshots, raw
   // html only on the extract round. Accumulated live; written + promoted at
@@ -1713,6 +1742,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     prevObserve: null,
     observeSnapshotFile: null,
     actionTrace: [],
+    provenanceClaims: [],
     captureRounds: [],
     usedLocatorFallback: false,
     replayState: null,
@@ -1840,7 +1870,7 @@ export function currentProvisionUrl(sessionId: string): string {
 // operate_pay has a deliberately small input contract with no session id: it
 // acts on the one live operator checkout. Fail closed rather than guessing if
 // zero or multiple browser sessions exist.
-export function activeProvisionBrowser(): BrowserController {
+function activeProvisionSession(): Session {
   touchWarmBrowser();
   if (sessions.size !== 1) {
     throw new Error(
@@ -1854,6 +1884,37 @@ export function activeProvisionBrowser(): BrowserController {
     throw new Error(
       "operate_pay refused: replay address/contact/quantity verification is not satisfied",
     );
+  }
+  return session;
+}
+
+export function activeProvisionBrowser(): BrowserController {
+  return activeProvisionSession().browser;
+}
+
+export async function activeProvisionBrowserForPayment(): Promise<BrowserController> {
+  const session = activeProvisionSession();
+  const state = session.replayState;
+  if (state?.moneyPath !== true) return session.browser;
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  for (const expected of state.expectedFields.values()) {
+    if (!state.verifiedFields.has(expected.stepIndex) || expected.target === null) continue;
+    if (resolveRecipeTarget(fresh, expected.target) === null) continue;
+    const guard = verifyFilledFieldValues(fresh, [
+      {
+        target: expected.target,
+        expected: expected.expected,
+        hole: expected.hole,
+        kind: expected.kind === "select" ? "select" : "type",
+      },
+    ]);
+    if (!guard.ok) {
+      markReplayFailure(session, guard.reason, expected.hole);
+      throw new Error(
+        "operate_pay refused: replay address/contact/quantity verification is not satisfied",
+      );
+    }
   }
   return session.browser;
 }
@@ -2490,7 +2551,17 @@ export async function act(
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (
+    action.kind === "type_secret" &&
+    action.provenance !== undefined &&
+    action.provenance.hole !== `credential.${action.slot}`
+  ) {
+    throw new Error(
+      `type_secret provenance must match the authoritative slot credential.${action.slot}`,
+    );
+  }
   const { browser } = session;
+  let completedAction: ProvisionAction = action;
   const auditTarget =
     "target" in action && parseLocatorTarget(action.target) !== null
       ? "<mode>=<redacted>"
@@ -2617,7 +2688,8 @@ export async function act(
         );
       }
       resolvedEl = el;
-      await browser.selectOption(el.selector, action.text);
+      const committedText = await browser.selectOption(el.selector, action.text);
+      completedAction = { ...action, text: committedText };
       await settleAfterStateChange(browser);
       break;
     }
@@ -2722,13 +2794,14 @@ export async function act(
       break;
     }
   }
-  await captureReplayRepairVerification(session, action, resolvedEl);
+  await captureReplayRepairVerification(session, completedAction, resolvedEl);
+  await refreshReplayVerificationAfterAction(session, completedAction, resolvedEl);
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
   if (!isInboxReadHost(browser.currentUrl())) {
-    recordTrace(session, action, resolvedEl);
-    recordCaptureRound(session, action, resolvedEl, urlBeforeAction);
+    recordTrace(session, completedAction, resolvedEl);
+    recordCaptureRound(session, completedAction, resolvedEl, urlBeforeAction);
   }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
@@ -2900,15 +2973,14 @@ function recordTrace(
         kind: "type",
         ...withText,
         ...withTarget,
-        value:
-          action.provenance ?? scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail),
+        value: scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail),
       };
       break;
     case "type_secret":
       a = {
         kind: "type_secret",
         slot: action.slot,
-        value: action.provenance ?? { hole: `credential.${action.slot}` },
+        value: { hole: `credential.${action.slot}` },
         ...withText,
         ...withTarget,
       };
@@ -2916,7 +2988,7 @@ function recordTrace(
     case "select":
       a = {
         kind: "select",
-        value: action.provenance ?? action.text,
+        value: action.text,
         ...withText,
         ...withTarget,
       };
@@ -2924,7 +2996,7 @@ function recordTrace(
     case "set_phone_country":
       a = {
         kind: "set_phone_country",
-        value: action.provenance ?? action.country,
+        value: action.country,
       };
       break;
     case "click":
@@ -2937,7 +3009,18 @@ function recordTrace(
       a = { kind: "oauth_click", ...withText, ...withTarget };
       break;
   }
+  const traceIndex = session.actionTrace.length;
   session.actionTrace.push({ action: a });
+  if (
+    (action.kind === "type" || action.kind === "select" || action.kind === "set_phone_country") &&
+    action.provenance !== undefined
+  ) {
+    session.provenanceClaims.push({
+      traceIndex,
+      hole: action.provenance.hole,
+      literal: action.kind === "set_phone_country" ? action.country : action.text,
+    });
+  }
 }
 
 // ── Medium capture → skill (docs/DESIGN-operator-hints.md) ──────────────────
@@ -3138,6 +3221,39 @@ async function settleAfterStateChange(browser: BrowserController): Promise<void>
 // Sealed secrets become SLOT references (stored:false) — never values. The
 // recipe's scope = start + auto_widen hosts (mid_session crossings replay via
 // the trace's own allow_host steps).
+function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs): TraceEntry[] {
+  const trace = session.actionTrace.map((entry) => ({
+    ...entry,
+    action: { ...entry.action },
+  }));
+  const claimedIndexes = new Set<number>();
+  for (const claim of session.provenanceClaims) {
+    if (claimedIndexes.has(claim.traceIndex)) {
+      throw new Error(`duplicate provenance claim for trace step ${claim.traceIndex}`);
+    }
+    claimedIndexes.add(claim.traceIndex);
+    const authoritative = knownRecipeInputValue(inputs, claim.hole);
+    if (authoritative === undefined) {
+      throw new Error(`provenance ${claim.hole} has no authoritative operate_remember input`);
+    }
+    if (authoritative !== claim.literal) {
+      throw new Error(`provenance ${claim.hole} does not match the injected value`);
+    }
+    const entry = trace[claim.traceIndex];
+    if (
+      entry === undefined ||
+      (entry.action.kind !== "type" &&
+        entry.action.kind !== "select" &&
+        entry.action.kind !== "set_phone_country") ||
+      typeof entry.action.value !== "string"
+    ) {
+      throw new Error(`provenance ${claim.hole} is not bound to a recorded value action`);
+    }
+    entry.action.value = { hole: claim.hole };
+  }
+  return trace;
+}
+
 export async function rememberRecipe(
   sessionId: string,
   opts: {
@@ -3180,7 +3296,7 @@ export async function rememberRecipe(
     // mid-flow single-use link inferred from the trace.
     entry_url: session.startUrl,
     allowed_hosts: [...new Set(egressSeedHosts(session))],
-    trace: tagTraceProvenance(session.actionTrace, opts.inputs ?? {}),
+    trace: traceWithVerifiedProvenance(session, opts.inputs ?? {}),
     secrets,
     postcondition: opts.postcondition,
   };
@@ -3374,15 +3490,19 @@ function markReplayFailure(
 async function verifyReplayField(
   session: Session,
   expected: ReplayExpectedField,
-  targetOverride?: RecipeTarget,
 ): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
   if (expected.kind === "set_phone_country") return { ok: false, reason: "field_missing" };
-  const target = targetOverride ?? expected.target;
+  const target = expected.target;
   if (target === null) return { ok: false, reason: "field_missing" };
   const fresh = await session.browser.extractInteractiveElements();
   session.lastElements = fresh;
   const guard = verifyFilledFieldValues(fresh, [
-    { target, expected: expected.expected, hole: expected.hole },
+    {
+      target,
+      expected: expected.expected,
+      hole: expected.hole,
+      kind: expected.kind === "select" ? "select" : "type",
+    },
   ]);
   return guard.ok ? { ok: true } : { ok: false, reason: guard.reason };
 }
@@ -3397,6 +3517,17 @@ async function captureReplayRepairVerification(
   const stepIndex = state.nextIndex - 1;
   const expected = state.expectedFields.get(stepIndex);
   if (expected === undefined) return;
+  if (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country") {
+    return;
+  }
+  if (
+    action.replayRepair === undefined ||
+    action.replayRepair.stepIndex !== stepIndex ||
+    action.replayRepair.hole !== expected.hole
+  ) {
+    markReplayFailure(session, "field_value_mismatch", expected.hole);
+    throw new Error(`replay repair must bind to step ${stepIndex} and ${expected.hole}`);
+  }
   const supplied =
     action.kind === "type" || action.kind === "select"
       ? action.text
@@ -3412,14 +3543,65 @@ async function captureReplayRepairVerification(
     state.verifiedFields.add(stepIndex);
     return;
   }
-  const target =
-    resolvedEl === null ? undefined : recipeTargetFor(resolvedEl, session.lastElements);
-  const guard = await verifyReplayField(session, expected, target);
+  const recordedResolution =
+    expected.target === null ? null : resolveRecipeTarget(session.lastElements, expected.target);
+  if (
+    resolvedEl === null ||
+    recordedResolution === null ||
+    recordedResolution.element.selector !== resolvedEl.selector
+  ) {
+    markReplayFailure(session, "field_missing", expected.hole);
+    throw new Error(`replay repair target mismatch for ${expected.hole}`);
+  }
+  const guard = await verifyReplayField(session, expected);
   if (!guard.ok) {
     markReplayFailure(session, guard.reason, expected.hole);
     throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
   }
   state.verifiedFields.add(stepIndex);
+}
+
+async function refreshReplayVerificationAfterAction(
+  session: Session,
+  action: ProvisionAction,
+  resolvedEl: InteractiveElement | null,
+): Promise<void> {
+  const state = session.replayState;
+  if (
+    state === null ||
+    !state.moneyPath ||
+    state.nextIndex !== null ||
+    state.paymentGuard !== "verified" ||
+    (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country")
+  ) {
+    return;
+  }
+  const affected = [...state.expectedFields.values()].filter((expected) => {
+    if (action.kind === "set_phone_country") return expected.kind === "set_phone_country";
+    if (expected.target === null || resolvedEl === null) return false;
+    return (
+      resolveRecipeTarget(session.lastElements, expected.target)?.element.selector ===
+      resolvedEl.selector
+    );
+  });
+  for (const expected of affected) {
+    state.verifiedFields.delete(expected.stepIndex);
+    state.paymentGuard = "pending";
+    const supplied = action.kind === "set_phone_country" ? action.country : action.text;
+    if (supplied !== expected.expected) {
+      markReplayFailure(session, "field_value_mismatch", expected.hole);
+      throw new Error(`replay field value mismatch for ${expected.hole}`);
+    }
+    if (expected.kind !== "set_phone_country") {
+      const guard = await verifyReplayField(session, expected);
+      if (!guard.ok) {
+        markReplayFailure(session, guard.reason, expected.hole);
+        throw new Error(`replay field verification failed for ${expected.hole}: ${guard.reason}`);
+      }
+    }
+    state.verifiedFields.add(expected.stepIndex);
+  }
+  if (state.verifiedFields.size === state.expectedFields.size) state.paymentGuard = "verified";
 }
 
 /**
@@ -3558,7 +3740,11 @@ export async function replayOperatorRecipe(
         return await fallback(step, i, "set_phone_country step has no value");
       }
       try {
-        action = { kind: "set_phone_country", country: bindRecipeValue(recorded.value, bindings) };
+        action = {
+          kind: "set_phone_country",
+          country: bindRecipeValue(recorded.value, bindings),
+          ...(typeof recorded.value === "string" ? {} : { provenance: recorded.value }),
+        };
       } catch (error) {
         return await fallback(step, i, error instanceof Error ? error.message : String(error));
       }
@@ -3591,8 +3777,18 @@ export async function replayOperatorRecipe(
         }
         action =
           recorded.kind === "type"
-            ? { kind: "type", target: ref, text }
-            : { kind: "select", target: ref, text };
+            ? {
+                kind: "type",
+                target: ref,
+                text,
+                ...(typeof recorded.value === "string" ? {} : { provenance: recorded.value }),
+              }
+            : {
+                kind: "select",
+                target: ref,
+                text,
+                ...(typeof recorded.value === "string" ? {} : { provenance: recorded.value }),
+              };
       } else if (recorded.kind === "type_secret") {
         if (recorded.slot === undefined) {
           return await fallback(step, i, "type_secret step has no slot");

@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { activeProvisionBrowser, recordActivePaymentProvenance } from "../bot/provision-session.js";
+import {
+  activeProvisionBrowserForPayment,
+  recordActivePaymentProvenance,
+} from "../bot/provision-session.js";
 import { executeOperatePay } from "../bot/pay-operator.js";
 import { assertApi, type Tool } from "./index.js";
 
@@ -143,7 +146,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           : {}),
       },
       api,
-      browser,
+      await activeProvisionBrowserForPayment(),
       context !== undefined
         ? {
             surfaceApprovalUrl: async (url) => {
