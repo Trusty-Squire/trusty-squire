@@ -13,8 +13,8 @@ const inputSchema = z
       .optional(),
     card_ref: z.string().min(1).max(64).optional(),
     card_label: z.string().min(1).max(256).optional(),
-    item: z.string().max(500).optional(),
-    reason: z.string().max(500).optional(),
+    item: z.string().trim().min(1).max(500),
+    reason: z.string().trim().min(1).max(500),
     three_ds_wait_seconds: z
       .number()
       .int()
@@ -58,6 +58,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   inputSchema,
   jsonInputSchema: {
     type: "object",
+    required: ["item", "reason"],
     // At most one selector — never both. Omitting both is valid (resolves
     // against the cards on file, or starts a JIT add-card ceremony if none).
     not: { required: ["card_ref", "card_label"] },
@@ -67,8 +68,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       currency: { type: "string", pattern: "^[A-Za-z]{3}$" },
       card_ref: { type: "string" },
       card_label: { type: "string" },
-      item: { type: "string" },
-      reason: { type: "string" },
+      item: { type: "string", minLength: 1 },
+      reason: { type: "string", minLength: 1 },
       three_ds_wait_seconds: {
         type: "integer",
         minimum: 0,
@@ -85,6 +86,19 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   },
   async handler(args, api, context) {
     assertApi(api);
+    const browser = activeProvisionBrowser();
+    if (await browser.isPayPalHostedCheckout()) {
+      return {
+        status: "paypal_checkout",
+        reason: "paypal_hosted_fields_unfillable",
+        needs_user: {
+          wall: "paypal",
+          message:
+            "This checkout uses PayPal-hosted payment fields. Trusty Squire cannot enter a saved card into that cross-origin PayPal frame.",
+          resume: "checkout",
+        },
+      };
+    }
     // Resolve which card to charge. An explicit card_ref wins. Otherwise:
     //  - card_label given  → resolve it (0 → error, >1 same-label → error)
     //  - neither given      → resolve against the cards on file:
@@ -122,14 +136,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
         ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
         ...(args.currency !== undefined ? { currency: args.currency } : {}),
-        ...(args.item !== undefined ? { item: args.item } : {}),
-        ...(args.reason !== undefined ? { reason: args.reason } : {}),
+        item: args.item,
+        reason: args.reason,
         ...(args.three_ds_wait_seconds !== undefined
           ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
           : {}),
       },
       api,
-      activeProvisionBrowser(),
+      browser,
       context !== undefined
         ? {
             surfaceApprovalUrl: async (url) => {

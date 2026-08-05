@@ -31,9 +31,11 @@ const createBody = z.object({
   // the card later via POST /v1/pay/approvals/:id/bind-card.
   card_ref: z.string().min(1).max(64).optional(),
   operator_pubkey: z.string().min(1).max(512),
-  item: z.string().max(500).optional(),
-  reason: z.string().max(500).optional(),
+  item: z.string().trim().min(1).max(500),
+  reason: z.string().trim().min(1).max(500),
 });
+
+const requesterName = z.string().trim().min(1).max(256);
 
 const approveBody = z.object({
   jws: z.string().max(8192),
@@ -75,7 +77,8 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     const ttlMs = parsed.data.card_ref == null ? 18 * 60 * 1000 : 10 * 60 * 1000;
     const expiresAt = new Date(now.getTime() + ttlMs);
     const nonce = randomBytes(16).toString("base64url");
-    const agent = auth.agent_identity ?? "unknown-agent";
+    const requester = requesterName.safeParse(req.headers["x-squire-agent-identity"]);
+    const agent = requester.success ? requester.data : (auth.agent_identity ?? "unknown-agent");
     const id = await opts.deps.pendingPaymentApprovalStore.create(auth.account_id, {
       merchant: parsed.data.merchant,
       checkoutOrigin: parsed.data.checkout_origin,
@@ -84,8 +87,8 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       nonce,
       cardRef: parsed.data.card_ref ?? null,
       operatorPubkey: parsed.data.operator_pubkey,
-      item: parsed.data.item ?? "",
-      reason: parsed.data.reason ?? "",
+      item: parsed.data.item,
+      reason: parsed.data.reason,
       agent,
       expiresAt,
     });

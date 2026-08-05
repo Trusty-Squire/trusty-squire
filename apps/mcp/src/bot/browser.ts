@@ -178,6 +178,31 @@ export interface CheckoutSubmitResult {
   challenge_url?: string;
 }
 
+interface CheckoutFrameDescriptor {
+  url: string;
+  name: string;
+  title: string;
+}
+
+export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescriptor[]): boolean {
+  return frames.some((frame) => {
+    const marker = `${frame.url} ${frame.name} ${frame.title}`.toLowerCase();
+    if (/__zoid__paypal_(?:buttons|card_fields|checkout)/.test(marker)) return true;
+
+    try {
+      const url = new URL(frame.url);
+      const paypalHost =
+        url.hostname === "paypal.com" ||
+        url.hostname.endsWith(".paypal.com") ||
+        url.hostname === "paypalobjects.com" ||
+        url.hostname.endsWith(".paypalobjects.com");
+      return paypalHost && /(?:smart|checkout|card[_ -]?fields|zoid)/.test(marker);
+    } catch {
+      return false;
+    }
+  });
+}
+
 const CURRENCY_SYMBOLS: Record<string, string> = {
   $: "USD",
   "€": "EUR",
@@ -5543,6 +5568,23 @@ export class BrowserController {
       checkout_origin: new URL(page.url()).origin,
       ...amount,
     };
+  }
+
+  async isPayPalHostedCheckout(): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    const iframeDescriptors = await this.page.evaluate(() =>
+      Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe"), (iframe) => ({
+        url: iframe.src,
+        name: iframe.name,
+        title: iframe.title,
+      })),
+    );
+    const frameDescriptors = this.page.frames().map((frame) => ({
+      url: frame.url(),
+      name: frame.name(),
+      title: "",
+    }));
+    return hasPayPalHostedCheckoutFrame([...iframeDescriptors, ...frameDescriptors]);
   }
 
   // Common autocomplete/name selectors across all CDP-reachable frames,

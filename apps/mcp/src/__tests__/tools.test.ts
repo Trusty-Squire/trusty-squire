@@ -6,7 +6,7 @@
 // the interactive provisioning driver, vault tools, and extract-failure
 // diagnostic pair.
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
 import type { PaymentBrowser } from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
@@ -33,6 +33,7 @@ import {
 
 function stubBrowser(): PaymentBrowser {
   return {
+    isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary: vi.fn().mockResolvedValue({
       merchant: "M",
       checkout_origin: "https://m.test",
@@ -44,6 +45,12 @@ function stubBrowser(): PaymentBrowser {
     currentUrl: vi.fn().mockReturnValue("https://m.test/checkout"),
   };
 }
+
+const PAYMENT_DETAILS = { item: "Synthetic item", reason: "Synthetic purchase reason" };
+
+beforeEach(() => {
+  mockBrowser = stubBrowser();
+});
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
   return {
@@ -95,13 +102,34 @@ describe("list_payment_cards", () => {
 });
 
 describe("operate_pay card selection", () => {
-  it("accepts no selector (resolves against cards on file) but rejects both", () => {
+  it("requires item and reason, accepts no selector, and rejects both selectors", () => {
     // Neither is now valid — the handler resolves against the cards on file
     // (0 → JIT ceremony, 1 → use it, >1 → error). Both is still rejected.
-    expect(() => operatePayTool.inputSchema.parse({})).not.toThrow();
+    expect(() => operatePayTool.inputSchema.parse({})).toThrow();
+    expect(() => operatePayTool.inputSchema.parse({ item: " ", reason: "why" })).toThrow();
+    expect(() => operatePayTool.inputSchema.parse(PAYMENT_DETAILS)).not.toThrow();
     expect(() =>
-      operatePayTool.inputSchema.parse({ card_ref: "card_1", card_label: "Personal" }),
+      operatePayTool.inputSchema.parse({
+        ...PAYMENT_DETAILS,
+        card_ref: "card_1",
+        card_label: "Personal",
+      }),
     ).toThrow();
+  });
+
+  it("surfaces PayPal-hosted checkout before resolving saved cards", async () => {
+    mockBrowser = stubBrowser();
+    vi.mocked(mockBrowser.isPayPalHostedCheckout).mockResolvedValue(true);
+    const listPaymentCards = vi.fn();
+    const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse(PAYMENT_DETAILS);
+
+    await expect(operatePayTool.handler(args, api)).resolves.toMatchObject({
+      status: "paypal_checkout",
+      reason: "paypal_hosted_fields_unfillable",
+      needs_user: { wall: "paypal" },
+    });
+    expect(listPaymentCards).not.toHaveBeenCalled();
   });
 
   it("reports ambiguous card labels before opening the checkout", async () => {
@@ -110,7 +138,7 @@ describe("operate_pay card selection", () => {
       { id: "card_2", label: "Personal" },
     ]);
     const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
-    const args = operatePayTool.inputSchema.parse({ card_label: "Personal" });
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, card_label: "Personal" });
 
     await expect(operatePayTool.handler(args, api)).rejects.toThrow(/Multiple saved payment cards/);
   });
@@ -121,7 +149,7 @@ describe("operate_pay card selection", () => {
       { id: "card_2", label: "Work" },
     ]);
     const api = makeMockApi({ listPaymentCards } as unknown as ApiClient);
-    const args = operatePayTool.inputSchema.parse({});
+    const args = operatePayTool.inputSchema.parse(PAYMENT_DETAILS);
 
     await expect(operatePayTool.handler(args, api)).rejects.toThrow(
       /Multiple saved payment cards on file.*"Personal".*"Work".*specify card_ref or card_label/,
@@ -150,6 +178,7 @@ describe("operate_pay card selection", () => {
       getPaymentApproval,
     } as unknown as ApiClient);
     const args = operatePayTool.inputSchema.parse({
+      ...PAYMENT_DETAILS,
       merchant: "M",
       amount_cents: 100,
       currency: "USD",
@@ -184,6 +213,7 @@ describe("operate_pay card selection", () => {
       getPaymentApproval,
     } as unknown as ApiClient);
     const args = operatePayTool.inputSchema.parse({
+      ...PAYMENT_DETAILS,
       merchant: "M",
       amount_cents: 100,
       currency: "USD",
