@@ -21,7 +21,7 @@ const task = {
   },
 };
 
-function browserEvent(tool, currentUrl, snapshot) {
+function browserEvent(tool, currentUrl, snapshot, checkoutTotals = []) {
   return {
     type: "item.completed",
     item: {
@@ -30,7 +30,15 @@ function browserEvent(tool, currentUrl, snapshot) {
       tool,
       result: {
         content: [
-          { type: "text", text: JSON.stringify({ ok: true, current_url: currentUrl, snapshot }) },
+          {
+            type: "text",
+            text: JSON.stringify({
+              ok: true,
+              current_url: currentUrl,
+              snapshot,
+              checkout_totals: checkoutTotals,
+            }),
+          },
         ],
       },
     },
@@ -50,6 +58,7 @@ describe("replay baseline capture trust boundary", () => {
         "browser_snapshot",
         "https://whitejade.xyz/checkouts/cn/session",
         'RootWebArea "Checkout" url="https://whitejade.xyz/checkouts/cn/session" The Glow Serum Quantity 1 Total $76.00 Payment controls: {"value":"replay-eval+whitejade-purchase-r0@trustysquire.ai"} {"value":"123 Test Street"} {"value":"10001"}',
+        [{ label: "Total", amount: "$76.00" }],
       ),
     ];
     expect(validateGroundedCapture(events, endState, task)).toMatchObject({
@@ -93,6 +102,34 @@ describe("replay baseline capture trust boundary", () => {
     expect(() => validateGroundedCapture(events, splitTask.expected_end_state, splitTask)).toThrow(
       "no single browser observation proves the expected end state",
     );
+  });
+
+  it("rejects a matching line-item price when the labeled total differs", () => {
+    const pricedTask = {
+      ...task,
+      task_id: "whitejade-purchase-r1",
+      expected_end_state: {
+        line_items: [{ title_contains: "The Recovery Crème", qty: 1 }],
+        total_cents: 8800,
+        reached: "checkout_review",
+      },
+    };
+    const events = [
+      browserEvent(
+        "browser_open",
+        "https://whitejade.xyz/cart/variant:1",
+        'RootWebArea "Cart" url="https://whitejade.xyz/cart/variant:1" The Recovery Crème $88.00',
+      ),
+      browserEvent(
+        "browser_snapshot",
+        "https://whitejade.xyz/checkouts/cn/session",
+        'RootWebArea "Checkout" url="https://whitejade.xyz/checkouts/cn/session" The Recovery Crème $88.00 Total $99.00 Payment controls: {"value":"replay-eval+whitejade-purchase-r1@trustysquire.ai"} {"value":"123 Test Street"} {"value":"10001"}',
+        [{ label: "Total", amount: "$99.00" }],
+      ),
+    ];
+    expect(() =>
+      validateGroundedCapture(events, pricedTask.expected_end_state, pricedTask),
+    ).toThrow("no single browser observation proves the expected end state");
   });
 
   it("rejects evidence from outside the task domain", () => {

@@ -261,7 +261,9 @@ it("emits frozen real-LLM cold evidence, metrics, and one NO-SHIP line", async (
         recording.provenance.driver === "codex-exec+constrained-browser-mcp" &&
         recording.provenance.model === "gpt-5.6-sol" &&
         (recording.provenance.browser_observations ?? 0) > 0 &&
-        recording.provenance.capture_policy === "read-only-playwright-mcp-v2" &&
+        (recording.end_state.reached === "checkout_review"
+          ? recording.provenance.capture_policy === "read-only-playwright-mcp-v3"
+          : recording.provenance.capture_policy === "read-only-playwright-mcp-v2") &&
         /^[a-f0-9]{64}$/.test(recording.provenance.evidence_sha256 ?? ""),
     ),
   ).toBe(true);

@@ -19,8 +19,8 @@
   "bucket": "repeat",
   "cold_baseline": {
     "turns": 18,
-    "tokens": 486460,
-    "wall_clock_ms": 73876,
+    "tokens": 303799,
+    "wall_clock_ms": 90702,
     "end_state": {
       "line_items": [{ "title_contains": "Red Light Face Mask", "qty": 1 }],
       "total_cents": 10900,
@@ -30,10 +30,10 @@
       "source": "driver",
       "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T05:45:23.583Z",
-      "browser_observations": 10,
-      "evidence_sha256": "b05d9435ca9939714d8492e28ac0a527cdaa54a8c8673252ec6a3e54d9bef619",
-      "capture_policy": "read-only-playwright-mcp-v2"
+      "recorded_at": "2026-08-05T06:05:39.470Z",
+      "browser_observations": 14,
+      "evidence_sha256": "e414ae67328e99a13350f8e6f4bc882f424edd83cb47e557f05a89cb7c5cb704",
+      "capture_policy": "read-only-playwright-mcp-v3"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }

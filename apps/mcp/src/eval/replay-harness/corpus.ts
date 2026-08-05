@@ -46,6 +46,7 @@ function parseEndState(value: unknown, label: string): ExpectedEndState {
 
 function parseBaseline(value: unknown, label: string): ColdBaseline {
   if (!isObject(value)) throw new Error(`${label}: cold_baseline is required`);
+  const endState = parseEndState(value.end_state, `${label}.cold_baseline.end_state`);
   if (
     !isNonNegativeNumber(value.turns) ||
     !isNonNegativeNumber(value.tokens) ||
@@ -66,7 +67,10 @@ function parseBaseline(value: unknown, label: string): ColdBaseline {
     (value.provenance.browser_observations as number) < 1 ||
     typeof value.provenance.evidence_sha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(value.provenance.evidence_sha256) ||
-    value.provenance.capture_policy !== "read-only-playwright-mcp-v2"
+    (value.provenance.capture_policy !== "read-only-playwright-mcp-v2" &&
+      value.provenance.capture_policy !== "read-only-playwright-mcp-v3") ||
+    (endState.reached === "checkout_review" &&
+      value.provenance.capture_policy !== "read-only-playwright-mcp-v3")
   ) {
     throw new Error(`${label}: cold_baseline requires grounded browser provenance`);
   }
@@ -74,7 +78,7 @@ function parseBaseline(value: unknown, label: string): ColdBaseline {
     turns: value.turns,
     tokens: value.tokens,
     wall_clock_ms: value.wall_clock_ms,
-    end_state: parseEndState(value.end_state, `${label}.cold_baseline.end_state`),
+    end_state: endState,
     provenance: {
       source: "driver",
       driver: value.provenance.driver,
@@ -82,7 +86,7 @@ function parseBaseline(value: unknown, label: string): ColdBaseline {
       recorded_at: value.provenance.recorded_at,
       browser_observations: value.provenance.browser_observations as number,
       evidence_sha256: value.provenance.evidence_sha256,
-      capture_policy: "read-only-playwright-mcp-v2",
+      capture_policy: value.provenance.capture_policy,
     },
   };
 }

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { delimiter, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 
-export const CAPTURE_POLICY = "read-only-playwright-mcp-v2";
+export const CAPTURE_POLICY = "read-only-playwright-mcp-v3";
 
 export function endStatesMatch(actual, expected) {
   return (
@@ -107,11 +107,26 @@ function completedBrowserCalls(events) {
       result === null ||
       result.ok !== true ||
       typeof result.current_url !== "string" ||
-      typeof result.snapshot !== "string"
+      typeof result.snapshot !== "string" ||
+      !Array.isArray(result.checkout_totals) ||
+      !result.checkout_totals.every(
+        (total) =>
+          typeof total === "object" &&
+          total !== null &&
+          total.label === "Total" &&
+          typeof total.amount === "string",
+      )
     ) {
       throw new Error(`${tool}: browser tool returned an invalid observation`);
     }
-    return [{ tool, current_url: result.current_url, snapshot: result.snapshot }];
+    return [
+      {
+        tool,
+        current_url: result.current_url,
+        snapshot: result.snapshot,
+        checkout_totals: result.checkout_totals,
+      },
+    ];
   });
 }
 
@@ -123,6 +138,24 @@ function evidenceContainsMoney(evidence, cents) {
   const fractional = cents % 100;
   const decimal = fractional === 0 ? "(?:\\.00)?" : `\\.${String(fractional).padStart(2, "0")}`;
   return new RegExp(`\\$\\s?(?:${alternatives})${decimal}(?![\\d.])`).test(evidence);
+}
+
+function moneyToCents(value) {
+  const match = value.match(/^\$\s*(\d[\d,]*)(?:\.(\d{2}))?$/);
+  if (match === null) return undefined;
+  return Number((match[1] ?? "0").replaceAll(",", "")) * 100 + Number(match[2] ?? "0");
+}
+
+function labeledCheckoutTotal(call) {
+  const totals = [
+    ...new Set(
+      call.checkout_totals
+        .filter((observation) => observation.label === "Total")
+        .map((observation) => moneyToCents(observation.amount))
+        .filter((value) => value !== undefined),
+    ),
+  ];
+  return totals.length === 1 ? totals[0] : undefined;
 }
 
 export function validateGroundedCapture(events, endState, task) {
@@ -153,12 +186,9 @@ export function validateGroundedCapture(events, endState, task) {
   const expectedTitles = task.expected_end_state.line_items.map((item) =>
     item.title_contains.toLowerCase(),
   );
-  const observationHasEndState = (call) => {
+  const observationHasExpectedTitles = (call) => {
     const snapshot = call.snapshot.toLowerCase();
-    return (
-      expectedTitles.every((title) => snapshot.includes(title)) &&
-      evidenceContainsMoney(call.snapshot, task.expected_end_state.total_cents)
-    );
+    return expectedTitles.every((title) => snapshot.includes(title));
   };
   const reachedExpectedState = calls.some((call) => {
     const url = new URL(call.current_url);
@@ -169,15 +199,28 @@ export function validateGroundedCapture(events, endState, task) {
         /"value":"123 Test St(?:reet)?(?:[",])/i.test(call.snapshot) &&
         call.snapshot.includes('"value":"10001"') &&
         /payment|pay\s*now|billing address|review order/i.test(call.snapshot);
-      return url.pathname.includes("/checkouts/") && reviewMarker && observationHasEndState(call);
+      return (
+        url.pathname.includes("/checkouts/") &&
+        reviewMarker &&
+        observationHasExpectedTitles(call) &&
+        labeledCheckoutTotal(call) === task.expected_end_state.total_cents
+      );
     }
-    return url.pathname.includes("/products/") && observationHasEndState(call);
+    return (
+      url.pathname.includes("/products/") &&
+      observationHasExpectedTitles(call) &&
+      evidenceContainsMoney(call.snapshot, task.expected_end_state.total_cents)
+    );
   });
   if (!reachedExpectedState) {
     throw new Error(`${task.task_id}: no single browser observation proves the expected end state`);
   }
 
-  const evidence = calls.map((call) => call.snapshot).join("\n");
+  const evidence = calls
+    .map((call) =>
+      JSON.stringify({ snapshot: call.snapshot, checkout_totals: call.checkout_totals }),
+    )
+    .join("\n");
 
   return {
     browser_observations: calls.length,

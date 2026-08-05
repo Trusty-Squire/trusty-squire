@@ -182,6 +182,40 @@ async function snapshot() {
     .locator("body")
     .ariaSnapshot({ timeout: 5000 })
     .catch(async () => page.locator("body").innerText({ timeout: 5000 }));
+  const checkoutTotals = await page.locator("body").evaluate((root) => {
+    const normalize = (value) => value.replace(/\s+/g, " ").trim();
+    const moneyPattern = /\$\s*\d[\d,]*(?:\.\d{2})?/g;
+    const observations = [];
+    for (const element of root.querySelectorAll("*")) {
+      if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) continue;
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden") continue;
+      const directText = normalize(
+        [...element.childNodes]
+          .filter((node) => node.nodeType === Node.TEXT_NODE)
+          .map((node) => node.textContent ?? "")
+          .join(" "),
+      );
+      const label = normalize(element.getAttribute("aria-label") ?? directText);
+      if (!/^total(?:\s+[A-Z]{3})?$/i.test(label)) continue;
+      let container = element;
+      for (let depth = 0; depth < 4 && container !== null; depth += 1) {
+        const amounts = normalize(container.innerText).match(moneyPattern) ?? [];
+        if (amounts.length > 0) {
+          for (const amount of amounts) observations.push({ label: "Total", amount });
+          break;
+        }
+        container = container.parentElement;
+      }
+    }
+    return observations.filter(
+      (observation, index) =>
+        observations.findIndex(
+          (candidate) =>
+            candidate.label === observation.label && candidate.amount === observation.amount,
+        ) === index,
+    );
+  });
   const controls = page.locator(
     'a[href]:visible,button:visible,input:visible,select:visible,textarea:visible,[role="button"]:visible,[role="link"]:visible,[role="checkbox"]:visible,[role="radio"]:visible,[role="option"]:visible,[role="menuitem"]:visible,[contenteditable="true"]:visible',
   );
@@ -224,7 +258,7 @@ async function snapshot() {
     "controls:",
     ...descriptions,
   ].join("\n");
-  return { ok: true, current_url: url, snapshot: rendered };
+  return { ok: true, current_url: url, snapshot: rendered, checkout_totals: checkoutTotals };
 }
 
 function assertClickIsAllowed(target) {

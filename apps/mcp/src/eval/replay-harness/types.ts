@@ -30,7 +30,7 @@ export interface ColdBaselineProvenance {
   recorded_at: string;
   browser_observations?: number;
   evidence_sha256?: string;
-  capture_policy?: "read-only-playwright-mcp-v2";
+  capture_policy?: "read-only-playwright-mcp-v2" | "read-only-playwright-mcp-v3";
 }
 
 export interface ColdBaselineRecording extends CostSample {
