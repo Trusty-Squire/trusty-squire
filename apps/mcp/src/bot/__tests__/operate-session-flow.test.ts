@@ -22,6 +22,7 @@ const h = vi.hoisted(() => ({
   startCalls: 0,
   closeCalls: 0,
   resetCalls: 0,
+  resetFailuresRemaining: 0,
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   connections: [] as boolean[],
@@ -87,6 +88,10 @@ vi.mock("../browser.js", () => ({
     }
     async resetPageForReuse(): Promise<void> {
       h.resetCalls += 1;
+      if (h.resetFailuresRemaining > 0) {
+        h.resetFailuresRemaining -= 1;
+        throw new Error("page reset failed");
+      }
       h.currentUrl = "about:blank";
     }
     async detectSessionProviders(): Promise<string[]> {
@@ -313,6 +318,7 @@ beforeEach(() => {
   h.startCalls = 0;
   h.closeCalls = 0;
   h.resetCalls = 0;
+  h.resetFailuresRemaining = 0;
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.connections = [];
@@ -694,6 +700,28 @@ describe("operate session — warm browser lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
+  it("discards a warm browser and cold-boots when page reset fails", async () => {
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    await finishProvisionSession(first.session_id);
+    h.resetFailuresRemaining = 1;
+
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+
+    expect(h.startCalls).toBe(2);
+    expect(h.closeCalls).toBe(1);
+    await finishProvisionSession(second.session_id);
+  });
+
+  it("refuses a second task while the single shared page is in flight", async () => {
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+
+    await expect(
+      startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+    ).rejects.toThrow(/another operator session is already in flight/);
+    expect(h.startCalls).toBe(1);
+    await finishProvisionSession(first.session_id);
+  });
+
   it("does not reap the shared browser while a session is in flight", async () => {
     vi.useFakeTimers();
     try {
@@ -707,6 +735,37 @@ describe("operate session — warm browser lifecycle", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("defers max-age recycling until the in-flight task reaches finish", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+      await vi.advanceTimersByTimeAsync(24 * 60 * 60 * 1_000);
+      expect(h.closeCalls).toBe(0);
+
+      await finishProvisionSession(session.session_id);
+      expect(h.closeCalls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("recycles at the configured default reuse-count boundary", async () => {
+    for (let index = 0; index <= 50; index += 1) {
+      const session = await startProvisionSession({
+        serviceUrl: `https://app.example.com/task-${index}`,
+      });
+      await finishProvisionSession(session.session_id);
+    }
+
+    expect(h.startCalls).toBe(1);
+    expect(h.closeCalls).toBe(1);
+
+    const next = await startProvisionSession({ serviceUrl: "https://app.example.com/task-51" });
+    expect(h.startCalls).toBe(2);
+    await finishProvisionSession(next.session_id);
   });
 });
 

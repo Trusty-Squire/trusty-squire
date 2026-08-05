@@ -687,9 +687,7 @@ export function matchesReapableBrowserArgs(
   }
   if (profiles.length === 0) return false;
   const profile = `(?:${profiles.join("|")})`;
-  return new RegExp(
-    `--user-data-dir=(?:"${profile}"|'${profile}'|${profile})(?=\\s|$)`,
-  ).test(args);
+  return new RegExp(`--user-data-dir=(?:"${profile}"|'${profile}'|${profile})(?=\\s|$)`).test(args);
 }
 
 export function claimOrphanBrowserReapScope(profileDir: string): {
