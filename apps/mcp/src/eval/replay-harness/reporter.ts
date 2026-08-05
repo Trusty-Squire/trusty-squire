@@ -35,12 +35,27 @@ export function renderReportMarkdown(report: HarnessReport): string {
       `= ${percent(thresholds.drift_catch_rate)}`,
     ],
     ["recipe_survival", "T+7d n/a; T+30d n/a", "reported by housekeeper"],
+    ["novel_false_hits", String(metrics.invariants.novel_false_hits), "= 0 (MISS invariant)"],
+    [
+      "missing_warm_samples",
+      String(metrics.invariants.missing_warm_samples),
+      "= 0 (complete observation invariant)",
+    ],
+  ];
+  const baselineSources = [
+    ...new Set(
+      report.cold_baseline.recordings.map((recording) => {
+        const { driver, model } = recording.provenance;
+        return model === undefined ? driver : `${driver}/${model}`;
+      }),
+    ),
   ];
   const lines = [
     "# Replay-engine evaluation",
     "",
     `Mode: ${report.mode}; corpus: ${report.corpus.tasks} tasks (${report.corpus.repeat} repeat, ${report.corpus.novel} novel), ${report.corpus.drift_trials} drift trials.`,
     `Cold baseline median: ${report.cold_baseline.median.turns.toFixed(1)} turns, ${report.cold_baseline.median.tokens.toFixed(0)} tokens, ${report.cold_baseline.median.wall_clock_ms.toFixed(0)} ms.`,
+    `Cold baseline evidence: ${report.cold_baseline.recordings.length} driver-recorded tasks${baselineSources.length === 0 ? "" : ` via ${baselineSources.join(", ")}`}.`,
     "",
     "| Metric | Value | Threshold |",
     "| --- | ---: | --- |",

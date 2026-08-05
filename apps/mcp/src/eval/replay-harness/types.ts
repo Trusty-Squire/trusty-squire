@@ -22,6 +22,20 @@ export interface ColdBaseline extends CostSample {
   end_state: ExpectedEndState;
 }
 
+export interface ColdBaselineProvenance {
+  source: "driver";
+  driver: string;
+  model?: string;
+  recorded_at: string;
+}
+
+export interface ColdBaselineRecording extends CostSample {
+  task_id: string;
+  end_state: ExpectedEndState;
+  end_state_matches: boolean;
+  provenance: ColdBaselineProvenance;
+}
+
 export interface ShoppingTaskRecord {
   task_id: string;
   verb: "purchase";
@@ -49,6 +63,7 @@ export interface TaskObservation {
   task_id: string;
   bucket: CorpusBucket;
   cold: CostSample;
+  cold_recording?: ColdBaselineRecording;
   recipe_applied: boolean;
   warm?: CostSample;
   end_state_matches: boolean;
@@ -98,6 +113,10 @@ export interface HarnessMetrics {
   money_escape: number;
   drift_catch_rate: number;
   recipe_survival: { t7d: number | null; t30d: number | null };
+  invariants: {
+    novel_false_hits: number;
+    missing_warm_samples: number;
+  };
 }
 
 export interface HarnessReport {
@@ -114,6 +133,7 @@ export interface HarnessReport {
     tasks: number;
     median: CostSample;
     total: CostSample;
+    recordings: ColdBaselineRecording[];
   };
   thresholds: HarnessThresholds;
   metrics: HarnessMetrics;

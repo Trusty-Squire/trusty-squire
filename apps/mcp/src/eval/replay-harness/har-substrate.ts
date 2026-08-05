@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { performance } from "node:perf_hooks";
 import { chromium, type Page } from "playwright";
+import { endStatesMatch } from "./corpus.js";
 import type { ExpectedEndState, ShoppingTaskRecord } from "./types.js";
 
 export interface ColdDriverResult {
@@ -12,6 +13,15 @@ export interface ColdDriverResult {
 
 export interface LiveCheckoutResult extends ColdDriverResult {
   wall_clock_ms: number;
+}
+
+export function assertLiveCheckoutEndState(
+  task: ShoppingTaskRecord,
+  actual: ExpectedEndState,
+): void {
+  if (!endStatesMatch(actual, task.expected_end_state)) {
+    throw new Error(`${task.task_id}: live checkout did not reach its expected end state`);
+  }
 }
 
 export function whitejadeCartPermalink(task: ShoppingTaskRecord): string {
@@ -80,6 +90,7 @@ export async function runLiveWhitejadeCheckout(
       throw new Error(`${task.task_id}: whitejade did not enter live checkout`);
     }
     const result = await drive(page);
+    assertLiveCheckoutEndState(task, result.end_state);
     return {
       ...result,
       wall_clock_ms: Math.round(performance.now() - started),

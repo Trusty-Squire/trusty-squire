@@ -35,15 +35,16 @@ export function computeMetrics(
   drift: DriftObservation[],
 ): HarnessMetrics {
   const realistic = tasks.filter((task) => task.bucket === "repeat");
-  const hits = realistic.filter((task) => task.recipe_applied && task.warm !== undefined);
+  const hits = realistic.filter((task) => task.recipe_applied);
+  const completeHits = hits.filter((task) => task.warm !== undefined);
   const hitRate = ratio(hits.length, realistic.length);
   const speedupOnHit = {
-    turns: median(speedups(hits, "turns")),
-    tokens: median(speedups(hits, "tokens")),
-    wall_clock: median(speedups(hits, "wall_clock_ms")),
+    turns: median(speedups(completeHits, "turns")),
+    tokens: median(speedups(completeHits, "tokens")),
+    wall_clock: median(speedups(completeHits, "wall_clock_ms")),
   };
-  const totalSteps = hits.reduce((sum, hit) => sum + hit.total_steps, 0);
-  const fallbacks = hits.reduce((sum, hit) => sum + hit.fallbacks, 0);
+  const totalSteps = completeHits.reduce((sum, hit) => sum + hit.total_steps, 0);
+  const fallbacks = completeHits.reduce((sum, hit) => sum + hit.fallbacks, 0);
   const moneyTrials = drift.filter((trial) => trial.money_affecting);
   const moneyEscapes = moneyTrials.filter(
     (trial) => !trial.end_state_matches && trial.guard_action === "missed",
@@ -61,14 +62,26 @@ export function computeMetrics(
       wall_clock: hitRate * speedupOnHit.wall_clock,
     },
     clean_replay_correctness: ratio(
-      hits.filter((hit) => hit.end_state_matches && hit.fallbacks === 0).length,
+      hits.filter(
+        (hit) => hit.warm !== undefined && hit.end_state_matches && hit.fallbacks === 0,
+      ).length,
       hits.length,
     ),
-    task_success: ratio(hits.filter((hit) => hit.end_state_matches).length, hits.length),
+    task_success: ratio(
+      hits.filter((hit) => hit.warm !== undefined && hit.end_state_matches).length,
+      hits.length,
+    ),
     fallback_rate: ratio(fallbacks, totalSteps),
     money_escape: moneyEscapes,
     drift_catch_rate: ratio(caughtMoneyDrift, moneyTrials.length),
     recipe_survival: { t7d: null, t30d: null },
+    invariants: {
+      novel_false_hits: tasks.filter((task) => task.bucket === "novel" && task.recipe_applied)
+        .length,
+      missing_warm_samples: tasks.filter(
+        (task) => task.recipe_applied && task.warm === undefined,
+      ).length,
+    },
   };
 }
 
@@ -107,6 +120,16 @@ export function buildHarnessReport(
       `drift catch rate ${(metrics.drift_catch_rate * 100).toFixed(2)}% < ${(thresholds.drift_catch_rate * 100).toFixed(2)}%`,
     );
   }
+  if (metrics.invariants.novel_false_hits > 0) {
+    reasons.push(
+      `novel MISS invariant: ${metrics.invariants.novel_false_hits} novel recipe false hit(s)`,
+    );
+  }
+  if (metrics.invariants.missing_warm_samples > 0) {
+    reasons.push(
+      `incomplete replay invariant: ${metrics.invariants.missing_warm_samples} applied recipe(s) missing warm samples`,
+    );
+  }
   return {
     schema_version: 1,
     mode: options.mode ?? "replay-eval",
@@ -129,6 +152,9 @@ export function buildHarnessReport(
         tokens: tasks.reduce((sum, task) => sum + task.cold.tokens, 0),
         wall_clock_ms: tasks.reduce((sum, task) => sum + task.cold.wall_clock_ms, 0),
       },
+      recordings: tasks.flatMap((task) =>
+        task.cold_recording === undefined ? [] : [task.cold_recording],
+      ),
     },
     thresholds,
     metrics,

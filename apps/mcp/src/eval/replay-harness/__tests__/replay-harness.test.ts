@@ -5,6 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { loadShoppingCorpus, resolveHarPath, resolveShoppingCorpusDir } from "../corpus.js";
 import { mutateHar, type HarFile } from "../har-mutate.js";
 import {
+  assertLiveCheckoutEndState,
   recordFrozenDocumentHar,
   replayFrozenHar,
   runLiveWhitejadeCheckout,
@@ -12,13 +13,9 @@ import {
 } from "../har-substrate.js";
 import { buildHarnessReport } from "../metrics.js";
 import { renderReportJson, renderReportMarkdown } from "../reporter.js";
-import { moneyDriftObservation, runAllColdHarness } from "../runner.js";
-import type {
-  DriftMutationName,
-  DriftObservation,
-  ShoppingTaskRecord,
-  TaskObservation,
-} from "../types.js";
+import { runAllColdHarness, runDriftBattery } from "../runner.js";
+import type { ColdBaselineDriver, DriftReplayAdapter } from "../runner.js";
+import type { DriftObservation, ShoppingTaskRecord, TaskObservation } from "../types.js";
 
 const corpusDir = resolveShoppingCorpusDir();
 const tasks = loadShoppingCorpus(corpusDir);
@@ -33,41 +30,100 @@ function readHar(task: ShoppingTaskRecord): HarFile {
   return JSON.parse(readFileSync(resolveHarPath(task, corpusDir), "utf8")) as HarFile;
 }
 
-function driftBattery(repeatTasks: ShoppingTaskRecord[]): DriftObservation[] {
-  const observations: DriftObservation[] = [];
+function moneyText(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
+}
+
+async function createFrozenReplayAdapter(
+  repeatTasks: ShoppingTaskRecord[],
+): Promise<DriftReplayAdapter> {
+  const baselineInputCounts = new Map<string, number>();
   for (const task of repeatTasks) {
-    const har = readHar(task);
-    for (const mutation of [
-      "rename-button",
-      "swap-testid",
-      "remove-field",
-      "change-price",
-      "out-of-stock",
-      "overlay",
-    ] satisfies DriftMutationName[]) {
-      const result = mutateHar(har, mutation, {
-        expectedTotalCents: task.expected_end_state.total_cents,
-        ...(task.params.product_price_cents === undefined
-          ? {}
-          : { displayedPriceCents: task.params.product_price_cents }),
-      });
-      expect(result.replacements, `${task.task_id}: ${mutation} must mutate a response`).toBe(1);
-      if (mutation === "change-price") {
-        expect(result.observed_total_cents).toBeDefined();
-        observations.push(moneyDriftObservation(task, result.observed_total_cents ?? 0));
-      } else {
-        observations.push({
-          task_id: task.task_id,
-          mutation,
-          money_affecting: false,
-          guard_action:
-            mutation === "rename-button" || mutation === "swap-testid" ? "clean" : "fallback",
-          end_state_matches: true,
-        });
-      }
-    }
+    if (corpusDir === null) throw new Error("shopping corpus is unavailable");
+    const inputCount = await replayFrozenHar(
+      task.entry_url,
+      resolveHarPath(task, corpusDir),
+      (page) => page.locator("input").count(),
+    );
+    baselineInputCounts.set(task.task_id, inputCount);
   }
-  return observations;
+
+  return async ({ task, mutation, har }) => {
+    const tempDir = mkdtempSync(join(process.cwd(), ".replay-eval-"));
+    tempDirs.push(tempDir);
+    const mutatedPath = join(tempDir, `${task.task_id}-${mutation}.har`);
+    writeFileSync(mutatedPath, JSON.stringify(har));
+    return replayFrozenHar(task.entry_url, mutatedPath, async (page) => {
+      const html = await page.content();
+      const body = await page.locator("body").innerText();
+      const inputCount = await page.locator("input").count();
+      const expectedProductCents = task.params.product_price_cents;
+      const priceDelta =
+        expectedProductCents !== undefined && html.includes(moneyText(expectedProductCents + 100))
+          ? 100
+          : 0;
+      const structuralGuardTriggered =
+        inputCount < (baselineInputCounts.get(task.task_id) ?? inputCount) ||
+        html.includes("data-replay-eval-overlay") ||
+        /(?:&quot;|")available(?:&quot;|")\s*:\s*false/i.test(html) ||
+        /out of stock|sold out/i.test(body);
+      const wantedItem = task.expected_end_state.line_items[0];
+      const itemObserved =
+        wantedItem !== undefined &&
+        body.toLowerCase().includes(wantedItem.title_contains.toLowerCase());
+      return {
+        guard_action: structuralGuardTriggered ? "fallback" : "clean",
+        end_state: {
+          line_items:
+            wantedItem === undefined || !itemObserved
+              ? []
+              : [{ title_contains: wantedItem.title_contains, qty: wantedItem.qty }],
+          total_cents: task.expected_end_state.total_cents + priceDelta,
+          reached: itemObserved ? task.expected_end_state.reached : "storefront",
+        },
+      };
+    });
+  };
+}
+
+let driftPromise: Promise<DriftObservation[]> | undefined;
+
+function measuredDriftBattery(): Promise<DriftObservation[]> {
+  const repeatTasks = tasks.filter((task) => task.bucket === "repeat");
+  driftPromise ??= createFrozenReplayAdapter(repeatTasks).then((adapter) =>
+    runDriftBattery(repeatTasks, readHar, adapter),
+  );
+  return driftPromise;
+}
+
+const seededColdDriver: ColdBaselineDriver = {
+  name: "fixture-cold-driver",
+  model: "fixture-v1",
+  async drive(task) {
+    return {
+      turns: task.cold_baseline.turns,
+      tokens: task.cold_baseline.tokens,
+      end_state: task.cold_baseline.end_state,
+    };
+  },
+};
+
+function measuredClock(durations: number[]): () => number {
+  let elapsed = 0;
+  let call = 0;
+  return () => {
+    if (call % 2 === 1) elapsed += durations[Math.floor(call / 2)] ?? 0;
+    call += 1;
+    return elapsed;
+  };
+}
+
+function parseDisplayedMoney(body: string): number[] {
+  return [...body.matchAll(/\$(\d[\d,]*)\.(\d{2})/g)].map((match) => {
+    const dollars = Number((match[1] ?? "0").replaceAll(",", ""));
+    const cents = Number(match[2] ?? "0");
+    return dollars * 100 + cents;
+  });
 }
 
 it("loads the explicitly under-seeded shopping corpus", () => {
@@ -134,6 +190,17 @@ describe("live whitejade checkout substrate", () => {
     expect(whitejadeCartPermalink(task)).toBe("https://whitejade.xyz/cart/53575613546607:1");
   });
 
+  it("rejects a live checkout result with the wrong end state", () => {
+    expect(task).toBeDefined();
+    if (task === undefined) return;
+    expect(() =>
+      assertLiveCheckoutEndState(task, {
+        ...task.expected_end_state,
+        total_cents: task.expected_end_state.total_cents + 100,
+      }),
+    ).toThrow("did not reach its expected end state");
+  });
+
   it.skipIf(process.env.REPLAY_EVAL_LIVE_CHECKOUT !== "1")(
     "reaches session-keyed checkout without a HAR route",
     async () => {
@@ -141,10 +208,21 @@ describe("live whitejade checkout substrate", () => {
       if (task === undefined) return;
       const observation = await runLiveWhitejadeCheckout(task, async (page) => {
         const body = await page.locator("body").innerText();
+        const displayedMoney = parseDisplayedMoney(body);
         expect(page.url()).toContain("/checkouts/");
         expect(body).toContain("The Glow Serum");
-        expect(body).toContain("$68.00");
-        return { turns: 1, tokens: 0, end_state: task.expected_end_state };
+        expect(displayedMoney).toContain(6800);
+        expect(displayedMoney).toContain(800);
+        expect(displayedMoney).toContain(7600);
+        return {
+          turns: 1,
+          tokens: 0,
+          end_state: {
+            line_items: [{ title_contains: "The Glow Serum", qty: 1 }],
+            total_cents: displayedMoney.includes(7600) ? 7600 : -1,
+            reached: displayedMoney.includes(7600) ? "checkout_review" : "checkout",
+          },
+        };
       });
       expect(observation.wall_clock_ms).toBeGreaterThan(0);
     },
@@ -152,33 +230,59 @@ describe("live whitejade checkout substrate", () => {
   );
 });
 
-it("runs all six drift mutations and total-verify vetoes every changed price", () => {
-  const repeatTasks = tasks.filter((task) => task.bucket === "repeat");
-  const drift = driftBattery(repeatTasks);
-  expect(drift).toHaveLength(repeatTasks.length * 6);
-  const priceTrials = drift.filter((trial) => trial.money_affecting);
-  expect(priceTrials).toHaveLength(repeatTasks.length);
-  expect(priceTrials.every((trial) => trial.guard_action === "abort")).toBe(true);
-  expect(priceTrials.every((trial) => !trial.end_state_matches)).toBe(true);
-});
+it(
+  "runs all six drift mutations and total-verify vetoes every changed price",
+  async () => {
+    const repeatTasks = tasks.filter((task) => task.bucket === "repeat");
+    const drift = await measuredDriftBattery();
+    expect(drift).toHaveLength(repeatTasks.length * 6);
+    const priceTrials = drift.filter((trial) => trial.money_affecting);
+    expect(priceTrials).toHaveLength(repeatTasks.length);
+    expect(priceTrials.every((trial) => trial.guard_action === "abort")).toBe(true);
+    expect(priceTrials.every((trial) => !trial.end_state_matches)).toBe(true);
+  },
+  120_000,
+);
 
-it("emits the all-cold JSON + metrics table and a single NO-SHIP line", () => {
-  const drift = driftBattery(tasks.filter((task) => task.bucket === "repeat"));
-  const report = runAllColdHarness(tasks, drift, "2026-08-04T20:00:00.000Z");
-  const json = renderReportJson(report);
-  const markdown = renderReportMarkdown(report);
-  expect(report.mode).toBe("all-cold-baseline");
-  expect(report.cold_baseline).toEqual({
-    tasks: 9,
-    median: { turns: 8, tokens: 5800, wall_clock_ms: 3100 },
-    total: { turns: 75, tokens: 54030, wall_clock_ms: 36272 },
-  });
-  expect(report.decision).toBe("NO-SHIP");
-  expect(markdown).toContain("| `net_speedup` |");
-  expect(markdown.match(/^NO-SHIP\b/gm)).toHaveLength(1);
-  console.log(`[replay-harness] report.json\n${json}`);
-  console.log(`[replay-harness] report.md\n${markdown}`);
-});
+it(
+  "emits driver-recorded all-cold evidence, metrics, and one NO-SHIP line",
+  async () => {
+    const captured = tasks.filter((task) => task.capture.status === "captured");
+    const drift = await measuredDriftBattery();
+    const report = await runAllColdHarness(tasks, drift, seededColdDriver, {
+      generatedAt: "2026-08-04T20:00:00.000Z",
+      now: measuredClock(captured.map((task) => task.cold_baseline.wall_clock_ms)),
+    });
+    const json = renderReportJson(report);
+    const markdown = renderReportMarkdown(report);
+    expect(report.mode).toBe("all-cold-baseline");
+    expect(report.cold_baseline).toEqual({
+      tasks: 9,
+      median: { turns: 8, tokens: 5800, wall_clock_ms: 3100 },
+      total: { turns: 75, tokens: 54030, wall_clock_ms: 36272 },
+      recordings: expect.arrayContaining([
+        expect.objectContaining({
+          task_id: "whitejade-purchase-r0",
+          end_state_matches: true,
+          provenance: {
+            source: "driver",
+            driver: "fixture-cold-driver",
+            model: "fixture-v1",
+            recorded_at: "2026-08-04T20:00:00.000Z",
+          },
+        }),
+      ]),
+    });
+    expect(report.cold_baseline.recordings).toHaveLength(9);
+    expect(report.decision).toBe("NO-SHIP");
+    expect(markdown).toContain("| `net_speedup` |");
+    expect(markdown).toContain("9 driver-recorded tasks via fixture-cold-driver/fixture-v1");
+    expect(markdown.match(/^NO-SHIP\b/gm)).toHaveLength(1);
+    console.log(`[replay-harness] report.json\n${json}`);
+    console.log(`[replay-harness] report.md\n${markdown}`);
+  },
+  120_000,
+);
 
 it("ships only when speed, correctness, and money safety all clear", () => {
   const successfulHits: TaskObservation[] = Array.from({ length: 10 }, (_, index) => ({
@@ -207,4 +311,28 @@ it("ships only when speed, correctness, and money safety all clear", () => {
   expect(vetoed.metrics.money_escape).toBe(1);
   expect(vetoed.decision).toBe("NO-SHIP");
   expect(vetoed.reasons.some((reason) => reason.startsWith("money-path veto"))).toBe(true);
+
+  const novelFalseHit: TaskObservation = {
+    ...successfulHits[0]!,
+    task_id: "deathwish-purchase-n0",
+    bucket: "novel",
+  };
+  const novelVetoed = buildHarnessReport([...successfulHits, novelFalseHit], caughtDrift);
+  expect(novelVetoed.metrics.invariants.novel_false_hits).toBe(1);
+  expect(novelVetoed.decision).toBe("NO-SHIP");
+  expect(novelVetoed.reasons.some((reason) => reason.startsWith("novel MISS invariant"))).toBe(
+    true,
+  );
+
+  const { warm: _missingWarm, ...incompleteHit } = successfulHits.at(-1)!;
+  const incompleteVetoed = buildHarnessReport(
+    [...successfulHits.slice(0, -1), incompleteHit],
+    caughtDrift,
+  );
+  expect(incompleteVetoed.metrics.invariants.missing_warm_samples).toBe(1);
+  expect(incompleteVetoed.metrics.clean_replay_correctness).toBe(0.9);
+  expect(incompleteVetoed.decision).toBe("NO-SHIP");
+  expect(
+    incompleteVetoed.reasons.some((reason) => reason.startsWith("incomplete replay invariant")),
+  ).toBe(true);
 });
