@@ -170,7 +170,8 @@ beforeEach(() => {
       return Promise.resolve({ card_ref: "card_new" });
     }
     if (path === "/v1/pay/approvals/appr_1/approve") {
-      const { card: _card, ...approval } = approvalBody();
+      const { card, ...approval } = approvalBody();
+      void card;
       const metadata = cardListOverride?.[0] ?? BOUND_CARD;
       return Promise.resolve({
         status: "verified",
@@ -291,9 +292,7 @@ describe("pay page — JIT add-card ceremony", () => {
       false,
     );
     expect(
-      api.apiPost.mock.calls.filter(
-        ([path]) => path === "/v1/pay/approvals/appr_1/bind-card",
-      ),
+      api.apiPost.mock.calls.filter(([path]) => path === "/v1/pay/approvals/appr_1/bind-card"),
     ).toHaveLength(1);
   });
 

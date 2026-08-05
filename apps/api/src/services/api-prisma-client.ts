@@ -346,7 +346,10 @@ export interface ApiPrismaClient {
   };
   pendingPaymentApproval: {
     create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
-    findFirst(args: { where: Record<string, unknown> }): Promise<PendingPaymentApprovalRow | null>;
+    findFirst(args: {
+      where: Record<string, unknown>;
+      select?: { id: true };
+    }): Promise<PendingPaymentApprovalRow | null>;
     updateMany(args: {
       where: Record<string, unknown>;
       data: Record<string, unknown>;

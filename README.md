@@ -54,9 +54,12 @@ and removals, payments, and app-grant changes without storing a PAN or CVV.
 
 `operate_pay` requires a non-empty item and reason, reads the checkout total,
 sends you a short-lived approval link, and submits only after you approve the
-exact purchase. The approval page shows the venue, item, amount, reason, and the
-requesting MCP client's name (for example, Hermes); one passkey prompt both
-signs that approval and releases the card to the checkout operator. A first-time
+exact purchase. The page initially withholds the purchase and card display
+details. Its review action uses one passkey ceremony to unlock the card and send
+an opaque review seal for operator verification; after verification releases the
+details, a second ceremony signs the exact purchase. You then inspect the venue,
+item, amount, reason, card, and requesting MCP client (for example, Hermes) before
+clicking **Approve payment** to relay the prepared final seal. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission. If the checkout exposes PayPal Smart Buttons
 or PayPal-hosted fields, Trusty Squire hands the checkout back before selecting a
@@ -147,9 +150,11 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - App grants are host-scoped, auditable, rate-limitable, and independently revocable. A leaked grant can be revoked without rotating the provider key.
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
-  payment, your phone releases the card only to that checkout operator after
-  you approve the exact details shown on the approval page. Trusty Squire's API
-  and the coding-agent model never receive plaintext PAN or CVV. See the
+  payment, your phone releases the card only to that checkout's ephemeral local
+  operator: transiently while it verifies the passkey-bound review, then for the
+  checkout after you approve the exact details shown on the approval page.
+  Trusty Squire's API and the coding-agent model never receive plaintext PAN or
+  CVV. See the
   [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)
   for the signed mandate's binding contract.
 - Browser screenshots and diagnostics can contain whatever a website visibly rendered. Treat diagnostic artifacts as sensitive and do not ask an agent to re-observe a page after a secret is shown.

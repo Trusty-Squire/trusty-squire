@@ -350,6 +350,9 @@ export default function PaymentApprovalPage() {
       : currentStatus === "expired"
         ? "This payment approval has expired."
         : "This payment is no longer pending.";
+  // The ref preserves whether this approval began card-less across ceremony
+  // refreshes; reading it does not participate in reactive rendering.
+  // eslint-disable-next-line react-hooks/refs
   const isJitOrigin = jitOrigin.current === true;
   const jitBindingMismatch =
     isJitOrigin &&
