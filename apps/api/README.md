@@ -39,8 +39,10 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send a Telegram 3-D Secure nudge to the account's linked chat and return `{ sent }` |
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Poll an account-owned payment approval |
+| `GET` | `/v1/pay/approvals/:id/ceremony` | none | Return only the opaque PRF/HPKE ceremony inputs for a pending approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
-| `POST` | `/v1/pay/approvals/:id/approve` | web | Relay a signed mandate and HPKE-sealed card to the operator |
+| `POST` | `/v1/pay/approvals/:id/approve` | none | Rendezvous a bound mandate and HPKE seal with the waiting account operator without persisting it |
+| `POST` | `/v1/pay/approvals/:id/confirm` | agent | Persist an operator-verified mandate and seal as approved |
 | `GET` | `/health` | none | Liveness |
 
 Client-encrypted card creation accepts optional plaintext `brand` and `last4`
@@ -73,7 +75,13 @@ approval follows the server-enforced seal → bind → approve order. Binding is
 pending-only, write-once, rejects an expired approval, and accepts only an
 `E2ECredential` owned by the same account; an unknown or foreign card returns
 `404`. Approving before a card is bound returns
-`409 { "error": "card_required" }`.
+`409 { "error": "card_required" }`. The unauthenticated ceremony response
+contains only the approval id, status, bound card reference, operator public key,
+and opaque encrypted card blob. Payment details and card display metadata are
+loaded through account-authenticated endpoints only after the local PRF unlock.
+The public approval submission is relayed directly to a waiting authenticated
+operator and is not written to the approval row; only the operator's confirmation
+persists the verified mandate, sealed card, and approved status.
 
 ## Auth model
 

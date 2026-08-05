@@ -12,11 +12,22 @@ import { getVouchflow } from "../../../lib/vouchflow";
 
 interface CeremonyCard {
   blob: string;
+}
+
+interface CardDetails {
   brand: string | null;
   last4: string | null;
 }
 
-interface Approval {
+interface CeremonyApproval {
+  id: string;
+  status: string;
+  card_ref: string | null;
+  operator_pubkey: string;
+  card: CeremonyCard | null;
+}
+
+interface ApprovalDetails {
   id: string;
   status: string;
   merchant: string;
@@ -30,7 +41,10 @@ interface Approval {
   item: string;
   reason: string;
   agent: string;
-  card: CeremonyCard | null;
+}
+
+interface Approval extends ApprovalDetails {
+  card: CardDetails;
 }
 
 interface StoredCard extends E2EBlob {
@@ -78,6 +92,7 @@ function formatAmount(amountCents: number, currency: string): string {
 export default function PaymentApprovalPage() {
   const { id } = useParams<{ id: string }>();
   const router = useRouter();
+  const [ceremony, setCeremony] = useState<CeremonyApproval | null>(null);
   const [approval, setApproval] = useState<Approval | null>(null);
   const [prepared, setPrepared] = useState<PreparedSubmission | null>(null);
   const [submitted, setSubmitted] = useState(false);
@@ -94,13 +109,15 @@ export default function PaymentApprovalPage() {
   }, [id, router]);
 
   const fetchCeremony = useCallback(
-    () => apiGet<Approval>(`/v1/pay/approvals/${encodeURIComponent(id)}/ceremony`),
+    () => apiGet<CeremonyApproval>(`/v1/pay/approvals/${encodeURIComponent(id)}/ceremony`),
     [id],
   );
 
-  const applyCeremony = useCallback((current: Approval) => {
+  const applyCeremony = useCallback((current: CeremonyApproval) => {
     if (jitOrigin.current === null) jitOrigin.current = current.card_ref === null;
-    setApproval(current);
+    setCeremony(current);
+    setApproval(null);
+    setPrepared(null);
     setCardMetadataError(null);
   }, []);
 
@@ -153,7 +170,7 @@ export default function PaymentApprovalPage() {
           if (result.card_ref !== cardId) {
             throw new Error("The payment was attached to an unexpected card.");
           }
-          setApproval((current) =>
+          setCeremony((current) =>
             current === null ? current : { ...current, card_ref: result.card_ref, card: null },
           );
           await refreshCeremony();
@@ -184,16 +201,17 @@ export default function PaymentApprovalPage() {
 
   const prepareApproval = useCallback(async () => {
     if (
-      approval === null ||
-      approval.status !== "pending" ||
-      approval.card_ref === null ||
-      approval.card === null
+      ceremony === null ||
+      ceremony.status !== "pending" ||
+      ceremony.card_ref === null ||
+      ceremony.card === null
     ) {
       return;
     }
     setBusy(true);
     setError(null);
     let key: Uint8Array | undefined;
+    let confirmationKey: Uint8Array | undefined;
     let card: Record<string, unknown> | undefined;
     let cardBytes: Uint8Array | undefined;
     try {
@@ -204,36 +222,65 @@ export default function PaymentApprovalPage() {
       }
       const publicKeyHash = await crypto.subtle.digest(
         "SHA-256",
-        fromBase64Url(approval.operator_pubkey),
+        fromBase64Url(ceremony.operator_pubkey),
       );
+      const recipientPubkeyHash = toBase64Url(new Uint8Array(publicKeyHash));
+      const storedCard = JSON.parse(ceremony.card.blob) as StoredCard;
+      const unlock = await getVouchflow().signPayload({
+        context: "purchase",
+        payload: {
+          approval_id: ceremony.id,
+          recipient_pubkey_hash: recipientPubkeyHash,
+        },
+        minConfidence: "low",
+        prfSalt: fromBase64(storedCard.prf_salt),
+      });
+      key = unlock.prfResult;
+      if (key === undefined) throw new Error("Passkey did not return a PRF result");
+      card = await decryptCard(key, storedCard);
+
+      const details = await apiGet<ApprovalDetails>(`/v1/pay/approvals/${encodeURIComponent(id)}`);
+      if (
+        details.id !== ceremony.id ||
+        details.status !== "pending" ||
+        details.card_ref !== ceremony.card_ref ||
+        details.operator_pubkey !== ceremony.operator_pubkey
+      ) {
+        throw new Error("Payment approval changed while it was being unlocked.");
+      }
+      const metadata = await apiGet<CardDetails & { id: string }>(
+        `/v1/vault/e2e/${encodeURIComponent(ceremony.card_ref)}`,
+      );
+      if (metadata.id !== ceremony.card_ref) {
+        throw new Error("The payment card changed while it was being unlocked.");
+      }
       const payload = {
-        approval_id: approval.id,
-        merchant: approval.merchant,
-        checkout_origin: approval.checkout_origin,
-        amount_cents: approval.amount_cents,
-        currency: approval.currency,
-        nonce: approval.nonce,
-        card_ref: approval.card_ref,
-        recipient_pubkey_hash: toBase64Url(new Uint8Array(publicKeyHash)),
-        item: approval.item,
-        reason: approval.reason,
-        agent: approval.agent,
+        approval_id: details.id,
+        merchant: details.merchant,
+        checkout_origin: details.checkout_origin,
+        amount_cents: details.amount_cents,
+        currency: details.currency,
+        nonce: details.nonce,
+        card_ref: details.card_ref,
+        recipient_pubkey_hash: recipientPubkeyHash,
+        item: details.item,
+        reason: details.reason,
+        agent: details.agent,
       };
-      const storedCard = JSON.parse(approval.card.blob) as StoredCard;
       const sign = await getVouchflow().signPayload({
         context: "purchase",
         payload,
         minConfidence: "low",
         prfSalt: fromBase64(storedCard.prf_salt),
       });
-      key = sign.prfResult;
-      if (key === undefined) throw new Error("Passkey did not return a PRF result");
+      confirmationKey = sign.prfResult;
+      if (confirmationKey === undefined) throw new Error("Passkey did not return a PRF result");
       const aad = new Uint8Array(
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sign.payload)),
       );
-      card = await decryptCard(key, storedCard);
       cardBytes = new TextEncoder().encode(JSON.stringify(card));
-      const sealedCard = await sealToRecipient(approval.operator_pubkey, cardBytes, aad);
+      const sealedCard = await sealToRecipient(details.operator_pubkey, cardBytes, aad);
+      setApproval({ ...details, card: { brand: metadata.brand, last4: metadata.last4 } });
       setPrepared({ jws: sign.assertion, sealed_card: sealedCard });
       setNeedsPasskeySetup(false);
     } catch (err) {
@@ -241,14 +288,19 @@ export default function PaymentApprovalPage() {
         setNeedsPasskeySetup(true);
         return;
       }
+      if (err instanceof ApiError && err.status === 401) {
+        redirectToLogin();
+        return;
+      }
       setError(err instanceof Error ? err.message : "Failed to unlock payment approval.");
     } finally {
       key?.fill(0);
+      confirmationKey?.fill(0);
       cardBytes?.fill(0);
       card = undefined;
       setBusy(false);
     }
-  }, [approval]);
+  }, [ceremony, id, redirectToLogin]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);
@@ -283,21 +335,22 @@ export default function PaymentApprovalPage() {
     }
   }, [approval, id, prepared]);
 
+  const currentStatus = approval?.status ?? ceremony?.status;
   const terminalMessage =
-    approval?.status === "approved"
+    currentStatus === "approved"
       ? "Approved — you can return to your session."
-      : approval?.status === "expired"
+      : currentStatus === "expired"
         ? "This payment approval has expired."
         : "This payment is no longer pending.";
   const isJitOrigin = jitOrigin.current === true;
   const jitBindingMismatch =
     isJitOrigin &&
-    approval !== null &&
-    approval.card_ref !== null &&
-    (savedCardId === null || approval.card_ref !== savedCardId);
+    ceremony !== null &&
+    ceremony.card_ref !== null &&
+    (savedCardId === null || ceremony.card_ref !== savedCardId);
   const jitReviewBlocked =
-    isJitOrigin && (jitBindingMismatch || approval?.card === null || cardMetadataError !== null);
-  const needsCard = approval?.status === "pending" && approval.card_ref === null;
+    isJitOrigin && (jitBindingMismatch || ceremony?.card === null || cardMetadataError !== null);
+  const needsCard = ceremony?.status === "pending" && ceremony.card_ref === null;
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
   const cardLine =
@@ -319,10 +372,10 @@ export default function PaymentApprovalPage() {
       </div>
 
       {error !== null && <div className="app-banner err">{error}</div>}
-      {approval === null && error === null && <p className="app-sub">Loading…</p>}
+      {ceremony === null && error === null && <p className="app-sub">Loading…</p>}
       {submitted && <div className="app-banner ok">Approval sent — operator verifying.</div>}
-      {approval !== null && approval.status !== "pending" && (
-        <div className={`app-banner ${approval.status === "approved" ? "ok" : ""}`}>
+      {ceremony !== null && currentStatus !== "pending" && (
+        <div className={`app-banner ${currentStatus === "approved" ? "ok" : ""}`}>
           {terminalMessage}
         </div>
       )}
@@ -352,8 +405,8 @@ export default function PaymentApprovalPage() {
       )}
 
       {!submitted &&
-        approval?.status === "pending" &&
-        approval.card_ref !== null &&
+        ceremony?.status === "pending" &&
+        ceremony.card_ref !== null &&
         prepared === null && (
           <section className="app-card" aria-labelledby="passkey-heading">
             <h2 className="app-title" id="passkey-heading" style={{ fontSize: "18px" }}>

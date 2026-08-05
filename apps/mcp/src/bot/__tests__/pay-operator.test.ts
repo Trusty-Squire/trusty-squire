@@ -89,7 +89,11 @@ async function harness(
         { status: 201 },
       );
     }
-    if (url.endsWith("/v1/pay/approvals/approval_test") && init?.method === "GET") {
+    if (
+      (url.endsWith("/v1/pay/approvals/approval_test") ||
+        url.endsWith("/v1/pay/approvals/approval_test?wait_for_submission=1")) &&
+      init?.method === "GET"
+    ) {
       approvalPolls += 1;
       const approval = approvalBodies[0]!;
       const operatorPublicKey = String(approval.operator_pubkey);
@@ -260,8 +264,7 @@ describe("operate_pay", () => {
       filledCards,
       resolvedCardRefs,
       confirmationBodies,
-    } =
-      await harness("happy");
+    } = await harness("happy");
 
     expect(result).toMatchObject({
       status: "payment_submitted",
@@ -586,7 +589,11 @@ async function runJit(cfg: {
         { status: 201 },
       );
     }
-    if (url.endsWith("/v1/pay/approvals/appr_jit") && init?.method === "GET") {
+    if (
+      (url.endsWith("/v1/pay/approvals/appr_jit") ||
+        url.endsWith("/v1/pay/approvals/appr_jit?wait_for_submission=1")) &&
+      init?.method === "GET"
+    ) {
       const state = cfg.poll(clock);
       const operatorPubkey = String(approvalBodies[0]!.operator_pubkey);
       if (state.status === "approved") {

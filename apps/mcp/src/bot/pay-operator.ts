@@ -337,7 +337,7 @@ export async function executeOperatePay(
     let claims: JWTPayload | undefined;
     const rejectedCandidates = new Set<string>();
     while (deps.now() < deadline) {
-      const approval = await api.getPaymentApproval(created.id);
+      const approval = await api.getPaymentApproval(created.id, true);
       boundCardRef = approval.card_ref;
       if (approval.status === "expired") {
         return timeoutResult();

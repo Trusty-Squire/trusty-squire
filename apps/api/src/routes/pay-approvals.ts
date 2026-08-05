@@ -115,6 +115,47 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
   requireAgent: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
 }> = async (fastify, opts) => {
+  type Submission = z.infer<typeof approveBody>;
+  type SubmissionWaiter = {
+    accountId: string;
+    resolve: (submission: Submission | null) => void;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  const submissionWaiters = new Map<string, SubmissionWaiter>();
+
+  const waitForSubmission = async (id: string, accountId: string): Promise<Submission | null> =>
+    await new Promise<Submission | null>((resolve) => {
+      const previous = submissionWaiters.get(id);
+      if (previous !== undefined) {
+        clearTimeout(previous.timer);
+        previous.resolve(null);
+      }
+      let waiter: SubmissionWaiter;
+      const timer = setTimeout(() => {
+        if (submissionWaiters.get(id) === waiter) submissionWaiters.delete(id);
+        resolve(null);
+      }, 15_000);
+      waiter = { accountId, resolve, timer };
+      submissionWaiters.set(id, waiter);
+    });
+
+  const deliverSubmission = (id: string, accountId: string, submission: Submission): boolean => {
+    const waiter = submissionWaiters.get(id);
+    if (waiter === undefined || waiter.accountId !== accountId) return false;
+    submissionWaiters.delete(id);
+    clearTimeout(waiter.timer);
+    waiter.resolve(submission);
+    return true;
+  };
+
+  fastify.addHook("onClose", async () => {
+    for (const waiter of submissionWaiters.values()) {
+      clearTimeout(waiter.timer);
+      waiter.resolve(null);
+    }
+    submissionWaiters.clear();
+  });
+
   fastify.get("/v1/pay/config", { preHandler: opts.requireAgent }, async (req, reply) => {
     if (req.auth!.kind !== "agent") return;
     const audience = process.env.VOUCHFLOW_CUSTOMER_ID?.trim();
@@ -201,7 +242,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     },
   );
 
-  fastify.get<{ Params: { id: string } }>(
+  fastify.get<{ Params: { id: string }; Querystring: { wait_for_submission?: string } }>(
     "/v1/pay/approvals/:id",
     { preHandler: opts.requireAny },
     async (req, reply) => {
@@ -216,6 +257,10 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       const now = opts.deps.now?.() ?? new Date();
       const status =
         record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
+      const submission =
+        req.auth!.kind === "agent" && req.query.wait_for_submission === "1" && status === "pending"
+          ? await waitForSubmission(record.id, record.accountId)
+          : null;
       return reply.code(200).send({
         id: record.id,
         status,
@@ -229,16 +274,13 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         item: record.item,
         reason: record.reason,
         agent: record.agent,
-        jws: record.jws,
-        sealed_card: record.sealedCard,
+        jws: submission?.jws ?? record.jws,
+        sealed_card: submission?.sealed_card ?? record.sealedCard,
         expires_at: record.expiresAt.toISOString(),
       });
     },
   );
 
-  // Public, opaque ceremony bootstrap. The approval id resolves the account and
-  // card server-side; no client-supplied account/card identity participates in
-  // the lookup. The encrypted blob is useful only to the account's PRF passkey.
   fastify.get<{ Params: { id: string } }>("/v1/pay/approvals/:id/ceremony", async (req, reply) => {
     const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
     if (record === null) {
@@ -259,25 +301,9 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     return reply.code(200).send({
       id: record.id,
       status,
-      merchant: record.merchant,
-      checkout_origin: record.checkoutOrigin,
-      amount_cents: record.amountCents,
-      currency: record.currency,
-      nonce: record.nonce,
       card_ref: record.cardRef,
       operator_pubkey: record.operatorPubkey,
-      item: record.item,
-      reason: record.reason,
-      agent: record.agent,
-      expires_at: record.expiresAt.toISOString(),
-      card:
-        card === null
-          ? null
-          : {
-              blob: card.blob,
-              brand: card.brand,
-              last4: card.last4,
-            },
+      card: card === null ? null : { blob: card.blob },
     });
   });
 
@@ -366,15 +392,8 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       reply.code(403).send({ error: "payment_approval_binding_mismatch" });
       return;
     }
-    const staged = await opts.deps.pendingPaymentApprovalStore.stageForAccount(
-      req.params.id,
-      record.accountId,
-      parsed.data.jws,
-      parsed.data.sealed_card,
-      now,
-    );
-    if (!staged) {
-      reply.code(409).send({ error: "payment_approval_not_pending" });
+    if (!deliverSubmission(req.params.id, record.accountId, parsed.data)) {
+      reply.code(409).send({ error: "payment_operator_unavailable" });
       return;
     }
     return reply.code(202).send({ status: "pending" });
@@ -391,12 +410,44 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
         return;
       }
+      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+        req.params.id,
+        auth.account_id,
+      );
+      if (record === null) {
+        reply.code(404).send({ error: "payment_approval_not_found" });
+        return;
+      }
+      const now = opts.deps.now?.() ?? new Date();
+      if (record.cardRef === null) {
+        reply.code(409).send({ error: "card_required" });
+        return;
+      }
+      if (record.status !== "pending") {
+        const sameApprovedSubmission =
+          record.status === "approved" &&
+          record.jws === parsed.data.jws &&
+          record.sealedCard === parsed.data.sealed_card;
+        if (sameApprovedSubmission) {
+          return reply.code(200).send({ status: "approved" });
+        }
+        reply.code(409).send({ error: "payment_approval_candidate_changed" });
+        return;
+      }
+      if (record.expiresAt <= now) {
+        reply.code(409).send({ error: "payment_approval_expired" });
+        return;
+      }
+      if (!submissionMatchesApproval(parsed.data, record)) {
+        reply.code(403).send({ error: "payment_approval_binding_mismatch" });
+        return;
+      }
       const confirmed = await opts.deps.pendingPaymentApprovalStore.approveForAccount(
         req.params.id,
         auth.account_id,
         parsed.data.jws,
         parsed.data.sealed_card,
-        opts.deps.now?.() ?? new Date(),
+        now,
       );
       if (!confirmed) {
         reply.code(409).send({ error: "payment_approval_candidate_changed" });

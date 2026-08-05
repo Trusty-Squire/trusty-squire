@@ -64,7 +64,7 @@ vi.mock("../../../../components/CardEntry", () => ({
 
 import PaymentApprovalPage from "../page";
 
-// The ceremony response carries metadata only for the server-bound card.
+// Authenticated detail responses carry metadata only for the server-bound card.
 const BOUND_CARD = {
   id: "card_new",
   label: "Personal",
@@ -112,6 +112,17 @@ function approvalBody() {
   };
 }
 
+function ceremonyBody() {
+  const current = approvalBody();
+  return {
+    id: current.id,
+    status: current.status,
+    card_ref: current.card_ref,
+    operator_pubkey: current.operator_pubkey,
+    card: current.card === null ? null : { blob: current.card.blob },
+  };
+}
+
 beforeEach(() => {
   bound = false;
   cardListFailures = 0;
@@ -138,7 +149,18 @@ beforeEach(() => {
         cardListFailures -= 1;
         return Promise.reject(new Error("card unavailable"));
       }
-      return Promise.resolve(approvalBody());
+      return Promise.resolve(ceremonyBody());
+    }
+    if (path === "/v1/pay/approvals/appr_1") {
+      const { card: _card, ...details } = approvalBody();
+      return Promise.resolve(details);
+    }
+    if (path === "/v1/vault/e2e/card_new") {
+      const metadata = cardListOverride?.[0] ?? BOUND_CARD;
+      return Promise.resolve({
+        ...metadata,
+        blob: JSON.stringify({ prf_salt: "AAAA", ciphertext: "encrypted" }),
+      });
     }
     return Promise.reject(new Error(`unexpected GET ${path}`));
   });
@@ -199,15 +221,17 @@ describe("pay page — JIT add-card ceremony", () => {
     );
   });
 
-  it("uses the passkey-only hot path for an already-bound approval", async () => {
+  it("loads authenticated payment details only after the passkey unlock", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
     const review = await screen.findByRole("button", { name: /Review with passkey/ });
     expect(router.replace).not.toHaveBeenCalled();
     expect(screen.queryByText("CASETiFY")).toBeNull();
+    expect(api.apiGet).not.toHaveBeenCalledWith("/v1/pay/approvals/appr_1");
     const user = userEvent.setup();
     await user.click(review);
     await screen.findByRole("button", { name: /Approve payment/ });
+    expect(api.apiGet).toHaveBeenCalledWith("/v1/pay/approvals/appr_1");
     expect(screen.queryByTestId("card-entry")).toBeNull();
     const anchor = screen.getByText(/Pay with/);
     expect(anchor.textContent).toContain("··4242");
