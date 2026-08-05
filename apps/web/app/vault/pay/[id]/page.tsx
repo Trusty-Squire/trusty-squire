@@ -80,6 +80,7 @@ export default function PaymentApprovalPage() {
   const router = useRouter();
   const [approval, setApproval] = useState<Approval | null>(null);
   const [prepared, setPrepared] = useState<PreparedSubmission | null>(null);
+  const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [binding, setBinding] = useState(false);
   const [savedCardId, setSavedCardId] = useState<string | null>(null);
@@ -273,7 +274,7 @@ export default function PaymentApprovalPage() {
     setError(null);
     try {
       await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/approve`, prepared);
-      setApproval({ ...approval, status: "approved" });
+      setSubmitted(true);
       setPrepared(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to approve payment.");
@@ -319,13 +320,14 @@ export default function PaymentApprovalPage() {
 
       {error !== null && <div className="app-banner err">{error}</div>}
       {approval === null && error === null && <p className="app-sub">Loading…</p>}
+      {submitted && <div className="app-banner ok">Approval sent — operator verifying.</div>}
       {approval !== null && approval.status !== "pending" && (
         <div className={`app-banner ${approval.status === "approved" ? "ok" : ""}`}>
           {terminalMessage}
         </div>
       )}
 
-      {needsCard && (
+      {!submitted && needsCard && (
         <section aria-labelledby="add-card-heading">
           <h2 className="sect-label" id="add-card-heading">
             Card
@@ -349,48 +351,51 @@ export default function PaymentApprovalPage() {
         </section>
       )}
 
-      {approval?.status === "pending" && approval.card_ref !== null && prepared === null && (
-        <section className="app-card" aria-labelledby="passkey-heading">
-          <h2 className="app-title" id="passkey-heading" style={{ fontSize: "18px" }}>
-            Passkey required
-          </h2>
-          <p className="app-sub" style={{ marginTop: "12px" }}>
-            Payment details stay hidden until your passkey unlocks the saved card.
-          </p>
-          {jitReviewBlocked ? (
-            <div className="app-banner err">
-              {jitBindingMismatch
-                ? "This payment was attached to a different card than the one you added."
-                : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
-              {!jitBindingMismatch && (
-                <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
-                  Retry
-                </button>
-              )}
-            </div>
-          ) : needsPasskeySetup ? (
-            <button
-              className="btn-primary"
-              type="button"
-              onClick={() => void setUpPasskey()}
-              disabled={busy}
-            >
-              {busy ? "Setting up…" : "Sign in and set up passkey"}
-            </button>
-          ) : (
-            <button
-              className="btn-primary"
-              type="button"
-              onClick={() => void prepareApproval()}
-              disabled={busy}
-            >
-              {busy ? "Unlocking…" : "Review with passkey"}
-            </button>
-          )}
-        </section>
-      )}
+      {!submitted &&
+        approval?.status === "pending" &&
+        approval.card_ref !== null &&
+        prepared === null && (
+          <section className="app-card" aria-labelledby="passkey-heading">
+            <h2 className="app-title" id="passkey-heading" style={{ fontSize: "18px" }}>
+              Passkey required
+            </h2>
+            <p className="app-sub" style={{ marginTop: "12px" }}>
+              Payment details stay hidden until your passkey unlocks the saved card.
+            </p>
+            {jitReviewBlocked ? (
+              <div className="app-banner err">
+                {jitBindingMismatch
+                  ? "This payment was attached to a different card than the one you added."
+                  : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
+                {!jitBindingMismatch && (
+                  <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
+                    Retry
+                  </button>
+                )}
+              </div>
+            ) : needsPasskeySetup ? (
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={() => void setUpPasskey()}
+                disabled={busy}
+              >
+                {busy ? "Setting up…" : "Sign in and set up passkey"}
+              </button>
+            ) : (
+              <button
+                className="btn-primary"
+                type="button"
+                onClick={() => void prepareApproval()}
+                disabled={busy}
+              >
+                {busy ? "Unlocking…" : "Review with passkey"}
+              </button>
+            )}
+          </section>
+        )}
 
-      {approval?.status === "pending" && prepared !== null && (
+      {!submitted && approval?.status === "pending" && prepared !== null && (
         <section className="app-card" aria-labelledby="payment-merchant">
           <h2 className="app-title" id="payment-merchant" style={{ fontSize: "18px" }}>
             {approval.merchant}

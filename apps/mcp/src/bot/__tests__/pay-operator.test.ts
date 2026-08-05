@@ -32,6 +32,7 @@ const SYNTHETIC_CARD = {
 
 type Mode =
   | "happy"
+  | "junk_then_happy"
   | "tampered_amount"
   | "tampered_origin"
   | "wrong_recipient"
@@ -59,8 +60,10 @@ async function harness(
   const filledCards: CheckoutCard[] = [];
   const notifyCalls: string[] = [];
   const resolvedCardRefs: string[] = [];
+  const confirmationBodies: Array<Record<string, unknown>> = [];
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
+  let approvalPolls = 0;
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -84,6 +87,7 @@ async function harness(
       );
     }
     if (url.endsWith("/v1/pay/approvals/approval_test") && init?.method === "GET") {
+      approvalPolls += 1;
       const approval = approvalBodies[0]!;
       const operatorPublicKey = String(approval.operator_pubkey);
       const recipientHash = createHash("sha256")
@@ -129,15 +133,19 @@ async function harness(
       );
       return Response.json({
         id: "approval_test",
-        status: "approved",
+        status: mode === "happy" || mode === "junk_then_happy" ? "pending" : "approved",
         ...CHECKOUT,
         nonce,
         card_ref: "card_test",
         operator_pubkey: operatorPublicKey,
         jws: assertion,
-        sealed_card: sealedCard,
+        sealed_card: mode === "junk_then_happy" && approvalPolls === 1 ? "junk" : sealedCard,
         expires_at: new Date(Date.now() + 60_000).toISOString(),
       });
+    }
+    if (url.endsWith("/v1/pay/approvals/approval_test/confirm") && init?.method === "POST") {
+      confirmationBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return Response.json({ status: "approved" });
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/notify-3ds") && init?.method === "POST") {
       notifyCalls.push(url);
@@ -208,13 +216,21 @@ async function harness(
     filledCards,
     notifyCalls,
     resolvedCardRefs,
+    confirmationBodies,
     browser,
   };
 }
 
 describe("operate_pay", () => {
   it("verifies the mandate, opens the card, fills the checkout, and audits last4 only", async () => {
-    const { result, approvalBodies, auditBodies, filledCards, resolvedCardRefs } =
+    const {
+      result,
+      approvalBodies,
+      auditBodies,
+      filledCards,
+      resolvedCardRefs,
+      confirmationBodies,
+    } =
       await harness("happy");
 
     expect(result).toMatchObject({
@@ -232,6 +248,7 @@ describe("operate_pay", () => {
     expect(approvalBodies[0]).not.toHaveProperty("agent");
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
     expect(resolvedCardRefs).toEqual(["card_test"]);
+    expect(confirmationBodies).toHaveLength(1);
     expect(auditBodies).toEqual([
       {
         merchant: CHECKOUT.merchant,
@@ -245,6 +262,15 @@ describe("operate_pay", () => {
     const auditJson = JSON.stringify(auditBodies);
     expect(auditJson).not.toContain(SYNTHETIC_CARD.pan);
     expect(auditJson).not.toContain(SYNTHETIC_CARD.cvv);
+  });
+
+  it("ignores a junk pending seal and confirms a valid replacement", async () => {
+    const { result, filledCards, confirmationBodies } = await harness("junk_then_happy");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(confirmationBodies).toHaveLength(1);
+    expect(confirmationBodies[0]).not.toMatchObject({ sealed_card: "junk" });
   });
 
   it("rejects a validly-signed mandate whose amount differs from the live checkout", async () => {

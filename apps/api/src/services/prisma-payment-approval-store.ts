@@ -131,9 +131,30 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
         id,
         account_id: accountId,
         status: "pending",
+        jws,
+        sealed_card: sealedCard,
         expires_at: { gt: now },
       },
-      data: { jws, sealed_card: sealedCard, status: "approved" },
+      data: { status: "approved" },
+    });
+    return result.count > 0;
+  }
+
+  async stageForAccount(
+    id: string,
+    accountId: string,
+    jws: string,
+    sealedCard: string,
+    now: Date,
+  ): Promise<boolean> {
+    const result = await this.prisma.pendingPaymentApproval.updateMany({
+      where: {
+        id,
+        account_id: accountId,
+        status: "pending",
+        expires_at: { gt: now },
+      },
+      data: { jws, sealed_card: sealedCard },
     });
     return result.count > 0;
   }

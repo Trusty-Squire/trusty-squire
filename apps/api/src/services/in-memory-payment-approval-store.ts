@@ -36,6 +36,13 @@ export interface PendingPaymentApprovalStore {
     cardRef: string,
     now: Date,
   ): Promise<BindCardForAccountResult>;
+  stageForAccount(
+    id: string,
+    accountId: string,
+    jws: string,
+    sealedCard: string,
+    now: Date,
+  ): Promise<boolean>;
   approveForAccount(
     id: string,
     accountId: string,
@@ -119,13 +126,34 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
       record === undefined ||
       record.accountId !== accountId ||
       record.status !== "pending" ||
+      record.jws !== jws ||
+      record.sealedCard !== sealedCard ||
+      record.expiresAt <= now
+    ) {
+      return false;
+    }
+    record.status = "approved";
+    return true;
+  }
+
+  async stageForAccount(
+    id: string,
+    accountId: string,
+    jws: string,
+    sealedCard: string,
+    now: Date,
+  ): Promise<boolean> {
+    const record = this.records.get(id);
+    if (
+      record === undefined ||
+      record.accountId !== accountId ||
+      record.status !== "pending" ||
       record.expiresAt <= now
     ) {
       return false;
     }
     record.jws = jws;
     record.sealedCard = sealedCard;
-    record.status = "approved";
     return true;
   }
 }

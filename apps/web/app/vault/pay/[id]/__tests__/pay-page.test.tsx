@@ -359,6 +359,8 @@ describe("pay page — passkey privacy gate", () => {
         }),
       ),
     );
+    expect(await screen.findByText("Approval sent — operator verifying.")).toBeTruthy();
+    expect(screen.queryByText(/Approved —/)).toBeNull();
     expect(router.replace).not.toHaveBeenCalled();
   });
 

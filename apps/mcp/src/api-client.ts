@@ -164,6 +164,13 @@ export class ApiClient {
     return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}`);
   }
 
+  async confirmPaymentApproval(
+    id: string,
+    submission: { jws: string; sealed_card: string },
+  ): Promise<{ status: "approved" }> {
+    return this.post(`/v1/pay/approvals/${encodeURIComponent(id)}/confirm`, submission);
+  }
+
   async getPaymentConfig(): Promise<{ vouchflow_audience?: string }> {
     return this.get("/v1/pay/config");
   }

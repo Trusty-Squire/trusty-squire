@@ -366,17 +366,43 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       reply.code(403).send({ error: "payment_approval_binding_mismatch" });
       return;
     }
-    const approved = await opts.deps.pendingPaymentApprovalStore.approveForAccount(
+    const staged = await opts.deps.pendingPaymentApprovalStore.stageForAccount(
       req.params.id,
       record.accountId,
       parsed.data.jws,
       parsed.data.sealed_card,
       now,
     );
-    if (!approved) {
+    if (!staged) {
       reply.code(409).send({ error: "payment_approval_not_pending" });
       return;
     }
-    return reply.code(200).send({ status: "approved" });
+    return reply.code(202).send({ status: "pending" });
   });
+
+  fastify.post<{ Params: { id: string } }>(
+    "/v1/pay/approvals/:id/confirm",
+    { preHandler: opts.requireAgent },
+    async (req, reply) => {
+      const auth = req.auth!;
+      if (auth.kind !== "agent") return;
+      const parsed = approveBody.safeParse(req.body);
+      if (!parsed.success) {
+        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+        return;
+      }
+      const confirmed = await opts.deps.pendingPaymentApprovalStore.approveForAccount(
+        req.params.id,
+        auth.account_id,
+        parsed.data.jws,
+        parsed.data.sealed_card,
+        opts.deps.now?.() ?? new Date(),
+      );
+      if (!confirmed) {
+        reply.code(409).send({ error: "payment_approval_candidate_changed" });
+        return;
+      }
+      return reply.code(200).send({ status: "approved" });
+    },
+  );
 };
