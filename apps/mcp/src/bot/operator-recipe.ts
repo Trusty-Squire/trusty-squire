@@ -180,6 +180,7 @@ export const OperatorRecipeSchema = z
     // mid-flow single-use links (a verify-email URL became the entry, so the
     // replay opened on an expired-token dead page — the plunk-recipe bug).
     entry_url: z.string().max(2000).optional(),
+    entry_mode: z.literal("runtime_service_url").optional(),
     allowed_hosts: z.array(z.string().max(253)).max(20).default([]),
     trace: z.array(TraceEntrySchema).max(200),
     secrets: z.array(SecretRefSchema).max(20).default([]),
@@ -191,6 +192,13 @@ export const OperatorRecipeSchema = z
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "operator recipe verb and domain must be present together",
+      });
+    }
+    if (recipe.entry_mode === "runtime_service_url" && recipe.entry_url !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["entry_url"],
+        message: "runtime-resolved operator recipes cannot persist an entry URL",
       });
     }
     recipe.trace.forEach((entry, index) => {
@@ -652,6 +660,26 @@ export function resolveRecipeTarget<T extends RecipeTargetElement>(
   return null;
 }
 
+export function resolveRecipeFieldTarget<T extends RecipeTargetElement>(
+  elements: readonly T[],
+  target: RecipeTarget,
+): RecipeTargetResolution<T> | null {
+  const resolution = resolveRecipeTarget(elements, target);
+  if (resolution === null) return null;
+  const fellPastStrongIdentity =
+    (target.dom_hint?.testid !== undefined || target.dom_hint?.id !== undefined) &&
+    resolution.via !== "testid" &&
+    resolution.via !== "id";
+  if (
+    fellPastStrongIdentity &&
+    (target.near_text_hint === undefined ||
+      filterByNearTextHint([resolution.element], target.near_text_hint, elements).length !== 1)
+  ) {
+    return null;
+  }
+  return resolution;
+}
+
 export function hasRecipeTargetCandidate<T extends RecipeTargetElement>(
   elements: readonly T[],
   target: RecipeTarget,
@@ -729,7 +757,7 @@ export function verifyFilledFieldValues(
   expectedFields: readonly FilledFieldExpectation[],
 ): FieldValueVerification {
   for (const expected of expectedFields) {
-    const resolved = resolveRecipeTarget(elements, expected.target);
+    const resolved = resolveRecipeFieldTarget(elements, expected.target);
     const field =
       expected.hole ?? expected.target.accessible_name ?? expected.target.dom_hint?.name ?? "field";
     if (resolved === null) return { ok: false, reason: "field_missing", field };
@@ -781,12 +809,17 @@ export function isSingleUseUrl(rawUrl: string): boolean {
   return u.pathname.split("/").some(looksOpaqueToken); // or in a path segment
 }
 
-export function recipeEntryUrl(recipe: OperatorRecipe): string | null {
+export function recipeEntryUrl(recipe: OperatorRecipe, runtimeServiceUrl?: string): string | null {
+  if (recipe.entry_mode === "runtime_service_url") return runtimeServiceUrl ?? null;
   // Prefer the recipe's canonical entry (the session's start URL). Recipes
   // synthesized before entry_url existed fall back to the first STABLE trace
   // goto — skipping single-use verification/magic links, which must never be a
   // replay entry (opening one lands on an expired-token dead page).
-  if (recipe.entry_url !== undefined && recipe.entry_url.length > 0) {
+  if (
+    recipe.entry_url !== undefined &&
+    recipe.entry_url.length > 0 &&
+    !isSingleUseUrl(recipe.entry_url)
+  ) {
     return recipe.entry_url;
   }
   const firstStableGoto = recipe.trace.find((t) => {

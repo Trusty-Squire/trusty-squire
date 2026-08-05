@@ -133,6 +133,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
       // the JIT add-card ceremony.
     }
+    let resolvedCardRef: string | null = null;
     const result = await executeOperatePay(
       {
         ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
@@ -147,18 +148,26 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       },
       api,
       await activeProvisionBrowserForPayment(),
-      context !== undefined
-        ? {
-            surfaceApprovalUrl: async (url) => {
-              await context.notifyUser(`Approve this payment on your phone: ${url}`, {
-                approval_url: url,
-              });
-            },
-          }
-        : {},
+      {
+        ...(context !== undefined
+          ? {
+              surfaceApprovalUrl: async (url: string) => {
+                await context.notifyUser(`Approve this payment on your phone: ${url}`, {
+                  approval_url: url,
+                });
+              },
+            }
+          : {}),
+        onCardResolved: (value) => {
+          resolvedCardRef = value;
+        },
+      },
     );
     if (result.status === "payment_submitted" || result.status === "payment_3ds_required") {
-      recordActivePaymentProvenance();
+      if (resolvedCardRef === null) {
+        throw new Error("operate_pay succeeded without an action-time card source attestation");
+      }
+      recordActivePaymentProvenance(resolvedCardRef);
     }
     return result;
   },

@@ -1067,9 +1067,13 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
         },
       };
     }
-    const entry = recipeEntryUrl(recipe);
+    const entry = recipeEntryUrl(recipe, args.service_url);
     if (entry === null) {
-      throw new Error(`operator-recipe "${recipe.name}" has no entry (goto) step to start from`);
+      throw new Error(
+        recipe.entry_mode === "runtime_service_url"
+          ? `operator-recipe "${recipe.name}" requires verb + service_url to resolve its runtime entry`
+          : `operator-recipe "${recipe.name}" has no stable entry (goto) step to start from`,
+      );
     }
     const { url, missing } = fillTemplate(entry, args.params ?? {});
     if (missing.length > 0) {

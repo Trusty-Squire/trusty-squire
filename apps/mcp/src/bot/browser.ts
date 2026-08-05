@@ -3738,11 +3738,43 @@ export class BrowserController {
       throw new Error("setPhoneCountry: empty country argument");
     }
     await this.clearPhoneCountryMarkers();
+    await this.page
+      .locator('[data-ts-phone-country-control="1"]')
+      .evaluateAll((elements) => {
+        elements.forEach((element) => element.removeAttribute("data-ts-phone-country-control"));
+      })
+      .catch(() => undefined);
     if (await this.trySetPhoneCountryNativeSelect(query)) return;
     throw new Error(
       "set_phone_country: no supported native phone-country <select> found " +
         "(this widget family is not supported yet) — enter a valid contact number instead.",
     );
+  }
+
+  async verifyPhoneCountry(country: string): Promise<boolean> {
+    if (!this.page) return false;
+    const query = classifyPhoneCountryQuery(country);
+    if (query.dialCode === undefined && query.iso2 === undefined && query.name === undefined) {
+      return false;
+    }
+    const selected = await this.page.evaluate(() => {
+      const control = document.querySelector('select[data-ts-phone-country-control="1"]');
+      if (!(control instanceof HTMLSelectElement)) return null;
+      const option = control.selectedOptions[0];
+      return option === undefined
+        ? null
+        : {
+            value: option.value,
+            text: (option.textContent ?? "").replace(/\s+/g, " ").trim(),
+          };
+    });
+    if (selected === null) return false;
+    const option: PhoneCountryOption = {
+      text: selected.text.length > 0 ? selected.text : undefined,
+      iso2: /^[A-Za-z]{2}$/.test(selected.value) ? selected.value.toUpperCase() : undefined,
+      dialCode: /^\+?\d{1,4}$/.test(selected.value) ? selected.value.replace(/\D/g, "") : undefined,
+    };
+    return phoneCountryOptionMatches(query, option);
   }
 
   // Strategy 1 — a native <select> that governs the phone country (react-
@@ -3858,6 +3890,7 @@ export class BrowserController {
         else sel.value = val;
         sel.dispatchEvent(new Event("input", { bubbles: true }));
         sel.dispatchEvent(new Event("change", { bubbles: true }));
+        sel.setAttribute("data-ts-phone-country-control", "1");
         return true;
       },
       { marker: best.marker, val: value },

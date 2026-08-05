@@ -43,6 +43,7 @@ interface PayDependencies {
   jitApprovalTimeoutMs: number;
   pollIntervalMs: number;
   surfaceApprovalUrl: (url: string) => void | Promise<void>;
+  onCardResolved: (cardRef: string) => void;
 }
 
 const cardSchema = z.object({
@@ -229,6 +230,7 @@ function defaultDependencies(): PayDependencies {
         `${JSON.stringify({ marker: "payment-approval", approval_url: url })}\n`,
       );
     },
+    onCardResolved: () => undefined,
   };
 }
 
@@ -386,6 +388,7 @@ export async function executeOperatePay(
         approval_url: approvalUrl,
       };
     }
+    deps.onCardResolved(cardRef);
 
     const publicKeyBytes = fromBase64Url(keypair.publicKey);
     const recipientHash = createHash("sha256").update(publicKeyBytes).digest();

@@ -16,6 +16,7 @@ import {
   operatorRecipeDomain,
   operatorRecipeKey,
   readRecipeForTask,
+  resolveRecipeFieldTarget,
   resolveRecipeTarget,
   tagProvenanceValue,
   tagTraceProvenance,
@@ -204,6 +205,40 @@ describe("ordered target fallback", () => {
       }),
     ).toMatchObject({ via: "id", element: { selector: "#target" } });
     expect(resolveRecipeTarget(duplicateTestIds, { dom_hint: { testid: "primary" } })).toBeNull();
+  });
+
+  it("requires owner context before a money field falls back to name", () => {
+    const billing = {
+      ...elements[0]!,
+      testId: "billing-city",
+      name: "city",
+      ariaLabel: "City",
+      selector: "#billing-city",
+    };
+    expect(
+      resolveRecipeFieldTarget([billing], {
+        dom_hint: { testid: "shipping-city", name: "city" },
+        accessible_name: "City",
+      }),
+    ).toBeNull();
+    expect(
+      resolveRecipeFieldTarget([{ ...billing, name: null }], {
+        dom_hint: { testid: "shipping-city" },
+        role_hint: "textbox",
+        accessible_name: "City",
+      }),
+    ).toBeNull();
+    const inventory = [
+      { selector: "#shipping-label", visibleText: "Shipping", role: null },
+      billing,
+    ];
+    expect(
+      resolveRecipeFieldTarget(inventory, {
+        dom_hint: { testid: "shipping-city", name: "city" },
+        accessible_name: "City",
+        near_text_hint: "Shipping",
+      })?.element.selector,
+    ).toBe("#billing-city");
   });
 });
 
@@ -497,6 +532,27 @@ describe("single-use link handling (replay-entry safety)", () => {
       ],
     };
     expect(recipeEntryUrl(r)).toBe("https://svc.example.com/login");
+  });
+
+  it("recipeEntryUrl ignores a persisted single-use entry", () => {
+    const r: OperatorRecipe = {
+      ...RECIPE,
+      entry_url: "https://svc.example.com/magic?code=ab12cd34ef56gh78ij90kl",
+      trace: [{ action: { kind: "goto", url_template: "https://svc.example.com/login" } }],
+    };
+    expect(recipeEntryUrl(r)).toBe("https://svc.example.com/login");
+  });
+
+  it("recipeEntryUrl resolves runtime entries from the current service URL", () => {
+    const r: OperatorRecipe = {
+      ...RECIPE,
+      entry_url: undefined,
+      entry_mode: "runtime_service_url",
+    };
+    expect(recipeEntryUrl(r)).toBeNull();
+    expect(recipeEntryUrl(r, "https://svc.example.com/signup")).toBe(
+      "https://svc.example.com/signup",
+    );
   });
 
   it("recipeEntryUrl is null when the only goto is single-use (no dead-page entry)", () => {
