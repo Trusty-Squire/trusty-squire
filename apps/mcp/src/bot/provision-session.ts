@@ -48,9 +48,9 @@ import {
   fillTemplate,
   hasRecipeTargetCandidate,
   isSingleUseUrl,
-  knownRecipeInputHolesForValue,
   knownRecipeInputValue,
   operatorRecipeDomain,
+  resolveRecipeRepairTarget,
   resolveRecipeTarget,
   verifyFilledFieldValues,
   writeRecipe,
@@ -3231,14 +3231,8 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
       throw new Error(`duplicate value source for trace step ${source.traceIndex}`);
     }
     recordedIndexes.add(source.traceIndex);
-    const matchingHoles = knownRecipeInputHolesForValue(inputs, source.literal);
     if (source.hole === undefined) {
-      if (matchingHoles.length > 0) {
-        throw new Error(
-          `known input value at trace step ${source.traceIndex} lacks explicit provenance`,
-        );
-      }
-      continue;
+      throw new Error(`value at trace step ${source.traceIndex} lacks explicit provenance`);
     }
     const authoritative = knownRecipeInputValue(inputs, source.hole);
     if (authoritative === undefined) {
@@ -3259,6 +3253,30 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
     }
     entry.action.value = { hole: source.hole };
   }
+  for (const [traceIndex, entry] of trace.entries()) {
+    const value = entry.action.value;
+    if (value === undefined || typeof value === "string" || recordedIndexes.has(traceIndex)) {
+      continue;
+    }
+    if (entry.action.kind === "type_secret") {
+      const authoritative = knownRecipeInputValue(inputs, value.hole);
+      const injected =
+        entry.action.slot === undefined ? undefined : session.secretSlots.get(entry.action.slot);
+      if (authoritative === undefined || injected === undefined || authoritative !== injected) {
+        throw new Error(`provenance ${value.hole} does not match the injected credential`);
+      }
+      continue;
+    }
+    if (entry.action.kind === "operate_pay") {
+      if (value.hole !== "card" || inputs.card === undefined) {
+        throw new Error(`provenance ${value.hole} has no authoritative operate_remember input`);
+      }
+      continue;
+    }
+    if (knownRecipeInputValue(inputs, value.hole) === undefined) {
+      throw new Error(`provenance ${value.hole} has no authoritative operate_remember input`);
+    }
+  }
   return trace;
 }
 
@@ -3269,7 +3287,7 @@ export async function rememberRecipe(
     goal: string;
     postcondition: Postcondition;
     verb?: OperatorVerb;
-    inputs?: KnownRecipeInputs;
+    inputs: KnownRecipeInputs;
   },
 ): Promise<{
   file: string;
@@ -3284,6 +3302,9 @@ export async function rememberRecipe(
     throw new Error(
       "operate_remember refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
     );
+  }
+  if (opts.inputs === undefined) {
+    throw new Error("operate_remember refused: complete provenance inputs are required");
   }
   // Record only through the existing machine-checkable success gate. Previously
   // operate_remember wrote first and operate_finish_task verified later, leaving
@@ -3304,7 +3325,7 @@ export async function rememberRecipe(
     // mid-flow single-use link inferred from the trace.
     entry_url: session.startUrl,
     allowed_hosts: [...new Set(egressSeedHosts(session))],
-    trace: traceWithVerifiedProvenance(session, opts.inputs ?? {}),
+    trace: traceWithVerifiedProvenance(session, opts.inputs),
     secrets,
     postcondition: opts.postcondition,
   };
@@ -3499,6 +3520,7 @@ function verifyReplayFieldInElements(
   session: Session,
   expected: ReplayExpectedField,
   elements: readonly InteractiveElement[],
+  allowCommittedSelect = false,
 ): { ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" } {
   if (expected.kind === "set_phone_country" || expected.target === null) {
     return { ok: false, reason: "field_missing" };
@@ -3513,12 +3535,22 @@ function verifyReplayFieldInElements(
       kind: expected.kind === "select" ? "select" : "type",
     },
   ]);
-  if (guard.ok) return { ok: true };
+  if (guard.ok) {
+    if (expected.kind === "select") {
+      session.committedSelectValues.delete(resolution.element.selector);
+    }
+    return { ok: true };
+  }
   if (
+    allowCommittedSelect &&
     expected.kind === "select" &&
     session.committedSelectValues.get(resolution.element.selector) === expected.expected
   ) {
+    session.committedSelectValues.delete(resolution.element.selector);
     return { ok: true };
+  }
+  if (expected.kind === "select") {
+    session.committedSelectValues.delete(resolution.element.selector);
   }
   return { ok: false, reason: guard.reason };
 }
@@ -3526,13 +3558,14 @@ function verifyReplayFieldInElements(
 async function verifyReplayField(
   session: Session,
   expected: ReplayExpectedField,
+  allowCommittedSelect = false,
 ): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
   if (expected.kind === "set_phone_country") return { ok: false, reason: "field_missing" };
   const target = expected.target;
   if (target === null) return { ok: false, reason: "field_missing" };
   const fresh = await session.browser.extractInteractiveElements();
   session.lastElements = fresh;
-  return verifyReplayFieldInElements(session, expected, fresh);
+  return verifyReplayFieldInElements(session, expected, fresh, allowCommittedSelect);
 }
 
 async function captureReplayRepairVerification(
@@ -3575,29 +3608,22 @@ async function captureReplayRepairVerification(
   if (resolvedEl === null) {
     throw new Error(`replay repair target mismatch for ${expected.hole}`);
   }
-  const replacementTarget = recipeTargetFor(resolvedEl, session.lastElements);
   const recordedTargetMatches = recordedResolution?.element.selector === resolvedEl.selector;
-  const replacementSemanticsMatch =
-    expected.target !== null &&
-    replacementTarget !== undefined &&
-    [
-      [expected.target.accessible_name, replacementTarget.accessible_name],
-      [expected.target.near_text_hint, replacementTarget.near_text_hint],
-      [expected.target.dom_hint?.name, replacementTarget.dom_hint?.name],
-      [expected.target.visible_text, replacementTarget.visible_text],
-    ].some(
-      ([recorded, replacement]) =>
-        recorded !== undefined && replacement !== undefined && norm(recorded) === norm(replacement),
-    );
+  const semanticResolution =
+    expected.target === null
+      ? null
+      : resolveRecipeRepairTarget(session.lastElements, expected.target);
+  const replacementSemanticsMatch = semanticResolution?.selector === resolvedEl.selector;
   if (!recordedTargetMatches && !replacementSemanticsMatch) {
     throw new Error(`replay repair target mismatch for ${expected.hole}`);
   }
+  const replacementTarget = recipeTargetFor(resolvedEl, session.lastElements);
   if (replacementTarget === undefined) {
     throw new Error(`replay repair target could not be attested for ${expected.hole}`);
   }
   expected.target = replacementTarget;
   state.retiredFields.delete(stepIndex);
-  const guard = await verifyReplayField(session, expected);
+  const guard = await verifyReplayField(session, expected, action.kind === "select");
   if (!guard.ok) {
     markReplayFailure(session, guard.reason, expected.hole);
     throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
@@ -3637,7 +3663,7 @@ async function refreshReplayVerificationAfterAction(
       throw new Error(`replay field value mismatch for ${expected.hole}`);
     }
     if (expected.kind !== "set_phone_country") {
-      const guard = await verifyReplayField(session, expected);
+      const guard = await verifyReplayField(session, expected, action.kind === "select");
       if (!guard.ok) {
         markReplayFailure(session, guard.reason, expected.hole);
         throw new Error(`replay field verification failed for ${expected.hole}: ${guard.reason}`);
@@ -3648,35 +3674,72 @@ async function refreshReplayVerificationAfterAction(
   if (state.verifiedFields.size === state.expectedFields.size) state.paymentGuard = "verified";
 }
 
-async function recordReplayTransitionRemovals(
+function isReplayTransitionAction(action: ProvisionAction): boolean {
+  return (
+    action.kind !== "type" &&
+    action.kind !== "select" &&
+    action.kind !== "set_phone_country" &&
+    action.kind !== "allow_host"
+  );
+}
+
+async function attestReplayFieldsBeforeTransition(
   session: Session,
   action: ProvisionAction,
-): Promise<void> {
+): Promise<
+  | { ok: true; fields: Set<number> }
+  | { ok: false; reason: "field_missing" | "field_value_mismatch"; field: string }
+> {
   const state = session.replayState;
-  if (
-    state === null ||
-    !state.moneyPath ||
-    action.kind === "type" ||
-    action.kind === "select" ||
-    action.kind === "set_phone_country" ||
-    action.kind === "type_secret" ||
-    action.kind === "upload" ||
-    action.kind === "scroll" ||
-    action.kind === "allow_host"
-  ) {
-    return;
+  const fields = new Set<number>();
+  if (state === null || !state.moneyPath || !isReplayTransitionAction(action)) {
+    return { ok: true, fields };
   }
   const fresh = await session.browser.extractInteractiveElements();
   session.lastElements = fresh;
   for (const expected of state.expectedFields.values()) {
     if (
-      state.verifiedFields.has(expected.stepIndex) &&
-      expected.target !== null &&
-      !hasRecipeTargetCandidate(fresh, expected.target)
+      !state.verifiedFields.has(expected.stepIndex) ||
+      state.retiredFields.has(expected.stepIndex) ||
+      expected.target === null
     ) {
-      state.retiredFields.add(expected.stepIndex);
+      continue;
+    }
+    const guard = verifyReplayFieldInElements(session, expected, fresh);
+    if (!guard.ok) {
+      return { ok: false, reason: guard.reason, field: expected.hole };
+    }
+    fields.add(expected.stepIndex);
+  }
+  return { ok: true, fields };
+}
+
+async function recordReplayTransitionRemovals(
+  session: Session,
+  action: ProvisionAction,
+  attestedFields: ReadonlySet<number>,
+): Promise<
+  { ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch"; field: string }
+> {
+  const state = session.replayState;
+  if (state === null || !state.moneyPath || !isReplayTransitionAction(action)) {
+    return { ok: true };
+  }
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  for (const stepIndex of attestedFields) {
+    const expected = state.expectedFields.get(stepIndex);
+    if (expected === undefined || expected.target === null) continue;
+    if (!hasRecipeTargetCandidate(fresh, expected.target)) {
+      state.retiredFields.add(stepIndex);
+      continue;
+    }
+    const guard = verifyReplayFieldInElements(session, expected, fresh);
+    if (!guard.ok) {
+      return { ok: false, reason: guard.reason, field: expected.hole };
     }
   }
+  return { ok: true };
 }
 
 /**
@@ -3880,6 +3943,10 @@ export async function replayOperatorRecipe(
     }
 
     try {
+      const transitionAttestation = await attestReplayFieldsBeforeTransition(session, action);
+      if (!transitionAttestation.ok) {
+        return await humanRequired(transitionAttestation.reason, transitionAttestation.field);
+      }
       await act(sessionId, action, "none");
       replayed += 1;
       const expected = state.expectedFields.get(i);
@@ -3887,12 +3954,19 @@ export async function replayOperatorRecipe(
         if (expected.kind === "set_phone_country") {
           state.verifiedFields.add(i);
         } else {
-          const guard = await verifyReplayField(session, expected);
+          const guard = await verifyReplayField(session, expected, expected.kind === "select");
           if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
           state.verifiedFields.add(i);
         }
       }
-      await recordReplayTransitionRemovals(session, action);
+      const transitionGuard = await recordReplayTransitionRemovals(
+        session,
+        action,
+        transitionAttestation.fields,
+      );
+      if (!transitionGuard.ok) {
+        return await humanRequired(transitionGuard.reason, transitionGuard.field);
+      }
     } catch (error) {
       return await fallback(step, i, error instanceof Error ? error.message : String(error));
     }

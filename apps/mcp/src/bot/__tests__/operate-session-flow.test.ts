@@ -19,6 +19,7 @@ const h = vi.hoisted(() => ({
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
   phoneCountries: [] as string[],
   clearElementsOnClick: false,
+  clickValueMutation: null as { selector: string; value: string } | null,
   gotos: [] as string[],
   started: 0,
   startCalls: 0,
@@ -203,6 +204,13 @@ vi.mock("../browser.js", () => ({
       h.phoneCountries.push(country);
     }
     async click(): Promise<void> {
+      if (h.clickValueMutation !== null) {
+        for (const element of h.elements as Array<Record<string, unknown>>) {
+          if (element.selector === h.clickValueMutation.selector) {
+            element.value = h.clickValueMutation.value;
+          }
+        }
+      }
       if (h.clearElementsOnClick) h.elements = [];
     }
     async clickViaJs(): Promise<void> {}
@@ -342,6 +350,7 @@ beforeEach(() => {
   h.selected = [];
   h.phoneCountries = [];
   h.clearElementsOnClick = false;
+  h.clickValueMutation = null;
   h.gotos = [];
   h.consentDismissCalls = 0;
   h.consentCta = null;
@@ -622,7 +631,7 @@ describe("prepared-statement replay", () => {
     expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
   });
 
-  it("rejects a repair that fills a different field with the expected value", async () => {
+  it("rejects an ambiguous sibling repair with the expected value", async () => {
     h.elements = [];
     const recipe = replayRecipe({
       trace: [
@@ -640,8 +649,8 @@ describe("prepared-statement replay", () => {
     });
     await replayOperatorRecipe(started.session_id, recipe, { "address.city": "Queens" });
     h.elements = [
-      elem({ testId: "shipping-city", labelText: "City", selector: "#shipping", value: "" }),
-      elem({ testId: "billing-city", labelText: "Billing city", selector: "#billing", value: "" }),
+      elem({ testId: "new-shipping-city", labelText: "City", selector: "#shipping", value: "" }),
+      elem({ testId: "billing-city", labelText: "City", selector: "#billing", value: "" }),
     ];
     await expect(
       act(started.session_id, {
@@ -716,7 +725,7 @@ describe("prepared-statement replay", () => {
     );
   });
 
-  it("retains the committed value for a custom combobox guard", async () => {
+  it("uses a committed custom-combobox value only for immediate attestation", async () => {
     h.elements = [
       elem({
         tag: "input",
@@ -749,7 +758,53 @@ describe("prepared-statement replay", () => {
       { "address.country": "United States" },
     );
     expect(result).toMatchObject({ status: "complete", field_values_verified: true });
-    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
+    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
+      /verification is not satisfied/i,
+    );
+  });
+
+  it("detects field drift caused by a replay transition before retirement", async () => {
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+      elem({
+        tag: "button",
+        testId: "recalculate",
+        role: "button",
+        ariaLabel: "Recalculate",
+        selector: "#recalculate",
+      }),
+    ];
+    h.clickValueMutation = { selector: "#city", value: "Brooklyn" };
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "type",
+              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+              value: { hole: "address.city" },
+            },
+          },
+          {
+            action: {
+              kind: "click",
+              target: { dom_hint: { testid: "recalculate" }, accessible_name: "Recalculate" },
+            },
+          },
+        ],
+      }),
+      { "address.city": "Queens" },
+    );
+    expect(result).toMatchObject({
+      status: "human_required",
+      reason: "field_value_mismatch",
+      field: "address.city",
+    });
+    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
   });
 
   it("invalidates a verified field when a later value action changes it", async () => {
@@ -830,6 +885,7 @@ describe("verified recipe recording", () => {
           name: "buy-coffee",
           goal: "Buy coffee",
           verb: "purchase",
+          inputs: {},
           postcondition: {
             kind: "execute_capability",
             describe: "Ready to approve",
@@ -844,7 +900,7 @@ describe("verified recipe recording", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("refuses to save an unprovenanced checkout field", async () => {
+  it("refuses to save an unprovenanced value action", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-unbound-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     h.elements = [
@@ -860,6 +916,7 @@ describe("verified recipe recording", () => {
           name: "unsafe-checkout",
           goal: "Buy coffee",
           verb: "purchase",
+          inputs: { address: { city: "Brooklyn" } },
           postcondition: {
             kind: "execute_capability",
             describe: "Ready to approve",
@@ -868,7 +925,33 @@ describe("verified recipe recording", () => {
         },
         null as unknown as ApiClient,
       ),
-    ).rejects.toThrow(/money field lacks provenance/i);
+    ).rejects.toThrow(/lacks explicit provenance/i);
+    expect(readdirSync(dir)).toEqual([]);
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("refuses to save when the complete provenance ledger is unavailable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-no-ledger-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.visibleText = "Review order";
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "missing-ledger",
+          goal: "Buy coffee",
+          verb: "purchase",
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Ready to approve",
+            success_signal: { text_present: "Review order" },
+          },
+        } as never,
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/complete provenance inputs are required/i);
     expect(readdirSync(dir)).toEqual([]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
@@ -964,7 +1047,7 @@ describe("verified recipe recording", () => {
         },
         null as unknown as ApiClient,
       ),
-    ).rejects.toThrow(/known input value.*lacks explicit provenance/i);
+    ).rejects.toThrow(/value.*lacks explicit provenance/i);
     expect(readdirSync(dir)).toEqual([]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
@@ -1023,6 +1106,7 @@ describe("verified recipe recording", () => {
         name: "sensitive-checkout",
         goal: "Complete checkout",
         verb: "purchase",
+        inputs: { credential: { oauth_secret: "vault-secret-value" }, card: "payment-card" },
         postcondition: {
           kind: "execute_capability",
           describe: "Ready to approve",
@@ -1146,6 +1230,7 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
           name: "locator-session",
           goal: "Add a product to the cart",
           verb: "add_to_cart",
+          inputs: {},
           postcondition: {
             kind: "execute_capability",
             describe: "Cart contains the product",

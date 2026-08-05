@@ -680,6 +680,38 @@ export function hasRecipeTargetCandidate<T extends RecipeTargetElement>(
   });
 }
 
+export function resolveRecipeRepairTarget<T extends RecipeTargetElement>(
+  elements: readonly T[],
+  target: RecipeTarget,
+): T | null {
+  let candidates = [...elements];
+  let constrained = false;
+  if (target.dom_hint?.name !== undefined) {
+    candidates = candidates.filter((candidate) => candidate.name === target.dom_hint?.name);
+    constrained = true;
+  }
+  if (target.role_hint !== undefined) {
+    const wantedRole = targetNorm(target.role_hint);
+    candidates = candidates.filter((candidate) => semanticRole(candidate) === wantedRole);
+    constrained = true;
+  }
+  if (target.accessible_name !== undefined) {
+    const wantedName = targetNorm(target.accessible_name);
+    candidates = candidates.filter((candidate) => accessibleName(candidate) === wantedName);
+    constrained = true;
+  }
+  if (target.visible_text !== undefined) {
+    const wantedText = targetNorm(target.visible_text);
+    candidates = candidates.filter((candidate) => targetNorm(candidate.visibleText) === wantedText);
+    constrained = true;
+  }
+  if (target.near_text_hint !== undefined) {
+    candidates = filterByNearTextHint(candidates, target.near_text_hint, elements);
+    constrained = true;
+  }
+  return constrained && candidates.length === 1 ? (candidates[0] ?? null) : null;
+}
+
 export interface FilledFieldExpectation {
   target: RecipeTarget;
   expected: string;

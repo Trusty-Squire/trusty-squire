@@ -942,8 +942,7 @@ const rememberSchema = z.object({
       card: z.union([z.string().max(2000), z.record(z.string().max(2000))]).optional(),
       quantity: z.union([z.string().max(100), z.number()]).optional(),
     })
-    .strict()
-    .optional(),
+    .strict(),
   postcondition: PostconditionSchema,
 });
 
@@ -951,8 +950,8 @@ export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
   name: "operate_remember",
   description:
     "Save the CURRENT successful operate session as a replayable local recipe. " +
-    "Pass the host-classified closed-enum `verb`, known injected `inputs` (address, contact, " +
-    "product_query, credential, card, quantity), a name, goal, and " +
+    "Pass the host-classified closed-enum `verb` and the complete authoritative `inputs` " +
+    "ledger (address, contact, product_query, credential, card, quantity), plus a name, goal, and " +
     "`postcondition`. The postcondition is checked BEFORE anything is written — the " +
     "machine-checkable success signal: kind 'execute_capability' observes the " +
     "end-state now; `success_signal` is {field_text,min_value_len} (a field whose " +
@@ -963,7 +962,7 @@ export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
   inputSchema: rememberSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["session_id", "name", "goal", "verb", "postcondition"],
+    required: ["session_id", "name", "goal", "verb", "inputs", "postcondition"],
     properties: {
       session_id: { type: "string" },
       name: { type: "string" },
@@ -988,7 +987,7 @@ export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
       goal: args.goal,
       postcondition: args.postcondition,
       verb: args.verb,
-      ...(args.inputs !== undefined ? { inputs: args.inputs } : {}),
+      inputs: args.inputs,
     });
   },
 };
