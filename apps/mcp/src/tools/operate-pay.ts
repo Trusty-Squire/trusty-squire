@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { activeProvisionBrowser } from "../bot/provision-session.js";
+import { activeProvisionBrowser, recordActivePaymentProvenance } from "../bot/provision-session.js";
 import { executeOperatePay } from "../bot/pay-operator.js";
 import { assertApi, type Tool } from "./index.js";
 
@@ -130,7 +130,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
       // the JIT add-card ceremony.
     }
-    return await executeOperatePay(
+    const result = await executeOperatePay(
       {
         ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
         ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
@@ -154,5 +154,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           }
         : {},
     );
+    if (result.status === "payment_submitted" || result.status === "payment_3ds_required") {
+      recordActivePaymentProvenance();
+    }
+    return result;
   },
 };

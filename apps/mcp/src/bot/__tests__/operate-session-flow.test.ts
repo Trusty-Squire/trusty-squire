@@ -17,6 +17,8 @@ const h = vi.hoisted(() => ({
   typed: [] as Array<{ selector: string; text: string }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
+  phoneCountries: [] as string[],
+  clearElementsOnClick: false,
   gotos: [] as string[],
   started: 0,
   startCalls: 0,
@@ -182,8 +184,16 @@ vi.mock("../browser.js", () => ({
     }
     async selectOption(selector: string, matcher?: string): Promise<void> {
       h.selected.push({ selector, matcher });
+      for (const element of h.elements as Array<Record<string, unknown>>) {
+        if (element.selector === selector) element.value = matcher ?? "";
+      }
     }
-    async click(): Promise<void> {}
+    async setPhoneCountry(country: string): Promise<void> {
+      h.phoneCountries.push(country);
+    }
+    async click(): Promise<void> {
+      if (h.clearElementsOnClick) h.elements = [];
+    }
     async clickViaJs(): Promise<void> {}
     async resolvePageTarget(
       _mode: string,
@@ -278,6 +288,8 @@ import {
   closeAllProvisionSessions,
   parseElementsTable,
   replayOperatorRecipe,
+  activeProvisionBrowser,
+  recordActivePaymentProvenance,
 } from "../provision-session.js";
 import type { OperatorRecipe } from "../operator-recipe.js";
 import {
@@ -316,6 +328,8 @@ beforeEach(() => {
   h.typed = [];
   h.uploads = [];
   h.selected = [];
+  h.phoneCountries = [];
+  h.clearElementsOnClick = false;
   h.gotos = [];
   h.consentDismissCalls = 0;
   h.consentCta = null;
@@ -435,7 +449,150 @@ describe("prepared-statement replay", () => {
     expect(result.status === "fallback_required" && result.next_index).toBe(1);
   });
 
-  it("aborts a money replay to the human when a skipped fallback mis-filled a field", async () => {
+  it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
+    h.elements = [];
+    const recipe = replayRecipe({
+      trace: [
+        {
+          action: {
+            kind: "click",
+            target: { dom_hint: { testid: "review-order" }, visible_text: "Review order" },
+          },
+        },
+      ],
+    });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const fallback = await replayOperatorRecipe(started.session_id, recipe, { quantity: "1" });
+    expect(fallback.status).toBe("fallback_required");
+    await expect(
+      replayOperatorRecipe(started.session_id, recipe, { quantity: "1" }, 2),
+    ).rejects.toThrow(/invalid replay continuation/i);
+    await expect(
+      replayOperatorRecipe(started.session_id, recipe, { quantity: "2" }, 1),
+    ).rejects.toThrow(/invalid replay continuation/i);
+
+    const fresh = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await expect(replayOperatorRecipe(fresh.session_id, recipe, {}, 1)).rejects.toThrow(
+      /invalid replay continuation/i,
+    );
+  });
+
+  it("retains a verified field after checkout navigation removes it", async () => {
+    h.elements = [
+      elem({
+        testId: "shipping-city",
+        labelText: "City",
+        selector: "#city",
+        value: "",
+      }),
+      elem({
+        tag: "button",
+        testId: "continue",
+        role: "button",
+        ariaLabel: "Continue",
+        selector: "#continue",
+      }),
+    ];
+    h.clearElementsOnClick = true;
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "type",
+              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+              value: { hole: "address.city" },
+            },
+          },
+          {
+            action: {
+              kind: "click",
+              target: { dom_hint: { testid: "continue" }, accessible_name: "Continue" },
+            },
+          },
+        ],
+      }),
+      { "address.city": "Queens" },
+    );
+    expect(result).toMatchObject({ status: "complete", field_values_verified: true });
+    expect(h.elements).toEqual([]);
+  });
+
+  it("blocks payment until the exact missed field is repaired and replay resumes", async () => {
+    h.elements = [];
+    const recipe = replayRecipe({
+      trace: [
+        {
+          action: {
+            kind: "type",
+            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+            value: { hole: "address.city" },
+          },
+        },
+        { action: { kind: "press", key: "Enter" } },
+      ],
+    });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const fallback = await replayOperatorRecipe(started.session_id, recipe, {
+      "address.city": "Queens",
+    });
+    expect(fallback).toMatchObject({ status: "fallback_required", next_index: 1 });
+    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
+
+    h.elements = [
+      elem({
+        testId: "live-city",
+        labelText: "Shipping city",
+        selector: "#live-city",
+        value: "",
+      }),
+    ];
+    await act(started.session_id, { kind: "type", target: "Shipping city", text: "Queens" });
+    const complete = await replayOperatorRecipe(
+      started.session_id,
+      recipe,
+      { "address.city": "Queens" },
+      1,
+    );
+    expect(complete.status).toBe("complete");
+    expect(() => activeProvisionBrowser()).not.toThrow();
+  });
+
+  it("rejects a wrong field repair and keeps payment blocked", async () => {
+    h.elements = [];
+    const recipe = replayRecipe({
+      trace: [
+        {
+          action: {
+            kind: "type",
+            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+            value: { hole: "address.city" },
+          },
+        },
+      ],
+    });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await replayOperatorRecipe(started.session_id, recipe, { "address.city": "Queens" });
+    h.elements = [elem({ labelText: "Shipping city", selector: "#live-city", value: "" })];
+    await expect(
+      act(started.session_id, { kind: "type", target: "Shipping city", text: "Brooklyn" }),
+    ).rejects.toThrow(/replay repair value mismatch/i);
+    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
+  });
+
+  it("does not let a caller skip straight past a mis-filled money field", async () => {
     h.elements = [
       elem({
         testId: "shipping-city",
@@ -447,31 +604,28 @@ describe("prepared-statement replay", () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const result = await replayOperatorRecipe(
-      started.session_id,
-      replayRecipe({
-        trace: [
-          {
-            action: {
-              kind: "type",
-              target: {
-                dom_hint: { testid: "shipping-city" },
-                accessible_name: "City",
-                css: "#city",
+    await expect(
+      replayOperatorRecipe(
+        started.session_id,
+        replayRecipe({
+          trace: [
+            {
+              action: {
+                kind: "type",
+                target: {
+                  dom_hint: { testid: "shipping-city" },
+                  accessible_name: "City",
+                  css: "#city",
+                },
+                value: { hole: "address.city" },
               },
-              value: { hole: "address.city" },
             },
-          },
-        ],
-      }),
-      { "address.city": "Queens" },
-      1,
-    );
-    expect(result).toMatchObject({
-      status: "human_required",
-      reason: "field_value_mismatch",
-      field: "address.city",
-    });
+          ],
+        }),
+        { "address.city": "Queens" },
+        1,
+      ),
+    ).rejects.toThrow(/invalid replay continuation/i);
   });
 });
 
@@ -497,6 +651,36 @@ describe("verified recipe recording", () => {
         null as unknown as ApiClient,
       ),
     ).rejects.toThrow(/postcondition not confirmed/i);
+    expect(readdirSync(dir)).toEqual([]);
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("refuses to save an unprovenanced checkout field", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-unbound-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "City", text: "Brooklyn" });
+    h.visibleText = "Review order";
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "unsafe-checkout",
+          goal: "Buy coffee",
+          verb: "purchase",
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Ready to approve",
+            success_signal: { text_present: "Review order" },
+          },
+        },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/money field lacks provenance/i);
     expect(readdirSync(dir)).toEqual([]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
@@ -560,6 +744,41 @@ describe("verified recipe recording", () => {
         },
       ],
     });
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("records credential and card provenance without storing either value", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-sensitive-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [elem({ labelText: "Client secret", selector: "#secret", value: "" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    stashSecretSlot(started.session_id, "oauth_secret", "vault-secret-value");
+    await act(started.session_id, {
+      kind: "type_secret",
+      slot: "oauth_secret",
+      target: "Client secret",
+    });
+    recordActivePaymentProvenance();
+    h.visibleText = "Review order";
+    await provisionRememberTool.handler(
+      {
+        session_id: started.session_id,
+        name: "sensitive-checkout",
+        goal: "Complete checkout",
+        verb: "purchase",
+        postcondition: {
+          kind: "execute_capability",
+          describe: "Ready to approve",
+          success_signal: { text_present: "Review order" },
+        },
+      },
+      null as unknown as ApiClient,
+    );
+    const raw = readFileSync(join(dir, "purchase--example.com.json"), "utf8");
+    expect(raw).toContain('"hole": "credential.oauth_secret"');
+    expect(raw).toContain('"hole": "card"');
+    expect(raw).not.toContain("vault-secret-value");
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
   });

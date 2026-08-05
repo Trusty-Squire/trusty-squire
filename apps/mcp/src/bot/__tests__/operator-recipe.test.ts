@@ -220,6 +220,63 @@ describe("provenance holes", () => {
     expect(trace[0]?.action.value).toEqual({ hole: "address.city" });
     expect(bindRecipeValue(trace[0]!.action.value!, { "address.city": "Queens" })).toBe("Queens");
   });
+
+  it("rejects ambiguous exact-value provenance instead of choosing the first hole", () => {
+    expect(() =>
+      tagProvenanceValue("ada@example.com", {
+        address: { email: "ada@example.com" },
+        contact: { email: "ada@example.com" },
+      }),
+    ).toThrow(/ambiguous recipe provenance.*address\.email, contact\.email/i);
+  });
+
+  it("tags select and phone-country values while preserving credential and card holes", () => {
+    const trace = tagTraceProvenance(
+      [
+        { action: { kind: "select", value: "3", text_match: "Quantity" } },
+        { action: { kind: "set_phone_country", value: "Brooklyn" } },
+        {
+          action: {
+            kind: "type_secret",
+            slot: "oauth_secret",
+            value: { hole: "credential.oauth_secret" },
+            text_match: "Secret",
+          },
+        },
+        { action: { kind: "operate_pay", value: { hole: "card" } } },
+      ],
+      inputs,
+    );
+    expect(trace.map((entry) => entry.action.value)).toEqual([
+      { hole: "quantity" },
+      { hole: "address.city" },
+      { hole: "credential.oauth_secret" },
+      { hole: "card" },
+    ]);
+  });
+
+  it("keeps card and credential holes on their sealed injection actions", () => {
+    expect(
+      OperatorRecipeSchema.safeParse({
+        ...RECIPE,
+        trace: [
+          {
+            action: {
+              kind: "type",
+              value: { hole: "card.pan" },
+              text_match: "Card number",
+            },
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      OperatorRecipeSchema.safeParse({
+        ...RECIPE,
+        trace: [{ action: { kind: "operate_pay", value: { hole: "card" } } }],
+      }).success,
+    ).toBe(true);
+  });
 });
 
 describe("money-path field-value guard", () => {

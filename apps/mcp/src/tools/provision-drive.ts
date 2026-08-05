@@ -39,6 +39,7 @@ import {
   recipeEntryUrl,
   fillTemplate,
   OperatorVerbSchema,
+  RecipeHoleSchema,
   PostconditionSchema,
 } from "../bot/operator-recipe.js";
 import { isMaskedDisplay } from "../bot/credential-shape.js";
@@ -249,44 +250,70 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   },
 };
 
-const actSchema = z.object({
-  session_id: z.string().min(1),
-  kind: z.enum([
-    "click",
-    "js_click",
-    "type",
-    "select",
-    "set_phone_country",
-    "goto",
-    "press",
-    "oauth_click",
-    "oauth_settle",
-    "allow_host",
-    "type_secret",
-    "scroll",
-    "upload",
-  ]),
-  target: z.string().min(1).max(200).optional(),
-  text: z.string().max(4096).optional(),
-  // set_phone_country supports phone-local native country <select> controls.
-  country: z.string().min(1).max(60).optional(),
-  // upload: absolute path to a LOCAL file to attach to `target` (the upload
-  // button/menu-item, or the file <input>).
-  path: z.string().min(1).max(4096).optional(),
-  url: z.string().url().optional(),
-  key: z.string().min(1).max(40).optional(),
-  // allow_host: a bare hostname to cross into mid-session.
-  host: z.string().min(1).max(253).optional(),
-  // type_secret: the sealed slot whose value to type into `target`.
-  slot: z.string().min(1).max(60).optional(),
-  // scroll: which way to move the viewport (default "down").
-  direction: z.enum(["down", "up", "bottom", "top"]).optional(),
-  // How much perception to return AFTER the action (the same ladder as
-  // operate_observe, plus "none"). "none" = a minimal ack (action ran; no page
-  // dump) for chained fills — call operate_observe before the next ref-targeted
-  // act. "full" = the legacy payload. Default "compact".
-  detail: z.enum(["none", "compact", "full"]).optional(),
-});
+const actSchema = z
+  .object({
+    session_id: z.string().min(1),
+    kind: z.enum([
+      "click",
+      "js_click",
+      "type",
+      "select",
+      "set_phone_country",
+      "goto",
+      "press",
+      "oauth_click",
+      "oauth_settle",
+      "allow_host",
+      "type_secret",
+      "scroll",
+      "upload",
+    ]),
+    target: z.string().min(1).max(200).optional(),
+    text: z.string().max(4096).optional(),
+    // set_phone_country supports phone-local native country <select> controls.
+    country: z.string().min(1).max(60).optional(),
+    // upload: absolute path to a LOCAL file to attach to `target` (the upload
+    // button/menu-item, or the file <input>).
+    path: z.string().min(1).max(4096).optional(),
+    url: z.string().url().optional(),
+    key: z.string().min(1).max(40).optional(),
+    // allow_host: a bare hostname to cross into mid-session.
+    host: z.string().min(1).max(253).optional(),
+    // type_secret: the sealed slot whose value to type into `target`.
+    slot: z.string().min(1).max(60).optional(),
+    provenance: RecipeHoleSchema.shape.hole.optional(),
+    // scroll: which way to move the viewport (default "down").
+    direction: z.enum(["down", "up", "bottom", "top"]).optional(),
+    // How much perception to return AFTER the action (the same ladder as
+    // operate_observe, plus "none"). "none" = a minimal ack (action ran; no page
+    // dump) for chained fills — call operate_observe before the next ref-targeted
+    // act. "full" = the legacy payload. Default "compact".
+    detail: z.enum(["none", "compact", "full"]).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.provenance === undefined) return;
+    if (
+      value.kind !== "type" &&
+      value.kind !== "select" &&
+      value.kind !== "set_phone_country" &&
+      value.kind !== "type_secret"
+    ) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "provenance requires a value action" });
+    } else if (value.kind === "type_secret" && !/^credential(?:\.|$)/.test(value.provenance)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "type_secret provenance must be credential",
+      });
+    } else if (
+      value.kind !== "type_secret" &&
+      /^(?:credential|card)(?:\.|$)/.test(value.provenance)
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "credential/card provenance requires type_secret or operate_pay",
+      });
+    }
+  });
 
 function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
   const need = (v: string | undefined, name: string): string => {
@@ -303,11 +330,25 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     case "oauth_click":
       return { kind: "oauth_click", target: need(args.target, "target") };
     case "type":
-      return { kind: "type", target: need(args.target, "target"), text: args.text ?? "" };
+      return {
+        kind: "type",
+        target: need(args.target, "target"),
+        text: args.text ?? "",
+        ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
+      };
     case "select":
-      return { kind: "select", target: need(args.target, "target"), text: need(args.text, "text") };
+      return {
+        kind: "select",
+        target: need(args.target, "target"),
+        text: need(args.text, "text"),
+        ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
+      };
     case "set_phone_country":
-      return { kind: "set_phone_country", country: need(args.country, "country") };
+      return {
+        kind: "set_phone_country",
+        country: need(args.country, "country"),
+        ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
+      };
     case "goto":
       return { kind: "goto", url: need(args.url, "url") };
     case "press":
@@ -321,6 +362,7 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
         kind: "type_secret",
         slot: need(args.slot, "slot"),
         target: need(args.target, "target"),
+        ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
       };
     case "scroll":
       return {
@@ -370,8 +412,11 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "button/menu-item (or the file <input>), path is an absolute local file " +
     "path. The bot sets the file via the browser's file chooser, so no OS dialog " +
     "is driven and no API credential is needed — it uses the session you're " +
-    "already signed into). Stable target refs remain reusable while their element " +
-    "exists; if a ref appears in removed or no longer resolves, re-observe before retrying. " +
+    "already signed into). " +
+    "For type/select/set_phone_country, pass provenance when the value came from a " +
+    "Squire-known address, contact, product_query, credential, card, or quantity input. " +
+    "Stable target refs remain reusable while their element exists; if a ref appears in " +
+    "removed or no longer resolves, re-observe before retrying. " +
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
     '"full" returns the legacy screen+accessibility payload. ' +
@@ -408,6 +453,11 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       key: { type: "string" },
       host: { type: "string" },
       slot: { type: "string" },
+      provenance: {
+        type: "string",
+        pattern:
+          "^(?:address|contact|credential|card)(?:\\.[a-zA-Z0-9_-]+)?$|^(?:product_query|quantity)$",
+      },
       direction: { type: "string", enum: ["down", "up", "bottom", "top"] },
       detail: { type: "string", enum: ["none", "compact", "full"] },
     },
@@ -845,6 +895,8 @@ const rememberSchema = z.object({
       address: z.record(z.string().max(2000)).optional(),
       contact: z.record(z.string().max(2000)).optional(),
       product_query: z.string().max(2000).optional(),
+      credential: z.union([z.string().max(2000), z.record(z.string().max(2000))]).optional(),
+      card: z.union([z.string().max(2000), z.record(z.string().max(2000))]).optional(),
       quantity: z.union([z.string().max(100), z.number()]).optional(),
     })
     .strict()
@@ -856,7 +908,8 @@ export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
   name: "operate_remember",
   description:
     "Save the CURRENT successful operate session as a replayable local recipe. " +
-    "Pass the host-classified closed-enum `verb`, known injected `inputs`, a name, goal, and " +
+    "Pass the host-classified closed-enum `verb`, known injected `inputs` (address, contact, " +
+    "product_query, credential, card, quantity), a name, goal, and " +
     "`postcondition`. The postcondition is checked BEFORE anything is written — the " +
     "machine-checkable success signal: kind 'execute_capability' observes the " +
     "end-state now; `success_signal` is {field_text,min_value_len} (a field whose " +
@@ -914,7 +967,10 @@ const useSchema = z
     (value) =>
       value.name !== undefined || (value.verb !== undefined && value.service_url !== undefined),
     { message: "provide legacy name, or both verb and service_url" },
-  );
+  )
+  .refine((value) => (value.session_id === undefined) === (value.resume_from === undefined), {
+    message: "session_id and resume_from must be provided together",
+  });
 
 export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
   name: "operate_use",

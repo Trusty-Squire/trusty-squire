@@ -36,6 +36,7 @@ import {
   type OperatorRecipe,
   type TraceEntry,
   type TraceAction,
+  type RecipeHole,
   type RecipeTarget,
   type OperatorVerb,
   type KnownRecipeInputs,
@@ -251,7 +252,7 @@ export type ProvisionAction =
   // React card/widget didn't register its onClick (the stochastic radio-card
   // stall). Same target resolution; different dispatch.
   | { kind: "js_click"; target: string }
-  | { kind: "type"; target: string; text: string }
+  | { kind: "type"; target: string; text: string; provenance?: RecipeHole }
   // Choose an option in a native <select> OR a custom listbox/combobox by its
   // visible text (fuzzy, case-insensitive substring). `type` cannot drive these
   // — page.fill throws on a <select> and humanized keystrokes break native
@@ -259,12 +260,12 @@ export type ProvisionAction =
   // browser.selectOption, which already handles both the native and the
   // <li role=option> custom shapes. target = the select/combobox (or its label);
   // text = the option to match (e.g. "South Korea").
-  | { kind: "select"; target: string; text: string }
+  | { kind: "select"; target: string; text: string; provenance?: RecipeHole }
   // Set the country on a phone-number field's dial-code picker. No ref/target
   // — the bot locates a phone-local native <select>, including
   // react-phone-number-input's opacity:0 select that inventory drops. Other
   // widget families are unsupported and throw.
-  | { kind: "set_phone_country"; country: string }
+  | { kind: "set_phone_country"; country: string; provenance?: RecipeHole }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }
   // Route an OAuth-provider button through startOAuth so the popup is adopted
@@ -279,7 +280,7 @@ export type ProvisionAction =
   // Sealed credential transfer — type a secret held in a session-local slot
   // into a field, WITHOUT the value ever crossing the MCP boundary to the
   // host. The host orchestrates by slot name; the bot types the real value.
-  | { kind: "type_secret"; slot: string; target: string }
+  | { kind: "type_secret"; slot: string; target: string; provenance?: RecipeHole }
   // Reveal below-the-fold controls on a long SPA form, then re-observe to pick
   // up the newly-visible elements (heavy consoles render fields off-viewport).
   | { kind: "scroll"; direction?: "down" | "up" | "bottom" | "top" }
@@ -300,6 +301,25 @@ export type HostSource = "start" | "mid_session" | "auto_widen";
 export interface AllowedHostEntry {
   host: string;
   source: HostSource;
+}
+
+interface ReplayExpectedField {
+  stepIndex: number;
+  hole: string;
+  expected: string;
+  target: RecipeTarget | null;
+  kind: "type" | "select" | "set_phone_country";
+}
+
+interface ReplayState {
+  recipeHash: string;
+  bindingsHash: string;
+  moneyPath: boolean;
+  nextIndex: number | null;
+  expectedFields: Map<number, ReplayExpectedField>;
+  verifiedFields: Set<number>;
+  paymentGuard: "pending" | "verified" | "failed";
+  failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
 }
 
 interface Session {
@@ -362,6 +382,7 @@ interface Session {
   // step — this flag suppresses auto-promotion so no silently-incomplete skill
   // ships (captureAndPromoteSession).
   usedLocatorFallback: boolean;
+  replayState: ReplayState | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -1694,6 +1715,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     actionTrace: [],
     captureRounds: [],
     usedLocatorFallback: false,
+    replayState: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -1827,7 +1849,21 @@ export function activeProvisionBrowser(): BrowserController {
         : "operate_pay refused: multiple active browser sessions",
     );
   }
-  return sessions.values().next().value!.browser;
+  const session = sessions.values().next().value!;
+  if (session.replayState?.moneyPath === true && session.replayState.paymentGuard !== "verified") {
+    throw new Error(
+      "operate_pay refused: replay address/contact/quantity verification is not satisfied",
+    );
+  }
+  return session.browser;
+}
+
+export function recordActivePaymentProvenance(): void {
+  if (sessions.size !== 1) return;
+  const session = sessions.values().next().value!;
+  const last = session.actionTrace.at(-1)?.action;
+  if (last?.kind === "operate_pay") return;
+  session.actionTrace.push({ action: { kind: "operate_pay", value: { hole: "card" } } });
 }
 
 // PR3c — the user's own email captured at login (the authoritative signup
@@ -2686,6 +2722,7 @@ export async function act(
       break;
     }
   }
+  await captureReplayRepairVerification(session, action, resolvedEl);
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
@@ -2833,15 +2870,6 @@ function recordTrace(
   // An upload attaches a machine-local file — not portable, never part of a
   // shared recipe. Skip it here (the action is still in the audit trail).
   if (action.kind === "upload") return;
-  // A native/custom-select pick isn't yet in the portable recipe vocabulary
-  // (TraceAction has no `select` kind). Skip it from the trace like upload — the
-  // action still runs and is audited. Selects were never traceable before this
-  // kind existed, so nothing regresses; wiring select into the replay engine is
-  // a follow-up for when a signup flow needs a replayable dropdown.
-  if (action.kind === "select") return;
-  // set_phone_country has no portable TraceAction kind either — the country is
-  // host-replannable per run, not baked into a shared recipe. Skip like select.
-  if (action.kind === "set_phone_country") return;
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
@@ -2872,11 +2900,32 @@ function recordTrace(
         kind: "type",
         ...withText,
         ...withTarget,
-        value: scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail),
+        value:
+          action.provenance ?? scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail),
       };
       break;
     case "type_secret":
-      a = { kind: "type_secret", slot: action.slot, ...withText, ...withTarget };
+      a = {
+        kind: "type_secret",
+        slot: action.slot,
+        value: action.provenance ?? { hole: `credential.${action.slot}` },
+        ...withText,
+        ...withTarget,
+      };
+      break;
+    case "select":
+      a = {
+        kind: "select",
+        value: action.provenance ?? action.text,
+        ...withText,
+        ...withTarget,
+      };
+      break;
+    case "set_phone_country":
+      a = {
+        kind: "set_phone_country",
+        value: action.provenance ?? action.country,
+      };
       break;
     case "click":
       a = { kind: "click", ...withText, ...withTarget };
@@ -3135,6 +3184,12 @@ export async function rememberRecipe(
     secrets,
     postcondition: opts.postcondition,
   };
+  const unprovenancedMoneyField = findUnprovenancedMoneyField(recipe);
+  if (unprovenancedMoneyField !== null) {
+    throw new Error(
+      `operate_remember refused: money field lacks provenance (${unprovenancedMoneyField})`,
+    );
+  }
   const file = await writeRecipe(recipe);
   audit(sessionId, "remember_recipe", {
     name: opts.name,
@@ -3230,20 +3285,141 @@ function replayTarget(action: TraceAction): RecipeTarget | null {
   return action.text_match !== undefined ? { visible_text: action.text_match } : null;
 }
 
-function fallbackResult(
-  observation: Observation,
-  step: TraceEntry,
-  stepIndex: number,
-  reason: string,
-): OperatorReplayResult {
-  return {
-    status: "fallback_required",
-    observation,
-    step_index: stepIndex,
-    next_index: stepIndex + 1,
-    step,
-    reason,
-  };
+const REPLAY_VERIFIED_HOLE = /^(?:address|contact)(?:\.|$)|^quantity$/;
+const MONEY_FIELD_TARGET =
+  /(?:^|[\s._-])(?:address|street|line\s*[12]|city|state|province|postal|zip|country|e-?mail|phone|first\s*name|last\s*name|full\s*name|quantity|qty)(?:$|[\s._-])/i;
+
+function moneyFieldName(action: TraceAction): string | null {
+  if (action.kind === "set_phone_country") return "phone_country";
+  if (action.kind !== "type" && action.kind !== "select") return null;
+  const target = replayTarget(action);
+  if (target === null) return null;
+  const label = [
+    target.dom_hint?.testid,
+    target.dom_hint?.id,
+    target.dom_hint?.name,
+    target.accessible_name,
+    target.visible_text,
+  ]
+    .filter((value): value is string => value !== undefined)
+    .join(" ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2");
+  return MONEY_FIELD_TARGET.test(label) ? label || "field" : null;
+}
+
+function findUnprovenancedMoneyField(recipe: OperatorRecipe): string | null {
+  if (recipe.verb === undefined || !MONEY_REPLAY_VERBS.has(recipe.verb)) return null;
+  for (const { action } of recipe.trace) {
+    const field = moneyFieldName(action);
+    if (field !== null && typeof action.value === "string") return field;
+  }
+  return null;
+}
+
+function replayDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function bindingDigest(bindings: Readonly<Record<string, string>>): string {
+  return replayDigest(
+    Object.entries(bindings)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => [key, value]),
+  );
+}
+
+function expectedReplayFields(
+  recipe: OperatorRecipe,
+  bindings: Readonly<Record<string, string>>,
+): { fields: Map<number, ReplayExpectedField>; missing: string | null } {
+  const fields = new Map<number, ReplayExpectedField>();
+  for (let stepIndex = 0; stepIndex < recipe.trace.length; stepIndex += 1) {
+    const action = recipe.trace[stepIndex]!.action;
+    const unprovenanced = moneyFieldName(action);
+    if (unprovenanced !== null && typeof action.value === "string") {
+      return { fields, missing: unprovenanced };
+    }
+    if (
+      (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country") ||
+      action.value === undefined ||
+      typeof action.value === "string" ||
+      !REPLAY_VERIFIED_HOLE.test(action.value.hole)
+    ) {
+      continue;
+    }
+    const expected = bindings[action.value.hole];
+    if (expected === undefined) return { fields, missing: action.value.hole };
+    fields.set(stepIndex, {
+      stepIndex,
+      hole: action.value.hole,
+      expected,
+      target: replayTarget(action),
+      kind: action.kind,
+    });
+  }
+  return { fields, missing: null };
+}
+
+function markReplayFailure(
+  session: Session,
+  reason: "field_missing" | "field_value_mismatch",
+  field: string,
+): void {
+  if (session.replayState === null) return;
+  session.replayState.paymentGuard = "failed";
+  session.replayState.failure = { reason, field };
+  audit(session.id, "replay_field_value_guard", { ok: false, reason, field });
+}
+
+async function verifyReplayField(
+  session: Session,
+  expected: ReplayExpectedField,
+  targetOverride?: RecipeTarget,
+): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
+  if (expected.kind === "set_phone_country") return { ok: false, reason: "field_missing" };
+  const target = targetOverride ?? expected.target;
+  if (target === null) return { ok: false, reason: "field_missing" };
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  const guard = verifyFilledFieldValues(fresh, [
+    { target, expected: expected.expected, hole: expected.hole },
+  ]);
+  return guard.ok ? { ok: true } : { ok: false, reason: guard.reason };
+}
+
+async function captureReplayRepairVerification(
+  session: Session,
+  action: ProvisionAction,
+  resolvedEl: InteractiveElement | null,
+): Promise<void> {
+  const state = session.replayState;
+  if (state === null || state.nextIndex === null || !state.moneyPath) return;
+  const stepIndex = state.nextIndex - 1;
+  const expected = state.expectedFields.get(stepIndex);
+  if (expected === undefined) return;
+  const supplied =
+    action.kind === "type" || action.kind === "select"
+      ? action.text
+      : action.kind === "set_phone_country"
+        ? action.country
+        : null;
+  if (supplied === null) return;
+  if (supplied !== expected.expected) {
+    markReplayFailure(session, "field_value_mismatch", expected.hole);
+    throw new Error(`replay repair value mismatch for ${expected.hole}`);
+  }
+  if (action.kind === "set_phone_country") {
+    state.verifiedFields.add(stepIndex);
+    return;
+  }
+  const target =
+    resolvedEl === null ? undefined : recipeTargetFor(resolvedEl, session.lastElements);
+  const guard = await verifyReplayField(session, expected, target);
+  if (!guard.ok) {
+    markReplayFailure(session, guard.reason, expected.hole);
+    throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
+  }
+  state.verifiedFields.add(stepIndex);
 }
 
 /**
@@ -3259,7 +3435,80 @@ export async function replayOperatorRecipe(
 ): Promise<OperatorReplayResult> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const recipeHash = replayDigest(recipe);
+  const bindingsHash = bindingDigest(bindings);
+  const isMoneyPath = recipe.verb !== undefined && MONEY_REPLAY_VERBS.has(recipe.verb);
+  let state: ReplayState;
+
+  const humanRequired = async (
+    reason: "field_missing" | "field_value_mismatch",
+    field: string,
+  ): Promise<OperatorReplayResult> => {
+    markReplayFailure(session, reason, field);
+    return { status: "human_required", observation: await observe(sessionId), reason, field };
+  };
+
+  if (fromIndex === 0) {
+    if (session.replayState !== null) {
+      throw new Error("replay already started in this session; use the issued continuation");
+    }
+    const expected = expectedReplayFields(recipe, bindings);
+    state = {
+      recipeHash,
+      bindingsHash,
+      moneyPath: isMoneyPath,
+      nextIndex: null,
+      expectedFields: expected.fields,
+      verifiedFields: new Set(),
+      paymentGuard: isMoneyPath ? "pending" : "verified",
+    };
+    session.replayState = state;
+    if (expected.missing !== null) return await humanRequired("field_missing", expected.missing);
+  } else {
+    state = session.replayState!;
+    if (
+      state === null ||
+      state.recipeHash !== recipeHash ||
+      state.bindingsHash !== bindingsHash ||
+      state.nextIndex !== fromIndex
+    ) {
+      throw new Error("invalid replay continuation: resume_from was not issued for this session");
+    }
+    if (state.failure !== undefined) {
+      return await humanRequired(state.failure.reason, state.failure.field);
+    }
+    const repairedField = state.expectedFields.get(fromIndex - 1);
+    if (repairedField !== undefined && !state.verifiedFields.has(fromIndex - 1)) {
+      const guard = await verifyReplayField(session, repairedField);
+      if (!guard.ok) return await humanRequired(guard.reason, repairedField.hole);
+      state.verifiedFields.add(fromIndex - 1);
+    }
+    state.nextIndex = null;
+  }
+
   let replayed = 0;
+
+  const fallback = async (
+    step: TraceEntry,
+    stepIndex: number,
+    reason: string,
+  ): Promise<OperatorReplayResult> => {
+    state.nextIndex = stepIndex + 1;
+    if (
+      step.action.kind === "operate_pay" &&
+      state.verifiedFields.size === state.expectedFields.size
+    ) {
+      state.paymentGuard = "verified";
+    }
+    return {
+      status: "fallback_required",
+      observation: await observe(sessionId),
+      step_index: stepIndex,
+      next_index: stepIndex + 1,
+      step,
+      reason,
+    };
+  };
 
   for (let i = fromIndex; i < recipe.trace.length; i += 1) {
     const step = recipe.trace[i] as TraceEntry;
@@ -3267,36 +3516,34 @@ export async function replayOperatorRecipe(
     let action: ProvisionAction;
 
     if (recorded.kind === "extract") {
-      return fallbackResult(
-        await observe(sessionId),
+      return await fallback(
         step,
         i,
         "credential extraction requires host planning on the live page",
       );
     }
 
+    if (recorded.kind === "operate_pay") {
+      return await fallback(step, i, "payment requires the existing operate_pay approval flow");
+    }
+
     if (recorded.kind === "goto") {
       if (recorded.url_template === undefined) {
-        return fallbackResult(await observe(sessionId), step, i, "goto step has no URL");
+        return await fallback(step, i, "goto step has no URL");
       }
       const filled = fillTemplate(recorded.url_template, bindings as Record<string, string>);
       if (filled.missing.length > 0) {
-        return fallbackResult(
-          await observe(sessionId),
-          step,
-          i,
-          `missing bindings: ${filled.missing.join(", ")}`,
-        );
+        return await fallback(step, i, `missing bindings: ${filled.missing.join(", ")}`);
       }
       action = { kind: "goto", url: filled.url };
     } else if (recorded.kind === "allow_host") {
       if (recorded.host === undefined) {
-        return fallbackResult(await observe(sessionId), step, i, "allow_host step has no host");
+        return await fallback(step, i, "allow_host step has no host");
       }
       action = { kind: "allow_host", host: recorded.host };
     } else if (recorded.kind === "press") {
       if (recorded.key === undefined) {
-        return fallbackResult(await observe(sessionId), step, i, "press step has no key");
+        return await fallback(step, i, "press step has no key");
       }
       action = { kind: "press", key: recorded.key };
     } else if (recorded.kind === "oauth_settle") {
@@ -3306,10 +3553,19 @@ export async function replayOperatorRecipe(
         kind: "scroll",
         ...(recorded.direction !== undefined ? { direction: recorded.direction } : {}),
       };
+    } else if (recorded.kind === "set_phone_country") {
+      if (recorded.value === undefined) {
+        return await fallback(step, i, "set_phone_country step has no value");
+      }
+      try {
+        action = { kind: "set_phone_country", country: bindRecipeValue(recorded.value, bindings) };
+      } catch (error) {
+        return await fallback(step, i, error instanceof Error ? error.message : String(error));
+      }
     } else {
       const target = replayTarget(recorded);
       if (target === null) {
-        return fallbackResult(await observe(sessionId), step, i, "step has no replay target");
+        return await fallback(step, i, "step has no replay target");
       }
       // Structural pre-check: resolve against the live inventory before every
       // deterministic act. This is especially load-bearing on money paths.
@@ -3317,31 +3573,29 @@ export async function replayOperatorRecipe(
       session.lastElements = fresh;
       const resolution = resolveRecipeTarget(fresh, target);
       if (resolution === null) {
-        return fallbackResult(await observe(sessionId), step, i, "ordered target resolver missed");
+        return await fallback(step, i, "ordered target resolver missed");
       }
       const ref = provisionElementRefs(fresh).get(resolution.element);
       if (ref === undefined) {
-        return fallbackResult(await observe(sessionId), step, i, "resolved target has no live ref");
+        return await fallback(step, i, "resolved target has no live ref");
       }
-      if (recorded.kind === "type") {
+      if (recorded.kind === "type" || recorded.kind === "select") {
         if (recorded.value === undefined) {
-          return fallbackResult(await observe(sessionId), step, i, "type step has no value");
+          return await fallback(step, i, `${recorded.kind} step has no value`);
         }
         let text: string;
         try {
           text = bindRecipeValue(recorded.value, bindings);
         } catch (error) {
-          return fallbackResult(
-            await observe(sessionId),
-            step,
-            i,
-            error instanceof Error ? error.message : String(error),
-          );
+          return await fallback(step, i, error instanceof Error ? error.message : String(error));
         }
-        action = { kind: "type", target: ref, text };
+        action =
+          recorded.kind === "type"
+            ? { kind: "type", target: ref, text }
+            : { kind: "select", target: ref, text };
       } else if (recorded.kind === "type_secret") {
         if (recorded.slot === undefined) {
-          return fallbackResult(await observe(sessionId), step, i, "type_secret step has no slot");
+          return await fallback(step, i, "type_secret step has no slot");
         }
         action = { kind: "type_secret", target: ref, slot: recorded.slot };
       } else if (recorded.kind === "click") {
@@ -3356,75 +3610,33 @@ export async function replayOperatorRecipe(
     try {
       await act(sessionId, action, "none");
       replayed += 1;
+      const expected = state.expectedFields.get(i);
+      if (expected !== undefined) {
+        if (expected.kind === "set_phone_country") {
+          state.verifiedFields.add(i);
+          continue;
+        }
+        const guard = await verifyReplayField(session, expected);
+        if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
+        state.verifiedFields.add(i);
+      }
     } catch (error) {
-      return fallbackResult(
-        await observe(sessionId),
-        step,
-        i,
-        error instanceof Error ? error.message : String(error),
-      );
+      return await fallback(step, i, error instanceof Error ? error.message : String(error));
     }
   }
 
-  const isMoneyPath = recipe.verb !== undefined && MONEY_REPLAY_VERBS.has(recipe.verb);
   if (isMoneyPath) {
-    const missingMoneyBinding = recipe.trace.find((step) => {
-      const value = step.action.value;
-      return (
-        step.action.kind === "type" &&
-        value !== undefined &&
-        typeof value !== "string" &&
-        /^(?:address|contact)(?:\.|$)|^quantity$/.test(value.hole) &&
-        bindings[value.hole] === undefined
-      );
-    });
-    if (missingMoneyBinding !== undefined) {
-      const value = missingMoneyBinding.action.value;
-      const field = typeof value === "string" || value === undefined ? "field" : value.hole;
-      audit(sessionId, "replay_field_value_guard", {
-        ok: false,
-        reason: "field_missing",
-        field,
-      });
-      return {
-        status: "human_required",
-        observation: await observe(sessionId),
-        reason: "field_missing",
-        field,
-      };
+    const unverified = [...state.expectedFields.values()].find(
+      (expected) => !state.verifiedFields.has(expected.stepIndex),
+    );
+    if (unverified !== undefined) {
+      return await humanRequired("field_missing", unverified.hole);
     }
-    const expectedFields = recipe.trace.flatMap((step) => {
-      const { action } = step;
-      if (
-        action.kind !== "type" ||
-        action.value === undefined ||
-        typeof action.value === "string" ||
-        !/^(?:address|contact)(?:\.|$)|^quantity$/.test(action.value.hole)
-      ) {
-        return [];
-      }
-      const target = replayTarget(action);
-      if (target === null) return [];
-      const bound = bindings[action.value.hole];
-      return bound === undefined ? [] : [{ target, expected: bound, hole: action.value.hole }];
+    state.paymentGuard = "verified";
+    audit(sessionId, "replay_field_value_guard", {
+      ok: true,
+      fields: state.expectedFields.size,
     });
-    const fresh = await session.browser.extractInteractiveElements();
-    session.lastElements = fresh;
-    const guard = verifyFilledFieldValues(fresh, expectedFields);
-    if (!guard.ok) {
-      audit(sessionId, "replay_field_value_guard", {
-        ok: false,
-        reason: guard.reason,
-        field: guard.field,
-      });
-      return {
-        status: "human_required",
-        observation: await observe(sessionId),
-        reason: guard.reason,
-        field: guard.field,
-      };
-    }
-    audit(sessionId, "replay_field_value_guard", { ok: true, fields: expectedFields.length });
   }
 
   return {

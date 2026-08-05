@@ -91,6 +91,9 @@ const TraceActionSchema = z
       "oauth_settle",
       "allow_host",
       "type_secret",
+      "select",
+      "set_phone_country",
+      "operate_pay",
       "scroll",
       "extract",
     ]),
@@ -100,8 +103,9 @@ const TraceActionSchema = z
     target: RecipeTargetSchema.optional(),
     // goto: a URL with optional ${VAR} templates for per-run identity.
     url_template: z.string().max(2000).optional(),
-    // type: the NON-secret value typed (names, emails, URIs). Secrets never
-    // appear here — they flow through `type_secret` + a slot.
+    // Value-bearing actions store either a non-secret literal or provenance
+    // hole. Secret/card actions carry only a hole; their raw values never land
+    // in the recipe.
     value: RecipeValueSchema.optional(),
     host: z.string().max(253).optional(),
     slot: z.string().max(60).optional(),
@@ -189,6 +193,34 @@ export const OperatorRecipeSchema = z
         message: "operator recipe verb and domain must be present together",
       });
     }
+    recipe.trace.forEach((entry, index) => {
+      const value = entry.action.value;
+      if (
+        entry.action.kind === "operate_pay" &&
+        (value === undefined || typeof value === "string" || !/^card(?:\.|$)/.test(value.hole))
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["trace", index, "action", "value"],
+          message: "operate_pay requires card provenance",
+        });
+      }
+      if (value === undefined || typeof value === "string") return;
+      if (/^card(?:\.|$)/.test(value.hole) && entry.action.kind !== "operate_pay") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["trace", index, "action", "value"],
+          message: "card provenance is only valid on operate_pay",
+        });
+      }
+      if (/^credential(?:\.|$)/.test(value.hole) && entry.action.kind !== "type_secret") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["trace", index, "action", "value"],
+          message: "credential provenance is only valid on type_secret",
+        });
+      }
+    });
   });
 export type OperatorRecipe = z.infer<typeof OperatorRecipeSchema>;
 
@@ -299,6 +331,12 @@ function describeAction(a: TraceAction): string {
       return `cross into ${a.host ?? ""}`;
     case "type_secret":
       return `type the sealed secret (slot ${a.slot ?? "?"}) into ${t}`;
+    case "select":
+      return `select ${v ?? ""} in ${t}`;
+    case "set_phone_country":
+      return `set the phone country to ${v ?? ""}`;
+    case "operate_pay":
+      return `pay with ${v ?? "{card}"}`;
     case "scroll":
       return `scroll ${a.direction ?? "down"}`;
     case "extract":
@@ -444,16 +482,21 @@ function flattenKnownInputs(inputs: KnownRecipeInputs): Array<[string, string]> 
 /** Tag only exact, caller-proven values. Unknown literals deliberately remain literals. */
 export function tagProvenanceValue(value: string, inputs: KnownRecipeInputs): RecipeValue {
   const knownInputs = flattenKnownInputs(inputs);
-  const match =
-    knownInputs.find(([, known]) => known === value) ??
-    (value === "${EMAIL_ALIAS}"
-      ? knownInputs.find(
-          ([hole, known]) =>
-            /^(?:address|contact|credential)(?:\.|$)/.test(hole) &&
-            /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(known),
-        )
-      : undefined);
-  return match === undefined ? value : { hole: match[0] };
+  const matches = knownInputs.filter(([, known]) => known === value);
+  if (matches.length === 0 && value === "${EMAIL_ALIAS}") {
+    matches.push(
+      ...knownInputs.filter(
+        ([hole, known]) =>
+          /^(?:address|contact|credential)(?:\.|$)/.test(hole) &&
+          /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(known),
+      ),
+    );
+  }
+  const holes = [...new Set(matches.map(([hole]) => hole))];
+  if (holes.length > 1) {
+    throw new Error(`ambiguous recipe provenance across holes: ${holes.join(", ")}`);
+  }
+  return holes[0] === undefined ? value : { hole: holes[0] };
 }
 
 export function tagTraceProvenance(
