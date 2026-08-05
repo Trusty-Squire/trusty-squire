@@ -1,0 +1,45 @@
+{
+  "captured_at": "2026-08-04T21:05:00Z",
+  "target": { "repeat": 20, "novel": 10 },
+  "captured": {
+    "repeat": [
+      "whitejade-purchase-r0",
+      "whitejade-purchase-r1",
+      "whitejade-purchase-r2",
+      "whitejade-purchase-r3"
+    ],
+    "novel": [
+      "allbirds-purchase-n0",
+      "brooklinen-purchase-n0",
+      "colourpop-purchase-n0",
+      "deathwish-purchase-n0",
+      "tentree-purchase-n0"
+    ]
+  },
+  "skipped": [
+    {
+      "bucket": "repeat",
+      "count": 16,
+      "reason": "v1 captures all four real whitejade products; remaining cross-param variations are logged rather than synthesized"
+    },
+    {
+      "bucket": "novel",
+      "count": 5,
+      "reason": "v1 live capture stopped after five stable unseen-store product pages; remaining target is logged rather than silently synthesized"
+    }
+  ],
+  "substrate": {
+    "har": "stable storefront/product pages only, captured with Playwright recordHar and replayed with notFound=abort",
+    "checkout": "live whitejade.xyz Shopify test mode only; never written to HAR"
+  },
+  "live_checkout": {
+    "task_id": "whitejade-purchase-r0",
+    "status": "checkout_review_verified",
+    "line_item": "The Glow Serum",
+    "subtotal_cents": 6800,
+    "shipping_cents": 800,
+    "total_cents": 7600,
+    "order_completion": "known gap: final submission is not asserted until the whitejade Admin API order-readback token is vaulted",
+    "har_recorded": false
+  }
+}

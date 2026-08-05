@@ -1,0 +1,38 @@
+{
+  "task_id": "tentree-purchase-n0",
+  "verb": "purchase",
+  "domain": "tentree.com",
+  "entry_url": "https://www.tentree.com/products/ruxton-packable-backpack-mauve-stone",
+  "params": {
+    "product_query": "Ruxton Packable Backpack, mauve stone",
+    "address": { "country": "US", "region": "NY", "postal_code": "10001" },
+    "card_ref": "not-used-novel-miss"
+  },
+  "expected_end_state": {
+    "line_items": [{ "title_contains": "Ruxton Packable Backpack", "qty": 1 }],
+    "total_cents": 7800,
+    "reached": "product_page"
+  },
+  "har": "tentree-purchase-n0.har",
+  "bucket": "novel",
+  "cold_baseline": {
+    "turns": 2,
+    "tokens": 69985,
+    "wall_clock_ms": 16304,
+    "end_state": {
+      "line_items": [{ "title_contains": "Ruxton Packable Backpack", "qty": 1 }],
+      "total_cents": 7800,
+      "reached": "product_page"
+    },
+    "provenance": {
+      "source": "driver",
+      "driver": "codex-exec+constrained-browser-mcp",
+      "model": "gpt-5.6-sol",
+      "recorded_at": "2026-08-05T05:40:32.414Z",
+      "browser_observations": 1,
+      "evidence_sha256": "7fb51c690233c5ea8e7daa034e2039319451ad5c6fbe5f3a1c951f5c661dee39",
+      "capture_policy": "read-only-playwright-mcp-v2"
+    }
+  },
+  "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }
+}

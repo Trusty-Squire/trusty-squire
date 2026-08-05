@@ -1,0 +1,40 @@
+{
+  "task_id": "whitejade-purchase-r3",
+  "verb": "purchase",
+  "domain": "whitejade.xyz",
+  "entry_url": "https://whitejade.xyz/products/red-light-face-mask?variant=53506565898351",
+  "params": {
+    "product_query": "Red Light Face Mask",
+    "product_variant_id": "53506565898351",
+    "product_price_cents": 10900,
+    "address": { "country": "US", "region": "NY", "postal_code": "10001" },
+    "card_ref": "whitejade-test-card"
+  },
+  "expected_end_state": {
+    "line_items": [{ "title_contains": "Red Light Face Mask", "qty": 1 }],
+    "total_cents": 10900,
+    "reached": "checkout_review"
+  },
+  "har": "whitejade-purchase-r3.har",
+  "bucket": "repeat",
+  "cold_baseline": {
+    "turns": 18,
+    "tokens": 303799,
+    "wall_clock_ms": 90702,
+    "end_state": {
+      "line_items": [{ "title_contains": "Red Light Face Mask", "qty": 1 }],
+      "total_cents": 10900,
+      "reached": "checkout_review"
+    },
+    "provenance": {
+      "source": "driver",
+      "driver": "codex-exec+constrained-browser-mcp",
+      "model": "gpt-5.6-sol",
+      "recorded_at": "2026-08-05T06:05:39.470Z",
+      "browser_observations": 14,
+      "evidence_sha256": "e414ae67328e99a13350f8e6f4bc882f424edd83cb47e557f05a89cb7c5cb704",
+      "capture_policy": "read-only-playwright-mcp-v3"
+    }
+  },
+  "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }
+}

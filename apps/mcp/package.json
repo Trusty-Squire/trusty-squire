@@ -49,6 +49,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "vitest run",
     "test:cov": "vitest run --coverage",
+    "eval:replay:capture": "node scripts/capture-replay-baseline.mjs",
     "smoke:opencode": "node scripts/smoke-opencode.mjs",
     "dev:server": "tsx src/bin.ts server",
     "install:dev": "tsx src/bin.ts install",

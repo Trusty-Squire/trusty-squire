@@ -1,0 +1,38 @@
+{
+  "task_id": "deathwish-purchase-n0",
+  "verb": "purchase",
+  "domain": "deathwishcoffee.com",
+  "entry_url": "https://www.deathwishcoffee.com/products/chocolate-hazelnut-coffee",
+  "params": {
+    "product_query": "Chocolate Hazelnut Coffee, one bag",
+    "address": { "country": "US", "region": "NY", "postal_code": "10001" },
+    "card_ref": "not-used-novel-miss"
+  },
+  "expected_end_state": {
+    "line_items": [{ "title_contains": "Chocolate Hazelnut Coffee", "qty": 1 }],
+    "total_cents": 1999,
+    "reached": "product_page"
+  },
+  "har": "deathwish-purchase-n0.har",
+  "bucket": "novel",
+  "cold_baseline": {
+    "turns": 2,
+    "tokens": 69375,
+    "wall_clock_ms": 19541,
+    "end_state": {
+      "line_items": [{ "title_contains": "Chocolate Hazelnut Coffee", "qty": 1 }],
+      "total_cents": 1999,
+      "reached": "product_page"
+    },
+    "provenance": {
+      "source": "driver",
+      "driver": "codex-exec+constrained-browser-mcp",
+      "model": "gpt-5.6-sol",
+      "recorded_at": "2026-08-05T05:40:10.560Z",
+      "browser_observations": 1,
+      "evidence_sha256": "e2c934934bea0c2f53ebe8dacc0ff90a5bedbf65088e228e92a8e84ed3c6c52c",
+      "capture_policy": "read-only-playwright-mcp-v2"
+    }
+  },
+  "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }
+}

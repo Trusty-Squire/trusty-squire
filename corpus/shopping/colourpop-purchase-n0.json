@@ -1,0 +1,38 @@
+{
+  "task_id": "colourpop-purchase-n0",
+  "verb": "purchase",
+  "domain": "colourpop.com",
+  "entry_url": "https://colourpop.com/products/infinite-possibilities-full-collection",
+  "params": {
+    "product_query": "Infinite Possibilities full collection",
+    "address": { "country": "US", "region": "NY", "postal_code": "10001" },
+    "card_ref": "not-used-novel-miss"
+  },
+  "expected_end_state": {
+    "line_items": [{ "title_contains": "Infinite Possibilities", "qty": 1 }],
+    "total_cents": 10800,
+    "reached": "product_page"
+  },
+  "har": "colourpop-purchase-n0.har",
+  "bucket": "novel",
+  "cold_baseline": {
+    "turns": 2,
+    "tokens": 92562,
+    "wall_clock_ms": 28503,
+    "end_state": {
+      "line_items": [{ "title_contains": "Infinite Possibilities", "qty": 1 }],
+      "total_cents": 10800,
+      "reached": "product_page"
+    },
+    "provenance": {
+      "source": "driver",
+      "driver": "codex-exec+constrained-browser-mcp",
+      "model": "gpt-5.6-sol",
+      "recorded_at": "2026-08-05T05:33:30.903Z",
+      "browser_observations": 1,
+      "evidence_sha256": "9b23a3ef6ce3a0e1227ca70ae85b82f012d4ff2b58d80ed3c8efb76481d15e8b",
+      "capture_policy": "read-only-playwright-mcp-v2"
+    }
+  },
+  "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }
+}

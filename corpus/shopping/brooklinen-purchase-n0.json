@@ -1,0 +1,38 @@
+{
+  "task_id": "brooklinen-purchase-n0",
+  "verb": "purchase",
+  "domain": "brooklinen.com",
+  "entry_url": "https://www.brooklinen.com/products/classic-core-sheet-set?variant=41405018112090",
+  "params": {
+    "product_query": "Classic Percale Core Sheet Set, solid white, twin",
+    "address": { "country": "US", "region": "NY", "postal_code": "10001" },
+    "card_ref": "not-used-novel-miss"
+  },
+  "expected_end_state": {
+    "line_items": [{ "title_contains": "Classic Percale Core Sheet Set", "qty": 1 }],
+    "total_cents": 13515,
+    "reached": "product_page"
+  },
+  "har": "brooklinen-purchase-n0.har",
+  "bucket": "novel",
+  "cold_baseline": {
+    "turns": 3,
+    "tokens": 167984,
+    "wall_clock_ms": 55625,
+    "end_state": {
+      "line_items": [{ "title_contains": "Classic Percale Core Sheet Set", "qty": 1 }],
+      "total_cents": 13515,
+      "reached": "product_page"
+    },
+    "provenance": {
+      "source": "driver",
+      "driver": "codex-exec+constrained-browser-mcp",
+      "model": "gpt-5.6-sol",
+      "recorded_at": "2026-08-05T05:33:02.334Z",
+      "browser_observations": 2,
+      "evidence_sha256": "b19e81810de71a6f1482218c40da820372da70da3e9be814bc76c3b6387222d1",
+      "capture_policy": "read-only-playwright-mcp-v2"
+    }
+  },
+  "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }
+}

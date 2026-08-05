@@ -38,6 +38,7 @@ jobs:
       api: ${{ steps.scope.outputs.api }}
       build_any: ${{ steps.scope.outputs.build_any }}
       mcp: ${{ steps.scope.outputs.mcp }}
+      replay_eval: ${{ steps.scope.outputs.replay_eval }}
       registry: ${{ steps.scope.outputs.registry }}
       schema: ${{ steps.scope.outputs.schema }}
       shell_tests: ${{ steps.scope.outputs.shell_tests }}
@@ -65,6 +66,7 @@ jobs:
 
           api=false
           mcp=false
+          replay_eval=false
           registry=false
           schema=false
           shell_tests=false
@@ -74,6 +76,7 @@ jobs:
           mark_all() {
             api=true
             mcp=true
+            replay_eval=true
             registry=true
             schema=true
             shell_tests=true
@@ -86,8 +89,16 @@ jobs:
               apps/api/*)
                 api=true
                 ;;
+              apps/mcp/src/eval/replay-harness/*|apps/mcp/src/replay-engine/*|apps/mcp/src/bot/replay-engine*)
+                mcp=true
+                replay_eval=true
+                ;;
               apps/mcp/*)
                 mcp=true
+                ;;
+              corpus/shopping/*)
+                mcp=true
+                replay_eval=true
                 ;;
               apps/registry/*)
                 registry=true
@@ -151,6 +162,7 @@ jobs:
             echo "api=$api"
             echo "build_any=$build_any"
             echo "mcp=$mcp"
+            echo "replay_eval=$replay_eval"
             echo "registry=$registry"
             echo "schema=$schema"
             echo "shell_tests=$shell_tests"
@@ -283,6 +295,13 @@ jobs:
         run: pnpm --filter '@trusty-squire/registry' prisma:generate
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
+      # The replay engine is not present yet; this named gate records the
+      # all-cold baseline and runs the frozen stable-page drift battery first.
+      # Checkout is deliberately excluded here and runs live only against the
+      # operator-owned whitejade test-mode store.
+      - name: Replay-engine frozen corpus gate
+        if: needs.secret-scan.outputs.replay_eval == 'true'
+        run: pnpm -F @trusty-squire/mcp test replay-harness
       # Per-package test over every package whose suite passes locally.
       # (registry + vault were historically excluded; the registry "prisma
       # drift" failures are resolved — both are green and now run here.)
