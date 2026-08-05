@@ -627,7 +627,8 @@ async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
 
 const selfManagedChromePids = new Set<number>();
 let selfManagedCleanupInstalled = false;
-let orphanVerifyReapRan = false;
+let orphanVerifierReapRan = false;
+const orphanOperatorProfilesReaped = new Set<string>();
 
 function killPid(pid: number, signal: NodeJS.Signals): void {
   try {
@@ -663,16 +664,50 @@ function registerSelfManagedChrome(child: ChildProcess): void {
   });
 }
 
-// Stale verifier browsers are the expensive leak mode: if the MCP process dies
+// Stale verifier/operator browsers are the expensive leak mode: if the MCP process dies
 // mid-verify, self-launched Chrome survives as PPID=1 with a
-// ~/.trusty-squire/profiles/verify-* user-data-dir. It keeps the profile lock,
+// ~/.trusty-squire/profiles/verify-* or ~/.trusty-squire/chrome-profile
+// user-data-dir. It keeps the profile lock,
 // burns memory, and may leave defunct helper children. A live verifier should
 // never be parented to init, so these are safe to reap at the next browser
 // startup. Best-effort and Linux-only; failure must not block signups.
-function reapOrphanedVerifyBrowsersOnce(): void {
-  if (orphanVerifyReapRan) return;
-  orphanVerifyReapRan = true;
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+export function matchesReapableBrowserArgs(
+  args: string,
+  profileDirs: readonly string[],
+  includeVerifier: boolean,
+): boolean {
+  if (!/(?:chrome|chromium)/i.test(args)) return false;
+  const profiles = [...new Set(profileDirs)].map(escapeRegExp);
+  if (includeVerifier) {
+    profiles.unshift(String.raw`[^\s"']*\.trusty-squire\/profiles\/verify-[^\/\s"']+`);
+  }
+  if (profiles.length === 0) return false;
+  const profile = `(?:${profiles.join("|")})`;
+  return new RegExp(`--user-data-dir=(?:"${profile}"|'${profile}'|${profile})(?=\\s|$)`).test(args);
+}
+
+export function claimOrphanBrowserReapScope(profileDir: string): {
+  includeVerifier: boolean;
+  profileDirs: string[];
+} | null {
+  const includeVerifier = !orphanVerifierReapRan;
+  const profileDirs = [...new Set([CHROME_PROFILE_DIR, profileDir])].filter(
+    (candidate) => !orphanOperatorProfilesReaped.has(candidate),
+  );
+  if (!includeVerifier && profileDirs.length === 0) return null;
+  orphanVerifierReapRan = true;
+  for (const candidate of profileDirs) orphanOperatorProfilesReaped.add(candidate);
+  return { includeVerifier, profileDirs };
+}
+
+function reapOrphanedBrowsersOnce(profileDir: string): void {
   if (process.platform !== "linux") return;
+  const scope = claimOrphanBrowserReapScope(profileDir);
+  if (scope === null) return;
   let rows = "";
   try {
     rows = execFileSync("ps", ["-eo", "pid=,ppid=,args="], {
@@ -691,14 +726,13 @@ function reapOrphanedVerifyBrowsersOnce(): void {
     if (
       Number.isFinite(pid) &&
       ppid === 1 &&
-      /(?:chrome|chromium)/i.test(args) &&
-      /--user-data-dir=.*\.trusty-squire\/profiles\/verify-[^/\s]+/.test(args)
+      matchesReapableBrowserArgs(args, scope.profileDirs, scope.includeVerifier)
     ) {
       pids.push(pid);
     }
   }
   if (pids.length === 0) return;
-  console.error(`[operator] reaping ${pids.length} orphaned verify Chrome process(es)`);
+  console.error(`[operator] reaping ${pids.length} orphaned Chrome process(es)`);
   for (const pid of pids) killPid(pid, "SIGTERM");
   setTimeout(() => {
     for (const pid of pids) killPid(pid, "SIGKILL");
@@ -981,6 +1015,11 @@ export class BrowserController {
   // Google session across runs — see profile.ts / google-login.ts.
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  // The page start() configured with the controller's navigation/captcha
+  // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
+  // reuse must always restore this original page rather than adopting a popup
+  // whose lifecycle handlers were never installed.
+  private primaryPage: Page | null = null;
   // Self-launch path (Turnstile-safe; see selfLaunchEnabled). When we spawn
   // Chrome ourselves and attach over CDP, these hold the child process and
   // the connected Browser so close() can tear both down.
@@ -1048,6 +1087,23 @@ export class BrowserController {
   // Per-launch egress override (verify-fleet identities each get their own IP).
   // null → use the env-global proxy. See resolveProxy().
   private readonly proxyOverride: string | null;
+
+  // Warm reuse is deliberately narrow: a browser belongs to exactly one
+  // persistent profile and one explicit egress override. Undefined/blank proxy
+  // values both mean "use the environment/default route".
+  matchesLaunchOptions(opts: Pick<BrowserControllerOptions, "profileDir" | "proxyUrl">): boolean {
+    const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
+    const proxyUrl =
+      opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
+    return this.profileDir === profileDir && this.proxyOverride === proxyUrl;
+  }
+
+  // Required health gate for a warm browser. BrowserContext alone is not a
+  // sufficient signal: a dead CDP transport can leave stale JS objects behind.
+  isConnected(): boolean {
+    const browser = this.cdpBrowser ?? this.context?.browser() ?? null;
+    return browser?.isConnected() === true;
+  }
 
   // Which browser channel the most recent .start() actually used.
   // `null` means bundled Chromium; a string like "chrome" means a
@@ -1269,7 +1325,7 @@ export class BrowserController {
   }
 
   async start(): Promise<void> {
-    reapOrphanedVerifyBrowsersOnce();
+    reapOrphanedBrowsersOnce(this.profileDir);
     const channel = await detectChromiumChannel();
     this.launchedChannel = channel;
     const proxy = await this.resolveProxy();
@@ -1654,6 +1710,7 @@ export class BrowserController {
     })();`;
     if (!remoteMode) await context.addInitScript({ content: installWebglSpoofScript });
     this.page = context.pages()[0] ?? (await context.newPage());
+    this.primaryPage = this.page;
     // addInitScript covers document-start page JS, but Playwright's
     // page.evaluate utility execution can run in a separate realm. Install the
     // same no-op helper there with a STRING evaluate (tsx cannot wrap strings
@@ -8755,6 +8812,51 @@ export class BrowserController {
     }
   }
 
+  // End one sequential task without tearing down Chrome. The original,
+  // handler-bound page survives; OAuth popups and any other incidental tabs are
+  // closed. about:blank replaces the task document while the persistent profile
+  // (cookies, OAuth identity, local profile data) intentionally remains intact.
+  async resetPageForReuse(): Promise<void> {
+    const context = this.context;
+    const primaryPage = this.primaryPage;
+    if (!this.isConnected() || context === null || primaryPage === null || primaryPage.isClosed()) {
+      throw new Error("warm browser page is not reusable");
+    }
+
+    this.page = primaryPage;
+    this.oauthProductPage = null;
+    this.oauthNetLog = [];
+    this.mouseX = 100;
+    this.mouseY = 100;
+
+    for (const page of context.pages()) {
+      if (page !== primaryPage && !page.isClosed()) {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            page.close(),
+            new Promise<never>((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error("timed out closing warm browser popup")),
+                5_000,
+              );
+              timer.unref();
+            }),
+          ]);
+        } finally {
+          if (timer !== undefined) clearTimeout(timer);
+        }
+      }
+    }
+    if (context.pages().some((page) => page !== primaryPage && !page.isClosed())) {
+      throw new Error("warm browser reset left a non-primary page open");
+    }
+    await primaryPage.goto("about:blank", {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+  }
+
   async close(): Promise<void> {
     // Each step is best-effort and independent: a throw closing the page
     // or context must NOT skip the Xvfb teardown below, or the virtual
@@ -8778,6 +8880,10 @@ export class BrowserController {
         new Promise<void>((r) => setTimeout(r, ms)),
       ]);
     if (this.page) await capped(this.page.close(), 5_000);
+    this.page = null;
+    this.primaryPage = null;
+    this.oauthProductPage = null;
+    this.oauthNetLog = [];
     if (this.context) await capped(this.context.close(), 10_000);
     // Self-launch path: disconnect the CDP browser and SIGKILL the Chrome we
     // spawned. context.close() on a connectOverCDP context only disconnects —
