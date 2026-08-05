@@ -1,7 +1,11 @@
 import { existsSync } from "node:fs";
 import { chromium, type Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
-import { BrowserController, parseCheckoutAmount } from "../browser.js";
+import {
+  BrowserController,
+  hasPayPalHostedCheckoutFrame,
+  parseCheckoutAmount,
+} from "../browser.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
 // main CI install downloads it, but the lean mcp-only publish-verify install
@@ -15,6 +19,28 @@ try {
 }
 
 describe("checkout payment parsing", () => {
+  it("detects PayPal Smart Button and hosted card-field frames without entering them", () => {
+    expect(
+      hasPayPalHostedCheckoutFrame([
+        { url: "about:blank", name: "__zoid__paypal_card_fields__uid_abc", title: "" },
+      ]),
+    ).toBe(true);
+    expect(
+      hasPayPalHostedCheckoutFrame([
+        {
+          url: "https://www.paypal.com/smart/buttons?client-id=synthetic",
+          name: "",
+          title: "PayPal",
+        },
+      ]),
+    ).toBe(true);
+    expect(
+      hasPayPalHostedCheckoutFrame([
+        { url: "https://merchant.test/checkout", name: "card-form", title: "Card details" },
+      ]),
+    ).toBe(false);
+  });
+
   it("uses the selected currency precision for a comma decimal", () => {
     expect(parseCheckoutAmount(["Total 12,345"], "KWD")).toEqual({
       amount_cents: 12_345,

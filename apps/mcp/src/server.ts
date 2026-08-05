@@ -85,6 +85,7 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
       );
     }
     try {
+      api.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
       const result = await tool.handler(parsed.data, api, {
         notifyUser: async (message, data) => {
           await server.sendLoggingMessage({

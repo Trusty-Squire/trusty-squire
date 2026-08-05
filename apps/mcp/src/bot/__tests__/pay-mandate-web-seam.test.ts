@@ -43,7 +43,7 @@ import { exportJWK, SignJWT } from "jose";
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
 import { executeOperatePay, type PaymentBrowser } from "../pay-operator.js";
-import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
+import { sealToRecipient } from "../payment-hpke.js";
 import type { CheckoutCard, CheckoutSummary } from "../browser.js";
 
 const CHECKOUT: CheckoutSummary = {
@@ -214,8 +214,8 @@ async function runSeam(cfg: {
         agent,
         cardRef: cfg.signCardRef ?? cfg.boundCardRef,
         amountCents: cfg.signAmountCents ?? CHECKOUT.amount_cents,
-        item: "",
-        reason: "",
+        item: "Synthetic seam item",
+        reason: "Synthetic seam purchase reason",
         ...(cfg.confidence !== undefined ? { confidence: cfg.confidence } : {}),
       });
       webCanonical = canonical;
@@ -238,6 +238,7 @@ async function runSeam(cfg: {
   }) as typeof fetch;
 
   const browser: PaymentBrowser = {
+    isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
@@ -260,6 +261,8 @@ async function runSeam(cfg: {
       merchant: CHECKOUT.merchant,
       amount_cents: CHECKOUT.amount_cents,
       currency: CHECKOUT.currency,
+      item: "Synthetic seam item",
+      reason: "Synthetic seam purchase reason",
     },
     api,
     browser,
@@ -346,8 +349,8 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
         nonce: "seam-nonce",
         card_ref: "card_bound_by_server",
         recipient_pubkey_hash: canonical.match(/"recipient_pubkey_hash":"([^"]*)"/)![1],
-        item: "",
-        reason: "",
+        item: "Synthetic seam item",
+        reason: "Synthetic seam purchase reason",
         agent: "seam-agent@host",
       }),
     );

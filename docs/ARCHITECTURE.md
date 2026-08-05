@@ -159,11 +159,14 @@ and transferred secrets are not returned to the agent.
 
 ```text
 agent starts operate_pay in the active checkout
-  -> operator reads merchant, origin, and total and adds optional item/reason
+  -> agent supplies a non-empty item and reason; operator reads merchant, origin,
+     and total
+  -> PayPal Smart Button or hosted-field frames hand checkout to the user before
+     saved-card resolution or approval creation
   -> an explicit card is used; otherwise one saved card is selected automatically,
      no saved cards starts add-card, and multiple cards require a user choice
   -> operator creates an ephemeral key; API creates a short-lived approval relay
-     and attaches the server-derived requesting-agent label
+     and attaches the requesting MCP host's initialize clientInfo.name
   -> if the approval has no card, the user adds one and the API binds that saved
      card to the still-pending approval
   -> user reviews the purchase and server-bound card on a paired phone

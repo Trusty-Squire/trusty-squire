@@ -73,7 +73,10 @@ describe("payment approval relay", () => {
     const response = await server.inject({
       method: "POST",
       url: "/v1/pay/approvals",
-      headers: { authorization: `Bearer ${agentToken}` },
+      headers: {
+        authorization: `Bearer ${agentToken}`,
+        "x-squire-agent-identity": "Hermes",
+      },
       payload: {
         merchant: "Synthetic Books",
         checkout_origin: "https://checkout.synthetic.test",
@@ -81,6 +84,8 @@ describe("payment approval relay", () => {
         currency: "USD",
         card_ref: "card_synthetic_1",
         operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: "Synthetic Book",
+        reason: "Synthetic test purchase",
       },
     });
     expect(response.statusCode).toBe(201);
@@ -96,13 +101,18 @@ describe("payment approval relay", () => {
     const response = await server.inject({
       method: "POST",
       url: "/v1/pay/approvals",
-      headers: { authorization: `Bearer ${agentToken}` },
+      headers: {
+        authorization: `Bearer ${agentToken}`,
+        "x-squire-agent-identity": "Hermes",
+      },
       payload: {
         merchant: "Synthetic Books",
         checkout_origin: "https://checkout.synthetic.test",
         amount_cents: 2599,
         currency: "USD",
         operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: "Synthetic Book",
+        reason: "Synthetic test purchase",
       },
     });
     expect(response.statusCode).toBe(201);
@@ -130,7 +140,7 @@ describe("payment approval relay", () => {
   it("creates a pending approval and returns it", async () => {
     const created = await createApproval();
     expect(created.nonce).toMatch(/^[A-Za-z0-9_-]{22}$/);
-    expect(created.agent).toBe("synthetic-payment-test-agent");
+    expect(created.agent).toBe("Hermes");
     expect(created.expires_at).toBe("2026-07-23T12:10:00.000Z");
 
     const response = await server.inject({
@@ -149,20 +159,23 @@ describe("payment approval relay", () => {
       nonce: created.nonce,
       card_ref: "card_synthetic_1",
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
-      item: "",
-      reason: "",
-      agent: "synthetic-payment-test-agent",
+      item: "Synthetic Book",
+      reason: "Synthetic test purchase",
+      agent: "Hermes",
       jws: null,
       sealed_card: null,
       expires_at: created.expires_at,
     });
   });
 
-  it("stores item/reason and ignores a body-supplied agent", async () => {
+  it("stores item/reason and the MCP client requester header", async () => {
     const response = await server.inject({
       method: "POST",
       url: "/v1/pay/approvals",
-      headers: { authorization: `Bearer ${agentToken}` },
+      headers: {
+        authorization: `Bearer ${agentToken}`,
+        "x-squire-agent-identity": "synthetic-shopping-agent",
+      },
       payload: {
         merchant: "Synthetic Books",
         checkout_origin: "https://checkout.synthetic.test",
@@ -172,12 +185,12 @@ describe("payment approval relay", () => {
         operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
         item: "Synthetic Widget",
         reason: "Restocking synthetic inventory",
-        agent: "synthetic-shopping-agent",
+        agent: "ignored-body-agent",
       },
     });
     expect(response.statusCode).toBe(201);
     const created = response.json() as { id: string; agent: string };
-    expect(created.agent).toBe("synthetic-payment-test-agent");
+    expect(created.agent).toBe("synthetic-shopping-agent");
 
     const get = await server.inject({
       method: "GET",
@@ -188,17 +201,15 @@ describe("payment approval relay", () => {
     expect(get.json()).toMatchObject({
       item: "Synthetic Widget",
       reason: "Restocking synthetic inventory",
-      agent: "synthetic-payment-test-agent",
+      agent: "synthetic-shopping-agent",
     });
   });
 
-  it("defaults an absent authenticated agent identity to unknown-agent", async () => {
-    const account = await deps.accountStore.createAccount("unknown-agent@example.test", "Unknown");
-    const token = await makeAgentToken(deps, account.id, new Date(nowMs), null);
-    const response = await server.inject({
+  it("rejects missing or blank item and reason", async () => {
+    const missing = await server.inject({
       method: "POST",
       url: "/v1/pay/approvals",
-      headers: { authorization: `Bearer ${token}` },
+      headers: { authorization: `Bearer ${agentToken}` },
       payload: {
         merchant: "Synthetic Books",
         checkout_origin: "https://checkout.synthetic.test",
@@ -208,17 +219,24 @@ describe("payment approval relay", () => {
         operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
       },
     });
-    expect(response.statusCode).toBe(201);
-    const created = response.json() as { id: string; agent: string };
-    expect(created.agent).toBe("unknown-agent");
+    expect(missing.statusCode).toBe(400);
 
-    const get = await server.inject({
-      method: "GET",
-      url: `/v1/pay/approvals/${created.id}`,
-      headers: { authorization: `Bearer ${token}` },
+    const blank = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {
+        merchant: "Synthetic Books",
+        checkout_origin: "https://checkout.synthetic.test",
+        amount_cents: 2599,
+        currency: "USD",
+        card_ref: "card_synthetic_1",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: " ",
+        reason: "because",
+      },
     });
-    expect(get.statusCode).toBe(200);
-    expect(get.json()).toMatchObject({ agent: "unknown-agent" });
+    expect(blank.statusCode).toBe(400);
   });
 
   it("returns the configured Vouchflow audience to an authenticated operator", async () => {

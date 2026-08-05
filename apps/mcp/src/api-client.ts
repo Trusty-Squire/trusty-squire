@@ -123,9 +123,15 @@ export interface PaymentApproval {
 
 export class ApiClient {
   private readonly fetchImpl: typeof fetch;
+  private requestingAgent: string | undefined;
 
   constructor(private readonly config: ApiClientConfig) {
     this.fetchImpl = config.fetch ?? fetch;
+  }
+
+  setRequestingAgent(name: string): void {
+    const normalized = name.trim();
+    this.requestingAgent = normalized.length > 0 ? normalized : "unknown-agent";
   }
 
   // ── Runs / provision / approvals ───────────────────────────
@@ -466,8 +472,9 @@ export class ApiClient {
       Accept: "application/json",
       "Content-Type": "application/json",
     };
-    if (this.config.agentIdentity !== undefined) {
-      h["X-Squire-Agent-Identity"] = this.config.agentIdentity;
+    const agentIdentity = this.requestingAgent ?? this.config.agentIdentity;
+    if (agentIdentity !== undefined) {
+      h["X-Squire-Agent-Identity"] = agentIdentity;
     }
     // The registry scopes its reads to `x-account-id`. Main API
     // ignores unknown headers, so it's safe to always send.

@@ -155,6 +155,7 @@ async function harness(
   }) as typeof fetch;
 
   const browser: PaymentBrowser = {
+    isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
@@ -174,6 +175,7 @@ async function harness(
     agentSessionToken: "synthetic-session-token",
     fetch: fetchMock,
   });
+  api.setRequestingAgent("Hermes");
   const result = await executeOperatePay(
     {
       card_ref: "card_test",
@@ -437,8 +439,8 @@ async function buildApprovedMandate(params: {
     // path that equals the server-bound ref; the swap test signs a different one.
     card_ref: params.signCardRef,
     recipient_pubkey_hash: recipientHash,
-    item: "",
-    reason: "",
+    item: "Synthetic JIT item",
+    reason: "Synthetic JIT purchase reason",
     agent: params.agent,
   })!;
   const aad = createHash("sha256").update(canonical, "utf8").digest();
@@ -543,6 +545,7 @@ async function runJit(cfg: {
   }) as typeof fetch;
 
   const browser: PaymentBrowser = {
+    isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary: vi.fn(async () => {
       const call = summaryReads++;
       if (call >= 1 && cfg.resumeThrows === true) {
@@ -574,6 +577,8 @@ async function runJit(cfg: {
       merchant: JIT_CHECKOUT.merchant,
       amount_cents: JIT_CHECKOUT.amount_cents,
       currency: JIT_CHECKOUT.currency,
+      item: "Synthetic JIT item",
+      reason: "Synthetic JIT purchase reason",
     },
     api,
     browser,

@@ -8,10 +8,11 @@
 //   2. The CLI no longer accepts `--pair` as a no-op or anything else;
 //      pairing is automatic and lives inside the `connect` command.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { buildServer } from "../server.js";
+import type { ApiClient } from "../api-client.js";
 
 describe("single-tier — stale install gate", () => {
   it("every tool returns a re-install instruction when api is null", async () => {
@@ -41,6 +42,28 @@ describe("single-tier — stale install gate", () => {
         });
         expect(JSON.stringify(result)).toMatch(/single-tier auth|install/i);
       }
+    } finally {
+      await client.close();
+    }
+  });
+});
+
+describe("MCP client identity", () => {
+  it("uses initialize clientInfo.name as the requesting agent", async () => {
+    const setRequestingAgent = vi.fn();
+    const api = {
+      setRequestingAgent,
+      listPaymentCards: vi.fn().mockResolvedValue([]),
+    } as unknown as ApiClient;
+    const server = await buildServer(api);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "Hermes", version: "1.0.0" });
+    await client.connect(clientTransport);
+
+    try {
+      await client.callTool({ name: "list_payment_cards", arguments: {} });
+      expect(setRequestingAgent).toHaveBeenCalledWith("Hermes");
     } finally {
       await client.close();
     }

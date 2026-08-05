@@ -15,12 +15,13 @@ export interface OperatePayArgs {
   // bound card_ref back from the approval — never args.card_ref, which does not
   // exist in the JIT branch.
   card_ref?: string;
-  item?: string;
-  reason?: string;
+  item: string;
+  reason: string;
   three_ds_wait_seconds?: number;
 }
 
 export interface PaymentBrowser {
+  isPayPalHostedCheckout(): Promise<boolean>;
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
   waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout">;
@@ -277,8 +278,8 @@ export async function executeOperatePay(
       };
     }
 
-    const item = args.item ?? "";
-    const reason = args.reason ?? "";
+    const item = args.item;
+    const reason = args.reason;
     // JIT add-card ceremony: no card on file, so mint the approval card-less
     // and read the SERVER-BOUND card_ref back on resume. The has-card path
     // (args.card_ref present) is entirely untouched by this flag.
