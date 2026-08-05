@@ -386,6 +386,15 @@ describe("payment approval relay", () => {
     expect(confirm.statusCode).toBe(200);
     expect(confirm.json()).toEqual({ status: "approved" });
 
+    const repeatedConfirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: verified,
+    });
+    expect(repeatedConfirm.statusCode).toBe(200);
+    expect(repeatedConfirm.json()).toEqual({ status: "approved" });
+
     const final = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}`,

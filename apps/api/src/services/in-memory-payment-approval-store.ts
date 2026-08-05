@@ -125,13 +125,13 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     if (
       record === undefined ||
       record.accountId !== accountId ||
-      record.status !== "pending" ||
       record.jws !== jws ||
-      record.sealedCard !== sealedCard ||
-      record.expiresAt <= now
+      record.sealedCard !== sealedCard
     ) {
       return false;
     }
+    if (record.status === "approved") return true;
+    if (record.status !== "pending" || record.expiresAt <= now) return false;
     record.status = "approved";
     return true;
   }

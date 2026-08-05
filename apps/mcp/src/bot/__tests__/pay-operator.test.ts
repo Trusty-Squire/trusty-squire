@@ -32,6 +32,8 @@ const SYNTHETIC_CARD = {
 
 type Mode =
   | "happy"
+  | "confirm_response_lost"
+  | "confirm_response_lost_changed"
   | "junk_then_happy"
   | "tampered_amount"
   | "tampered_origin"
@@ -64,6 +66,7 @@ async function harness(
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
   let approvalPolls = 0;
+  let confirmedCandidate: Record<string, unknown> | undefined;
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -90,6 +93,19 @@ async function harness(
       approvalPolls += 1;
       const approval = approvalBodies[0]!;
       const operatorPublicKey = String(approval.operator_pubkey);
+      if (confirmedCandidate !== undefined) {
+        return Response.json({
+          id: "approval_test",
+          status: "approved",
+          ...CHECKOUT,
+          nonce,
+          card_ref: "card_test",
+          operator_pubkey: operatorPublicKey,
+          jws: confirmedCandidate.jws,
+          sealed_card: confirmedCandidate.sealed_card,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        });
+      }
       const recipientHash = createHash("sha256")
         .update(Buffer.from(operatorPublicKey, "base64url"))
         .digest("base64url");
@@ -133,7 +149,13 @@ async function harness(
       );
       return Response.json({
         id: "approval_test",
-        status: mode === "happy" || mode === "junk_then_happy" ? "pending" : "approved",
+        status:
+          mode === "happy" ||
+          mode === "confirm_response_lost" ||
+          mode === "confirm_response_lost_changed" ||
+          mode === "junk_then_happy"
+            ? "pending"
+            : "approved",
         ...CHECKOUT,
         nonce,
         card_ref: "card_test",
@@ -144,7 +166,15 @@ async function harness(
       });
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/confirm") && init?.method === "POST") {
-      confirmationBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      confirmationBodies.push(body);
+      confirmedCandidate =
+        mode === "confirm_response_lost_changed"
+          ? { ...body, sealed_card: "different-candidate" }
+          : body;
+      if (mode === "confirm_response_lost" || mode === "confirm_response_lost_changed") {
+        throw new TypeError("confirm response lost");
+      }
       return Response.json({ status: "approved" });
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/notify-3ds") && init?.method === "POST") {
@@ -271,6 +301,18 @@ describe("operate_pay", () => {
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
     expect(confirmationBodies).toHaveLength(1);
     expect(confirmationBodies[0]).not.toMatchObject({ sealed_card: "junk" });
+  });
+
+  it("reconciles a lost confirm response before submitting payment", async () => {
+    const { result, filledCards, confirmationBodies } = await harness("confirm_response_lost");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(confirmationBodies).toHaveLength(1);
+  });
+
+  it("does not reconcile a lost response to a different approved candidate", async () => {
+    await expect(harness("confirm_response_lost_changed")).rejects.toThrow("confirm response lost");
   });
 
   it("rejects a validly-signed mandate whose amount differs from the live checkout", async () => {

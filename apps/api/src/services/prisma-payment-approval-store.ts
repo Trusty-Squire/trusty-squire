@@ -137,7 +137,18 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
       },
       data: { status: "approved" },
     });
-    return result.count > 0;
+    if (result.count > 0) return true;
+    const approved = await this.prisma.pendingPaymentApproval.findFirst({
+      where: {
+        id,
+        account_id: accountId,
+        status: "approved",
+        jws,
+        sealed_card: sealedCard,
+      },
+      select: { id: true },
+    });
+    return approved !== null;
   }
 
   async stageForAccount(

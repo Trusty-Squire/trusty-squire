@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import canonicalize from "canonicalize";
 import { createLocalJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
-import { ApiCallError, type ApiClient } from "../api-client.js";
+import type { ApiClient } from "../api-client.js";
 import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
 import { generateOperatorKeypair, openSealed } from "./payment-hpke.js";
 
@@ -445,16 +445,25 @@ export async function executeOperatePay(
                     try {
                       await api.confirmPaymentApproval(created.id, candidate);
                     } catch (error) {
-                      candidateCardBytes.fill(0);
-                      if (
-                        error instanceof ApiCallError &&
-                        error.code === "payment_approval_candidate_changed"
-                      ) {
+                      let current: Awaited<ReturnType<ApiClient["getPaymentApproval"]>>;
+                      try {
+                        current = await api.getPaymentApproval(created.id);
+                      } catch {
+                        candidateCardBytes.fill(0);
+                        throw error;
+                      }
+                      const exactCandidateApproved =
+                        current.status === "approved" &&
+                        current.jws === candidate.jws &&
+                        current.sealed_card === candidate.sealed_card &&
+                        current.card_ref === candidate.card_ref;
+                      if (!exactCandidateApproved) {
+                        candidateCardBytes.fill(0);
+                        if (current.status !== "pending") throw error;
                         rejectedCandidates.delete(candidateKey);
                         await deps.sleep(deps.pollIntervalMs);
                         continue;
                       }
-                      throw error;
                     }
                   }
                   cardBytes = candidateCardBytes;
