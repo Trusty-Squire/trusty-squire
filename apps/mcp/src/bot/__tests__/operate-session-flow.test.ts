@@ -184,22 +184,20 @@ vi.mock("../browser.js", () => ({
     }
     async selectOption(selector: string, matcher?: string): Promise<string> {
       h.selected.push({ selector, matcher });
+      let committed = matcher ?? "";
       for (const element of h.elements as Array<Record<string, unknown>>) {
         if (element.selector !== selector) continue;
         const options = element.selectOptions as Array<{ value: string; text: string }> | undefined;
         const selected = options?.find((option) =>
           option.text.toLowerCase().includes((matcher ?? "").toLowerCase()),
         );
-        element.value = selected?.value ?? matcher ?? "";
-        element.selectedOptionText = selected?.text ?? matcher ?? "";
+        committed = selected?.text ?? matcher ?? "";
+        if (element.tag === "select") {
+          element.value = selected?.value ?? matcher ?? "";
+          element.selectedOptionText = committed;
+        }
       }
-      return (
-        ((h.elements as Array<Record<string, unknown>>).find(
-          (element) => element.selector === selector,
-        )?.selectedOptionText as string | undefined) ??
-        matcher ??
-        ""
-      );
+      return committed;
     }
     async setPhoneCountry(country: string): Promise<void> {
       h.phoneCountries.push(country);
@@ -538,6 +536,7 @@ describe("prepared-statement replay", () => {
     );
     expect(result).toMatchObject({ status: "complete", field_values_verified: true });
     expect(h.elements).toEqual([]);
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
   });
 
   it("blocks payment until the exact missed field is repaired and replay resumes", async () => {
@@ -565,15 +564,15 @@ describe("prepared-statement replay", () => {
 
     h.elements = [
       elem({
-        testId: "shipping-city",
-        labelText: "Shipping city",
+        testId: "live-city",
+        labelText: "City",
         selector: "#live-city",
         value: "",
       }),
     ];
     await act(started.session_id, {
       kind: "type",
-      target: "shipping-city",
+      target: "live-city",
       text: "Queens",
       replayRepair: { stepIndex: 0, hole: "address.city" },
     });
@@ -687,6 +686,70 @@ describe("prepared-statement replay", () => {
     await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
       /verification is not satisfied/i,
     );
+  });
+
+  it("blocks payment when a verified target drifts without a replay transition", async () => {
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "type",
+              target: { dom_hint: { testid: "shipping-city" }, css: "#city" },
+              value: { hole: "address.city" },
+            },
+          },
+        ],
+      }),
+      { "address.city": "Queens" },
+    );
+    h.elements = [elem({ testId: "new-city", selector: "#new-city", value: "Brooklyn" })];
+    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
+      /verification is not satisfied/i,
+    );
+  });
+
+  it("retains the committed value for a custom combobox guard", async () => {
+    h.elements = [
+      elem({
+        tag: "input",
+        role: "combobox",
+        testId: "shipping-country",
+        labelText: "Country",
+        selector: "#country",
+        value: "",
+        selectedOptionText: null,
+        visibleText: null,
+        selectOptions: [{ value: "US", text: "United States" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          {
+            action: {
+              kind: "select",
+              target: { dom_hint: { testid: "shipping-country" }, accessible_name: "Country" },
+              value: { hole: "address.country" },
+            },
+          },
+        ],
+      }),
+      { "address.country": "United States" },
+    );
+    expect(result).toMatchObject({ status: "complete", field_values_verified: true });
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
   });
 
   it("invalidates a verified field when a later value action changes it", async () => {
@@ -874,6 +937,35 @@ describe("verified recipe recording", () => {
         },
       ],
     });
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("rejects an unlabelled literal that matches a known input", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-unlabelled-known-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [elem({ testId: "query", labelText: "Search", selector: "#query" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Search", text: "dark roast" });
+    h.visibleText = "Review order";
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "unlabelled-query",
+          goal: "Buy coffee",
+          verb: "purchase",
+          inputs: { product_query: "dark roast" },
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Ready to approve",
+            success_signal: { text_present: "Review order" },
+          },
+        },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/known input value.*lacks explicit provenance/i);
+    expect(readdirSync(dir)).toEqual([]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
   });

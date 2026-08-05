@@ -149,7 +149,7 @@ describe("ordered target fallback", () => {
       resolveRecipeTarget(elements, { dom_hint: { testid: "gone", id: "target-id" } })?.via,
     ).toBe("id");
     expect(
-      resolveRecipeTarget(elements, {
+      resolveRecipeTarget([elements[1]!], {
         dom_hint: { testid: "gone", id: "gone" },
         role_hint: "button",
         accessible_name: "Buy now",
@@ -191,6 +191,19 @@ describe("ordered target fallback", () => {
       near_text_hint: "Shipping",
     });
     expect(result?.element.selector).toBe("#shipping");
+  });
+
+  it("requires a unique stable-attribute match before accepting a tier", () => {
+    const duplicateTestIds = [
+      { ...elements[0]!, id: "duplicate", selector: "#duplicate" },
+      { ...elements[0]!, id: "target-id", selector: "#target" },
+    ];
+    expect(
+      resolveRecipeTarget(duplicateTestIds, {
+        dom_hint: { testid: "primary", id: "target-id" },
+      }),
+    ).toMatchObject({ via: "id", element: { selector: "#target" } });
+    expect(resolveRecipeTarget(duplicateTestIds, { dom_hint: { testid: "primary" } })).toBeNull();
   });
 });
 

@@ -483,6 +483,12 @@ export function knownRecipeInputValue(inputs: KnownRecipeInputs, hole: string): 
   return flattenKnownInputs(inputs).find(([candidate]) => candidate === hole)?.[1];
 }
 
+export function knownRecipeInputHolesForValue(inputs: KnownRecipeInputs, value: string): string[] {
+  return flattenKnownInputs(inputs)
+    .filter(([, known]) => known === value)
+    .map(([hole]) => hole);
+}
+
 /** Tag only exact, caller-proven values. Unknown literals deliberately remain literals. */
 export function tagProvenanceValue(value: string, inputs: KnownRecipeInputs): RecipeValue {
   const knownInputs = flattenKnownInputs(inputs);
@@ -585,7 +591,8 @@ export function resolveRecipeTarget<T extends RecipeTargetElement>(
   target: RecipeTarget,
 ): RecipeTargetResolution<T> | null {
   const first = (matches: T[]): T | undefined => {
-    if (target.near_text_hint === undefined || matches.length < 2) return matches[0];
+    if (matches.length === 1) return matches[0];
+    if (target.near_text_hint === undefined || matches.length === 0) return undefined;
     const narrowed = filterByNearTextHint(matches, target.near_text_hint, elements);
     return narrowed.length === 1 ? narrowed[0] : undefined;
   };
@@ -643,6 +650,34 @@ export function resolveRecipeTarget<T extends RecipeTargetElement>(
     if (matches.length === 1) return { element: matches[0] as T, via: "visible-text" };
   }
   return null;
+}
+
+export function hasRecipeTargetCandidate<T extends RecipeTargetElement>(
+  elements: readonly T[],
+  target: RecipeTarget,
+): boolean {
+  const wantedAccessibleName = targetNorm(target.accessible_name);
+  const wantedVisibleText = targetNorm(target.visible_text);
+  return elements.some((candidate) => {
+    if (target.dom_hint?.testid !== undefined && candidate.testId === target.dom_hint.testid) {
+      return true;
+    }
+    if (target.dom_hint?.id !== undefined && candidate.id === target.dom_hint.id) return true;
+    if (target.dom_hint?.name !== undefined && candidate.name === target.dom_hint.name) return true;
+    if (
+      target.role_hint !== undefined &&
+      target.accessible_name !== undefined &&
+      semanticRole(candidate) === targetNorm(target.role_hint) &&
+      accessibleName(candidate) === wantedAccessibleName
+    ) {
+      return true;
+    }
+    if (target.href_hint !== undefined && candidate.href === target.href_hint) return true;
+    if (target.css !== undefined && candidate.selector === target.css) return true;
+    return (
+      target.visible_text !== undefined && targetNorm(candidate.visibleText) === wantedVisibleText
+    );
+  });
 }
 
 export interface FilledFieldExpectation {

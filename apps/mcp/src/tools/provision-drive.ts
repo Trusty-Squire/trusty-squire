@@ -300,6 +300,16 @@ const actSchema = z
       });
     }
     if (
+      value.replay_hole !== undefined &&
+      value.provenance !== undefined &&
+      value.replay_hole !== value.provenance
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "replay_hole and provenance must identify the same source",
+      });
+    }
+    if (
       value.replay_step_index !== undefined &&
       value.kind !== "type" &&
       value.kind !== "select" &&
@@ -310,7 +320,8 @@ const actSchema = z
         message: "replay repair binding requires a value action",
       });
     }
-    if (value.provenance === undefined) return;
+    const provenance = value.provenance ?? value.replay_hole;
+    if (provenance === undefined) return;
     if (
       value.kind !== "type" &&
       value.kind !== "select" &&
@@ -318,15 +329,12 @@ const actSchema = z
       value.kind !== "type_secret"
     ) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "provenance requires a value action" });
-    } else if (value.kind === "type_secret" && !/^credential(?:\.|$)/.test(value.provenance)) {
+    } else if (value.kind === "type_secret" && !/^credential(?:\.|$)/.test(provenance)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "type_secret provenance must be credential",
       });
-    } else if (
-      value.kind !== "type_secret" &&
-      /^(?:credential|card)(?:\.|$)/.test(value.provenance)
-    ) {
+    } else if (value.kind !== "type_secret" && /^(?:credential|card)(?:\.|$)/.test(provenance)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "credential/card provenance requires type_secret or operate_pay",
@@ -345,6 +353,7 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     args.replay_step_index !== undefined && args.replay_hole !== undefined
       ? { replayRepair: { stepIndex: args.replay_step_index, hole: args.replay_hole } }
       : {};
+  const provenance = args.provenance ?? args.replay_hole;
   switch (args.kind) {
     case "click":
       return { kind: "click", target: need(args.target, "target") };
@@ -357,7 +366,7 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
         kind: "type",
         target: need(args.target, "target"),
         text: args.text ?? "",
-        ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
+        ...(provenance !== undefined ? { provenance: { hole: provenance } } : {}),
         ...replayRepair,
       };
     case "select":
@@ -365,14 +374,14 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
         kind: "select",
         target: need(args.target, "target"),
         text: need(args.text, "text"),
-        ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
+        ...(provenance !== undefined ? { provenance: { hole: provenance } } : {}),
         ...replayRepair,
       };
     case "set_phone_country":
       return {
         kind: "set_phone_country",
         country: need(args.country, "country"),
-        ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
+        ...(provenance !== undefined ? { provenance: { hole: provenance } } : {}),
         ...replayRepair,
       };
     case "goto":
