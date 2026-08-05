@@ -319,7 +319,6 @@ import {
   closeAllProvisionSessions,
   parseElementsTable,
   replayOperatorRecipe,
-  verifySavedRecipePostcondition,
   activeProvisionBrowser,
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
@@ -327,6 +326,7 @@ import {
 import { readRecipeForTask, type OperatorRecipe } from "../operator-recipe.js";
 import {
   provisionRememberTool,
+  provisionFinishTaskTool,
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
   provisionStoreLoginTool,
@@ -1340,8 +1340,19 @@ describe("verified recipe recording", () => {
       "address.email": "buyer@example.com",
     });
     expect(replay.status).toBe("complete");
-    const replayVerified = await verifySavedRecipePostcondition(replayStarted.session_id, recipe);
-    expect(replayVerified.confirmed).toBe(true);
+    const finished = await provisionFinishTaskTool.handler(
+      {
+        session_id: replayStarted.session_id,
+        kind: "result",
+        summary: "Account created",
+        verify_recipe: "email-url",
+      },
+      null as unknown as ApiClient,
+    );
+    expect(finished).toMatchObject({
+      kind: "result",
+      verified: { confirmed: true },
+    });
     expect(h.gotos).toContain("https://shop.example.com/account/buyer%2540example.com");
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });

@@ -342,6 +342,7 @@ interface ReplayExpectedField {
 }
 
 interface ReplayState {
+  recipeName: string;
   recipeHash: string;
   bindingsHash: string;
   boundPostcondition: Postcondition;
@@ -3625,6 +3626,20 @@ export async function verifySavedRecipePostcondition(
   return await verifyPostcondition(sessionId, postcondition);
 }
 
+export async function verifyActiveRecipePostcondition(
+  sessionId: string,
+  recipeName: string,
+): Promise<PostconditionResult | null> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const state = session.replayState;
+  if (state === null) return null;
+  if (state.recipeName !== recipeName) {
+    throw new Error(`verify_recipe ${recipeName} does not match active replay ${state.recipeName}`);
+  }
+  return await verifyPostcondition(sessionId, state.boundPostcondition);
+}
+
 const MONEY_REPLAY_VERBS = new Set<OperatorVerb>([
   "purchase",
   "subscribe",
@@ -4151,6 +4166,7 @@ export async function replayOperatorRecipe(
     }
     const expected = expectedReplayFields(recipe, bindings);
     state = {
+      recipeName: recipe.name,
       recipeHash,
       bindingsHash,
       boundPostcondition,

@@ -25,6 +25,7 @@ import {
   generatePassword,
   rememberRecipe,
   verifyPostcondition,
+  verifyActiveRecipePostcondition,
   verifySavedRecipePostcondition,
   captureAndPromoteSession,
   replayOperatorRecipe,
@@ -888,12 +889,13 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
     // result kind — optionally verify a saved recipe's postcondition (the
     // anti-false-green gate) against the live session BEFORE closing, then close.
     const verified =
-      args.verify_recipe !== undefined
-        ? await verifySavedRecipePostcondition(
+      args.verify_recipe === undefined
+        ? undefined
+        : ((await verifyActiveRecipePostcondition(args.session_id, args.verify_recipe)) ??
+          (await verifySavedRecipePostcondition(
             args.session_id,
             await readRecipe(args.verify_recipe),
-          )
-        : undefined;
+          )));
     emitProvisionMeasurement(
       args.session_id,
       verified === undefined || verified.confirmed ? "success" : "fail",
