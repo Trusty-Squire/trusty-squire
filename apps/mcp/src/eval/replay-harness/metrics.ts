@@ -47,13 +47,12 @@ export function computeMetrics(
   const fallbacks = completeHits.reduce((sum, hit) => sum + hit.fallbacks, 0);
   const moneyTrials = drift.filter((trial) => trial.money_affecting);
   const moneyEscapes = moneyTrials.filter(
-    (trial) =>
-      !trial.end_state_matches &&
-      trial.guard_action !== "abort" &&
-      trial.guard_action !== "fallback",
+    (trial) => !trial.end_state_matches && trial.guard_action !== "abort",
   ).length;
   const caughtMoneyDrift = moneyTrials.filter(
-    (trial) => trial.guard_action === "abort" || trial.guard_action === "fallback",
+    (trial) =>
+      trial.guard_action === "abort" ||
+      (trial.guard_action === "fallback" && trial.end_state_matches),
   ).length;
 
   return {
@@ -65,9 +64,8 @@ export function computeMetrics(
       wall_clock: hitRate * speedupOnHit.wall_clock,
     },
     clean_replay_correctness: ratio(
-      hits.filter(
-        (hit) => hit.warm !== undefined && hit.end_state_matches && hit.fallbacks === 0,
-      ).length,
+      hits.filter((hit) => hit.warm !== undefined && hit.end_state_matches && hit.fallbacks === 0)
+        .length,
       hits.length,
     ),
     task_success: ratio(
@@ -81,9 +79,8 @@ export function computeMetrics(
     invariants: {
       novel_false_hits: tasks.filter((task) => task.bucket === "novel" && task.recipe_applied)
         .length,
-      missing_warm_samples: tasks.filter(
-        (task) => task.recipe_applied && task.warm === undefined,
-      ).length,
+      missing_warm_samples: tasks.filter((task) => task.recipe_applied && task.warm === undefined)
+        .length,
     },
   };
 }

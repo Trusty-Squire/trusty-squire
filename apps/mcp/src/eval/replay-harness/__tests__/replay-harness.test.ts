@@ -309,6 +309,22 @@ it("ships only when speed, correctness, and money safety all clear", () => {
   expect(vetoed.decision).toBe("NO-SHIP");
   expect(vetoed.reasons.some((reason) => reason.startsWith("money-path veto"))).toBe(true);
 
+  const unsafeFallback = caughtDrift.map((trial, index) =>
+    index === 0 ? { ...trial, guard_action: "fallback" as const } : trial,
+  );
+  const fallbackVetoed = buildHarnessReport(successfulHits, unsafeFallback);
+  expect(fallbackVetoed.metrics.money_escape).toBe(1);
+  expect(fallbackVetoed.metrics.drift_catch_rate).toBe(0.9);
+  expect(fallbackVetoed.decision).toBe("NO-SHIP");
+
+  const safeFallback = unsafeFallback.map((trial, index) =>
+    index === 0 ? { ...trial, end_state_matches: true } : trial,
+  );
+  const fallbackPassed = buildHarnessReport(successfulHits, safeFallback);
+  expect(fallbackPassed.metrics.money_escape).toBe(0);
+  expect(fallbackPassed.metrics.drift_catch_rate).toBe(1);
+  expect(fallbackPassed.decision).toBe("SHIP");
+
   const novelFalseHit: TaskObservation = {
     ...successfulHits[0]!,
     task_id: "deathwish-purchase-n0",
