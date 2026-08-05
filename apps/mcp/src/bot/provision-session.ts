@@ -365,6 +365,138 @@ function egressSeedHosts(session: Session): string[] {
 
 const sessions = new Map<string, Session>();
 
+interface WarmBrowser {
+  controller: BrowserController;
+  createdAt: number;
+  reuseCount: number;
+}
+
+function positiveEnvNumber(name: string, fallback: number): number {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+const WARM_BROWSER_IDLE_TTL_MS = positiveEnvNumber(
+  "BOT_WARM_BROWSER_IDLE_TTL_MS",
+  6 * 60 * 60 * 1_000,
+);
+const WARM_BROWSER_MAX_REUSES = positiveEnvNumber("BOT_WARM_BROWSER_MAX_REUSES", 50);
+const WARM_BROWSER_MAX_AGE_MS = positiveEnvNumber(
+  "BOT_WARM_BROWSER_MAX_AGE_MS",
+  24 * 60 * 60 * 1_000,
+);
+
+let warmBrowser: WarmBrowser | null = null;
+let warmBrowserIdleTimer: ReturnType<typeof setTimeout> | null = null;
+// Sequential single-page model: one start may be booting OR one task may hold
+// the browser. This is also the lifecycle/payment safety lease — every reaper
+// checks it before closing shared Chrome.
+let starting = false;
+let inFlight = false;
+
+function clearWarmBrowserIdleTimer(): void {
+  if (warmBrowserIdleTimer === null) return;
+  clearTimeout(warmBrowserIdleTimer);
+  warmBrowserIdleTimer = null;
+}
+
+async function closeWarmBrowserIfIdle(reason: string): Promise<boolean> {
+  if (warmBrowser === null) return false;
+  if (starting || inFlight) {
+    armWarmBrowserIdleTimer();
+    return false;
+  }
+  const browser = warmBrowser.controller;
+  warmBrowser = null;
+  clearWarmBrowserIdleTimer();
+  console.error(`[operator] recycling warm browser reason=${reason}`);
+  await browser.close().catch(() => undefined);
+  return true;
+}
+
+function armWarmBrowserIdleTimer(): void {
+  clearWarmBrowserIdleTimer();
+  if (warmBrowser === null) return;
+  warmBrowserIdleTimer = setTimeout(() => {
+    warmBrowserIdleTimer = null;
+    void closeWarmBrowserIfIdle("idle_ttl");
+  }, WARM_BROWSER_IDLE_TTL_MS);
+  warmBrowserIdleTimer.unref();
+}
+
+// Every operate call reaches this module through start or a session lookup.
+// Resetting the one unref'd timer here measures genuine operator quiet.
+function touchWarmBrowser(): void {
+  armWarmBrowserIdleTimer();
+}
+
+function warmBrowserExpired(slot: WarmBrowser): "max_reuses" | "max_age" | null {
+  if (slot.reuseCount >= WARM_BROWSER_MAX_REUSES) return "max_reuses";
+  if (Date.now() - slot.createdAt >= WARM_BROWSER_MAX_AGE_MS) return "max_age";
+  return null;
+}
+
+async function acquireWarmBrowser(
+  opts: StartOptions,
+  sessionId: string,
+): Promise<BrowserController> {
+  const slot = warmBrowser;
+  if (slot !== null) {
+    const expired = warmBrowserExpired(slot);
+    const eligible = slot.controller.matchesLaunchOptions(opts);
+    const healthy = slot.controller.isConnected();
+    if (expired !== null || !eligible || !healthy) {
+      warmBrowser = null;
+      clearWarmBrowserIdleTimer();
+      await slot.controller.close().catch(() => undefined);
+      audit(sessionId, "browser_recycle", {
+        reason: expired ?? (!eligible ? "launch_config_mismatch" : "disconnected"),
+      });
+    } else {
+      try {
+        await slot.controller.resetPageForReuse();
+        slot.reuseCount += 1;
+        touchWarmBrowser();
+        audit(sessionId, "browser_reuse", { reuse_count: slot.reuseCount });
+        return slot.controller;
+      } catch {
+        warmBrowser = null;
+        clearWarmBrowserIdleTimer();
+        await slot.controller.close().catch(() => undefined);
+        audit(sessionId, "browser_recycle", { reason: "page_reset_failed" });
+      }
+    }
+  }
+
+  const controller = new BrowserController({
+    ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
+    ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
+  });
+  await startBrowserBounded(controller, sessionId);
+  warmBrowser = { controller, createdAt: Date.now(), reuseCount: 0 };
+  touchWarmBrowser();
+  return controller;
+}
+
+async function releaseWarmBrowserPage(browser: BrowserController): Promise<void> {
+  if (warmBrowser?.controller !== browser) {
+    await browser.close().catch(() => undefined);
+    return;
+  }
+  try {
+    await browser.resetPageForReuse();
+  } catch {
+    warmBrowser = null;
+    clearWarmBrowserIdleTimer();
+    await browser.close().catch(() => undefined);
+  }
+}
+
+function sessionForCall(sessionId: string): Session | undefined {
+  touchWarmBrowser();
+  return sessions.get(sessionId);
+}
+
 const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 // Audit trail (security posture): every session action emits one structured
@@ -1470,6 +1602,10 @@ async function ensureProvisionPrimaryProviderSession(
 
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
   const id = randomUUID();
+  touchWarmBrowser();
+  if (starting || inFlight) {
+    throw new Error("operate_start refused: another operator session is already in flight");
+  }
   const liveProviders = await ensureProvisionPrimaryProviderSession(opts.profileDir);
   // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
   // needs to act as the user and there's no live Google session, hand back now;
@@ -1481,11 +1617,19 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
     }
   }
-  const browser = new BrowserController({
-    ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
-    ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
-  });
-  await startBrowserBounded(browser, id);
+  // The identity probe above is asynchronous, so another start may have taken
+  // the single-page lease while this call was waiting. Re-check immediately
+  // before claiming the boot/reuse slot.
+  if (starting || inFlight) {
+    throw new Error("operate_start refused: another operator session is already in flight");
+  }
+  starting = true;
+  let browser: BrowserController;
+  try {
+    browser = await acquireWarmBrowser(opts, id);
+  } finally {
+    starting = false;
+  }
   const targetHost = registrableHost(opts.serviceUrl);
   const seedHosts = [
     ...(targetHost !== null ? [targetHost] : []),
@@ -1518,48 +1662,57 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
-  audit(id, "start", {
-    service_url: opts.serviceUrl,
-    allowed_hosts: hostStrings(session),
-    has_hint: opts.hint !== undefined,
-  });
-  await browser.goto(opts.serviceUrl);
-  // A cookie/consent overlay (Usercentrics/OneTrust/…) renders after load and its
-  // backdrop occludes the ENTIRE form — the agent then sees every element
-  // occluded_by a div and gives up, or falls back to the only thing that looks
-  // clickable (e.g. a "Connect wallet" CTA on the Robinhood faucet). Dismiss it
-  // BEFORE the first observation so the real actionable form is operable.
-  // dismissConsentBanner() existed but had NO call sites (dead code); it only
-  // clicks banner-specific CTAs (accept/reject all), so a false click is unlikely.
-  // Best-effort + one retry, since the widget lazy-loads a beat after the goto.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const cta = await browser.dismissConsentBanner().catch(() => null);
-    if (cta !== null) {
-      audit(id, "consent_dismissed", { cta });
-      break;
+  inFlight = true;
+  try {
+    audit(id, "start", {
+      service_url: opts.serviceUrl,
+      allowed_hosts: hostStrings(session),
+      has_hint: opts.hint !== undefined,
+    });
+    await browser.goto(opts.serviceUrl);
+    // A cookie/consent overlay (Usercentrics/OneTrust/…) renders after load and its
+    // backdrop occludes the ENTIRE form — the agent then sees every element
+    // occluded_by a div and gives up, or falls back to the only thing that looks
+    // clickable (e.g. a "Connect wallet" CTA on the Robinhood faucet). Dismiss it
+    // BEFORE the first observation so the real actionable form is operable.
+    // dismissConsentBanner() existed but had NO call sites (dead code); it only
+    // clicks banner-specific CTAs (accept/reject all), so a false click is unlikely.
+    // Best-effort + one retry, since the widget lazy-loads a beat after the goto.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cta = await browser.dismissConsentBanner().catch(() => null);
+      if (cta !== null) {
+        audit(id, "consent_dismissed", { cta });
+        break;
+      }
+      if (attempt === 0) await browser.waitForCaptchaChallengeToSettle(800, 0).catch(() => false);
     }
-    if (attempt === 0) await browser.waitForCaptchaChallengeToSettle(800, 0).catch(() => false);
+    const observation = await observeSession(session);
+    // Tell the agent which provider the user actually has a live session for
+    // (Google-preferred) — the bot knows from the profile cookies, so the agent
+    // doesn't have to guess. Composed with the skill route hint (if any).
+    const hintParts = [
+      loginSessionGuidance(liveProviders),
+      ...(opts.hint !== undefined ? [opts.hint] : []),
+    ];
+    return {
+      ...observation,
+      hint: hintParts.join("\n"),
+      ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
+    };
+  } catch (err) {
+    sessions.delete(id);
+    await releaseWarmBrowserPage(browser);
+    inFlight = false;
+    touchWarmBrowser();
+    throw err;
   }
-  const observation = await observeSession(session);
-  // Tell the agent which provider the user actually has a live session for
-  // (Google-preferred) — the bot knows from the profile cookies, so the agent
-  // doesn't have to guess. Composed with the skill route hint (if any).
-  const hintParts = [
-    loginSessionGuidance(liveProviders),
-    ...(opts.hint !== undefined ? [opts.hint] : []),
-  ];
-  return {
-    ...observation,
-    hint: hintParts.join("\n"),
-    ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
-  };
 }
 
 export async function observe(
   sessionId: string,
   detail: "compact" | "full" = "compact",
 ): Promise<Observation> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return await observeSession(session, detail);
 }
@@ -1568,7 +1721,7 @@ export async function observe(
 // session: start + auto_widen, NEVER mid_session task scope (a wide multi-app
 // operate scope must not silently over-grant a key's egress allow-list).
 export function observedHostsForSession(sessionId: string): string[] {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   widenAllowedHostsFromCurrentUrl(session);
   return [...new Set(egressSeedHosts(session))];
@@ -1595,7 +1748,7 @@ export interface SlotHandle {
 // host — a later type_secret enters it into another site's form. Extends the
 // write-only-vault moat to in-session credential transfer.
 export function stashSecretSlot(sessionId: string, slot: string, value: string): SlotHandle {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   session.secretSlots.set(slot, value);
   // Record the SEAL in the recipe trace (the value never goes in — only that a
@@ -1609,7 +1762,7 @@ export function stashSecretSlot(sessionId: string, slot: string, value: string):
 // signup password to the vault after the service account is created. Never
 // expose this value in a tool response or recipe trace.
 export function readSecretSlotValue(sessionId: string, slot: string): string {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const value = session.secretSlots.get(slot);
   if (value === undefined) throw new Error(`no sealed slot named "${slot}"`);
@@ -1617,7 +1770,7 @@ export function readSecretSlotValue(sessionId: string, slot: string): string {
 }
 
 export function currentProvisionUrl(sessionId: string): string {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return session.browser.currentUrl();
 }
@@ -1626,6 +1779,7 @@ export function currentProvisionUrl(sessionId: string): string {
 // acts on the one live operator checkout. Fail closed rather than guessing if
 // zero or multiple browser sessions exist.
 export function activeProvisionBrowser(): BrowserController {
+  touchWarmBrowser();
   if (sessions.size !== 1) {
     throw new Error(
       sessions.size === 0
@@ -1640,7 +1794,7 @@ export function activeProvisionBrowser(): BrowserController {
 // address), or null when none was captured. The tool layer reads this to fill
 // username/password signups so the account is user-owned.
 export function getSessionUserEmail(sessionId: string): string | null {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   return session.userEmail;
 }
@@ -2258,7 +2412,7 @@ export async function act(
   action: ProvisionAction,
   detail: ObserveDetail = "compact",
 ): Promise<Observation> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
   const auditTarget =
@@ -2733,7 +2887,7 @@ async function recordExtractRound(session: Session): Promise<void> {
 export async function captureAndPromoteSession(
   sessionId: string,
 ): Promise<PromoteResult | { kind: "skipped"; reason: string }> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) return { kind: "skipped", reason: "unknown_session" };
   // A run that used the text=/css= locator click fallback hit a control with no
   // inventory ref; the synthesizer can't represent that step, so promoting would
@@ -2800,7 +2954,7 @@ export function emitProvisionMeasurement(
   sessionId: string,
   outcome: "success" | "fail",
 ): ProvisionMeasurement | null {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) return null;
   const m = buildProvisionMeasurement({
     service: captureService(session),
@@ -2834,7 +2988,7 @@ export async function rememberRecipe(
   sessionId: string,
   opts: { name: string; goal: string; postcondition: Postcondition },
 ): Promise<{ file: string; name: string; steps: number; secrets: string[] }> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.usedLocatorFallback) {
     throw new Error(
@@ -2886,7 +3040,7 @@ export async function verifyPostcondition(
   sessionId: string,
   postcondition: Postcondition,
 ): Promise<PostconditionResult> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (postcondition.kind === "observe_artifact" && postcondition.probe_url !== undefined) {
     const host = registrableHost(postcondition.probe_url);
@@ -3032,7 +3186,7 @@ export function classifyVouchflowCredentials(text: string): Record<string, strin
 // isTruncatedCapture + extraction.ts accumulation). Reuses the substrate —
 // no new credential regexes.
 export async function extractCredentials(sessionId: string): Promise<ExtractResult> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
 
@@ -3311,7 +3465,7 @@ async function solveCaptchaWithTokenSolver(
 // response token is the success signal; challenge disappearance alone is not
 // enough because a reCAPTCHA v2 checkbox can be idle with an empty token.
 export async function captchaGate(sessionId: string): Promise<CaptchaGateResult> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const det = await session.browser.detectCaptchaVariant();
   const found = det.variant !== "unknown" || det.challengeRendered;
@@ -3567,7 +3721,7 @@ export async function awaitVerification(
   sessionId: string,
   opts: AwaitVerificationOptions = {},
 ): Promise<VerificationResult> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const { browser } = session;
 
@@ -3660,12 +3814,19 @@ export interface FinishResult {
 }
 
 export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
-  const session = sessions.get(sessionId);
+  const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
-  await session.browser.close();
   sessions.delete(sessionId);
+  try {
+    await releaseWarmBrowserPage(session.browser);
+  } finally {
+    inFlight = false;
+  }
+  const expired = warmBrowser !== null ? warmBrowserExpired(warmBrowser) : null;
+  if (expired !== null) await closeWarmBrowserIfIdle(expired);
+  else touchWarmBrowser();
   return { session_id: sessionId, url, closed: true };
 }
 
@@ -3678,6 +3839,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
       /* best-effort */
     }
   }
+  await closeWarmBrowserIfIdle("shutdown");
 }
 
 export function activeSessionCount(): number {

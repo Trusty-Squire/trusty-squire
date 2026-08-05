@@ -817,8 +817,8 @@ const finishSchema = z.object({ session_id: z.string().min(1) });
 export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   name: "operate_finish",
   description:
-    "Close a provisioning session and tear down its browser. Always call this " +
-    "when the run is complete (success or give-up) to release the browser.",
+    "Close a provisioning session and reset its task page. Always call this " +
+    "when the run is complete (success or give-up); Chrome stays warm for the next task.",
   inputSchema: finishSchema,
   jsonInputSchema: {
     type: "object",

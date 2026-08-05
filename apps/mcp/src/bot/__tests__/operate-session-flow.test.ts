@@ -19,6 +19,10 @@ const h = vi.hoisted(() => ({
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
   gotos: [] as string[],
   started: 0,
+  startCalls: 0,
+  closeCalls: 0,
+  resetCalls: 0,
+  connections: [] as boolean[],
   currentUrl: "",
   elements: [] as unknown[],
   visibleText: "",
@@ -58,9 +62,30 @@ const h = vi.hoisted(() => ({
 
 vi.mock("../browser.js", () => ({
   BrowserController: class {
-    constructor(_opts?: unknown) {}
+    private readonly index: number;
+    private readonly opts: { profileDir?: string; proxyUrl?: string };
+    constructor(opts: { profileDir?: string; proxyUrl?: string } = {}) {
+      this.index = h.connections.length;
+      this.opts = opts;
+      h.connections.push(true);
+    }
     async start(): Promise<void> {
       h.started += 1;
+      h.startCalls += 1;
+    }
+    matchesLaunchOptions(opts: { profileDir?: string; proxyUrl?: string }): boolean {
+      const proxy = (value: string | undefined): string | null => value?.trim() || null;
+      return (
+        this.opts.profileDir === opts.profileDir &&
+        proxy(this.opts.proxyUrl) === proxy(opts.proxyUrl)
+      );
+    }
+    isConnected(): boolean {
+      return h.connections[this.index] === true;
+    }
+    async resetPageForReuse(): Promise<void> {
+      h.resetCalls += 1;
+      h.currentUrl = "about:blank";
     }
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
@@ -185,7 +210,9 @@ vi.mock("../browser.js", () => ({
     async settleAfterOAuth(): Promise<void> {}
     async pressKey(): Promise<void> {}
     async close(): Promise<void> {
-      h.started -= 1;
+      h.closeCalls += 1;
+      if (h.connections[this.index] === true) h.started -= 1;
+      h.connections[this.index] = false;
     }
   },
 }));
@@ -274,6 +301,10 @@ beforeEach(() => {
   h.consentDismissCalls = 0;
   h.consentCta = null;
   h.started = 0;
+  h.startCalls = 0;
+  h.closeCalls = 0;
+  h.resetCalls = 0;
+  h.connections = [];
   h.currentUrl = "";
   h.elements = [];
   h.visibleText = "";
@@ -588,6 +619,81 @@ describe("operate session — Change 5 precondition gate", () => {
     expect(obs.needs_user).toBeUndefined();
     expect(h.started).toBe(1);
     await finishProvisionSession(obs.session_id);
+  });
+});
+
+describe("operate session — warm browser lifecycle", () => {
+  it("reuses the warm browser for the same profile and proxy without a second boot", async () => {
+    const first = await startProvisionSession({
+      serviceUrl: "https://app.example.com/one",
+      profileDir: "/tmp/operator-a",
+      proxyUrl: "http://proxy-a.test:8080",
+    });
+    await finishProvisionSession(first.session_id);
+
+    const second = await startProvisionSession({
+      serviceUrl: "https://app.example.com/two",
+      profileDir: "/tmp/operator-a",
+      proxyUrl: "http://proxy-a.test:8080",
+    });
+
+    expect(h.startCalls).toBe(1);
+    expect(h.resetCalls).toBeGreaterThanOrEqual(2);
+    await finishProvisionSession(second.session_id);
+  });
+
+  it.each([
+    {
+      label: "profile",
+      second: { profileDir: "/tmp/operator-b", proxyUrl: "http://proxy-a.test:8080" },
+    },
+    {
+      label: "proxy",
+      second: { profileDir: "/tmp/operator-a", proxyUrl: "http://proxy-b.test:8080" },
+    },
+  ])("cold-boots on a $label mismatch", async ({ second }) => {
+    const first = await startProvisionSession({
+      serviceUrl: "https://app.example.com/one",
+      profileDir: "/tmp/operator-a",
+      proxyUrl: "http://proxy-a.test:8080",
+    });
+    await finishProvisionSession(first.session_id);
+
+    const next = await startProvisionSession({
+      serviceUrl: "https://app.example.com/two",
+      ...second,
+    });
+
+    expect(h.startCalls).toBe(2);
+    expect(h.closeCalls).toBe(1);
+    await finishProvisionSession(next.session_id);
+  });
+
+  it("discards a disconnected warm browser and cold-boots", async () => {
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    await finishProvisionSession(first.session_id);
+    h.connections[0] = false;
+
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+
+    expect(h.startCalls).toBe(2);
+    expect(h.closeCalls).toBe(1);
+    await finishProvisionSession(second.session_id);
+  });
+
+  it("does not reap the shared browser while a session is in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+
+      await vi.advanceTimersByTimeAsync(6 * 60 * 60 * 1_000);
+
+      expect(h.closeCalls).toBe(0);
+      await finishProvisionSession(session.session_id);
+      await closeAllProvisionSessions();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

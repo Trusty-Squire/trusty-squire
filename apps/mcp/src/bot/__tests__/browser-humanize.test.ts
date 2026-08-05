@@ -4,7 +4,7 @@
 // timing characteristics (bezier mouse, variable typing) are covered
 // by end-to-end signup tests against real services.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { BrowserController } from "../browser.js";
 
 describe("BrowserController humanize option", () => {
@@ -37,5 +37,55 @@ describe("BrowserController humanize option", () => {
     const browser = new BrowserController();
     expect((browser as unknown as { mouseX: number; mouseY: number }).mouseX).toBe(100);
     expect((browser as unknown as { mouseX: number; mouseY: number }).mouseY).toBe(100);
+  });
+});
+
+describe("BrowserController warm page reset", () => {
+  it("keeps the handler-bound primary page, closes popups, and clears task state", async () => {
+    const primary = {
+      isClosed: () => false,
+      close: vi.fn(async () => undefined),
+      goto: vi.fn(async () => undefined),
+    };
+    const popup = {
+      isClosed: () => false,
+      close: vi.fn(async () => undefined),
+    };
+    const controller = new BrowserController({ humanize: false });
+    const internals = controller as unknown as {
+      context: {
+        browser: () => { isConnected: () => boolean };
+        pages: () => unknown[];
+      };
+      page: unknown;
+      primaryPage: unknown;
+      oauthProductPage: unknown;
+      oauthNetLog: unknown[];
+      mouseX: number;
+      mouseY: number;
+    };
+    internals.context = {
+      browser: () => ({ isConnected: () => true }),
+      pages: () => [primary, popup],
+    };
+    internals.page = popup;
+    internals.primaryPage = primary;
+    internals.oauthProductPage = primary;
+    internals.oauthNetLog = [{ url: "https://oauth.test", status: 200 }];
+    internals.mouseX = 900;
+    internals.mouseY = 700;
+
+    await controller.resetPageForReuse();
+
+    expect(popup.close).toHaveBeenCalledOnce();
+    expect(primary.close).not.toHaveBeenCalled();
+    expect(primary.goto).toHaveBeenCalledWith("about:blank", {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+    expect(internals.page).toBe(primary);
+    expect(internals.oauthProductPage).toBeNull();
+    expect(internals.oauthNetLog).toEqual([]);
+    expect([internals.mouseX, internals.mouseY]).toEqual([100, 100]);
   });
 });
