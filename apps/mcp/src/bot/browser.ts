@@ -627,7 +627,8 @@ async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
 
 const selfManagedChromePids = new Set<number>();
 let selfManagedCleanupInstalled = false;
-let orphanBrowserReapRan = false;
+let orphanVerifierReapRan = false;
+const orphanOperatorProfilesReaped = new Set<string>();
 
 function killPid(pid: number, signal: NodeJS.Signals): void {
   try {
@@ -674,22 +675,41 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function matchesReapableBrowserArgs(args: string, profileDir: string): boolean {
+export function matchesReapableBrowserArgs(
+  args: string,
+  profileDirs: readonly string[],
+  includeVerifier: boolean,
+): boolean {
   if (!/(?:chrome|chromium)/i.test(args)) return false;
-  const verifyProfile = String.raw`[^\s"']*\.trusty-squire\/profiles\/verify-[^\/\s"']+`;
-  const operatorProfiles = [...new Set([CHROME_PROFILE_DIR, profileDir])]
-    .map(escapeRegExp)
-    .join("|");
-  const profile = `(?:${verifyProfile}|${operatorProfiles})`;
+  const profiles = [...new Set(profileDirs)].map(escapeRegExp);
+  if (includeVerifier) {
+    profiles.unshift(String.raw`[^\s"']*\.trusty-squire\/profiles\/verify-[^\/\s"']+`);
+  }
+  if (profiles.length === 0) return false;
+  const profile = `(?:${profiles.join("|")})`;
   return new RegExp(
     `--user-data-dir=(?:"${profile}"|'${profile}'|${profile})(?=\\s|$)`,
   ).test(args);
 }
 
+export function claimOrphanBrowserReapScope(profileDir: string): {
+  includeVerifier: boolean;
+  profileDirs: string[];
+} | null {
+  const includeVerifier = !orphanVerifierReapRan;
+  const profileDirs = [...new Set([CHROME_PROFILE_DIR, profileDir])].filter(
+    (candidate) => !orphanOperatorProfilesReaped.has(candidate),
+  );
+  if (!includeVerifier && profileDirs.length === 0) return null;
+  orphanVerifierReapRan = true;
+  for (const candidate of profileDirs) orphanOperatorProfilesReaped.add(candidate);
+  return { includeVerifier, profileDirs };
+}
+
 function reapOrphanedBrowsersOnce(profileDir: string): void {
-  if (orphanBrowserReapRan) return;
-  orphanBrowserReapRan = true;
   if (process.platform !== "linux") return;
+  const scope = claimOrphanBrowserReapScope(profileDir);
+  if (scope === null) return;
   let rows = "";
   try {
     rows = execFileSync("ps", ["-eo", "pid=,ppid=,args="], {
@@ -708,7 +728,7 @@ function reapOrphanedBrowsersOnce(profileDir: string): void {
     if (
       Number.isFinite(pid) &&
       ppid === 1 &&
-      matchesReapableBrowserArgs(args, profileDir)
+      matchesReapableBrowserArgs(args, scope.profileDirs, scope.includeVerifier)
     ) {
       pids.push(pid);
     }

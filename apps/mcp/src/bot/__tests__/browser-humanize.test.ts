@@ -5,7 +5,11 @@
 // by end-to-end signup tests against real services.
 
 import { describe, expect, it, vi } from "vitest";
-import { BrowserController, matchesReapableBrowserArgs } from "../browser.js";
+import {
+  BrowserController,
+  claimOrphanBrowserReapScope,
+  matchesReapableBrowserArgs,
+} from "../browser.js";
 
 describe("BrowserController humanize option", () => {
   it("defaults humanize to true", () => {
@@ -135,13 +139,15 @@ describe("orphan browser profile matching", () => {
     expect(
       matchesReapableBrowserArgs(
         `google-chrome --user-data-dir=${profileDir} --remote-debugging-port=9222`,
-        profileDir,
+        [profileDir],
+        false,
       ),
     ).toBe(true);
     expect(
       matchesReapableBrowserArgs(
         "google-chrome --user-data-dir=/tmp/operatorXteam/profile primary",
-        profileDir,
+        [profileDir],
+        false,
       ),
     ).toBe(false);
   });
@@ -150,8 +156,23 @@ describe("orphan browser profile matching", () => {
     expect(
       matchesReapableBrowserArgs(
         "chromium --user-data-dir=/home/test/.trusty-squire/profiles/verify-worker-1",
-        "/tmp/operator-profile",
+        [],
+        true,
       ),
     ).toBe(true);
+  });
+
+  it("claims each operator profile once while claiming verifiers only once", () => {
+    const first = claimOrphanBrowserReapScope("/tmp/operator-a");
+    expect(first?.includeVerifier).toBe(true);
+    expect(first?.profileDirs).toContain("/tmp/operator-a");
+
+    expect(claimOrphanBrowserReapScope("/tmp/operator-a")).toBeNull();
+
+    expect(claimOrphanBrowserReapScope("/tmp/operator-b")).toEqual({
+      includeVerifier: false,
+      profileDirs: ["/tmp/operator-b"],
+    });
+    expect(claimOrphanBrowserReapScope("/tmp/operator-b")).toBeNull();
   });
 });
