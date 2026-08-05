@@ -44,14 +44,15 @@ describe("checkout payment parsing", () => {
         const page = await browser.newPage();
         await page.setContent(`
         <form id="checkout">
+          <input id="date-of-birth" placeholder="MM/DD/YYYY">
           <input autocomplete="cc-number">
-          <input autocomplete="cc-exp" inputmode="numeric" placeholder="MM/YY">
+          <input inputmode="numeric" placeholder="MM/YY">
           <input autocomplete="cc-csc">
           <input autocomplete="cc-name">
           <button type="submit">Pay now</button>
         </form>
         <script>
-          const expiry = document.querySelector('[autocomplete="cc-exp"]');
+          const expiry = document.querySelector('[placeholder="MM/YY"]');
           expiry.addEventListener("keydown", (event) => {
             if (event.key.length === 1) {
               document.body.dataset.expiryKeys =
@@ -67,6 +68,8 @@ describe("checkout payment parsing", () => {
           });
           document.querySelector("#checkout").addEventListener("submit", (event) => {
             event.preventDefault();
+            document.body.dataset.dobAtSubmit =
+              document.querySelector("#date-of-birth").value;
             document.body.dataset.expiryAtSubmit = expiry.value;
             document.body.dataset.submitted = "true";
             setTimeout(() => {
@@ -95,6 +98,7 @@ describe("checkout payment parsing", () => {
         });
 
         expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+        expect(await page.locator("body").getAttribute("data-dob-at-submit")).toBe("");
         expect(await page.locator("body").getAttribute("data-expiry-at-submit")).toBe("12/30");
         expect(await page.locator("body").getAttribute("data-expiry-keys")).toBe("1230");
         expect(result.three_ds_required).toBe(true);
@@ -103,7 +107,7 @@ describe("checkout payment parsing", () => {
           await page
             .locator("input")
             .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
-        ).toEqual(["", "", "", ""]);
+        ).toEqual(["", "", "", "", ""]);
       } finally {
         await browser.close();
       }
