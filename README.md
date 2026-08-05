@@ -169,8 +169,12 @@ for the system and data flows.
   control has no observed ref, `click` and `js_click` can target its live
   `text=…` or `css=…` locator; that one-off fallback is not replayable.
 - `operate_extract` captures a generated credential into a sealed slot or the vault.
-- `operate_remember` and `operate_use` save and replay eligible successful flows
-  built from observed refs.
+- `operate_remember` saves a postcondition-verified local recipe under a closed
+  task verb plus the service's registrable domain. It records stable target
+  attributes and exact provenance for Squire-supplied values, not observed refs
+  or plaintext secrets. `operate_use` binds new values and replays those steps;
+  on one missed step it returns a local repair point and can continue in the
+  same session. Older name-only recipes remain planning hints.
 - `list_payment_cards` returns saved-card labels and opaque references;
   `operate_pay` can use a selected card, the only card on file, or a just-in-time
   add-card approval, then fills the checkout and waits for the user to resolve

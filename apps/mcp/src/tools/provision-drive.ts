@@ -24,7 +24,6 @@ import {
   getSessionUserEmail,
   generatePassword,
   rememberRecipe,
-  verifyPostcondition,
   verifyActiveRecipePostcondition,
   verifySavedRecipePostcondition,
   captureAndPromoteSession,

@@ -1,5 +1,10 @@
 # DESIGN — generalized skill steps as operator guidance
 
+Scope note: this document owns registry skill guidance. Local `operate_use`
+replay is a separate system; [DESIGN-replay-engine.md](DESIGN-replay-engine.md)
+owns that contract and supersedes this document's earlier blind-replay
+assumptions.
+
 ## Problem
 
 The skill registry is the one compounding asset: a from-scratch host-driven
@@ -67,9 +72,8 @@ Applied in `synthesizeSteps` / `promoteToSkill`. Not a judgment call, a fixed li
 
 ## Fix 2 — consume steps as operator guidance
 
-Today `steps[]` are consumed by the replay engine (`operate_use` / the housekeeper
-verifier), which drives them blind-ish. That path stays for the housekeeper's
-verification, but the OPERATOR gets the steps as guidance:
+Registry `steps[]` remain available to the housekeeper verifier, but the
+OPERATOR gets them as guidance:
 
 - `resolveRouteHint` (`provision-drive.ts:59`) already fetches the active skill and
   renders it into the operator's first observation via `renderSkillHint`. Widen
@@ -79,8 +83,8 @@ verification, but the OPERATOR gets the steps as guidance:
 - The operator already treats the hint as a prior, not a command (its tool
   description says "read it and …"). No change to the drive loop. The operator
   observes, adapts, and a stale step just costs a re-look, not a failure.
-- `operate_use` (blind replay for the same-user local fast path) is out of scope
-  here and is not fed by this work.
+- Local `operate_use` recipes are not registry Skills; their deterministic
+  replay and repair behavior is specified in `DESIGN-replay-engine.md`.
 
 ## Producer — capture at verified success
 
@@ -140,7 +144,6 @@ in the same change; let real provisions size the lift.
 
 ## NOT in scope
 
-- **`operate_use` blind replay.** Left as-is; not fed by this path. Not the moat.
 - **Multi-credential skills.** Single credential v1.
 - **Signing.** `POST /skills` ignores signatures (verifier is the trust signal);
   no signing work.

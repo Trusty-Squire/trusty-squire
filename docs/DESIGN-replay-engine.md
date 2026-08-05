@@ -1,157 +1,126 @@
-# DESIGN — replay engine ("prepared-statement recipes")
+# DESIGN — local prepared-statement replay engine
 
-Status: proposed (2026-08-04), for eng review. The eval harness (`docs/DESIGN-replay-eval-harness.md`)
-is being built first and records the all-cold baseline; this engine is measured against it.
-Supersedes the shape-hierarchy / anti-unification / platform-template design captured earlier in
-gbrain `trusty-squire-shape-cache-design-2026-08-04` — that was an intermediate, heavier version;
-this is the converged, deliberately-simpler one.
+Status: implemented (2026-08-05). This document owns the local operator-recipe
+contract. Registry Skills and their `serviceSlugFromUrl` key remain a separate
+system; `DESIGN-operator-hints.md` owns how those Skills guide the host.
 
-## 1. Purpose + predicate
+## Purpose
 
-Make *repeated* agent tasks (checkout, credential provisioning) fast by recording one successful run
-and replaying it with new parameters, keeping the LLM out of the hot path on repeats. We build on the
-predicate that replays are fast and accurate; the harness is the instrument that confirms it.
+Repeated `operate_use` tasks can skip rediscovering every browser action. A
+successful run is recorded as ordered mechanics plus typed parameter holes, then
+replayed with fresh values. The host LLM classifies the task and repairs a local
+miss; it does not choose targets during a clean replay.
 
-## 2. Governing principle: the key is guarded, so it may be crude
+## Recipe identity
 
-A replay is guarded by a deterministic pre-check with LLM fallback. Therefore:
+The local key is `(verb, eTLD+1)`:
 
+- `verb` is parsed by the closed `OperatorVerbSchema` enum in
+  `apps/mcp/src/bot/operator-recipe.ts`. It is host-classified, not free-form.
+- The domain is derived with the Public Suffix List. Paths and queries do not
+  participate, so ordinary `www`, `shop`, and `checkout` subdomains collapse to
+  their registrable domain.
+- Tenant subdomains under `myshopify.com` and `notion.site` retain the full host.
+- Recipes are local files under `~/.trusty-squire/operator-recipes/`, or the
+  directory selected by `TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR`.
+
+This key does not alter registry Skill lookup or `serviceSlugFromUrl`.
+
+## Recording contract
+
+`operate_remember` requires a name, goal, closed verb, complete authoritative
+input ledger, and machine-checkable postcondition. It checks the postcondition
+before writing, so an unverified run never creates or replaces a recipe.
+Sessions that used an off-inventory `text=`/`css=` locator or violated a replay
+attestation are also refused.
+
+A value becomes a hole only when all of these are true:
+
+1. Squire recorded its source at action time.
+2. The caller identifies that source in the authoritative input ledger.
+3. The recorded literal exactly equals the authoritative value.
+
+The supported holes are `address.*`, `contact.*`, `product_query`,
+`credential.*`, `card.*`, and `quantity` (the group name without a field suffix
+is also valid). Unknown non-money values remain literals. A checkout field that
+looks like address, contact, or quantity data but lacks provenance makes
+recording fail closed.
+
+Credentials are stored as sealed slot references with `stored: false`, never as
+plaintext. Payment records only a card-reference hole after `operate_pay`
+resolves the card. Known email occurrences are converted to attested templates,
+and single-use verification, magic-link, and reset URLs are not persisted as
+replay steps or stable entries. When the start URL is single-use or contains the
+known email, replay uses the caller's runtime `service_url` after confirming its
+recipe domain.
+
+## Stable targets
+
+Each recorded target carries the stable attributes available in the observed
+inventory. Replay resolves them in strict order, taking the first unique match:
+
+```text
+testid -> id -> name -> role + accessible name -> href path -> css -> unique visible text
 ```
- false MISS  (no recipe used)            → re-drive cold (no speedup, NO harm)
- false HIT   (guard rejects/falls back)  → LLM rescues (no speedup, NO harm)
- correct replay, clean                    → fast
- correct replay, some steps fell back     → success, just a cost
- wrong outcome the guard MISSED           → the ONLY real failure (money-path veto)
-```
 
-So the cache key never has to be *right* — only good enough to win the common repeat case. That is
-what lets every mapping below be cheap. A fallback is a **cost**, never a failure.
+When an earlier tier has multiple matches, `near_text_hint` may narrow that tier
+to one element. Visible text is always the unique-only final fallback. This is
+an ordered resolver, not fingerprint scoring or weighted matching.
 
-## 3. The design
+Before every deterministic target action, replay refreshes the live inventory
+and resolves the target structurally. Provenance-bearing money fields use the
+stricter `testid`/`id` resolution rail for value verification.
 
-**Key = `(verb, eTLD+1)`.**
-- `verb` ∈ a closed ~15-item set (`purchase, get_api_key, signup, subscribe, cancel, …`), tagged by
-  the host LLM from the task (classification into a fixed list, not free generation → typo-robust,
-  no embeddings). The product/object is NOT in the key — it is a param.
-- `eTLD+1` via the Public Suffix List (`shop.`/`www.`/`checkout.` collapse to the registrable
-  domain); path + query dropped. Small allowlist for subdomain-is-tenant hosts (`*.myshopify.com`,
-  `*.notion.site`) where the full host is kept.
-- This keys the **local `operate_use` recipe store** (`~/.trusty-squire/operator-recipes/`). It is
-  NOT the registry's `serviceSlugFromUrl` signup-skill keying — those are a separate system and are
-  untouched. (Review correction: the earlier "replaces the service-slug key" wording was imprecise.)
+## Replay and repair
 
-**Recipe = ordered `[{ action, target, value }]`.**
-- `target` = a stable-attr bundle resolved at replay by an ORDERED FALLBACK, first hit wins:
-  `testid → id/name → role+accessible-name → href → css`. Gloss visible-text is LAST and only if it
-  resolves to exactly one element. (This is the E3 fix; the capture already records these attrs —
-  `promote-to-skill.ts` synthesizeSteps pulls role/near-text/label/href/testId today.) It is an
-  ordered fallback, NOT a weighted scoring engine.
-- `value` = a literal, or a `{hole-ref}`.
+New calls select a recipe with `operate_use { verb, service_url, params }`.
+`params` binds hole names and any legacy `${VAR}` templates. A keyed cache miss
+opens a normal cold session and returns `replay.status = "cache_miss"`. Legacy
+name-only recipes remain hint-only and do not enter deterministic replay.
 
-**Holes bound by provenance (not inference).**
-A hole is a typed value whose string matches a KNOWN run input — because Squire injected it and thus
-knows its source at type time:
+Replay walks the trace in order. A binding, target, live-ref, or action miss
+returns exactly one `fallback_required` result containing the missed step and a
+`next_index`. Extraction and payment also return local repair points because
+credential discovery and the existing `operate_pay` approval flow remain
+host-driven. After repairing that step, the host calls `operate_use` with the
+same recipe bindings, `session_id`, and `resume_from = next_index`; replay checks
+the continuation against the same recipe and bindings, then continues.
 
-| typed value == | → hole |
+The saved postcondition is bound from the active replay's parameters before
+`operate_finish_task` verifies it.
+
+## Money-path guards
+
+The replay money path covers purchase, subscribe, checkout, renew, upgrade,
+book, and reserve recipes. Its additional invariants are:
+
+1. Every deterministic target action passes a fresh structural resolution.
+2. Every injected address, contact, and quantity value is checked against the
+   live field immediately after the action and across state-changing
+   transitions while the field remains mounted.
+3. A host-repaired money field must identify the issued step and hole, supply
+   the same value, match the recorded or uniquely equivalent target, and pass a
+   fresh live-value check.
+4. Missing or mismatched fields return `human_required`; `operate_pay` refuses
+   to run until all replay field guards are satisfied and rechecks mounted
+   fields immediately before payment.
+
+The existing `operate_pay` phone approval, passkey mandate, card injection,
+3-D Secure handling, and expected-total behavior are unchanged.
+
+## Code ownership
+
+| Contract | Authoritative implementation |
 |---|---|
-| the user's saved address field | `{address.*}` |
-| the task's object ("dark roast") | `{product_query}` |
-| a vault secret / email | `{credential}` |
-| the card via operate_pay | `{card}` |
-| single-use token / session param in a URL | stripped (existing `isSingleUseUrl` transform) |
+| Verb schema, PSL key, local persistence, holes, target resolver | `apps/mcp/src/bot/operator-recipe.ts` |
+| Action-time provenance, verified recording, replay, repair, field guards | `apps/mcp/src/bot/provision-session.ts` |
+| Public `operate_remember` / `operate_use` contracts | `apps/mcp/src/tools/provision-drive.ts` |
+| Card-source attestation and payment gate | `apps/mcp/src/tools/operate-pay.ts`, `apps/mcp/src/bot/pay-operator.ts` |
+| Registry Skill keying | `packages/skill-schema/src/service-slugs.ts` |
 
-Everything else the agent typed that matches nothing known stays literal. Reuse the existing
-enumerable transforms in `promote-to-skill.ts` (single-use-token strip, provider generalization,
-`scrubKnownEmail`). At replay, holes are bound from the new task's inputs. This is literally a
-prepared statement: recipe = compiled statement, holes = bind params.
+## Explicitly out of scope
 
-**Replay is per-step.**
-For a matching `(verb, eTLD+1)`, walk the steps and inject params. Per step: resolve `target` via the
-ordered fallback → act. No resolve → hand THAT step to the host LLM to re-plan from the live page,
-then continue the recipe. That per-step fallback IS the entire graceful-degradation story — no
-monomorphic/polymorphic bookkeeping.
-
-**Guards (unchanged safety surface).**
-- Structural pre-check before acting on the money path (do the expected fields resolve?).
-- Total-verify against `expected_total` before the passkey; mismatch ABORTS.
-- `operate_pay` phone-approval + passkey mandate + card injection unchanged.
-
-## 4. Maps onto existing code (mostly reuse, small new surface)
-
-| Piece | Where | Change |
-|---|---|---|
-| Record on verified success | `provision-session.ts` verifyPostcondition gate; `promote-to-skill.ts` synthesizeSteps | add provenance hole-tagging; keep existing transforms |
-| Targeting bundle | already captured in the inventory (role/testId/aria/href) | consume in the ordered-fallback resolver (new, small) |
-| Recipe store + key | `operator-recipe.ts` (writeRecipe, entry_url); registry keying (`serviceSlugFromUrl`) | re-key to `(verb, eTLD+1)`; param injection at replay |
-| Deterministic replay path | `operate_use` (the same-user local fast path) | extend from hint-only to resolve-then-fallback per step |
-| Money guards | `operate_pay`, total-verify | unchanged |
-| Verify / demote | housekeeper (`classify.ts`), registry (`prisma-skill-store.ts`) | unchanged; already distinguishes transient vs rot |
-
-New code is essentially: the `(verb, eTLD+1)` keyer, the ordered-fallback resolver, provenance
-hole-tagging, and the per-step replay-with-fallback loop. Everything else is reuse.
-
-## 5. Scope — the corrected 3-quadrant value model
-
-Value wherever selection is text-decidable/pinned **OR** the store rides a common checkout platform:
-
-| | Platform checkout | Custom checkout |
-|---|---|---|
-| **Text-decidable / pinned** | ① both cache (max win) | ② selection cheap + per-store recording |
-| **Visual taste** | ③ cache all but the choice | ④ weakest (repeat-only rescue) |
-
-Build for ①②③. The dead slice is ④'s one-off novel-visual-taste on a bespoke storefront — that
-stays a full LLM+vision drive, and should.
-
-## 6. Explicitly OUT of scope (superseded / deferred)
-
-- **Cross-store platform templates** (Shopify-checkout-transfers-across-stores) — the big hit-rate
-  multiplier, but the complex part (platform detection, cross-store keying). Deferred until data
-  shows many one-shot different-store visits. Per-`(verb,domain)` already wins the repeat loop.
-- **Anti-unification of N runs** — v1 records ONE run + parametrizes known holes. Add merging only if
-  a single recording proves too brittle (surfaced as high fallback-rate on that recipe).
-- **The 3-level shape hierarchy** — collapsed to one recipe per `(verb, domain)`.
-- **Inline-cache state machine, fingerprint scoring, embeddings** — cut.
-- **Vision/taste selection quality** — never cached; it is a decision/param, not mechanics.
-
-## 7. Money-path safety (non-negotiable)
-
-1. Pre-check must pass before any deterministic act on checkout (no blind replay on a drifted page).
-2. Total-verify vs expected before the passkey; mismatch aborts to LLM/user.
-3. **Field-value verify (added by eng review 2026-08-04).** `total-verify` only catches price/qty
-   drift. A per-step LLM fallback on a checkout FILL step could mis-fill a field that does not change
-   the total — wrong shipping address / wrong contact — and ship a real gift to the wrong person on a
-   real charge. So before the passkey, the money-path pre-check ALSO deterministically asserts every
-   filled field equals the param Squire injected (address, contact, qty); a mismatch aborts to the
-   human. Cheap — it compares the live field values to the provenance values Squire already holds.
-   (Per-step fallback stays enabled on the money path; this check closes the wrong-data gap without
-   forcing a full re-drive. The stricter alternative — disable per-step fallback on checkout entirely
-   — is the fallback position if field-value verify proves insufficient.)
-4. `operate_pay` passkey + phone approval unchanged — the human confirms the charge.
-5. Any pre-check miss falls through to the LLM → no regression vs today's behavior.
-The eval harness's drift battery asserts 100% catch on money-affecting mutations (price/item/qty AND
-address/contact mis-fill); a single escape is a ship veto.
-
-## 8. Build order
-
-1. Eval harness + all-cold baseline — **in flight** (crewmate).
-2. Engine: `(verb, eTLD+1)` keyer + ordered-fallback resolver + provenance hole-tagging + per-step
-   replay-with-fallback, behind the guards. Record-on-verified-success wired to the existing gate.
-3. Measure against the harness (net speedup ≥5×, correctness ≥90%, zero money escapes). Iterate.
-4. ONLY if the data justifies it: the cross-store platform-template multiplier.
-
-## 9. Honest risks / open questions (for the review)
-
-- **Hit rate is unproven.** The whole value is `hit_rate × speedup`; per-`(verb,domain)` keying bets
-  on repeat traffic (the gifting loop). If real traffic is mostly one-off novel stores, hit rate is
-  low and the engine underdelivers regardless of per-hit speed. The harness measures this before we
-  over-invest.
-- **Provenance hole-tagging assumes Squire supplied the value.** A value the *user* typed into the
-  live page that Squire did not inject (rare in our flows) would be recorded literal and could leak a
-  run-specific value into the recipe. Mitigation: only vault/param/address/card values are ever
-  injected by Squire; free-typed values are already rare and flagged.
-- **`operate_use` is currently the "blind replay" path DESIGN-operator-hints deliberately fenced off.**
-  Extending it to resolve-then-fallback must not regress the operator-hint path (which stays
-  LLM-guidance). Clean seam needed between "hint the planner" (unchanged) and "replay with fallback"
-  (new).
-- **Verb taxonomy drift.** A closed verb set is only stable if it stays small and closed; adding
-  verbs ad hoc would fragment keys. Governance: the set is a reviewed enum, not free-form.
+- Cross-store platform templates or changes to registry Skill keying
+- Anti-unification across multiple recordings or shape hierarchies
+- Fingerprint scoring, embeddings, or vision/taste selection
+- Changes to the sibling replay evaluation harness or corpus
