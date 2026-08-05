@@ -47,7 +47,10 @@ export function computeMetrics(
   const fallbacks = completeHits.reduce((sum, hit) => sum + hit.fallbacks, 0);
   const moneyTrials = drift.filter((trial) => trial.money_affecting);
   const moneyEscapes = moneyTrials.filter(
-    (trial) => !trial.end_state_matches && trial.guard_action === "missed",
+    (trial) =>
+      !trial.end_state_matches &&
+      trial.guard_action !== "abort" &&
+      trial.guard_action !== "fallback",
   ).length;
   const caughtMoneyDrift = moneyTrials.filter(
     (trial) => trial.guard_action === "abort" || trial.guard_action === "fallback",

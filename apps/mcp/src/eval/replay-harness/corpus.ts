@@ -53,11 +53,29 @@ function parseBaseline(value: unknown, label: string): ColdBaseline {
   ) {
     throw new Error(`${label}: cold_baseline costs must be non-negative numbers`);
   }
+  if (
+    !isObject(value.provenance) ||
+    value.provenance.source !== "driver" ||
+    typeof value.provenance.driver !== "string" ||
+    value.provenance.driver.length === 0 ||
+    typeof value.provenance.model !== "string" ||
+    value.provenance.model.length === 0 ||
+    typeof value.provenance.recorded_at !== "string" ||
+    Number.isNaN(Date.parse(value.provenance.recorded_at))
+  ) {
+    throw new Error(`${label}: cold_baseline requires real driver/model provenance`);
+  }
   return {
     turns: value.turns,
     tokens: value.tokens,
     wall_clock_ms: value.wall_clock_ms,
     end_state: parseEndState(value.end_state, `${label}.cold_baseline.end_state`),
+    provenance: {
+      source: "driver",
+      driver: value.provenance.driver,
+      model: value.provenance.model,
+      recorded_at: value.provenance.recorded_at,
+    },
   };
 }
 

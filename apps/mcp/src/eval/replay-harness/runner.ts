@@ -30,7 +30,7 @@ export interface ColdBaselineDriverResult {
 
 export interface ColdBaselineDriver {
   name: string;
-  model?: string;
+  model: string;
   drive(task: ShoppingTaskRecord): Promise<ColdBaselineDriverResult>;
 }
 
@@ -71,12 +71,13 @@ export async function recordAllColdBaseline(
   options: ColdBaselineCaptureOptions = {},
 ): Promise<TaskObservation[]> {
   if (driver.name.trim().length === 0) throw new Error("cold driver name is required");
+  if (driver.model.trim().length === 0) throw new Error("cold driver model is required");
   const now = options.now ?? performance.now.bind(performance);
   const recordedAt = options.recordedAt ?? new Date().toISOString();
   const provenance: ColdBaselineProvenance = {
     source: "driver",
     driver: driver.name,
-    ...(driver.model === undefined ? {} : { model: driver.model }),
+    model: driver.model,
     recorded_at: recordedAt,
   };
   const observations: TaskObservation[] = [];
@@ -110,6 +111,38 @@ export async function recordAllColdBaseline(
   return observations;
 }
 
+export function readFrozenAllColdBaseline(tasks: ShoppingTaskRecord[]): TaskObservation[] {
+  return tasks
+    .filter((task) => task.capture.status === "captured")
+    .map((task) => {
+      const cold = {
+        turns: task.cold_baseline.turns,
+        tokens: task.cold_baseline.tokens,
+        wall_clock_ms: task.cold_baseline.wall_clock_ms,
+      };
+      const endStateMatches = endStatesMatch(
+        task.cold_baseline.end_state,
+        task.expected_end_state,
+      );
+      return {
+        task_id: task.task_id,
+        bucket: task.bucket,
+        cold,
+        cold_recording: {
+          task_id: task.task_id,
+          ...cold,
+          end_state: task.cold_baseline.end_state,
+          end_state_matches: endStateMatches,
+          provenance: task.cold_baseline.provenance,
+        },
+        recipe_applied: false,
+        end_state_matches: endStateMatches,
+        fallbacks: 0,
+        total_steps: 0,
+      } satisfies TaskObservation;
+    });
+}
+
 export async function runAllColdHarness(
   tasks: ShoppingTaskRecord[],
   drift: DriftObservation[],
@@ -129,6 +162,23 @@ export async function runAllColdHarness(
   return buildHarnessReport(observations, drift, {
     mode: "all-cold-baseline",
     ...(options.generatedAt === undefined ? {} : { generatedAt: options.generatedAt }),
+  });
+}
+
+export function runFrozenAllColdHarness(
+  tasks: ShoppingTaskRecord[],
+  drift: DriftObservation[],
+  generatedAt?: string,
+): HarnessReport {
+  const observations = readFrozenAllColdBaseline(tasks);
+  for (const observation of observations) {
+    if (!observation.end_state_matches) {
+      throw new Error(`${observation.task_id}: frozen cold baseline has the wrong end state`);
+    }
+  }
+  return buildHarnessReport(observations, drift, {
+    mode: "all-cold-baseline",
+    ...(generatedAt === undefined ? {} : { generatedAt }),
   });
 }
 
@@ -156,9 +206,15 @@ export async function runDriftBattery(
         task_id: task.task_id,
         mutation,
         money_affecting: moneyAffecting,
-        guard_action: moneyAffecting
-          ? totalVerifyGuard(task.expected_end_state.total_cents, result.end_state.total_cents)
-          : result.guard_action,
+        guard_action: result.guard_action,
+        ...(moneyAffecting
+          ? {
+              total_verify_oracle: totalVerifyGuard(
+                task.expected_end_state.total_cents,
+                result.end_state.total_cents,
+              ),
+            }
+          : {}),
         end_state_matches: endStatesMatch(result.end_state, task.expected_end_state),
       });
     }
@@ -176,13 +232,17 @@ export function totalVerifyGuard(
 export function moneyDriftObservation(
   task: ShoppingTaskRecord,
   observedTotalCents: number,
+  observedGuardAction: DriftObservation["guard_action"],
 ): DriftObservation {
-  const guardAction = totalVerifyGuard(task.expected_end_state.total_cents, observedTotalCents);
   return {
     task_id: task.task_id,
     mutation: "change-price",
     money_affecting: true,
-    guard_action: guardAction,
+    guard_action: observedGuardAction,
+    total_verify_oracle: totalVerifyGuard(
+      task.expected_end_state.total_cents,
+      observedTotalCents,
+    ),
     end_state_matches: observedTotalCents === task.expected_end_state.total_cents,
   };
 }

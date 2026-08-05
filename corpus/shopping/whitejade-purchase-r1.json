@@ -12,19 +12,25 @@
   },
   "expected_end_state": {
     "line_items": [{ "title_contains": "The Recovery Crème", "qty": 1 }],
-    "total_cents": 9600,
+    "total_cents": 8800,
     "reached": "checkout_review"
   },
   "har": "whitejade-purchase-r1.har",
   "bucket": "repeat",
   "cold_baseline": {
-    "turns": 7,
-    "tokens": 5200,
-    "wall_clock_ms": 2900,
+    "turns": 28,
+    "tokens": 1066522,
+    "wall_clock_ms": 181397,
     "end_state": {
       "line_items": [{ "title_contains": "The Recovery Crème", "qty": 1 }],
-      "total_cents": 9600,
+      "total_cents": 8800,
       "reached": "checkout_review"
+    },
+    "provenance": {
+      "source": "driver",
+      "driver": "codex-exec+chrome-devtools-axi",
+      "model": "gpt-5.6-sol",
+      "recorded_at": "2026-08-05T04:02:57.127Z"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }

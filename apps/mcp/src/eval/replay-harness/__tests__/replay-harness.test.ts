@@ -13,8 +13,8 @@ import {
 } from "../har-substrate.js";
 import { buildHarnessReport } from "../metrics.js";
 import { renderReportJson, renderReportMarkdown } from "../reporter.js";
-import { runAllColdHarness, runDriftBattery } from "../runner.js";
-import type { ColdBaselineDriver, DriftReplayAdapter } from "../runner.js";
+import { runDriftBattery, runFrozenAllColdHarness, totalVerifyGuard } from "../runner.js";
+import type { DriftReplayAdapter } from "../runner.js";
 import type { DriftObservation, ShoppingTaskRecord, TaskObservation } from "../types.js";
 
 const corpusDir = resolveShoppingCorpusDir();
@@ -71,14 +71,20 @@ async function createFrozenReplayAdapter(
       const itemObserved =
         wantedItem !== undefined &&
         body.toLowerCase().includes(wantedItem.title_contains.toLowerCase());
+      const observedTotalCents = task.expected_end_state.total_cents + priceDelta;
       return {
-        guard_action: structuralGuardTriggered ? "fallback" : "clean",
+        guard_action:
+          mutation === "change-price"
+            ? totalVerifyGuard(task.expected_end_state.total_cents, observedTotalCents)
+            : structuralGuardTriggered
+              ? "fallback"
+              : "clean",
         end_state: {
           line_items:
             wantedItem === undefined || !itemObserved
               ? []
               : [{ title_contains: wantedItem.title_contains, qty: wantedItem.qty }],
-          total_cents: task.expected_end_state.total_cents + priceDelta,
+          total_cents: observedTotalCents,
           reached: itemObserved ? task.expected_end_state.reached : "storefront",
         },
       };
@@ -94,28 +100,6 @@ function measuredDriftBattery(): Promise<DriftObservation[]> {
     runDriftBattery(repeatTasks, readHar, adapter),
   );
   return driftPromise;
-}
-
-const seededColdDriver: ColdBaselineDriver = {
-  name: "fixture-cold-driver",
-  model: "fixture-v1",
-  async drive(task) {
-    return {
-      turns: task.cold_baseline.turns,
-      tokens: task.cold_baseline.tokens,
-      end_state: task.cold_baseline.end_state,
-    };
-  },
-};
-
-function measuredClock(durations: number[]): () => number {
-  let elapsed = 0;
-  let call = 0;
-  return () => {
-    if (call % 2 === 1) elapsed += durations[Math.floor(call / 2)] ?? 0;
-    call += 1;
-    return elapsed;
-  };
 }
 
 function parseDisplayedMoney(body: string): number[] {
@@ -244,39 +228,55 @@ it(
   120_000,
 );
 
+it("preserves a missed price guard while recording the abort oracle", async () => {
+  const task = tasks.find((candidate) => candidate.task_id === "whitejade-purchase-r0");
+  expect(task).toBeDefined();
+  if (task === undefined) return;
+  const drift = await runDriftBattery([task], readHar, async ({ mutation }) => ({
+    guard_action: mutation === "change-price" ? "missed" : "clean",
+    end_state: {
+      ...task.expected_end_state,
+      total_cents:
+        task.expected_end_state.total_cents + (mutation === "change-price" ? 100 : 0),
+    },
+  }));
+  const priceTrial = drift.find((trial) => trial.mutation === "change-price");
+  expect(priceTrial).toMatchObject({
+    guard_action: "missed",
+    total_verify_oracle: "abort",
+    end_state_matches: false,
+  });
+  const report = buildHarnessReport([], drift);
+  expect(report.metrics.money_escape).toBe(1);
+  expect(report.decision).toBe("NO-SHIP");
+});
+
 it(
-  "emits driver-recorded all-cold evidence, metrics, and one NO-SHIP line",
+  "emits frozen real-LLM cold evidence, metrics, and one NO-SHIP line",
   async () => {
-    const captured = tasks.filter((task) => task.capture.status === "captured");
     const drift = await measuredDriftBattery();
-    const report = await runAllColdHarness(tasks, drift, seededColdDriver, {
-      generatedAt: "2026-08-04T20:00:00.000Z",
-      now: measuredClock(captured.map((task) => task.cold_baseline.wall_clock_ms)),
-    });
+    const report = runFrozenAllColdHarness(tasks, drift, "2026-08-04T20:00:00.000Z");
     const json = renderReportJson(report);
     const markdown = renderReportMarkdown(report);
     expect(report.mode).toBe("all-cold-baseline");
-    expect(report.cold_baseline).toEqual({
-      tasks: 9,
-      median: { turns: 8, tokens: 5800, wall_clock_ms: 3100 },
-      total: { turns: 75, tokens: 54030, wall_clock_ms: 36272 },
-      recordings: expect.arrayContaining([
-        expect.objectContaining({
-          task_id: "whitejade-purchase-r0",
-          end_state_matches: true,
-          provenance: {
-            source: "driver",
-            driver: "fixture-cold-driver",
-            model: "fixture-v1",
-            recorded_at: "2026-08-04T20:00:00.000Z",
-          },
-        }),
-      ]),
-    });
+    expect(report.cold_baseline.tasks).toBe(9);
     expect(report.cold_baseline.recordings).toHaveLength(9);
+    expect(
+      report.cold_baseline.recordings.every(
+        (recording) =>
+          recording.end_state_matches &&
+          recording.provenance.driver === "codex-exec+chrome-devtools-axi" &&
+          recording.provenance.model === "gpt-5.6-sol",
+      ),
+    ).toBe(true);
+    expect(report.cold_baseline.total.turns).toBeGreaterThan(9);
+    expect(report.cold_baseline.total.tokens).toBeGreaterThan(0);
+    expect(report.cold_baseline.total.wall_clock_ms).toBeGreaterThan(0);
     expect(report.decision).toBe("NO-SHIP");
     expect(markdown).toContain("| `net_speedup` |");
-    expect(markdown).toContain("9 driver-recorded tasks via fixture-cold-driver/fixture-v1");
+    expect(markdown).toContain(
+      "9 driver-recorded tasks via codex-exec+chrome-devtools-axi/gpt-5.6-sol",
+    );
     expect(markdown.match(/^NO-SHIP\b/gm)).toHaveLength(1);
     console.log(`[replay-harness] report.json\n${json}`);
     console.log(`[replay-harness] report.md\n${markdown}`);

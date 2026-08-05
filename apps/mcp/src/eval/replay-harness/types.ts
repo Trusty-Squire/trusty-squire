@@ -20,12 +20,13 @@ export interface CostSample {
 
 export interface ColdBaseline extends CostSample {
   end_state: ExpectedEndState;
+  provenance: ColdBaselineProvenance;
 }
 
 export interface ColdBaselineProvenance {
   source: "driver";
   driver: string;
-  model?: string;
+  model: string;
   recorded_at: string;
 }
 
@@ -84,6 +85,7 @@ export interface DriftObservation {
   mutation: DriftMutationName;
   money_affecting: boolean;
   guard_action: "clean" | "fallback" | "abort" | "missed";
+  total_verify_oracle?: "clean" | "abort";
   end_state_matches: boolean;
 }
 

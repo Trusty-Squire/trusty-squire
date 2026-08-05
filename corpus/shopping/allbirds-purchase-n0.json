@@ -16,13 +16,19 @@
   "har": "allbirds-purchase-n0.har",
   "bucket": "novel",
   "cold_baseline": {
-    "turns": 10,
-    "tokens": 7112,
-    "wall_clock_ms": 3294,
+    "turns": 2,
+    "tokens": 48688,
+    "wall_clock_ms": 23418,
     "end_state": {
       "line_items": [{ "title_contains": "Men's Tree Runner NZ", "qty": 1 }],
       "total_cents": 10000,
       "reached": "product_page"
+    },
+    "provenance": {
+      "source": "driver",
+      "driver": "codex-exec+chrome-devtools-axi",
+      "model": "gpt-5.6-sol",
+      "recorded_at": "2026-08-05T03:50:39.309Z"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }
