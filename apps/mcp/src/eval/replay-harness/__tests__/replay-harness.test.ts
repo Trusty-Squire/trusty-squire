@@ -214,19 +214,15 @@ describe("live whitejade checkout substrate", () => {
   );
 });
 
-it(
-  "runs all six drift mutations and total-verify vetoes every changed price",
-  async () => {
-    const repeatTasks = tasks.filter((task) => task.bucket === "repeat");
-    const drift = await measuredDriftBattery();
-    expect(drift).toHaveLength(repeatTasks.length * 6);
-    const priceTrials = drift.filter((trial) => trial.money_affecting);
-    expect(priceTrials).toHaveLength(repeatTasks.length);
-    expect(priceTrials.every((trial) => trial.guard_action === "abort")).toBe(true);
-    expect(priceTrials.every((trial) => !trial.end_state_matches)).toBe(true);
-  },
-  120_000,
-);
+it("runs all six drift mutations and total-verify vetoes every changed price", async () => {
+  const repeatTasks = tasks.filter((task) => task.bucket === "repeat");
+  const drift = await measuredDriftBattery();
+  expect(drift).toHaveLength(repeatTasks.length * 6);
+  const priceTrials = drift.filter((trial) => trial.money_affecting);
+  expect(priceTrials).toHaveLength(repeatTasks.length);
+  expect(priceTrials.every((trial) => trial.guard_action === "abort")).toBe(true);
+  expect(priceTrials.every((trial) => !trial.end_state_matches)).toBe(true);
+}, 120_000);
 
 it("preserves a missed price guard while recording the abort oracle", async () => {
   const task = tasks.find((candidate) => candidate.task_id === "whitejade-purchase-r0");
@@ -236,8 +232,7 @@ it("preserves a missed price guard while recording the abort oracle", async () =
     guard_action: mutation === "change-price" ? "missed" : "clean",
     end_state: {
       ...task.expected_end_state,
-      total_cents:
-        task.expected_end_state.total_cents + (mutation === "change-price" ? 100 : 0),
+      total_cents: task.expected_end_state.total_cents + (mutation === "change-price" ? 100 : 0),
     },
   }));
   const priceTrial = drift.find((trial) => trial.mutation === "change-price");
@@ -251,38 +246,37 @@ it("preserves a missed price guard while recording the abort oracle", async () =
   expect(report.decision).toBe("NO-SHIP");
 });
 
-it(
-  "emits frozen real-LLM cold evidence, metrics, and one NO-SHIP line",
-  async () => {
-    const drift = await measuredDriftBattery();
-    const report = runFrozenAllColdHarness(tasks, drift, "2026-08-04T20:00:00.000Z");
-    const json = renderReportJson(report);
-    const markdown = renderReportMarkdown(report);
-    expect(report.mode).toBe("all-cold-baseline");
-    expect(report.cold_baseline.tasks).toBe(9);
-    expect(report.cold_baseline.recordings).toHaveLength(9);
-    expect(
-      report.cold_baseline.recordings.every(
-        (recording) =>
-          recording.end_state_matches &&
-          recording.provenance.driver === "codex-exec+chrome-devtools-axi" &&
-          recording.provenance.model === "gpt-5.6-sol",
-      ),
-    ).toBe(true);
-    expect(report.cold_baseline.total.turns).toBeGreaterThan(9);
-    expect(report.cold_baseline.total.tokens).toBeGreaterThan(0);
-    expect(report.cold_baseline.total.wall_clock_ms).toBeGreaterThan(0);
-    expect(report.decision).toBe("NO-SHIP");
-    expect(markdown).toContain("| `net_speedup` |");
-    expect(markdown).toContain(
-      "9 driver-recorded tasks via codex-exec+chrome-devtools-axi/gpt-5.6-sol",
-    );
-    expect(markdown.match(/^NO-SHIP\b/gm)).toHaveLength(1);
-    console.log(`[replay-harness] report.json\n${json}`);
-    console.log(`[replay-harness] report.md\n${markdown}`);
-  },
-  120_000,
-);
+it("emits frozen real-LLM cold evidence, metrics, and one NO-SHIP line", async () => {
+  const drift = await measuredDriftBattery();
+  const report = runFrozenAllColdHarness(tasks, drift, "2026-08-04T20:00:00.000Z");
+  const json = renderReportJson(report);
+  const markdown = renderReportMarkdown(report);
+  expect(report.mode).toBe("all-cold-baseline");
+  expect(report.cold_baseline.tasks).toBe(9);
+  expect(report.cold_baseline.recordings).toHaveLength(9);
+  expect(
+    report.cold_baseline.recordings.every(
+      (recording) =>
+        recording.end_state_matches &&
+        recording.provenance.driver === "codex-exec+constrained-browser-mcp" &&
+        recording.provenance.model === "gpt-5.6-sol" &&
+        (recording.provenance.browser_observations ?? 0) > 0 &&
+        recording.provenance.capture_policy === "read-only-browser-mcp-v1" &&
+        /^[a-f0-9]{64}$/.test(recording.provenance.evidence_sha256 ?? ""),
+    ),
+  ).toBe(true);
+  expect(report.cold_baseline.total.turns).toBeGreaterThan(9);
+  expect(report.cold_baseline.total.tokens).toBeGreaterThan(0);
+  expect(report.cold_baseline.total.wall_clock_ms).toBeGreaterThan(0);
+  expect(report.decision).toBe("NO-SHIP");
+  expect(markdown).toContain("| `net_speedup` |");
+  expect(markdown).toContain(
+    "9 driver-recorded tasks via codex-exec+constrained-browser-mcp/gpt-5.6-sol",
+  );
+  expect(markdown.match(/^NO-SHIP\b/gm)).toHaveLength(1);
+  console.log(`[replay-harness] report.json\n${json}`);
+  console.log(`[replay-harness] report.md\n${markdown}`);
+}, 120_000);
 
 it("ships only when speed, correctness, and money safety all clear", () => {
   const successfulHits: TaskObservation[] = Array.from({ length: 10 }, (_, index) => ({

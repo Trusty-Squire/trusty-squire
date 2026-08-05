@@ -17,8 +17,8 @@
   "bucket": "novel",
   "cold_baseline": {
     "turns": 10,
-    "tokens": 332239,
-    "wall_clock_ms": 86510,
+    "tokens": 501119,
+    "wall_clock_ms": 110050,
     "end_state": {
       "line_items": [{ "title_contains": "Chocolate Hazelnut Coffee", "qty": 1 }],
       "total_cents": 1999,
@@ -26,9 +26,12 @@
     },
     "provenance": {
       "source": "driver",
-      "driver": "codex-exec+chrome-devtools-axi",
+      "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T03:53:32.781Z"
+      "recorded_at": "2026-08-05T04:48:12.011Z",
+      "browser_observations": 5,
+      "evidence_sha256": "91e7685d2852502adb8b20c50de11bf67d614a06c5a9c44c34548f827572ccd1",
+      "capture_policy": "read-only-browser-mcp-v1"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }

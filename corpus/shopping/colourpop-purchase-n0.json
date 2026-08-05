@@ -16,9 +16,9 @@
   "har": "colourpop-purchase-n0.har",
   "bucket": "novel",
   "cold_baseline": {
-    "turns": 7,
-    "tokens": 199967,
-    "wall_clock_ms": 52417,
+    "turns": 5,
+    "tokens": 160508,
+    "wall_clock_ms": 42020,
     "end_state": {
       "line_items": [{ "title_contains": "Infinite Possibilities", "qty": 1 }],
       "total_cents": 10800,
@@ -26,9 +26,12 @@
     },
     "provenance": {
       "source": "driver",
-      "driver": "codex-exec+chrome-devtools-axi",
+      "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T03:52:05.489Z"
+      "recorded_at": "2026-08-05T04:46:15.592Z",
+      "browser_observations": 3,
+      "evidence_sha256": "92559f80c700858d61310d326b13e053c520bde88d2f3d2b7b474f11708b8a29",
+      "capture_policy": "read-only-browser-mcp-v1"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }

@@ -61,9 +61,14 @@ function parseBaseline(value: unknown, label: string): ColdBaseline {
     typeof value.provenance.model !== "string" ||
     value.provenance.model.length === 0 ||
     typeof value.provenance.recorded_at !== "string" ||
-    Number.isNaN(Date.parse(value.provenance.recorded_at))
+    Number.isNaN(Date.parse(value.provenance.recorded_at)) ||
+    !Number.isInteger(value.provenance.browser_observations) ||
+    (value.provenance.browser_observations as number) < 1 ||
+    typeof value.provenance.evidence_sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(value.provenance.evidence_sha256) ||
+    value.provenance.capture_policy !== "read-only-browser-mcp-v1"
   ) {
-    throw new Error(`${label}: cold_baseline requires real driver/model provenance`);
+    throw new Error(`${label}: cold_baseline requires grounded browser provenance`);
   }
   return {
     turns: value.turns,
@@ -75,6 +80,9 @@ function parseBaseline(value: unknown, label: string): ColdBaseline {
       driver: value.provenance.driver,
       model: value.provenance.model,
       recorded_at: value.provenance.recorded_at,
+      browser_observations: value.provenance.browser_observations as number,
+      evidence_sha256: value.provenance.evidence_sha256,
+      capture_policy: "read-only-browser-mcp-v1",
     },
   };
 }

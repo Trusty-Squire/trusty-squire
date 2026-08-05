@@ -28,6 +28,9 @@ export interface ColdBaselineProvenance {
   driver: string;
   model: string;
   recorded_at: string;
+  browser_observations?: number;
+  evidence_sha256?: string;
+  capture_policy?: "read-only-browser-mcp-v1";
 }
 
 export interface ColdBaselineRecording extends CostSample {

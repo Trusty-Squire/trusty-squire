@@ -18,9 +18,9 @@
   "har": "whitejade-purchase-r1.har",
   "bucket": "repeat",
   "cold_baseline": {
-    "turns": 28,
-    "tokens": 1066522,
-    "wall_clock_ms": 181397,
+    "turns": 26,
+    "tokens": 1020746,
+    "wall_clock_ms": 166160,
     "end_state": {
       "line_items": [{ "title_contains": "The Recovery Crème", "qty": 1 }],
       "total_cents": 8800,
@@ -28,9 +28,12 @@
     },
     "provenance": {
       "source": "driver",
-      "driver": "codex-exec+chrome-devtools-axi",
+      "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T04:02:57.127Z"
+      "recorded_at": "2026-08-05T04:55:42.032Z",
+      "browser_observations": 20,
+      "evidence_sha256": "8a94b2b500156a8ffe6a692d5b12855b9c5bf2fb0cc8e65e3a90c707e501c7aa",
+      "capture_policy": "read-only-browser-mcp-v1"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }

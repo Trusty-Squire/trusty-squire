@@ -16,9 +16,9 @@
   "har": "tentree-purchase-n0.har",
   "bucket": "novel",
   "cold_baseline": {
-    "turns": 7,
-    "tokens": 179303,
-    "wall_clock_ms": 41775,
+    "turns": 2,
+    "tokens": 92442,
+    "wall_clock_ms": 28252,
     "end_state": {
       "line_items": [{ "title_contains": "Ruxton Packable Backpack", "qty": 1 }],
       "total_cents": 7800,
@@ -26,9 +26,12 @@
     },
     "provenance": {
       "source": "driver",
-      "driver": "codex-exec+chrome-devtools-axi",
+      "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T03:54:15.216Z"
+      "recorded_at": "2026-08-05T04:48:40.925Z",
+      "browser_observations": 1,
+      "evidence_sha256": "506ef05090cb52e6d6efef780c736e5c40ef24c8bd4b9052f2534a6ac01aa29f",
+      "capture_policy": "read-only-browser-mcp-v1"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }

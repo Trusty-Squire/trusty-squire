@@ -18,9 +18,9 @@
   "har": "whitejade-purchase-r3.har",
   "bucket": "repeat",
   "cold_baseline": {
-    "turns": 21,
-    "tokens": 777254,
-    "wall_clock_ms": 111348,
+    "turns": 24,
+    "tokens": 741802,
+    "wall_clock_ms": 106842,
     "end_state": {
       "line_items": [{ "title_contains": "Red Light Face Mask", "qty": 1 }],
       "total_cents": 10900,
@@ -28,9 +28,12 @@
     },
     "provenance": {
       "source": "driver",
-      "driver": "codex-exec+chrome-devtools-axi",
+      "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T04:07:09.212Z"
+      "recorded_at": "2026-08-05T04:59:35.316Z",
+      "browser_observations": 14,
+      "evidence_sha256": "beec757a053d97b46f92f124d0c01fc31c52078d691e8f906fd88f4e004d2a6f",
+      "capture_policy": "read-only-browser-mcp-v1"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }

@@ -18,9 +18,9 @@
   "har": "whitejade-purchase-r2.har",
   "bucket": "repeat",
   "cold_baseline": {
-    "turns": 26,
-    "tokens": 1033215,
-    "wall_clock_ms": 128335,
+    "turns": 27,
+    "tokens": 965444,
+    "wall_clock_ms": 125287,
     "end_state": {
       "line_items": [{ "title_contains": "Collagen Glow Sheet Mask", "qty": 1 }],
       "total_cents": 2700,
@@ -28,9 +28,12 @@
     },
     "provenance": {
       "source": "driver",
-      "driver": "codex-exec+chrome-devtools-axi",
+      "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T04:05:12.077Z"
+      "recorded_at": "2026-08-05T04:57:47.874Z",
+      "browser_observations": 15,
+      "evidence_sha256": "e68f73360857e77bcb9c3def6a58f1523d65ff14738acc9fd1a75d775f0464f9",
+      "capture_policy": "read-only-browser-mcp-v1"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }

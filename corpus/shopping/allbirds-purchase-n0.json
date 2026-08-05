@@ -17,8 +17,8 @@
   "bucket": "novel",
   "cold_baseline": {
     "turns": 2,
-    "tokens": 48688,
-    "wall_clock_ms": 23418,
+    "tokens": 70339,
+    "wall_clock_ms": 31517,
     "end_state": {
       "line_items": [{ "title_contains": "Men's Tree Runner NZ", "qty": 1 }],
       "total_cents": 10000,
@@ -26,9 +26,12 @@
     },
     "provenance": {
       "source": "driver",
-      "driver": "codex-exec+chrome-devtools-axi",
+      "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T03:50:39.309Z"
+      "recorded_at": "2026-08-05T04:43:22.002Z",
+      "browser_observations": 1,
+      "evidence_sha256": "35e541b3ec3d5bceea943a11d2b80921c85a6fbb926259523332be1fb3946d13",
+      "capture_policy": "read-only-browser-mcp-v1"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }
