@@ -59,18 +59,21 @@ from the canonical
 [`VAULT_AUDIT_TYPES`](../../packages/vault/src/types.ts) values rather than a
 second hand-maintained enum. Every event payload is display metadata only.
 
-Payment approval creation accepts optional `item` and `reason` strings, storing
-an empty string when either is omitted. The API derives `agent` from the
-authenticated install identity and falls back to `unknown-agent`; clients
-cannot set it. The create response returns `agent`, and polling returns all
-three values for the approval page and signed mandate. `card_ref` is optional,
-but `operator_pubkey` remains required at creation. Card-less approvals expire
-after 18 minutes to allow the JIT add-card ceremony; approvals created with a
-card keep the 10-minute window. A card-less approval follows the server-enforced
-seal → bind → approve order. Binding is pending-only, write-once, rejects an
-expired approval, and accepts only an `E2ECredential` owned by the same account;
-an unknown or foreign card returns `404`. Approving before a card is bound
-returns `409 { "error": "card_required" }`.
+Payment approval creation requires non-empty `item` and `reason` strings and
+stores their trimmed values. The API records `agent` from a valid, non-empty
+`X-Squire-Agent-Identity` header; the MCP server sets that header from the
+requesting host's `initialize` `clientInfo.name`. An absent or invalid header
+falls back to the authenticated install identity and then `unknown-agent`; an
+`agent` field in the JSON body cannot override it. The create response returns
+`agent`, and polling returns all three values for the approval page and signed
+mandate. `card_ref` is optional, but `operator_pubkey` remains required at
+creation. Card-less approvals expire after 18 minutes to allow the JIT add-card
+ceremony; approvals created with a card keep the 10-minute window. A card-less
+approval follows the server-enforced seal → bind → approve order. Binding is
+pending-only, write-once, rejects an expired approval, and accepts only an
+`E2ECredential` owned by the same account; an unknown or foreign card returns
+`404`. Approving before a card is bound returns
+`409 { "error": "card_required" }`.
 
 ## Auth model
 

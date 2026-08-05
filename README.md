@@ -52,18 +52,22 @@ browser before showing the number, name, expiry, and billing address. The CVV is
 never shown, even after reveal. The Activity page also records card additions
 and removals, payments, and app-grant changes without storing a PAN or CVV.
 
-`operate_pay` reads the checkout total, sends you a short-lived approval link,
-and submits only after you approve the exact purchase. The approval page shows
-the venue, item, amount, requesting agent, and reason; one passkey prompt both
+`operate_pay` requires a non-empty item and reason, reads the checkout total,
+sends you a short-lived approval link, and submits only after you approve the
+exact purchase. The approval page shows the venue, item, amount, reason, and the
+requesting MCP client's name (for example, Hermes); one passkey prompt both
 signs that approval and releases the card to the checkout operator. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
-between approval and submission. If the issuer requires 3-D Secure, Trusty
-Squire notifies your linked Telegram chat and waits 180 seconds by default for
-you to complete the challenge in the open checkout instead of automating it. It
-reports a visible success or decline and hands an unresolved challenge back on
-timeout. `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to
-`0` on `operate_pay` to skip the notification and waiting and receive the
-handoff immediately.
+between approval and submission. If the checkout exposes PayPal Smart Buttons
+or PayPal-hosted fields, Trusty Squire hands the checkout back before selecting a
+saved card or creating an approval; it does not sign in to PayPal or use vaulted
+PayPal credentials. If the issuer requires 3-D Secure, Trusty Squire notifies
+your linked Telegram chat and waits 180 seconds by default for you to complete
+the challenge in the open checkout instead of automating it. It reports a
+visible success or decline and hands an unresolved challenge back on timeout.
+`three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to `0` on
+`operate_pay` to skip the notification and waiting and receive the handoff
+immediately.
 
 Connect Telegram under Vault Settings to receive secret-free alerts for
 credential, card, payment, and app-grant lifecycle changes. Routine credential

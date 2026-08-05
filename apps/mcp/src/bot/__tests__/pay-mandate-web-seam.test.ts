@@ -43,7 +43,7 @@ import { exportJWK, SignJWT } from "jose";
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
 import { executeOperatePay, type PaymentBrowser } from "../pay-operator.js";
-import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
+import { sealToRecipient } from "../payment-hpke.js";
 import type { CheckoutCard, CheckoutSummary } from "../browser.js";
 
 const CHECKOUT: CheckoutSummary = {
