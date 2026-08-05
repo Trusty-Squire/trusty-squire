@@ -8,7 +8,7 @@
 # per-package test suites. Deterministic, matches CI exactly.
 commands:
   test: |
-    set -euo pipefail
+    set -eu
     pnpm --filter '@trusty-squire/registry' prisma:generate
     pnpm -r --filter "./packages/**" --if-present build
     pnpm -r --if-present test
