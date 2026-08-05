@@ -64,7 +64,7 @@ vi.mock("../../../../components/CardEntry", () => ({
 
 import PaymentApprovalPage from "../page";
 
-// Authenticated detail responses carry metadata only for the server-bound card.
+// Operator-verified review responses carry metadata for the server-bound card.
 const BOUND_CARD = {
   id: "card_new",
   label: "Personal",
@@ -119,6 +119,7 @@ function ceremonyBody() {
     status: current.status,
     card_ref: current.card_ref,
     operator_pubkey: current.operator_pubkey,
+    approval_payload_sha256: "synthetic-approval-payload-hash",
     card: current.card === null ? null : { blob: current.card.blob },
   };
 }
@@ -151,17 +152,6 @@ beforeEach(() => {
       }
       return Promise.resolve(ceremonyBody());
     }
-    if (path === "/v1/pay/approvals/appr_1") {
-      const { card: _card, ...details } = approvalBody();
-      return Promise.resolve(details);
-    }
-    if (path === "/v1/vault/e2e/card_new") {
-      const metadata = cardListOverride?.[0] ?? BOUND_CARD;
-      return Promise.resolve({
-        ...metadata,
-        blob: JSON.stringify({ prf_salt: "AAAA", ciphertext: "encrypted" }),
-      });
-    }
     return Promise.reject(new Error(`unexpected GET ${path}`));
   });
   api.apiPost.mockImplementation((path: string) => {
@@ -178,6 +168,18 @@ beforeEach(() => {
       bound = true;
       if (failCardListAfterBind) cardListFailures += 1;
       return Promise.resolve({ card_ref: "card_new" });
+    }
+    if (path === "/v1/pay/approvals/appr_1/approve") {
+      const { card: _card, ...approval } = approvalBody();
+      const metadata = cardListOverride?.[0] ?? BOUND_CARD;
+      return Promise.resolve({
+        status: "verified",
+        approval,
+        card: {
+          brand: (metadata as typeof BOUND_CARD).brand,
+          last4: (metadata as typeof BOUND_CARD).last4,
+        },
+      });
     }
     return Promise.resolve({});
   });
@@ -221,17 +223,18 @@ describe("pay page — JIT add-card ceremony", () => {
     );
   });
 
-  it("loads authenticated payment details only after the passkey unlock", async () => {
+  it("releases payment details after operator verification without OAuth", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
     const review = await screen.findByRole("button", { name: /Review with passkey/ });
     expect(router.replace).not.toHaveBeenCalled();
     expect(screen.queryByText("CASETiFY")).toBeNull();
-    expect(api.apiGet).not.toHaveBeenCalledWith("/v1/pay/approvals/appr_1");
     const user = userEvent.setup();
     await user.click(review);
     await screen.findByRole("button", { name: /Approve payment/ });
-    expect(api.apiGet).toHaveBeenCalledWith("/v1/pay/approvals/appr_1");
+    expect(api.apiGet).not.toHaveBeenCalledWith("/v1/pay/approvals/appr_1");
+    expect(api.apiGet).not.toHaveBeenCalledWith("/v1/vault/e2e/card_new");
+    expect(router.replace).not.toHaveBeenCalled();
     expect(screen.queryByTestId("card-entry")).toBeNull();
     const anchor = screen.getByText(/Pay with/);
     expect(anchor.textContent).toContain("··4242");
@@ -287,7 +290,11 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.getByRole("button", { name: /Approve payment/ }).hasAttribute("disabled")).toBe(
       false,
     );
-    expect(api.apiPost).toHaveBeenCalledTimes(1);
+    expect(
+      api.apiPost.mock.calls.filter(
+        ([path]) => path === "/v1/pay/approvals/appr_1/bind-card",
+      ),
+    ).toHaveLength(1);
   });
 
   it("retries binding the same saved card without reopening card entry", async () => {

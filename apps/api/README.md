@@ -41,8 +41,8 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Poll an account-owned payment approval |
 | `GET` | `/v1/pay/approvals/:id/ceremony` | none | Return only the opaque PRF/HPKE ceremony inputs for a pending approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
-| `POST` | `/v1/pay/approvals/:id/approve` | none | Rendezvous a bound mandate and HPKE seal with the waiting account operator without persisting it |
-| `POST` | `/v1/pay/approvals/:id/confirm` | agent | Persist an operator-verified mandate and seal as approved |
+| `POST` | `/v1/pay/approvals/:id/approve` | none | Relay an opaque review or final approval seal to the waiting account operator without persisting it |
+| `POST` | `/v1/pay/approvals/:id/confirm` | agent | Release review details or persist a final approval after operator verification |
 | `GET` | `/health` | none | Liveness |
 
 Client-encrypted card creation accepts optional plaintext `brand` and `last4`
@@ -77,11 +77,12 @@ pending-only, write-once, rejects an expired approval, and accepts only an
 `404`. Approving before a card is bound returns
 `409 { "error": "card_required" }`. The unauthenticated ceremony response
 contains only the approval id, status, bound card reference, operator public key,
-and opaque encrypted card blob. Payment details and card display metadata are
-loaded through account-authenticated endpoints only after the local PRF unlock.
-The public approval submission is relayed directly to a waiting authenticated
-operator and is not written to the approval row; only the operator's confirmation
-persists the verified mandate, sealed card, and approved status.
+an opaque approval payload digest, and the encrypted card blob. An enrolled
+passkey holder submits a review seal without a web session; payment details and
+card display metadata are returned only after the authenticated operator verifies
+that approval-bound PRF/HPKE seal. Neither review nor final submissions are staged
+on the approval row. Review confirmation releases details without mutation; final
+confirmation persists the verified mandate, sealed card, and approved status.
 
 ## Auth model
 

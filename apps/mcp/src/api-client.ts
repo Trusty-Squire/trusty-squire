@@ -168,7 +168,7 @@ export class ApiClient {
   async confirmPaymentApproval(
     id: string,
     submission: { jws: string; sealed_card: string },
-  ): Promise<{ status: "approved" }> {
+  ): Promise<{ status: "verified" | "approved" }> {
     return this.post(`/v1/pay/approvals/${encodeURIComponent(id)}/confirm`, submission);
   }
 

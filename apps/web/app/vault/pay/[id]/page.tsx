@@ -24,6 +24,7 @@ interface CeremonyApproval {
   status: string;
   card_ref: string | null;
   operator_pubkey: string;
+  approval_payload_sha256: string | null;
   card: CeremonyCard | null;
 }
 
@@ -54,6 +55,12 @@ interface StoredCard extends E2EBlob {
 interface PreparedSubmission {
   jws: string;
   sealed_card: string;
+}
+
+interface VerifiedReview {
+  status: "verified";
+  approval: ApprovalDetails;
+  card: CardDetails;
 }
 
 function fromBase64(value: string): Uint8Array<ArrayBuffer> {
@@ -204,6 +211,7 @@ export default function PaymentApprovalPage() {
       ceremony === null ||
       ceremony.status !== "pending" ||
       ceremony.card_ref === null ||
+      ceremony.approval_payload_sha256 === null ||
       ceremony.card === null
     ) {
       return;
@@ -226,33 +234,38 @@ export default function PaymentApprovalPage() {
       );
       const recipientPubkeyHash = toBase64Url(new Uint8Array(publicKeyHash));
       const storedCard = JSON.parse(ceremony.card.blob) as StoredCard;
-      const unlock = await getVouchflow().signPayload({
+      const reviewSign = await getVouchflow().signPayload({
         context: "purchase",
         payload: {
           approval_id: ceremony.id,
+          approval_payload_sha256: ceremony.approval_payload_sha256,
+          card_ref: ceremony.card_ref,
           recipient_pubkey_hash: recipientPubkeyHash,
         },
         minConfidence: "low",
         prfSalt: fromBase64(storedCard.prf_salt),
       });
-      key = unlock.prfResult;
+      key = reviewSign.prfResult;
       if (key === undefined) throw new Error("Passkey did not return a PRF result");
       card = await decryptCard(key, storedCard);
-
-      const details = await apiGet<ApprovalDetails>(`/v1/pay/approvals/${encodeURIComponent(id)}`);
+      cardBytes = new TextEncoder().encode(JSON.stringify(card));
+      const reviewAad = new Uint8Array(
+        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(reviewSign.payload)),
+      );
+      const reviewSeal = await sealToRecipient(ceremony.operator_pubkey, cardBytes, reviewAad);
+      const review = await apiPost<VerifiedReview>(
+        `/v1/pay/approvals/${encodeURIComponent(id)}/approve`,
+        { jws: reviewSign.assertion, sealed_card: reviewSeal },
+      );
+      const details = review.approval;
       if (
+        review.status !== "verified" ||
         details.id !== ceremony.id ||
         details.status !== "pending" ||
         details.card_ref !== ceremony.card_ref ||
         details.operator_pubkey !== ceremony.operator_pubkey
       ) {
         throw new Error("Payment approval changed while it was being unlocked.");
-      }
-      const metadata = await apiGet<CardDetails & { id: string }>(
-        `/v1/vault/e2e/${encodeURIComponent(ceremony.card_ref)}`,
-      );
-      if (metadata.id !== ceremony.card_ref) {
-        throw new Error("The payment card changed while it was being unlocked.");
       }
       const payload = {
         approval_id: details.id,
@@ -278,18 +291,13 @@ export default function PaymentApprovalPage() {
       const aad = new Uint8Array(
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sign.payload)),
       );
-      cardBytes = new TextEncoder().encode(JSON.stringify(card));
       const sealedCard = await sealToRecipient(details.operator_pubkey, cardBytes, aad);
-      setApproval({ ...details, card: { brand: metadata.brand, last4: metadata.last4 } });
+      setApproval({ ...details, card: review.card });
       setPrepared({ jws: sign.assertion, sealed_card: sealedCard });
       setNeedsPasskeySetup(false);
     } catch (err) {
       if (isPaymentPasskeyUnavailable(err)) {
         setNeedsPasskeySetup(true);
-        return;
-      }
-      if (err instanceof ApiError && err.status === 401) {
-        redirectToLogin();
         return;
       }
       setError(err instanceof Error ? err.message : "Failed to unlock payment approval.");
@@ -300,7 +308,7 @@ export default function PaymentApprovalPage() {
       card = undefined;
       setBusy(false);
     }
-  }, [ceremony, id, redirectToLogin]);
+  }, [ceremony, id]);
 
   const setUpPasskey = useCallback(async () => {
     setBusy(true);

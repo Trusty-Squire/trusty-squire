@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import canonicalize from "canonicalize";
-import { createLocalJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
+import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
 import type { ApiClient } from "../api-client.js";
 import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
@@ -396,12 +396,41 @@ export async function executeOperatePay(
                 };
               }
             } else {
-              const aad = new Uint8Array(createHash("sha256").update(canonical, "utf8").digest());
+              const approvalAad = new Uint8Array(
+                createHash("sha256").update(canonical, "utf8").digest(),
+              );
+              const reviewCanonical = canonicalize({
+                approval_id: created.id,
+                approval_payload_sha256: toBase64Url(approvalAad),
+                card_ref: cardRef,
+                recipient_pubkey_hash: toBase64Url(recipientHash),
+              });
+              if (reviewCanonical === undefined) {
+                return {
+                  status: "payment_mandate_rejected",
+                  reason: "canonicalization_failed",
+                  approval_url: approvalUrl,
+                };
+              }
+              const reviewAad = new Uint8Array(
+                createHash("sha256").update(reviewCanonical, "utf8").digest(),
+              );
               let verifiedClaims: JWTPayload | undefined;
+              let reviewCandidate = false;
+              let candidateAad: Uint8Array | undefined;
               try {
+                const claimedHash = decodePayloadHash(decodeJwt(candidate.jws).payload_sha256);
+                if (timingSafeEqual(Buffer.from(claimedHash), Buffer.from(approvalAad))) {
+                  candidateAad = approvalAad;
+                } else if (timingSafeEqual(Buffer.from(claimedHash), Buffer.from(reviewAad))) {
+                  candidateAad = reviewAad;
+                  reviewCandidate = true;
+                } else {
+                  throw new Error("payload_hash_mismatch");
+                }
                 verifiedClaims = await verifyMandate(
                   candidate.jws,
-                  aad,
+                  candidateAad,
                   deps.vouchflowApiBase,
                   expectedAudience,
                   deps.fetch,
@@ -429,7 +458,7 @@ export async function executeOperatePay(
                   candidateCardBytes = await openSealed(
                     keypair.privateKey,
                     candidate.sealed_card,
-                    aad,
+                    candidateAad!,
                   );
                   candidateCard = normalizeCard(
                     JSON.parse(new TextDecoder().decode(candidateCardBytes)) as unknown,
@@ -441,6 +470,21 @@ export async function executeOperatePay(
                   }
                 }
                 if (candidateCardBytes !== undefined && candidateCard !== undefined) {
+                  if (reviewCandidate) {
+                    try {
+                      const confirmation = await api.confirmPaymentApproval(created.id, candidate);
+                      if (confirmation.status !== "verified") {
+                        throw new Error("review_confirmation_failed");
+                      }
+                    } catch {
+                      candidateCardBytes.fill(0);
+                      await deps.sleep(deps.pollIntervalMs);
+                      continue;
+                    }
+                    candidateCardBytes.fill(0);
+                    await deps.sleep(deps.pollIntervalMs);
+                    continue;
+                  }
                   if (approval.status === "pending") {
                     try {
                       await api.confirmPaymentApproval(created.id, candidate);

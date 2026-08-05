@@ -32,6 +32,7 @@ const SYNTHETIC_CARD = {
 
 type Mode =
   | "happy"
+  | "review_then_happy"
   | "confirm_response_lost"
   | "confirm_response_lost_changed"
   | "junk_then_happy"
@@ -130,8 +131,17 @@ async function harness(
       };
       const canonical = canonicalize(payload)!;
       const aad = createHash("sha256").update(canonical, "utf8").digest();
+      const reviewCandidate = mode === "review_then_happy" && approvalPolls === 1;
+      const reviewCanonical = canonicalize({
+        approval_id: "approval_test",
+        approval_payload_sha256: aad.toString("base64url"),
+        card_ref: "card_test",
+        recipient_pubkey_hash: recipientHash,
+      })!;
+      const reviewAad = createHash("sha256").update(reviewCanonical, "utf8").digest();
+      const candidateAad = reviewCandidate ? reviewAad : aad;
       const assertion = await new SignJWT({
-        payload_sha256: aad.toString("base64url"),
+        payload_sha256: candidateAad.toString("base64url"),
         context: "purchase",
         confidence: mode === "low_confidence" ? "low" : "high",
         mandate_id: "mandate_test",
@@ -149,12 +159,13 @@ async function harness(
       const sealedCard = await sealToRecipient(
         recipient,
         new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
-        aad,
+        candidateAad,
       );
       return Response.json({
         id: "approval_test",
         status:
           mode === "happy" ||
+          mode === "review_then_happy" ||
           mode === "confirm_response_lost" ||
           mode === "confirm_response_lost_changed" ||
           mode === "junk_then_happy"
@@ -172,6 +183,9 @@ async function harness(
     if (url.endsWith("/v1/pay/approvals/approval_test/confirm") && init?.method === "POST") {
       const body = JSON.parse(String(init.body)) as Record<string, unknown>;
       confirmationBodies.push(body);
+      if (mode === "review_then_happy" && confirmationBodies.length === 1) {
+        return Response.json({ status: "verified" });
+      }
       confirmedCandidate =
         mode === "confirm_response_lost_changed"
           ? { ...body, sealed_card: "different-candidate" }
@@ -295,6 +309,14 @@ describe("operate_pay", () => {
     const auditJson = JSON.stringify(auditBodies);
     expect(auditJson).not.toContain(SYNTHETIC_CARD.pan);
     expect(auditJson).not.toContain(SYNTHETIC_CARD.cvv);
+  });
+
+  it("verifies an opaque review seal before accepting the final approval", async () => {
+    const { result, confirmationBodies, filledCards } = await harness("review_then_happy");
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(confirmationBodies).toHaveLength(2);
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
   });
 
   it("ignores a junk pending seal and confirms a valid replacement", async () => {

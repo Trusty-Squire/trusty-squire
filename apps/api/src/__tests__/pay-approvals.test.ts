@@ -184,6 +184,32 @@ describe("payment approval relay", () => {
     };
   }
 
+  function makeReviewSubmission(input: {
+    id: string;
+    card_ref: string;
+    operator_pubkey: string;
+    approval_payload_sha256: string;
+  }): { jws: string; sealed_card: string } {
+    const canonical = JSON.stringify({
+      approval_id: input.id,
+      approval_payload_sha256: input.approval_payload_sha256,
+      card_ref: input.card_ref,
+      recipient_pubkey_hash: createHash("sha256")
+        .update(Buffer.from(input.operator_pubkey, "base64url"))
+        .digest("base64url"),
+    });
+    const claims = Buffer.from(
+      JSON.stringify({
+        context: "purchase",
+        payload_sha256: createHash("sha256").update(canonical).digest("base64url"),
+      }),
+    ).toString("base64url");
+    return {
+      jws: `e30.${claims}.synthetic-review-signature`,
+      sealed_card: "c2VhbGVkLXN5bnRoZXRpYy1yZXZpZXctY2FyZA",
+    };
+  }
+
   async function relaySubmission(
     id: string,
     submission: { jws: string; sealed_card: string },
@@ -247,6 +273,7 @@ describe("payment approval relay", () => {
       status: "pending",
       card_ref: cardId,
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+      approval_payload_sha256: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
       card: {
         blob: '{ "ciphertext": "synthetic-sealed-card" }',
       },
@@ -258,6 +285,99 @@ describe("payment approval relay", () => {
     expect(response.json()).not.toHaveProperty("item");
     expect(response.json()).not.toHaveProperty("reason");
     expect(response.json()).not.toHaveProperty("agent");
+  });
+
+  it("releases details without a session only after operator review verification", async () => {
+    const cardId = await createOwnedCard(webCookie);
+    const created = await createApproval(cardId);
+    const ceremonyResponse = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}/ceremony`,
+    });
+    const ceremony = ceremonyResponse.json() as {
+      id: string;
+      card_ref: string;
+      operator_pubkey: string;
+      approval_payload_sha256: string;
+    };
+    const review = makeReviewSubmission(ceremony);
+    const operatorWait = server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}?wait_for_submission=1`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    let detailsReleased = false;
+    const reviewRequest = server
+      .inject({
+        method: "POST",
+        url: `/v1/pay/approvals/${created.id}/approve`,
+        payload: review,
+      })
+      .then((response) => {
+        detailsReleased = true;
+        return response;
+      });
+    const relayed = await operatorWait;
+    expect(relayed.json()).toMatchObject(review);
+    expect(detailsReleased).toBe(false);
+
+    const wrongAccount = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${otherAgentToken}` },
+      payload: review,
+    });
+    expect(wrongAccount.statusCode).toBe(404);
+    expect(detailsReleased).toBe(false);
+
+    const beforeVerification = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(beforeVerification.json()).toMatchObject({
+      status: "pending",
+      jws: null,
+      sealed_card: null,
+    });
+
+    const verified = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: review,
+    });
+    expect(verified.statusCode).toBe(200);
+    expect(verified.json()).toEqual({ status: "verified" });
+
+    const released = await reviewRequest;
+    expect(released.statusCode).toBe(200);
+    expect(released.json()).toMatchObject({
+      status: "verified",
+      approval: {
+        id: created.id,
+        merchant: "Synthetic Books",
+        amount_cents: 2599,
+        item: "Synthetic Book",
+        reason: "Synthetic test purchase",
+        agent: "Hermes",
+      },
+      card: { brand: "visa", last4: "4242" },
+    });
+
+    const finalSubmission = makeSubmission({ ...created, card_ref: cardId });
+    const finalRelay = await relaySubmission(created.id, finalSubmission);
+    expect(finalRelay.approvalStatus).toBe(202);
+    const confirmed = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: finalSubmission,
+    });
+    expect(confirmed.statusCode).toBe(200);
+    expect(confirmed.json()).toEqual({ status: "approved" });
   });
 
   it("stores item/reason and the MCP client requester header", async () => {
@@ -831,14 +951,27 @@ describe("payment approval relay", () => {
   });
 
   it("rejects replaying a submission bound to a different approval", async () => {
-    const first = await createApproval();
-    const second = await createApproval();
-    const replay = await server.inject({
+    const cardId = await createOwnedCard(webCookie);
+    const first = await createApproval(cardId);
+    const second = await createApproval(cardId);
+    const approvalReplay = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${second.id}/approve`,
-      payload: makeSubmission(first),
+      payload: makeSubmission({ ...first, card_ref: cardId }),
     });
-    expect(replay.statusCode).toBe(403);
-    expect(replay.json()).toEqual({ error: "payment_approval_binding_mismatch" });
+    expect(approvalReplay.statusCode).toBe(403);
+    expect(approvalReplay.json()).toEqual({ error: "payment_approval_binding_mismatch" });
+
+    const firstCeremony = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${first.id}/ceremony`,
+    });
+    const reviewReplay = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${second.id}/approve`,
+      payload: makeReviewSubmission(firstCeremony.json()),
+    });
+    expect(reviewReplay.statusCode).toBe(403);
+    expect(reviewReplay.json()).toEqual({ error: "payment_approval_binding_mismatch" });
   });
 });
