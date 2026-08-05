@@ -5,6 +5,7 @@ import {
   buildCodexArguments,
   endStatesMatch,
   isAllowedTopLevelUrl,
+  shouldBlockTopLevelNavigation,
   validateGroundedCapture,
 } from "../replay-capture-support.mjs";
 
@@ -48,7 +49,7 @@ describe("replay baseline capture trust boundary", () => {
       browserEvent(
         "browser_snapshot",
         "https://whitejade.xyz/checkouts/cn/session",
-        'RootWebArea "Checkout" url="https://whitejade.xyz/checkouts/cn/session" The Glow Serum Quantity 1 Total $76.00',
+        'RootWebArea "Checkout" url="https://whitejade.xyz/checkouts/cn/session" The Glow Serum Quantity 1 Total $76.00 Payment controls: {"value":"replay-eval+whitejade-purchase-r0@trustysquire.ai"} {"value":"123 Test Street"} {"value":"10001"}',
       ),
     ];
     expect(validateGroundedCapture(events, endState, task)).toMatchObject({
@@ -64,6 +65,33 @@ describe("replay baseline capture trust boundary", () => {
   it("rejects prompt-echoed results without constrained browser calls", () => {
     expect(() => validateGroundedCapture([], task.expected_end_state, task)).toThrow(
       "did not begin with the constrained browser",
+    );
+  });
+
+  it("rejects checkout evidence split across separate observations", () => {
+    const splitTask = {
+      ...task,
+      task_id: "whitejade-purchase-r1",
+      expected_end_state: {
+        line_items: [{ title_contains: "The Recovery Crème", qty: 1 }],
+        total_cents: 8800,
+        reached: "checkout_review",
+      },
+    };
+    const events = [
+      browserEvent(
+        "browser_open",
+        "https://whitejade.xyz/cart/variant:1",
+        'RootWebArea "Cart" url="https://whitejade.xyz/cart/variant:1" The Recovery Crème $88.00',
+      ),
+      browserEvent(
+        "browser_snapshot",
+        "https://whitejade.xyz/checkouts/cn/session",
+        'RootWebArea "Checkout" url="https://whitejade.xyz/checkouts/cn/session" Payment controls: {"value":"replay-eval+whitejade-purchase-r1@trustysquire.ai"} {"value":"123 Test Street"} {"value":"10001"}',
+      ),
+    ];
+    expect(() => validateGroundedCapture(events, splitTask.expected_end_state, splitTask)).toThrow(
+      "no single browser observation proves the expected end state",
     );
   });
 
@@ -107,13 +135,55 @@ describe("replay baseline capture trust boundary", () => {
     });
   });
 
+  it("blocks off-domain main-frame requests before navigation", () => {
+    const allowedHosts = ["whitejade.xyz"];
+    expect(
+      shouldBlockTopLevelNavigation(
+        {
+          url: "https://evil.example/collect",
+          isNavigationRequest: true,
+          isMainFrame: true,
+        },
+        allowedHosts,
+      ),
+    ).toBe(true);
+    expect(
+      shouldBlockTopLevelNavigation(
+        {
+          url: "https://cdn.example/asset.js",
+          isNavigationRequest: false,
+          isMainFrame: false,
+        },
+        allowedHosts,
+      ),
+    ).toBe(false);
+    expect(
+      shouldBlockTopLevelNavigation(
+        {
+          url: "https://evil.example/frame",
+          isNavigationRequest: true,
+          isMainFrame: false,
+        },
+        allowedHosts,
+      ),
+    ).toBe(false);
+    expect(
+      shouldBlockTopLevelNavigation(
+        {
+          url: "https://whitejade.xyz/checkouts/1",
+          isNavigationRequest: true,
+          isMainFrame: true,
+        },
+        allowedHosts,
+      ),
+    ).toBe(false);
+  });
+
   it("runs Codex read-only with no shell and a minimal environment", () => {
     const args = buildCodexArguments({
       model: "test-model",
       mcpServerPath: "/repo/browser.mjs",
       browserConfig: {
-        chrome_entry: "/repo/chrome.mjs",
-        session: "test",
         start_url: "https://whitejade.xyz",
         allowed_hosts: ["whitejade.xyz"],
       },
@@ -126,6 +196,7 @@ describe("replay baseline capture trust boundary", () => {
     expect(args.join(" ")).toContain(
       'mcp_servers.replay_browser.default_tools_approval_mode="approve"',
     );
+    expect(args.join(" ")).toContain("browser_select");
     expect(args.join(" ")).toContain('approval_policy="never"');
     expect(args.join(" ")).toContain("mcp_servers.untrusted_server.enabled=false");
 

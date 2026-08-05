@@ -1,17 +1,16 @@
-import { spawnSync } from "node:child_process";
+import { chromium } from "playwright";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { currentUrlFromSnapshot, isAllowedTopLevelUrl } from "./replay-capture-support.mjs";
+import { isAllowedTopLevelUrl, shouldBlockTopLevelNavigation } from "./replay-capture-support.mjs";
 
 const config = JSON.parse(process.env.REPLAY_CAPTURE_BROWSER_CONFIG ?? "null");
 if (
   config === null ||
   typeof config !== "object" ||
-  typeof config.chrome_entry !== "string" ||
-  typeof config.session !== "string" ||
   typeof config.start_url !== "string" ||
-  !Array.isArray(config.allowed_hosts)
+  !Array.isArray(config.allowed_hosts) ||
+  !config.allowed_hosts.every((host) => typeof host === "string")
 ) {
   throw new Error("invalid replay capture browser configuration");
 }
@@ -35,7 +34,7 @@ const tools = [
     description: "Click a visible element by snapshot reference.",
     inputSchema: {
       type: "object",
-      properties: { ref: { type: "string", pattern: "^@[A-Za-z0-9:_-]+$" } },
+      properties: { ref: { type: "string", pattern: "^@r[0-9]+:[0-9]+$" } },
       required: ["ref"],
       additionalProperties: false,
     },
@@ -46,10 +45,23 @@ const tools = [
     inputSchema: {
       type: "object",
       properties: {
-        ref: { type: "string", pattern: "^@[A-Za-z0-9:_-]+$" },
+        ref: { type: "string", pattern: "^@r[0-9]+:[0-9]+$" },
         text: { type: "string", minLength: 1, maxLength: 240 },
       },
       required: ["ref", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "browser_select",
+    description: "Select an option by its visible label.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        ref: { type: "string", pattern: "^@r[0-9]+:[0-9]+$" },
+        label: { type: "string", minLength: 1, maxLength: 120 },
+      },
+      required: ["ref", "label"],
       additionalProperties: false,
     },
   },
@@ -94,43 +106,12 @@ const tools = [
   },
 ];
 
+let browser;
+let context;
+let page;
 let opened = false;
-let lastSnapshot = "";
-
-function chromeEnvironment() {
-  return {
-    HOME: process.env.HOME ?? "",
-    LANG: process.env.LANG ?? "C.UTF-8",
-    NO_COLOR: "1",
-    PATH: process.env.PATH ?? "",
-    CHROME_DEVTOOLS_AXI_SESSION: config.session,
-  };
-}
-
-function runChrome(args) {
-  const result = spawnSync(process.execPath, [config.chrome_entry, ...args], {
-    encoding: "utf8",
-    env: chromeEnvironment(),
-    timeout: 30_000,
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  if (result.error !== undefined) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(result.stderr.trim() || `browser command exited ${result.status}`);
-  }
-  return result.stdout;
-}
-
-function snapshotAfter(args) {
-  const output = runChrome(args);
-  const snapshot = args[0] === "snapshot" ? output : runChrome(["snapshot"]);
-  const currentUrl = currentUrlFromSnapshot(snapshot);
-  if (!isAllowedTopLevelUrl(currentUrl, config.allowed_hosts)) {
-    throw new Error(`top-level navigation blocked: ${currentUrl}`);
-  }
-  lastSnapshot = snapshot;
-  return { ok: true, current_url: currentUrl, snapshot };
-}
+let generation = 0;
+let references = new Map();
 
 function assertObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -140,79 +121,208 @@ function assertObject(value) {
 }
 
 function assertRef(value) {
-  if (typeof value !== "string" || !/^@[A-Za-z0-9:_-]+$/.test(value)) {
+  if (typeof value !== "string" || !/^@r[0-9]+:[0-9]+$/.test(value)) {
     throw new Error("invalid browser reference");
   }
-  return value;
+  const target = references.get(value);
+  if (target === undefined) throw new Error("stale browser reference");
+  return target;
 }
 
-function assertClickIsAllowed(ref) {
-  const uid = ref.slice(1).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const target = lastSnapshot.match(new RegExp(`uid=${uid}[^\\n]*`))?.[0] ?? "";
-  if (/pay now|place order|complete order|submit order|buy now/i.test(target)) {
+function safeAllowedUrl(url) {
+  try {
+    return isAllowedTopLevelUrl(url, config.allowed_hosts);
+  } catch {
+    return false;
+  }
+}
+
+async function launchBrowser() {
+  if (browser !== undefined) return;
+  browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+  context = await browser.newContext({ acceptDownloads: false, serviceWorkers: "block" });
+  await context.route("**/*", async (route) => {
+    const request = route.request();
+    let isMainFrame = false;
+    try {
+      const frame = request.frame();
+      isMainFrame = frame === frame.page().mainFrame();
+    } catch {
+      isMainFrame = request.isNavigationRequest();
+    }
+    if (
+      shouldBlockTopLevelNavigation(
+        {
+          url: request.url(),
+          isNavigationRequest: request.isNavigationRequest(),
+          isMainFrame,
+        },
+        config.allowed_hosts,
+      )
+    ) {
+      await route.abort("blockedbyclient");
+      return;
+    }
+    await route.continue();
+  });
+  page = await context.newPage();
+  context.on("page", (candidate) => {
+    if (candidate !== page) void candidate.close();
+  });
+}
+
+async function snapshot() {
+  if (page === undefined) throw new Error("browser_open must be called first");
+  generation += 1;
+  references = new Map();
+  const title = await page.title();
+  const url = page.url();
+  if (!safeAllowedUrl(url)) throw new Error(`top-level navigation blocked: ${url}`);
+  const body = await page
+    .locator("body")
+    .ariaSnapshot({ timeout: 5000 })
+    .catch(async () => page.locator("body").innerText({ timeout: 5000 }));
+  const controls = page.locator(
+    'a[href]:visible,button:visible,input:visible,select:visible,textarea:visible,[role="button"]:visible,[role="link"]:visible,[role="checkbox"]:visible,[role="radio"]:visible,[role="option"]:visible,[role="menuitem"]:visible,[contenteditable="true"]:visible',
+  );
+  const count = Math.min(await controls.count(), 250);
+  const descriptions = [];
+  for (let index = 0; index < count; index += 1) {
+    const handle = await controls.nth(index).elementHandle();
+    if (handle === null) continue;
+    const details = await handle.evaluate((element) => {
+      const html = element;
+      const labels = "labels" in html && html.labels ? [...html.labels] : [];
+      const label =
+        element.getAttribute("aria-label") ||
+        labels.map((item) => item.textContent ?? "").join(" ") ||
+        element.getAttribute("placeholder") ||
+        element.textContent ||
+        element.getAttribute("name") ||
+        element.getAttribute("type") ||
+        element.tagName;
+      const value = "value" in html ? String(html.value ?? "") : "";
+      const href = element instanceof HTMLAnchorElement ? element.href : "";
+      return {
+        tag: element.tagName.toLowerCase(),
+        role: element.getAttribute("role") ?? "",
+        type: element.getAttribute("type") ?? "",
+        label: label.replace(/\s+/g, " ").trim().slice(0, 200),
+        value: value.slice(0, 240),
+        href,
+        target: element.getAttribute("target") ?? "",
+        disabled: "disabled" in html && Boolean(html.disabled),
+      };
+    });
+    const ref = `@r${generation}:${index + 1}`;
+    references.set(ref, { handle, details });
+    descriptions.push(`${ref} ${JSON.stringify(details)}`);
+  }
+  const rendered = [
+    `RootWebArea ${JSON.stringify(title)} url=${JSON.stringify(url)}`,
+    body.slice(0, 180_000),
+    "controls:",
+    ...descriptions,
+  ].join("\n");
+  return { ok: true, current_url: url, snapshot: rendered };
+}
+
+function assertClickIsAllowed(target) {
+  const text = `${target.details.label} ${target.details.type} ${target.details.role}`;
+  if (
+    /pay\s*now|place.*order|complete.*order|submit.*order|buy\s*now|confirm.*(?:order|purchase)|complete.*purchase|purchase\s*now/i.test(
+      text,
+    )
+  ) {
     throw new Error("final order control is blocked");
   }
-  const targetUrl = target.match(/\burl="([^"]+)"/)?.[1];
-  if (targetUrl !== undefined && !isAllowedTopLevelUrl(targetUrl, config.allowed_hosts)) {
+  if (target.details.href.length > 0 && !safeAllowedUrl(target.details.href)) {
     throw new Error("cross-domain navigation is blocked");
+  }
+  if (target.details.target.length > 0 && target.details.target.toLowerCase() !== "_self") {
+    throw new Error("new-page navigation is blocked");
   }
 }
 
-function commandFor(name, rawArguments) {
+async function runTool(name, rawArguments) {
   const args = assertObject(rawArguments ?? {});
   if (name === "browser_open") {
     if (opened) throw new Error("browser_open may only be called once");
     opened = true;
-    return ["open", config.start_url];
+    await launchBrowser();
+    await page.goto(config.start_url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    return snapshot();
   }
-  if (!opened) throw new Error("browser_open must be called first");
-  if (name === "browser_snapshot") return ["snapshot"];
+  if (!opened || page === undefined) throw new Error("browser_open must be called first");
+  if (name === "browser_snapshot") return snapshot();
   if (name === "browser_click") {
-    const ref = assertRef(args.ref);
-    assertClickIsAllowed(ref);
-    return ["click", ref];
+    const target = assertRef(args.ref);
+    assertClickIsAllowed(target);
+    await target.handle.click({ timeout: 10_000 });
+    return snapshot();
   }
   if (name === "browser_fill") {
-    const ref = assertRef(args.ref);
+    const target = assertRef(args.ref);
     if (typeof args.text !== "string" || args.text.length < 1 || args.text.length > 240) {
       throw new Error("invalid fill text");
     }
-    return ["fill", ref, args.text];
+    await target.handle.fill(args.text, { timeout: 10_000 });
+    return snapshot();
+  }
+  if (name === "browser_select") {
+    const target = assertRef(args.ref);
+    if (typeof args.label !== "string" || args.label.length < 1 || args.label.length > 120) {
+      throw new Error("invalid option label");
+    }
+    await target.handle.selectOption({ label: args.label }, { timeout: 10_000 });
+    return snapshot();
   }
   if (name === "browser_press") {
     const allowed = ["Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
     if (!allowed.includes(args.key)) throw new Error("submitting key is blocked");
-    return ["press", args.key];
+    await page.keyboard.press(args.key);
+    return snapshot();
   }
   if (name === "browser_scroll") {
     if (args.direction !== "up" && args.direction !== "down") {
       throw new Error("invalid scroll direction");
     }
-    return ["scroll", args.direction];
+    await page.mouse.wheel(0, args.direction === "down" ? 700 : -700);
+    return snapshot();
   }
   if (name === "browser_wait") {
-    if (
-      !(
-        (Number.isInteger(args.value) && args.value >= 1 && args.value <= 5000) ||
-        (typeof args.value === "string" && args.value.length >= 1 && args.value.length <= 120)
-      )
+    if (Number.isInteger(args.value) && args.value >= 1 && args.value <= 5000) {
+      await page.waitForTimeout(args.value);
+    } else if (
+      typeof args.value === "string" &&
+      args.value.length >= 1 &&
+      args.value.length <= 120
     ) {
+      await page.getByText(args.value, { exact: false }).first().waitFor({ timeout: 5000 });
+    } else {
       throw new Error("invalid wait value");
     }
-    return ["wait", String(args.value)];
+    return snapshot();
   }
   throw new Error(`unknown browser tool: ${name}`);
 }
 
+async function closeBrowser() {
+  await browser?.close().catch(() => undefined);
+  browser = undefined;
+  context = undefined;
+  page = undefined;
+}
+
 const server = new Server(
-  { name: "replay-capture-browser", version: "1.0.0" },
+  { name: "replay-capture-browser", version: "2.0.0" },
   { capabilities: { tools: {} } },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
-    const result = snapshotAfter(commandFor(request.params.name, request.params.arguments));
+    const result = await runTool(request.params.name, request.params.arguments);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   } catch (error) {
     return {
@@ -228,6 +338,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       ],
     };
   }
+});
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    void closeBrowser().finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  });
+}
+
+process.stdin.once("close", () => {
+  void closeBrowser();
 });
 
 await server.connect(new StdioServerTransport());

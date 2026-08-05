@@ -18,9 +18,9 @@
   "har": "whitejade-purchase-r0.har",
   "bucket": "repeat",
   "cold_baseline": {
-    "turns": 42,
-    "tokens": 1977575,
-    "wall_clock_ms": 253637,
+    "turns": 18,
+    "tokens": 252390,
+    "wall_clock_ms": 76457,
     "end_state": {
       "line_items": [{ "title_contains": "The Glow Serum", "qty": 1 }],
       "total_cents": 7600,
@@ -30,10 +30,10 @@
       "source": "driver",
       "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T04:52:55.177Z",
-      "browser_observations": 28,
-      "evidence_sha256": "0970394c70075a2935510c95a80ed36f39ca771a038b3604711c15d1fecc4081",
-      "capture_policy": "read-only-browser-mcp-v1"
+      "recorded_at": "2026-08-05T05:41:48.933Z",
+      "browser_observations": 11,
+      "evidence_sha256": "06ea5427ee060e5eb46aa46445c98405d52f38ab8a4a43662d8f361661075877",
+      "capture_policy": "read-only-playwright-mcp-v2"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }

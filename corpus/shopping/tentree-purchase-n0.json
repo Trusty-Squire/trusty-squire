@@ -17,8 +17,8 @@
   "bucket": "novel",
   "cold_baseline": {
     "turns": 2,
-    "tokens": 92442,
-    "wall_clock_ms": 28252,
+    "tokens": 69985,
+    "wall_clock_ms": 16304,
     "end_state": {
       "line_items": [{ "title_contains": "Ruxton Packable Backpack", "qty": 1 }],
       "total_cents": 7800,
@@ -28,10 +28,10 @@
       "source": "driver",
       "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T04:48:40.925Z",
+      "recorded_at": "2026-08-05T05:40:32.414Z",
       "browser_observations": 1,
-      "evidence_sha256": "506ef05090cb52e6d6efef780c736e5c40ef24c8bd4b9052f2534a6ac01aa29f",
-      "capture_policy": "read-only-browser-mcp-v1"
+      "evidence_sha256": "7fb51c690233c5ea8e7daa034e2039319451ad5c6fbe5f3a1c951f5c661dee39",
+      "capture_policy": "read-only-playwright-mcp-v2"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }

@@ -16,9 +16,9 @@
   "har": "deathwish-purchase-n0.har",
   "bucket": "novel",
   "cold_baseline": {
-    "turns": 10,
-    "tokens": 501119,
-    "wall_clock_ms": 110050,
+    "turns": 2,
+    "tokens": 69375,
+    "wall_clock_ms": 19541,
     "end_state": {
       "line_items": [{ "title_contains": "Chocolate Hazelnut Coffee", "qty": 1 }],
       "total_cents": 1999,
@@ -28,10 +28,10 @@
       "source": "driver",
       "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T04:48:12.011Z",
-      "browser_observations": 5,
-      "evidence_sha256": "91e7685d2852502adb8b20c50de11bf67d614a06c5a9c44c34548f827572ccd1",
-      "capture_policy": "read-only-browser-mcp-v1"
+      "recorded_at": "2026-08-05T05:40:10.560Z",
+      "browser_observations": 1,
+      "evidence_sha256": "e2c934934bea0c2f53ebe8dacc0ff90a5bedbf65088e228e92a8e84ed3c6c52c",
+      "capture_policy": "read-only-playwright-mcp-v2"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }

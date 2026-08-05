@@ -66,7 +66,7 @@ function parseBaseline(value: unknown, label: string): ColdBaseline {
     (value.provenance.browser_observations as number) < 1 ||
     typeof value.provenance.evidence_sha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(value.provenance.evidence_sha256) ||
-    value.provenance.capture_policy !== "read-only-browser-mcp-v1"
+    value.provenance.capture_policy !== "read-only-playwright-mcp-v2"
   ) {
     throw new Error(`${label}: cold_baseline requires grounded browser provenance`);
   }
@@ -82,7 +82,7 @@ function parseBaseline(value: unknown, label: string): ColdBaseline {
       recorded_at: value.provenance.recorded_at,
       browser_observations: value.provenance.browser_observations as number,
       evidence_sha256: value.provenance.evidence_sha256,
-      capture_policy: "read-only-browser-mcp-v1",
+      capture_policy: "read-only-playwright-mcp-v2",
     },
   };
 }

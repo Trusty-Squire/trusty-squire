@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { delimiter, dirname, resolve } from "node:path";
 import { homedir } from "node:os";
 
-export const CAPTURE_POLICY = "read-only-browser-mcp-v1";
+export const CAPTURE_POLICY = "read-only-playwright-mcp-v2";
 
 export function endStatesMatch(actual, expected) {
   return (
@@ -47,8 +47,20 @@ export function allowedHostsFor(startUrl) {
 }
 
 export function isAllowedTopLevelUrl(url, allowedHosts) {
-  const parsed = new URL(url);
-  return parsed.protocol === "https:" && allowedHosts.includes(parsed.hostname.toLowerCase());
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && allowedHosts.includes(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+export function shouldBlockTopLevelNavigation(request, allowedHosts) {
+  return (
+    request.isNavigationRequest &&
+    request.isMainFrame &&
+    !isAllowedTopLevelUrl(request.url, allowedHosts)
+  );
 }
 
 export function currentUrlFromSnapshot(snapshot) {
@@ -138,26 +150,34 @@ export function validateGroundedCapture(events, endState, task) {
     }
   }
 
-  const evidence = calls.map((call) => call.snapshot).join("\n");
-  const expectedTitle = task.expected_end_state.line_items[0]?.title_contains;
-  if (
-    expectedTitle === undefined ||
-    !evidence.toLowerCase().includes(expectedTitle.toLowerCase())
-  ) {
-    throw new Error(`${task.task_id}: product identity was not observed in browser output`);
-  }
-  if (!evidenceContainsMoney(evidence, task.expected_end_state.total_cents)) {
-    throw new Error(`${task.task_id}: expected total was not observed in browser output`);
+  const expectedTitles = task.expected_end_state.line_items.map((item) =>
+    item.title_contains.toLowerCase(),
+  );
+  const observationHasEndState = (call) => {
+    const snapshot = call.snapshot.toLowerCase();
+    return (
+      expectedTitles.every((title) => snapshot.includes(title)) &&
+      evidenceContainsMoney(call.snapshot, task.expected_end_state.total_cents)
+    );
+  };
+  const reachedExpectedState = calls.some((call) => {
+    const url = new URL(call.current_url);
+    if (task.expected_end_state.reached === "checkout_review") {
+      const emailValue = `"value":"replay-eval+${task.task_id}@trustysquire.ai"`;
+      const reviewMarker =
+        call.snapshot.includes(emailValue) &&
+        /"value":"123 Test St(?:reet)?(?:[",])/i.test(call.snapshot) &&
+        call.snapshot.includes('"value":"10001"') &&
+        /payment|pay\s*now|billing address|review order/i.test(call.snapshot);
+      return url.pathname.includes("/checkouts/") && reviewMarker && observationHasEndState(call);
+    }
+    return url.pathname.includes("/products/") && observationHasEndState(call);
+  });
+  if (!reachedExpectedState) {
+    throw new Error(`${task.task_id}: no single browser observation proves the expected end state`);
   }
 
-  const observedUrls = calls.map((call) => new URL(call.current_url));
-  const reachedExpectedState =
-    task.expected_end_state.reached === "checkout_review"
-      ? observedUrls.some((url) => url.pathname.includes("/checkouts/"))
-      : observedUrls.some((url) => url.pathname.includes("/products/"));
-  if (!reachedExpectedState) {
-    throw new Error(`${task.task_id}: expected browser state was not observed`);
-  }
+  const evidence = calls.map((call) => call.snapshot).join("\n");
 
   return {
     browser_observations: calls.length,
@@ -226,7 +246,7 @@ export function buildCodexArguments({
     "-c",
     'mcp_servers.replay_browser.default_tools_approval_mode="approve"',
     "-c",
-    'mcp_servers.replay_browser.enabled_tools=["browser_open","browser_snapshot","browser_click","browser_fill","browser_press","browser_scroll","browser_wait"]',
+    'mcp_servers.replay_browser.enabled_tools=["browser_open","browser_snapshot","browser_click","browser_fill","browser_select","browser_press","browser_scroll","browser_wait"]',
     ...disabledMcpServers.flatMap((name) => ["-c", `mcp_servers.${name}.enabled=false`]),
     "-m",
     model,

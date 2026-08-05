@@ -17,8 +17,8 @@
   "bucket": "novel",
   "cold_baseline": {
     "turns": 3,
-    "tokens": 125591,
-    "wall_clock_ms": 41702,
+    "tokens": 167984,
+    "wall_clock_ms": 55625,
     "end_state": {
       "line_items": [{ "title_contains": "Classic Percale Core Sheet Set", "qty": 1 }],
       "total_cents": 13515,
@@ -28,10 +28,10 @@
       "source": "driver",
       "driver": "codex-exec+constrained-browser-mcp",
       "model": "gpt-5.6-sol",
-      "recorded_at": "2026-08-05T04:44:19.873Z",
+      "recorded_at": "2026-08-05T05:33:02.334Z",
       "browser_observations": 2,
-      "evidence_sha256": "456f424c5875a64f8e5125132c5fe0426c8ad48f244432cd4318df5c8e80e353",
-      "capture_policy": "read-only-browser-mcp-v1"
+      "evidence_sha256": "b19e81810de71a6f1482218c40da820372da70da3e9be814bc76c3b6387222d1",
+      "capture_policy": "read-only-playwright-mcp-v2"
     }
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T19:58:00Z" }
