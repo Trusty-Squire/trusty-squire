@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import type { FastifyInstance } from "fastify";
 import { issueAgentSession } from "../auth/agent.js";
 import { issueSession, SESSION_COOKIE_NAME, signSessionJwt } from "../auth/session.js";
@@ -64,7 +65,7 @@ describe("payment approval relay", () => {
     await server.close();
   });
 
-  async function createApproval(): Promise<{
+  async function createApproval(cardRef = "card_synthetic_1"): Promise<{
     id: string;
     nonce: string;
     agent: string;
@@ -82,7 +83,7 @@ describe("payment approval relay", () => {
         checkout_origin: "https://checkout.synthetic.test",
         amount_cents: 2599,
         currency: "USD",
-        card_ref: "card_synthetic_1",
+        card_ref: cardRef,
         operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
         item: "Synthetic Book",
         reason: "Synthetic test purchase",
@@ -137,6 +138,52 @@ describe("payment approval relay", () => {
     return (res.json() as { id: string }).id;
   }
 
+  function makeSubmission(input: {
+    id: string;
+    nonce: string;
+    card_ref?: string;
+    merchant?: string;
+    checkout_origin?: string;
+    amount_cents?: number;
+    currency?: string;
+    operator_pubkey?: string;
+    item?: string;
+    reason?: string;
+    agent?: string;
+  }): { jws: string; sealed_card: string } {
+    const operatorPubkey = input.operator_pubkey ?? "c3ludGhldGljLW9wZXJhdG9yLWtleQ";
+    const payload = {
+      approval_id: input.id,
+      merchant: input.merchant ?? "Synthetic Books",
+      checkout_origin: input.checkout_origin ?? "https://checkout.synthetic.test",
+      amount_cents: input.amount_cents ?? 2599,
+      currency: input.currency ?? "USD",
+      nonce: input.nonce,
+      card_ref: input.card_ref ?? "card_synthetic_1",
+      recipient_pubkey_hash: createHash("sha256")
+        .update(Buffer.from(operatorPubkey, "base64url"))
+        .digest("base64url"),
+      item: input.item ?? "Synthetic Book",
+      reason: input.reason ?? "Synthetic test purchase",
+      agent: input.agent ?? "Hermes",
+    };
+    const canonical = JSON.stringify(
+      Object.fromEntries(
+        Object.entries(payload).sort(([left], [right]) => left.localeCompare(right)),
+      ),
+    );
+    const claims = Buffer.from(
+      JSON.stringify({
+        context: "purchase",
+        payload_sha256: createHash("sha256").update(canonical).digest("base64url"),
+      }),
+    ).toString("base64url");
+    return {
+      jws: `e30.${claims}.synthetic-signature`,
+      sealed_card: "c2VhbGVkLXN5bnRoZXRpYy1jYXJk",
+    };
+  }
+
   it("creates a pending approval and returns it", async () => {
     const created = await createApproval();
     expect(created.nonce).toMatch(/^[A-Za-z0-9_-]{22}$/);
@@ -165,6 +212,25 @@ describe("payment approval relay", () => {
       jws: null,
       sealed_card: null,
       expires_at: created.expires_at,
+    });
+  });
+
+  it("resolves the encrypted ceremony card from the approval id without a web session", async () => {
+    const cardId = await createOwnedCard(webCookie);
+    const created = await createApproval(cardId);
+    const response = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}/ceremony`,
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      id: created.id,
+      card_ref: cardId,
+      card: {
+        blob: '{ "ciphertext": "synthetic-sealed-card" }',
+        brand: "visa",
+        last4: "4242",
+      },
     });
   });
 
@@ -263,15 +329,13 @@ describe("payment approval relay", () => {
     expect(response.json()).toEqual({});
   });
 
-  it("approves once and stores the opaque payloads verbatim", async () => {
+  it("approves without a web session when the PRF-sealed submission is correctly bound", async () => {
     const created = await createApproval();
-    const jws = "synthetic.header.signature";
-    const sealedCard = "c2VhbGVkLXN5bnRoZXRpYy1jYXJk";
+    const submission = makeSubmission(created);
     const approved = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
-      headers: { cookie: webCookie },
-      payload: { jws, sealed_card: sealedCard },
+      payload: submission,
     });
     expect(approved.statusCode).toBe(200);
     expect(approved.json()).toEqual({ status: "approved" });
@@ -281,13 +345,16 @@ describe("payment approval relay", () => {
       url: `/v1/pay/approvals/${created.id}`,
       headers: { authorization: `Bearer ${agentToken}` },
     });
-    expect(get.json()).toMatchObject({ status: "approved", jws, sealed_card: sealedCard });
+    expect(get.json()).toMatchObject({
+      status: "approved",
+      jws: submission.jws,
+      sealed_card: submission.sealed_card,
+    });
 
     const second = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
-      headers: { cookie: webCookie },
-      payload: { jws, sealed_card: sealedCard },
+      payload: submission,
     });
     expect(second.statusCode).toBe(409);
     expect(second.json()).toEqual({ error: "payment_approval_already_approved" });
@@ -307,8 +374,7 @@ describe("payment approval relay", () => {
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
-      headers: { cookie: webCookie },
-      payload: { jws: "expired.synthetic.jws", sealed_card: "ZXhwaXJlZC1zZWFsZWQtY2FyZA" },
+      payload: makeSubmission(created),
     });
     expect(approve.statusCode).toBe(409);
     expect(approve.json()).toEqual({ error: "payment_approval_expired" });
@@ -452,11 +518,11 @@ describe("payment approval relay", () => {
     });
     expect(get.json()).toMatchObject({ card_ref: cardId });
 
+    const bound = get.json() as { id: string; nonce: string; card_ref: string };
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
-      headers: { cookie: webCookie },
-      payload: { jws: "synthetic.header.sig", sealed_card: "c2VhbGVkLXN5bnRoZXRpYy1jYXJk" },
+      payload: makeSubmission(bound),
     });
     expect(approve.statusCode).toBe(200);
     expect(approve.json()).toEqual({ status: "approved" });
@@ -467,8 +533,7 @@ describe("payment approval relay", () => {
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
-      headers: { cookie: webCookie },
-      payload: { jws: "synthetic.header.sig", sealed_card: "c2VhbGVkLXN5bnRoZXRpYy1jYXJk" },
+      payload: { jws: "synthetic.header.sig", sealed_card: "sealed" },
     });
     expect(approve.statusCode).toBe(409);
     expect(approve.json()).toEqual({ error: "card_required" });
@@ -617,11 +682,15 @@ describe("payment approval relay", () => {
       headers: { cookie: webCookie },
       payload: { card_ref: cardId },
     });
+    const current = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
-      headers: { cookie: webCookie },
-      payload: { jws: "synthetic.header.sig", sealed_card: "c2VhbGVkLXN5bnRoZXRpYy1jYXJk" },
+      payload: makeSubmission(current.json()),
     });
     expect(approve.statusCode).toBe(200);
 
@@ -635,7 +704,7 @@ describe("payment approval relay", () => {
     expect(rebind.json()).toEqual({ error: "payment_approval_not_pending" });
   });
 
-  it("denies cross-account reads and approvals", async () => {
+  it("denies cross-account reads and rejects a wrong-account submission", async () => {
     const created = await createApproval();
     const get = await server.inject({
       method: "GET",
@@ -644,12 +713,50 @@ describe("payment approval relay", () => {
     });
     expect(get.statusCode).toBe(404);
 
+    const otherCreatedResponse = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${otherAgentToken}` },
+      payload: {
+        merchant: "Other Merchant",
+        checkout_origin: "https://other.synthetic.test",
+        amount_cents: 100,
+        currency: "USD",
+        card_ref: "other_card",
+        operator_pubkey: "b3RoZXItb3BlcmF0b3Ita2V5",
+        item: "Other Item",
+        reason: "Other reason",
+      },
+    });
+    const otherCreated = otherCreatedResponse.json() as { id: string; nonce: string };
     const approve = await server.inject({
       method: "POST",
       url: `/v1/pay/approvals/${created.id}/approve`,
-      headers: { cookie: otherWebCookie },
-      payload: { jws: "other.synthetic.jws", sealed_card: "b3RoZXItc2VhbGVkLWNhcmQ" },
+      payload: makeSubmission({
+        ...otherCreated,
+        merchant: "Other Merchant",
+        checkout_origin: "https://other.synthetic.test",
+        amount_cents: 100,
+        card_ref: "other_card",
+        operator_pubkey: "b3RoZXItb3BlcmF0b3Ita2V5",
+        item: "Other Item",
+        reason: "Other reason",
+        agent: "synthetic-payment-test-agent",
+      }),
     });
-    expect(approve.statusCode).toBe(404);
+    expect(approve.statusCode).toBe(403);
+    expect(approve.json()).toEqual({ error: "payment_approval_binding_mismatch" });
+  });
+
+  it("rejects replaying a submission bound to a different approval", async () => {
+    const first = await createApproval();
+    const second = await createApproval();
+    const replay = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${second.id}/approve`,
+      payload: makeSubmission(first),
+    });
+    expect(replay.statusCode).toBe(403);
+    expect(replay.json()).toEqual({ error: "payment_approval_binding_mismatch" });
   });
 });

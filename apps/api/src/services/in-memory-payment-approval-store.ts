@@ -28,6 +28,7 @@ export type BindCardForAccountResult = "card_not_found" | "not_bindable" | "ok";
 
 export interface PendingPaymentApprovalStore {
   create(accountId: string, input: PendingPaymentApprovalInput): Promise<string>;
+  getById(id: string): Promise<PendingPaymentApprovalRecord | null>;
   getByIdForAccount(id: string, accountId: string): Promise<PendingPaymentApprovalRecord | null>;
   bindCardForAccount(
     id: string,
@@ -75,6 +76,11 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
   ): Promise<PendingPaymentApprovalRecord | null> {
     const record = this.records.get(id);
     return record === undefined || record.accountId !== accountId ? null : { ...record };
+  }
+
+  async getById(id: string): Promise<PendingPaymentApprovalRecord | null> {
+    const record = this.records.get(id);
+    return record === undefined ? null : { ...record };
   }
 
   async bindCardForAccount(

@@ -90,6 +90,7 @@ async function harness(
         .update(Buffer.from(operatorPublicKey, "base64url"))
         .digest("base64url");
       const payload = {
+        approval_id: "approval_test",
         merchant: CHECKOUT.merchant,
         checkout_origin:
           mode === "tampered_origin" ? "https://evil.synthetic.test" : CHECKOUT.checkout_origin,
@@ -442,6 +443,7 @@ async function buildApprovedMandate(params: {
     .update(Buffer.from(params.operatorPubkey, "base64url"))
     .digest("base64url");
   const canonical = canonicalize({
+    approval_id: "appr_jit",
     merchant: JIT_CHECKOUT.merchant,
     checkout_origin: JIT_CHECKOUT.checkout_origin,
     amount_cents: JIT_CHECKOUT.amount_cents,

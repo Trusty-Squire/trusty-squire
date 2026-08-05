@@ -74,6 +74,7 @@ const SYNTHETIC_CARD = {
 // assembly code isn't executed in-process" gap — it can't be: signPayload fires
 // a real WebAuthn passkey ceremony + vouchflow network calls).
 const MANDATE_FIELDS = [
+  "approval_id",
   "merchant",
   "checkout_origin",
   "amount_cents",
@@ -142,6 +143,7 @@ async function signMandateLikeWeb(params: {
 }): Promise<{ jws: string; sealed_card: string; canonical: string }> {
   // ↓↓↓ VERBATIM field construction from page.tsx (the production web payload).
   const payload = {
+    approval_id: "appr_seam",
     merchant: CHECKOUT.merchant,
     checkout_origin: CHECKOUT.checkout_origin,
     amount_cents: params.amountCents,
@@ -305,6 +307,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
   it("web-SDK canonicalize and mcp npm-canonicalize are BYTE-IDENTICAL for the production payload", () => {
     // The literal fields the web page constructs (page.tsx:245-256).
     const payload = {
+      approval_id: "appr_seam",
       merchant: CHECKOUT.merchant,
       checkout_origin: CHECKOUT.checkout_origin,
       amount_cents: CHECKOUT.amount_cents,
@@ -342,6 +345,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
     // it equals what mcp would produce for the same object.
     expect(canonical).toBe(
       canonicalize({
+        approval_id: "appr_seam",
         merchant: CHECKOUT.merchant,
         checkout_origin: CHECKOUT.checkout_origin,
         amount_cents: CHECKOUT.amount_cents,

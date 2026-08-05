@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
@@ -37,10 +37,73 @@ const createBody = z.object({
 
 const requesterName = z.string().trim().min(1).max(256);
 
-const approveBody = z.object({
-  jws: z.string().max(8192),
-  sealed_card: z.string().max(16384),
-});
+const approveBody = z
+  .object({
+    jws: z.string().max(8192),
+    sealed_card: z.string().max(16384),
+  })
+  .strict();
+
+function decodePayloadHash(jws: string): Buffer | null {
+  const parts = jws.split(".");
+  if (parts.length !== 3 || !/^[A-Za-z0-9_-]+$/.test(parts[1]!)) return null;
+  try {
+    const claims = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf8")) as {
+      payload_sha256?: unknown;
+      context?: unknown;
+    };
+    if (claims.context !== "purchase" || typeof claims.payload_sha256 !== "string") return null;
+    if (/^[0-9a-fA-F]{64}$/.test(claims.payload_sha256)) {
+      return Buffer.from(claims.payload_sha256, "hex");
+    }
+    if (/^[A-Za-z0-9_-]{43}$/.test(claims.payload_sha256)) {
+      return Buffer.from(claims.payload_sha256, "base64url");
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function recipientPubkeyHash(operatorPubkey: string): string | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(operatorPubkey)) return null;
+  try {
+    return createHash("sha256")
+      .update(Buffer.from(operatorPubkey, "base64url"))
+      .digest("base64url");
+  } catch {
+    return null;
+  }
+}
+
+function submissionMatchesApproval(
+  submission: z.infer<typeof approveBody>,
+  record: Awaited<ReturnType<ApiDeps["pendingPaymentApprovalStore"]["getById"]>>,
+): boolean {
+  if (record === null || record.cardRef === null) return false;
+  const signedHash = decodePayloadHash(submission.jws);
+  if (signedHash === null || signedHash.byteLength !== 32) return false;
+  const recipientHash = recipientPubkeyHash(record.operatorPubkey);
+  if (recipientHash === null) return false;
+  // JSON Canonicalization Scheme orders these flat keys lexicographically.
+  // All values are strings or an integer, so JSON.stringify over this explicit
+  // order is byte-identical to the web SDK and the operator's canonicalize().
+  const canonical = JSON.stringify({
+    agent: record.agent,
+    amount_cents: record.amountCents,
+    approval_id: record.id,
+    card_ref: record.cardRef,
+    checkout_origin: record.checkoutOrigin,
+    currency: record.currency,
+    item: record.item,
+    merchant: record.merchant,
+    nonce: record.nonce,
+    reason: record.reason,
+    recipient_pubkey_hash: recipientHash,
+  });
+  const expectedHash = createHash("sha256").update(canonical, "utf8").digest();
+  return timingSafeEqual(signedHash, expectedHash);
+}
 
 const bindCardBody = z.object({
   card_ref: z.string().min(1).max(64),
@@ -173,6 +236,51 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     },
   );
 
+  // Public, opaque ceremony bootstrap. The approval id resolves the account and
+  // card server-side; no client-supplied account/card identity participates in
+  // the lookup. The encrypted blob is useful only to the account's PRF passkey.
+  fastify.get<{ Params: { id: string } }>("/v1/pay/approvals/:id/ceremony", async (req, reply) => {
+    const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
+    if (record === null) {
+      reply.code(404).send({ error: "payment_approval_not_found" });
+      return;
+    }
+    const now = opts.deps.now?.() ?? new Date();
+    const status =
+      record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
+    const card =
+      record.cardRef === null || status !== "pending"
+        ? null
+        : await opts.deps.e2eCredentialStore.getByIdForAccount(record.cardRef, record.accountId);
+    if (status === "pending" && record.cardRef !== null && card === null) {
+      reply.code(409).send({ error: "payment_card_unavailable" });
+      return;
+    }
+    return reply.code(200).send({
+      id: record.id,
+      status,
+      merchant: record.merchant,
+      checkout_origin: record.checkoutOrigin,
+      amount_cents: record.amountCents,
+      currency: record.currency,
+      nonce: record.nonce,
+      card_ref: record.cardRef,
+      operator_pubkey: record.operatorPubkey,
+      item: record.item,
+      reason: record.reason,
+      agent: record.agent,
+      expires_at: record.expiresAt.toISOString(),
+      card:
+        card === null
+          ? null
+          : {
+              blob: card.blob,
+              brand: card.brand,
+              last4: card.last4,
+            },
+    });
+  });
+
   // Binds a stored card to a card-less pending approval (the JIT add-card
   // ceremony). Web-authed, pending-only, write-once, and the bound card must
   // be an E2ECredential owned by the same account. Converts the
@@ -228,52 +336,47 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     },
   );
 
-  fastify.post<{ Params: { id: string } }>(
-    "/v1/pay/approvals/:id/approve",
-    { preHandler: opts.requireWeb },
-    async (req, reply) => {
-      const auth = req.auth!;
-      if (auth.kind !== "web") return;
-      const parsed = approveBody.safeParse(req.body);
-      if (!parsed.success) {
-        reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
-        return;
-      }
-      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
-        req.params.id,
-        auth.account_id,
-      );
-      if (record === null) {
-        reply.code(404).send({ error: "payment_approval_not_found" });
-        return;
-      }
-      // A card-less mandate cannot be approved — the card must be bound first
-      // (seal→bind→approve). Server-enforced, not client convention.
-      if (record.cardRef === null) {
-        reply.code(409).send({ error: "card_required" });
-        return;
-      }
-      const now = opts.deps.now?.() ?? new Date();
-      if (record.status !== "pending") {
-        reply.code(409).send({ error: "payment_approval_already_approved" });
-        return;
-      }
-      if (record.expiresAt <= now) {
-        reply.code(409).send({ error: "payment_approval_expired" });
-        return;
-      }
-      const approved = await opts.deps.pendingPaymentApprovalStore.approveForAccount(
-        req.params.id,
-        auth.account_id,
-        parsed.data.jws,
-        parsed.data.sealed_card,
-        now,
-      );
-      if (!approved) {
-        reply.code(409).send({ error: "payment_approval_not_pending" });
-        return;
-      }
-      return reply.code(200).send({ status: "approved" });
-    },
-  );
+  fastify.post<{ Params: { id: string } }>("/v1/pay/approvals/:id/approve", async (req, reply) => {
+    const parsed = approveBody.safeParse(req.body);
+    if (!parsed.success) {
+      reply.code(400).send({ error: "invalid_request", issues: parsed.error.issues });
+      return;
+    }
+    const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
+    if (record === null) {
+      reply.code(404).send({ error: "payment_approval_not_found" });
+      return;
+    }
+    // A card-less mandate cannot be approved — the card must be bound first
+    // (seal→bind→approve). Server-enforced, not client convention.
+    if (record.cardRef === null) {
+      reply.code(409).send({ error: "card_required" });
+      return;
+    }
+    const now = opts.deps.now?.() ?? new Date();
+    if (record.status !== "pending") {
+      reply.code(409).send({ error: "payment_approval_already_approved" });
+      return;
+    }
+    if (record.expiresAt <= now) {
+      reply.code(409).send({ error: "payment_approval_expired" });
+      return;
+    }
+    if (!submissionMatchesApproval(parsed.data, record)) {
+      reply.code(403).send({ error: "payment_approval_binding_mismatch" });
+      return;
+    }
+    const approved = await opts.deps.pendingPaymentApprovalStore.approveForAccount(
+      req.params.id,
+      record.accountId,
+      parsed.data.jws,
+      parsed.data.sealed_card,
+      now,
+    );
+    if (!approved) {
+      reply.code(409).send({ error: "payment_approval_not_pending" });
+      return;
+    }
+    return reply.code(200).send({ status: "approved" });
+  });
 };

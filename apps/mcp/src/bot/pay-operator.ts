@@ -393,6 +393,7 @@ export async function executeOperatePay(
     const publicKeyBytes = fromBase64Url(keypair.publicKey);
     const recipientHash = createHash("sha256").update(publicKeyBytes).digest();
     const canonical = canonicalize({
+      approval_id: created.id,
       merchant: checkout.merchant,
       checkout_origin: checkout.checkout_origin,
       amount_cents: checkout.amount_cents,
