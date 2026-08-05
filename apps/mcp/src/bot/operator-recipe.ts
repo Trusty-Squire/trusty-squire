@@ -80,6 +80,23 @@ export const RecipeTargetSchema = z
 export type RecipeTarget = z.infer<typeof RecipeTargetSchema>;
 
 const EmailHoleSchema = RecipeHoleSchema.shape.hole;
+const EmailAliasTemplatePattern = /\$\{EMAIL_ALIAS((?:_(?:URI|CSS))*)\}/g;
+
+function hasEmailAliasTemplate(value: string | undefined): boolean {
+  return value?.includes("${EMAIL_ALIAS") === true;
+}
+
+const PostconditionUrlSchema = z
+  .string()
+  .max(2000)
+  .refine((value) => {
+    try {
+      new URL(value.replace(EmailAliasTemplatePattern, "buyer@example.com"));
+      return true;
+    } catch {
+      return false;
+    }
+  }, "invalid URL");
 
 const TraceActionSchema = z
   .object({
@@ -151,9 +168,26 @@ export const PostconditionSchema = z
     kind: z.enum(["execute_capability", "observe_artifact"]),
     describe: z.string().min(1).max(300),
     success_signal: SuccessSignalSchema,
-    probe_url: z.string().url().max(2000).optional(),
+    probe_url: PostconditionUrlSchema.optional(),
+    email_hole: EmailHoleSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((postcondition, ctx) => {
+    const urlContains =
+      "url_contains" in postcondition.success_signal
+        ? postcondition.success_signal.url_contains
+        : undefined;
+    if (
+      (hasEmailAliasTemplate(postcondition.probe_url) || hasEmailAliasTemplate(urlContains)) &&
+      postcondition.email_hole === undefined
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["email_hole"],
+        message: "known-email postcondition template lacks an attested source hole",
+      });
+    }
+  });
 export type Postcondition = z.infer<typeof PostconditionSchema>;
 
 const SecretRefSchema = z
@@ -594,16 +628,36 @@ export function bindKnownEmailTemplate(
   }
   const email = bindings[emailHole];
   if (email === undefined) throw new Error(`missing recipe binding: ${emailHole}`);
-  const encoded = encodeURIComponent(email);
-  return value
-    .split("${EMAIL_ALIAS_URI_CSS}")
-    .join(cssEscapeRecipeValue(encoded))
-    .split("${EMAIL_ALIAS_CSS}")
-    .join(cssEscapeRecipeValue(email))
-    .split("${EMAIL_ALIAS_URI}")
-    .join(encoded)
-    .split("${EMAIL_ALIAS}")
-    .join(email);
+  return value.replace(EmailAliasTemplatePattern, (_token, suffix: string) =>
+    suffix
+      .split("_")
+      .filter(Boolean)
+      .reduce(
+        (bound, operation) =>
+          operation === "URI" ? encodeURIComponent(bound) : cssEscapeRecipeValue(bound),
+        email,
+      ),
+  );
+}
+
+export function bindRecipePostcondition(
+  postcondition: Postcondition,
+  bindings: Readonly<Record<string, string>>,
+): Postcondition {
+  const bind = (value: string | undefined): string | undefined =>
+    value === undefined
+      ? undefined
+      : bindKnownEmailTemplate(value, bindings, postcondition.email_hole);
+  const successSignal = postcondition.success_signal;
+  const probeUrl = bind(postcondition.probe_url);
+  return {
+    ...postcondition,
+    ...(probeUrl !== undefined ? { probe_url: probeUrl } : {}),
+    success_signal:
+      "url_contains" in successSignal
+        ? { url_contains: bind(successSignal.url_contains)! }
+        : successSignal,
+  };
 }
 
 export function cssEscapeRecipeValue(value: string): string {

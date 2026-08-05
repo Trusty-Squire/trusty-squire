@@ -319,11 +319,12 @@ import {
   closeAllProvisionSessions,
   parseElementsTable,
   replayOperatorRecipe,
+  verifySavedRecipePostcondition,
   activeProvisionBrowser,
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
 } from "../provision-session.js";
-import type { OperatorRecipe } from "../operator-recipe.js";
+import { readRecipeForTask, type OperatorRecipe } from "../operator-recipe.js";
 import {
   provisionRememberTool,
   provisionPrepareLoginTool,
@@ -1316,9 +1317,10 @@ describe("verified recipe recording", () => {
         verb: "signup",
         inputs: { address: { email: "buyer@example.com" } },
         postcondition: {
-          kind: "execute_capability",
+          kind: "observe_artifact",
           describe: "Account created",
-          success_signal: { text_present: "Review order" },
+          probe_url: "https://shop.example.com/account/buyer%2540example.com",
+          success_signal: { url_contains: "/account/buyer%2540example.com" },
         },
       },
       null as unknown as ApiClient,
@@ -1326,7 +1328,21 @@ describe("verified recipe recording", () => {
     const raw = readFileSync(join(dir, "signup--example.com.json"), "utf8");
     expect(raw).toContain('"entry_mode": "runtime_service_url"');
     expect(raw).toContain("${EMAIL_ALIAS_URI}");
+    expect(raw).toContain("${EMAIL_ALIAS_URI_URI}");
+    expect(raw).toContain('"email_hole": "address.email"');
     expect(raw).not.toMatch(/buyer(?:@|%40)example(?:\.|%2e)com/i);
+    expect(raw).not.toContain("buyer%2540example.com");
+    const recipe = await readRecipeForTask("signup", "https://shop.example.com/cart");
+    const replayStarted = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/cart",
+    });
+    const replay = await replayOperatorRecipe(replayStarted.session_id, recipe, {
+      "address.email": "buyer@example.com",
+    });
+    expect(replay.status).toBe("complete");
+    const replayVerified = await verifySavedRecipePostcondition(replayStarted.session_id, recipe);
+    expect(replayVerified.confirmed).toBe(true);
+    expect(h.gotos).toContain("https://shop.example.com/account/buyer%2540example.com");
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
     rmSync(profileDir, { recursive: true, force: true });

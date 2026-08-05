@@ -21,6 +21,7 @@ import {
   tagProvenanceValue,
   tagTraceProvenance,
   bindKnownEmailTemplate,
+  bindRecipePostcondition,
   bindRecipeTarget,
   bindRecipeValue,
   cssEscapeRecipeValue,
@@ -335,6 +336,39 @@ describe("provenance holes", () => {
         "credential.login",
       ),
     ).toBe("https://service.test/account/buyer%40example.com");
+    expect(
+      bindKnownEmailTemplate(
+        "https://service.test/account/${EMAIL_ALIAS_URI_URI}",
+        { "credential.login": "buyer@example.com" },
+        "credential.login",
+      ),
+    ).toBe("https://service.test/account/buyer%2540example.com");
+    expect(
+      bindRecipePostcondition(
+        {
+          kind: "observe_artifact",
+          describe: "Account artifact exists",
+          probe_url: "https://service.test/account/${EMAIL_ALIAS_URI_URI}",
+          success_signal: { url_contains: "/account/${EMAIL_ALIAS_URI_URI}" },
+          email_hole: "credential.login",
+        },
+        { "credential.login": "buyer@example.com" },
+      ),
+    ).toMatchObject({
+      probe_url: "https://service.test/account/buyer%2540example.com",
+      success_signal: { url_contains: "/account/buyer%2540example.com" },
+    });
+    expect(() =>
+      OperatorRecipeSchema.parse({
+        ...RECIPE,
+        postcondition: {
+          kind: "observe_artifact",
+          describe: "Account artifact exists",
+          probe_url: "https://service.test/account/${EMAIL_ALIAS_URI}",
+          success_signal: { url_contains: "/account/${EMAIL_ALIAS_URI}" },
+        },
+      }),
+    ).toThrow(/attested source hole/);
     expect(
       OperatorRecipeSchema.parse({
         ...RECIPE,

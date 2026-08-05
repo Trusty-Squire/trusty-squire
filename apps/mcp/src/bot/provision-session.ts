@@ -46,6 +46,7 @@ import {
   type PostconditionSnapshot,
   checkSuccessSignal,
   bindKnownEmailTemplate,
+  bindRecipePostcondition,
   bindRecipeTarget,
   bindRecipeValue,
   cssEscapeRecipeValue,
@@ -343,6 +344,7 @@ interface ReplayExpectedField {
 interface ReplayState {
   recipeHash: string;
   bindingsHash: string;
+  boundPostcondition: Postcondition;
   moneyPath: boolean;
   nextIndex: number | null;
   expectedFields: Map<number, ReplayExpectedField>;
@@ -2850,9 +2852,85 @@ export async function act(
 // name keeps its legacy form for corpus compatibility (validateReplayGraph and
 // published skills key off it); it now means "the email to fill", not a Squire alias.
 const EMAIL_SLOT_TEMPLATE = "${EMAIL_ALIAS}";
-const EMAIL_SLOT_CSS_TEMPLATE = "${EMAIL_ALIAS_CSS}";
-const EMAIL_SLOT_URI_TEMPLATE = "${EMAIL_ALIAS_URI}";
-const EMAIL_SLOT_URI_CSS_TEMPLATE = "${EMAIL_ALIAS_URI_CSS}";
+
+type EmailEncodingOperation = "URI" | "CSS";
+
+function regexEscape(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function nestedPercentByte(byte: number): string {
+  return `%(?:25)*${byte.toString(16).padStart(2, "0")}`;
+}
+
+function encodedCharacterPattern(char: string): string {
+  const raw = regexEscape(char);
+  const percent = [...Buffer.from(char)].map(nestedPercentByte).join("");
+  const encoded = `(?:${raw}|${percent})`;
+  const slash = `(?:\\\\|${nestedPercentByte(0x5c)})`;
+  const cssSimple = /[a-zA-Z0-9_-]/.test(char) ? null : `${slash}${encoded}`;
+  const cssHex = `${slash}${[...char.codePointAt(0)!.toString(16)]
+    .map((digit) => `(?:${digit}|${nestedPercentByte(digit.charCodeAt(0))})`)
+    .join("")}(?:(?:\\s|${nestedPercentByte(0x20)}))?`;
+  return `(?:${[encoded, cssSimple, cssHex].filter(Boolean).join("|")})`;
+}
+
+function decodeUriLayer(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function decodeCssLayer(value: string): string {
+  return value.replace(
+    /\\([0-9a-f]{1,6})(?:\r\n|[\t\n\f\r ])?|\\([^\r\n\f])/gi,
+    (_match, hex: string | undefined, escaped: string | undefined) =>
+      hex === undefined ? (escaped ?? "") : String.fromCodePoint(Number.parseInt(hex, 16)),
+  );
+}
+
+function applyEmailEncoding(value: string, operations: readonly EmailEncodingOperation[]): string {
+  return operations.reduce(
+    (encoded, operation) =>
+      operation === "URI" ? encodeURIComponent(encoded) : cssEscapeRecipeValue(encoded),
+    value,
+  );
+}
+
+function emailTemplateForRepresentation(representation: string, email: string): string | null {
+  const queue: Array<{ value: string; inverse: EmailEncodingOperation[] }> = [
+    { value: representation, inverse: [] },
+  ];
+  const seen = new Set<string>();
+  let fallback: EmailEncodingOperation[] | null = null;
+  while (queue.length > 0 && seen.size <= 4096) {
+    const current = queue.shift()!;
+    const key = `${current.value}\0${current.inverse.join("_")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (current.value.toLowerCase() === email.toLowerCase()) {
+      const operations = [...current.inverse].reverse();
+      if (applyEmailEncoding(email, operations).toLowerCase() === representation.toLowerCase()) {
+        return `\${EMAIL_ALIAS${operations.map((operation) => `_${operation}`).join("")}}`;
+      }
+      fallback ??= operations;
+      continue;
+    }
+    const uriDecoded = decodeUriLayer(current.value);
+    if (uriDecoded !== current.value) {
+      queue.push({ value: uriDecoded, inverse: [...current.inverse, "URI"] });
+    }
+    const cssDecoded = decodeCssLayer(current.value);
+    if (cssDecoded !== current.value) {
+      queue.push({ value: cssDecoded, inverse: [...current.inverse, "CSS"] });
+    }
+  }
+  return fallback === null
+    ? null
+    : `\${EMAIL_ALIAS${fallback.map((operation) => `_${operation}`).join("")}}`;
+}
 const REPLAY_VERIFIED_HOLE = /^(?:address|contact)(?:\.|$)|^quantity$/;
 function looksLikeEmailValue(v: string): boolean {
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
@@ -2872,25 +2950,13 @@ export function redactEmailForTrace(value: string): string {
 // not wired into operate_*.) Exported for unit tests.
 export function scrubKnownEmail(s: string, userEmail: string | null): string {
   if (userEmail === null || userEmail.length === 0) return s;
-  const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const pattern = [...userEmail]
-    .map((char) => {
-      const raw = escapeRegex(char);
-      const percent = [...Buffer.from(char)]
-        .map((byte) => `%${byte.toString(16).padStart(2, "0")}`)
-        .join("");
-      const cssHex = `\\\\${char.codePointAt(0)!.toString(16)}(?:\\s)?`;
-      const cssSimple = /[a-zA-Z0-9_-]/.test(char) ? null : `\\\\${raw}`;
-      return `(?:${[raw, percent, cssHex, cssSimple].filter(Boolean).join("|")})`;
-    })
-    .join("");
+  const pattern = [...userEmail].map(encodedCharacterPattern).join("");
   return s.replace(new RegExp(pattern, "gi"), (matched) => {
-    const escaped = matched.includes("\\");
-    const encoded = /%[0-9a-f]{2}/i.test(matched);
-    if (escaped && encoded) return EMAIL_SLOT_URI_CSS_TEMPLATE;
-    if (escaped) return EMAIL_SLOT_CSS_TEMPLATE;
-    if (encoded) return EMAIL_SLOT_URI_TEMPLATE;
-    return EMAIL_SLOT_TEMPLATE;
+    const template = emailTemplateForRepresentation(matched, userEmail);
+    if (template === null) {
+      throw new Error("known email encoding could not be provenance-templated");
+    }
+    return template;
   });
 }
 
@@ -3298,6 +3364,20 @@ async function settleAfterStateChange(browser: BrowserController): Promise<void>
 // Sealed secrets become SLOT references (stored:false) — never values. The
 // recipe's scope = start + auto_widen hosts (mid_session crossings replay via
 // the trace's own allow_host steps).
+function verifiedEmailSources(
+  session: Session,
+  inputs: KnownRecipeInputs,
+): Array<RecordedValueSource & { hole: string }> {
+  return session.recordedValues.filter(
+    (source): source is RecordedValueSource & { hole: string } =>
+      source.hole !== undefined &&
+      session.userEmail !== null &&
+      source.literal === session.userEmail &&
+      looksLikeEmailValue(source.literal) &&
+      knownRecipeInputValue(inputs, source.hole) === source.literal,
+  );
+}
+
 function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs): TraceEntry[] {
   const trace = session.actionTrace.map((entry) => ({
     ...entry,
@@ -3341,13 +3421,7 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
     }
     throw new Error(`provenance ${source.hole} is not bound to a recorded value action`);
   }
-  const emailSources = session.recordedValues.filter(
-    (source): source is RecordedValueSource & { hole: string } =>
-      source.hole !== undefined &&
-      session.userEmail !== null &&
-      source.literal === session.userEmail &&
-      looksLikeEmailValue(source.literal),
-  );
+  const emailSources = verifiedEmailSources(session, inputs);
   const emailHoles = new Set(emailSources.map((source) => source.hole));
   for (const [traceIndex, entry] of trace.entries()) {
     const targetText = JSON.stringify({
@@ -3371,6 +3445,43 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
     throw new Error(`provenance ${value.hole} lacks an action-time source attestation`);
   }
   return trace;
+}
+
+function scrubRecipePostcondition(
+  session: Session,
+  postcondition: Postcondition,
+  inputs: KnownRecipeInputs,
+): Postcondition {
+  const probeUrl =
+    postcondition.probe_url === undefined
+      ? undefined
+      : scrubKnownEmail(postcondition.probe_url, session.userEmail);
+  const signal = postcondition.success_signal;
+  const successSignal =
+    "url_contains" in signal
+      ? { url_contains: scrubKnownEmail(signal.url_contains, session.userEmail) }
+      : signal;
+  const hasTemplate =
+    probeUrl?.includes("${EMAIL_ALIAS") === true ||
+    ("url_contains" in successSignal && successSignal.url_contains.includes("${EMAIL_ALIAS"));
+  const base = { kind: postcondition.kind, describe: postcondition.describe };
+  if (!hasTemplate) {
+    return {
+      ...base,
+      ...(probeUrl !== undefined ? { probe_url: probeUrl } : {}),
+      success_signal: successSignal,
+    };
+  }
+  const holes = [...new Set(verifiedEmailSources(session, inputs).map((source) => source.hole))];
+  if (holes.length !== 1) {
+    throw new Error("known-email postcondition lacks one unambiguous action-time source hole");
+  }
+  return {
+    ...base,
+    ...(probeUrl !== undefined ? { probe_url: probeUrl } : {}),
+    success_signal: successSignal,
+    email_hole: holes[0],
+  };
 }
 
 export async function rememberRecipe(
@@ -3411,6 +3522,8 @@ export async function rememberRecipe(
   }
   const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
   const scrubbedStartUrl = scrubKnownEmail(session.startUrl, session.userEmail);
+  const trace = traceWithVerifiedProvenance(session, opts.inputs);
+  const postcondition = scrubRecipePostcondition(session, opts.postcondition, opts.inputs);
   const recipe: OperatorRecipe = {
     name: opts.name,
     schema_version: 1,
@@ -3424,9 +3537,9 @@ export async function rememberRecipe(
       ? { entry_mode: "runtime_service_url" as const }
       : { entry_url: session.startUrl }),
     allowed_hosts: [...new Set(egressSeedHosts(session))],
-    trace: traceWithVerifiedProvenance(session, opts.inputs),
+    trace,
     secrets,
-    postcondition: opts.postcondition,
+    postcondition,
   };
   assertRecipeEmailScrubbed(recipe, session.userEmail);
   const unprovenancedMoneyField = findUnprovenancedMoneyField(recipe);
@@ -3491,6 +3604,25 @@ export async function verifyPostcondition(
     reason: result.reason,
   });
   return result;
+}
+
+export async function verifySavedRecipePostcondition(
+  sessionId: string,
+  recipe: OperatorRecipe,
+): Promise<PostconditionResult> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const state = session.replayState;
+  if (state !== null && state.recipeHash === replayDigest(recipe)) {
+    return await verifyPostcondition(sessionId, state.boundPostcondition);
+  }
+  let postcondition: Postcondition;
+  try {
+    postcondition = bindRecipePostcondition(recipe.postcondition, {});
+  } catch {
+    throw new Error("saved recipe postcondition requires bindings from its active replay");
+  }
+  return await verifyPostcondition(sessionId, postcondition);
 }
 
 const MONEY_REPLAY_VERBS = new Set<OperatorVerb>([
@@ -3998,6 +4130,7 @@ export async function replayOperatorRecipe(
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const recipeHash = replayDigest(recipe);
   const bindingsHash = bindingDigest(bindings);
+  const boundPostcondition = bindRecipePostcondition(recipe.postcondition, bindings);
   if (recipe.verb === undefined || recipe.domain === undefined) {
     throw new Error("legacy named recipes are hint-only and cannot replay deterministically");
   }
@@ -4020,6 +4153,7 @@ export async function replayOperatorRecipe(
     state = {
       recipeHash,
       bindingsHash,
+      boundPostcondition,
       moneyPath: isMoneyPath,
       nextIndex: null,
       expectedFields: expected.fields,
