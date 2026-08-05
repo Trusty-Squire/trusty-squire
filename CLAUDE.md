@@ -346,6 +346,16 @@ and cuts a GitHub release `v<version>`. It is idempotent: if tag `v<version>`
 already exists it's a no-op, so re-pushing `main` without a version bump does
 NOT republish.
 
+**Branch routing (enforced) — feature/fix PRs target `staging`, NOT `main`.**
+`staging` is the integration branch where all work accumulates; **`main`
+receives work ONLY via the stable release promotion** (a `release:mcp <stable>`
+cut off staging → PR to main → npm `latest`). Merging feature PRs straight to
+`main` while `staging` holds unpromoted RC work is what forked the two branches
+(38 commits diverged, a 27-file payment-auth merge conflict) and forced a full
+reconciliation before the `1.1.7` release — do not repeat it. When dispatching
+crews or opening PRs for feature work, branch off `origin/staging` and target
+`staging`. Only `release:mcp` stable cuts touch `main`.
+
 The release SOP — `pnpm release:mcp <version>` automates steps 1-2 (bump +
 CHANGELOG seed + branch + PR to the right channel):
 1. Bump `apps/mcp/package.json` `version` (the **source of truth**).
