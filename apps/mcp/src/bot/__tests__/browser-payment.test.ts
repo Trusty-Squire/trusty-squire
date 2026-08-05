@@ -37,22 +37,40 @@ describe("checkout payment parsing", () => {
   });
 
   it.skipIf(!chromiumAvailable)(
-    "submits a visible button using its text when its value is empty",
+    "types digits into a combined numeric expiry field and lets the site format MM/YY",
     async () => {
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
         await page.setContent(`
         <form id="checkout">
+          <input id="date-of-birth" placeholder="MM/DD/YYYY">
           <input autocomplete="cc-number">
-          <input autocomplete="cc-exp">
+          <input inputmode="numeric" placeholder="MM/YY">
           <input autocomplete="cc-csc">
           <input autocomplete="cc-name">
           <button type="submit">Pay now</button>
         </form>
         <script>
+          const expiry = document.querySelector('[placeholder="MM/YY"]');
+          expiry.addEventListener("keydown", (event) => {
+            if (event.key.length === 1) {
+              document.body.dataset.expiryKeys =
+                (document.body.dataset.expiryKeys || "") + event.key;
+              if (!/\\d/.test(event.key)) event.preventDefault();
+            }
+          });
+          expiry.addEventListener("input", () => {
+            const digits = expiry.value.replace(/\\D/g, "").slice(0, 4);
+            expiry.value = digits.length > 2
+              ? digits.slice(0, 2) + "/" + digits.slice(2)
+              : digits;
+          });
           document.querySelector("#checkout").addEventListener("submit", (event) => {
             event.preventDefault();
+            document.body.dataset.dobAtSubmit =
+              document.querySelector("#date-of-birth").value;
+            document.body.dataset.expiryAtSubmit = expiry.value;
             document.body.dataset.submitted = "true";
             setTimeout(() => {
               const challenge = document.createElement("iframe");
@@ -80,13 +98,16 @@ describe("checkout payment parsing", () => {
         });
 
         expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+        expect(await page.locator("body").getAttribute("data-dob-at-submit")).toBe("");
+        expect(await page.locator("body").getAttribute("data-expiry-at-submit")).toBe("12/30");
+        expect(await page.locator("body").getAttribute("data-expiry-keys")).toBe("1230");
         expect(result.three_ds_required).toBe(true);
         expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
         expect(
           await page
             .locator("input")
             .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
-        ).toEqual(["", "", "", ""]);
+        ).toEqual(["", "", "", "", ""]);
       } finally {
         await browser.close();
       }
