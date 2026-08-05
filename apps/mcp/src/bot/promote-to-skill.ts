@@ -48,10 +48,7 @@ import {
 import type { InteractiveElement } from "./browser.js";
 import type { PostVerifyStep } from "./provision-types.js";
 import { extractAllLabeledTokensFromReason } from "./credential-extraction-flow.js";
-import {
-  verifyCaptureChain,
-  type OnboardingCaseFile,
-} from "./onboarding-capture.js";
+import { verifyCaptureChain, type OnboardingCaseFile } from "./onboarding-capture.js";
 import { filterByNearTextHint } from "./near-text-hint.js";
 
 // ── Public API ───────────────────────────────────────────────────────
@@ -93,9 +90,7 @@ export interface PromoteInput {
   status?: "pending-review" | "active";
 }
 
-export type PromoteResult =
-  | { kind: "ok"; skill: Skill }
-  | PromoteRejection;
+export type PromoteResult = { kind: "ok"; skill: Skill } | PromoteRejection;
 
 /**
  * Structured rejection. Mirrors the rejection.json shape the CLI writes
@@ -193,17 +188,12 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
   // or terminal onboarding confirmation page. If the capture never saw such a
   // URL, reject the skill instead of publishing a stale replay entry.
   const entryRound = verification.rounds.find(
-    (r) =>
-      !isIdentityProviderUrl(r.state.url) &&
-      !isUnstableSignupEntryUrl(r.state.url),
+    (r) => !isIdentityProviderUrl(r.state.url) && !isUnstableSignupEntryUrl(r.state.url),
   );
   let capturedEntryUrl: string;
   if (entryRound !== undefined) {
     capturedEntryUrl = stableSignupEntryUrl(entryRound.state.url, verification.rounds);
-  } else if (
-    input.signupUrl !== undefined &&
-    !isUnstableSignupEntryUrl(input.signupUrl)
-  ) {
+  } else if (input.signupUrl !== undefined && !isUnstableSignupEntryUrl(input.signupUrl)) {
     // No CAPTURED round qualifies as a clean entry — MEASURED 2026-06-24 (auth0:
     // every round is either an accounts.google.com OAuth page or a per-tenant
     // manage.auth0.com/dashboard/us/<tenant> URL, both unstable). Fall back to
@@ -235,8 +225,10 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
       try {
         const signup = new URL(signupUrl);
         const captured = new URL(capturedEntryUrl);
-        return `${signup.origin}${signup.pathname.replace(/\/+$/, "")}` !==
-          `${captured.origin}${captured.pathname.replace(/\/+$/, "")}`;
+        return (
+          `${signup.origin}${signup.pathname.replace(/\/+$/, "")}` !==
+          `${captured.origin}${captured.pathname.replace(/\/+$/, "")}`
+        );
       } catch {
         return signupUrl !== capturedEntryUrl;
       }
@@ -324,18 +316,14 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
 
   const extractStepIndices = stepsResult.steps
     .map((s, i) => ({ s, i }))
-    .filter(
-      ({ s }) =>
-        s.kind === "extract_via_copy_button" || s.kind === "extract_via_regex",
-    );
+    .filter(({ s }) => s.kind === "extract_via_copy_button" || s.kind === "extract_via_regex");
   const multiCred = extractStepIndices.length > 1;
   // Phase-E label-scoped multi-cred: each extract_labeled step already
   // names the credential it produces (distinct produces guaranteed by
   // collapseRedundantExtracts). Build one spec per distinct produces —
   // no upgradeToMultiCred pass (that's for the copy_button/regex shape).
   const labeledSteps = stepsResult.steps.filter(
-    (s): s is Extract<SkillStep, { kind: "extract_labeled" }> =>
-      s.kind === "extract_labeled",
+    (s): s is Extract<SkillStep, { kind: "extract_labeled" }> => s.kind === "extract_labeled",
   );
   let steps: SkillStep[] = stepsResult.steps;
   let credentials: SkillCredentialSpec[];
@@ -356,17 +344,11 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
     for (const s of labeledSteps) {
       if (seen.has(s.produces)) continue;
       seen.add(s.produces);
-      specs.push(
-        buildCredentialSpecForMulti(s.produces, "opaque", input.service, visibility),
-      );
+      specs.push(buildCredentialSpecForMulti(s.produces, "opaque", input.service, visibility));
     }
     credentials = specs;
   } else if (multiCred) {
-    const multiResult = upgradeToMultiCred(
-      stepsResult.steps,
-      verification.rounds,
-      input.service,
-    );
+    const multiResult = upgradeToMultiCred(stepsResult.steps, verification.rounds, input.service);
     if (multiResult.kind !== "ok") return multiResult;
     steps = multiResult.steps;
     credentials = multiResult.credentials;
@@ -451,10 +433,7 @@ interface StepsOk {
   steps: SkillStep[];
 }
 
-function synthesizeSteps(
-  rounds: OnboardingCaseFile[],
-  runId: string,
-): StepsOk | PromoteRejection {
+function synthesizeSteps(rounds: OnboardingCaseFile[], runId: string): StepsOk | PromoteRejection {
   const steps: SkillStep[] = [];
   // 0.8.1 — soft-drop policy for intermediate click rounds. The bot's
   // planner captures every round it tried, including failed clicks on
@@ -485,7 +464,13 @@ function synthesizeSteps(
       round_index: i,
     };
 
-    const translated = translateStep(round.observed, round.inventory, provenance, i, round.state.html);
+    const translated = translateStep(
+      round.observed,
+      round.inventory,
+      provenance,
+      i,
+      round.state.html,
+    );
     if (translated.kind === "ok") {
       if (translated.step !== null) {
         // 0.8.2-rc.21 — dedup consecutive identical steps. The bot
@@ -537,8 +522,7 @@ function synthesizeSteps(
     // (it reads the EXISTING credential shown on the page), and they're unlabeled
     // by nature. Detect by a bare confirmation-token value so a real data fill
     // (which is load-bearing — Sentry's permission grid) is never dropped.
-    const fillValue =
-      round.observed.kind === "fill" ? (round.observed.value ?? "").trim() : "";
+    const fillValue = round.observed.kind === "fill" ? (round.observed.value ?? "").trim() : "";
     const isConfirmationFill =
       round.observed.kind === "fill" &&
       translated.error_kind === "missing_text_hint" &&
@@ -1149,7 +1133,9 @@ export function hasEphemeralPathSegment(path: string): boolean {
     // Account-scope id: an org/team/project/workspace prefix + a generated tail
     // with a 4+ digit run (Neon: org-nameless-base-41435035). The digit-run
     // requirement keeps stable pages like /project or /team-settings out.
-    if (/^(?:org|team|ws|proj|project|account|acct|workspace|tenant|grp|group)[-_].*\d{4,}/i.test(seg))
+    if (
+      /^(?:org|team|ws|proj|project|account|acct|workspace|tenant|grp|group)[-_].*\d{4,}/i.test(seg)
+    )
       return true;
     return false;
   });
@@ -1185,9 +1171,7 @@ const IDENTITY_PROVIDER_HOSTS = [
 export function isIdentityProviderUrl(url: string): boolean {
   try {
     const host = new URL(url).hostname.toLowerCase();
-    return IDENTITY_PROVIDER_HOSTS.some(
-      (idp) => host === idp || host.endsWith(`.${idp}`),
-    );
+    return IDENTITY_PROVIDER_HOSTS.some((idp) => host === idp || host.endsWith(`.${idp}`));
   } catch {
     return false; // relative / malformed — not an IdP entry
   }
@@ -1203,11 +1187,7 @@ export function isUnstableSignupEntryUrl(url: string): boolean {
     if (path.includes("/register/create-user-new-org-confirmation")) return true;
     if (path.includes("/oauth/callback") || path.includes("/auth/callback")) return true;
     if (path.includes("/login/callback") || path.includes("/sso/callback")) return true;
-    if (
-      path.endsWith("/confirmation") ||
-      path.endsWith("/confirm") ||
-      path.endsWith("/reserved")
-    ) {
+    if (path.endsWith("/confirmation") || path.endsWith("/confirm") || path.endsWith("/reserved")) {
       return true;
     }
     return false;
@@ -1253,10 +1233,7 @@ function captureLooksLikeSignupForm(rounds: readonly OnboardingCaseFile[]): bool
   });
 }
 
-export function stableSignupEntryUrl(
-  url: string,
-  rounds: readonly OnboardingCaseFile[],
-): string {
+export function stableSignupEntryUrl(url: string, rounds: readonly OnboardingCaseFile[]): string {
   const generalized = generalizeCapturedUrl(url);
   // A per-account id in the PATH (project/org/team UUID or org-…-<digits> slug)
   // can't replay on another account and leaks THIS user's id into a shared skill.
@@ -1329,7 +1306,9 @@ function pickSameTextAnchorHrefHint(
       (el.tag === "a" || el.role === "link") &&
       pickClickText(el) === hint,
   );
-  const hrefs = [...new Set(anchors.map((el) => pickHrefHint(el)).filter((h): h is string => h !== null))];
+  const hrefs = [
+    ...new Set(anchors.map((el) => pickHrefHint(el)).filter((h): h is string => h !== null)),
+  ];
   return hrefs.length === 1 ? hrefs[0]! : null;
 }
 
@@ -1421,10 +1400,7 @@ function isOwnFormControlLabelEcho(
   candidate: InteractiveElement,
   hint: string,
 ): boolean {
-  if (
-    target.tag !== "input" ||
-    (target.type !== "radio" && target.type !== "checkbox")
-  ) {
+  if (target.tag !== "input" || (target.type !== "radio" && target.type !== "checkbox")) {
     return false;
   }
   if (candidate.tag !== "label") return false;
@@ -1514,13 +1490,7 @@ function pickClickText(el: InteractiveElement): string | null {
   // common surface for modern dashboards that ship "Sign in with X"
   // OAuth buttons as an SVG with no text — the iconLabel folds in
   // alt/aria-label from descendant <img>/<svg>. Trim and drop empties.
-  const text = (
-    el.visibleText ??
-    el.ariaLabel ??
-    el.title ??
-    el.iconLabel ??
-    ""
-  ).trim();
+  const text = (el.visibleText ?? el.ariaLabel ?? el.title ?? el.iconLabel ?? "").trim();
   if (text.length > 0) {
     // Truncate exceptionally long text — a 500-char button label is
     // almost certainly a paragraph picked up by the inventory scraper.
@@ -1569,9 +1539,7 @@ function looksLikeRuntimeId(s: string): boolean {
   return false;
 }
 
-function inferRoleHint(
-  el: InteractiveElement,
-): "button" | "link" | "tab" | "menuitem" | undefined {
+function inferRoleHint(el: InteractiveElement): "button" | "link" | "tab" | "menuitem" | undefined {
   if (el.tag === "button" || el.role === "button") return "button";
   if (el.tag === "a" || el.role === "link") return "link";
   if (el.role === "tab") return "tab";
@@ -1602,8 +1570,7 @@ function resolveLabelHint(
       kind: "rejected",
       stage: "synthesis",
       error_kind: "inventory_entry_not_found",
-      message:
-        `Captured fill/select selector ${JSON.stringify(selector)} does not appear in this round's inventory.`,
+      message: `Captured fill/select selector ${JSON.stringify(selector)} does not appear in this round's inventory.`,
       offending_round: roundIndex,
       synthesizer_version: SYNTHESIZER_VERSION,
     };
@@ -1618,12 +1585,14 @@ function resolveLabelHint(
   // already does the <label for=> matching, so labelText is
   // authoritative when present.
   const comboboxButtonText =
-    match.role === "combobox" && match.tag === "button"
-      ? match.visibleText ?? null
-      : null;
-  let hint =
-    (match.labelText ?? match.placeholder ?? match.ariaLabel ?? comboboxButtonText ?? "")
-      .trim();
+    match.role === "combobox" && match.tag === "button" ? (match.visibleText ?? null) : null;
+  let hint = (
+    match.labelText ??
+    match.placeholder ??
+    match.ariaLabel ??
+    comboboxButtonText ??
+    ""
+  ).trim();
   if (hint.length === 0) {
     // 0.8.3-rc.1 — same stable-attribute fallback as pickClickText:
     // form fields routinely have a stable `name` attribute even when
@@ -1728,7 +1697,7 @@ function resolveLabelHint(
 // target (the typical row-header position), then checking they don't
 // also appear before any sibling. Returns null when no such snippet
 // exists.
-function pickRowDisambiguator(
+export function pickRowDisambiguator(
   target: InteractiveElement,
   siblings: readonly InteractiveElement[],
   inventory: readonly InteractiveElement[],
@@ -1911,7 +1880,19 @@ function synthesizeExtractStep(
 // the extractApiKeyFromText ordering.
 function detectKnownCredentialPattern(
   html: string,
-): "stripe_secret" | "stripe_publishable" | "resend" | "sendgrid" | "mailgun" | "render" | "sentry_token" | "openrouter" | "anthropic" | "openai_legacy" | "openai_project" | "uuid_token" {
+):
+  | "stripe_secret"
+  | "stripe_publishable"
+  | "resend"
+  | "sendgrid"
+  | "mailgun"
+  | "render"
+  | "sentry_token"
+  | "openrouter"
+  | "anthropic"
+  | "openai_legacy"
+  | "openai_project"
+  | "uuid_token" {
   if (/\bre_[a-zA-Z0-9_]{20,}\b/.test(html)) return "resend";
   if (/\bsk_(?:live|test)_[a-zA-Z0-9]{20,}\b/.test(html)) return "stripe_secret";
   if (/\bsk-or-v1-[a-f0-9]{40,80}/i.test(html)) return "openrouter";
@@ -1952,14 +1933,10 @@ function detectKnownCredentialPattern(
 export function dropSpuriousUuidExtract(steps: SkillStep[]): SkillStep[] {
   const hasCopyButton = steps.some((s) => s.kind === "extract_via_copy_button");
   if (!hasCopyButton) return steps;
-  return steps.filter(
-    (s) => !(s.kind === "extract_via_regex" && s.pattern_name === "uuid_token"),
-  );
+  return steps.filter((s) => !(s.kind === "extract_via_regex" && s.pattern_name === "uuid_token"));
 }
 
-function findCopyButton(
-  inventory: readonly InteractiveElement[],
-): InteractiveElement | null {
+function findCopyButton(inventory: readonly InteractiveElement[]): InteractiveElement | null {
   for (const el of inventory) {
     // rc.19 — also include title (icon-only buttons like Railway's
     // "Copy Code" modal button carry the label there) and iconLabel
@@ -1967,9 +1944,12 @@ function findCopyButton(
     // this, the synthesizer picks extract_via_regex for Railway-
     // class flows, then the replay's regex library can't match a
     // bare UUID and the skill replay-fails forever.
-    const text = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.title ?? ""} ${el.iconLabel ?? ""}`.trim();
+    const text =
+      `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.title ?? ""} ${el.iconLabel ?? ""}`.trim();
     // Same vocabulary as the copy-button extraction path.
-    if (/^\s*copy(?:\b|\s|$)|copy\s+(?:api\s*key|secret|token|code|key|to\s+clipboard)\b/i.test(text)) {
+    if (
+      /^\s*copy(?:\b|\s|$)|copy\s+(?:api\s*key|secret|token|code|key|to\s+clipboard)\b/i.test(text)
+    ) {
       return el;
     }
   }
@@ -1997,10 +1977,7 @@ function findCopyButton(
   return null;
 }
 
-function pickNearTextHint(
-  copyButton: InteractiveElement,
-  observedReason: string,
-): string {
+function pickNearTextHint(copyButton: InteractiveElement, observedReason: string): string {
   // The Copy button's own text is a poor hint — every credential
   // modal has a "Copy" button. We want the *nearby* heading or label
   // that disambiguates ("New Token" vs "Project ID"). The observed
@@ -2013,11 +1990,7 @@ function pickNearTextHint(
     // Common patterns: "in the 'New Token' section", "under 'New Token'",
     // "after creation". We pull the first quoted phrase if any.
     const quoted = /['"]([^'"]{3,40})['"]/.exec(reasonText);
-    if (
-      quoted !== null &&
-      quoted[1] !== undefined &&
-      !looksLikeSecretValue(quoted[1])
-    ) {
+    if (quoted !== null && quoted[1] !== undefined && !looksLikeSecretValue(quoted[1])) {
       return quoted[1];
     }
   }
@@ -2256,10 +2229,10 @@ function validatorForShape(
   }
 }
 
-function clampOpaqueValidator(v: {
+function clampOpaqueValidator(v: { min_length: number; max_length: number }): {
   min_length: number;
   max_length: number;
-}): { min_length: number; max_length: number } {
+} {
   return {
     min_length: Math.max(4, v.min_length),
     max_length: Math.max(64, v.max_length),
@@ -2289,7 +2262,8 @@ function inferOpaqueValidatorFromHtml(
   // extractCredentialCandidates fallback uses validator length to
   // filter, so we want a tight ±2-char range around the observed
   // length to keep nav strings ("Dashboard", "Downloads") out.
-  const labeled = /(?:API[\s_-]?Token|API[\s_-]?Key|Token|Secret)\s*[:=]?\s*([a-zA-Z0-9_-]{8,64})/i.exec(text);
+  const labeled =
+    /(?:API[\s_-]?Token|API[\s_-]?Key|Token|Secret)\s*[:=]?\s*([a-zA-Z0-9_-]{8,64})/i.exec(text);
   if (labeled !== null && labeled[1] !== undefined) {
     const len = labeled[1].length;
     return { min_length: Math.max(8, len - 2), max_length: len + 2 };
@@ -2373,9 +2347,7 @@ function inferShapeHint(
       ? extractStep.near_text_hint
       : undefined;
   const scopedHtml =
-    nearTextHint !== undefined
-      ? scopeHtmlAround(fullHtml, nearTextHint)
-      : fullHtml;
+    nearTextHint !== undefined ? scopeHtmlAround(fullHtml, nearTextHint) : fullHtml;
 
   // Prefer the scoped window: a prefix that hits inside the copy-
   // button's neighborhood is far more likely correct than one that
@@ -2405,7 +2377,8 @@ function inferShapeHint(
 // credential UUID that the dashboard renders next to its label does.
 function uuidNearCredentialContext(html: string): boolean {
   const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
-  const CONTEXT = /\b(?:token|api[\s_-]*key|secret|access[\s_-]*key|api[\s_-]*token|personal[\s_-]*access)\b/gi;
+  const CONTEXT =
+    /\b(?:token|api[\s_-]*key|secret|access[\s_-]*key|api[\s_-]*token|personal[\s_-]*access)\b/gi;
   const WINDOW = 200;
   // Collect all context offsets first (cheap) and check each UUID
   // against them. log(n) join would be tighter; n is small enough
@@ -2769,10 +2742,7 @@ export function deriveSkillId(candidate: Omit<Skill, "skill_id">): string {
   return out;
 }
 
-function chainRejectionMessage(
-  reason: string,
-  offendingRound: number | undefined,
-): string {
+function chainRejectionMessage(reason: string, offendingRound: number | undefined): string {
   const where = offendingRound !== undefined ? ` at round ${offendingRound}` : "";
   switch (reason) {
     case "unknown_version":

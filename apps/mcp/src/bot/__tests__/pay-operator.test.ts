@@ -58,6 +58,7 @@ async function harness(
   const approvalBodies: Array<Record<string, unknown>> = [];
   const filledCards: CheckoutCard[] = [];
   const notifyCalls: string[] = [];
+  const resolvedCardRefs: string[] = [];
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
 
@@ -195,15 +196,25 @@ async function harness(
       vouchflowExpectedAudience: expectedAudience ?? undefined,
       webBase: "https://web.test",
       surfaceApprovalUrl: vi.fn(),
+      onCardResolved: (cardRef) => resolvedCardRefs.push(cardRef),
     },
   );
 
-  return { result, approvalBodies, auditBodies, filledCards, notifyCalls, browser };
+  return {
+    result,
+    approvalBodies,
+    auditBodies,
+    filledCards,
+    notifyCalls,
+    resolvedCardRefs,
+    browser,
+  };
 }
 
 describe("operate_pay", () => {
   it("verifies the mandate, opens the card, fills the checkout, and audits last4 only", async () => {
-    const { result, approvalBodies, auditBodies, filledCards } = await harness("happy");
+    const { result, approvalBodies, auditBodies, filledCards, resolvedCardRefs } =
+      await harness("happy");
 
     expect(result).toMatchObject({
       status: "payment_submitted",
@@ -219,6 +230,7 @@ describe("operate_pay", () => {
     });
     expect(approvalBodies[0]).not.toHaveProperty("agent");
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(resolvedCardRefs).toEqual(["card_test"]);
     expect(auditBodies).toEqual([
       {
         merchant: CHECKOUT.merchant,
@@ -478,6 +490,7 @@ async function runJit(cfg: {
   approvalBodies: Array<Record<string, unknown>>;
   filledCards: CheckoutCard[];
   auditBodies: unknown[];
+  resolvedCardRefs: string[];
   summaryReads: number;
 }> {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -485,6 +498,7 @@ async function runJit(cfg: {
   const approvalBodies: Array<Record<string, unknown>> = [];
   const filledCards: CheckoutCard[] = [];
   const auditBodies: unknown[] = [];
+  const resolvedCardRefs: string[] = [];
   const nonce = "jit-nonce";
   const agent = "jit-agent";
   let clock = 0;
@@ -592,6 +606,7 @@ async function runJit(cfg: {
       vouchflowExpectedAudience: "customer_test",
       webBase: "https://web.test",
       surfaceApprovalUrl: vi.fn(),
+      onCardResolved: (cardRef) => resolvedCardRefs.push(cardRef),
       ...(cfg.approvalTimeoutMs !== undefined ? { approvalTimeoutMs: cfg.approvalTimeoutMs } : {}),
       ...(cfg.jitApprovalTimeoutMs !== undefined
         ? { jitApprovalTimeoutMs: cfg.jitApprovalTimeoutMs }
@@ -599,12 +614,12 @@ async function runJit(cfg: {
     },
   )) as Record<string, unknown>;
 
-  return { result, approvalBodies, filledCards, auditBodies, summaryReads };
+  return { result, approvalBodies, filledCards, auditBodies, resolvedCardRefs, summaryReads };
 }
 
 describe("operate_pay JIT add-card ceremony", () => {
   it("mints a card-less approval and resumes with the SERVER-BOUND card_ref", async () => {
-    const { result, approvalBodies, filledCards, auditBodies } = await runJit({
+    const { result, approvalBodies, filledCards, auditBodies, resolvedCardRefs } = await runJit({
       boundCardRef: "card_bound_by_server",
       poll: () => ({ status: "approved", card_ref: "card_bound_by_server" }),
     });
@@ -613,6 +628,7 @@ describe("operate_pay JIT add-card ceremony", () => {
     // args.card_ref) could only pass verifyMandate by re-canonicalizing with it.
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(resolvedCardRefs).toEqual(["card_bound_by_server"]);
     // Card-less create — no card_ref in the create body.
     expect(approvalBodies[0]).not.toHaveProperty("card_ref");
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_submitted" })]);

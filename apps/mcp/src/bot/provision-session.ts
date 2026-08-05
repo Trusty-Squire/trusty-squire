@@ -17,6 +17,7 @@
 //    `finish`/extract path; the vault stays write-only.
 
 import { createHash, randomInt, randomUUID } from "node:crypto";
+import { Buffer } from "node:buffer";
 import { chmodSync, mkdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,11 +37,28 @@ import {
   type OperatorRecipe,
   type TraceEntry,
   type TraceAction,
+  type RecipeHole,
+  type RecipeTarget,
+  type OperatorVerb,
+  type KnownRecipeInputs,
   type Postcondition,
   type PostconditionResult,
   type PostconditionSnapshot,
   checkSuccessSignal,
+  bindKnownEmailTemplate,
+  bindRecipePostcondition,
+  bindRecipeTarget,
+  bindRecipeValue,
+  cssEscapeRecipeValue,
+  fillTemplate,
+  hasRecipeTargetCandidate,
   isSingleUseUrl,
+  knownRecipeInputValue,
+  operatorRecipeDomain,
+  resolveRecipeFieldTarget,
+  resolveRecipeRepairTarget,
+  resolveRecipeTarget,
+  verifyFilledFieldValues,
   writeRecipe,
 } from "./operator-recipe.js";
 import {
@@ -50,7 +68,13 @@ import {
   resolveCaptureDir,
   type OnboardingRoundCapture,
 } from "./onboarding-capture.js";
-import { promoteToSkill, type PromoteResult } from "./promote-to-skill.js";
+import {
+  promoteToSkill,
+  pickRowDisambiguator,
+  pickStableDomHint,
+  pickHrefHint,
+  type PromoteResult,
+} from "./promote-to-skill.js";
 import { serviceSlugFromHost } from "@trusty-squire/skill-schema";
 import type { PostVerifyStep } from "./provision-types.js";
 import {
@@ -236,7 +260,13 @@ export type ProvisionAction =
   // React card/widget didn't register its onClick (the stochastic radio-card
   // stall). Same target resolution; different dispatch.
   | { kind: "js_click"; target: string }
-  | { kind: "type"; target: string; text: string }
+  | {
+      kind: "type";
+      target: string;
+      text: string;
+      provenance?: RecipeHole;
+      replayRepair?: ReplayRepairBinding;
+    }
   // Choose an option in a native <select> OR a custom listbox/combobox by its
   // visible text (fuzzy, case-insensitive substring). `type` cannot drive these
   // — page.fill throws on a <select> and humanized keystrokes break native
@@ -244,12 +274,23 @@ export type ProvisionAction =
   // browser.selectOption, which already handles both the native and the
   // <li role=option> custom shapes. target = the select/combobox (or its label);
   // text = the option to match (e.g. "South Korea").
-  | { kind: "select"; target: string; text: string }
+  | {
+      kind: "select";
+      target: string;
+      text: string;
+      provenance?: RecipeHole;
+      replayRepair?: ReplayRepairBinding;
+    }
   // Set the country on a phone-number field's dial-code picker. No ref/target
   // — the bot locates a phone-local native <select>, including
   // react-phone-number-input's opacity:0 select that inventory drops. Other
   // widget families are unsupported and throw.
-  | { kind: "set_phone_country"; country: string }
+  | {
+      kind: "set_phone_country";
+      country: string;
+      provenance?: RecipeHole;
+      replayRepair?: ReplayRepairBinding;
+    }
   | { kind: "goto"; url: string }
   | { kind: "press"; key: string }
   // Route an OAuth-provider button through startOAuth so the popup is adopted
@@ -264,7 +305,7 @@ export type ProvisionAction =
   // Sealed credential transfer — type a secret held in a session-local slot
   // into a field, WITHOUT the value ever crossing the MCP boundary to the
   // host. The host orchestrates by slot name; the bot types the real value.
-  | { kind: "type_secret"; slot: string; target: string }
+  | { kind: "type_secret"; slot: string; target: string; provenance?: RecipeHole }
   // Reveal below-the-fold controls on a long SPA form, then re-observe to pick
   // up the newly-visible elements (heavy consoles render fields off-viewport).
   | { kind: "scroll"; direction?: "down" | "up" | "bottom" | "top" }
@@ -273,6 +314,11 @@ export type ProvisionAction =
   // Playwright (filechooser/setInputFiles), so the OS dialog is never driven.
   // Not recorded in skill recipes — a machine-local path isn't portable.
   | { kind: "upload"; target: string; path: string };
+
+export interface ReplayRepairBinding {
+  stepIndex: number;
+  hole: string;
+}
 
 // Where a host on the allow-set came from. start = declared at operate_start;
 // mid_session = added via an allow_host action; auto_widen = an organic
@@ -285,6 +331,33 @@ export type HostSource = "start" | "mid_session" | "auto_widen";
 export interface AllowedHostEntry {
   host: string;
   source: HostSource;
+}
+
+interface ReplayExpectedField {
+  stepIndex: number;
+  hole: string;
+  expected: string;
+  target: RecipeTarget | null;
+  kind: "type" | "select" | "set_phone_country";
+}
+
+interface ReplayState {
+  recipeName: string;
+  recipeHash: string;
+  bindingsHash: string;
+  boundPostcondition: Postcondition;
+  moneyPath: boolean;
+  nextIndex: number | null;
+  expectedFields: Map<number, ReplayExpectedField>;
+  verifiedFields: Set<number>;
+  paymentGuard: "pending" | "verified" | "failed";
+  failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
+}
+
+interface RecordedValueSource {
+  traceIndex: number;
+  hole?: string;
+  literal: string;
 }
 
 interface Session {
@@ -317,6 +390,8 @@ interface Session {
   // be `remember`ed as a replayable rail. Records visible text + non-secret
   // params only — sealed secret values stay in secretSlots, never the trace.
   actionTrace: TraceEntry[];
+  recordedValues: RecordedValueSource[];
+  committedSelectValues: Map<string, string>;
   // MEDIUM capture rounds for skill synthesis at verified success (docs/DESIGN-
   // operator-hints.md): inventory + action + url per step, no screenshots, raw
   // html only on the extract round. Accumulated live; written + promoted at
@@ -347,6 +422,8 @@ interface Session {
   // step — this flag suppresses auto-promotion so no silently-incomplete skill
   // ships (captureAndPromoteSession).
   usedLocatorFallback: boolean;
+  recipeRejectionReason: string | null;
+  replayState: ReplayState | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -1677,8 +1754,12 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     prevObserve: null,
     observeSnapshotFile: null,
     actionTrace: [],
+    recordedValues: [],
+    committedSelectValues: new Map(),
     captureRounds: [],
     usedLocatorFallback: false,
+    recipeRejectionReason: null,
+    replayState: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -1803,7 +1884,7 @@ export function currentProvisionUrl(sessionId: string): string {
 // operate_pay has a deliberately small input contract with no session id: it
 // acts on the one live operator checkout. Fail closed rather than guessing if
 // zero or multiple browser sessions exist.
-export function activeProvisionBrowser(): BrowserController {
+function activeProvisionSession(): Session {
   touchWarmBrowser();
   if (sessions.size !== 1) {
     throw new Error(
@@ -1812,7 +1893,52 @@ export function activeProvisionBrowser(): BrowserController {
         : "operate_pay refused: multiple active browser sessions",
     );
   }
-  return sessions.values().next().value!.browser;
+  const session = sessions.values().next().value!;
+  if (session.replayState?.moneyPath === true && session.replayState.paymentGuard !== "verified") {
+    throw new Error(
+      "operate_pay refused: replay address/contact/quantity verification is not satisfied",
+    );
+  }
+  return session;
+}
+
+export function activeProvisionBrowser(): BrowserController {
+  return activeProvisionSession().browser;
+}
+
+export async function activeProvisionBrowserForPayment(): Promise<BrowserController> {
+  const session = activeProvisionSession();
+  const state = session.replayState;
+  if (state?.moneyPath !== true) return session.browser;
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  for (const expected of state.expectedFields.values()) {
+    if (!state.verifiedFields.has(expected.stepIndex)) continue;
+    if (!(await isReplayFieldMounted(session, expected, fresh))) {
+      markReplayFailure(session, "field_missing", expected.hole);
+      throw new Error(
+        "operate_pay refused: replay address/contact/quantity verification is not satisfied",
+      );
+    }
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    if (!guard.ok) {
+      markReplayFailure(session, guard.reason, expected.hole);
+      throw new Error(
+        "operate_pay refused: replay address/contact/quantity verification is not satisfied",
+      );
+    }
+  }
+  return session.browser;
+}
+
+export function recordActivePaymentProvenance(cardRef: string): void {
+  if (sessions.size !== 1) return;
+  const session = sessions.values().next().value!;
+  const last = session.actionTrace.at(-1)?.action;
+  if (last?.kind === "operate_pay") return;
+  const traceIndex = session.actionTrace.length;
+  session.actionTrace.push({ action: { kind: "operate_pay", value: { hole: "card" } } });
+  session.recordedValues.push({ traceIndex, hole: "card", literal: cardRef });
 }
 
 // PR3c — the user's own email captured at login (the authoritative signup
@@ -2439,7 +2565,18 @@ export async function act(
 ): Promise<Observation> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (
+    action.kind === "type_secret" &&
+    action.provenance !== undefined &&
+    action.provenance.hole !== `credential.${action.slot}`
+  ) {
+    throw new Error(
+      `type_secret provenance must match the authoritative slot credential.${action.slot}`,
+    );
+  }
   const { browser } = session;
+  let completedAction: ProvisionAction = action;
+  let sensitiveSource: RecordedValueSource | undefined;
   const auditTarget =
     "target" in action && parseLocatorTarget(action.target) !== null
       ? "<mode>=<redacted>"
@@ -2478,6 +2615,8 @@ export async function act(
       );
     }
   }
+
+  const recordingTransitionFields = await attestRecordedFieldsBeforeTransition(session, action);
 
   // Captured for the operator-recipe trace: the element a target action
   // resolved to, so we record the VISIBLE text it acted on (not the ref).
@@ -2526,6 +2665,11 @@ export async function act(
             `[${[...session.secretSlots.keys()].join(", ")}]`,
         );
       }
+      sensitiveSource = {
+        traceIndex: -1,
+        hole: `credential.${action.slot}`,
+        literal: value,
+      };
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
       // resolveTarget recomputes identities (incl. volatile positional-group
@@ -2566,7 +2710,9 @@ export async function act(
         );
       }
       resolvedEl = el;
-      await browser.selectOption(el.selector, action.text);
+      const committedText = await browser.selectOption(el.selector, action.text);
+      session.committedSelectValues.set(el.selector, committedText);
+      completedAction = { ...action, text: committedText };
       await settleAfterStateChange(browser);
       break;
     }
@@ -2658,8 +2804,10 @@ export async function act(
       resolvedEl = el;
       if (action.kind === "click") await browser.click(el.selector);
       else if (action.kind === "js_click") await browser.clickViaJs(el.selector);
-      else if (action.kind === "type") await browser.type(el.selector, action.text);
-      else if (action.kind === "upload") {
+      else if (action.kind === "type") {
+        session.committedSelectValues.delete(el.selector);
+        await browser.type(el.selector, action.text);
+      } else if (action.kind === "upload") {
         await browser.uploadFile(el.selector, action.path);
         audit(sessionId, "upload", {
           target: action.target,
@@ -2671,12 +2819,15 @@ export async function act(
       break;
     }
   }
+  await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
+  await captureReplayRepairVerification(session, completedAction, resolvedEl);
+  await refreshReplayVerificationAfterAction(session, completedAction, resolvedEl);
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
   if (!isInboxReadHost(browser.currentUrl())) {
-    recordTrace(session, action, resolvedEl);
-    recordCaptureRound(session, action, resolvedEl, urlBeforeAction);
+    recordTrace(session, completedAction, resolvedEl, sensitiveSource);
+    recordCaptureRound(session, completedAction, resolvedEl, urlBeforeAction);
   }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
@@ -2702,6 +2853,86 @@ export async function act(
 // name keeps its legacy form for corpus compatibility (validateReplayGraph and
 // published skills key off it); it now means "the email to fill", not a Squire alias.
 const EMAIL_SLOT_TEMPLATE = "${EMAIL_ALIAS}";
+
+type EmailEncodingOperation = "URI" | "CSS";
+
+function regexEscape(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function nestedPercentByte(byte: number): string {
+  return `%(?:25)*${byte.toString(16).padStart(2, "0")}`;
+}
+
+function encodedCharacterPattern(char: string): string {
+  const raw = regexEscape(char);
+  const percent = [...Buffer.from(char)].map(nestedPercentByte).join("");
+  const encoded = `(?:${raw}|${percent})`;
+  const slash = `(?:\\\\|${nestedPercentByte(0x5c)})`;
+  const cssSimple = /[a-zA-Z0-9_-]/.test(char) ? null : `${slash}${encoded}`;
+  const cssHex = `${slash}${[...char.codePointAt(0)!.toString(16)]
+    .map((digit) => `(?:${digit}|${nestedPercentByte(digit.charCodeAt(0))})`)
+    .join("")}(?:(?:\\s|${nestedPercentByte(0x20)}))?`;
+  return `(?:${[encoded, cssSimple, cssHex].filter(Boolean).join("|")})`;
+}
+
+function decodeUriLayer(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+function decodeCssLayer(value: string): string {
+  return value.replace(
+    /\\([0-9a-f]{1,6})(?:\r\n|[\t\n\f\r ])?|\\([^\r\n\f])/gi,
+    (_match, hex: string | undefined, escaped: string | undefined) =>
+      hex === undefined ? (escaped ?? "") : String.fromCodePoint(Number.parseInt(hex, 16)),
+  );
+}
+
+function applyEmailEncoding(value: string, operations: readonly EmailEncodingOperation[]): string {
+  return operations.reduce(
+    (encoded, operation) =>
+      operation === "URI" ? encodeURIComponent(encoded) : cssEscapeRecipeValue(encoded),
+    value,
+  );
+}
+
+function emailTemplateForRepresentation(representation: string, email: string): string | null {
+  const queue: Array<{ value: string; inverse: EmailEncodingOperation[] }> = [
+    { value: representation, inverse: [] },
+  ];
+  const seen = new Set<string>();
+  let fallback: EmailEncodingOperation[] | null = null;
+  while (queue.length > 0 && seen.size <= 4096) {
+    const current = queue.shift()!;
+    const key = `${current.value}\0${current.inverse.join("_")}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (current.value.toLowerCase() === email.toLowerCase()) {
+      const operations = [...current.inverse].reverse();
+      if (applyEmailEncoding(email, operations).toLowerCase() === representation.toLowerCase()) {
+        return `\${EMAIL_ALIAS${operations.map((operation) => `_${operation}`).join("")}}`;
+      }
+      fallback ??= operations;
+      continue;
+    }
+    const uriDecoded = decodeUriLayer(current.value);
+    if (uriDecoded !== current.value) {
+      queue.push({ value: uriDecoded, inverse: [...current.inverse, "URI"] });
+    }
+    const cssDecoded = decodeCssLayer(current.value);
+    if (cssDecoded !== current.value) {
+      queue.push({ value: cssDecoded, inverse: [...current.inverse, "CSS"] });
+    }
+  }
+  return fallback === null
+    ? null
+    : `\${EMAIL_ALIAS${fallback.map((operation) => `_${operation}`).join("")}}`;
+}
+const REPLAY_VERIFIED_HOLE = /^(?:address|contact)(?:\.|$)|^quantity$/;
 function looksLikeEmailValue(v: string): boolean {
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
 }
@@ -2719,12 +2950,26 @@ export function redactEmailForTrace(value: string): string {
 // NOT a vector here — that path belonged to the retired autonomous bot and is
 // not wired into operate_*.) Exported for unit tests.
 export function scrubKnownEmail(s: string, userEmail: string | null): string {
-  if (userEmail === null || userEmail.length === 0 || !s.includes(userEmail)) return s;
-  return s.split(userEmail).join(EMAIL_SLOT_TEMPLATE);
+  if (userEmail === null || userEmail.length === 0) return s;
+  const pattern = [...userEmail].map(encodedCharacterPattern).join("");
+  return s.replace(new RegExp(pattern, "gi"), (matched) => {
+    const template = emailTemplateForRepresentation(matched, userEmail);
+    if (template === null) {
+      throw new Error("known email encoding could not be provenance-templated");
+    }
+    return template;
+  });
 }
 
-// Append a TEXT-targeted entry to the session's operator-recipe trace. Stores
-// the visible text the action hit (never a ref/coordinate) + non-secret params.
+function assertRecipeEmailScrubbed(recipe: OperatorRecipe, userEmail: string | null): void {
+  const serialized = JSON.stringify(recipe);
+  if (scrubKnownEmail(serialized, userEmail) !== serialized) {
+    throw new Error("operate_remember refused: known email remains in serialized recipe data");
+  }
+}
+
+// Append a stable-attribute-targeted entry to the session's operator-recipe
+// trace. Stores no ref/coordinate; visible text remains a unique-only fallback.
 // `extract` (the seal) is recorded separately in stashSecretSlot.
 function traceTextFor(el: InteractiveElement | null): string | undefined {
   if (el === null) return undefined;
@@ -2733,10 +2978,83 @@ function traceTextFor(el: InteractiveElement | null): string | undefined {
   return typeof first === "string" && first.length > 0 ? first.slice(0, 120) : undefined;
 }
 
+// Stable attributes already present in the inventory and consumed by the
+// skill synthesizer. Keep all of them; replay chooses in a fixed order.
+export function recipeTargetFor(
+  el: InteractiveElement | null,
+  inventory: readonly InteractiveElement[] = [],
+  userEmail: string | null = null,
+): RecipeTarget | undefined {
+  if (el === null) return undefined;
+  const role =
+    el.role ??
+    (el.tag === "button"
+      ? "button"
+      : el.tag === "a"
+        ? "link"
+        : el.tag === "input" || el.tag === "textarea"
+          ? "textbox"
+          : undefined);
+  const accessibleName =
+    el.ariaLabel ??
+    el.labelText ??
+    el.visibleText ??
+    el.iconLabel ??
+    el.placeholder ??
+    el.title ??
+    el.name ??
+    undefined;
+  const siblings = inventory.filter((candidate) => {
+    if (candidate === el || candidate.selector === el.selector) return false;
+    const candidateName =
+      candidate.ariaLabel ??
+      candidate.labelText ??
+      candidate.visibleText ??
+      candidate.iconLabel ??
+      candidate.placeholder ??
+      candidate.title ??
+      candidate.name ??
+      undefined;
+    return (
+      (el.testId !== null && el.testId !== undefined && candidate.testId === el.testId) ||
+      (el.id !== null && candidate.id === el.id) ||
+      (el.name !== null && candidate.name === el.name) ||
+      (accessibleName !== undefined && candidateName === accessibleName) ||
+      (el.href !== null && el.href !== undefined && candidate.href === el.href)
+    );
+  });
+  const nearText = siblings.length > 0 ? pickRowDisambiguator(el, siblings, inventory) : null;
+  const domHint = pickStableDomHint(el);
+  const hrefHint = pickHrefHint(el);
+  const scrub = (value: string): string => scrubKnownEmail(value, userEmail);
+  return {
+    ...(domHint !== undefined
+      ? {
+          dom_hint: {
+            ...(domHint.testid !== undefined ? { testid: scrub(domHint.testid) } : {}),
+            ...(domHint.id !== undefined ? { id: scrub(domHint.id) } : {}),
+            ...(domHint.name !== undefined ? { name: scrub(domHint.name) } : {}),
+          },
+        }
+      : {}),
+    ...(role !== undefined && role.length > 0 ? { role_hint: scrub(role) } : {}),
+    ...(accessibleName !== undefined && accessibleName.length > 0
+      ? { accessible_name: scrub(accessibleName) }
+      : {}),
+    ...(nearText !== null ? { near_text_hint: scrub(nearText) } : {}),
+    ...(hrefHint !== null && !isSingleUseUrl(el.href ?? "") ? { href_hint: scrub(hrefHint) } : {}),
+    ...(el.selector.length > 0 ? { css: scrub(el.selector) } : {}),
+    ...(el.visibleText !== null && el.visibleText.length > 0
+      ? { visible_text: scrub(el.visibleText) }
+      : {}),
+  };
+}
+
 function recordTrace(
   session: Session,
   action: ProvisionAction,
   el: InteractiveElement | null,
+  sensitiveSource?: RecordedValueSource,
 ): void {
   // Never freeze a single-use link (email-verify / magic / reset token) into
   // the recipe — it's dead on the next replay. The host agent re-plans the
@@ -2756,22 +3074,26 @@ function recordTrace(
   // An upload attaches a machine-local file — not portable, never part of a
   // shared recipe. Skip it here (the action is still in the audit trail).
   if (action.kind === "upload") return;
-  // A native/custom-select pick isn't yet in the portable recipe vocabulary
-  // (TraceAction has no `select` kind). Skip it from the trace like upload — the
-  // action still runs and is audited. Selects were never traceable before this
-  // kind existed, so nothing regresses; wiring select into the replay engine is
-  // a follow-up for when a signup flow needs a replayable dropdown.
-  if (action.kind === "select") return;
-  // set_phone_country has no portable TraceAction kind either — the country is
-  // host-replannable per run, not baked into a shared recipe. Skip like select.
-  if (action.kind === "set_phone_country") return;
+  const knownEmailHole =
+    action.kind === "type" &&
+    action.provenance === undefined &&
+    session.userEmail !== null &&
+    action.text === session.userEmail
+      ? "contact.email"
+      : undefined;
+  const actionHole =
+    action.kind === "type" || action.kind === "select" || action.kind === "set_phone_country"
+      ? (action.provenance?.hole ?? knownEmailHole)
+      : undefined;
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
+  const target = recipeTargetFor(el, session.lastElements, session.userEmail);
+  const withTarget = target !== undefined ? { target } : {};
   let a: TraceAction;
   switch (action.kind) {
     case "goto":
-      a = { kind: "goto", url_template: action.url };
+      a = { kind: "goto", url_template: scrubKnownEmail(action.url, session.userEmail) };
       break;
     case "allow_host":
       a = { kind: "allow_host", host: action.host };
@@ -2792,23 +3114,57 @@ function recordTrace(
       a = {
         kind: "type",
         ...withText,
+        ...withTarget,
         value: scrubKnownEmail(redactEmailForTrace(action.text), session.userEmail),
       };
       break;
     case "type_secret":
-      a = { kind: "type_secret", slot: action.slot, ...withText };
+      a = {
+        kind: "type_secret",
+        slot: action.slot,
+        value: { hole: `credential.${action.slot}` },
+        ...withText,
+        ...withTarget,
+      };
+      break;
+    case "select":
+      a = {
+        kind: "select",
+        value: action.text,
+        ...withText,
+        ...withTarget,
+      };
+      break;
+    case "set_phone_country":
+      a = {
+        kind: "set_phone_country",
+        value: action.country,
+      };
       break;
     case "click":
-      a = { kind: "click", ...withText };
+      a = { kind: "click", ...withText, ...withTarget };
       break;
     case "js_click":
-      a = { kind: "js_click", ...withText };
+      a = { kind: "js_click", ...withText, ...withTarget };
       break;
     case "oauth_click":
-      a = { kind: "oauth_click", ...withText };
+      a = { kind: "oauth_click", ...withText, ...withTarget };
       break;
   }
+  const traceIndex = session.actionTrace.length;
   session.actionTrace.push({ action: a });
+  if (action.kind === "type" || action.kind === "select" || action.kind === "set_phone_country") {
+    session.recordedValues.push({
+      traceIndex,
+      ...(actionHole !== undefined ? { hole: actionHole } : {}),
+      literal: action.kind === "set_phone_country" ? action.country : action.text,
+    });
+  } else if (action.kind === "type_secret") {
+    if (sensitiveSource === undefined) {
+      throw new Error(`type_secret ${action.slot} lacks an action-time source attestation`);
+    }
+    session.recordedValues.push({ ...sensitiveSource, traceIndex });
+  }
 }
 
 // ── Medium capture → skill (docs/DESIGN-operator-hints.md) ──────────────────
@@ -3005,14 +3361,146 @@ async function settleAfterStateChange(browser: BrowserController): Promise<void>
 
 // ── operator-recipe: remember a successful run, verify a postcondition ──
 
-// Persist the session's action trace as a named, replayable operator-recipe.
+// Persist the session's action trace as a keyed, replayable operator-recipe.
 // Sealed secrets become SLOT references (stored:false) — never values. The
 // recipe's scope = start + auto_widen hosts (mid_session crossings replay via
 // the trace's own allow_host steps).
+function verifiedEmailSources(
+  session: Session,
+  inputs: KnownRecipeInputs,
+): Array<RecordedValueSource & { hole: string }> {
+  return session.recordedValues.filter(
+    (source): source is RecordedValueSource & { hole: string } =>
+      source.hole !== undefined &&
+      session.userEmail !== null &&
+      source.literal === session.userEmail &&
+      looksLikeEmailValue(source.literal) &&
+      knownRecipeInputValue(inputs, source.hole) === source.literal,
+  );
+}
+
+function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs): TraceEntry[] {
+  const trace = session.actionTrace.map((entry) => ({
+    ...entry,
+    action: { ...entry.action },
+  }));
+  const recordedIndexes = new Set<number>();
+  for (const source of session.recordedValues) {
+    if (recordedIndexes.has(source.traceIndex)) {
+      throw new Error(`duplicate value source for trace step ${source.traceIndex}`);
+    }
+    recordedIndexes.add(source.traceIndex);
+    if (source.hole === undefined) {
+      throw new Error(`value at trace step ${source.traceIndex} lacks explicit provenance`);
+    }
+    const authoritative = knownRecipeInputValue(inputs, source.hole);
+    if (authoritative === undefined) {
+      throw new Error(`provenance ${source.hole} has no authoritative operate_remember input`);
+    }
+    if (authoritative !== source.literal) {
+      throw new Error(`provenance ${source.hole} does not match the injected value`);
+    }
+    const entry = trace[source.traceIndex];
+    if (entry === undefined) {
+      throw new Error(`provenance ${source.hole} is not bound to a recorded value action`);
+    }
+    if (
+      (entry.action.kind === "type" ||
+        entry.action.kind === "select" ||
+        entry.action.kind === "set_phone_country") &&
+      typeof entry.action.value === "string"
+    ) {
+      entry.action.value = { hole: source.hole };
+      continue;
+    }
+    if (
+      (entry.action.kind === "type_secret" || entry.action.kind === "operate_pay") &&
+      typeof entry.action.value !== "string" &&
+      entry.action.value?.hole === source.hole
+    ) {
+      continue;
+    }
+    throw new Error(`provenance ${source.hole} is not bound to a recorded value action`);
+  }
+  const emailSources = verifiedEmailSources(session, inputs);
+  const emailHoles = new Set(emailSources.map((source) => source.hole));
+  for (const [traceIndex, entry] of trace.entries()) {
+    const targetText = JSON.stringify({
+      text_match: entry.action.text_match,
+      target: entry.action.target,
+      url_template: entry.action.url_template,
+    });
+    if (!targetText.includes("${EMAIL_ALIAS")) continue;
+    const directEmailHole = emailSources.find((source) => source.traceIndex === traceIndex)?.hole;
+    if (directEmailHole === undefined && emailHoles.size !== 1) {
+      throw new Error("known-email target lacks one unambiguous action-time source hole");
+    }
+    const emailHole = directEmailHole ?? [...emailHoles][0]!;
+    entry.action.email_hole = emailHole;
+  }
+  for (const [traceIndex, entry] of trace.entries()) {
+    const value = entry.action.value;
+    if (value === undefined || typeof value === "string" || recordedIndexes.has(traceIndex)) {
+      continue;
+    }
+    throw new Error(`provenance ${value.hole} lacks an action-time source attestation`);
+  }
+  return trace;
+}
+
+function scrubRecipePostcondition(
+  session: Session,
+  postcondition: Postcondition,
+  inputs: KnownRecipeInputs,
+): Postcondition {
+  const probeUrl =
+    postcondition.probe_url === undefined
+      ? undefined
+      : scrubKnownEmail(postcondition.probe_url, session.userEmail);
+  const signal = postcondition.success_signal;
+  const successSignal =
+    "url_contains" in signal
+      ? { url_contains: scrubKnownEmail(signal.url_contains, session.userEmail) }
+      : signal;
+  const hasTemplate =
+    probeUrl?.includes("${EMAIL_ALIAS") === true ||
+    ("url_contains" in successSignal && successSignal.url_contains.includes("${EMAIL_ALIAS"));
+  const base = { kind: postcondition.kind, describe: postcondition.describe };
+  if (!hasTemplate) {
+    return {
+      ...base,
+      ...(probeUrl !== undefined ? { probe_url: probeUrl } : {}),
+      success_signal: successSignal,
+    };
+  }
+  const holes = [...new Set(verifiedEmailSources(session, inputs).map((source) => source.hole))];
+  if (holes.length !== 1) {
+    throw new Error("known-email postcondition lacks one unambiguous action-time source hole");
+  }
+  return {
+    ...base,
+    ...(probeUrl !== undefined ? { probe_url: probeUrl } : {}),
+    success_signal: successSignal,
+    email_hole: holes[0],
+  };
+}
+
 export async function rememberRecipe(
   sessionId: string,
-  opts: { name: string; goal: string; postcondition: Postcondition },
-): Promise<{ file: string; name: string; steps: number; secrets: string[] }> {
+  opts: {
+    name: string;
+    goal: string;
+    postcondition: Postcondition;
+    verb?: OperatorVerb;
+    inputs: KnownRecipeInputs;
+  },
+): Promise<{
+  file: string;
+  name: string;
+  steps: number;
+  secrets: string[];
+  verified: PostconditionResult;
+}> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.usedLocatorFallback) {
@@ -3020,19 +3508,47 @@ export async function rememberRecipe(
       "operate_remember refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
     );
   }
+  if (session.recipeRejectionReason !== null) {
+    throw new Error(`operate_remember refused: ${session.recipeRejectionReason}`);
+  }
+  if (opts.inputs === undefined) {
+    throw new Error("operate_remember refused: complete provenance inputs are required");
+  }
+  // Record only through the existing machine-checkable success gate. Previously
+  // operate_remember wrote first and operate_finish_task verified later, leaving
+  // an unverified recipe on disk when the postcondition failed.
+  const verified = await verifyPostcondition(sessionId, opts.postcondition);
+  if (!verified.confirmed) {
+    throw new Error(`operate_remember refused: postcondition not confirmed (${verified.reason})`);
+  }
   const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
+  const scrubbedStartUrl = scrubKnownEmail(session.startUrl, session.userEmail);
+  const trace = traceWithVerifiedProvenance(session, opts.inputs);
+  const postcondition = scrubRecipePostcondition(session, opts.postcondition, opts.inputs);
   const recipe: OperatorRecipe = {
     name: opts.name,
     schema_version: 1,
     goal: opts.goal,
+    ...(opts.verb !== undefined
+      ? { verb: opts.verb, domain: operatorRecipeDomain(session.startUrl) }
+      : {}),
     // Canonical, stable replay entry — the page the session started at, never a
     // mid-flow single-use link inferred from the trace.
-    entry_url: session.startUrl,
+    ...(isSingleUseUrl(session.startUrl) || scrubbedStartUrl !== session.startUrl
+      ? { entry_mode: "runtime_service_url" as const }
+      : { entry_url: session.startUrl }),
     allowed_hosts: [...new Set(egressSeedHosts(session))],
-    trace: session.actionTrace,
+    trace,
     secrets,
-    postcondition: opts.postcondition,
+    postcondition,
   };
+  assertRecipeEmailScrubbed(recipe, session.userEmail);
+  const unprovenancedMoneyField = findUnprovenancedMoneyField(recipe);
+  if (unprovenancedMoneyField !== null) {
+    throw new Error(
+      `operate_remember refused: money field lacks provenance (${unprovenancedMoneyField})`,
+    );
+  }
   const file = await writeRecipe(recipe);
   audit(sessionId, "remember_recipe", {
     name: opts.name,
@@ -3040,7 +3556,13 @@ export async function rememberRecipe(
     secrets: secrets.length,
     file,
   });
-  return { file, name: opts.name, steps: recipe.trace.length, secrets: secrets.map((s) => s.slot) };
+  return {
+    file,
+    name: opts.name,
+    steps: recipe.trace.length,
+    secrets: secrets.map((s) => s.slot),
+    verified,
+  };
 }
 
 // Read a single page snapshot for postcondition checking. Field VALUES are
@@ -3083,6 +3605,797 @@ export async function verifyPostcondition(
     reason: result.reason,
   });
   return result;
+}
+
+export async function verifySavedRecipePostcondition(
+  sessionId: string,
+  recipe: OperatorRecipe,
+): Promise<PostconditionResult> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const state = session.replayState;
+  if (state !== null && state.recipeHash === replayDigest(recipe)) {
+    return await verifyPostcondition(sessionId, state.boundPostcondition);
+  }
+  let postcondition: Postcondition;
+  try {
+    postcondition = bindRecipePostcondition(recipe.postcondition, {});
+  } catch {
+    throw new Error("saved recipe postcondition requires bindings from its active replay");
+  }
+  return await verifyPostcondition(sessionId, postcondition);
+}
+
+export async function verifyActiveRecipePostcondition(
+  sessionId: string,
+  recipeName: string,
+): Promise<PostconditionResult | null> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const state = session.replayState;
+  if (state === null) return null;
+  if (state.recipeName !== recipeName) {
+    throw new Error(`verify_recipe ${recipeName} does not match active replay ${state.recipeName}`);
+  }
+  return await verifyPostcondition(sessionId, state.boundPostcondition);
+}
+
+const MONEY_REPLAY_VERBS = new Set<OperatorVerb>([
+  "purchase",
+  "subscribe",
+  "checkout",
+  "renew",
+  "upgrade",
+  "book",
+  "reserve",
+]);
+
+export type OperatorReplayResult =
+  | {
+      status: "complete";
+      observation: Observation;
+      replayed_steps: number;
+      field_values_verified: boolean;
+    }
+  | {
+      status: "fallback_required";
+      observation: Observation;
+      step_index: number;
+      next_index: number;
+      step: TraceEntry;
+      reason: string;
+    }
+  | {
+      status: "human_required";
+      observation: Observation;
+      reason: "field_missing" | "field_value_mismatch";
+      field: string;
+    };
+
+function replayTarget(action: TraceAction): RecipeTarget | null {
+  return action.target !== undefined
+    ? action.target
+    : action.text_match !== undefined
+      ? { visible_text: action.text_match }
+      : null;
+}
+
+function boundReplayTarget(
+  action: TraceAction,
+  bindings: Readonly<Record<string, string>>,
+): RecipeTarget | null {
+  const target =
+    action.target !== undefined
+      ? action.target
+      : action.text_match !== undefined
+        ? { visible_text: action.text_match }
+        : null;
+  return target === null ? null : bindRecipeTarget(target, bindings, action.email_hole);
+}
+
+const MONEY_FIELD_TARGET =
+  /(?:^|[\s._-])(?:address|street|line\s*[12]|city|state|province|postal|zip|country|e-?mail|phone|first\s*name|last\s*name|full\s*name|quantity|qty)(?:$|[\s._-])/i;
+
+function moneyFieldName(action: TraceAction): string | null {
+  if (action.kind === "set_phone_country") return "phone_country";
+  if (action.kind !== "type" && action.kind !== "select") return null;
+  const target = replayTarget(action);
+  if (target === null) return null;
+  const label = [
+    target.dom_hint?.testid,
+    target.dom_hint?.id,
+    target.dom_hint?.name,
+    target.accessible_name,
+    target.visible_text,
+  ]
+    .filter((value): value is string => value !== undefined)
+    .join(" ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2");
+  return MONEY_FIELD_TARGET.test(label) ? label || "field" : null;
+}
+
+function findUnprovenancedMoneyField(recipe: OperatorRecipe): string | null {
+  if (recipe.verb === undefined || !MONEY_REPLAY_VERBS.has(recipe.verb)) return null;
+  for (const { action } of recipe.trace) {
+    const field = moneyFieldName(action);
+    if (field !== null && typeof action.value === "string") return field;
+  }
+  return null;
+}
+
+function replayDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+
+function bindingDigest(bindings: Readonly<Record<string, string>>): string {
+  return replayDigest(
+    Object.entries(bindings)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, value]) => [key, value]),
+  );
+}
+
+function expectedReplayFields(
+  recipe: OperatorRecipe,
+  bindings: Readonly<Record<string, string>>,
+): { fields: Map<number, ReplayExpectedField>; missing: string | null } {
+  const fields = new Map<number, ReplayExpectedField>();
+  for (let stepIndex = 0; stepIndex < recipe.trace.length; stepIndex += 1) {
+    const action = recipe.trace[stepIndex]!.action;
+    const unprovenanced = moneyFieldName(action);
+    if (unprovenanced !== null && typeof action.value === "string") {
+      return { fields, missing: unprovenanced };
+    }
+    if (
+      (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country") ||
+      action.value === undefined ||
+      typeof action.value === "string" ||
+      !REPLAY_VERIFIED_HOLE.test(action.value.hole)
+    ) {
+      continue;
+    }
+    const expected = bindings[action.value.hole];
+    if (expected === undefined) return { fields, missing: action.value.hole };
+    let target: RecipeTarget | null;
+    try {
+      target = boundReplayTarget(action, bindings);
+    } catch {
+      return { fields, missing: action.email_hole ?? "email_target" };
+    }
+    fields.set(stepIndex, {
+      stepIndex,
+      hole: action.value.hole,
+      expected,
+      target,
+      kind: action.kind,
+    });
+  }
+  return { fields, missing: null };
+}
+
+function markReplayFailure(
+  session: Session,
+  reason: "field_missing" | "field_value_mismatch",
+  field: string,
+): void {
+  rejectRecipeRecording(session, `replay transition failed (${field}: ${reason})`);
+  if (session.replayState === null) return;
+  session.replayState.paymentGuard = "failed";
+  session.replayState.failure = { reason, field };
+  audit(session.id, "replay_field_value_guard", { ok: false, reason, field });
+}
+
+function verifyReplayFieldInElements(
+  session: Session,
+  expected: ReplayExpectedField,
+  elements: readonly InteractiveElement[],
+  allowCommittedSelect = false,
+): { ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" } {
+  if (expected.kind === "set_phone_country" || expected.target === null) {
+    return { ok: false, reason: "field_missing" };
+  }
+  const resolution = resolveRecipeFieldTarget(elements, expected.target);
+  if (resolution === null) return { ok: false, reason: "field_missing" };
+  const guard = verifyFilledFieldValues(elements, [
+    {
+      target: expected.target,
+      expected: expected.expected,
+      hole: expected.hole,
+      kind: expected.kind === "select" ? "select" : "type",
+    },
+  ]);
+  if (guard.ok) {
+    if (expected.kind === "select") {
+      session.committedSelectValues.delete(resolution.element.selector);
+    }
+    return { ok: true };
+  }
+  if (
+    allowCommittedSelect &&
+    expected.kind === "select" &&
+    session.committedSelectValues.get(resolution.element.selector) === expected.expected
+  ) {
+    session.committedSelectValues.delete(resolution.element.selector);
+    return { ok: true };
+  }
+  if (expected.kind === "select") {
+    session.committedSelectValues.delete(resolution.element.selector);
+  }
+  return { ok: false, reason: guard.reason };
+}
+
+async function verifyReplayField(
+  session: Session,
+  expected: ReplayExpectedField,
+  allowCommittedSelect = false,
+): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
+  if (expected.kind === "set_phone_country") {
+    return (await session.browser.verifyPhoneCountry(expected.expected))
+      ? { ok: true }
+      : { ok: false, reason: "field_value_mismatch" };
+  }
+  const target = expected.target;
+  if (target === null) return { ok: false, reason: "field_missing" };
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  return verifyReplayFieldInElements(session, expected, fresh, allowCommittedSelect);
+}
+
+async function verifyReplayFieldWithElements(
+  session: Session,
+  expected: ReplayExpectedField,
+  elements: readonly InteractiveElement[],
+  allowCommittedSelect = false,
+): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
+  if (expected.kind === "set_phone_country") {
+    return (await session.browser.verifyPhoneCountry(expected.expected))
+      ? { ok: true }
+      : { ok: false, reason: "field_value_mismatch" };
+  }
+  return verifyReplayFieldInElements(session, expected, elements, allowCommittedSelect);
+}
+
+async function isReplayFieldMounted(
+  session: Session,
+  expected: ReplayExpectedField,
+  elements: readonly InteractiveElement[],
+): Promise<boolean> {
+  if (expected.kind === "set_phone_country") {
+    return await session.browser.hasPhoneCountryControl();
+  }
+  return expected.target !== null && hasRecipeTargetCandidate(elements, expected.target);
+}
+
+async function captureReplayRepairVerification(
+  session: Session,
+  action: ProvisionAction,
+  resolvedEl: InteractiveElement | null,
+): Promise<void> {
+  const state = session.replayState;
+  if (state === null || state.nextIndex === null || !state.moneyPath) return;
+  const stepIndex = state.nextIndex - 1;
+  const expected = state.expectedFields.get(stepIndex);
+  if (expected === undefined) return;
+  if (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country") {
+    return;
+  }
+  if (
+    action.replayRepair === undefined ||
+    action.replayRepair.stepIndex !== stepIndex ||
+    action.replayRepair.hole !== expected.hole
+  ) {
+    throw new Error(`replay repair must bind to step ${stepIndex} and ${expected.hole}`);
+  }
+  const supplied =
+    action.kind === "type" || action.kind === "select"
+      ? action.text
+      : action.kind === "set_phone_country"
+        ? action.country
+        : null;
+  if (supplied === null) return;
+  if (supplied !== expected.expected) {
+    markReplayFailure(session, "field_value_mismatch", expected.hole);
+    throw new Error(`replay repair value mismatch for ${expected.hole}`);
+  }
+  if (action.kind === "set_phone_country") {
+    const guard = await verifyReplayField(session, expected);
+    if (!guard.ok) {
+      markReplayFailure(session, guard.reason, expected.hole);
+      throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
+    }
+    state.verifiedFields.add(stepIndex);
+    return;
+  }
+  const recordedResolution =
+    expected.target === null
+      ? null
+      : resolveRecipeFieldTarget(session.lastElements, expected.target);
+  if (resolvedEl === null) {
+    throw new Error(`replay repair target mismatch for ${expected.hole}`);
+  }
+  const recordedTargetMatches = recordedResolution?.element.selector === resolvedEl.selector;
+  const semanticResolution =
+    expected.target === null
+      ? null
+      : resolveRecipeRepairTarget(session.lastElements, expected.target);
+  const replacementSemanticsMatch = semanticResolution?.selector === resolvedEl.selector;
+  if (!recordedTargetMatches && !replacementSemanticsMatch) {
+    throw new Error(`replay repair target mismatch for ${expected.hole}`);
+  }
+  const replacementTarget = recipeTargetFor(resolvedEl, session.lastElements, session.userEmail);
+  if (replacementTarget === undefined) {
+    throw new Error(`replay repair target could not be attested for ${expected.hole}`);
+  }
+  expected.target = replacementTarget;
+  const guard = await verifyReplayField(session, expected, action.kind === "select");
+  if (!guard.ok) {
+    markReplayFailure(session, guard.reason, expected.hole);
+    throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
+  }
+  state.verifiedFields.add(stepIndex);
+}
+
+async function refreshReplayVerificationAfterAction(
+  session: Session,
+  action: ProvisionAction,
+  resolvedEl: InteractiveElement | null,
+): Promise<void> {
+  const state = session.replayState;
+  if (
+    state === null ||
+    !state.moneyPath ||
+    state.nextIndex !== null ||
+    state.paymentGuard !== "verified" ||
+    (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country")
+  ) {
+    return;
+  }
+  const affected = [...state.expectedFields.values()].filter((expected) => {
+    if (action.kind === "set_phone_country") return expected.kind === "set_phone_country";
+    if (expected.target === null || resolvedEl === null) return false;
+    return (
+      resolveRecipeFieldTarget(session.lastElements, expected.target)?.element.selector ===
+      resolvedEl.selector
+    );
+  });
+  for (const expected of affected) {
+    state.verifiedFields.delete(expected.stepIndex);
+    state.paymentGuard = "pending";
+    const supplied = action.kind === "set_phone_country" ? action.country : action.text;
+    if (supplied !== expected.expected) {
+      markReplayFailure(session, "field_value_mismatch", expected.hole);
+      throw new Error(`replay field value mismatch for ${expected.hole}`);
+    }
+    const guard = await verifyReplayField(session, expected, action.kind === "select");
+    if (!guard.ok) {
+      markReplayFailure(session, guard.reason, expected.hole);
+      throw new Error(`replay field verification failed for ${expected.hole}: ${guard.reason}`);
+    }
+    state.verifiedFields.add(expected.stepIndex);
+  }
+  if (state.verifiedFields.size === state.expectedFields.size) state.paymentGuard = "verified";
+}
+
+function isReplayTransitionAction(action: ProvisionAction): boolean {
+  return (
+    action.kind !== "type" &&
+    action.kind !== "select" &&
+    action.kind !== "set_phone_country" &&
+    action.kind !== "allow_host"
+  );
+}
+
+function rejectRecipeRecording(session: Session, reason: string): void {
+  session.recipeRejectionReason ??= reason;
+}
+
+function recordedMoneyFields(session: Session): ReplayExpectedField[] {
+  const fields: ReplayExpectedField[] = [];
+  for (const source of session.recordedValues) {
+    if (source.hole === undefined || !REPLAY_VERIFIED_HOLE.test(source.hole)) continue;
+    const action = session.actionTrace[source.traceIndex]?.action;
+    if (
+      action === undefined ||
+      (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country")
+    ) {
+      continue;
+    }
+    let target: RecipeTarget | null = null;
+    if (action.kind !== "set_phone_country") {
+      try {
+        target = boundReplayTarget(
+          { ...action, email_hole: source.hole },
+          { [source.hole]: source.literal },
+        );
+      } catch {
+        target = null;
+      }
+    }
+    fields.push({
+      stepIndex: source.traceIndex,
+      hole: source.hole,
+      expected: source.literal,
+      target,
+      kind: action.kind,
+    });
+  }
+  return fields;
+}
+
+async function attestRecordedFieldsBeforeTransition(
+  session: Session,
+  action: ProvisionAction,
+): Promise<ReplayExpectedField[]> {
+  if (session.replayState !== null || !isReplayTransitionAction(action)) return [];
+  const fields = recordedMoneyFields(session);
+  if (fields.length === 0) return fields;
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  for (const expected of fields) {
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    if (!guard.ok) {
+      rejectRecipeRecording(
+        session,
+        `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
+      );
+      return [];
+    }
+  }
+  return fields;
+}
+
+async function verifyRecordedFieldsAfterTransition(
+  session: Session,
+  action: ProvisionAction,
+  fields: readonly ReplayExpectedField[],
+): Promise<void> {
+  if (session.replayState !== null || !isReplayTransitionAction(action) || fields.length === 0) {
+    return;
+  }
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  for (const expected of fields) {
+    if (!(await isReplayFieldMounted(session, expected, fresh))) {
+      rejectRecipeRecording(
+        session,
+        `checkout transition could not be attested (${expected.hole}: field_missing)`,
+      );
+      return;
+    }
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    if (!guard.ok) {
+      rejectRecipeRecording(
+        session,
+        `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
+      );
+      return;
+    }
+  }
+}
+
+async function attestReplayFieldsBeforeTransition(
+  session: Session,
+  action: ProvisionAction,
+): Promise<
+  | { ok: true; fields: Set<number> }
+  | { ok: false; reason: "field_missing" | "field_value_mismatch"; field: string }
+> {
+  const state = session.replayState;
+  const fields = new Set<number>();
+  if (state === null || !state.moneyPath || !isReplayTransitionAction(action)) {
+    return { ok: true, fields };
+  }
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  for (const expected of state.expectedFields.values()) {
+    if (
+      !state.verifiedFields.has(expected.stepIndex) ||
+      (expected.target === null && expected.kind !== "set_phone_country")
+    ) {
+      continue;
+    }
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    if (!guard.ok) {
+      return { ok: false, reason: guard.reason, field: expected.hole };
+    }
+    fields.add(expected.stepIndex);
+  }
+  return { ok: true, fields };
+}
+
+async function verifyReplayFieldsAfterTransition(
+  session: Session,
+  action: ProvisionAction,
+  attestedFields: ReadonlySet<number>,
+): Promise<
+  { ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch"; field: string }
+> {
+  const state = session.replayState;
+  if (state === null || !state.moneyPath || !isReplayTransitionAction(action)) {
+    return { ok: true };
+  }
+  const fresh = await session.browser.extractInteractiveElements();
+  session.lastElements = fresh;
+  for (const stepIndex of attestedFields) {
+    const expected = state.expectedFields.get(stepIndex);
+    if (expected === undefined) continue;
+    if (!(await isReplayFieldMounted(session, expected, fresh))) {
+      return { ok: false, reason: "field_missing", field: expected.hole };
+    }
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    if (!guard.ok) {
+      return { ok: false, reason: guard.reason, field: expected.hole };
+    }
+  }
+  return { ok: true };
+}
+
+/**
+ * Execute deterministic recipe steps until completion or one local miss.
+ * A miss is returned to the host with a continuation index; after the host
+ * repairs that one step, calling again with `fromIndex=next_index` continues.
+ */
+export async function replayOperatorRecipe(
+  sessionId: string,
+  recipe: OperatorRecipe,
+  bindings: Readonly<Record<string, string>>,
+  fromIndex = 0,
+): Promise<OperatorReplayResult> {
+  const session = sessions.get(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const recipeHash = replayDigest(recipe);
+  const bindingsHash = bindingDigest(bindings);
+  const boundPostcondition = bindRecipePostcondition(recipe.postcondition, bindings);
+  if (recipe.verb === undefined || recipe.domain === undefined) {
+    throw new Error("legacy named recipes are hint-only and cannot replay deterministically");
+  }
+  const isMoneyPath = MONEY_REPLAY_VERBS.has(recipe.verb);
+  let state: ReplayState;
+
+  const humanRequired = async (
+    reason: "field_missing" | "field_value_mismatch",
+    field: string,
+  ): Promise<OperatorReplayResult> => {
+    markReplayFailure(session, reason, field);
+    return { status: "human_required", observation: await observe(sessionId), reason, field };
+  };
+
+  if (fromIndex === 0) {
+    if (session.replayState !== null) {
+      throw new Error("replay already started in this session; use the issued continuation");
+    }
+    const expected = expectedReplayFields(recipe, bindings);
+    state = {
+      recipeName: recipe.name,
+      recipeHash,
+      bindingsHash,
+      boundPostcondition,
+      moneyPath: isMoneyPath,
+      nextIndex: null,
+      expectedFields: expected.fields,
+      verifiedFields: new Set(),
+      paymentGuard: isMoneyPath ? "pending" : "verified",
+    };
+    session.replayState = state;
+    if (expected.missing !== null) return await humanRequired("field_missing", expected.missing);
+  } else {
+    state = session.replayState!;
+    if (
+      state === null ||
+      state.recipeHash !== recipeHash ||
+      state.bindingsHash !== bindingsHash ||
+      state.nextIndex !== fromIndex
+    ) {
+      throw new Error("invalid replay continuation: resume_from was not issued for this session");
+    }
+    if (state.failure !== undefined) {
+      return await humanRequired(state.failure.reason, state.failure.field);
+    }
+    const repairedField = state.expectedFields.get(fromIndex - 1);
+    if (repairedField !== undefined && !state.verifiedFields.has(fromIndex - 1)) {
+      const guard = await verifyReplayField(session, repairedField);
+      if (!guard.ok) return await humanRequired(guard.reason, repairedField.hole);
+      state.verifiedFields.add(fromIndex - 1);
+    }
+    state.nextIndex = null;
+  }
+
+  let replayed = 0;
+
+  const fallback = async (
+    step: TraceEntry,
+    stepIndex: number,
+    reason: string,
+  ): Promise<OperatorReplayResult> => {
+    state.nextIndex = stepIndex + 1;
+    if (
+      step.action.kind === "operate_pay" &&
+      state.verifiedFields.size === state.expectedFields.size
+    ) {
+      state.paymentGuard = "verified";
+    }
+    return {
+      status: "fallback_required",
+      observation: await observe(sessionId),
+      step_index: stepIndex,
+      next_index: stepIndex + 1,
+      step,
+      reason,
+    };
+  };
+
+  for (let i = fromIndex; i < recipe.trace.length; i += 1) {
+    const step = recipe.trace[i] as TraceEntry;
+    const recorded = step.action;
+    let action: ProvisionAction;
+
+    if (recorded.kind === "extract") {
+      return await fallback(
+        step,
+        i,
+        "credential extraction requires host planning on the live page",
+      );
+    }
+
+    if (recorded.kind === "operate_pay") {
+      return await fallback(step, i, "payment requires the existing operate_pay approval flow");
+    }
+
+    if (recorded.kind === "goto") {
+      if (recorded.url_template === undefined) {
+        return await fallback(step, i, "goto step has no URL");
+      }
+      let urlTemplate: string;
+      try {
+        urlTemplate = bindKnownEmailTemplate(recorded.url_template, bindings, recorded.email_hole);
+      } catch (error) {
+        return await fallback(step, i, error instanceof Error ? error.message : String(error));
+      }
+      const filled = fillTemplate(urlTemplate, bindings as Record<string, string>);
+      if (filled.missing.length > 0) {
+        return await fallback(step, i, `missing bindings: ${filled.missing.join(", ")}`);
+      }
+      action = { kind: "goto", url: filled.url };
+    } else if (recorded.kind === "allow_host") {
+      if (recorded.host === undefined) {
+        return await fallback(step, i, "allow_host step has no host");
+      }
+      action = { kind: "allow_host", host: recorded.host };
+    } else if (recorded.kind === "press") {
+      if (recorded.key === undefined) {
+        return await fallback(step, i, "press step has no key");
+      }
+      action = { kind: "press", key: recorded.key };
+    } else if (recorded.kind === "oauth_settle") {
+      action = { kind: "oauth_settle" };
+    } else if (recorded.kind === "scroll") {
+      action = {
+        kind: "scroll",
+        ...(recorded.direction !== undefined ? { direction: recorded.direction } : {}),
+      };
+    } else if (recorded.kind === "set_phone_country") {
+      if (recorded.value === undefined) {
+        return await fallback(step, i, "set_phone_country step has no value");
+      }
+      try {
+        action = {
+          kind: "set_phone_country",
+          country: bindRecipeValue(recorded.value, bindings),
+          ...(typeof recorded.value === "string" ? {} : { provenance: recorded.value }),
+        };
+      } catch (error) {
+        return await fallback(step, i, error instanceof Error ? error.message : String(error));
+      }
+    } else {
+      let target: RecipeTarget | null;
+      try {
+        target = boundReplayTarget(recorded, bindings);
+      } catch (error) {
+        return await fallback(step, i, error instanceof Error ? error.message : String(error));
+      }
+      if (target === null) {
+        return await fallback(step, i, "step has no replay target");
+      }
+      // Structural pre-check: resolve against the live inventory before every
+      // deterministic act. This is especially load-bearing on money paths.
+      const fresh = await session.browser.extractInteractiveElements();
+      session.lastElements = fresh;
+      const expectedForStep = state.expectedFields.get(i);
+      const resolution =
+        expectedForStep === undefined
+          ? resolveRecipeTarget(fresh, target)
+          : resolveRecipeFieldTarget(fresh, target);
+      if (resolution === null) {
+        return await fallback(step, i, "ordered target resolver missed");
+      }
+      const ref = provisionElementRefs(fresh).get(resolution.element);
+      if (ref === undefined) {
+        return await fallback(step, i, "resolved target has no live ref");
+      }
+      if (recorded.kind === "type" || recorded.kind === "select") {
+        if (recorded.value === undefined) {
+          return await fallback(step, i, `${recorded.kind} step has no value`);
+        }
+        let text: string;
+        try {
+          text = bindRecipeValue(recorded.value, bindings);
+        } catch (error) {
+          return await fallback(step, i, error instanceof Error ? error.message : String(error));
+        }
+        action =
+          recorded.kind === "type"
+            ? {
+                kind: "type",
+                target: ref,
+                text,
+                ...(typeof recorded.value === "string" ? {} : { provenance: recorded.value }),
+              }
+            : {
+                kind: "select",
+                target: ref,
+                text,
+                ...(typeof recorded.value === "string" ? {} : { provenance: recorded.value }),
+              };
+      } else if (recorded.kind === "type_secret") {
+        if (recorded.slot === undefined) {
+          return await fallback(step, i, "type_secret step has no slot");
+        }
+        action = { kind: "type_secret", target: ref, slot: recorded.slot };
+      } else if (recorded.kind === "click") {
+        action = { kind: "click", target: ref };
+      } else if (recorded.kind === "js_click") {
+        action = { kind: "js_click", target: ref };
+      } else {
+        action = { kind: "oauth_click", target: ref };
+      }
+    }
+
+    try {
+      const transitionAttestation = await attestReplayFieldsBeforeTransition(session, action);
+      if (!transitionAttestation.ok) {
+        return await humanRequired(transitionAttestation.reason, transitionAttestation.field);
+      }
+      await act(sessionId, action, "none");
+      replayed += 1;
+      const expected = state.expectedFields.get(i);
+      if (expected !== undefined) {
+        const guard = await verifyReplayField(session, expected, expected.kind === "select");
+        if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
+        state.verifiedFields.add(i);
+      }
+      const transitionGuard = await verifyReplayFieldsAfterTransition(
+        session,
+        action,
+        transitionAttestation.fields,
+      );
+      if (!transitionGuard.ok) {
+        return await humanRequired(transitionGuard.reason, transitionGuard.field);
+      }
+    } catch (error) {
+      return await fallback(step, i, error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  if (isMoneyPath) {
+    const unverified = [...state.expectedFields.values()].find(
+      (expected) => !state.verifiedFields.has(expected.stepIndex),
+    );
+    if (unverified !== undefined) {
+      return await humanRequired("field_missing", unverified.hole);
+    }
+    state.paymentGuard = "verified";
+    audit(sessionId, "replay_field_value_guard", {
+      ok: true,
+      fields: state.expectedFields.size,
+    });
+  }
+
+  return {
+    status: "complete",
+    observation: await observe(sessionId),
+    replayed_steps: replayed,
+    field_values_verified: isMoneyPath,
+  };
 }
 
 // ── extraction (the `extract` thick tool) ──

@@ -24,8 +24,10 @@ import {
   getSessionUserEmail,
   generatePassword,
   rememberRecipe,
-  verifyPostcondition,
+  verifyActiveRecipePostcondition,
+  verifySavedRecipePostcondition,
   captureAndPromoteSession,
+  replayOperatorRecipe,
   emitProvisionMeasurement,
   type ProvisionAction,
   type ExtractResult,
@@ -33,9 +35,12 @@ import {
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
   readRecipe,
+  readRecipeForTask,
   renderOperatorRecipeHint,
   recipeEntryUrl,
   fillTemplate,
+  OperatorVerbSchema,
+  RecipeHoleSchema,
   PostconditionSchema,
 } from "../bot/operator-recipe.js";
 import { isMaskedDisplay } from "../bot/credential-shape.js";
@@ -246,44 +251,97 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   },
 };
 
-const actSchema = z.object({
-  session_id: z.string().min(1),
-  kind: z.enum([
-    "click",
-    "js_click",
-    "type",
-    "select",
-    "set_phone_country",
-    "goto",
-    "press",
-    "oauth_click",
-    "oauth_settle",
-    "allow_host",
-    "type_secret",
-    "scroll",
-    "upload",
-  ]),
-  target: z.string().min(1).max(200).optional(),
-  text: z.string().max(4096).optional(),
-  // set_phone_country supports phone-local native country <select> controls.
-  country: z.string().min(1).max(60).optional(),
-  // upload: absolute path to a LOCAL file to attach to `target` (the upload
-  // button/menu-item, or the file <input>).
-  path: z.string().min(1).max(4096).optional(),
-  url: z.string().url().optional(),
-  key: z.string().min(1).max(40).optional(),
-  // allow_host: a bare hostname to cross into mid-session.
-  host: z.string().min(1).max(253).optional(),
-  // type_secret: the sealed slot whose value to type into `target`.
-  slot: z.string().min(1).max(60).optional(),
-  // scroll: which way to move the viewport (default "down").
-  direction: z.enum(["down", "up", "bottom", "top"]).optional(),
-  // How much perception to return AFTER the action (the same ladder as
-  // operate_observe, plus "none"). "none" = a minimal ack (action ran; no page
-  // dump) for chained fills — call operate_observe before the next ref-targeted
-  // act. "full" = the legacy payload. Default "compact".
-  detail: z.enum(["none", "compact", "full"]).optional(),
-});
+const actSchema = z
+  .object({
+    session_id: z.string().min(1),
+    kind: z.enum([
+      "click",
+      "js_click",
+      "type",
+      "select",
+      "set_phone_country",
+      "goto",
+      "press",
+      "oauth_click",
+      "oauth_settle",
+      "allow_host",
+      "type_secret",
+      "scroll",
+      "upload",
+    ]),
+    target: z.string().min(1).max(200).optional(),
+    text: z.string().max(4096).optional(),
+    // set_phone_country supports phone-local native country <select> controls.
+    country: z.string().min(1).max(60).optional(),
+    // upload: absolute path to a LOCAL file to attach to `target` (the upload
+    // button/menu-item, or the file <input>).
+    path: z.string().min(1).max(4096).optional(),
+    url: z.string().url().optional(),
+    key: z.string().min(1).max(40).optional(),
+    // allow_host: a bare hostname to cross into mid-session.
+    host: z.string().min(1).max(253).optional(),
+    // type_secret: the sealed slot whose value to type into `target`.
+    slot: z.string().min(1).max(60).optional(),
+    provenance: RecipeHoleSchema.shape.hole.optional(),
+    replay_step_index: z.number().int().min(0).optional(),
+    replay_hole: RecipeHoleSchema.shape.hole.optional(),
+    // scroll: which way to move the viewport (default "down").
+    direction: z.enum(["down", "up", "bottom", "top"]).optional(),
+    // How much perception to return AFTER the action (the same ladder as
+    // operate_observe, plus "none"). "none" = a minimal ack (action ran; no page
+    // dump) for chained fills — call operate_observe before the next ref-targeted
+    // act. "full" = the legacy payload. Default "compact".
+    detail: z.enum(["none", "compact", "full"]).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if ((value.replay_step_index === undefined) !== (value.replay_hole === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "replay_step_index and replay_hole must be provided together",
+      });
+    }
+    if (
+      value.replay_hole !== undefined &&
+      value.provenance !== undefined &&
+      value.replay_hole !== value.provenance
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "replay_hole and provenance must identify the same source",
+      });
+    }
+    if (
+      value.replay_step_index !== undefined &&
+      value.kind !== "type" &&
+      value.kind !== "select" &&
+      value.kind !== "set_phone_country"
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "replay repair binding requires a value action",
+      });
+    }
+    const provenance = value.provenance ?? value.replay_hole;
+    if (provenance === undefined) return;
+    if (
+      value.kind !== "type" &&
+      value.kind !== "select" &&
+      value.kind !== "set_phone_country" &&
+      value.kind !== "type_secret"
+    ) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: "provenance requires a value action" });
+    } else if (value.kind === "type_secret" && !/^credential(?:\.|$)/.test(provenance)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "type_secret provenance must be credential",
+      });
+    } else if (value.kind !== "type_secret" && /^(?:credential|card)(?:\.|$)/.test(provenance)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "credential/card provenance requires type_secret or operate_pay",
+      });
+    }
+  });
 
 function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
   const need = (v: string | undefined, name: string): string => {
@@ -292,6 +350,11 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     }
     return v;
   };
+  const replayRepair =
+    args.replay_step_index !== undefined && args.replay_hole !== undefined
+      ? { replayRepair: { stepIndex: args.replay_step_index, hole: args.replay_hole } }
+      : {};
+  const provenance = args.provenance ?? args.replay_hole;
   switch (args.kind) {
     case "click":
       return { kind: "click", target: need(args.target, "target") };
@@ -300,11 +363,28 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     case "oauth_click":
       return { kind: "oauth_click", target: need(args.target, "target") };
     case "type":
-      return { kind: "type", target: need(args.target, "target"), text: args.text ?? "" };
+      return {
+        kind: "type",
+        target: need(args.target, "target"),
+        text: args.text ?? "",
+        ...(provenance !== undefined ? { provenance: { hole: provenance } } : {}),
+        ...replayRepair,
+      };
     case "select":
-      return { kind: "select", target: need(args.target, "target"), text: need(args.text, "text") };
+      return {
+        kind: "select",
+        target: need(args.target, "target"),
+        text: need(args.text, "text"),
+        ...(provenance !== undefined ? { provenance: { hole: provenance } } : {}),
+        ...replayRepair,
+      };
     case "set_phone_country":
-      return { kind: "set_phone_country", country: need(args.country, "country") };
+      return {
+        kind: "set_phone_country",
+        country: need(args.country, "country"),
+        ...(provenance !== undefined ? { provenance: { hole: provenance } } : {}),
+        ...replayRepair,
+      };
     case "goto":
       return { kind: "goto", url: need(args.url, "url") };
     case "press":
@@ -318,6 +398,7 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
         kind: "type_secret",
         slot: need(args.slot, "slot"),
         target: need(args.target, "target"),
+        ...(args.provenance !== undefined ? { provenance: { hole: args.provenance } } : {}),
       };
     case "scroll":
       return {
@@ -367,8 +448,13 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "button/menu-item (or the file <input>), path is an absolute local file " +
     "path. The bot sets the file via the browser's file chooser, so no OS dialog " +
     "is driven and no API credential is needed — it uses the session you're " +
-    "already signed into). Stable target refs remain reusable while their element " +
-    "exists; if a ref appears in removed or no longer resolves, re-observe before retrying. " +
+    "already signed into). " +
+    "For type/select/set_phone_country, pass provenance when the value came from a " +
+    "Squire-known address, contact, product_query, or quantity input; type_secret and " +
+    "operate_pay record credential and card provenance from their sealed sources. " +
+    "When repairing a replay fallback field, pass its replay_step_index and replay_hole. " +
+    "Stable target refs remain reusable while their element exists; if a ref appears in " +
+    "removed or no longer resolves, re-observe before retrying. " +
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
     '"full" returns the legacy screen+accessibility payload. ' +
@@ -405,6 +491,17 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       key: { type: "string" },
       host: { type: "string" },
       slot: { type: "string" },
+      provenance: {
+        type: "string",
+        pattern:
+          "^(?:address|contact|credential|card)(?:\\.[a-zA-Z0-9_-]+)?$|^(?:product_query|quantity)$",
+      },
+      replay_step_index: { type: "integer", minimum: 0 },
+      replay_hole: {
+        type: "string",
+        pattern:
+          "^(?:address|contact|credential|card)(?:\\.[a-zA-Z0-9_-]+)?$|^(?:product_query|quantity)$",
+      },
       direction: { type: "string", enum: ["down", "up", "bottom", "top"] },
       detail: { type: "string", enum: ["none", "compact", "full"] },
     },
@@ -791,12 +888,13 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
     // result kind — optionally verify a saved recipe's postcondition (the
     // anti-false-green gate) against the live session BEFORE closing, then close.
     const verified =
-      args.verify_recipe !== undefined
-        ? await verifyPostcondition(
+      args.verify_recipe === undefined
+        ? undefined
+        : ((await verifyActiveRecipePostcondition(args.session_id, args.verify_recipe)) ??
+          (await verifySavedRecipePostcondition(
             args.session_id,
-            (await readRecipe(args.verify_recipe)).postcondition,
-          )
-        : undefined;
+            await readRecipe(args.verify_recipe),
+          )));
     emitProvisionMeasurement(
       args.session_id,
       verified === undefined || verified.confirmed ? "success" : "fail",
@@ -836,28 +934,43 @@ const rememberSchema = z.object({
   session_id: z.string().min(1),
   name: z.string().min(1).max(80),
   goal: z.string().min(1).max(300),
+  verb: OperatorVerbSchema,
+  inputs: z
+    .object({
+      address: z.record(z.string().max(2000)).optional(),
+      contact: z.record(z.string().max(2000)).optional(),
+      product_query: z.string().max(2000).optional(),
+      credential: z.union([z.string().max(2000), z.record(z.string().max(2000))]).optional(),
+      card: z.union([z.string().max(2000), z.record(z.string().max(2000))]).optional(),
+      quantity: z.union([z.string().max(100), z.number()]).optional(),
+    })
+    .strict(),
   postcondition: PostconditionSchema,
 });
 
 export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
   name: "operate_remember",
   description:
-    "Save the CURRENT successful operate session as a replayable operator-recipe " +
-    "(local, named). Pass `name`, a one-line `goal`, and a `postcondition` — the " +
+    "Save the CURRENT successful operate session as a replayable local recipe. " +
+    "Pass the host-classified closed-enum `verb` and the complete authoritative `inputs` " +
+    "ledger (address, contact, product_query, credential, card, quantity), plus a name, goal, and " +
+    "`postcondition`. The postcondition is checked BEFORE anything is written — the " +
     "machine-checkable success signal: kind 'execute_capability' observes the " +
     "end-state now; `success_signal` is {field_text,min_value_len} (a field whose " +
     "value is at least N chars — checked by LENGTH, never the value), {text_present}, " +
     "or {url_contains}. The recipe stores the session's TEXT-targeted action trace " +
     "as a rail; sealed secrets become slot references, NEVER values. Call AFTER the " +
-    "task succeeded; replay later with operate_use{name}.",
+    "task succeeded; replay later by (verb, service URL), or by legacy name.",
   inputSchema: rememberSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["session_id", "name", "goal", "postcondition"],
+    required: ["session_id", "name", "goal", "verb", "inputs", "postcondition"],
     properties: {
       session_id: { type: "string" },
       name: { type: "string" },
       goal: { type: "string" },
+      verb: { type: "string", enum: OperatorVerbSchema.options },
+      inputs: { type: "object" },
       postcondition: {
         type: "object",
         required: ["kind", "describe", "success_signal"],
@@ -875,58 +988,137 @@ export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
       name: args.name,
       goal: args.goal,
       postcondition: args.postcondition,
+      verb: args.verb,
+      inputs: args.inputs,
     });
   },
 };
 
-const useSchema = z.object({
-  name: z.string().min(1).max(80),
-  params: z.record(z.string().max(2000)).optional(),
-  require_live_identity: z.boolean().optional(),
-});
+const useSchema = z
+  .object({
+    // Legacy selector; new calls use verb + service_url.
+    name: z.string().min(1).max(80).optional(),
+    verb: OperatorVerbSchema.optional(),
+    service_url: z.string().url().optional(),
+    params: z.record(z.string().max(2000)).optional(),
+    require_live_identity: z.boolean().optional(),
+    // After the host repairs one missed step, resume the same live session at
+    // replay.next_index instead of starting over.
+    session_id: z.string().min(1).optional(),
+    resume_from: z.number().int().min(0).max(200).optional(),
+  })
+  .refine(
+    (value) =>
+      value.name !== undefined || (value.verb !== undefined && value.service_url !== undefined),
+    { message: "provide legacy name, or both verb and service_url" },
+  )
+  .refine((value) => (value.session_id === undefined) === (value.resume_from === undefined), {
+    message: "session_id and resume_from must be provided together",
+  });
 
 export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
   name: "operate_use",
   description:
-    "Replay a saved operator-recipe by name: opens a scoped browser at the recipe's " +
-    "entry and returns the start observation with the recipe's route as a `hint` — a " +
-    "MAP to drive toward, NOT a literal script (re-plan if the live page diverges). " +
-    "Fill ${VAR} entry templates via `params` (e.g. {PROJECT:'my-proj'}). Sealed " +
-    "steps must be re-sealed + typed yourself (operate_extract{into_slot} → " +
-    "type_secret) — the recipe never holds secret values. Drive the task, then " +
-    "operate_finish_task{kind:'result', verify_recipe:<name>} to verify the " +
-    "postcondition (the anti-false-green gate).",
+    "Replay a local prepared-statement recipe selected by the host-classified closed-enum " +
+    "verb plus service_url (eTLD+1 keyed; path/query ignored). A legacy name opens the " +
+    "saved workflow as a planning hint without deterministic replay. Binds " +
+    "hole values and executes each step through ordered target fallback. A single miss " +
+    "returns replay.status='fallback_required' with that step and next_index; repair only " +
+    "that step, then call operate_use again with the same params plus session_id + " +
+    "resume_from=next_index. " +
+    "Money-path completion deterministically verifies every injected address/contact/qty field.",
   inputSchema: useSchema,
   jsonInputSchema: {
     type: "object",
-    required: ["name"],
     properties: {
       name: { type: "string" },
+      verb: { type: "string", enum: OperatorVerbSchema.options },
+      service_url: { type: "string" },
       params: { type: "object" },
       require_live_identity: { type: "boolean" },
+      session_id: { type: "string" },
+      resume_from: { type: "integer" },
     },
   },
   async handler(args) {
-    const recipe = await readRecipe(args.name);
-    const entry = recipeEntryUrl(recipe);
+    let recipe: Awaited<ReturnType<typeof readRecipe>>;
+    try {
+      recipe =
+        args.name !== undefined
+          ? await readRecipe(args.name)
+          : await readRecipeForTask(args.verb!, args.service_url!);
+    } catch (error) {
+      // A keyed cache miss is the expected cold path, not a task failure.
+      if (
+        args.name !== undefined ||
+        args.service_url === undefined ||
+        args.session_id !== undefined
+      ) {
+        throw error;
+      }
+      const cold = await startProvisionSession({
+        serviceUrl: args.service_url,
+        consentInboxRead: await readInboxConsent(),
+        ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
+      });
+      if (cold.needs_user !== undefined) return cold;
+      return {
+        ...cold,
+        replay: {
+          status: "cache_miss" as const,
+          reason: "no local recipe for this (verb, eTLD+1); continue cold",
+        },
+      };
+    }
+    const entry = recipeEntryUrl(recipe, args.service_url);
     if (entry === null) {
-      throw new Error(`operator-recipe "${args.name}" has no entry (goto) step to start from`);
+      throw new Error(
+        recipe.entry_mode === "runtime_service_url"
+          ? `operator-recipe "${recipe.name}" requires verb + service_url to resolve its runtime entry`
+          : `operator-recipe "${recipe.name}" has no stable entry (goto) step to start from`,
+      );
     }
     const { url, missing } = fillTemplate(entry, args.params ?? {});
     if (missing.length > 0) {
       throw new Error(
-        `operator-recipe "${args.name}" needs params: ${missing.join(", ")} — ` +
+        `operator-recipe "${recipe.name}" needs params: ${missing.join(", ")} — ` +
           `pass them as operate_use{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
       );
     }
-    const consentInboxRead = await readInboxConsent();
-    return await startProvisionSession({
-      serviceUrl: url,
-      consentInboxRead,
-      ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
-      hint: renderOperatorRecipeHint(recipe),
-      ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
-    });
+    let sessionId = args.session_id;
+    const legacyHintOnly = recipe.verb === undefined || recipe.domain === undefined;
+    if (legacyHintOnly && sessionId !== undefined) {
+      throw new Error("legacy named recipes are hint-only and do not support replay continuation");
+    }
+    if (sessionId === undefined) {
+      const consentInboxRead = await readInboxConsent();
+      const started = await startProvisionSession({
+        serviceUrl: url,
+        consentInboxRead,
+        ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
+        hint: renderOperatorRecipeHint(recipe),
+        ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
+      });
+      if (started.needs_user !== undefined) return started;
+      if (legacyHintOnly) {
+        return {
+          ...started,
+          replay: {
+            status: "legacy_hint_only" as const,
+            reason: "legacy named recipe has no closed-enum verb/domain classification",
+          },
+        };
+      }
+      sessionId = started.session_id;
+    }
+    const replay = await replayOperatorRecipe(
+      sessionId,
+      recipe,
+      args.params ?? {},
+      args.resume_from ?? 0,
+    );
+    const { observation, ...replayState } = replay;
+    return { ...observation, replay: replayState };
   },
 };
 

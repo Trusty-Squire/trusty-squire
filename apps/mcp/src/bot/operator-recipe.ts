@@ -1,13 +1,13 @@
 // operator-recipe.ts — Phase A of "user-saved operator workflows as skills"
 // (docs/ARCHITECTURE.md). A LOCAL artifact (deliberately NOT the
 // registry Skill schema yet — that bump is Phase B) that captures a successful
-// operate run so it can be replayed by name.
+// operate run so it can be replayed by (verb, eTLD+1). Legacy named recipes
+// remain readable.
 //
 // Three invariants baked in here:
-//   1. Text-based targeting only. A trace entry stores the VISIBLE text it
-//      acted on, never a ref/coordinate — operator targets are heavy SPAs whose
-//      refs churn every observation, so literal playback would rot. The recipe
-//      is a RAIL the planner re-drives along, not a script.
+//   1. Stable-attribute targeting only. A trace stores authored DOM/semantic
+//      hints, never a ref/coordinate; visible text is the unique-only last
+//      fallback because operator targets are heavy SPAs whose refs churn.
 //   2. Sealed secrets are stored as SLOT REFERENCES, never values. A recipe
 //      built from a session that sealed a secret records `{slot, stored:false}`
 //      and an `extract`/`type_secret` step; the raw value never touches disk.
@@ -17,24 +17,116 @@
 
 import { z } from "zod";
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import { getDomain } from "tldts";
+import { filterByNearTextHint } from "./near-text-hint.js";
 
 // ── Schema ──────────────────────────────────────────────────────────
+
+export const OperatorVerbSchema = z.enum([
+  "purchase",
+  "get_api_key",
+  "signup",
+  "subscribe",
+  "cancel",
+  "login",
+  "book",
+  "reserve",
+  "renew",
+  "upgrade",
+  "downgrade",
+  "add_to_cart",
+  "checkout",
+  "download",
+  "configure",
+]);
+export type OperatorVerb = z.infer<typeof OperatorVerbSchema>;
+
+export const RecipeHoleSchema = z
+  .object({
+    hole: z
+      .string()
+      .regex(
+        /^(?:address|contact|credential|card)(?:\.[a-zA-Z0-9_-]+)?$|^(?:product_query|quantity)$/,
+      ),
+  })
+  .strict();
+export type RecipeHole = z.infer<typeof RecipeHoleSchema>;
+
+export const RecipeValueSchema = z.union([z.string().max(2000), RecipeHoleSchema]);
+export type RecipeValue = z.infer<typeof RecipeValueSchema>;
+
+export const RecipeTargetSchema = z
+  .object({
+    dom_hint: z
+      .object({
+        testid: z.string().max(200).optional(),
+        id: z.string().max(200).optional(),
+        name: z.string().max(200).optional(),
+      })
+      .strict()
+      .optional(),
+    role_hint: z.string().max(80).optional(),
+    accessible_name: z.string().max(200).optional(),
+    near_text_hint: z.string().max(200).optional(),
+    href_hint: z.string().max(2000).optional(),
+    css: z.string().max(2000).optional(),
+    // Deliberately last-resort. Replay accepts this only when it is unique.
+    visible_text: z.string().max(200).optional(),
+  })
+  .strict();
+export type RecipeTarget = z.infer<typeof RecipeTargetSchema>;
+
+const EmailHoleSchema = RecipeHoleSchema.shape.hole;
+const EmailAliasTemplatePattern = /\$\{EMAIL_ALIAS((?:_(?:URI|CSS))*)\}/g;
+
+function hasEmailAliasTemplate(value: string | undefined): boolean {
+  return value?.includes("${EMAIL_ALIAS") === true;
+}
+
+const PostconditionUrlSchema = z
+  .string()
+  .max(2000)
+  .refine((value) => {
+    try {
+      new URL(value.replace(EmailAliasTemplatePattern, "buyer@example.com"));
+      return true;
+    } catch {
+      return false;
+    }
+  }, "invalid URL");
 
 const TraceActionSchema = z
   .object({
     kind: z.enum([
-      "goto", "click", "js_click", "type", "press", "oauth_click",
-      "oauth_settle", "allow_host", "type_secret", "scroll", "extract",
+      "goto",
+      "click",
+      "js_click",
+      "type",
+      "press",
+      "oauth_click",
+      "oauth_settle",
+      "allow_host",
+      "type_secret",
+      "select",
+      "set_phone_country",
+      "operate_pay",
+      "scroll",
+      "extract",
     ]),
-    // Visible text the action targeted (the rail). Never a ref/coordinate.
+    // Legacy visible-text rail. New recordings also carry `target`; this stays
+    // for backwards compatibility and is the unique-only final fallback.
     text_match: z.string().max(200).optional(),
+    target: RecipeTargetSchema.optional(),
+    email_hole: EmailHoleSchema.optional(),
     // goto: a URL with optional ${VAR} templates for per-run identity.
     url_template: z.string().max(2000).optional(),
-    // type: the NON-secret value typed (names, emails, URIs). Secrets never
-    // appear here — they flow through `type_secret` + a slot.
-    value: z.string().max(2000).optional(),
+    // Value-bearing actions store either a non-secret literal or provenance
+    // hole. Secret/card actions carry only a hole; their raw values never land
+    // in the recipe.
+    value: RecipeValueSchema.optional(),
     host: z.string().max(253).optional(),
     slot: z.string().max(60).optional(),
     direction: z.enum(["down", "up", "bottom", "top"]).optional(),
@@ -56,7 +148,12 @@ const SuccessSignalSchema = z.union([
   // A field/input whose label≈field_text holds a value at least N chars long
   // (e.g. OAuth Playground's "Access token"). We check the LENGTH, never the
   // value — the success signal must not leak the credential it proves.
-  z.object({ field_text: z.string().min(1).max(120), min_value_len: z.number().int().positive().max(4096) }).strict(),
+  z
+    .object({
+      field_text: z.string().min(1).max(120),
+      min_value_len: z.number().int().positive().max(4096),
+    })
+    .strict(),
   // Visible page text contains this phrase.
   z.object({ text_present: z.string().min(1).max(200) }).strict(),
   // The current URL contains this substring (post-login path, etc.).
@@ -71,9 +168,26 @@ export const PostconditionSchema = z
     kind: z.enum(["execute_capability", "observe_artifact"]),
     describe: z.string().min(1).max(300),
     success_signal: SuccessSignalSchema,
-    probe_url: z.string().url().max(2000).optional(),
+    probe_url: PostconditionUrlSchema.optional(),
+    email_hole: EmailHoleSchema.optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((postcondition, ctx) => {
+    const urlContains =
+      "url_contains" in postcondition.success_signal
+        ? postcondition.success_signal.url_contains
+        : undefined;
+    if (
+      (hasEmailAliasTemplate(postcondition.probe_url) || hasEmailAliasTemplate(urlContains)) &&
+      postcondition.email_hole === undefined
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["email_hole"],
+        message: "known-email postcondition template lacks an attested source hole",
+      });
+    }
+  });
 export type Postcondition = z.infer<typeof PostconditionSchema>;
 
 const SecretRefSchema = z
@@ -92,6 +206,10 @@ export const OperatorRecipeSchema = z
     name: z.string().min(1).max(80),
     schema_version: z.literal(1),
     goal: z.string().min(1).max(300),
+    // New prepared-statement key. Optional only so existing local v1 recipes
+    // remain readable; new keyed recordings always set both fields.
+    verb: OperatorVerbSchema.optional(),
+    domain: z.string().min(1).max(253).optional(),
     // The canonical replay entry — the session's START url (the service_url
     // passed to operate_start). Optional for back-compat with recipes saved
     // before this field; recipeEntryUrl falls back to the first STABLE trace
@@ -99,12 +217,56 @@ export const OperatorRecipeSchema = z
     // mid-flow single-use links (a verify-email URL became the entry, so the
     // replay opened on an expired-token dead page — the plunk-recipe bug).
     entry_url: z.string().max(2000).optional(),
+    entry_mode: z.literal("runtime_service_url").optional(),
     allowed_hosts: z.array(z.string().max(253)).max(20).default([]),
     trace: z.array(TraceEntrySchema).max(200),
     secrets: z.array(SecretRefSchema).max(20).default([]),
     postcondition: PostconditionSchema,
   })
-  .strict();
+  .strict()
+  .superRefine((recipe, ctx) => {
+    if ((recipe.verb === undefined) !== (recipe.domain === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "operator recipe verb and domain must be present together",
+      });
+    }
+    if (recipe.entry_mode === "runtime_service_url" && recipe.entry_url !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["entry_url"],
+        message: "runtime-resolved operator recipes cannot persist an entry URL",
+      });
+    }
+    recipe.trace.forEach((entry, index) => {
+      const value = entry.action.value;
+      if (
+        entry.action.kind === "operate_pay" &&
+        (value === undefined || typeof value === "string" || !/^card(?:\.|$)/.test(value.hole))
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["trace", index, "action", "value"],
+          message: "operate_pay requires card provenance",
+        });
+      }
+      if (value === undefined || typeof value === "string") return;
+      if (/^card(?:\.|$)/.test(value.hole) && entry.action.kind !== "operate_pay") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["trace", index, "action", "value"],
+          message: "card provenance is only valid on operate_pay",
+        });
+      }
+      if (/^credential(?:\.|$)/.test(value.hole) && entry.action.kind !== "type_secret") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["trace", index, "action", "value"],
+          message: "credential provenance is only valid on type_secret",
+        });
+      }
+    });
+  });
 export type OperatorRecipe = z.infer<typeof OperatorRecipeSchema>;
 
 // ── Local IO ────────────────────────────────────────────────────────
@@ -116,8 +278,33 @@ export function operatorRecipeDir(): string {
 }
 
 function safeFileName(name: string): string {
-  const slug = name.toLowerCase().replace(/[^a-z0-9._-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
-  return slug.length > 0 ? slug : "recipe";
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (slug.length === 0) return "recipe";
+  if (slug.length <= 80) return slug;
+  // DNS names may exceed the legacy 80-char recipe-name cap. Preserve the
+  // readable prefix but hash the tail so two long tenant/domain keys cannot
+  // silently overwrite one another.
+  const digest = createHash("sha256").update(slug).digest("hex").slice(0, 16);
+  return `${slug.slice(0, 63)}-${digest}`;
+}
+
+const TENANT_HOST_SUFFIXES = ["myshopify.com", "notion.site"] as const;
+
+/** Public-Suffix-List-backed local recipe domain; registry service slugs are unrelated. */
+export function operatorRecipeDomain(url: string): string {
+  const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
+  const tenantSuffix = TENANT_HOST_SUFFIXES.find(
+    (suffix) => hostname !== suffix && hostname.endsWith(`.${suffix}`),
+  );
+  if (tenantSuffix !== undefined) return hostname;
+  return getDomain(hostname, { allowPrivateDomains: false }) ?? hostname;
+}
+
+export function operatorRecipeKey(verb: OperatorVerb, url: string): string {
+  return `${verb}--${operatorRecipeDomain(url)}`;
 }
 
 export async function writeRecipe(recipe: OperatorRecipe): Promise<string> {
@@ -126,7 +313,11 @@ export async function writeRecipe(recipe: OperatorRecipe): Promise<string> {
   const parsed = OperatorRecipeSchema.parse(recipe);
   const dir = operatorRecipeDir();
   await fs.mkdir(dir, { recursive: true });
-  const file = path.join(dir, `${safeFileName(parsed.name)}.json`);
+  const fileStem =
+    parsed.verb !== undefined && parsed.domain !== undefined
+      ? `${parsed.verb}--${parsed.domain}`
+      : parsed.name;
+  const file = path.join(dir, `${safeFileName(fileStem)}.json`);
   await fs.writeFile(file, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
   return file;
 }
@@ -137,10 +328,20 @@ export async function readRecipe(name: string): Promise<OperatorRecipe> {
   return OperatorRecipeSchema.parse(JSON.parse(raw));
 }
 
+export async function readRecipeForTask(
+  verb: OperatorVerb,
+  serviceUrl: string,
+): Promise<OperatorRecipe> {
+  return await readRecipe(operatorRecipeKey(verb, serviceUrl));
+}
+
 export async function listRecipes(): Promise<string[]> {
   try {
     const files = await fs.readdir(operatorRecipeDir());
-    return files.filter((f) => f.endsWith(".json")).map((f) => f.slice(0, -5)).sort();
+    return files
+      .filter((f) => f.endsWith(".json"))
+      .map((f) => f.slice(0, -5))
+      .sort();
   } catch {
     return [];
   }
@@ -150,18 +351,41 @@ export async function listRecipes(): Promise<string[]> {
 
 function describeAction(a: TraceAction): string {
   const t = a.text_match !== undefined ? `"${a.text_match}"` : "";
+  const v =
+    typeof a.value === "string"
+      ? `"${a.value}"`
+      : a.value !== undefined
+        ? `{${a.value.hole}}`
+        : undefined;
   switch (a.kind) {
-    case "goto": return `go to ${a.url_template ?? ""}`;
-    case "click": return `click ${t}`;
-    case "js_click": return `click ${t} (JS-dispatch if a plain click doesn't register)`;
-    case "type": return `type ${a.value !== undefined ? `"${a.value}" ` : ""}into ${t}`;
-    case "press": return `press ${a.key ?? ""}`;
-    case "oauth_click": return `click the OAuth button ${t}`;
-    case "oauth_settle": return `complete the OAuth handshake`;
-    case "allow_host": return `cross into ${a.host ?? ""}`;
-    case "type_secret": return `type the sealed secret (slot ${a.slot ?? "?"}) into ${t}`;
-    case "scroll": return `scroll ${a.direction ?? "down"}`;
-    case "extract": return `reveal + seal the secret into slot ${a.slot ?? "?"}`;
+    case "goto":
+      return `go to ${a.url_template ?? ""}`;
+    case "click":
+      return `click ${t}`;
+    case "js_click":
+      return `click ${t} (JS-dispatch if a plain click doesn't register)`;
+    case "type":
+      return `type ${v !== undefined ? `${v} ` : ""}into ${t}`;
+    case "press":
+      return `press ${a.key ?? ""}`;
+    case "oauth_click":
+      return `click the OAuth button ${t}`;
+    case "oauth_settle":
+      return `complete the OAuth handshake`;
+    case "allow_host":
+      return `cross into ${a.host ?? ""}`;
+    case "type_secret":
+      return `type the sealed secret (slot ${a.slot ?? "?"}) into ${t}`;
+    case "select":
+      return `select ${v ?? ""} in ${t}`;
+    case "set_phone_country":
+      return `set the phone country to ${v ?? ""}`;
+    case "operate_pay":
+      return `pay with ${v ?? "{card}"}`;
+    case "scroll":
+      return `scroll ${a.direction ?? "down"}`;
+    case "extract":
+      return `reveal + seal the secret into slot ${a.slot ?? "?"}`;
   }
 }
 
@@ -224,14 +448,20 @@ export function checkSuccessSignal(
         : field === undefined
           ? `no field matching "${signal.field_text}"`
           : `field "${signal.field_text}" value too short (${field.value_len} < ${signal.min_value_len})`,
-      evidence: { field: signal.field_text, value_len: field?.value_len ?? 0, required: signal.min_value_len },
+      evidence: {
+        field: signal.field_text,
+        value_len: field?.value_len ?? 0,
+        required: signal.min_value_len,
+      },
     };
   }
   if ("text_present" in signal) {
     const ok = norm(snap.text).includes(norm(signal.text_present));
     return {
       confirmed: ok,
-      reason: ok ? `page text contains "${signal.text_present}"` : `page text missing "${signal.text_present}"`,
+      reason: ok
+        ? `page text contains "${signal.text_present}"`
+        : `page text missing "${signal.text_present}"`,
       evidence: { text_present: signal.text_present },
     };
   }
@@ -252,10 +482,429 @@ export function fillTemplate(
   const missing: string[] = [];
   const url = template.replace(/\$\{([A-Z0-9_]+)\}/g, (_m, name: string) => {
     const v = params[name];
-    if (v === undefined) { missing.push(name); return `\${${name}}`; }
+    if (v === undefined) {
+      missing.push(name);
+      return `\${${name}}`;
+    }
     return v;
   });
   return { url, missing };
+}
+
+export interface KnownRecipeInputs {
+  address?: Readonly<Record<string, string>> | undefined;
+  contact?: Readonly<Record<string, string>> | undefined;
+  product_query?: string | undefined;
+  credential?: string | Readonly<Record<string, string>> | undefined;
+  card?: string | Readonly<Record<string, string>> | undefined;
+  quantity?: string | number | undefined;
+}
+
+function flattenKnownInputs(inputs: KnownRecipeInputs): Array<[string, string]> {
+  const out: Array<[string, string]> = [];
+  const addGroup = (
+    prefix: "address" | "contact" | "credential" | "card",
+    value: string | Readonly<Record<string, string>> | undefined,
+  ): void => {
+    if (typeof value === "string") {
+      out.push([prefix, value]);
+      return;
+    }
+    if (value === undefined) return;
+    for (const [field, fieldValue] of Object.entries(value)) {
+      out.push([`${prefix}.${field}`, fieldValue]);
+    }
+  };
+  addGroup("address", inputs.address);
+  addGroup("contact", inputs.contact);
+  if (inputs.product_query !== undefined) out.push(["product_query", inputs.product_query]);
+  addGroup("credential", inputs.credential);
+  addGroup("card", inputs.card);
+  if (inputs.quantity !== undefined) out.push(["quantity", String(inputs.quantity)]);
+  return out;
+}
+
+export function knownRecipeInputValue(inputs: KnownRecipeInputs, hole: string): string | undefined {
+  return flattenKnownInputs(inputs).find(([candidate]) => candidate === hole)?.[1];
+}
+
+export function knownRecipeInputHolesForValue(inputs: KnownRecipeInputs, value: string): string[] {
+  return flattenKnownInputs(inputs)
+    .filter(([, known]) => known === value)
+    .map(([hole]) => hole);
+}
+
+/** Tag only exact, caller-proven values. Unknown literals deliberately remain literals. */
+export function tagProvenanceValue(value: string, inputs: KnownRecipeInputs): RecipeValue {
+  const knownInputs = flattenKnownInputs(inputs);
+  const matches = knownInputs.filter(([, known]) => known === value);
+  if (matches.length === 0 && value === "${EMAIL_ALIAS}") {
+    matches.push(
+      ...knownInputs.filter(
+        ([hole, known]) =>
+          /^(?:address|contact|credential)(?:\.|$)/.test(hole) &&
+          /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(known),
+      ),
+    );
+  }
+  const holes = [...new Set(matches.map(([hole]) => hole))];
+  if (holes.length > 1) {
+    throw new Error(`ambiguous recipe provenance across holes: ${holes.join(", ")}`);
+  }
+  return holes[0] === undefined ? value : { hole: holes[0] };
+}
+
+export function tagTraceProvenance(
+  trace: readonly TraceEntry[],
+  inputs: KnownRecipeInputs,
+): TraceEntry[] {
+  return trace.map((entry) => {
+    const value = entry.action.value;
+    if (typeof value !== "string") return entry;
+    return {
+      ...entry,
+      action: { ...entry.action, value: tagProvenanceValue(value, inputs) },
+    };
+  });
+}
+
+export function bindRecipeValue(
+  value: RecipeValue,
+  bindings: Readonly<Record<string, string>>,
+): string {
+  if (typeof value === "string") {
+    const filled = fillTemplate(value, bindings as Record<string, string>);
+    if (filled.missing.length > 0) {
+      throw new Error(`missing recipe binding: ${filled.missing.join(", ")}`);
+    }
+    return filled.url;
+  }
+  const bound = bindings[value.hole];
+  if (bound === undefined) throw new Error(`missing recipe binding: ${value.hole}`);
+  return bound;
+}
+
+export function bindRecipeTarget(
+  target: RecipeTarget,
+  bindings: Readonly<Record<string, string>>,
+  emailHole?: string,
+): RecipeTarget {
+  const bind = (value: string | undefined): string | undefined =>
+    value === undefined ? undefined : bindKnownEmailTemplate(value, bindings, emailHole);
+  const domHint = target.dom_hint;
+  return {
+    ...(domHint !== undefined
+      ? {
+          dom_hint: {
+            ...(bind(domHint.testid) !== undefined ? { testid: bind(domHint.testid)! } : {}),
+            ...(bind(domHint.id) !== undefined ? { id: bind(domHint.id)! } : {}),
+            ...(bind(domHint.name) !== undefined ? { name: bind(domHint.name)! } : {}),
+          },
+        }
+      : {}),
+    ...(bind(target.role_hint) !== undefined ? { role_hint: bind(target.role_hint)! } : {}),
+    ...(bind(target.accessible_name) !== undefined
+      ? { accessible_name: bind(target.accessible_name)! }
+      : {}),
+    ...(bind(target.near_text_hint) !== undefined
+      ? { near_text_hint: bind(target.near_text_hint)! }
+      : {}),
+    ...(bind(target.href_hint) !== undefined ? { href_hint: bind(target.href_hint)! } : {}),
+    ...(bind(target.css) !== undefined ? { css: bind(target.css)! } : {}),
+    ...(bind(target.visible_text) !== undefined
+      ? { visible_text: bind(target.visible_text)! }
+      : {}),
+  };
+}
+
+export function bindKnownEmailTemplate(
+  value: string,
+  bindings: Readonly<Record<string, string>>,
+  emailHole?: string,
+): string {
+  if (!value.includes("${EMAIL_ALIAS")) return value;
+  if (emailHole === undefined) {
+    throw new Error("email template lacks an attested source hole");
+  }
+  const email = bindings[emailHole];
+  if (email === undefined) throw new Error(`missing recipe binding: ${emailHole}`);
+  return value.replace(EmailAliasTemplatePattern, (_token, suffix: string) =>
+    suffix
+      .split("_")
+      .filter(Boolean)
+      .reduce(
+        (bound, operation) =>
+          operation === "URI" ? encodeURIComponent(bound) : cssEscapeRecipeValue(bound),
+        email,
+      ),
+  );
+}
+
+export function bindRecipePostcondition(
+  postcondition: Postcondition,
+  bindings: Readonly<Record<string, string>>,
+): Postcondition {
+  const bind = (value: string | undefined): string | undefined =>
+    value === undefined
+      ? undefined
+      : bindKnownEmailTemplate(value, bindings, postcondition.email_hole);
+  const successSignal = postcondition.success_signal;
+  const probeUrl = bind(postcondition.probe_url);
+  return {
+    ...postcondition,
+    ...(probeUrl !== undefined ? { probe_url: probeUrl } : {}),
+    success_signal:
+      "url_contains" in successSignal
+        ? { url_contains: bind(successSignal.url_contains)! }
+        : successSignal,
+  };
+}
+
+export function cssEscapeRecipeValue(value: string): string {
+  const chars = [...value];
+  return chars
+    .map((char, index) => {
+      const code = char.codePointAt(0)!;
+      if (code === 0) return "�";
+      if (
+        (code >= 1 && code <= 31) ||
+        code === 127 ||
+        (index === 0 && code >= 48 && code <= 57) ||
+        (index === 1 && code >= 48 && code <= 57 && chars[0] === "-")
+      ) {
+        return `\\${code.toString(16)} `;
+      }
+      if (index === 0 && char === "-" && chars.length === 1) return "\\-";
+      if (
+        code >= 128 ||
+        char === "-" ||
+        char === "_" ||
+        (code >= 48 && code <= 57) ||
+        (code >= 65 && code <= 90) ||
+        (code >= 97 && code <= 122)
+      ) {
+        return char;
+      }
+      return `\\${char}`;
+    })
+    .join("");
+}
+
+export interface RecipeTargetElement {
+  tag?: string;
+  testId?: string | null;
+  id?: string | null;
+  name?: string | null;
+  role?: string | null;
+  ariaLabel?: string | null;
+  labelText?: string | null;
+  visibleText?: string | null;
+  iconLabel?: string | null;
+  placeholder?: string | null;
+  title?: string | null;
+  href?: string | null;
+  selector: string;
+  value?: string | null;
+  selectedOptionText?: string | null;
+}
+
+export type RecipeTargetResolution<T extends RecipeTargetElement> = {
+  element: T;
+  via: "testid" | "id" | "name" | "role+accessible-name" | "href" | "css" | "visible-text";
+};
+
+const targetNorm = (value: string | null | undefined): string =>
+  (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+
+function accessibleName(element: RecipeTargetElement): string {
+  return targetNorm(
+    element.ariaLabel ??
+      element.labelText ??
+      element.visibleText ??
+      element.iconLabel ??
+      element.placeholder ??
+      element.title ??
+      element.name,
+  );
+}
+
+function semanticRole(element: RecipeTargetElement): string {
+  if (element.role !== null && element.role !== undefined) return targetNorm(element.role);
+  if (element.tag === "button") return "button";
+  if (element.tag === "a") return "link";
+  if (element.tag === "input" || element.tag === "textarea") return "textbox";
+  return targetNorm(element.tag);
+}
+
+/** Ordered fallback. It is intentionally not a weighted/scored matcher. */
+export function resolveRecipeTarget<T extends RecipeTargetElement>(
+  elements: readonly T[],
+  target: RecipeTarget,
+): RecipeTargetResolution<T> | null {
+  const first = (matches: T[]): T | undefined => {
+    if (matches.length === 1) return matches[0];
+    if (target.near_text_hint === undefined || matches.length === 0) return undefined;
+    const narrowed = filterByNearTextHint(matches, target.near_text_hint, elements);
+    return narrowed.length === 1 ? narrowed[0] : undefined;
+  };
+  if (target.dom_hint?.testid !== undefined) {
+    const element = first(
+      elements.filter((candidate) => candidate.testId === target.dom_hint?.testid),
+    );
+    if (element !== undefined) return { element, via: "testid" };
+  }
+  if (target.dom_hint?.id !== undefined) {
+    const element = first(elements.filter((candidate) => candidate.id === target.dom_hint?.id));
+    if (element !== undefined) return { element, via: "id" };
+  }
+  if (target.dom_hint?.name !== undefined) {
+    const element = first(elements.filter((candidate) => candidate.name === target.dom_hint?.name));
+    if (element !== undefined) return { element, via: "name" };
+  }
+  if (target.role_hint !== undefined && target.accessible_name !== undefined) {
+    const wantedRole = targetNorm(target.role_hint);
+    const wantedName = targetNorm(target.accessible_name);
+    const element = first(
+      elements.filter(
+        (candidate) =>
+          semanticRole(candidate) === wantedRole && accessibleName(candidate) === wantedName,
+      ),
+    );
+    if (element !== undefined) return { element, via: "role+accessible-name" };
+  }
+  if (target.href_hint !== undefined) {
+    const hrefPath = (value: string): string => {
+      try {
+        return new URL(value, "https://recipe.invalid").pathname;
+      } catch {
+        return value;
+      }
+    };
+    const wantedHref = hrefPath(target.href_hint);
+    const element = first(
+      elements.filter(
+        (candidate) =>
+          candidate.href !== null &&
+          candidate.href !== undefined &&
+          hrefPath(candidate.href) === wantedHref,
+      ),
+    );
+    if (element !== undefined) return { element, via: "href" };
+  }
+  if (target.css !== undefined) {
+    const element = first(elements.filter((candidate) => candidate.selector === target.css));
+    if (element !== undefined) return { element, via: "css" };
+  }
+  if (target.visible_text !== undefined) {
+    const wanted = targetNorm(target.visible_text);
+    const matches = elements.filter((candidate) => targetNorm(candidate.visibleText) === wanted);
+    if (matches.length === 1) return { element: matches[0] as T, via: "visible-text" };
+  }
+  return null;
+}
+
+export function resolveRecipeFieldTarget<T extends RecipeTargetElement>(
+  elements: readonly T[],
+  target: RecipeTarget,
+): RecipeTargetResolution<T> | null {
+  const resolution = resolveRecipeTarget(elements, target);
+  if (resolution === null) return null;
+  return resolution.via === "testid" || resolution.via === "id" ? resolution : null;
+}
+
+export function hasRecipeTargetCandidate<T extends RecipeTargetElement>(
+  elements: readonly T[],
+  target: RecipeTarget,
+): boolean {
+  const wantedAccessibleName = targetNorm(target.accessible_name);
+  const wantedVisibleText = targetNorm(target.visible_text);
+  return elements.some((candidate) => {
+    if (target.dom_hint?.testid !== undefined && candidate.testId === target.dom_hint.testid) {
+      return true;
+    }
+    if (target.dom_hint?.id !== undefined && candidate.id === target.dom_hint.id) return true;
+    if (target.dom_hint?.name !== undefined && candidate.name === target.dom_hint.name) return true;
+    if (
+      target.role_hint !== undefined &&
+      target.accessible_name !== undefined &&
+      semanticRole(candidate) === targetNorm(target.role_hint) &&
+      accessibleName(candidate) === wantedAccessibleName
+    ) {
+      return true;
+    }
+    if (target.href_hint !== undefined && candidate.href === target.href_hint) return true;
+    if (target.css !== undefined && candidate.selector === target.css) return true;
+    return (
+      target.visible_text !== undefined && targetNorm(candidate.visibleText) === wantedVisibleText
+    );
+  });
+}
+
+export function resolveRecipeRepairTarget<T extends RecipeTargetElement>(
+  elements: readonly T[],
+  target: RecipeTarget,
+): T | null {
+  let candidates = [...elements];
+  let constrained = false;
+  if (target.dom_hint?.name !== undefined) {
+    candidates = candidates.filter((candidate) => candidate.name === target.dom_hint?.name);
+    constrained = true;
+  }
+  if (target.role_hint !== undefined) {
+    const wantedRole = targetNorm(target.role_hint);
+    candidates = candidates.filter((candidate) => semanticRole(candidate) === wantedRole);
+    constrained = true;
+  }
+  if (target.accessible_name !== undefined) {
+    const wantedName = targetNorm(target.accessible_name);
+    candidates = candidates.filter((candidate) => accessibleName(candidate) === wantedName);
+    constrained = true;
+  }
+  if (target.visible_text !== undefined) {
+    const wantedText = targetNorm(target.visible_text);
+    candidates = candidates.filter((candidate) => targetNorm(candidate.visibleText) === wantedText);
+    constrained = true;
+  }
+  if (target.near_text_hint !== undefined) {
+    candidates = filterByNearTextHint(candidates, target.near_text_hint, elements);
+    constrained = true;
+  }
+  return constrained && candidates.length === 1 ? (candidates[0] ?? null) : null;
+}
+
+export interface FilledFieldExpectation {
+  target: RecipeTarget;
+  expected: string;
+  hole?: string;
+  kind?: "type" | "select";
+}
+
+export type FieldValueVerification =
+  | { ok: true }
+  | { ok: false; reason: "field_missing" | "field_value_mismatch"; field: string };
+
+/** Money-path guard: exact live values must equal every value Squire injected. */
+export function verifyFilledFieldValues(
+  elements: readonly RecipeTargetElement[],
+  expectedFields: readonly FilledFieldExpectation[],
+): FieldValueVerification {
+  for (const expected of expectedFields) {
+    const resolved = resolveRecipeFieldTarget(elements, expected.target);
+    const field =
+      expected.hole ?? expected.target.accessible_name ?? expected.target.dom_hint?.name ?? "field";
+    if (resolved === null) return { ok: false, reason: "field_missing", field };
+    const actual =
+      expected.kind === "select"
+        ? (resolved.element.selectedOptionText ??
+          resolved.element.value ??
+          resolved.element.visibleText ??
+          "")
+        : (resolved.element.value ?? "");
+    if (actual !== expected.expected) {
+      return { ok: false, reason: "field_value_mismatch", field };
+    }
+  }
+  return { ok: true };
 }
 
 // A URL that carries a ONE-TIME credential in its path/query — email
@@ -273,18 +922,15 @@ const SINGLE_USE_TOKEN_PARAM =
 // A long, token-shaped string: not a human word — long, token charset, and
 // mixes letters+digits (so "verify-email" or "confirmation" don't qualify).
 function looksOpaqueToken(s: string): boolean {
-  return (
-    s.length >= 16 &&
-    /^[A-Za-z0-9._-]+$/.test(s) &&
-    /[0-9]/.test(s) &&
-    /[A-Za-z]/.test(s)
-  );
+  return s.length >= 16 && /^[A-Za-z0-9._-]+$/.test(s) && /[0-9]/.test(s) && /[A-Za-z]/.test(s);
 }
 
 export function isSingleUseUrl(rawUrl: string): boolean {
   let u: URL;
   try {
-    u = new URL(rawUrl);
+    // A captured href is often relative; the placeholder base lets the same
+    // token transform cover both href hints and absolute goto URLs.
+    u = new URL(rawUrl, "https://recipe.invalid");
   } catch {
     return false;
   }
@@ -295,22 +941,28 @@ export function isSingleUseUrl(rawUrl: string): boolean {
   return u.pathname.split("/").some(looksOpaqueToken); // or in a path segment
 }
 
-export function recipeEntryUrl(recipe: OperatorRecipe): string | null {
+export function recipeEntryUrl(recipe: OperatorRecipe, runtimeServiceUrl?: string): string | null {
+  if (recipe.entry_mode === "runtime_service_url") {
+    if (runtimeServiceUrl === undefined) return null;
+    if (recipe.domain === undefined || operatorRecipeDomain(runtimeServiceUrl) !== recipe.domain) {
+      throw new Error(`runtime service URL domain does not match operator-recipe "${recipe.name}"`);
+    }
+    return runtimeServiceUrl;
+  }
   // Prefer the recipe's canonical entry (the session's start URL). Recipes
   // synthesized before entry_url existed fall back to the first STABLE trace
   // goto — skipping single-use verification/magic links, which must never be a
   // replay entry (opening one lands on an expired-token dead page).
-  if (recipe.entry_url !== undefined && recipe.entry_url.length > 0) {
+  if (
+    recipe.entry_url !== undefined &&
+    recipe.entry_url.length > 0 &&
+    !isSingleUseUrl(recipe.entry_url)
+  ) {
     return recipe.entry_url;
   }
   const firstStableGoto = recipe.trace.find((t) => {
     const url = t.action.url_template;
-    return (
-      t.action.kind === "goto" &&
-      url !== undefined &&
-      url.length > 0 &&
-      !isSingleUseUrl(url)
-    );
+    return t.action.kind === "goto" && url !== undefined && url.length > 0 && !isSingleUseUrl(url);
   });
   return firstStableGoto?.action.url_template ?? null;
 }

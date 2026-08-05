@@ -198,6 +198,9 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
       );
       expect(country).toBe("JP");
       expect(await page.textContent("#flag")).toBe("JP");
+      expect(await ctrl.verifyPhoneCountry("Japan")).toBe(true);
+      await page.locator(".PhoneInputCountrySelect").selectOption("US");
+      expect(await ctrl.verifyPhoneCountry("Japan")).toBe(false);
     } finally {
       await page.close();
     }

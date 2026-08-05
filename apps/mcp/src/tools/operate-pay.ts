@@ -1,5 +1,8 @@
 import { z } from "zod";
-import { activeProvisionBrowser } from "../bot/provision-session.js";
+import {
+  activeProvisionBrowserForPayment,
+  recordActivePaymentProvenance,
+} from "../bot/provision-session.js";
 import { executeOperatePay } from "../bot/pay-operator.js";
 import { assertApi, type Tool } from "./index.js";
 
@@ -86,7 +89,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   },
   async handler(args, api, context) {
     assertApi(api);
-    const browser = activeProvisionBrowser();
+    const browser = await activeProvisionBrowserForPayment();
     if (await browser.isPayPalHostedCheckout()) {
       return {
         status: "paypal_checkout",
@@ -130,7 +133,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
       // the JIT add-card ceremony.
     }
-    return await executeOperatePay(
+    let resolvedCardRef: string | null = null;
+    const result = await executeOperatePay(
       {
         ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
         ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
@@ -143,16 +147,28 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           : {}),
       },
       api,
-      browser,
-      context !== undefined
-        ? {
-            surfaceApprovalUrl: async (url) => {
-              await context.notifyUser(`Approve this payment on your phone: ${url}`, {
-                approval_url: url,
-              });
-            },
-          }
-        : {},
+      await activeProvisionBrowserForPayment(),
+      {
+        ...(context !== undefined
+          ? {
+              surfaceApprovalUrl: async (url: string) => {
+                await context.notifyUser(`Approve this payment on your phone: ${url}`, {
+                  approval_url: url,
+                });
+              },
+            }
+          : {}),
+        onCardResolved: (value) => {
+          resolvedCardRef = value;
+        },
+      },
     );
+    if (result.status === "payment_submitted" || result.status === "payment_3ds_required") {
+      if (resolvedCardRef === null) {
+        throw new Error("operate_pay succeeded without an action-time card source attestation");
+      }
+      recordActivePaymentProvenance(resolvedCardRef);
+    }
+    return result;
   },
 };
