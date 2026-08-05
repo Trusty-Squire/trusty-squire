@@ -22,6 +22,7 @@ import {
   tagTraceProvenance,
   bindRecipeTarget,
   bindRecipeValue,
+  cssEscapeRecipeValue,
   verifyFilledFieldValues,
   type OperatorRecipe,
 } from "../operator-recipe.js";
@@ -235,15 +236,20 @@ describe("ordered target fallback", () => {
         accessible_name: "City",
       }),
     ).toBeNull();
-    const inventory = [
-      { selector: "#shipping-label", visibleText: "Shipping", role: null },
-      billing,
-    ];
     expect(
-      resolveRecipeFieldTarget(inventory, {
-        dom_hint: { testid: "shipping-city", name: "city" },
+      resolveRecipeFieldTarget(
+        [{ selector: "#shipping-label", visibleText: "Shipping", role: null }, billing],
+        {
+          dom_hint: { name: "city" },
+          accessible_name: "City",
+          near_text_hint: "Shipping",
+        },
+      ),
+    ).toBeNull();
+    expect(
+      resolveRecipeTarget([billing], {
+        dom_hint: { name: "city" },
         accessible_name: "City",
-        near_text_hint: "Shipping",
       })?.element.selector,
     ).toBe("#billing-city");
   });
@@ -291,13 +297,33 @@ describe("provenance holes", () => {
         css: '[aria-label="${EMAIL_ALIAS}"]',
         visible_text: "${EMAIL_ALIAS}",
       },
-      { "contact.email": "buyer@example.com" },
+      { "address.email": "buyer@example.com" },
+      "address.email",
     );
     expect(JSON.stringify(target)).not.toContain("${EMAIL_ALIAS}");
     expect(JSON.stringify(target)).toContain("buyer@example.com");
-    expect(() => bindRecipeTarget({ visible_text: "${EMAIL_ALIAS}" }, {})).toThrow(
-      /missing recipe binding: contact\.email/i,
+    expect(() => bindRecipeTarget({ visible_text: "${EMAIL_ALIAS}" }, {}, "address.email")).toThrow(
+      /missing recipe binding: address\.email/i,
     );
+    expect(() =>
+      bindRecipeTarget({ visible_text: "${EMAIL_ALIAS}" }, { "contact.email": "x@y.test" }),
+    ).toThrow(/lacks an attested source hole/i);
+  });
+
+  it("rebinds escaped and encoded known-email target transforms", () => {
+    const email = "buyer@example.com";
+    const target = bindRecipeTarget(
+      {
+        css: '[data-testid="${EMAIL_ALIAS_CSS}"]',
+        href_hint: "/account/${EMAIL_ALIAS_URI}",
+        visible_text: "${EMAIL_ALIAS}",
+      },
+      { "contact.email": email },
+      "contact.email",
+    );
+    expect(target.css).toBe(`[data-testid="${cssEscapeRecipeValue(email)}"]`);
+    expect(target.href_hint).toBe(`/account/${encodeURIComponent(email)}`);
+    expect(target.visible_text).toBe(email);
   });
 
   it("rejects ambiguous exact-value provenance instead of choosing the first hole", () => {

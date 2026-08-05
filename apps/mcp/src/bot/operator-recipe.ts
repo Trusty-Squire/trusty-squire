@@ -79,6 +79,8 @@ export const RecipeTargetSchema = z
   .strict();
 export type RecipeTarget = z.infer<typeof RecipeTargetSchema>;
 
+const EmailHoleSchema = z.string().regex(/^(?:address|contact)\.[a-zA-Z0-9_-]+$/);
+
 const TraceActionSchema = z
   .object({
     kind: z.enum([
@@ -101,6 +103,7 @@ const TraceActionSchema = z
     // for backwards compatibility and is the unique-only final fallback.
     text_match: z.string().max(200).optional(),
     target: RecipeTargetSchema.optional(),
+    email_hole: EmailHoleSchema.optional(),
     // goto: a URL with optional ${VAR} templates for per-run identity.
     url_template: z.string().max(2000).optional(),
     // Value-bearing actions store either a non-secret literal or provenance
@@ -550,12 +553,25 @@ export function bindRecipeValue(
 export function bindRecipeTarget(
   target: RecipeTarget,
   bindings: Readonly<Record<string, string>>,
+  emailHole?: string,
 ): RecipeTarget {
   const bind = (value: string | undefined): string | undefined => {
-    if (value === undefined || !value.includes("${EMAIL_ALIAS}")) return value;
-    const email = bindings["contact.email"];
-    if (email === undefined) throw new Error("missing recipe binding: contact.email");
-    return value.split("${EMAIL_ALIAS}").join(email);
+    if (value === undefined || !value.includes("${EMAIL_ALIAS")) return value;
+    if (emailHole === undefined) {
+      throw new Error("email target lacks an attested source hole");
+    }
+    const email = bindings[emailHole];
+    if (email === undefined) throw new Error(`missing recipe binding: ${emailHole}`);
+    const encoded = encodeURIComponent(email);
+    return value
+      .split("${EMAIL_ALIAS_URI_CSS}")
+      .join(cssEscapeRecipeValue(encoded))
+      .split("${EMAIL_ALIAS_CSS}")
+      .join(cssEscapeRecipeValue(email))
+      .split("${EMAIL_ALIAS_URI}")
+      .join(encoded)
+      .split("${EMAIL_ALIAS}")
+      .join(email);
   };
   const domHint = target.dom_hint;
   return {
@@ -581,6 +597,36 @@ export function bindRecipeTarget(
       ? { visible_text: bind(target.visible_text)! }
       : {}),
   };
+}
+
+export function cssEscapeRecipeValue(value: string): string {
+  const chars = [...value];
+  return chars
+    .map((char, index) => {
+      const code = char.codePointAt(0)!;
+      if (code === 0) return "�";
+      if (
+        (code >= 1 && code <= 31) ||
+        code === 127 ||
+        (index === 0 && code >= 48 && code <= 57) ||
+        (index === 1 && code >= 48 && code <= 57 && chars[0] === "-")
+      ) {
+        return `\\${code.toString(16)} `;
+      }
+      if (index === 0 && char === "-" && chars.length === 1) return "\\-";
+      if (
+        code >= 128 ||
+        char === "-" ||
+        char === "_" ||
+        (code >= 48 && code <= 57) ||
+        (code >= 65 && code <= 90) ||
+        (code >= 97 && code <= 122)
+      ) {
+        return char;
+      }
+      return `\\${char}`;
+    })
+    .join("");
 }
 
 export interface RecipeTargetElement {
@@ -702,15 +748,7 @@ export function resolveRecipeFieldTarget<T extends RecipeTargetElement>(
 ): RecipeTargetResolution<T> | null {
   const resolution = resolveRecipeTarget(elements, target);
   if (resolution === null) return null;
-  const fellPastStrongIdentity = resolution.via !== "testid" && resolution.via !== "id";
-  if (
-    fellPastStrongIdentity &&
-    (target.near_text_hint === undefined ||
-      filterByNearTextHint([resolution.element], target.near_text_hint, elements).length !== 1)
-  ) {
-    return null;
-  }
-  return resolution;
+  return resolution.via === "testid" || resolution.via === "id" ? resolution : null;
 }
 
 export function hasRecipeTargetCandidate<T extends RecipeTargetElement>(

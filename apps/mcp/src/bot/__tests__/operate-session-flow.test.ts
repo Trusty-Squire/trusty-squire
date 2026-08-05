@@ -516,7 +516,7 @@ describe("prepared-statement replay", () => {
     );
   });
 
-  it("retains action-time attestation when a transition unmounts the field", async () => {
+  it("requires a human when a transition mutates and unmounts a field", async () => {
     h.elements = [
       elem({
         testId: "shipping-city",
@@ -558,9 +558,15 @@ describe("prepared-statement replay", () => {
       }),
       { "address.city": "Queens" },
     );
-    expect(result).toMatchObject({ status: "complete", field_values_verified: true });
+    expect(result).toMatchObject({
+      status: "human_required",
+      reason: "field_missing",
+      field: "address.city",
+    });
     expect(h.elements).toEqual([]);
-    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
+    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
+      /verification is not satisfied/i,
+    );
   });
 
   it("rejects unclassified legacy recipes from deterministic replay", async () => {
@@ -1148,7 +1154,7 @@ describe("verified recipe recording", () => {
         ariaLabel: "buyer@example.com",
         visibleText: "buyer@example.com",
         href: "https://shop.example.com/account/buyer@example.com",
-        selector: '[aria-label="buyer@example.com"]',
+        selector: '[data-testid="email-buyer\\@example\\.com"]',
       }),
     ];
     const started = await startProvisionSession({
@@ -1159,6 +1165,7 @@ describe("verified recipe recording", () => {
       kind: "type",
       target: "buyer@example.com",
       text: "buyer@example.com",
+      provenance: { hole: "address.email" },
     });
     h.visibleText = "Review order";
     await provisionRememberTool.handler(
@@ -1167,7 +1174,7 @@ describe("verified recipe recording", () => {
         name: "known-email",
         goal: "Buy coffee",
         verb: "purchase",
-        inputs: { contact: { email: "buyer@example.com" } },
+        inputs: { address: { email: "buyer@example.com" } },
         postcondition: {
           kind: "execute_capability",
           describe: "Ready to approve",
@@ -1177,9 +1184,12 @@ describe("verified recipe recording", () => {
       null as unknown as ApiClient,
     );
     const raw = readFileSync(join(dir, "purchase--example.com.json"), "utf8");
-    expect(raw).toContain('"hole": "contact.email"');
+    expect(raw).toContain('"hole": "address.email"');
+    expect(raw).toContain('"email_hole": "address.email"');
     expect(raw).toContain("${EMAIL_ALIAS}");
+    expect(raw).toContain("${EMAIL_ALIAS_CSS}");
     expect(raw).not.toContain("buyer@example.com");
+    expect(raw).not.toContain("buyer\\\\@example\\\\.com");
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
     rmSync(profileDir, { recursive: true, force: true });

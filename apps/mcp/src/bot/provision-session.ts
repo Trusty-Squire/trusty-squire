@@ -46,6 +46,7 @@ import {
   checkSuccessSignal,
   bindRecipeTarget,
   bindRecipeValue,
+  cssEscapeRecipeValue,
   fillTemplate,
   hasRecipeTargetCandidate,
   isSingleUseUrl,
@@ -344,7 +345,6 @@ interface ReplayState {
   nextIndex: number | null;
   expectedFields: Map<number, ReplayExpectedField>;
   verifiedFields: Set<number>;
-  unmountedFields: Set<number>;
   paymentGuard: "pending" | "verified" | "failed";
   failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
 }
@@ -1908,13 +1908,11 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
   for (const expected of state.expectedFields.values()) {
     if (!state.verifiedFields.has(expected.stepIndex)) continue;
     if (!(await isReplayFieldMounted(session, expected, fresh))) {
-      if (state.unmountedFields.has(expected.stepIndex)) continue;
       markReplayFailure(session, "field_missing", expected.hole);
       throw new Error(
         "operate_pay refused: replay address/contact/quantity verification is not satisfied",
       );
     }
-    state.unmountedFields.delete(expected.stepIndex);
     const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
       markReplayFailure(session, guard.reason, expected.hole);
@@ -2845,6 +2843,10 @@ export async function act(
 // name keeps its legacy form for corpus compatibility (validateReplayGraph and
 // published skills key off it); it now means "the email to fill", not a Squire alias.
 const EMAIL_SLOT_TEMPLATE = "${EMAIL_ALIAS}";
+const EMAIL_SLOT_CSS_TEMPLATE = "${EMAIL_ALIAS_CSS}";
+const EMAIL_SLOT_URI_TEMPLATE = "${EMAIL_ALIAS_URI}";
+const EMAIL_SLOT_URI_CSS_TEMPLATE = "${EMAIL_ALIAS_URI_CSS}";
+const REPLAY_VERIFIED_HOLE = /^(?:address|contact)(?:\.|$)|^quantity$/;
 function looksLikeEmailValue(v: string): boolean {
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v.trim());
 }
@@ -2862,8 +2864,17 @@ export function redactEmailForTrace(value: string): string {
 // NOT a vector here — that path belonged to the retired autonomous bot and is
 // not wired into operate_*.) Exported for unit tests.
 export function scrubKnownEmail(s: string, userEmail: string | null): string {
-  if (userEmail === null || userEmail.length === 0 || !s.includes(userEmail)) return s;
-  return s.split(userEmail).join(EMAIL_SLOT_TEMPLATE);
+  if (userEmail === null || userEmail.length === 0) return s;
+  const encoded = encodeURIComponent(userEmail);
+  return s
+    .split(cssEscapeRecipeValue(encoded))
+    .join(EMAIL_SLOT_URI_CSS_TEMPLATE)
+    .split(cssEscapeRecipeValue(userEmail))
+    .join(EMAIL_SLOT_CSS_TEMPLATE)
+    .split(encoded)
+    .join(EMAIL_SLOT_URI_TEMPLATE)
+    .split(userEmail)
+    .join(EMAIL_SLOT_TEMPLATE);
 }
 
 // Append a stable-attribute-targeted entry to the session's operator-recipe
@@ -2972,6 +2983,17 @@ function recordTrace(
   // An upload attaches a machine-local file — not portable, never part of a
   // shared recipe. Skip it here (the action is still in the audit trail).
   if (action.kind === "upload") return;
+  const knownEmailHole =
+    action.kind === "type" &&
+    action.provenance === undefined &&
+    session.userEmail !== null &&
+    action.text === session.userEmail
+      ? "contact.email"
+      : undefined;
+  const actionHole =
+    action.kind === "type" || action.kind === "select" || action.kind === "set_phone_country"
+      ? (action.provenance?.hole ?? knownEmailHole)
+      : undefined;
   const rawText = traceTextFor(el);
   const text = rawText !== undefined ? scrubKnownEmail(rawText, session.userEmail) : undefined;
   const withText = text !== undefined ? { text_match: text } : {};
@@ -3041,20 +3063,9 @@ function recordTrace(
   const traceIndex = session.actionTrace.length;
   session.actionTrace.push({ action: a });
   if (action.kind === "type" || action.kind === "select" || action.kind === "set_phone_country") {
-    const knownEmailHole =
-      action.kind === "type" &&
-      action.provenance === undefined &&
-      session.userEmail !== null &&
-      action.text === session.userEmail
-        ? "contact.email"
-        : undefined;
     session.recordedValues.push({
       traceIndex,
-      ...(action.provenance !== undefined
-        ? { hole: action.provenance.hole }
-        : knownEmailHole !== undefined
-          ? { hole: knownEmailHole }
-          : {}),
+      ...(actionHole !== undefined ? { hole: actionHole } : {}),
       literal: action.kind === "set_phone_country" ? action.country : action.text,
     });
   } else if (action.kind === "type_secret") {
@@ -3306,6 +3317,30 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
     }
     throw new Error(`provenance ${source.hole} is not bound to a recorded value action`);
   }
+  const emailSources = session.recordedValues.filter(
+    (source): source is RecordedValueSource & { hole: string } =>
+      source.hole !== undefined &&
+      session.userEmail !== null &&
+      source.literal === session.userEmail &&
+      looksLikeEmailValue(source.literal),
+  );
+  const emailHoles = new Set(emailSources.map((source) => source.hole));
+  for (const [traceIndex, entry] of trace.entries()) {
+    const targetText = JSON.stringify({
+      text_match: entry.action.text_match,
+      target: entry.action.target,
+    });
+    if (!targetText.includes("${EMAIL_ALIAS")) continue;
+    const directEmailHole = emailSources.find((source) => source.traceIndex === traceIndex)?.hole;
+    if (directEmailHole === undefined && emailHoles.size !== 1) {
+      throw new Error("known-email target lacks one unambiguous action-time source hole");
+    }
+    const emailHole = directEmailHole ?? [...emailHoles][0]!;
+    if (!/^(?:address|contact)\.[a-zA-Z0-9_-]+$/.test(emailHole)) {
+      throw new Error(`known-email target source ${emailHole} is not an address/contact field`);
+    }
+    entry.action.email_hole = emailHole;
+  }
   for (const [traceIndex, entry] of trace.entries()) {
     const value = entry.action.value;
     if (value === undefined || typeof value === "string" || recordedIndexes.has(traceIndex)) {
@@ -3481,10 +3516,9 @@ function boundReplayTarget(
       : action.text_match !== undefined
         ? { visible_text: action.text_match }
         : null;
-  return target === null ? null : bindRecipeTarget(target, bindings);
+  return target === null ? null : bindRecipeTarget(target, bindings, action.email_hole);
 }
 
-const REPLAY_VERIFIED_HOLE = /^(?:address|contact)(?:\.|$)|^quantity$/;
 const MONEY_FIELD_TARGET =
   /(?:^|[\s._-])(?:address|street|line\s*[12]|city|state|province|postal|zip|country|e-?mail|phone|first\s*name|last\s*name|full\s*name|quantity|qty)(?:$|[\s._-])/i;
 
@@ -3552,7 +3586,7 @@ function expectedReplayFields(
     try {
       target = boundReplayTarget(action, bindings);
     } catch {
-      return { fields, missing: "contact.email" };
+      return { fields, missing: action.email_hole ?? "email_target" };
     }
     fields.set(stepIndex, {
       stepIndex,
@@ -3724,7 +3758,6 @@ async function captureReplayRepairVerification(
     throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
   }
   state.verifiedFields.add(stepIndex);
-  state.unmountedFields.delete(stepIndex);
 }
 
 async function refreshReplayVerificationAfterAction(
@@ -3764,7 +3797,6 @@ async function refreshReplayVerificationAfterAction(
       throw new Error(`replay field verification failed for ${expected.hole}: ${guard.reason}`);
     }
     state.verifiedFields.add(expected.stepIndex);
-    state.unmountedFields.delete(expected.stepIndex);
   }
   if (state.verifiedFields.size === state.expectedFields.size) state.paymentGuard = "verified";
 }
@@ -3799,10 +3831,6 @@ async function attestReplayFieldsBeforeTransition(
     ) {
       continue;
     }
-    if (state.unmountedFields.has(expected.stepIndex)) {
-      if (!(await isReplayFieldMounted(session, expected, fresh))) continue;
-      state.unmountedFields.delete(expected.stepIndex);
-    }
     const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
       return { ok: false, reason: guard.reason, field: expected.hole };
@@ -3829,10 +3857,8 @@ async function verifyReplayFieldsAfterTransition(
     const expected = state.expectedFields.get(stepIndex);
     if (expected === undefined) continue;
     if (!(await isReplayFieldMounted(session, expected, fresh))) {
-      state.unmountedFields.add(stepIndex);
-      continue;
+      return { ok: false, reason: "field_missing", field: expected.hole };
     }
-    state.unmountedFields.delete(stepIndex);
     const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
       return { ok: false, reason: guard.reason, field: expected.hole };
@@ -3882,7 +3908,6 @@ export async function replayOperatorRecipe(
       nextIndex: null,
       expectedFields: expected.fields,
       verifiedFields: new Set(),
-      unmountedFields: new Set(),
       paymentGuard: isMoneyPath ? "pending" : "verified",
     };
     session.replayState = state;
@@ -3905,7 +3930,6 @@ export async function replayOperatorRecipe(
       const guard = await verifyReplayField(session, repairedField);
       if (!guard.ok) return await humanRequired(guard.reason, repairedField.hole);
       state.verifiedFields.add(fromIndex - 1);
-      state.unmountedFields.delete(fromIndex - 1);
     }
     state.nextIndex = null;
   }
@@ -4066,7 +4090,6 @@ export async function replayOperatorRecipe(
         const guard = await verifyReplayField(session, expected, expected.kind === "select");
         if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
         state.verifiedFields.add(i);
-        state.unmountedFields.delete(i);
       }
       const transitionGuard = await verifyReplayFieldsAfterTransition(
         session,

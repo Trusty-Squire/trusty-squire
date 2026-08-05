@@ -572,6 +572,15 @@ describe("scrubKnownEmail (PR3d — exact known-email scrub in trace text)", () 
     expect(scrubKnownEmail("ada@x.com", null)).toBe("ada@x.com");
     expect(scrubKnownEmail("ada@x.com", "")).toBe("ada@x.com");
   });
+
+  it("scrubs CSS-escaped and URL-encoded forms with reversible tokens", () => {
+    expect(scrubKnownEmail('[data-testid="ada\\@x\\.com"]', "ada@x.com")).toBe(
+      '[data-testid="${EMAIL_ALIAS_CSS}"]',
+    );
+    expect(scrubKnownEmail("/account/ada%40x.com", "ada@x.com")).toBe(
+      "/account/${EMAIL_ALIAS_URI}",
+    );
+  });
 });
 
 describe("generatePassword (PR3c signup password)", () => {
