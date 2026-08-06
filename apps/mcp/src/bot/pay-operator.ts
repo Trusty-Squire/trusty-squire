@@ -437,6 +437,12 @@ export async function executeOperatePay(
                 );
               } catch (error) {
                 const failureReason = safeFailureReason(error);
+                if (reviewCandidate) {
+                  console.info(JSON.stringify({ event: "review_candidate_rejected", approval_id: created.id, candidate_fingerprint: candidateKey, failure_code: failureReason }));
+                  if (failureReason !== "jwks_fetch_failed" && failureReason !== "jwks_fetch_timeout") {
+                    return { status: "payment_review_verification_failed", reason: failureReason, approval_url: approvalUrl };
+                  }
+                }
                 if (approval.status === "approved") {
                   return {
                     status: "payment_mandate_rejected",
@@ -465,6 +471,10 @@ export async function executeOperatePay(
                   );
                 } catch {
                   candidateCardBytes?.fill(0);
+                  if (reviewCandidate) {
+                    console.info(JSON.stringify({ event: "review_candidate_rejected", approval_id: created.id, candidate_fingerprint: candidateKey, failure_code: "card_open_failed" }));
+                    return { status: "payment_review_verification_failed", reason: "card_open_failed", approval_url: approvalUrl };
+                  }
                   if (approval.status === "approved") {
                     return { status: "payment_card_open_failed", approval_url: approvalUrl };
                   }
@@ -476,11 +486,13 @@ export async function executeOperatePay(
                       if (confirmation.status !== "verified") {
                         throw new Error("review_confirmation_failed");
                       }
-                    } catch {
+                    } catch (error) {
                       candidateCardBytes.fill(0);
-                      await deps.sleep(deps.pollIntervalMs);
-                      continue;
+                      const reason = error instanceof Error && /404|409/.test(error.message) ? "confirm_status" : "confirm_failed";
+                      console.info(JSON.stringify({ event: "review_candidate_rejected", approval_id: created.id, candidate_fingerprint: candidateKey, failure_code: reason }));
+                      return { status: "payment_review_verification_failed", reason, approval_url: approvalUrl };
                     }
+                    console.info(JSON.stringify({ event: "review_candidate_verified", approval_id: created.id, candidate_fingerprint: candidateKey, failure_code: "ok" }));
                     candidateCardBytes.fill(0);
                     await deps.sleep(deps.pollIntervalMs);
                     continue;

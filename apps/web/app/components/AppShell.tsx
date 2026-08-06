@@ -22,7 +22,7 @@ function isPro(status: PlanStatus | null): boolean {
   );
 }
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({ children, anonymous = false }: { children: ReactNode; anonymous?: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
   const [plan, setPlan] = useState<PlanStatus | null>(null);
@@ -34,6 +34,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [billingEnabled, setBillingEnabled] = useState(false);
 
   useEffect(() => {
+    if (anonymous) return;
     let stopped = false;
     apiGet<StatusFlags>("/v1/status")
       .then((s) => {
@@ -45,12 +46,12 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => {
       stopped = true;
     };
-  }, []);
+  }, [anonymous]);
 
   // Plan pill — at-a-glance tier. Best-effort: if it fails, no pill renders.
   // Only meaningful when billing is enabled.
   useEffect(() => {
-    if (!billingEnabled) return;
+    if (anonymous || !billingEnabled) return;
     let stopped = false;
     apiGet<PlanStatus>("/v1/billing/status")
       .then((s) => {
@@ -62,7 +63,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => {
       stopped = true;
     };
-  }, [billingEnabled]);
+  }, [anonymous, billingEnabled]);
 
   async function signOut() {
     setMenuOpen(false);
@@ -77,11 +78,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="app-shell">
       <header className="app-nav">
-        <Link className="brand" href="/vault">
+        <Link className="brand" href={anonymous ? "/" : "/vault"}>
           <Shield glyph />
           Trusty Squire
         </Link>
-        <div className="nav-r">
+        {!anonymous && <div className="nav-r">
           <Link className={pathname === "/vault" ? "on" : ""} href="/vault">
             Vault
           </Link>
@@ -180,7 +181,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               </>
             )}
           </div>
-        </div>
+        </div>}
       </header>
       <main className="app-main">{children}</main>
     </div>

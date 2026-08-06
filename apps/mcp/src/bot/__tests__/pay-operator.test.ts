@@ -33,6 +33,7 @@ const SYNTHETIC_CARD = {
 type Mode =
   | "happy"
   | "review_then_happy"
+  | "review_wrong_issuer"
   | "confirm_response_lost"
   | "confirm_response_lost_changed"
   | "junk_then_happy"
@@ -131,7 +132,7 @@ async function harness(
       };
       const canonical = canonicalize(payload)!;
       const aad = createHash("sha256").update(canonical, "utf8").digest();
-      const reviewCandidate = mode === "review_then_happy" && approvalPolls === 1;
+      const reviewCandidate = (mode === "review_then_happy" || mode === "review_wrong_issuer") && approvalPolls === 1;
       const reviewCanonical = canonicalize({
         approval_id: "approval_test",
         approval_payload_sha256: aad.toString("base64url"),
@@ -148,7 +149,7 @@ async function harness(
       })
         .setProtectedHeader({ alg: "RS256", kid: "test-key" })
         .setIssuer(
-          mode === "wrong_issuer" ? "https://other-issuer.example" : "https://vouchflow.dev",
+          mode === "wrong_issuer" || mode === "review_wrong_issuer" ? "https://other-issuer.example" : "https://vouchflow.dev",
         )
         .setAudience(mode === "wrong_audience" ? "other-customer" : "customer_test")
         .sign(privateKey);
@@ -317,6 +318,17 @@ describe("operate_pay", () => {
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(confirmationBodies).toHaveLength(2);
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
+  });
+
+  it("surfaces a rejected review issuer instead of silently polling", async () => {
+    const { result, filledCards, confirmationBodies } = await harness("review_wrong_issuer");
+
+    expect(result).toMatchObject({
+      status: "payment_review_verification_failed",
+      reason: "mandate_verification_failed",
+    });
+    expect(confirmationBodies).toHaveLength(0);
+    expect(filledCards).toHaveLength(0);
   });
 
   it("ignores a junk pending seal and confirms a valid replacement", async () => {
