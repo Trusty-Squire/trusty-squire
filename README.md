@@ -52,15 +52,15 @@ browser before showing the number, name, expiry, and billing address. The CVV is
 never shown, even after reveal. The Activity page also records card additions
 and removals, payments, and app-grant changes without storing a PAN or CVV.
 
-As of MCP 1.1.7, `operate_pay` requires a non-empty item and reason (calls that
-omit either receive a validation error). It reads the checkout total,
+`operate_pay` requires a non-empty item and reason (calls that omit either
+receive a validation error). It reads the checkout total,
 sends you a short-lived approval link, and submits only after you approve the
-exact purchase. The page initially withholds the purchase and card display
-details. Its review action uses one passkey ceremony to unlock the card and send
-an opaque review seal for operator verification; after verification releases the
-details, a second ceremony signs the exact purchase. You then inspect the venue,
-item, amount, reason, card, and requesting MCP client (for example, Hermes) before
-clicking **Approve payment** to relay the prepared final seal. A first-time
+exact purchase. The anonymous approval page shows the merchant, checkout origin,
+amount and currency, item, and reason directly from the short-lived server record
+before one passkey ceremony authorizes those canonical payment values. You also
+see the requesting MCP client (for example, Hermes) and that a saved card will be
+used before clicking **Approve payment** to relay the operator-sealed final
+authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission. If the checkout exposes PayPal Smart Buttons
 or PayPal-hosted fields, Trusty Squire hands the checkout back before selecting a
@@ -152,8 +152,10 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
   payment, your phone releases the card only to that checkout's ephemeral local
-  operator: transiently while it verifies the passkey-bound review, then for the
-  checkout after you approve the exact details shown on the approval page.
+  operator after one passkey authorization over the exact details already shown
+  on the approval page. The API temporarily relays only operator-sealed card
+  ciphertext and its signed mandate; successful operator confirmation clears
+  those relay bytes.
   Trusty Squire's API and the coding-agent model never receive plaintext PAN or
   CVV. See the
   [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)

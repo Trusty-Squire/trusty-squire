@@ -64,7 +64,7 @@ vi.mock("../../../../components/CardEntry", () => ({
 
 import PaymentApprovalPage from "../page";
 
-// Operator-verified review responses carry metadata for the server-bound card.
+// The ceremony response carries the server-bound card needed for authorization.
 const BOUND_CARD = {
   id: "card_new",
   label: "Personal",
@@ -115,10 +115,7 @@ function approvalBody() {
 function ceremonyBody() {
   const current = approvalBody();
   return {
-    id: current.id,
-    status: current.status,
-    card_ref: current.card_ref,
-    operator_pubkey: current.operator_pubkey,
+    ...current,
     approval_payload_sha256: "synthetic-approval-payload-hash",
     card: current.card === null ? null : { blob: current.card.blob },
   };
@@ -196,7 +193,7 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
   });
 
-  it("add → bind → passkey review shows the SERVER-BOUND card last4", async () => {
+  it("add → bind shows the server record before one passkey approval", async () => {
     render(<PaymentApprovalPage />);
     await waitFor(() => expect(screen.getByTestId("card-entry")).toBeTruthy());
 
@@ -210,35 +207,41 @@ describe("pay page — JIT add-card ceremony", () => {
       }),
     );
 
-    const review = await screen.findByRole("button", { name: /Review with passkey/ });
-    expect(screen.queryByText(/Pay with/)).toBeNull();
-    await user.click(review);
+    const approve = await screen.findByRole("button", { name: /Approve payment/ });
+    expect(screen.getByText("CASETiFY")).toBeTruthy();
+    expect(screen.getByText("https://casetify.com")).toBeTruthy();
+    expect(screen.getByText("phone case")).toBeTruthy();
+    expect(screen.getByText("gift")).toBeTruthy();
+    expect(screen.getByText(/Pay with/).textContent).toContain("$60.00");
+    expect(approve.hasAttribute("disabled")).toBe(false);
+    expect(vouchflow.signPayload).not.toHaveBeenCalled();
 
-    // Details and the bound card's last4 appear only after the passkey ceremony.
-    const anchor = await screen.findByText(/Pay with/);
-    expect(anchor.textContent).toContain("··4242");
-
-    // Approve is the lone action, and only appears after the card is bound.
-    expect(screen.getByRole("button", { name: /Approve payment/ }).hasAttribute("disabled")).toBe(
-      false,
-    );
+    await user.click(approve);
+    await waitFor(() => expect(vouchflow.signPayload).toHaveBeenCalledTimes(1));
   });
 
-  it("releases payment details after operator verification without OAuth", async () => {
+  it("discloses server-record details before authorization without OAuth or account navigation", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
-    const review = await screen.findByRole("button", { name: /Review with passkey/ });
-    expect(router.replace).not.toHaveBeenCalled();
-    expect(screen.queryByText("CASETiFY")).toBeNull();
-    const user = userEvent.setup();
-    await user.click(review);
     await screen.findByRole("button", { name: /Approve payment/ });
+    expect(router.replace).not.toHaveBeenCalled();
+    expect(screen.getByText("CASETiFY")).toBeTruthy();
+    expect(screen.getByText("https://casetify.com")).toBeTruthy();
+    expect(screen.getByText("phone case")).toBeTruthy();
+    expect(screen.getByText("gift")).toBeTruthy();
+    expect(screen.getByText(/Pay with/).textContent).toContain("$60.00");
     expect(api.apiGet).not.toHaveBeenCalledWith("/v1/pay/approvals/appr_1");
     expect(api.apiGet).not.toHaveBeenCalledWith("/v1/vault/e2e/card_new");
     expect(router.replace).not.toHaveBeenCalled();
     expect(screen.queryByTestId("card-entry")).toBeNull();
-    const anchor = screen.getByText(/Pay with/);
-    expect(anchor.textContent).toContain("··4242");
+    expect(screen.queryByRole("button", { name: "Account" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Vault" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Cards" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Activity" })).toBeNull();
+    const links = screen.getAllByRole("link");
+    expect(links).toHaveLength(1);
+    expect(links[0]?.getAttribute("href")).toBe("/");
+    expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 
   it("blocks JIT approval when the server-bound card metadata cannot be loaded", async () => {
@@ -251,7 +254,8 @@ describe("pay page — JIT add-card ceremony", () => {
 
     await screen.findByRole("button", { name: "Retry" });
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
-    expect(screen.queryByText(/your saved card/i)).toBeNull();
+    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText("CASETiFY")).toBeTruthy();
     expect(screen.getByText("card unavailable")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
     expect(
@@ -264,9 +268,9 @@ describe("pay page — JIT add-card ceremony", () => {
     cardListOverride = [LEGACY_BOUND_CARD];
     render(<PaymentApprovalPage />);
 
-    const review = await screen.findByRole("button", { name: /Review with passkey/ });
-    expect(review.hasAttribute("disabled")).toBe(false);
-    expect(screen.queryByText(/your saved card/i)).toBeNull();
+    const approve = await screen.findByRole("button", { name: /Approve payment/ });
+    expect(approve.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText(/your saved card/i)).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
@@ -280,17 +284,13 @@ describe("pay page — JIT add-card ceremony", () => {
 
     expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
     expect(screen.queryByTestId("card-entry")).toBeNull();
-    expect(screen.queryByText(/your saved card/i)).toBeNull();
+    expect(screen.getByText(/your saved card/i)).toBeTruthy();
     expect(screen.getByText("card unavailable")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "Retry" }));
-    const review = await screen.findByRole("button", { name: /Review with passkey/ });
-    await user.click(review);
-    const anchor = await screen.findByText(/Pay with/);
-    expect(anchor.textContent).toContain("··4242");
-    expect(screen.getByRole("button", { name: /Approve payment/ }).hasAttribute("disabled")).toBe(
-      false,
-    );
+    const approve = await screen.findByRole("button", { name: /Approve payment/ });
+    expect(approve.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText("CASETiFY")).toBeTruthy();
     expect(
       api.apiPost.mock.calls.filter(([path]) => path === "/v1/pay/approvals/appr_1/bind-card"),
     ).toHaveLength(1);
@@ -309,10 +309,8 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(screen.getByText("bind unavailable")).toBeTruthy();
 
     await user.click(retry);
-    const review = await screen.findByRole("button", { name: /Review with passkey/ });
-    await user.click(review);
-    const anchor = await screen.findByText(/Pay with/);
-    expect(anchor.textContent).toContain("··4242");
+    await screen.findByRole("button", { name: /Approve payment/ });
+    expect(screen.getByText("CASETiFY")).toBeTruthy();
     expect(screen.queryByTestId("card-entry")).toBeNull();
 
     const bindCalls = api.apiPost.mock.calls.filter(
@@ -332,10 +330,8 @@ describe("pay page — JIT add-card ceremony", () => {
     const user = userEvent.setup();
     await user.click(screen.getByTestId("card-entry"));
 
-    const review = await screen.findByRole("button", { name: /Review with passkey/ });
-    await user.click(review);
-    const anchor = await screen.findByText(/Pay with/);
-    expect(anchor.textContent).toContain("··4242");
+    await screen.findByRole("button", { name: /Approve payment/ });
+    expect(screen.getByText("CASETiFY")).toBeTruthy();
     expect(screen.queryByTestId("card-entry")).toBeNull();
     expect(screen.queryByText("bind response lost")).toBeNull();
     expect(
@@ -359,27 +355,50 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(
       screen.getByText("This payment was attached to a different card than the one you added."),
     ).toBeTruthy();
-    expect(screen.queryByText(/your saved card/i)).toBeNull();
+    expect(screen.getByText(/your saved card/i)).toBeTruthy();
+    expect(screen.getByText("CASETiFY")).toBeTruthy();
   });
 });
 
-describe("pay page — passkey privacy gate", () => {
-  it("does not render merchant, amount, item, or reason before the passkey ceremony", async () => {
+describe("pay page — single payment authorization", () => {
+  it("renders canonical merchant, origin, amount, item, and reason before authorization", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
-    await screen.findByRole("button", { name: /Review with passkey/ });
-    expect(screen.queryByText("CASETiFY")).toBeNull();
-    expect(screen.queryByText("phone case")).toBeNull();
-    expect(screen.queryByText("gift")).toBeNull();
-    expect(screen.queryByText(/\$60/)).toBeNull();
+    await screen.findByRole("button", { name: /Approve payment/ });
+    expect(screen.getByText("CASETiFY")).toBeTruthy();
+    expect(screen.getByText("https://casetify.com")).toBeTruthy();
+    expect(screen.getByText("phone case")).toBeTruthy();
+    expect(screen.getByText("gift")).toBeTruthy();
+    expect(screen.getByText(/Pay with/).textContent).toContain("$60.00");
+    expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 
-  it("submits the prepared seal without redirecting through OAuth", async () => {
+  it("signs the displayed canonical values exactly once and submits without OAuth", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /Review with passkey/ }));
     await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
+    await waitFor(() =>
+      expect(vouchflow.signPayload).toHaveBeenCalledWith({
+        context: "purchase",
+        payload: {
+          approval_id: "appr_1",
+          merchant: "CASETiFY",
+          checkout_origin: "https://casetify.com",
+          amount_cents: 6000,
+          currency: "USD",
+          nonce: "nonce",
+          card_ref: "card_new",
+          recipient_pubkey_hash: expect.any(String),
+          item: "phone case",
+          reason: "gift",
+          agent: "claude-code",
+        },
+        minConfidence: "low",
+        prfSalt: expect.any(Uint8Array),
+      }),
+    );
+    expect(vouchflow.signPayload).toHaveBeenCalledTimes(1);
     await waitFor(() =>
       expect(api.apiPost).toHaveBeenCalledWith(
         "/v1/pay/approvals/appr_1/approve",
@@ -389,9 +408,13 @@ describe("pay page — passkey privacy gate", () => {
         }),
       ),
     );
+    expect(
+      api.apiPost.mock.calls.filter(([path]) => path === "/v1/pay/approvals/appr_1/approve"),
+    ).toHaveLength(1);
     expect(await screen.findByText("Approval sent — operator verifying.")).toBeTruthy();
     expect(screen.queryByText(/Approved —/)).toBeNull();
     expect(router.replace).not.toHaveBeenCalled();
+    expect(router.push).not.toHaveBeenCalled();
   });
 
   it("uses OAuth only as the setup fallback when no PRF passkey is enrolled", async () => {
@@ -399,7 +422,7 @@ describe("pay page — passkey privacy gate", () => {
     pairing.getPairingState.mockResolvedValue({ enrolled: false });
     render(<PaymentApprovalPage />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /Review with passkey/ }));
+    await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
     await user.click(await screen.findByRole("button", { name: /Sign in and set up passkey/ }));
     await waitFor(() => expect(pairing.pairDevice).toHaveBeenCalledTimes(1));
     expect(api.apiGet).toHaveBeenCalledWith("/v1/vault/e2e");
@@ -413,9 +436,10 @@ describe("pay page — passkey privacy gate", () => {
     vault.decryptCard.mockRejectedValue(new Error("card decrypt failed"));
     render(<PaymentApprovalPage />);
     const user = userEvent.setup();
-    await user.click(await screen.findByRole("button", { name: /Review with passkey/ }));
+    await user.click(await screen.findByRole("button", { name: /Approve payment/ }));
     await screen.findByText("card decrypt failed");
-    expect(screen.queryByRole("button", { name: /Approve payment/ })).toBeNull();
+    expect(screen.getByRole("button", { name: /Approve payment/ })).toBeTruthy();
+    expect(vouchflow.signPayload).toHaveBeenCalledTimes(1);
     expect(
       api.apiPost.mock.calls.some(([path]) => path === "/v1/pay/approvals/appr_1/approve"),
     ).toBe(false);

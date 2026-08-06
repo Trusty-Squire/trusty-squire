@@ -234,6 +234,10 @@ function defaultDependencies(): PayDependencies {
   };
 }
 
+function logPaymentReviewLifecycle(event: Record<string, string>): void {
+  process.stderr.write(`${JSON.stringify(event)}\n`);
+}
+
 export async function executeOperatePay(
   args: OperatePayArgs,
   api: ApiClient,
@@ -437,6 +441,24 @@ export async function executeOperatePay(
                 );
               } catch (error) {
                 const failureReason = safeFailureReason(error);
+                if (reviewCandidate) {
+                  logPaymentReviewLifecycle({
+                    event: "review_candidate_rejected",
+                    approval_id: created.id,
+                    candidate_fingerprint: candidateKey,
+                    failure_code: failureReason,
+                  });
+                  if (
+                    failureReason !== "jwks_fetch_failed" &&
+                    failureReason !== "jwks_fetch_timeout"
+                  ) {
+                    return {
+                      status: "payment_review_verification_failed",
+                      reason: failureReason,
+                      approval_url: approvalUrl,
+                    };
+                  }
+                }
                 if (approval.status === "approved") {
                   return {
                     status: "payment_mandate_rejected",
@@ -465,6 +487,19 @@ export async function executeOperatePay(
                   );
                 } catch {
                   candidateCardBytes?.fill(0);
+                  if (reviewCandidate) {
+                    logPaymentReviewLifecycle({
+                      event: "review_candidate_rejected",
+                      approval_id: created.id,
+                      candidate_fingerprint: candidateKey,
+                      failure_code: "card_open_failed",
+                    });
+                    return {
+                      status: "payment_review_verification_failed",
+                      reason: "card_open_failed",
+                      approval_url: approvalUrl,
+                    };
+                  }
                   if (approval.status === "approved") {
                     return { status: "payment_card_open_failed", approval_url: approvalUrl };
                   }
@@ -476,11 +511,30 @@ export async function executeOperatePay(
                       if (confirmation.status !== "verified") {
                         throw new Error("review_confirmation_failed");
                       }
-                    } catch {
+                    } catch (error) {
                       candidateCardBytes.fill(0);
-                      await deps.sleep(deps.pollIntervalMs);
-                      continue;
+                      const reason =
+                        error instanceof Error && /404|409/.test(error.message)
+                          ? "confirm_status"
+                          : "confirm_failed";
+                      logPaymentReviewLifecycle({
+                        event: "review_candidate_rejected",
+                        approval_id: created.id,
+                        candidate_fingerprint: candidateKey,
+                        failure_code: reason,
+                      });
+                      return {
+                        status: "payment_review_verification_failed",
+                        reason,
+                        approval_url: approvalUrl,
+                      };
                     }
+                    logPaymentReviewLifecycle({
+                      event: "review_candidate_verified",
+                      approval_id: created.id,
+                      candidate_fingerprint: candidateKey,
+                      failure_code: "ok",
+                    });
                     candidateCardBytes.fill(0);
                     await deps.sleep(deps.pollIntervalMs);
                     continue;
@@ -489,24 +543,15 @@ export async function executeOperatePay(
                     try {
                       await api.confirmPaymentApproval(created.id, candidate);
                     } catch (error) {
-                      let current: Awaited<ReturnType<ApiClient["getPaymentApproval"]>>;
                       try {
-                        current = await api.getPaymentApproval(created.id);
+                        const reconciliation = await api.confirmPaymentApproval(
+                          created.id,
+                          candidate,
+                        );
+                        if (reconciliation.status !== "approved") throw error;
                       } catch {
                         candidateCardBytes.fill(0);
                         throw error;
-                      }
-                      const exactCandidateApproved =
-                        current.status === "approved" &&
-                        current.jws === candidate.jws &&
-                        current.sealed_card === candidate.sealed_card &&
-                        current.card_ref === candidate.card_ref;
-                      if (!exactCandidateApproved) {
-                        candidateCardBytes.fill(0);
-                        if (current.status !== "pending") throw error;
-                        rejectedCandidates.delete(candidateKey);
-                        await deps.sleep(deps.pollIntervalMs);
-                        continue;
                       }
                     }
                   }

@@ -19,7 +19,7 @@ interface CardDetails {
   last4: string | null;
 }
 
-interface CeremonyApproval {
+interface CeremonyApproval extends ApprovalDetails {
   id: string;
   status: string;
   card_ref: string | null;
@@ -50,17 +50,6 @@ interface Approval extends ApprovalDetails {
 
 interface StoredCard extends E2EBlob {
   prf_salt: string;
-}
-
-interface PreparedSubmission {
-  jws: string;
-  sealed_card: string;
-}
-
-interface VerifiedReview {
-  status: "verified";
-  approval: ApprovalDetails;
-  card: CardDetails;
 }
 
 function fromBase64(value: string): Uint8Array<ArrayBuffer> {
@@ -101,7 +90,6 @@ export default function PaymentApprovalPage() {
   const router = useRouter();
   const [ceremony, setCeremony] = useState<CeremonyApproval | null>(null);
   const [approval, setApproval] = useState<Approval | null>(null);
-  const [prepared, setPrepared] = useState<PreparedSubmission | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [binding, setBinding] = useState(false);
@@ -123,8 +111,10 @@ export default function PaymentApprovalPage() {
   const applyCeremony = useCallback((current: CeremonyApproval) => {
     if (jitOrigin.current === null) jitOrigin.current = current.card_ref === null;
     setCeremony(current);
-    setApproval(null);
-    setPrepared(null);
+    // Details are capability-link disclosure from the server record. Rendering
+    // them never signs anything; the single payment signature happens only in
+    // the explicit Approve payment handler below.
+    setApproval({ ...current, card: { brand: null, last4: null } });
     setCardMetadataError(null);
   }, []);
 
@@ -219,7 +209,6 @@ export default function PaymentApprovalPage() {
     setBusy(true);
     setError(null);
     let key: Uint8Array | undefined;
-    let confirmationKey: Uint8Array | undefined;
     let card: Record<string, unknown> | undefined;
     let cardBytes: Uint8Array | undefined;
     try {
@@ -234,51 +223,20 @@ export default function PaymentApprovalPage() {
       );
       const recipientPubkeyHash = toBase64Url(new Uint8Array(publicKeyHash));
       const storedCard = JSON.parse(ceremony.card.blob) as StoredCard;
-      const reviewSign = await getVouchflow().signPayload({
-        context: "purchase",
-        payload: {
-          approval_id: ceremony.id,
-          approval_payload_sha256: ceremony.approval_payload_sha256,
-          card_ref: ceremony.card_ref,
-          recipient_pubkey_hash: recipientPubkeyHash,
-        },
-        minConfidence: "low",
-        prfSalt: fromBase64(storedCard.prf_salt),
-      });
-      key = reviewSign.prfResult;
-      if (key === undefined) throw new Error("Passkey did not return a PRF result");
-      card = await decryptCard(key, storedCard);
-      cardBytes = new TextEncoder().encode(JSON.stringify(card));
-      const reviewAad = new Uint8Array(
-        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(reviewSign.payload)),
-      );
-      const reviewSeal = await sealToRecipient(ceremony.operator_pubkey, cardBytes, reviewAad);
-      const review = await apiPost<VerifiedReview>(
-        `/v1/pay/approvals/${encodeURIComponent(id)}/approve`,
-        { jws: reviewSign.assertion, sealed_card: reviewSeal },
-      );
-      const details = review.approval;
-      if (
-        review.status !== "verified" ||
-        details.id !== ceremony.id ||
-        details.status !== "pending" ||
-        details.card_ref !== ceremony.card_ref ||
-        details.operator_pubkey !== ceremony.operator_pubkey
-      ) {
-        throw new Error("Payment approval changed while it was being unlocked.");
-      }
+      // The only payment-context ceremony: it follows rendered server details
+      // and binds exactly those canonical values.
       const payload = {
-        approval_id: details.id,
-        merchant: details.merchant,
-        checkout_origin: details.checkout_origin,
-        amount_cents: details.amount_cents,
-        currency: details.currency,
-        nonce: details.nonce,
-        card_ref: details.card_ref,
+        approval_id: ceremony.id,
+        merchant: ceremony.merchant,
+        checkout_origin: ceremony.checkout_origin,
+        amount_cents: ceremony.amount_cents,
+        currency: ceremony.currency,
+        nonce: ceremony.nonce,
+        card_ref: ceremony.card_ref,
         recipient_pubkey_hash: recipientPubkeyHash,
-        item: details.item,
-        reason: details.reason,
-        agent: details.agent,
+        item: ceremony.item,
+        reason: ceremony.reason,
+        agent: ceremony.agent,
       };
       const sign = await getVouchflow().signPayload({
         context: "purchase",
@@ -286,14 +244,19 @@ export default function PaymentApprovalPage() {
         minConfidence: "low",
         prfSalt: fromBase64(storedCard.prf_salt),
       });
-      confirmationKey = sign.prfResult;
-      if (confirmationKey === undefined) throw new Error("Passkey did not return a PRF result");
+      key = sign.prfResult;
+      if (key === undefined) throw new Error("Passkey did not return a PRF result");
+      card = await decryptCard(key, storedCard);
+      cardBytes = new TextEncoder().encode(JSON.stringify(card));
       const aad = new Uint8Array(
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sign.payload)),
       );
-      const sealedCard = await sealToRecipient(details.operator_pubkey, cardBytes, aad);
-      setApproval({ ...details, card: review.card });
-      setPrepared({ jws: sign.assertion, sealed_card: sealedCard });
+      const sealedCard = await sealToRecipient(ceremony.operator_pubkey, cardBytes, aad);
+      await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/approve`, {
+        jws: sign.assertion,
+        sealed_card: sealedCard,
+      });
+      setSubmitted(true);
       setNeedsPasskeySetup(false);
     } catch (err) {
       if (isPaymentPasskeyUnavailable(err)) {
@@ -303,7 +266,6 @@ export default function PaymentApprovalPage() {
       setError(err instanceof Error ? err.message : "Failed to unlock payment approval.");
     } finally {
       key?.fill(0);
-      confirmationKey?.fill(0);
       cardBytes?.fill(0);
       card = undefined;
       setBusy(false);
@@ -327,21 +289,6 @@ export default function PaymentApprovalPage() {
       setBusy(false);
     }
   }, [redirectToLogin]);
-
-  const approve = useCallback(async () => {
-    if (approval === null || prepared === null) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/approve`, prepared);
-      setSubmitted(true);
-      setPrepared(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to approve payment.");
-    } finally {
-      setBusy(false);
-    }
-  }, [approval, id, prepared]);
 
   const currentStatus = approval?.status ?? ceremony?.status;
   const terminalMessage =
@@ -370,7 +317,7 @@ export default function PaymentApprovalPage() {
       : "your saved card";
 
   return (
-    <AppShell>
+    <AppShell anonymous>
       <div className="app-head">
         <div>
           <h1 className="app-title">{needsCard ? "Add a card to pay" : "Approve payment"}</h1>
@@ -415,51 +362,7 @@ export default function PaymentApprovalPage() {
         </section>
       )}
 
-      {!submitted &&
-        ceremony?.status === "pending" &&
-        ceremony.card_ref !== null &&
-        prepared === null && (
-          <section className="app-card" aria-labelledby="passkey-heading">
-            <h2 className="app-title" id="passkey-heading" style={{ fontSize: "18px" }}>
-              Passkey required
-            </h2>
-            <p className="app-sub" style={{ marginTop: "12px" }}>
-              Payment details stay hidden until your passkey unlocks the saved card.
-            </p>
-            {jitReviewBlocked ? (
-              <div className="app-banner err">
-                {jitBindingMismatch
-                  ? "This payment was attached to a different card than the one you added."
-                  : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
-                {!jitBindingMismatch && (
-                  <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
-                    Retry
-                  </button>
-                )}
-              </div>
-            ) : needsPasskeySetup ? (
-              <button
-                className="btn-primary"
-                type="button"
-                onClick={() => void setUpPasskey()}
-                disabled={busy}
-              >
-                {busy ? "Setting up…" : "Sign in and set up passkey"}
-              </button>
-            ) : (
-              <button
-                className="btn-primary"
-                type="button"
-                onClick={() => void prepareApproval()}
-                disabled={busy}
-              >
-                {busy ? "Unlocking…" : "Review with passkey"}
-              </button>
-            )}
-          </section>
-        )}
-
-      {!submitted && approval?.status === "pending" && prepared !== null && (
+      {!submitted && approval?.status === "pending" && (
         <section className="app-card" aria-labelledby="payment-merchant">
           <h2 className="app-title" id="payment-merchant" style={{ fontSize: "18px" }}>
             {approval.merchant}
@@ -495,14 +398,36 @@ export default function PaymentApprovalPage() {
           <p className="pay-anchor">
             Pay with <span className="mono">{cardLine}</span> · {amountLabel} to {approval.merchant}
           </p>
-          <button
-            className="btn-primary"
-            type="button"
-            onClick={() => void approve()}
-            disabled={busy}
-          >
-            {busy ? "Approving…" : "Approve payment"}
-          </button>
+          {jitReviewBlocked ? (
+            <div className="app-banner err">
+              {jitBindingMismatch
+                ? "This payment was attached to a different card than the one you added."
+                : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
+              {!jitBindingMismatch && (
+                <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
+                  Retry
+                </button>
+              )}
+            </div>
+          ) : needsPasskeySetup ? (
+            <button
+              className="btn-primary"
+              type="button"
+              onClick={() => void setUpPasskey()}
+              disabled={busy}
+            >
+              {busy ? "Setting up…" : "Sign in and set up passkey"}
+            </button>
+          ) : (
+            <button
+              className="btn-primary"
+              type="button"
+              onClick={() => void prepareApproval()}
+              disabled={busy}
+            >
+              {busy ? "Approving…" : "Approve payment"}
+            </button>
+          )}
         </section>
       )}
     </AppShell>

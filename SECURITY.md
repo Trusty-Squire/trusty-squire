@@ -66,10 +66,13 @@ encrypted blob plus optional constrained display metadata (`brand` and
 The account-scoped detail API can return that opaque blob to an authenticated
 web or agent session so a trusted client can decrypt it. During a pending
 payment, the unauthenticated ceremony endpoint can also return the bound blob to
-the holder of the short-lived approval link. That response is limited to the
-approval ID and status, opaque card reference, operator public key, purchase
-payload digest, and encrypted blob; it omits purchase details and card display
-metadata. List responses omit the blob and expose only the record ID, label,
+the holder of the short-lived approval link. That capability-link response also
+returns the exact server-recorded merchant, checkout origin, amount, currency,
+nonce, item, reason, requesting-agent label, and expiry that the user must review
+and authorize. It includes the approval ID and status, opaque card reference,
+operator public key, purchase-payload digest, and encrypted blob, but omits card
+display metadata and does not grant account navigation. List responses omit the
+blob and expose only the record ID, label,
 creation time, and optional plaintext card display metadata: a no-digit network
 name (`brand`) and exactly four digits (`last4`). These fields cannot carry a
 full PAN; legacy rows return `null`. Losing the enrolled passkey makes the card
@@ -87,20 +90,13 @@ fields.
 Before card entry or payment approval, the browser requires a one-time Vouchflow
 passkey enrollment and confirms that the platform authenticator supports the
 WebAuthn PRF extension. A payment approval is short-lived and account-scoped.
-Before the API releases purchase or card display details, the phone signs a
-review payload that binds the approval ID, opaque purchase-payload digest, card
-reference, and SHA-256 hash of the operator's ephemeral public key. The waiting
-operator must verify that signature and open the review envelope, then confirm
-the exact candidate through its authenticated agent session. The API does not
-persist that review candidate.
-
-Only after review confirmation does the API return the purchase and constrained
-card display metadata to the phone. The phone then signs the canonical purchase
-payload, which binds the merchant, checkout origin, amount, currency, single-use
+The anonymous approval shell displays the canonical server values before any
+payment-context ceremony. One explicit **Approve payment** action then signs a
+payload binding the merchant, checkout origin, amount, currency, single-use
 nonce, card reference, operator-key hash, item description, purchase reason, and
-server-derived requesting-agent label. The API uses the install's authenticated
-agent identity when present and otherwise signs `unknown-agent`; the client
-cannot supply the label.
+server-derived requesting-agent label while deriving the card-decryption key.
+The API uses the install's authenticated agent identity when present and
+otherwise signs `unknown-agent`; the client cannot supply the label.
 
 Just-in-time add-card approvals may be created without a card reference, while
 still binding the operator's ephemeral public key at creation. The API permits
@@ -116,19 +112,28 @@ field changed.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash
-is also that stage's HPKE associated data, so neither the review nor final
-envelope can be moved to a different approval, card, purchase, or operator. The
-API relays each signed candidate and sealed card only to the currently waiting
-account operator. It persists neither candidate before operator verification;
-the authenticated final confirmation atomically records the exact verified
-candidate and approved status. Repeating confirmation for that same final
-candidate is safe, while a different candidate fails closed.
+is the HPKE associated data, so the envelope cannot be moved to a different
+approval, card, purchase, or operator. The API temporarily stages only the JWS,
+operator-sealed ciphertext, SHA-256 candidate fingerprint, phase, and expiry in
+the account-owned approval row. The 15-second relay survives API-worker changes;
+only an authenticated agent for the same account can receive or confirm it.
+After the operator verifies the mandate issuer, audience, canonical payload, and
+envelope, final confirmation must match the delivered fingerprint, atomically
+marks the approval approved, and clears all persisted JWS and ciphertext bytes.
+Repeating confirmation for that same fingerprint is safe during the relay TTL,
+while a different, expired, wrong-account, or undelivered candidate fails closed.
 
-For both stages, the MCP operator fetches Vouchflow's JWKS and fails closed
-unless signature, issuer, audience, purchase context, and the stage-specific
-payload hash all verify and user presence is established. It opens and discards
-the review copy of the card before releasing details. For the final candidate,
-it confirms the exact verified submission before retaining the card to fill the
+Review-format candidates remain accepted only for compatibility. A review seal
+is never final approval: operator confirmation clears its JWS and ciphertext but
+leaves the approval pending for a separately verified canonical purchase
+candidate. Review verification failures are bounded and returned to the caller;
+only transient JWKS fetch failures or timeouts may retry. Lifecycle logs contain
+identifiers, account hashes, candidate fingerprints, machine/release metadata,
+and failure codes, never card plaintext, JWS values, or sealed-card values.
+
+The MCP operator fetches Vouchflow's JWKS and fails closed unless signature,
+issuer, audience, purchase context, payload hash, and user presence all verify.
+It confirms the exact verified submission before retaining the card to fill the
 checkout. Browser passkeys are capped at low confidence in Vouchflow regardless
 of biometric, so mandate assurance rests on user presence, the single-use nonce,
 and amount, recipient, origin, and item binding rather than a high confidence
@@ -159,8 +164,8 @@ audit retention window, which defaults to 365 days.
   and decrypts the blob; the API stores opaque ciphertext it cannot decrypt,
   plus the constrained `brand` and `last4` display metadata.
 - During payment, the phone releases card data only to the ephemeral local
-  operator key: first under the review binding, then under the exact purchase
-  binding. The API and coding-agent model never see plaintext PAN or CVV.
+  operator key under the exact purchase binding. The API and coding-agent model
+  never see plaintext PAN or CVV.
 
 ### Using a credential without exposing the key: egress grants
 
