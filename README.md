@@ -52,7 +52,8 @@ browser before showing the number, name, expiry, and billing address. The CVV is
 never shown, even after reveal. The Activity page also records card additions
 and removals, payments, and app-grant changes without storing a PAN or CVV.
 
-`operate_pay` requires a non-empty item and reason, reads the checkout total,
+As of MCP 1.1.7, `operate_pay` requires a non-empty item and reason (calls that
+omit either receive a validation error). It reads the checkout total,
 sends you a short-lived approval link, and submits only after you approve the
 exact purchase. The page initially withholds the purchase and card display
 details. Its review action uses one passkey ceremony to unlock the card and send
