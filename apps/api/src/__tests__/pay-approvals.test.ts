@@ -382,7 +382,12 @@ describe("payment approval relay", () => {
     const created = await createApproval(cardId);
     const ceremony = (
       await server.inject({ method: "GET", url: `/v1/pay/approvals/${created.id}/ceremony` })
-    ).json() as { id: string; card_ref: string; operator_pubkey: string; approval_payload_sha256: string };
+    ).json() as {
+      id: string;
+      card_ref: string;
+      operator_pubkey: string;
+      approval_payload_sha256: string;
+    };
     const review = makeReviewSubmission(ceremony);
     const workerB = await buildServer({ deps });
     try {

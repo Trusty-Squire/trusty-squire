@@ -52,7 +52,6 @@ interface StoredCard extends E2EBlob {
   prf_salt: string;
 }
 
-
 function fromBase64(value: string): Uint8Array<ArrayBuffer> {
   const decoded = atob(value);
   const bytes = new Uint8Array(decoded.length);
@@ -239,7 +238,12 @@ export default function PaymentApprovalPage() {
         reason: ceremony.reason,
         agent: ceremony.agent,
       };
-      const sign = await getVouchflow().signPayload({ context: "purchase", payload, minConfidence: "low", prfSalt: fromBase64(storedCard.prf_salt) });
+      const sign = await getVouchflow().signPayload({
+        context: "purchase",
+        payload,
+        minConfidence: "low",
+        prfSalt: fromBase64(storedCard.prf_salt),
+      });
       key = sign.prfResult;
       if (key === undefined) throw new Error("Passkey did not return a PRF result");
       card = await decryptCard(key, storedCard);
@@ -248,7 +252,10 @@ export default function PaymentApprovalPage() {
         await crypto.subtle.digest("SHA-256", new TextEncoder().encode(sign.payload)),
       );
       const sealedCard = await sealToRecipient(ceremony.operator_pubkey, cardBytes, aad);
-      await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/approve`, { jws: sign.assertion, sealed_card: sealedCard });
+      await apiPost(`/v1/pay/approvals/${encodeURIComponent(id)}/approve`, {
+        jws: sign.assertion,
+        sealed_card: sealedCard,
+      });
       setSubmitted(true);
       setNeedsPasskeySetup(false);
     } catch (err) {
@@ -282,7 +289,6 @@ export default function PaymentApprovalPage() {
       setBusy(false);
     }
   }, [redirectToLogin]);
-
 
   const currentStatus = approval?.status ?? ceremony?.status;
   const terminalMessage =
@@ -397,14 +403,28 @@ export default function PaymentApprovalPage() {
               {jitBindingMismatch
                 ? "This payment was attached to a different card than the one you added."
                 : (cardMetadataError ?? "We couldn't load the saved card for this payment.")}
-              {!jitBindingMismatch && <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>Retry</button>}
+              {!jitBindingMismatch && (
+                <button className="linkbtn" type="button" onClick={() => void refreshCeremony()}>
+                  Retry
+                </button>
+              )}
             </div>
           ) : needsPasskeySetup ? (
-            <button className="btn-primary" type="button" onClick={() => void setUpPasskey()} disabled={busy}>
+            <button
+              className="btn-primary"
+              type="button"
+              onClick={() => void setUpPasskey()}
+              disabled={busy}
+            >
               {busy ? "Setting up…" : "Sign in and set up passkey"}
             </button>
           ) : (
-            <button className="btn-primary" type="button" onClick={() => void prepareApproval()} disabled={busy}>
+            <button
+              className="btn-primary"
+              type="button"
+              onClick={() => void prepareApproval()}
+              disabled={busy}
+            >
               {busy ? "Approving…" : "Approve payment"}
             </button>
           )}

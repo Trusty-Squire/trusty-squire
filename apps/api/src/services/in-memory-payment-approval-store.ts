@@ -172,8 +172,19 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     now: Date,
   ): Promise<"submitted" | "in_progress" | "not_pending"> {
     const record = this.records.get(id);
-    if (record === undefined || record.accountId !== accountId || record.status !== "pending" || record.expiresAt <= now) return "not_pending";
-    if (record.reviewPhase !== null && record.reviewExpiresAt !== null && record.reviewExpiresAt > now) return "in_progress";
+    if (
+      record === undefined ||
+      record.accountId !== accountId ||
+      record.status !== "pending" ||
+      record.expiresAt <= now
+    )
+      return "not_pending";
+    if (
+      record.reviewPhase !== null &&
+      record.reviewExpiresAt !== null &&
+      record.reviewExpiresAt > now
+    )
+      return "in_progress";
     record.reviewJws = candidate.jws;
     record.reviewSealedCard = candidate.sealedCard;
     record.reviewCandidateFingerprint = candidate.fingerprint;
@@ -182,23 +193,61 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     return "submitted";
   }
 
-  async getReviewRelayForAccount(id: string, accountId: string, now: Date): Promise<ReviewRelayState> {
+  async getReviewRelayForAccount(
+    id: string,
+    accountId: string,
+    now: Date,
+  ): Promise<ReviewRelayState> {
     const record = this.records.get(id);
-    if (record === undefined || record.accountId !== accountId || record.reviewExpiresAt === null || record.reviewExpiresAt <= now) return null;
-    if (record.reviewPhase === "confirmed" && record.reviewCandidateFingerprint !== null) return { phase: "confirmed", fingerprint: record.reviewCandidateFingerprint };
-    if ((record.reviewPhase === "submitted" || record.reviewPhase === "delivered") && record.reviewJws !== null && record.reviewSealedCard !== null && record.reviewCandidateFingerprint !== null) {
+    if (
+      record === undefined ||
+      record.accountId !== accountId ||
+      record.reviewExpiresAt === null ||
+      record.reviewExpiresAt <= now
+    )
+      return null;
+    if (record.reviewPhase === "confirmed" && record.reviewCandidateFingerprint !== null)
+      return { phase: "confirmed", fingerprint: record.reviewCandidateFingerprint };
+    if (
+      (record.reviewPhase === "submitted" || record.reviewPhase === "delivered") &&
+      record.reviewJws !== null &&
+      record.reviewSealedCard !== null &&
+      record.reviewCandidateFingerprint !== null
+    ) {
       record.reviewPhase = "delivered";
-      return { phase: "delivered", jws: record.reviewJws, sealedCard: record.reviewSealedCard, fingerprint: record.reviewCandidateFingerprint };
+      return {
+        phase: "delivered",
+        jws: record.reviewJws,
+        sealedCard: record.reviewSealedCard,
+        fingerprint: record.reviewCandidateFingerprint,
+      };
     }
     return null;
   }
 
-  async confirmReviewCandidate(id: string, accountId: string, fingerprint: string, now: Date): Promise<"confirmed" | "candidate_changed" | "not_pending"> {
+  async confirmReviewCandidate(
+    id: string,
+    accountId: string,
+    fingerprint: string,
+    now: Date,
+  ): Promise<"confirmed" | "candidate_changed" | "not_pending"> {
     const record = this.records.get(id);
-    if (record === undefined || record.accountId !== accountId || record.status !== "pending" || record.expiresAt <= now) return "not_pending";
-    if (record.reviewExpiresAt === null || record.reviewExpiresAt <= now || record.reviewCandidateFingerprint !== fingerprint) return "candidate_changed";
+    if (
+      record === undefined ||
+      record.accountId !== accountId ||
+      record.status !== "pending" ||
+      record.expiresAt <= now
+    )
+      return "not_pending";
+    if (
+      record.reviewExpiresAt === null ||
+      record.reviewExpiresAt <= now ||
+      record.reviewCandidateFingerprint !== fingerprint
+    )
+      return "candidate_changed";
     if (record.reviewPhase === "confirmed") return "confirmed";
-    if (record.reviewPhase !== "submitted" && record.reviewPhase !== "delivered") return "candidate_changed";
+    if (record.reviewPhase !== "submitted" && record.reviewPhase !== "delivered")
+      return "candidate_changed";
     record.reviewPhase = "confirmed";
     // Delete the only durable copy of the sealed candidate immediately after use.
     record.reviewJws = null;
@@ -214,9 +263,17 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     now: Date,
   ): Promise<"submitted" | "in_progress" | "not_pending"> {
     const record = this.records.get(id);
-    if (record === undefined || record.accountId !== accountId || record.status !== "pending" || record.expiresAt <= now) return "not_pending";
+    if (
+      record === undefined ||
+      record.accountId !== accountId ||
+      record.status !== "pending" ||
+      record.expiresAt <= now
+    )
+      return "not_pending";
     if (record.submissionExpiresAt !== null && record.submissionExpiresAt > now) {
-      return record.submissionCandidateFingerprint === candidate.fingerprint ? "submitted" : "in_progress";
+      return record.submissionCandidateFingerprint === candidate.fingerprint
+        ? "submitted"
+        : "in_progress";
     }
     record.submissionJws = candidate.jws;
     record.submissionSealedCard = candidate.sealedCard;
@@ -226,9 +283,19 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     return "submitted";
   }
 
-  async getRelayCandidateForAccount(id: string, accountId: string, now: Date): Promise<PaymentRelayCandidate | null> {
+  async getRelayCandidateForAccount(
+    id: string,
+    accountId: string,
+    now: Date,
+  ): Promise<PaymentRelayCandidate | null> {
     const record = this.records.get(id);
-    if (record === undefined || record.accountId !== accountId || record.status !== "pending" || record.expiresAt <= now) return null;
+    if (
+      record === undefined ||
+      record.accountId !== accountId ||
+      record.status !== "pending" ||
+      record.expiresAt <= now
+    )
+      return null;
     if (
       record.submissionExpiresAt !== null &&
       record.submissionExpiresAt > now &&

@@ -132,7 +132,8 @@ async function harness(
       };
       const canonical = canonicalize(payload)!;
       const aad = createHash("sha256").update(canonical, "utf8").digest();
-      const reviewCandidate = (mode === "review_then_happy" || mode === "review_wrong_issuer") && approvalPolls === 1;
+      const reviewCandidate =
+        (mode === "review_then_happy" || mode === "review_wrong_issuer") && approvalPolls === 1;
       const reviewCanonical = canonicalize({
         approval_id: "approval_test",
         approval_payload_sha256: aad.toString("base64url"),
@@ -149,7 +150,9 @@ async function harness(
       })
         .setProtectedHeader({ alg: "RS256", kid: "test-key" })
         .setIssuer(
-          mode === "wrong_issuer" || mode === "review_wrong_issuer" ? "https://other-issuer.example" : "https://vouchflow.dev",
+          mode === "wrong_issuer" || mode === "review_wrong_issuer"
+            ? "https://other-issuer.example"
+            : "https://vouchflow.dev",
         )
         .setAudience(mode === "wrong_audience" ? "other-customer" : "customer_test")
         .sign(privateKey);
@@ -198,10 +201,7 @@ async function harness(
         throw new TypeError("confirm response lost");
       }
       if (mode === "confirm_response_lost_changed") {
-        return Response.json(
-          { error: "payment_approval_candidate_changed" },
-          { status: 409 },
-        );
+        return Response.json({ error: "payment_approval_candidate_changed" }, { status: 409 });
       }
       confirmedCandidate = body;
       return Response.json({ status: "approved" });

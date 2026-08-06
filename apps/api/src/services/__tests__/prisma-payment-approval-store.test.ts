@@ -72,10 +72,7 @@ describe("PrismaPendingPaymentApprovalStore", () => {
         async findFirst() {
           return row;
         },
-        async updateMany(args: {
-          where: Record<string, unknown>;
-          data: Record<string, unknown>;
-        }) {
+        async updateMany(args: { where: Record<string, unknown>; data: Record<string, unknown> }) {
           updates.push(args);
           return { count: 1 };
         },
@@ -83,9 +80,7 @@ describe("PrismaPendingPaymentApprovalStore", () => {
     } as unknown as ApiPrismaClient;
     const store = new PrismaPendingPaymentApprovalStore(prisma);
 
-    await expect(
-      store.getRelayCandidateForAccount(row.id, ACCOUNT_ID, now),
-    ).resolves.toEqual({
+    await expect(store.getRelayCandidateForAccount(row.id, ACCOUNT_ID, now)).resolves.toEqual({
       binding: "approval",
       jws: "candidate-jws",
       sealedCard: "candidate-seal",

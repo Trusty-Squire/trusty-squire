@@ -142,15 +142,32 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
   type Submission = z.infer<typeof approveBody>;
   const reviewTtlMs = 15_000;
   const relayPollIntervalMs = 1_000;
-  const sleep = async (ms: number): Promise<void> => await new Promise((resolve) => setTimeout(resolve, ms));
+  const sleep = async (ms: number): Promise<void> =>
+    await new Promise((resolve) => setTimeout(resolve, ms));
 
   const submissionFingerprint = (submission: Submission): string =>
     createHash("sha256")
       .update(JSON.stringify([submission.jws, submission.sealed_card]))
       .digest("base64url");
 
-  const event = (name: string, record: ApprovalRecord, fingerprint: string | null, failureCode: string) =>
-    fastify.log.info({ event: name, approval_id: record.id, candidate_fingerprint: fingerprint, account_hash: createHash("sha256").update(record.accountId).digest("base64url"), machine_id: process.env.FLY_MACHINE_ID ?? "unknown", release_id: process.env.FLY_IMAGE_REF ?? process.env.RELEASE_ID ?? "unknown", failure_code: failureCode }, "payment review lifecycle");
+  const event = (
+    name: string,
+    record: ApprovalRecord,
+    fingerprint: string | null,
+    failureCode: string,
+  ) =>
+    fastify.log.info(
+      {
+        event: name,
+        approval_id: record.id,
+        candidate_fingerprint: fingerprint,
+        account_hash: createHash("sha256").update(record.accountId).digest("base64url"),
+        machine_id: process.env.FLY_MACHINE_ID ?? "unknown",
+        release_id: process.env.FLY_IMAGE_REF ?? process.env.RELEASE_ID ?? "unknown",
+        failure_code: failureCode,
+      },
+      "payment review lifecycle",
+    );
 
   const waitForSubmission = async (id: string, accountId: string): Promise<Submission | null> => {
     const deadline = Date.now() + reviewTtlMs;
@@ -166,10 +183,18 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     return null;
   };
 
-  const waitForReviewConfirmation = async (id: string, accountId: string, fingerprint: string): Promise<boolean> => {
+  const waitForReviewConfirmation = async (
+    id: string,
+    accountId: string,
+    fingerprint: string,
+  ): Promise<boolean> => {
     const deadline = Date.now() + reviewTtlMs;
     while (Date.now() < deadline) {
-      const relay = await opts.deps.pendingPaymentApprovalStore.getReviewRelayForAccount(id, accountId, opts.deps.now?.() ?? new Date());
+      const relay = await opts.deps.pendingPaymentApprovalStore.getReviewRelayForAccount(
+        id,
+        accountId,
+        opts.deps.now?.() ?? new Date(),
+      );
       if (relay?.phase === "confirmed" && relay.fingerprint === fingerprint) return true;
       await sleep(relayPollIntervalMs);
     }
@@ -281,7 +306,8 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         req.auth!.kind === "agent" && req.query.wait_for_submission === "1" && status === "pending"
           ? await waitForSubmission(record.id, record.accountId)
           : null;
-      if (submission !== null) event("candidate_delivered", record, submissionFingerprint(submission), "ok");
+      if (submission !== null)
+        event("candidate_delivered", record, submissionFingerprint(submission), "ok");
       return reply.code(200).send({
         id: record.id,
         status,

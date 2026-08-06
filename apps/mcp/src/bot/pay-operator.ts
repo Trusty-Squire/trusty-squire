@@ -234,6 +234,10 @@ function defaultDependencies(): PayDependencies {
   };
 }
 
+function logPaymentReviewLifecycle(event: Record<string, string>): void {
+  process.stderr.write(`${JSON.stringify(event)}\n`);
+}
+
 export async function executeOperatePay(
   args: OperatePayArgs,
   api: ApiClient,
@@ -438,9 +442,21 @@ export async function executeOperatePay(
               } catch (error) {
                 const failureReason = safeFailureReason(error);
                 if (reviewCandidate) {
-                  console.info(JSON.stringify({ event: "review_candidate_rejected", approval_id: created.id, candidate_fingerprint: candidateKey, failure_code: failureReason }));
-                  if (failureReason !== "jwks_fetch_failed" && failureReason !== "jwks_fetch_timeout") {
-                    return { status: "payment_review_verification_failed", reason: failureReason, approval_url: approvalUrl };
+                  logPaymentReviewLifecycle({
+                    event: "review_candidate_rejected",
+                    approval_id: created.id,
+                    candidate_fingerprint: candidateKey,
+                    failure_code: failureReason,
+                  });
+                  if (
+                    failureReason !== "jwks_fetch_failed" &&
+                    failureReason !== "jwks_fetch_timeout"
+                  ) {
+                    return {
+                      status: "payment_review_verification_failed",
+                      reason: failureReason,
+                      approval_url: approvalUrl,
+                    };
                   }
                 }
                 if (approval.status === "approved") {
@@ -472,8 +488,17 @@ export async function executeOperatePay(
                 } catch {
                   candidateCardBytes?.fill(0);
                   if (reviewCandidate) {
-                    console.info(JSON.stringify({ event: "review_candidate_rejected", approval_id: created.id, candidate_fingerprint: candidateKey, failure_code: "card_open_failed" }));
-                    return { status: "payment_review_verification_failed", reason: "card_open_failed", approval_url: approvalUrl };
+                    logPaymentReviewLifecycle({
+                      event: "review_candidate_rejected",
+                      approval_id: created.id,
+                      candidate_fingerprint: candidateKey,
+                      failure_code: "card_open_failed",
+                    });
+                    return {
+                      status: "payment_review_verification_failed",
+                      reason: "card_open_failed",
+                      approval_url: approvalUrl,
+                    };
                   }
                   if (approval.status === "approved") {
                     return { status: "payment_card_open_failed", approval_url: approvalUrl };
@@ -488,11 +513,28 @@ export async function executeOperatePay(
                       }
                     } catch (error) {
                       candidateCardBytes.fill(0);
-                      const reason = error instanceof Error && /404|409/.test(error.message) ? "confirm_status" : "confirm_failed";
-                      console.info(JSON.stringify({ event: "review_candidate_rejected", approval_id: created.id, candidate_fingerprint: candidateKey, failure_code: reason }));
-                      return { status: "payment_review_verification_failed", reason, approval_url: approvalUrl };
+                      const reason =
+                        error instanceof Error && /404|409/.test(error.message)
+                          ? "confirm_status"
+                          : "confirm_failed";
+                      logPaymentReviewLifecycle({
+                        event: "review_candidate_rejected",
+                        approval_id: created.id,
+                        candidate_fingerprint: candidateKey,
+                        failure_code: reason,
+                      });
+                      return {
+                        status: "payment_review_verification_failed",
+                        reason,
+                        approval_url: approvalUrl,
+                      };
                     }
-                    console.info(JSON.stringify({ event: "review_candidate_verified", approval_id: created.id, candidate_fingerprint: candidateKey, failure_code: "ok" }));
+                    logPaymentReviewLifecycle({
+                      event: "review_candidate_verified",
+                      approval_id: created.id,
+                      candidate_fingerprint: candidateKey,
+                      failure_code: "ok",
+                    });
                     candidateCardBytes.fill(0);
                     await deps.sleep(deps.pollIntervalMs);
                     continue;
