@@ -53,14 +53,18 @@ never shown, even after reveal. The Activity page also records card additions
 and removals, payments, and app-grant changes without storing a PAN or CVV.
 
 `operate_pay` requires a non-empty item and reason (calls that omit either
-receive a validation error). It reads the checkout total,
-sends you a short-lived approval link, and submits only after you approve the
-exact purchase. The anonymous approval page shows the merchant, checkout origin,
-amount and currency, item, and reason directly from the short-lived server record
-before one passkey ceremony authorizes those canonical payment values. You also
-see the requesting MCP client (for example, Hermes) and that a saved card will be
-used before clicking **Approve payment** to relay the operator-sealed final
-authorization. A first-time
+receive a validation error). It reads the checkout total, sends you a short-lived
+approval link, and submits only after you approve the exact purchase. Page currency
+notation is authoritative: Trusty Squire refuses to create an approval when it
+cannot resolve that notation, or when the displayed fractional precision conflicts
+with an agent-supplied fallback currency. Approval, 3-D Secure, Activity, and
+notification amounts use the currency's minor-unit precision (for example, whole
+yen for JPY and two decimals for USD). The anonymous approval page shows the
+merchant, checkout origin, amount and currency, item, and reason directly from the
+short-lived server record before one passkey ceremony authorizes those canonical
+payment values. You also see the requesting MCP client (for example, Hermes) and
+that a saved card will be used before clicking **Approve payment** to relay the
+operator-sealed final authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission. If the checkout exposes PayPal Smart Buttons
 or PayPal-hosted fields, Trusty Squire hands the checkout back before selecting a

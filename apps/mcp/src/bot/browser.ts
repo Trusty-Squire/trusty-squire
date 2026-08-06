@@ -205,13 +205,13 @@ export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescr
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
   $: "USD",
-  "US$": "USD",
+  US$: "USD",
   "€": "EUR",
   "£": "GBP",
   "¥": "JPY",
   "₩": "KRW",
   円: "JPY",
-  "ZŁ": "PLN",
+  ZŁ: "PLN",
 };
 
 const CHECKOUT_CURRENCY_CODES = new Set(Intl.supportedValuesOf("currency"));
@@ -278,7 +278,7 @@ function resolveCheckoutCurrencyToken(token: string | undefined): string | undef
     code !== undefined &&
     symbol !== undefined &&
     CHECKOUT_CURRENCY_CODES.has(code) &&
-    CURRENCY_SYMBOLS[symbol] !== undefined
+    CURRENCY_SYMBOLS[symbol] === code
   ) {
     return code;
   }

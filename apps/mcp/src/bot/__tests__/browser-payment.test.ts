@@ -134,22 +134,20 @@ describe("checkout payment parsing", () => {
     "Order total 98.45 R$",
     "Order total 98.45 kr",
     "Order total 98.45 ₺",
-  ])(
-    "fails closed when a total uses unresolved currency notation: %s",
-    async (text) => {
-      const browser = new BrowserController({ humanize: false });
-      const page = {
-        evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
-        frames: () => [{ evaluate: vi.fn().mockResolvedValue(text) }],
-        url: () => "https://flowers.example.test/checkout",
-      };
-      Object.defineProperty(browser, "page", { value: page });
+    "Order total JPY$98.45",
+  ])("fails closed when a total uses unresolved currency notation: %s", async (text) => {
+    const browser = new BrowserController({ humanize: false });
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
+      frames: () => [{ evaluate: vi.fn().mockResolvedValue(text) }],
+      url: () => "https://flowers.example.test/checkout",
+    };
+    Object.defineProperty(browser, "page", { value: page });
 
-      await expect(browser.readCheckoutSummary("USD")).rejects.toMatchObject({
-        message: "payment_checkout_currency_unresolved",
-      });
-    },
-  );
+    await expect(browser.readCheckoutSummary("USD")).rejects.toMatchObject({
+      message: "payment_checkout_currency_unresolved",
+    });
+  });
 
   it.skipIf(!chromiumAvailable)(
     "types digits into a combined numeric expiry field and lets the site format MM/YY",

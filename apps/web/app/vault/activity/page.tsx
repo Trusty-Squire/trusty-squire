@@ -35,8 +35,10 @@ const PAGE = 50;
 
 function formatAmount(amountCents: number, currency: string): string {
   try {
-    const minorDigits = new Intl.NumberFormat(undefined, { style: "currency", currency })
-      .resolvedOptions().maximumFractionDigits;
+    const minorDigits = new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency,
+    }).resolvedOptions().maximumFractionDigits;
     if (minorDigits === undefined) return `${currency} ${amountCents} minor units`;
     return `${currency} ${(amountCents / 10 ** minorDigits).toFixed(minorDigits)}`;
   } catch {
@@ -140,7 +142,7 @@ export default function ActivityPage() {
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
+    void (async () => {
       try {
         await fetchPage();
       } catch (err) {
