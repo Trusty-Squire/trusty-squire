@@ -28,6 +28,8 @@ export interface PendingPaymentApprovalRecord extends PendingPaymentApprovalInpu
   reviewExpiresAt: Date | null;
   submissionJws: string | null;
   submissionSealedCard: string | null;
+  submissionCandidateFingerprint: string | null;
+  submissionPhase: "submitted" | "delivered" | "confirmed" | null;
   submissionExpiresAt: Date | null;
   createdAt: Date;
 }
@@ -36,6 +38,13 @@ export type ReviewRelayState =
   | { phase: "submitted" | "delivered"; jws: string; sealedCard: string; fingerprint: string }
   | { phase: "confirmed"; fingerprint: string }
   | null;
+
+export type PaymentRelayCandidate = {
+  binding: "review" | "approval";
+  jws: string;
+  sealedCard: string;
+  fingerprint: string;
+};
 
 export type BindCardForAccountResult = "card_not_found" | "not_bindable" | "ok";
 
@@ -49,13 +58,6 @@ export interface PendingPaymentApprovalStore {
     cardRef: string,
     now: Date,
   ): Promise<BindCardForAccountResult>;
-  approveForAccount(
-    id: string,
-    accountId: string,
-    jws: string,
-    sealedCard: string,
-    now: Date,
-  ): Promise<boolean>;
   submitReviewCandidate(
     id: string,
     accountId: string,
@@ -70,8 +72,24 @@ export interface PendingPaymentApprovalStore {
     fingerprint: string,
     now: Date,
   ): Promise<"confirmed" | "candidate_changed" | "not_pending">;
-  submitCandidate(id: string, accountId: string, candidate: { jws: string; sealedCard: string }, expiresAt: Date, now: Date): Promise<"submitted" | "not_pending">;
-  getCandidateForAccount(id: string, accountId: string, now: Date): Promise<{ jws: string; sealedCard: string } | null>;
+  submitCandidate(
+    id: string,
+    accountId: string,
+    candidate: { jws: string; sealedCard: string; fingerprint: string },
+    expiresAt: Date,
+    now: Date,
+  ): Promise<"submitted" | "in_progress" | "not_pending">;
+  getRelayCandidateForAccount(
+    id: string,
+    accountId: string,
+    now: Date,
+  ): Promise<PaymentRelayCandidate | null>;
+  confirmCandidateForAccount(
+    id: string,
+    accountId: string,
+    fingerprint: string,
+    now: Date,
+  ): Promise<"confirmed" | "candidate_changed" | "not_pending">;
 }
 
 export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprovalStore {
@@ -100,6 +118,8 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
       reviewExpiresAt: null,
       submissionJws: null,
       submissionSealedCard: null,
+      submissionCandidateFingerprint: null,
+      submissionPhase: null,
       submissionExpiresAt: null,
       createdAt: this.now(),
     };
@@ -144,27 +164,6 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     return "ok";
   }
 
-  async approveForAccount(
-    id: string,
-    accountId: string,
-    jws: string,
-    sealedCard: string,
-    now: Date,
-  ): Promise<boolean> {
-    const record = this.records.get(id);
-    if (record === undefined || record.accountId !== accountId) {
-      return false;
-    }
-    if (record.status === "approved") {
-      return record.jws === jws && record.sealedCard === sealedCard;
-    }
-    if (record.status !== "pending" || record.expiresAt <= now) return false;
-    record.jws = jws;
-    record.sealedCard = sealedCard;
-    record.status = "approved";
-    return true;
-  }
-
   async submitReviewCandidate(
     id: string,
     accountId: string,
@@ -207,21 +206,98 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     return "confirmed";
   }
 
-  async submitCandidate(id: string, accountId: string, candidate: { jws: string; sealedCard: string }, expiresAt: Date, now: Date): Promise<"submitted" | "not_pending"> {
+  async submitCandidate(
+    id: string,
+    accountId: string,
+    candidate: { jws: string; sealedCard: string; fingerprint: string },
+    expiresAt: Date,
+    now: Date,
+  ): Promise<"submitted" | "in_progress" | "not_pending"> {
     const record = this.records.get(id);
     if (record === undefined || record.accountId !== accountId || record.status !== "pending" || record.expiresAt <= now) return "not_pending";
+    if (record.submissionExpiresAt !== null && record.submissionExpiresAt > now) {
+      return record.submissionCandidateFingerprint === candidate.fingerprint ? "submitted" : "in_progress";
+    }
     record.submissionJws = candidate.jws;
     record.submissionSealedCard = candidate.sealedCard;
+    record.submissionCandidateFingerprint = candidate.fingerprint;
+    record.submissionPhase = "submitted";
     record.submissionExpiresAt = expiresAt;
     return "submitted";
   }
-  async getCandidateForAccount(id: string, accountId: string, now: Date): Promise<{ jws: string; sealedCard: string } | null> {
+
+  async getRelayCandidateForAccount(id: string, accountId: string, now: Date): Promise<PaymentRelayCandidate | null> {
     const record = this.records.get(id);
-    if (record === undefined || record.accountId !== accountId || record.submissionExpiresAt === null || record.submissionExpiresAt <= now || record.submissionJws === null || record.submissionSealedCard === null) return null;
-    const candidate = { jws: record.submissionJws, sealedCard: record.submissionSealedCard };
+    if (record === undefined || record.accountId !== accountId || record.status !== "pending" || record.expiresAt <= now) return null;
+    if (
+      record.submissionExpiresAt !== null &&
+      record.submissionExpiresAt > now &&
+      (record.submissionPhase === "submitted" || record.submissionPhase === "delivered") &&
+      record.submissionJws !== null &&
+      record.submissionSealedCard !== null &&
+      record.submissionCandidateFingerprint !== null
+    ) {
+      record.submissionPhase = "delivered";
+      return {
+        binding: "approval",
+        jws: record.submissionJws,
+        sealedCard: record.submissionSealedCard,
+        fingerprint: record.submissionCandidateFingerprint,
+      };
+    }
+    if (
+      record.reviewExpiresAt !== null &&
+      record.reviewExpiresAt > now &&
+      (record.reviewPhase === "submitted" || record.reviewPhase === "delivered") &&
+      record.reviewJws !== null &&
+      record.reviewSealedCard !== null &&
+      record.reviewCandidateFingerprint !== null
+    ) {
+      record.reviewPhase = "delivered";
+      return {
+        binding: "review",
+        jws: record.reviewJws,
+        sealedCard: record.reviewSealedCard,
+        fingerprint: record.reviewCandidateFingerprint,
+      };
+    }
+    return null;
+  }
+
+  async confirmCandidateForAccount(
+    id: string,
+    accountId: string,
+    fingerprint: string,
+    now: Date,
+  ): Promise<"confirmed" | "candidate_changed" | "not_pending"> {
+    const record = this.records.get(id);
+    if (record === undefined || record.accountId !== accountId) return "not_pending";
+    if (
+      record.status === "approved" &&
+      record.submissionPhase === "confirmed" &&
+      record.submissionCandidateFingerprint === fingerprint &&
+      record.submissionExpiresAt !== null &&
+      record.submissionExpiresAt > now
+    ) {
+      return "confirmed";
+    }
+    if (record.status !== "pending" || record.expiresAt <= now) return "not_pending";
+    if (
+      record.submissionPhase !== "delivered" ||
+      record.submissionCandidateFingerprint !== fingerprint ||
+      record.submissionExpiresAt === null ||
+      record.submissionExpiresAt <= now
+    ) {
+      return "candidate_changed";
+    }
+    record.status = "approved";
+    record.jws = null;
+    record.sealedCard = null;
+    record.reviewJws = null;
+    record.reviewSealedCard = null;
     record.submissionJws = null;
     record.submissionSealedCard = null;
-    record.submissionExpiresAt = null;
-    return candidate;
+    record.submissionPhase = "confirmed";
+    return "confirmed";
   }
 }

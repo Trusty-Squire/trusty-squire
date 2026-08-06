@@ -359,6 +359,8 @@ model PendingPaymentApproval {
   review_expires_at            DateTime?
   submission_jws               String?
   submission_sealed_card       String?
+  submission_candidate_fingerprint String?
+  submission_phase             String?
   submission_expires_at        DateTime?
   created_at      DateTime @default(now())
   expires_at      DateTime

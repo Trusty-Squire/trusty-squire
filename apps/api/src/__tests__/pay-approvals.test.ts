@@ -535,6 +535,14 @@ describe("payment approval relay", () => {
     expect(relayedForgery.statusCode).toBe(200);
     expect(relayedForgery.json()).toMatchObject(forged);
 
+    const redeliveredForgery = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}?wait_for_submission=1`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(redeliveredForgery.statusCode).toBe(200);
+    expect(redeliveredForgery.json()).toMatchObject(forged);
+
     const afterRelay = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}`,
@@ -542,6 +550,7 @@ describe("payment approval relay", () => {
     });
     expect(afterRelay.json()).toMatchObject({ status: "pending", jws: null, sealed_card: null });
 
+    nowMs += 15_001;
     const verified = { ...makeSubmission(created), sealed_card: "verified-seal" };
     const relayedVerified = await relaySubmission(created.id, verified);
     expect(relayedVerified.approvalStatus).toBe(202);
@@ -555,6 +564,17 @@ describe("payment approval relay", () => {
     });
     expect(wrongAccountConfirm.statusCode).toBe(404);
     expect(wrongAccountConfirm.json()).toEqual({ error: "payment_approval_not_found" });
+
+    const changedCandidateConfirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { ...verified, sealed_card: "different-seal" },
+    });
+    expect(changedCandidateConfirm.statusCode).toBe(409);
+    expect(changedCandidateConfirm.json()).toEqual({
+      error: "payment_approval_candidate_changed",
+    });
 
     const confirm = await server.inject({
       method: "POST",
@@ -574,6 +594,21 @@ describe("payment approval relay", () => {
     expect(repeatedConfirm.statusCode).toBe(200);
     expect(repeatedConfirm.json()).toEqual({ status: "approved" });
 
+    const stored = await deps.pendingPaymentApprovalStore.getById(created.id);
+    expect(stored).toMatchObject({
+      status: "approved",
+      jws: null,
+      sealedCard: null,
+      reviewJws: null,
+      reviewSealedCard: null,
+      submissionJws: null,
+      submissionSealedCard: null,
+      submissionPhase: "confirmed",
+      submissionCandidateFingerprint: createHash("sha256")
+        .update(JSON.stringify([verified.jws, verified.sealed_card]))
+        .digest("base64url"),
+    });
+
     const final = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}`,
@@ -581,8 +616,8 @@ describe("payment approval relay", () => {
     });
     expect(final.json()).toMatchObject({
       status: "approved",
-      jws: verified.jws,
-      sealed_card: verified.sealed_card,
+      jws: null,
+      sealed_card: null,
     });
   });
 

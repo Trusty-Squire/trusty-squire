@@ -141,6 +141,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
 }> = async (fastify, opts) => {
   type Submission = z.infer<typeof approveBody>;
   const reviewTtlMs = 15_000;
+  const relayPollIntervalMs = 1_000;
   const sleep = async (ms: number): Promise<void> => await new Promise((resolve) => setTimeout(resolve, ms));
 
   const submissionFingerprint = (submission: Submission): string =>
@@ -154,11 +155,13 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
   const waitForSubmission = async (id: string, accountId: string): Promise<Submission | null> => {
     const deadline = Date.now() + reviewTtlMs;
     while (Date.now() < deadline) {
-      const candidate = await opts.deps.pendingPaymentApprovalStore.getCandidateForAccount(id, accountId, opts.deps.now?.() ?? new Date());
+      const candidate = await opts.deps.pendingPaymentApprovalStore.getRelayCandidateForAccount(
+        id,
+        accountId,
+        opts.deps.now?.() ?? new Date(),
+      );
       if (candidate !== null) return { jws: candidate.jws, sealed_card: candidate.sealedCard };
-      const relay = await opts.deps.pendingPaymentApprovalStore.getReviewRelayForAccount(id, accountId, opts.deps.now?.() ?? new Date());
-      if (relay?.phase === "delivered") return { jws: relay.jws, sealed_card: relay.sealedCard };
-      await sleep(100);
+      await sleep(relayPollIntervalMs);
     }
     return null;
   };
@@ -168,7 +171,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     while (Date.now() < deadline) {
       const relay = await opts.deps.pendingPaymentApprovalStore.getReviewRelayForAccount(id, accountId, opts.deps.now?.() ?? new Date());
       if (relay?.phase === "confirmed" && relay.fingerprint === fingerprint) return true;
-      await sleep(100);
+      await sleep(relayPollIntervalMs);
     }
     return false;
   };
@@ -278,7 +281,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         req.auth!.kind === "agent" && req.query.wait_for_submission === "1" && status === "pending"
           ? await waitForSubmission(record.id, record.accountId)
           : null;
-      if (submission !== null) event("review_delivered", record, submissionFingerprint(submission), "ok");
+      if (submission !== null) event("candidate_delivered", record, submissionFingerprint(submission), "ok");
       return reply.code(200).send({
         id: record.id,
         status,
@@ -494,13 +497,18 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       });
     }
     const submittedAt = opts.deps.now?.() ?? new Date();
+    const fingerprint = submissionFingerprint(parsed.data);
     const submitted = await opts.deps.pendingPaymentApprovalStore.submitCandidate(
       record.id,
       record.accountId,
-      { jws: parsed.data.jws, sealedCard: parsed.data.sealed_card },
+      { jws: parsed.data.jws, sealedCard: parsed.data.sealed_card, fingerprint },
       new Date(Math.min(record.expiresAt.getTime(), submittedAt.getTime() + reviewTtlMs)),
       submittedAt,
     );
+    if (submitted === "in_progress") {
+      reply.code(409).send({ error: "payment_approval_in_progress" });
+      return;
+    }
     if (submitted !== "submitted") {
       reply.code(409).send({ error: "payment_approval_not_pending" });
       return;
@@ -532,18 +540,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         reply.code(409).send({ error: "card_required" });
         return;
       }
-      if (record.status !== "pending") {
-        const sameApprovedSubmission =
-          record.status === "approved" &&
-          record.jws === parsed.data.jws &&
-          record.sealedCard === parsed.data.sealed_card;
-        if (sameApprovedSubmission) {
-          return reply.code(200).send({ status: "approved" });
-        }
+      if (record.status !== "pending" && record.status !== "approved") {
         reply.code(409).send({ error: "payment_approval_candidate_changed" });
         return;
       }
-      if (record.expiresAt <= now) {
+      if (record.status === "pending" && record.expiresAt <= now) {
         reply.code(409).send({ error: "payment_approval_expired" });
         return;
       }
@@ -553,6 +554,10 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         return;
       }
       if (binding === "review") {
+        if (record.status !== "pending") {
+          reply.code(409).send({ error: "payment_approval_candidate_changed" });
+          return;
+        }
         const fingerprint = submissionFingerprint(parsed.data);
         event("review_confirm_received", record, fingerprint, "ok");
         const result = await opts.deps.pendingPaymentApprovalStore.confirmReviewCandidate(
@@ -569,14 +574,13 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         event("review_confirm_matched", record, fingerprint, "ok");
         return reply.code(200).send({ status: "verified" });
       }
-      const confirmed = await opts.deps.pendingPaymentApprovalStore.approveForAccount(
+      const confirmed = await opts.deps.pendingPaymentApprovalStore.confirmCandidateForAccount(
         req.params.id,
         auth.account_id,
-        parsed.data.jws,
-        parsed.data.sealed_card,
+        submissionFingerprint(parsed.data),
         now,
       );
-      if (!confirmed) {
+      if (confirmed !== "confirmed") {
         reply.code(409).send({ error: "payment_approval_candidate_changed" });
         return;
       }

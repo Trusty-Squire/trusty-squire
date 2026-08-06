@@ -165,6 +165,8 @@ interface PendingPaymentApprovalRow {
   review_expires_at: Date | null;
   submission_jws: string | null;
   submission_sealed_card: string | null;
+  submission_candidate_fingerprint: string | null;
+  submission_phase: string | null;
   submission_expires_at: Date | null;
   created_at: Date;
   expires_at: Date;

@@ -55,12 +55,11 @@ and removals, payments, and app-grant changes without storing a PAN or CVV.
 As of MCP 1.1.7, `operate_pay` requires a non-empty item and reason (calls that
 omit either receive a validation error). It reads the checkout total,
 sends you a short-lived approval link, and submits only after you approve the
-exact purchase. The page initially withholds the purchase and card display
-details. Its review action uses one passkey ceremony to unlock the card and send
-an opaque review seal for operator verification; after verification releases the
-details, a second ceremony signs the exact purchase. You then inspect the venue,
-item, amount, reason, card, and requesting MCP client (for example, Hermes) before
-clicking **Approve payment** to relay the prepared final seal. A first-time
+exact purchase. The anonymous approval page shows the merchant, checkout origin,
+amount and currency, item, and reason directly from the short-lived server record
+before one passkey ceremony authorizes those canonical payment values. You also
+inspect the card and requesting MCP client (for example, Hermes) before clicking
+**Approve payment** to relay the operator-sealed final authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission. If the checkout exposes PayPal Smart Buttons
 or PayPal-hosted fields, Trusty Squire hands the checkout back before selecting a

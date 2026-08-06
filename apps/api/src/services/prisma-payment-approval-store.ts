@@ -65,6 +65,8 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
           reviewExpiresAt: row.review_expires_at,
           submissionJws: row.submission_jws,
           submissionSealedCard: row.submission_sealed_card,
+          submissionCandidateFingerprint: row.submission_candidate_fingerprint,
+          submissionPhase: row.submission_phase as PendingPaymentApprovalRecord["submissionPhase"],
           submissionExpiresAt: row.submission_expires_at,
           createdAt: row.created_at,
           expiresAt: row.expires_at,
@@ -98,6 +100,8 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
           reviewExpiresAt: row.review_expires_at,
           submissionJws: row.submission_jws,
           submissionSealedCard: row.submission_sealed_card,
+          submissionCandidateFingerprint: row.submission_candidate_fingerprint,
+          submissionPhase: row.submission_phase as PendingPaymentApprovalRecord["submissionPhase"],
           submissionExpiresAt: row.submission_expires_at,
           createdAt: row.created_at,
           expiresAt: row.expires_at,
@@ -133,36 +137,6 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
       });
       return result.count > 0 ? "ok" : "not_bindable";
     });
-  }
-
-  async approveForAccount(
-    id: string,
-    accountId: string,
-    jws: string,
-    sealedCard: string,
-    now: Date,
-  ): Promise<boolean> {
-    const result = await this.prisma.pendingPaymentApproval.updateMany({
-      where: {
-        id,
-        account_id: accountId,
-        status: "pending",
-        expires_at: { gt: now },
-      },
-      data: { status: "approved", jws, sealed_card: sealedCard },
-    });
-    if (result.count > 0) return true;
-    const approved = await this.prisma.pendingPaymentApproval.findFirst({
-      where: {
-        id,
-        account_id: accountId,
-        status: "approved",
-        jws,
-        sealed_card: sealedCard,
-      },
-      select: { id: true },
-    });
-    return approved !== null;
   }
 
   async submitReviewCandidate(
@@ -202,15 +176,163 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
     return row !== null && row.status === "pending" && row.expires_at > now ? "candidate_changed" : "not_pending";
   }
 
-  async submitCandidate(id: string, accountId: string, candidate: { jws: string; sealedCard: string }, expiresAt: Date, now: Date): Promise<"submitted" | "not_pending"> {
-    const result = await this.prisma.pendingPaymentApproval.updateMany({ where: { id, account_id: accountId, status: "pending", expires_at: { gt: now } }, data: { submission_jws: candidate.jws, submission_sealed_card: candidate.sealedCard, submission_expires_at: expiresAt } });
-    return result.count > 0 ? "submitted" : "not_pending";
+  async submitCandidate(
+    id: string,
+    accountId: string,
+    candidate: { jws: string; sealedCard: string; fingerprint: string },
+    expiresAt: Date,
+    now: Date,
+  ): Promise<"submitted" | "in_progress" | "not_pending"> {
+    const result = await this.prisma.pendingPaymentApproval.updateMany({
+      where: {
+        id,
+        account_id: accountId,
+        status: "pending",
+        expires_at: { gt: now },
+        OR: [{ submission_phase: null }, { submission_expires_at: { lte: now } }],
+      },
+      data: {
+        submission_jws: candidate.jws,
+        submission_sealed_card: candidate.sealedCard,
+        submission_candidate_fingerprint: candidate.fingerprint,
+        submission_phase: "submitted",
+        submission_expires_at: expiresAt,
+      },
+    });
+    if (result.count > 0) return "submitted";
+    const row = await this.prisma.pendingPaymentApproval.findFirst({
+      where: { id, account_id: accountId },
+      select: {
+        status: true,
+        expires_at: true,
+        submission_candidate_fingerprint: true,
+        submission_expires_at: true,
+      },
+    });
+    if (
+      row !== null &&
+      row.status === "pending" &&
+      row.expires_at > now &&
+      row.submission_expires_at !== null &&
+      row.submission_expires_at > now
+    ) {
+      return row.submission_candidate_fingerprint === candidate.fingerprint
+        ? "submitted"
+        : "in_progress";
+    }
+    return "not_pending";
   }
 
-  async getCandidateForAccount(id: string, accountId: string, now: Date): Promise<{ jws: string; sealedCard: string } | null> {
-    const row = await this.prisma.pendingPaymentApproval.findFirst({ where: { id, account_id: accountId, submission_expires_at: { gt: now } }, select: { submission_jws: true, submission_sealed_card: true } });
-    if (row === null || row.submission_jws === null || row.submission_sealed_card === null) return null;
-    await this.prisma.pendingPaymentApproval.updateMany({ where: { id, account_id: accountId, submission_jws: row.submission_jws, submission_sealed_card: row.submission_sealed_card }, data: { submission_jws: null, submission_sealed_card: null, submission_expires_at: null } });
-    return { jws: row.submission_jws, sealedCard: row.submission_sealed_card };
+  async getRelayCandidateForAccount(id: string, accountId: string, now: Date) {
+    const row = await this.prisma.pendingPaymentApproval.findFirst({
+      where: { id, account_id: accountId, status: "pending", expires_at: { gt: now } },
+    });
+    if (row === null) return null;
+    if (
+      row.submission_expires_at !== null &&
+      row.submission_expires_at > now &&
+      (row.submission_phase === "submitted" || row.submission_phase === "delivered") &&
+      row.submission_jws !== null &&
+      row.submission_sealed_card !== null &&
+      row.submission_candidate_fingerprint !== null
+    ) {
+      await this.prisma.pendingPaymentApproval.updateMany({
+        where: {
+          id,
+          account_id: accountId,
+          status: "pending",
+          submission_phase: "submitted",
+          submission_candidate_fingerprint: row.submission_candidate_fingerprint,
+          submission_expires_at: row.submission_expires_at,
+        },
+        data: { submission_phase: "delivered" },
+      });
+      return {
+        binding: "approval" as const,
+        jws: row.submission_jws,
+        sealedCard: row.submission_sealed_card,
+        fingerprint: row.submission_candidate_fingerprint,
+      };
+    }
+    if (
+      row.review_expires_at !== null &&
+      row.review_expires_at > now &&
+      (row.review_phase === "submitted" || row.review_phase === "delivered") &&
+      row.review_jws !== null &&
+      row.review_sealed_card !== null &&
+      row.review_candidate_fingerprint !== null
+    ) {
+      await this.prisma.pendingPaymentApproval.updateMany({
+        where: {
+          id,
+          account_id: accountId,
+          status: "pending",
+          review_phase: "submitted",
+          review_candidate_fingerprint: row.review_candidate_fingerprint,
+          review_expires_at: row.review_expires_at,
+        },
+        data: { review_phase: "delivered" },
+      });
+      return {
+        binding: "review" as const,
+        jws: row.review_jws,
+        sealedCard: row.review_sealed_card,
+        fingerprint: row.review_candidate_fingerprint,
+      };
+    }
+    return null;
+  }
+
+  async confirmCandidateForAccount(
+    id: string,
+    accountId: string,
+    fingerprint: string,
+    now: Date,
+  ): Promise<"confirmed" | "candidate_changed" | "not_pending"> {
+    const result = await this.prisma.pendingPaymentApproval.updateMany({
+      where: {
+        id,
+        account_id: accountId,
+        status: "pending",
+        expires_at: { gt: now },
+        submission_candidate_fingerprint: fingerprint,
+        submission_expires_at: { gt: now },
+        submission_phase: "delivered",
+      },
+      data: {
+        status: "approved",
+        jws: null,
+        sealed_card: null,
+        review_jws: null,
+        review_sealed_card: null,
+        submission_jws: null,
+        submission_sealed_card: null,
+        submission_phase: "confirmed",
+      },
+    });
+    if (result.count > 0) return "confirmed";
+    const row = await this.prisma.pendingPaymentApproval.findFirst({
+      where: { id, account_id: accountId },
+      select: {
+        status: true,
+        expires_at: true,
+        submission_candidate_fingerprint: true,
+        submission_expires_at: true,
+        submission_phase: true,
+      },
+    });
+    if (
+      row !== null &&
+      row.status === "approved" &&
+      row.submission_phase === "confirmed" &&
+      row.submission_candidate_fingerprint === fingerprint &&
+      row.submission_expires_at !== null &&
+      row.submission_expires_at > now
+    ) {
+      return "confirmed";
+    }
+    return row !== null && row.status === "pending" && row.expires_at > now
+      ? "candidate_changed"
+      : "not_pending";
   }
 }
