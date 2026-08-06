@@ -187,13 +187,23 @@ async function harness(
       if (mode === "review_then_happy" && confirmationBodies.length === 1) {
         return Response.json({ status: "verified" });
       }
-      confirmedCandidate =
-        mode === "confirm_response_lost_changed"
-          ? { ...body, sealed_card: "different-candidate" }
-          : body;
-      if (mode === "confirm_response_lost" || mode === "confirm_response_lost_changed") {
+      if (
+        (mode === "confirm_response_lost" || mode === "confirm_response_lost_changed") &&
+        confirmationBodies.length === 1
+      ) {
+        confirmedCandidate =
+          mode === "confirm_response_lost_changed"
+            ? { ...body, sealed_card: "different-candidate" }
+            : body;
         throw new TypeError("confirm response lost");
       }
+      if (mode === "confirm_response_lost_changed") {
+        return Response.json(
+          { error: "payment_approval_candidate_changed" },
+          { status: 409 },
+        );
+      }
+      confirmedCandidate = body;
       return Response.json({ status: "approved" });
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/notify-3ds") && init?.method === "POST") {
@@ -345,7 +355,8 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
-    expect(confirmationBodies).toHaveLength(1);
+    expect(confirmationBodies).toHaveLength(2);
+    expect(confirmationBodies[1]).toEqual(confirmationBodies[0]);
   });
 
   it("does not reconcile a lost response to a different approved candidate", async () => {

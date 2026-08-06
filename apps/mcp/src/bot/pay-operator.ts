@@ -501,24 +501,15 @@ export async function executeOperatePay(
                     try {
                       await api.confirmPaymentApproval(created.id, candidate);
                     } catch (error) {
-                      let current: Awaited<ReturnType<ApiClient["getPaymentApproval"]>>;
                       try {
-                        current = await api.getPaymentApproval(created.id);
+                        const reconciliation = await api.confirmPaymentApproval(
+                          created.id,
+                          candidate,
+                        );
+                        if (reconciliation.status !== "approved") throw error;
                       } catch {
                         candidateCardBytes.fill(0);
                         throw error;
-                      }
-                      const exactCandidateApproved =
-                        current.status === "approved" &&
-                        current.jws === candidate.jws &&
-                        current.sealed_card === candidate.sealed_card &&
-                        current.card_ref === candidate.card_ref;
-                      if (!exactCandidateApproved) {
-                        candidateCardBytes.fill(0);
-                        if (current.status !== "pending") throw error;
-                        rejectedCandidates.delete(candidateKey);
-                        await deps.sleep(deps.pollIntervalMs);
-                        continue;
                       }
                     }
                   }
