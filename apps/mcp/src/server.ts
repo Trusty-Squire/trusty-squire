@@ -81,7 +81,9 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
     const parsed = tool.inputSchema.safeParse(req.params.arguments ?? {});
     if (!parsed.success) {
       return errorContent(
-        `invalid arguments: ${parsed.error.issues.map((i) => i.message).join("; ")}`,
+        `invalid arguments: ${parsed.error.issues
+          .map((i) => (i.path.length > 0 ? `${i.path.join(".")}: ${i.message}` : i.message))
+          .join("; ")}`,
       );
     }
     try {
