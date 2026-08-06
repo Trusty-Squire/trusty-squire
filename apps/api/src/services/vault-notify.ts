@@ -28,6 +28,7 @@ import type {
 } from "@trusty-squire/vault";
 import { VAULT_AUDIT_TYPES } from "@trusty-squire/vault";
 import type { AccountStore } from "./in-memory-account-store.js";
+import { formatCurrencyAmount } from "./money.js";
 import { sendTelegramMessage } from "./telegram.js";
 
 const NOTIFY_TYPES: ReadonlySet<VaultAuditType> = new Set([
@@ -67,7 +68,7 @@ export function formatVaultEventMessage(event: VaultAuditEventInput, at: Date): 
     case VAULT_AUDIT_TYPES.paymentExecuted:
       return `💸 Payment ${p.payment_status ?? "executed"}: ${p.merchant ?? "unknown merchant"}${
         p.amount_cents !== undefined && p.currency !== undefined
-          ? ` — ${p.currency} ${(p.amount_cents / 100).toFixed(2)}`
+          ? ` — ${formatCurrencyAmount(p.amount_cents, p.currency)}`
           : ""
       }${p.last4 !== undefined ? ` ··${p.last4}` : ""} · ${ts}`;
     case VAULT_AUDIT_TYPES.grantMinted:

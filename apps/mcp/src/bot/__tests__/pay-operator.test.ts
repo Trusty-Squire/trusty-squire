@@ -281,6 +281,55 @@ async function harness(
 }
 
 describe("operate_pay", () => {
+  it("does not mint an approval when checkout currency grounding contradicts the fallback", async () => {
+    const approvalBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
+        return Response.json({ vouchflow_audience: "customer_test" });
+      }
+      if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+        approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      }
+      return Response.json({ error: "unexpected_request" }, { status: 500 });
+    }) as typeof fetch;
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session-token",
+      fetch: fetchMock,
+    });
+    const browser: PaymentBrowser = {
+      isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
+      readCheckoutSummary: vi
+        .fn()
+        .mockRejectedValue(new Error("payment_checkout_currency_unresolved_scale_mismatch")),
+      currentUrl: vi.fn().mockReturnValue("https://flowers.example.test/checkout"),
+      fillAndSubmitCheckout: vi.fn(),
+      waitForThreeDsResolution: vi.fn(),
+    };
+
+    await expect(
+      executeOperatePay(
+        {
+          card_ref: "card_test",
+          merchant: "Japan Flower Shop",
+          amount_cents: 9_845,
+          currency: "JPY",
+          item: "Flowers",
+          reason: "Gift",
+        },
+        api,
+        browser,
+        { vouchflowExpectedAudience: "customer_test" },
+      ),
+    ).resolves.toEqual({
+      status: "payment_checkout_currency_unresolved",
+      reason: "fallback_currency_scale_mismatch",
+    });
+    expect(approvalBodies).toEqual([]);
+  });
+
   it("verifies the mandate, opens the card, fills the checkout, and audits last4 only", async () => {
     const {
       result,

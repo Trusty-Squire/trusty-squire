@@ -33,6 +33,17 @@ interface AuditEvent {
 
 const PAGE = 50;
 
+function formatAmount(amountCents: number, currency: string): string {
+  try {
+    const minorDigits = new Intl.NumberFormat(undefined, { style: "currency", currency })
+      .resolvedOptions().maximumFractionDigits;
+    if (minorDigits === undefined) return `${currency} ${amountCents} minor units`;
+    return `${currency} ${(amountCents / 10 ** minorDigits).toFixed(minorDigits)}`;
+  } catch {
+    return `${currency} ${amountCents} minor units`;
+  }
+}
+
 // Maps an event to { tone, label, detail } for the timeline. Tone drives
 // the status dot color (ok / warn / err / neutral).
 function describe(e: AuditEvent): { tone: string; label: string; detail: string } {
@@ -75,7 +86,7 @@ function describe(e: AuditEvent): { tone: string; label: string; detail: string 
       // Merchant + amount + last4 only — a full PAN never reaches the trail.
       const amount =
         e.amount_cents !== undefined && e.currency !== undefined
-          ? `${e.currency} ${(e.amount_cents / 100).toFixed(2)}`
+          ? formatAmount(e.amount_cents, e.currency)
           : null;
       const tail = e.last4 !== undefined ? ` ··${e.last4}` : "";
       const declined =
