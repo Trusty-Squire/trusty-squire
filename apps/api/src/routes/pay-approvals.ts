@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
+import { formatCurrencyAmount } from "../services/money.js";
 import { sendTelegramMessage } from "../services/telegram.js";
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
@@ -246,9 +247,9 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     // Telegram error must never delay or fail the approval response.
     const account = await opts.deps.accountStore.findAccountById(auth.account_id);
     if (account?.telegram_chat_id != null) {
-      const amount = (parsed.data.amount_cents / 100).toFixed(2);
+      const amount = formatCurrencyAmount(parsed.data.amount_cents, parsed.data.currency);
       const text =
-        `Trusty Squire — approve ${parsed.data.currency} ${amount} to ${parsed.data.merchant}\n` +
+        `Trusty Squire — approve ${amount} to ${parsed.data.merchant}\n` +
         `${webBaseUrl()}/vault/pay/${id}`;
       void sendTelegramMessage(account.telegram_chat_id, text).catch(() => {});
     }
@@ -275,9 +276,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       if (account?.telegram_chat_id != null) {
         const text =
           "🔐 3-D Secure required — complete the challenge in the open checkout browser to finish your " +
-          record.currency +
-          " " +
-          (record.amountCents / 100).toFixed(2) +
+          formatCurrencyAmount(record.amountCents, record.currency) +
           " payment to " +
           record.merchant +
           ".";

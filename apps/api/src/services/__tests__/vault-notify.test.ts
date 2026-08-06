@@ -127,6 +127,24 @@ describe("NotifyingVaultAuditStore", () => {
     expect(payMsg).toContain("USD 12.34");
     expect(payMsg).toContain("··4242");
     expect(payMsg).toContain("2026-07-23T12:00:00Z");
+
+    const yenPayMsg = formatVaultEventMessage(
+      {
+        account_id: "a",
+        type: VAULT_AUDIT_TYPES.paymentExecuted,
+        payload: {
+          reference: "pay://p2",
+          requester: "agent",
+          merchant: "Japan Flower Shop",
+          amount_cents: 9845,
+          currency: "JPY",
+          payment_status: "approved",
+        },
+      },
+      NOW,
+    );
+    expect(yenPayMsg).toContain("JPY 9845");
+    expect(yenPayMsg).not.toContain("JPY 98.45");
   });
 
   it("logs audit failures without rejecting a completed mutation", async () => {

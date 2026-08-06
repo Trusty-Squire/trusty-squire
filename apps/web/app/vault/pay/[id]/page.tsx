@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { decryptCard, type E2EBlob } from "@trusty-squire/vault/e2e";
 import { sealToRecipient } from "@trusty-squire/vault/hpke";
@@ -97,7 +97,7 @@ export default function PaymentApprovalPage() {
   const [cardMetadataError, setCardMetadataError] = useState<string | null>(null);
   const [needsPasskeySetup, setNeedsPasskeySetup] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const jitOrigin = useRef<boolean | null>(null);
+  const [jitOrigin, setJitOrigin] = useState<boolean | null>(null);
 
   const redirectToLogin = useCallback(() => {
     router.replace(`/login?next=/vault/pay/${encodeURIComponent(id)}`);
@@ -109,7 +109,7 @@ export default function PaymentApprovalPage() {
   );
 
   const applyCeremony = useCallback((current: CeremonyApproval) => {
-    if (jitOrigin.current === null) jitOrigin.current = current.card_ref === null;
+    setJitOrigin((origin) => origin ?? current.card_ref === null);
     setCeremony(current);
     // Details are capability-link disclosure from the server record. Rendering
     // them never signs anything; the single payment signature happens only in
@@ -297,10 +297,7 @@ export default function PaymentApprovalPage() {
       : currentStatus === "expired"
         ? "This payment approval has expired."
         : "This payment is no longer pending.";
-  // The ref preserves whether this approval began card-less across ceremony
-  // refreshes; reading it does not participate in reactive rendering.
-  // eslint-disable-next-line react-hooks/refs
-  const isJitOrigin = jitOrigin.current === true;
+  const isJitOrigin = jitOrigin === true;
   const jitBindingMismatch =
     isJitOrigin &&
     ceremony !== null &&

@@ -664,6 +664,36 @@ describe("payment approval relay", () => {
     expect(body.text).toContain(`/vault/pay/${created.id}`);
   });
 
+  it("formats zero-decimal approval currencies without fake cents in Telegram", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${agentToken}`, "x-squire-agent-identity": "Hermes" },
+      payload: {
+        merchant: "Japan Flower Shop",
+        checkout_origin: "https://flowers.example.test",
+        amount_cents: 9845,
+        currency: "JPY",
+        card_ref: "card_synthetic_1",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: "Flowers",
+        reason: "Synthetic test purchase",
+      },
+    });
+    expect(response.statusCode).toBe(201);
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.text).toContain("JPY 9845");
+    expect(body.text).not.toContain("JPY 98.45");
+  });
+
   it("does not push to Telegram when the account has no linked chat", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
@@ -696,6 +726,44 @@ describe("payment approval relay", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.text).toContain("Synthetic Books");
     expect(body.text).toContain("USD 25.99");
+  });
+
+  it("formats zero-decimal currencies without fake cents in 3-D Secure Telegram messages", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+
+    const created = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${agentToken}`, "x-squire-agent-identity": "Hermes" },
+      payload: {
+        merchant: "Japan Flower Shop",
+        checkout_origin: "https://flowers.example.test",
+        amount_cents: 9845,
+        currency: "JPY",
+        card_ref: "card_synthetic_1",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: "Flowers",
+        reason: "Synthetic test purchase",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    fetchMock.mockClear();
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${(created.json() as { id: string }).id}/notify-3ds`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.text).toContain("JPY 9845");
+    expect(body.text).not.toContain("JPY 98.45");
   });
 
   it("does not notify Telegram about 3-D Secure without a linked chat", async () => {

@@ -85,6 +85,8 @@ let bindFailures = 0;
 let loseBindResponse = false;
 let lostResponseCardRef = "card_new";
 let cardListOverride: unknown[] | null = null;
+let approvalAmountCents = 6000;
+let approvalCurrency = "USD";
 
 function approvalBody() {
   const metadata = cardListOverride?.[0] ?? BOUND_CARD;
@@ -93,8 +95,8 @@ function approvalBody() {
     status: "pending",
     merchant: "CASETiFY",
     checkout_origin: "https://casetify.com",
-    amount_cents: 6000,
-    currency: "USD",
+    amount_cents: approvalAmountCents,
+    currency: approvalCurrency,
     nonce: "nonce",
     card_ref: bound ? lostResponseCardRef : null,
     operator_pubkey: "AAAA",
@@ -129,6 +131,8 @@ beforeEach(() => {
   loseBindResponse = false;
   lostResponseCardRef = "card_new";
   cardListOverride = null;
+  approvalAmountCents = 6000;
+  approvalCurrency = "USD";
   vi.clearAllMocks();
   pairing.getPairingState.mockResolvedValue({ enrolled: true });
   pairing.pairDevice.mockResolvedValue(undefined);
@@ -361,6 +365,17 @@ describe("pay page — JIT add-card ceremony", () => {
 });
 
 describe("pay page — single payment authorization", () => {
+  it("shows a JPY approval as a whole-yen amount", async () => {
+    bound = true;
+    approvalAmountCents = 9845;
+    approvalCurrency = "JPY";
+    render(<PaymentApprovalPage />);
+
+    const paymentLine = await screen.findByText(/Pay with/);
+    expect(paymentLine.textContent).toContain("9,845");
+    expect(paymentLine.textContent).not.toMatch(/9,845\.00/);
+  });
+
   it("renders canonical merchant, origin, amount, item, and reason before authorization", async () => {
     bound = true;
     render(<PaymentApprovalPage />);
