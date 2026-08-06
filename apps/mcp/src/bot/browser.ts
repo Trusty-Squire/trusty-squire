@@ -267,7 +267,7 @@ function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
 }
 
 const checkoutTotalPattern =
-  /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK|\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9][0-9.,]*)(?:\s*([A-Z]{3})\b)?/giu;
+  /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK|\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9][0-9.,]*)(?:\s*(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK|\p{L}{1,4}\p{Sc}|\p{Sc}|\p{L}{2,4})(?=\s|$|[.,;:!?)]|\p{Sc}))?/giu;
 
 interface CheckoutAmountParseResult {
   amount: { amount_cents: number; currency: string } | null;
@@ -280,6 +280,10 @@ function resolveCheckoutCurrencyToken(token: string | undefined): string | undef
   const upper = token.toUpperCase();
   if (CHECKOUT_CURRENCY_CODES.has(upper)) return upper;
   return CURRENCY_SYMBOLS[token] ?? CURRENCY_SYMBOLS[upper];
+}
+
+function isCurrencyShapedToken(token: string): boolean {
+  return /\p{Sc}/u.test(token) || token.toLowerCase() === "kr" || /^[A-Z]{3}$/.test(token);
 }
 
 // A lone separator with three trailing digits is ambiguous: it can be either a
@@ -314,7 +318,9 @@ function parseCheckoutAmountResult(
       if (
         (match[1] !== undefined && prefixCurrency === undefined) ||
         (match[2] !== undefined && symbolCurrency === undefined) ||
-        (match[4] !== undefined && suffixCurrency === undefined)
+        (match[4] !== undefined &&
+          suffixCurrency === undefined &&
+          isCurrencyShapedToken(match[4]))
       ) {
         currencyUnresolved = true;
         continue;
