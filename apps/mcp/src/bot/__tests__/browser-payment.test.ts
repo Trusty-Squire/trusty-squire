@@ -69,6 +69,27 @@ describe("checkout payment parsing", () => {
     });
   });
 
+  it("resolves Japanese yen suffix notation", () => {
+    expect(parseCheckoutAmount(["Order total 9,845円"], "USD")).toEqual({
+      amount_cents: 9_845,
+      currency: "JPY",
+    });
+  });
+
+  it("resolves Polish złoty suffix notation", () => {
+    expect(parseCheckoutAmount(["Order total 98.45 zł"], "USD")).toEqual({
+      amount_cents: 9_845,
+      currency: "PLN",
+    });
+  });
+
+  it("resolves the won symbol using zero-decimal precision", () => {
+    expect(parseCheckoutAmount(["Order total ₩9,845"], "USD")).toEqual({
+      amount_cents: 9_845,
+      currency: "KRW",
+    });
+  });
+
   it("retains code-plus-symbol checkout parsing", () => {
     expect(parseCheckoutAmount(["Order total USD$98.45"], "JPY")).toEqual({
       amount_cents: 9_845,
@@ -76,8 +97,13 @@ describe("checkout payment parsing", () => {
     });
   });
 
-  it("retains fallback parsing before incidental prose", () => {
-    expect(parseCheckoutAmount(["Order total 98.45 tax included"], "USD")).toEqual({
+  it.each([
+    "Order total 98.45 tax included",
+    "Order total 98.45 TAX INCLUDED",
+    "Order total 98.45 VAT included",
+    "TOTAL DUE 98.45",
+  ])("retains scale-checked fallback parsing around incidental prose: %s", (text) => {
+    expect(parseCheckoutAmount([text], "USD")).toEqual({
       amount_cents: 9_845,
       currency: "USD",
     });
@@ -103,7 +129,12 @@ describe("checkout payment parsing", () => {
     );
   });
 
-  it.each(["Order total R$ 98.45", "Order total 98.45 R$", "Order total 98.45 kr"])(
+  it.each([
+    "Order total R$ 98.45",
+    "Order total 98.45 R$",
+    "Order total 98.45 kr",
+    "Order total 98.45 ₺",
+  ])(
     "fails closed when a total uses unresolved currency notation: %s",
     async (text) => {
       const browser = new BrowserController({ humanize: false });

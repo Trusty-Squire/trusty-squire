@@ -209,21 +209,13 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
   "€": "EUR",
   "£": "GBP",
   "¥": "JPY",
+  "₩": "KRW",
+  円: "JPY",
+  "ZŁ": "PLN",
 };
 
-const CHECKOUT_CURRENCY_CODES = new Set([
-  "USD",
-  "EUR",
-  "GBP",
-  "CAD",
-  "AUD",
-  "JPY",
-  "NZD",
-  "CHF",
-  "SEK",
-  "NOK",
-  "DKK",
-]);
+const CHECKOUT_CURRENCY_CODES = new Set(Intl.supportedValuesOf("currency"));
+const UNRESOLVED_CURRENCY_NOTATIONS = new Set(["KR"]);
 
 export function currencyMinorDigits(currency: string): number {
   return new Intl.NumberFormat(undefined, {
@@ -267,7 +259,7 @@ function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
 }
 
 const checkoutTotalPattern =
-  /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK|\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9][0-9.,]*)(?:\s*(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK|\p{L}{1,4}\p{Sc}|\p{Sc}|\p{L}{2,4})(?=\s|$|[.,;:!?)]|\p{Sc}))?/giu;
+  /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9][0-9.,]*)(?:\s*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)]))?/giu;
 
 interface CheckoutAmountParseResult {
   amount: { amount_cents: number; currency: string } | null;
@@ -279,11 +271,34 @@ function resolveCheckoutCurrencyToken(token: string | undefined): string | undef
   if (token === undefined) return undefined;
   const upper = token.toUpperCase();
   if (CHECKOUT_CURRENCY_CODES.has(upper)) return upper;
+  const codeWithSymbol = upper.match(/^([A-Z]{3})(\p{Sc})$/u);
+  const code = codeWithSymbol?.[1];
+  const symbol = codeWithSymbol?.[2];
+  if (
+    code !== undefined &&
+    symbol !== undefined &&
+    CHECKOUT_CURRENCY_CODES.has(code) &&
+    CURRENCY_SYMBOLS[symbol] !== undefined
+  ) {
+    return code;
+  }
   return CURRENCY_SYMBOLS[token] ?? CURRENCY_SYMBOLS[upper];
 }
 
-function isCurrencyShapedToken(token: string): boolean {
-  return /\p{Sc}/u.test(token) || token.toLowerCase() === "kr" || /^[A-Z]{3}$/.test(token);
+interface CheckoutCurrencyTokenResult {
+  currency: string | undefined;
+  unresolved: boolean;
+}
+
+function classifyCheckoutCurrencyToken(token: string | undefined): CheckoutCurrencyTokenResult {
+  if (token === undefined) return { currency: undefined, unresolved: false };
+  const currency = resolveCheckoutCurrencyToken(token);
+  return {
+    currency,
+    unresolved:
+      currency === undefined &&
+      (/\p{Sc}/u.test(token) || UNRESOLVED_CURRENCY_NOTATIONS.has(token.toUpperCase())),
+  };
 }
 
 // A lone separator with three trailing digits is ambiguous: it can be either a
@@ -312,20 +327,14 @@ function parseCheckoutAmountResult(
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
-      const prefixCurrency = resolveCheckoutCurrencyToken(match[1]);
-      const symbolCurrency = resolveCheckoutCurrencyToken(match[2]);
-      const suffixCurrency = resolveCheckoutCurrencyToken(match[4]);
-      if (
-        (match[1] !== undefined && prefixCurrency === undefined) ||
-        (match[2] !== undefined && symbolCurrency === undefined) ||
-        (match[4] !== undefined &&
-          suffixCurrency === undefined &&
-          isCurrencyShapedToken(match[4]))
-      ) {
+      const prefix = classifyCheckoutCurrencyToken(match[1]);
+      const symbol = classifyCheckoutCurrencyToken(match[2]);
+      const suffix = classifyCheckoutCurrencyToken(match[4]);
+      if (prefix.unresolved || symbol.unresolved || suffix.unresolved) {
         currencyUnresolved = true;
         continue;
       }
-      const pageCurrency = prefixCurrency ?? suffixCurrency ?? symbolCurrency;
+      const pageCurrency = prefix.currency ?? suffix.currency ?? symbol.currency;
       const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
       if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) continue;
       const minorDigits = currencyMinorDigits(currency);
