@@ -62,6 +62,20 @@ describe("checkout payment parsing", () => {
     });
   });
 
+  it("resolves unambiguous US$ notation as USD", () => {
+    expect(parseCheckoutAmount(["Order total US$ 98.45"], "JPY")).toEqual({
+      amount_cents: 9_845,
+      currency: "USD",
+    });
+  });
+
+  it("retains code-plus-symbol checkout parsing", () => {
+    expect(parseCheckoutAmount(["Order total USD$98.45"], "JPY")).toEqual({
+      amount_cents: 9_845,
+      currency: "USD",
+    });
+  });
+
   it("refuses a decimal total when only a zero-decimal fallback currency is available", () => {
     // A Japan-based merchant is not evidence that a bare 98.45 total is JPY.
     // Treating the dot as a group would silently mint JPY 9,845 for a USD price.
@@ -79,6 +93,20 @@ describe("checkout payment parsing", () => {
 
     await expect(browser.readCheckoutSummary("JPY")).rejects.toThrow(
       "payment_checkout_currency_unresolved_scale_mismatch",
+    );
+  });
+
+  it("fails closed when a total uses an unresolved currency notation", async () => {
+    const browser = new BrowserController({ humanize: false });
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
+      frames: () => [{ evaluate: vi.fn().mockResolvedValue("Order total R$ 98.45") }],
+      url: () => "https://flowers.example.test/checkout",
+    };
+    Object.defineProperty(browser, "page", { value: page });
+
+    await expect(browser.readCheckoutSummary("JPY")).rejects.toThrow(
+      "payment_checkout_currency_unresolved",
     );
   });
 

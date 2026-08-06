@@ -268,6 +268,12 @@ export async function executeOperatePay(
     try {
       checkout = await browser.readCheckoutSummary(args.currency);
     } catch (error) {
+      if (error instanceof Error && error.message === "payment_checkout_currency_unresolved") {
+        return {
+          status: "payment_checkout_currency_unresolved",
+          reason: "checkout_currency_unrecognized",
+        };
+      }
       if (
         error instanceof Error &&
         error.message === "payment_checkout_currency_unresolved_scale_mismatch"

@@ -205,10 +205,25 @@ export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescr
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
   $: "USD",
+  "US$": "USD",
   "€": "EUR",
   "£": "GBP",
   "¥": "JPY",
 };
+
+const CHECKOUT_CURRENCY_CODES = new Set([
+  "USD",
+  "EUR",
+  "GBP",
+  "CAD",
+  "AUD",
+  "JPY",
+  "NZD",
+  "CHF",
+  "SEK",
+  "NOK",
+  "DKK",
+]);
 
 export function currencyMinorDigits(currency: string): number {
   return new Intl.NumberFormat(undefined, {
@@ -252,11 +267,19 @@ function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
 }
 
 const checkoutTotalPattern =
-  /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK)\s*)?([$€£¥])?\s*([0-9][0-9.,]*)(?:\s*(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK))?/gi;
+  /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK|\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9][0-9.,]*)(?:\s*([A-Z]{3})\b)?/giu;
 
 interface CheckoutAmountParseResult {
   amount: { amount_cents: number; currency: string } | null;
+  currencyUnresolved: boolean;
   fallbackCurrencyScaleMismatch: boolean;
+}
+
+function resolveCheckoutCurrencyToken(token: string | undefined): string | undefined {
+  if (token === undefined) return undefined;
+  const upper = token.toUpperCase();
+  if (CHECKOUT_CURRENCY_CODES.has(upper)) return upper;
+  return CURRENCY_SYMBOLS[token] ?? CURRENCY_SYMBOLS[upper];
 }
 
 // A lone separator with three trailing digits is ambiguous: it can be either a
@@ -280,11 +303,23 @@ function parseCheckoutAmountResult(
   texts: readonly string[],
   fallbackCurrency?: string,
 ): CheckoutAmountParseResult {
+  let currencyUnresolved = false;
   let fallbackCurrencyScaleMismatch = false;
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
-      const pageCurrency = match[1] ?? match[4] ?? CURRENCY_SYMBOLS[match[2] ?? ""];
+      const prefixCurrency = resolveCheckoutCurrencyToken(match[1]);
+      const symbolCurrency = resolveCheckoutCurrencyToken(match[2]);
+      const suffixCurrency = resolveCheckoutCurrencyToken(match[4]);
+      if (
+        (match[1] !== undefined && prefixCurrency === undefined) ||
+        (match[2] !== undefined && symbolCurrency === undefined) ||
+        (match[4] !== undefined && suffixCurrency === undefined)
+      ) {
+        currencyUnresolved = true;
+        continue;
+      }
+      const pageCurrency = prefixCurrency ?? suffixCurrency ?? symbolCurrency;
       const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
       if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) continue;
       const minorDigits = currencyMinorDigits(currency);
@@ -300,10 +335,14 @@ function parseCheckoutAmountResult(
       const scale = 10 ** minorDigits;
       const minor = Math.round(amount * scale);
       if (Math.abs(amount * scale - minor) > 1e-6) continue;
-      return { amount: { amount_cents: minor, currency }, fallbackCurrencyScaleMismatch };
+      return {
+        amount: { amount_cents: minor, currency },
+        currencyUnresolved,
+        fallbackCurrencyScaleMismatch,
+      };
     }
   }
-  return { amount: null, fallbackCurrencyScaleMismatch };
+  return { amount: null, currencyUnresolved, fallbackCurrencyScaleMismatch };
 }
 
 export function parseCheckoutAmount(
@@ -5643,6 +5682,9 @@ export class BrowserController {
         ),
     );
     const parsedAmount = parseCheckoutAmountResult(texts, fallbackCurrency);
+    if (parsedAmount.currencyUnresolved) {
+      throw new Error("payment_checkout_currency_unresolved");
+    }
     if (parsedAmount.fallbackCurrencyScaleMismatch) {
       throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
     }
