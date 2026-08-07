@@ -10,9 +10,10 @@ it.
 ## 1. The problem
 
 `readRecipeForTask(verb, serviceUrl)`
-(`apps/mcp/src/bot/operator-recipe.ts:331-335`) resolves exactly one recipe,
+(`apps/mcp/src/bot/operator-recipe.ts:126-131`) resolves exactly one recipe,
 once, at session entry, via `operatorRecipeKey(verb, url)` →
-`` `${verb}--${operatorRecipeDomain(url)}` `` (`operator-recipe.ts:306-308`) —
+`` `${verb}--${operatorRecipeDomain(url)}` ``
+(`packages/recipe-schema/src/operator-recipe.ts:288-290`) —
 a `(verb, eTLD+1)` key, per `DESIGN-replay-engine.md` §"Recipe identity".
 
 Two consequences follow from keying at the domain level, at entry:
@@ -156,18 +157,20 @@ half of graceful degradation already works today.
 analysis of `apps/mcp/src/bot/provision-session.ts`, the only implementation
 of replay, found two distinct escape hatches that are not equivalent:
 
-- `fallback_required` (`provision-session.ts:4205-4225`) is a working
+- `fallback_required` (`provision-session.ts:4287-4307`) is a working
   **step**-level degrade: a single missed target returns `next_index`, the
   host repairs just that step, and replay resumes there.
-- `human_required` (`provision-session.ts:4155-4161`, called from
-  guard-failure sites including the post-fill verification at line 4197)
+- `human_required` (`provision-session.ts:4237-4243`, called from
+  guard-failure sites including the post-fill verification at line 4279)
   aborts the **entire** replay call the moment any one field's post-fill
   guard trips — there is no continuation path from it.
 
 The reason there's no narrower fallback is structural, one level below the
-abort call site: `OperatorRecipe` (`operator-recipe.ts:90-108`) stores an
+abort call site: `OperatorRecipe`
+(`packages/recipe-schema/src/operator-recipe.ts:204-224`) stores an
 entire task as one flat `trace: TraceEntry[]` array under one
-`operatorRecipeKey(verb, domain)` (`operator-recipe.ts:306-308`). Catalog,
+`operatorRecipeKey(verb, domain)`
+(`packages/recipe-schema/src/operator-recipe.ts:288-290`). Catalog,
 storefront, and checkout steps are just consecutive entries in the same
 array under the same key — there is no leg boundary in the schema for a
 guard failure to fall back to. So a money-path guard trip has nowhere

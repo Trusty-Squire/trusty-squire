@@ -16,13 +16,17 @@ miss; it does not choose targets during a clean replay.
 The local key is `(verb, eTLD+1)`:
 
 - `verb` is parsed by the closed `OperatorVerbSchema` enum in
-  `apps/mcp/src/bot/operator-recipe.ts`. It is host-classified, not free-form.
+  `packages/recipe-schema` (re-exported by `apps/mcp/src/bot/operator-recipe.ts`).
+  It is host-classified, not free-form.
 - The domain is derived with the Public Suffix List. Paths and queries do not
   participate, so ordinary `www`, `shop`, and `checkout` subdomains collapse to
   their registrable domain.
 - Tenant subdomains under `myshopify.com` and `notion.site` retain the full host.
 - Recipes are local files under `~/.trusty-squire/operator-recipes/`, or the
-  directory selected by `TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR`.
+  directory selected by `TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR`. Share-eligible
+  recipes are additionally submitted to the shared registry's candidate pool
+  and, once promoted, served to other installs on a local miss — CLAUDE.md
+  §"Operator Recipe registry (replay-registry-share)" owns that flow.
 
 This key does not alter registry Skill lookup or `serviceSlugFromUrl`.
 
@@ -120,7 +124,8 @@ The existing `operate_pay` phone approval, passkey mandate, card injection,
 
 | Contract | Authoritative implementation |
 |---|---|
-| Verb schema, PSL key, local persistence, holes, target resolver | `apps/mcp/src/bot/operator-recipe.ts` |
+| Wire schema (verb enum, PSL key, holes, share-eligibility gate) | `packages/recipe-schema/src/operator-recipe.ts` |
+| Local persistence, render/bind, target resolver | `apps/mcp/src/bot/operator-recipe.ts` |
 | Action-time provenance, verified recording, replay, repair, field guards | `apps/mcp/src/bot/provision-session.ts` |
 | Public `operate_remember` / `operate_use` contracts | `apps/mcp/src/tools/provision-drive.ts` |
 | Card-source attestation and payment gate | `apps/mcp/src/tools/operate-pay.ts`, `apps/mcp/src/bot/pay-operator.ts` |

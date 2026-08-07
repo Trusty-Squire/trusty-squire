@@ -18,8 +18,65 @@ datasource db {
   url      = env("REGISTRY_DATABASE_URL")
 }
 
-// SkillRecord — Tier-2 Learned Skills (0.7.0). Post-0.8 this is the
-// registry's only published-recipe table.
+// OperatorRecipeCandidateRecord — shared Operator Recipes, keyed by
+// (verb, eTLD+1). `POST /recipes` (unauthenticated, just the client-side
+// share-eligibility gate) writes ONLY here, never to the live table below.
+// A candidate is NEVER replayed — operate_use / GET /recipes/:verb/:domain
+// never reads this table — so last-write-wins across untrusted callers is
+// safe: the worst an attacker can do is overwrite a candidate nobody is
+// serving yet. Safe by construction, not by trust in the write path.
+model OperatorRecipeCandidateRecord {
+  // `${verb}--${domain}`, e.g. "get_api_key--example.com".
+  key            String   @id
+
+  verb           String
+  domain         String
+
+  // The full OperatorRecipeSchema-validated JSON.
+  payload_json   Json
+
+  schema_version Int
+
+  submitted_at   DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  @@index([domain])
+}
+
+// OperatorRecipeRecord — the LIVE / promoted table. Written ONLY by the
+// admin-bearer-gated `POST /admin/recipes/:verb/:domain/promote` route,
+// after a housekeeper (or an operator, until the housekeeper-side wiring
+// lands — see CLAUDE.md) has vetted the candidate's navigation targets
+// (entry_url/allowed_hosts/goto templates) for the site they claim to be
+// for. `operate_use` / `GET /recipes/:verb/:domain` read ONLY this table,
+// so an unauthenticated candidate write can never steer another user's
+// replay browser until a promotion decision has been made. See
+// docs/ARCHITECTURE.md.
+model OperatorRecipeRecord {
+  key            String   @id
+
+  verb           String
+  domain         String
+
+  payload_json   Json
+
+  schema_version Int
+
+  promoted_at    DateTime @default(now())
+  // Free-text identity of whoever/whatever promoted this (an operator
+  // handle, or "housekeeper" once that integration lands). Not an auth
+  // mechanism — audit trail only; the admin bearer is the actual gate.
+  promoted_by    String
+
+  updated_at     DateTime @updatedAt
+
+  @@index([domain])
+}
+
+// SkillRecord — Tier-2 Learned Skills (0.7.0). Post-0.8 this was the
+// registry's only published-recipe table; the OperatorRecipe* models above
+// are the second (a distinct, simpler flow for operator-driver replay
+// plans, with its own minimal candidate/promote trust boundary).
 //
 // `payload_json` carries the full SkillSchema-validated JSON. Health
 // counters live as columns rather than inside the JSON so atomic SQL

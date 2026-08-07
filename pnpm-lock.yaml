@@ -111,6 +111,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.0.4
         version: 1.29.0(zod@3.25.76)
+      '@trusty-squire/recipe-schema':
+        specifier: workspace:*
+        version: link:../../packages/recipe-schema
       '@trusty-squire/skill-schema':
         specifier: workspace:*
         version: link:../../packages/skill-schema
@@ -197,6 +200,9 @@ importers:
       '@prisma/client':
         specifier: ^5.22.0
         version: 5.22.0(prisma@5.22.0)
+      '@trusty-squire/recipe-schema':
+        specifier: workspace:*
+        version: link:../../packages/recipe-schema
       '@trusty-squire/skill-schema':
         specifier: workspace:*
         version: link:../../packages/skill-schema
@@ -288,6 +294,22 @@ importers:
         version: 4.3.0
       typescript:
         specifier: ^5
+        version: 5.9.3
+      vitest:
+        specifier: ^1.2.0
+        version: 1.6.1(@types/node@20.19.40)(happy-dom@20.11.1)
+
+  packages/recipe-schema:
+    dependencies:
+      tldts:
+        specifier: ^7.0.30
+        version: 7.0.30
+      zod:
+        specifier: ^3.23.8
+        version: 3.25.76
+    devDependencies:
+      typescript:
+        specifier: ^5.3.3
         version: 5.9.3
       vitest:
         specifier: ^1.2.0
@@ -2547,7 +2569,7 @@ packages:
       std-env: 3.10.0
       strip-literal: 2.1.1
       test-exclude: 6.0.0
-      vitest: 1.6.1(@types/node@20.19.40)(happy-dom@20.11.1)
+      vitest: 1.6.1(@types/node@22.19.19)
     transitivePeerDependencies:
       - supports-color
     dev: true

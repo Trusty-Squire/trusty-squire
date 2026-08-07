@@ -5,6 +5,12 @@
 import Fastify from "fastify";
 import { SKILL_SCHEMA_VERSION } from "@trusty-squire/skill-schema";
 import { registerSkillsRoute } from "./routes/skills.js";
+import { registerRecipesRoute } from "./routes/recipes.js";
+import { registerAdminRecipesRoute } from "./routes/admin-recipes.js";
+import { InMemoryOperatorRecipeStore } from "./recipe-store-memory.js";
+import type { OperatorRecipeStore } from "./recipe-store.js";
+import { InMemoryOperatorRecipeCandidateStore } from "./recipe-candidate-store-memory.js";
+import type { OperatorRecipeCandidateStore } from "./recipe-candidate-store.js";
 import { registerAdminRoutes } from "./routes/admin.js";
 import { registerAdminDashboardRoute } from "./routes/admin-dashboard.js";
 import { registerExtractFailuresRoute } from "./routes/extract-failures.js";
@@ -60,6 +66,14 @@ export interface BuildServerOpts {
   // Memory-overhaul Phase 4 — the drainable failure ledger. In-memory default;
   // production wires a Prisma store at boot.
   openIssueStore?: OpenIssueStore;
+  // Shared Operator Recipes (replay-registry-share) — the live/promoted
+  // store (GET /recipes reads only this). In-memory default; production
+  // wires a Prisma-backed store at boot.
+  recipeStore?: OperatorRecipeStore;
+  // The candidate store — POST /recipes writes only here; promotion (admin-
+  // bearer gated) is what moves a row into recipeStore. In-memory default;
+  // production wires a Prisma-backed store at boot.
+  recipeCandidateStore?: OperatorRecipeCandidateStore;
   // Google SSO config for the dashboard. Defaults to adminAuthFromEnv()
   // when omitted; tests inject a config (or null for bearer-only).
   adminAuth?: AdminAuthConfig | null;
@@ -115,6 +129,9 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     opts.serviceStateStore ?? new InMemoryServiceStateStore();
   const openIssueStore =
     opts.openIssueStore ?? new InMemoryOpenIssueStore();
+  const recipeStore = opts.recipeStore ?? new InMemoryOperatorRecipeStore();
+  const recipeCandidateStore =
+    opts.recipeCandidateStore ?? new InMemoryOperatorRecipeCandidateStore();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
   // used both for skill provenance (`signed_by` field on stored
@@ -162,6 +179,11 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     ...(skillVerifyPublicKey !== undefined && skillVerifyPublicKey.length > 0
       ? { skillVerifyPublicKey }
       : {}),
+  });
+
+  await fastify.register(registerRecipesRoute, {
+    store: recipeStore,
+    candidateStore: recipeCandidateStore,
   });
 
   await fastify.register(registerExtractFailuresRoute, {
@@ -254,6 +276,14 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     ...(demotionWebhookUrl !== undefined ? { demotionWebhookUrl } : {}),
     ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
   });
+  // Shared Operator Recipes — the candidate→live promotion surface (admin-
+  // bearer gated). The integration point for the housekeeper repo; see
+  // routes/admin-recipes.ts.
+  await fastify.register(registerAdminRecipesRoute, {
+    store: recipeStore,
+    candidateStore: recipeCandidateStore,
+    ...(adminBearer !== undefined && adminBearer.length > 0 ? { adminBearer } : {}),
+  });
   // Memory-overhaul Phase 4 — the drainable ledger's HTTP surface (admin-bearer
   // gated; the close-gate is enforced inside the store, not the route).
   await fastify.register(registerIssuesRoutes, {
@@ -329,6 +359,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       openIssueStore: await (
         await import("./prisma-open-issue-store.js")
       ).PrismaOpenIssueStore.fromEnv(),
+      // Shared Operator Recipes (replay-registry-share) — live + candidate.
+      recipeStore: await (
+        await import("./prisma-recipe-store.js")
+      ).PrismaOperatorRecipeStore.fromEnv(),
+      recipeCandidateStore: await (
+        await import("./prisma-recipe-candidate-store.js")
+      ).PrismaOperatorRecipeCandidateStore.fromEnv(),
     };
   }
   const server = await buildServer(serverOpts);

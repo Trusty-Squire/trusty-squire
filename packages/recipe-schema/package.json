@@ -1,0 +1,55 @@
+{
+  "name": "@trusty-squire/recipe-schema",
+  "version": "0.1.0-rc.1",
+  "type": "module",
+  "description": "Type-checked operator-recipe wire schema for Trusty Squire. Defines the (verb, eTLD+1)-keyed replay-plan contract shared by the mcp client (record + publish) and the registry server (validate + store).",
+  "license": "MIT",
+  "author": "Trusty Squire",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Trusty-Squire/trusty-squire.git",
+    "directory": "packages/recipe-schema"
+  },
+  "homepage": "https://github.com/Trusty-Squire/trusty-squire/tree/main/packages/recipe-schema#readme",
+  "bugs": {
+    "url": "https://github.com/Trusty-Squire/trusty-squire/issues"
+  },
+  "keywords": [
+    "trusty-squire",
+    "operator-recipe",
+    "schema",
+    "zod"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run --passWithNoTests",
+    "prepublishOnly": "rm -rf dist && npm run build"
+  },
+  "dependencies": {
+    "tldts": "^7.0.30",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0"
+  }
+}
