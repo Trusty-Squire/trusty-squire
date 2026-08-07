@@ -686,4 +686,29 @@ describe("extractVisibleText — opacity:0 elements excluded", () => {
       await page.close();
     }
   }, 30000);
+
+  // A foreign-namespace element (createElementNS) has no .style; combined
+  // with a page-load fade-in rule like *{opacity:0} it must neither throw
+  // nor abandon already-hidden elements as display:none in the live DOM.
+  it("tolerates non-styleable namespaced elements without leaving residue", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <style>*{opacity:0}</style>
+        <div id="faded">FADED_LINE</div>
+        <div>ALSO_FADED_LINE</div>
+        <script>
+          document.body.appendChild(document.createElementNS("urn:example", "weird-el"));
+        </script>`),
+    );
+    try {
+      const text = await ctrl.extractVisibleText();
+      expect(text).not.toContain("FADED_LINE");
+      expect(await page.locator("#faded").getAttribute("style")).toBeNull();
+      expect(await page.locator("#faded").evaluate((el) => getComputedStyle(el).display)).toBe(
+        "block",
+      );
+    } finally {
+      await page.close();
+    }
+  }, 30000);
 });
