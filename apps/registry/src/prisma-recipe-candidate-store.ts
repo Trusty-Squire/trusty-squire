@@ -2,10 +2,7 @@
 // server. Tests use InMemoryOperatorRecipeCandidateStore.
 
 import { parseOperatorRecipe } from "@trusty-squire/recipe-schema";
-import {
-  createRegistryPrismaClient,
-  type RegistryPrismaClient,
-} from "./registry-prisma-client.js";
+import { createRegistryPrismaClient, type RegistryPrismaClient } from "./registry-prisma-client.js";
 import { recipeStoreKey } from "./recipe-store.js";
 import type {
   OperatorRecipeCandidateStore,
@@ -65,7 +62,10 @@ export class PrismaOperatorRecipeCandidateStore implements OperatorRecipeCandida
     };
   }
 
-  async findByKey(verb: string, domain: string): Promise<OperatorRecipeCandidateStoreRecord | null> {
+  async findByKey(
+    verb: string,
+    domain: string,
+  ): Promise<OperatorRecipeCandidateStoreRecord | null> {
     const row = await this.client.operatorRecipeCandidateRecord.findUnique({
       where: { key: recipeStoreKey(verb, domain) },
     });

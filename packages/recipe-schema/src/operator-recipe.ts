@@ -377,7 +377,9 @@ export function isRecipeShareEligible(recipe: OperatorRecipe): RecipeShareEligib
     const value = action.value;
     if (value === undefined || typeof value !== "string") return; // already a hole, or absent
     if (action.kind === "type_secret") {
-      reasons.push(`trace[${index}] type_secret carries a literal value — secrets must be slot refs`);
+      reasons.push(
+        `trace[${index}] type_secret carries a literal value — secrets must be slot refs`,
+      );
       return;
     }
     if (value.includes("${")) return; // provenance/alias template, already accounted for

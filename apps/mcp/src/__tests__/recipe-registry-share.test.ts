@@ -84,7 +84,10 @@ function makeMockRegistryBackend(): MockRegistryBackend {
     const url = typeof input === "string" ? input : input.toString();
     const method = (init?.method ?? "GET").toUpperCase();
     const json = (status: number, body: unknown): Response =>
-      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+      new Response(JSON.stringify(body), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
 
     if (method === "POST" && url.endsWith("/recipes")) {
       const parsed = JSON.parse(String(init?.body ?? "{}")) as { recipe?: OperatorRecipe };
@@ -94,7 +97,13 @@ function makeMockRegistryBackend(): MockRegistryBackend {
       }
       const key = `${recipe.verb}--${recipe.domain.toLowerCase()}`;
       candidates.set(key, { recipe, updated_at: new Date(0).toISOString() });
-      return json(201, { ok: true, key, verb: recipe.verb, domain: recipe.domain, status: "pending-review" });
+      return json(201, {
+        ok: true,
+        key,
+        verb: recipe.verb,
+        domain: recipe.domain,
+        status: "pending-review",
+      });
     }
 
     const match = /\/recipes\/([^/]+)\/([^/?]+)/.exec(url);
@@ -171,7 +180,9 @@ describe("cross-user recipe reuse via the shared registry (replay-registry-share
     // written — the same "not resolvable by replay" property the registry
     // route test proves server-side.
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
-    await expect(resolveRecipeForTask("get_api_key", "https://example.com/signup")).rejects.toThrow();
+    await expect(
+      resolveRecipeForTask("get_api_key", "https://example.com/signup"),
+    ).rejects.toThrow();
   });
 
   it("a recipe recorded on install A is reused by install B once promoted, and install B has no local copy", async () => {
@@ -220,7 +231,9 @@ describe("cross-user recipe reuse via the shared registry (replay-registry-share
     expect(backend.live.size).toBe(0);
 
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
-    await expect(resolveRecipeForTask("get_api_key", "https://example.com/signup")).rejects.toThrow();
+    await expect(
+      resolveRecipeForTask("get_api_key", "https://example.com/signup"),
+    ).rejects.toThrow();
   });
 
   it("an unreachable registry degrades to the local-miss error rather than blocking the flow", async () => {
@@ -228,7 +241,9 @@ describe("cross-user recipe reuse via the shared registry (replay-registry-share
       throw new Error("simulated network outage");
     }) as typeof globalThis.fetch;
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB; // empty — no local recipe either
-    await expect(resolveRecipeForTask("get_api_key", "https://example.com/signup")).rejects.toThrow();
+    await expect(
+      resolveRecipeForTask("get_api_key", "https://example.com/signup"),
+    ).rejects.toThrow();
   }, 10_000);
 
   it("existing single-user behavior is unchanged: a local hit never calls the registry", async () => {

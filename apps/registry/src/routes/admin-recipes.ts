@@ -70,10 +70,7 @@ export const registerAdminRecipesRoute: FastifyPluginAsync<AdminRecipesRouteDeps
   fastify: FastifyInstance,
   opts,
 ) => {
-  function denyIfNotAdmin(
-    req: { headers: Record<string, unknown> },
-    reply: FastifyReply,
-  ): boolean {
+  function denyIfNotAdmin(req: { headers: Record<string, unknown> }, reply: FastifyReply): boolean {
     if (opts.adminBearer === undefined || opts.adminBearer.length === 0) {
       reply.code(503).send({ ok: false, error: "admin_not_configured" });
       return true;
@@ -96,7 +93,10 @@ export const registerAdminRecipesRoute: FastifyPluginAsync<AdminRecipesRouteDeps
       const raw = req.query.limit;
       const limit =
         raw !== undefined
-          ? Math.max(1, Math.min(CANDIDATE_LIST_MAX_LIMIT, Number(raw) || CANDIDATE_LIST_DEFAULT_LIMIT))
+          ? Math.max(
+              1,
+              Math.min(CANDIDATE_LIST_MAX_LIMIT, Number(raw) || CANDIDATE_LIST_DEFAULT_LIMIT),
+            )
           : CANDIDATE_LIST_DEFAULT_LIMIT;
       const candidates = await opts.candidateStore.listCandidates(limit);
       reply.send({

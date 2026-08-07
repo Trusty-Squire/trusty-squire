@@ -6,10 +6,7 @@
 // than a verifier replay loop.
 
 import { parseOperatorRecipe } from "@trusty-squire/recipe-schema";
-import {
-  createRegistryPrismaClient,
-  type RegistryPrismaClient,
-} from "./registry-prisma-client.js";
+import { createRegistryPrismaClient, type RegistryPrismaClient } from "./registry-prisma-client.js";
 import {
   recipeStoreKey,
   type OperatorRecipeStore,

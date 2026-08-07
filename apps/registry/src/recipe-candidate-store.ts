@@ -34,9 +34,7 @@ export interface UpsertOperatorRecipeCandidateInput {
 
 export interface OperatorRecipeCandidateStore {
   /** Write (or replace) the candidate for a (verb, domain) key. Last-write-wins. */
-  upsert(
-    input: UpsertOperatorRecipeCandidateInput,
-  ): Promise<OperatorRecipeCandidateStoreRecord>;
+  upsert(input: UpsertOperatorRecipeCandidateInput): Promise<OperatorRecipeCandidateStoreRecord>;
 
   /** Fetch the candidate for a (verb, domain) key, or null if none exists. */
   findByKey(verb: string, domain: string): Promise<OperatorRecipeCandidateStoreRecord | null>;

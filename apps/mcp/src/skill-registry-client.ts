@@ -375,7 +375,11 @@ export class SkillRegistryClient {
    * to the local store or cold driving. This client never throws on
    * transport-level failures.
    */
-  async fetchRecipe(verb: OperatorVerb, domain: string, provisionId?: string): Promise<RecipeFetchOutcome> {
+  async fetchRecipe(
+    verb: OperatorVerb,
+    domain: string,
+    provisionId?: string,
+  ): Promise<RecipeFetchOutcome> {
     const cacheKey = recipeCacheKey(verb, domain);
     const cached = this.readRecipeCache(cacheKey);
     if (cached !== null) return { kind: "found", result: cached };

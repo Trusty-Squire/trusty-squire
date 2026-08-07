@@ -552,7 +552,13 @@ the same site.
   write can therefore never steer another user's replay browser until a
   promotion decision has vetted its navigation targets
   (`entry_url`/`allowed_hosts`/`goto` templates) — safe by construction,
-  not by trust in the write path. Two stores: `recipe-store.ts` (live) +
+  not by trust in the write path. Promotion is pinned to the reviewed
+  CONTENT, not the slot: `GET /admin/recipe-candidates` surfaces a sha256
+  `content_digest` per candidate and `promote` requires echoing it (409
+  `not_current` if an unauthenticated re-submit overwrote the slot after
+  review). `POST /recipes` is additionally backstopped by a per-IP
+  rolling-hour rate limit and a domain-plausibility check
+  (`routes/recipes.ts`). Two stores: `recipe-store.ts` (live) +
   `recipe-candidate-store.ts` (candidate), each with memory + Prisma
   implementations. **The housekeeper-side wiring to actually call
   `promote` after vetting is NOT done** — the housekeeper lives in the

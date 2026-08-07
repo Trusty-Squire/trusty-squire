@@ -32,7 +32,10 @@ export class InMemoryOperatorRecipeCandidateStore implements OperatorRecipeCandi
     return record;
   }
 
-  async findByKey(verb: string, domain: string): Promise<OperatorRecipeCandidateStoreRecord | null> {
+  async findByKey(
+    verb: string,
+    domain: string,
+  ): Promise<OperatorRecipeCandidateStoreRecord | null> {
     return this.rows.get(recipeStoreKey(verb, domain)) ?? null;
   }
 

@@ -182,7 +182,10 @@ export async function publishRecipeToRegistry(file: string): Promise<string> {
 // registry miss (promoted or not) or an unreachable registry re-throws the
 // ORIGINAL local error so the caller's existing cold-start fallback is
 // untouched.
-export async function resolveRecipeForTask(verb: OperatorVerb, serviceUrl: string): Promise<OperatorRecipe> {
+export async function resolveRecipeForTask(
+  verb: OperatorVerb,
+  serviceUrl: string,
+): Promise<OperatorRecipe> {
   try {
     return await readRecipeForTask(verb, serviceUrl);
   } catch (localErr) {

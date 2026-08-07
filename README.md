@@ -184,9 +184,13 @@ for the system and data flows.
 - `operate_remember` saves a postcondition-verified local recipe under a closed
   task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs
-  or plaintext secrets. `operate_use` binds new values and replays those steps;
-  on one missed step it returns a local repair point and can continue in the
-  same session. Older name-only recipes remain planning hints.
+  or plaintext secrets. Recipes that pass a share-eligibility check (no
+  personal or secret-shaped literals) are also submitted to the shared
+  registry, where an admin-vetted promotion can make them reusable by other
+  installs. `operate_use` binds new values and replays those steps, preferring
+  the local recipe and falling back to a promoted shared one; on one missed
+  step it returns a local repair point and can continue in the same session.
+  Older name-only recipes remain planning hints.
 - `list_payment_cards` returns saved-card labels and opaque references;
   `operate_pay` can use a selected card, the only card on file, or a just-in-time
   add-card approval, then fills the checkout and waits for the user to resolve
@@ -221,8 +225,9 @@ trusty-squire/
 │   ├── registry/   Signed website skills and verification service
 │   └── web/        Marketing site and vault UI
 └── packages/
-    ├── vault/        Encrypted credential storage and audit log
-    └── skill-schema/ Shared schema for replayable website skills
+    ├── vault/         Encrypted credential storage and audit log
+    ├── skill-schema/  Shared schema for replayable website skills
+    └── recipe-schema/ Shared wire schema for operator replay recipes
 ```
 
 Product and public-web changes should follow [PRODUCT.md](https://github.com/trusty-squire/trusty-squire/blob/main/PRODUCT.md) and [DESIGN.md](https://github.com/trusty-squire/trusty-squire/blob/main/DESIGN.md).
