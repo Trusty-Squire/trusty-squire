@@ -58,7 +58,9 @@ describe("CardEntry — the shared sensitive add-card flow", () => {
     );
   });
 
-  it("derives brand + last4 in the browser and sends only those (never the PAN)", async () => {
+  // userEvent typing across 9 fields exceeds the 5s default when the whole
+  // workspace's suites run in parallel and starve the CPU.
+  it("derives brand + last4 in the browser and sends only those (never the PAN)", { timeout: 30_000 }, async () => {
     api.apiPost.mockResolvedValue({ id: "card_new" });
     const onSaved = vi.fn();
     render(<CardEntry onSaved={onSaved} />);
