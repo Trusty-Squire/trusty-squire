@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.8 (2026-08-07)
+
+- release(mcp): 1.1.8-rc.1
+- fix: ground payment currency and harden approval relays (#439)
+- fix: make payment approvals durable and single-passkey (#438)
+- fix(mcp): name invalid argument fields (#437)
+- docs: route feature PRs through staging, not main (#436)
+
 ## 1.1.8-rc.1 (2026-08-07)
 
 - fix: ground payment currency and harden approval relays (#439)
