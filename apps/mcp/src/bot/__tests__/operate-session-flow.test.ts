@@ -570,7 +570,11 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
+              target: {
+                dom_hint: { testid: "shipping-city" },
+                accessible_name: "City",
+                field_role: "ac:address-level2",
+              },
               value: { hole: "address.city" },
             },
           },
@@ -695,7 +699,11 @@ describe("prepared-statement replay", () => {
         {
           action: {
             kind: "type",
-            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
+            target: {
+              dom_hint: { testid: "shipping-city" },
+              accessible_name: "City",
+              field_role: "ac:address-level2",
+            },
             value: { hole: "address.city" },
           },
         },
@@ -742,7 +750,11 @@ describe("prepared-statement replay", () => {
         {
           action: {
             kind: "type",
-            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
+            target: {
+              dom_hint: { testid: "shipping-city" },
+              accessible_name: "City",
+              field_role: "ac:address-level2",
+            },
             value: { hole: "address.city" },
           },
         },
@@ -778,7 +790,11 @@ describe("prepared-statement replay", () => {
         {
           action: {
             kind: "type",
-            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
+            target: {
+              dom_hint: { testid: "shipping-city" },
+              accessible_name: "City",
+              field_role: "ac:address-level2",
+            },
             value: { hole: "address.city" },
           },
         },
@@ -822,7 +838,11 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
+              target: {
+                dom_hint: { testid: "shipping-city" },
+                accessible_name: "City",
+                field_role: "ac:address-level2",
+              },
               value: { hole: "address.city" },
             },
           },
@@ -851,7 +871,11 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, css: "#city", field_role: "ac:address-level2" },
+              target: {
+                dom_hint: { testid: "shipping-city" },
+                css: "#city",
+                field_role: "ac:address-level2",
+              },
               value: { hole: "address.city" },
             },
           },
@@ -889,7 +913,11 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "select",
-              target: { dom_hint: { testid: "shipping-country" }, accessible_name: "Country", field_role: "ac:country" },
+              target: {
+                dom_hint: { testid: "shipping-country" },
+                accessible_name: "Country",
+                field_role: "ac:country",
+              },
               value: { hole: "address.country" },
             },
           },
@@ -925,7 +953,11 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
+              target: {
+                dom_hint: { testid: "shipping-city" },
+                accessible_name: "City",
+                field_role: "ac:address-level2",
+              },
               value: { hole: "address.city" },
             },
           },
@@ -961,7 +993,11 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
+              target: {
+                dom_hint: { testid: "shipping-city" },
+                accessible_name: "City",
+                field_role: "ac:address-level2",
+              },
               value: { hole: "address.city" },
             },
           },

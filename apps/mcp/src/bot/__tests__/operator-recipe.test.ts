@@ -647,13 +647,27 @@ describe("money-path field-value guard", () => {
     expect(
       verifyFilledFieldValues(
         [{ ...countryEl, value: "US", selectedOptionText: "United States" }],
-        [{ target: countryTarget, expected: "United States", hole: "address.country", kind: "select" }],
+        [
+          {
+            target: countryTarget,
+            expected: "United States",
+            hole: "address.country",
+            kind: "select",
+          },
+        ],
       ),
     ).toEqual({ ok: true });
     expect(
       verifyFilledFieldValues(
         [{ ...countryEl, value: null, visibleText: "United States" }],
-        [{ target: countryTarget, expected: "United States", hole: "address.country", kind: "select" }],
+        [
+          {
+            target: countryTarget,
+            expected: "United States",
+            hole: "address.country",
+            kind: "select",
+          },
+        ],
       ),
     ).toEqual({ ok: true });
   });

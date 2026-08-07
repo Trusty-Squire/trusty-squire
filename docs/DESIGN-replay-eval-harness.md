@@ -46,8 +46,9 @@ escaped wrong-outcomes; fallbacks are a **cost** that shows up in net speedup.
 - **Key** = `(verb, eTLD+1)`. `verb` ∈ a closed ~15-item set (purchase, get_api_key, signup, …),
   tagged by the host LLM from the task. `eTLD+1` via Public Suffix List; path/query dropped; small
   allowlist for `*.myshopify.com`-class subdomain-is-tenant hosts.
-- **Recipe** = ordered `[{ action, target, value }]` where `target` is a stable-attr bundle
-  `{testid?, id?, name?, role+name?, href?, css}` and `value` is a literal or a `{hole-ref}`.
+- **Recipe** = ordered `[{ action, target, value }]` where `target` is a stable-attr bundle and
+  `value` is a literal or a `{hole-ref}`. `DESIGN-replay-engine.md` § Stable targets owns the
+  authoritative bundle shape (including the locale-stable `field_role` money-fill guard).
 - **Holes** bound by provenance at record (a typed value === a known run input → address / product /
   credential / card); bound from the new task's inputs at replay.
 - **Per-step replay**: resolve `target` via ordered fallback (testid → id/name → role+name → href →
