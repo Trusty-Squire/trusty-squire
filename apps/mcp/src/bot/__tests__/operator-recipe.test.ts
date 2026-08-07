@@ -274,6 +274,13 @@ describe("locale-stable field role (money-path fill guard)", () => {
     expect(localeStableFieldRole({ autocomplete: null, type: "text" })).toBeNull();
   });
 
+  it("skips the webauthn modifier token so annotated fields keep distinct roles", () => {
+    expect(localeStableFieldRole({ autocomplete: "username webauthn" })).toBe("ac:username");
+    expect(localeStableFieldRole({ autocomplete: "one-time-code webauthn" })).toBe(
+      "ac:one-time-code",
+    );
+  });
+
   it("never wrong-fills when first/last labels swap under stable ids (report mutation #4)", () => {
     // Verbatim from shape-partial-match-safety report: ids/names unchanged,
     // only labels swapped. Without a matching field_role the fill is a miss.

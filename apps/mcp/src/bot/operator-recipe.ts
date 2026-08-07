@@ -765,7 +765,7 @@ const GENERIC_INPUT_TYPES = new Set([
 ]);
 
 // Autocomplete tokens that do not identify a field role (browser hints only).
-const NON_ROLE_AUTOCOMPLETE = new Set(["on", "off"]);
+const NON_ROLE_AUTOCOMPLETE = new Set(["on", "off", "webauthn"]);
 
 /**
  * Locale-stable field-role signal for money-path fill safety.
