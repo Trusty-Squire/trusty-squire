@@ -7917,6 +7917,8 @@ export class BrowserController {
         container: string | null;
         topmost: boolean | null;
         occludedBy: string | null;
+        autocomplete: string | null;
+        dataRole: string | null;
       }> = [];
       for (const el of collected) {
         if (seen.has(el)) continue;
@@ -8012,6 +8014,12 @@ export class BrowserController {
             const lm = el.closest("header,main,footer,nav,aside,article,section");
             return lm !== null ? lm.tagName.toLowerCase() : null;
           })(),
+          // Locale-stable role signals for money-path fill guards. Prefer
+          // autocomplete over visible labels (labels flip under i18n).
+          autocomplete: (el.getAttribute("autocomplete") ?? "").trim() || null,
+          dataRole:
+            (el.getAttribute("data-field-role") ?? el.getAttribute("data-role") ?? "").trim() ||
+            null,
           value:
             el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
               ? el.value
@@ -9521,6 +9529,13 @@ export interface InteractiveElement {
   // changes). pickStableDomHint prefers it; replay's matchesDomHint resolves it
   // ahead of text_match. Optional; test fixtures may omit.
   testId?: string | null;
+  // HTML autocomplete attribute (e.g. "given-name", "shipping postal-code").
+  // Locale-stable role signal for money-path fill guards. Optional; fixtures
+  // may omit (absence ⇒ no confident field fill when role is required).
+  autocomplete?: string | null;
+  // Site-authored stable role: data-field-role or data-role. Fallback when
+  // autocomplete is absent.
+  dataRole?: string | null;
   // F15 — nearest HTML5 landmark ancestor: header | main | footer |
   // nav | aside | article | section, or null when the element is
   // outside any landmark. The agent's inventory renderer uses this to

@@ -75,6 +75,11 @@ export const RecipeTargetSchema = z
     css: z.string().max(2000).optional(),
     // Deliberately last-resort. Replay accepts this only when it is unique.
     visible_text: z.string().max(200).optional(),
+    // Locale-stable field-role signal recorded at capture time and re-checked
+    // at money-path fill. Prefer autocomplete tokens (given-name, family-name,
+    // …) over visible labels so EN→JP cross-locale reuse still works. Format
+    // is produced by localeStableFieldRole(); absence ⇒ no confident fill.
+    field_role: z.string().max(100).optional(),
   })
   .strict();
 export type RecipeTarget = z.infer<typeof RecipeTargetSchema>;
@@ -614,6 +619,8 @@ export function bindRecipeTarget(
     ...(bind(target.visible_text) !== undefined
       ? { visible_text: bind(target.visible_text)! }
       : {}),
+    // field_role is a locale-stable token (not email-templated); pass through.
+    ...(target.field_role !== undefined ? { field_role: target.field_role } : {}),
   };
 }
 
@@ -706,6 +713,12 @@ export interface RecipeTargetElement {
   selector: string;
   value?: string | null;
   selectedOptionText?: string | null;
+  /** HTML autocomplete attribute (may be space-separated tokens). */
+  autocomplete?: string | null;
+  /** HTML input type (or null for non-inputs). */
+  type?: string | null;
+  /** Optional site-authored stable role attribute (data-role / data-field-role). */
+  dataRole?: string | null;
 }
 
 export type RecipeTargetResolution<T extends RecipeTargetElement> = {
@@ -734,6 +747,69 @@ function semanticRole(element: RecipeTargetElement): string {
   if (element.tag === "a") return "link";
   if (element.tag === "input" || element.tag === "textarea") return "textbox";
   return targetNorm(element.tag);
+}
+
+// Input types too generic to prove field identity on their own.
+const GENERIC_INPUT_TYPES = new Set([
+  "text",
+  "search",
+  "hidden",
+  "submit",
+  "button",
+  "reset",
+  "image",
+  "checkbox",
+  "radio",
+  "file",
+  "",
+]);
+
+// Autocomplete tokens that do not identify a field role (browser hints only).
+const NON_ROLE_AUTOCOMPLETE = new Set(["on", "off"]);
+
+/**
+ * Locale-stable field-role signal for money-path fill safety.
+ *
+ * Priority (never visible label text — that breaks EN→JP cross-locale reuse):
+ *  1. autocomplete token (given-name, family-name, postal-code, …)
+ *  2. data-role / data-field-role attribute
+ *  3. distinguishing input type (email, tel, number, …) — not plain "text"
+ *
+ * Returns null when nothing stable is available. Callers must treat null as a
+ * miss: absence of proof is not proof of identity.
+ */
+export function localeStableFieldRole(
+  element: Pick<RecipeTargetElement, "autocomplete" | "type" | "dataRole">,
+): string | null {
+  const rawAc = (element.autocomplete ?? "").trim().toLowerCase();
+  if (rawAc.length > 0) {
+    // HTML autocomplete may be space-separated ("shipping given-name"). Prefer
+    // the rightmost non-section token — section prefixes (shipping/billing)
+    // are useful but the field kind is the last token.
+    const tokens = rawAc.split(/\s+/).filter((t) => t.length > 0);
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      const token = tokens[i]!;
+      if (token.startsWith("section-")) continue;
+      if (token === "shipping" || token === "billing") continue;
+      if (NON_ROLE_AUTOCOMPLETE.has(token)) continue;
+      return `ac:${token}`;
+    }
+  }
+  const dataRole = (element.dataRole ?? "").trim().toLowerCase();
+  if (dataRole.length > 0) return `data:${dataRole.slice(0, 80)}`;
+  const inputType = (element.type ?? "").trim().toLowerCase();
+  if (!GENERIC_INPUT_TYPES.has(inputType)) return `type:${inputType}`;
+  return null;
+}
+
+/** True only when both sides have a role signal and they agree exactly. */
+export function fieldRoleMatches(
+  recorded: string | undefined,
+  element: Pick<RecipeTargetElement, "autocomplete" | "type" | "dataRole">,
+): boolean {
+  if (recorded === undefined || recorded.length === 0) return false;
+  const live = localeStableFieldRole(element);
+  return live !== null && live === recorded;
 }
 
 /** Ordered fallback. It is intentionally not a weighted/scored matcher. */
@@ -809,7 +885,13 @@ export function resolveRecipeFieldTarget<T extends RecipeTargetElement>(
 ): RecipeTargetResolution<T> | null {
   const resolution = resolveRecipeTarget(elements, target);
   if (resolution === null) return null;
-  return resolution.via === "testid" || resolution.via === "id" ? resolution : null;
+  // Money fields resolve by id/testid only (no fuzzy name/label) so an id
+  // drift cannot smuggle a value via a looser match. Then require a
+  // locale-stable role match so a page whose labels (or worse, role tokens)
+  // have moved under the same id cannot receive a confident wrong fill.
+  if (resolution.via !== "testid" && resolution.via !== "id") return null;
+  if (!fieldRoleMatches(target.field_role, resolution.element)) return null;
+  return resolution;
 }
 
 export function hasRecipeTargetCandidate<T extends RecipeTargetElement>(

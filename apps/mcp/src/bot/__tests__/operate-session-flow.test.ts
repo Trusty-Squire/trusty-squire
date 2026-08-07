@@ -336,6 +336,26 @@ import {
 import type { ApiClient } from "../../api-client.js";
 
 function elem(partial: Record<string, unknown>): unknown {
+  // Default locale-stable role signals for money-path fixtures so the
+  // field_role fill guard can match without every call site restating them.
+  const testId = typeof partial.testId === "string" ? partial.testId : "";
+  const name = typeof partial.name === "string" ? partial.name : "";
+  let autocomplete: string | null = null;
+  if (partial.autocomplete !== undefined) {
+    autocomplete = partial.autocomplete as string | null;
+  } else if (testId.includes("city") || name === "city") {
+    autocomplete = "address-level2";
+  } else if (testId.includes("country") || name === "country") {
+    autocomplete = "country";
+  } else if (testId.includes("email") || name === "email") {
+    autocomplete = "email";
+  } else if (testId.includes("phone") || name === "phone") {
+    autocomplete = "tel";
+  } else if (name === "firstName" || testId.includes("first")) {
+    autocomplete = "given-name";
+  } else if (name === "lastName" || testId.includes("last")) {
+    autocomplete = "family-name";
+  }
   return {
     index: 0,
     tag: "input",
@@ -351,7 +371,10 @@ function elem(partial: Record<string, unknown>): unknown {
     visible: true,
     inViewport: true,
     inConsentWidget: false,
+    autocomplete,
     ...partial,
+    // Keep derived autocomplete unless the caller overrode it.
+    ...(partial.autocomplete !== undefined ? {} : { autocomplete }),
   };
 }
 
@@ -444,6 +467,7 @@ describe("prepared-statement replay", () => {
                 dom_hint: { testid: "shipping-city", name: "city" },
                 accessible_name: "City",
                 css: "#city",
+                field_role: "ac:address-level2",
               },
               value: { hole: "address.city" },
             },
@@ -546,7 +570,7 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
               value: { hole: "address.city" },
             },
           },
@@ -607,6 +631,7 @@ describe("prepared-statement replay", () => {
               target: {
                 dom_hint: { testid: "shipping-city", name: "city" },
                 accessible_name: "City",
+                field_role: "ac:address-level2",
               },
               value: { hole: "address.city" },
             },
@@ -670,7 +695,7 @@ describe("prepared-statement replay", () => {
         {
           action: {
             kind: "type",
-            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
             value: { hole: "address.city" },
           },
         },
@@ -717,7 +742,7 @@ describe("prepared-statement replay", () => {
         {
           action: {
             kind: "type",
-            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
             value: { hole: "address.city" },
           },
         },
@@ -753,7 +778,7 @@ describe("prepared-statement replay", () => {
         {
           action: {
             kind: "type",
-            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+            target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
             value: { hole: "address.city" },
           },
         },
@@ -797,7 +822,7 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
               value: { hole: "address.city" },
             },
           },
@@ -826,7 +851,7 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, css: "#city" },
+              target: { dom_hint: { testid: "shipping-city" }, css: "#city", field_role: "ac:address-level2" },
               value: { hole: "address.city" },
             },
           },
@@ -864,7 +889,7 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "select",
-              target: { dom_hint: { testid: "shipping-country" }, accessible_name: "Country" },
+              target: { dom_hint: { testid: "shipping-country" }, accessible_name: "Country", field_role: "ac:country" },
               value: { hole: "address.country" },
             },
           },
@@ -900,7 +925,7 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
               value: { hole: "address.city" },
             },
           },
@@ -936,7 +961,7 @@ describe("prepared-statement replay", () => {
           {
             action: {
               kind: "type",
-              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City" },
+              target: { dom_hint: { testid: "shipping-city" }, accessible_name: "City", field_role: "ac:address-level2" },
               value: { hole: "address.city" },
             },
           },
@@ -974,6 +999,7 @@ describe("prepared-statement replay", () => {
                   dom_hint: { testid: "shipping-city" },
                   accessible_name: "City",
                   css: "#city",
+                  field_role: "ac:address-level2",
                 },
                 value: { hole: "address.city" },
               },
