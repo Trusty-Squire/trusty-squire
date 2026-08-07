@@ -640,4 +640,50 @@ describe("extractVisibleText — opacity:0 elements excluded", () => {
       await page.close();
     }
   }, 30000);
+
+  // innerText's pre-existing exclusions must survive the opacity:0 fix: a
+  // detached-clone read would degrade innerText to textContent semantics and
+  // re-include exactly this content (hidden "Loading…" skeletons false-trip
+  // the loading-shell gate; Shopify inline JSON scripts flood the text).
+  it("keeps excluding display:none, visibility:hidden, and <script> text", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <div>VISIBLE_LINE</div>
+        <div style="display:none">DISPLAY_NONE_LINE</div>
+        <div style="visibility:hidden">VISIBILITY_HIDDEN_LINE</div>
+        <div style="opacity:0">OPACITY_ZERO_LINE</div>
+        <script type="application/json">{"payload":"SCRIPT_PAYLOAD_LINE"}</script>`),
+    );
+    try {
+      const text = await ctrl.extractVisibleText();
+      expect(text).toContain("VISIBLE_LINE");
+      expect(text).not.toContain("DISPLAY_NONE_LINE");
+      expect(text).not.toContain("VISIBILITY_HIDDEN_LINE");
+      expect(text).not.toContain("OPACITY_ZERO_LINE");
+      expect(text).not.toContain("SCRIPT_PAYLOAD_LINE");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("leaves the live DOM's style attributes byte-identical after reading", async () => {
+    const { ctrl, page } = await pageFor(
+      dataUrl(`
+        <style>.ghost{opacity:0}</style>
+        <div class="ghost" id="ghost">GHOST_LINE</div>
+        <div id="inline" style="opacity:0;width:48px">INLINE_LINE</div>
+        <div>VISIBLE_LINE</div>`),
+    );
+    try {
+      const text = await ctrl.extractVisibleText();
+      expect(text).not.toContain("GHOST_LINE");
+      expect(text).not.toContain("INLINE_LINE");
+      // Stylesheet-hidden element must not gain a residual style attribute…
+      expect(await page.locator("#ghost").getAttribute("style")).toBeNull();
+      // …and an inline-styled one must keep its exact original attribute.
+      expect(await page.locator("#inline").getAttribute("style")).toBe("opacity:0;width:48px");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
 });

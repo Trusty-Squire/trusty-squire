@@ -5747,19 +5747,33 @@ export class BrowserController {
       // opens on tap; with every <option> in the box, that dumps hundreds of
       // country names into the page text, flooding/truncating what a sighted
       // user never sees (and what really matters, like an error banner past
-      // the truncation cutoff). Strip opacity:0 subtrees from a detached
-      // clone before reading innerText, so page text matches what's actually
-      // visible without touching the live DOM.
-      const clone = body.cloneNode(true) as HTMLElement;
-      const originals = Array.from(body.querySelectorAll("*"));
-      const clones = Array.from(clone.querySelectorAll("*"));
-      for (let i = 0; i < originals.length; i++) {
-        const original = originals[i];
-        if (original !== undefined && window.getComputedStyle(original).opacity === "0") {
-          clones[i]?.remove();
+      // the truncation cutoff). A detached clone won't do: innerText on an
+      // unrendered element degrades to textContent semantics, re-including
+      // the display:none/script text innerText exists to exclude. Instead,
+      // temporarily force display:none on opacity:0 elements in the LIVE
+      // body, read innerText, and restore each element's style attribute
+      // byte-identically (removing it when it was absent) — all inside
+      // this one synchronous evaluate, so the change is never painted.
+      const hidden: Array<{ el: HTMLElement; style: string | null }> = [];
+      for (const el of Array.from(body.querySelectorAll<HTMLElement>("*"))) {
+        if (window.getComputedStyle(el).opacity === "0") {
+          hidden.push({ el, style: el.getAttribute("style") });
+          el.style.setProperty("display", "none", "important");
         }
       }
-      return clone.innerText ?? "";
+      const text = body.innerText ?? "";
+      for (const { el, style } of hidden) {
+        if (style === null) {
+          // Plain removeAttribute here leaves an empty style="" behind:
+          // Blink lazily re-syncs the dirty CSSOM declaration back into the
+          // attribute after the innerText read. Clear the declaration first.
+          el.style.removeProperty("display");
+          if (el.getAttribute("style") === "") el.removeAttribute("style");
+        } else {
+          el.setAttribute("style", style);
+        }
+      }
+      return text;
     });
   }
 
