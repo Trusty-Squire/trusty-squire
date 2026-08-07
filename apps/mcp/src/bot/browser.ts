@@ -5736,7 +5736,50 @@ export class BrowserController {
   // extractText() and must stay byte-identical, so this is purely additive.
   async extractVisibleText(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => document.body?.innerText ?? "");
+    return await this.page.evaluate(() => {
+      const body = document.body;
+      if (!body) return "";
+      // innerText excludes display:none/visibility:hidden but NOT opacity:0 —
+      // an element with opacity:0 keeps its layout box, so innerText still
+      // walks it. Hidden-native-<select> country-code widgets (e.g.
+      // react-phone-number-input) commonly style the real <select>
+      // opacity:0 (rather than display:none) so a native mobile picker still
+      // opens on tap; with every <option> in the box, that dumps hundreds of
+      // country names into the page text, flooding/truncating what a sighted
+      // user never sees (and what really matters, like an error banner past
+      // the truncation cutoff). A detached clone won't do: innerText on an
+      // unrendered element degrades to textContent semantics, re-including
+      // the display:none/script text innerText exists to exclude. Instead,
+      // temporarily force display:none on opacity:0 elements in the LIVE
+      // body, read innerText, and restore each element's style attribute
+      // byte-identically (removing it when it was absent) — all inside
+      // this one synchronous evaluate, so the change is never painted.
+      const hidden: Array<{ el: HTMLElement | SVGElement; style: string | null }> = [];
+      let text = "";
+      try {
+        for (const el of Array.from(body.querySelectorAll("*"))) {
+          if (!(el instanceof HTMLElement || el instanceof SVGElement)) continue;
+          if (window.getComputedStyle(el).opacity === "0") {
+            hidden.push({ el, style: el.getAttribute("style") });
+            el.style.setProperty("display", "none", "important");
+          }
+        }
+        text = body.innerText ?? "";
+      } finally {
+        for (const { el, style } of hidden) {
+          if (style === null) {
+            // Plain removeAttribute here leaves an empty style="" behind:
+            // Blink lazily re-syncs the dirty CSSOM declaration back into the
+            // attribute after the innerText read. Clear the declaration first.
+            el.style.removeProperty("display");
+            if (el.getAttribute("style") === "") el.removeAttribute("style");
+          } else {
+            el.setAttribute("style", style);
+          }
+        }
+      }
+      return text;
+    });
   }
 
   async readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
