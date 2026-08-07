@@ -169,10 +169,13 @@ export type RecipeFetchOutcome =
   | { kind: "unavailable"; reason: string };
 
 export type PublishRecipeOutcome =
+  // Submitted to the registry's CANDIDATE pool — not yet replayable by
+  // anyone. It becomes live only once an admin-bearer-gated promotion
+  // (normally the housekeeper) vets and promotes it.
   | { kind: "ok"; key: string }
   // The recipe failed the (client- or server-side) share-eligibility gate —
-  // never published. Not an error: the caller keeps the local copy exactly
-  // as before, it just never becomes a shared recipe.
+  // never submitted. Not an error: the caller keeps the local copy exactly
+  // as before, it just never becomes a shared candidate.
   | { kind: "not_share_eligible"; reasons: string[] }
   | { kind: "unavailable"; reason: string };
 
@@ -390,10 +393,15 @@ export class SkillRegistryClient {
   }
 
   /**
-   * Publish a recipe to the shared registry, keyed by (verb, domain).
-   * Re-runs the share-eligibility gate here (in addition to the caller's
-   * own check and the registry's own server-side re-check) so this is the
-   * single choke point every recipe publish passes through regardless of
+   * Submit a recipe to the shared registry's CANDIDATE pool, keyed by
+   * (verb, domain). This is NOT a live publish — `POST /recipes` is
+   * unauthenticated, so it only ever writes a candidate; a candidate is
+   * never replayed by anyone (including this same account) until an
+   * admin-bearer-gated promotion (routes/admin-recipes.ts on the
+   * registry, normally driven by the housekeeper) has vetted it. Re-runs
+   * the share-eligibility gate here (in addition to the caller's own
+   * check and the registry's own server-side re-check) so this is the
+   * single choke point every submission passes through regardless of
    * caller. Fire-and-forget at the caller level — a failure here must
    * never fail the local `operate_remember` that produced the recipe;
    * the local copy always stands on its own.

@@ -1,26 +1,30 @@
 // Integration tests for the shared Operator Recipe registry endpoints
-// (replay-registry-share). Each test boots buildServer() with an
-// in-memory OperatorRecipeStore and hits the routes via fastify.inject()
-// — no real network, no DB.
+// (replay-registry-share). Each test boots buildServer() with in-memory
+// stores and hits the routes via fastify.inject() — no real network, no DB.
 //
 // Coverage targets:
-//   - POST /recipes publishes an eligible recipe and returns 201
+//   - POST /recipes writes a CANDIDATE (pending-review) and returns 201
 //   - POST /recipes rejects a malformed recipe with 400
 //   - POST /recipes rejects a recipe missing (verb, domain) with 400
 //   - POST /recipes rejects a not-share-eligible recipe with 400
 //     (server-side re-check — defense in depth against a bypassed client)
-//   - GET /recipes/:verb/:domain returns the published recipe
-//   - GET /recipes/:verb/:domain returns 404 when nothing exists
+//   - A write that lands as a candidate is NOT resolvable via GET
+//     (the core safety property: replay never reads an unpromoted candidate)
+//   - GET /recipes/:verb/:domain returns 404 for a key nobody has ever written
 //   - GET /recipes/:verb/:domain rejects an unknown verb with 400
-//   - POST /recipes upserts — republishing the same key overwrites, not conflicts
-//   - Cross-user reuse: a SECOND server instance backed by the SAME store
-//     resolves the recipe the first instance published (no local state
-//     shared between the two "installs")
+//   - A PROMOTED recipe IS resolvable via GET
+//   - POST /recipes upserts the candidate — republishing overwrites, not conflicts
+//   - Cross-user reuse: a SECOND server instance backed by the SAME stores
+//     resolves the promoted recipe the first instance's candidate became
+//     (no local state shared between the two "installs")
 
 import { beforeEach, describe, expect, it } from "vitest";
 import type { OperatorRecipe } from "@trusty-squire/recipe-schema";
 import { buildServer } from "../server.js";
 import { InMemoryOperatorRecipeStore } from "../recipe-store-memory.js";
+import { InMemoryOperatorRecipeCandidateStore } from "../recipe-candidate-store-memory.js";
+
+const ADMIN_BEARER = "test-admin-bearer-recipes-9f8e7d6c";
 
 function validRecipe(overrides: Partial<OperatorRecipe> = {}): OperatorRecipe {
   const base: OperatorRecipe = {
@@ -53,16 +57,31 @@ function validRecipe(overrides: Partial<OperatorRecipe> = {}): OperatorRecipe {
   return { ...base, ...overrides };
 }
 
-describe("POST /recipes + GET /recipes/:verb/:domain", () => {
+describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", () => {
   let store: InMemoryOperatorRecipeStore;
+  let candidateStore: InMemoryOperatorRecipeCandidateStore;
   let server: Awaited<ReturnType<typeof buildServer>>;
 
   beforeEach(async () => {
     store = new InMemoryOperatorRecipeStore();
-    server = await buildServer({ recipeStore: store });
+    candidateStore = new InMemoryOperatorRecipeCandidateStore();
+    server = await buildServer({
+      recipeStore: store,
+      recipeCandidateStore: candidateStore,
+      adminBearer: ADMIN_BEARER,
+    });
   });
 
-  it("publishes an eligible recipe and returns 201", async () => {
+  async function promote(verb: string, domain: string): Promise<void> {
+    const res = await server.inject({
+      method: "POST",
+      url: `/admin/recipes/${verb}/${domain}/promote`,
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(res.statusCode).toBe(200);
+  }
+
+  it("publishes an eligible recipe as a pending-review CANDIDATE and returns 201", async () => {
     const res = await server.inject({
       method: "POST",
       url: "/recipes",
@@ -75,6 +94,7 @@ describe("POST /recipes + GET /recipes/:verb/:domain", () => {
       key: "get_api_key--example.com",
       verb: "get_api_key",
       domain: "example.com",
+      status: "pending-review",
     });
   });
 
@@ -125,6 +145,31 @@ describe("POST /recipes + GET /recipes/:verb/:domain", () => {
     expect(body.reasons.some((r: string) => r.includes("name"))).toBe(true);
   });
 
+  it("SAFETY: a write that lands as a candidate is NOT resolvable via GET until promoted", async () => {
+    const publish = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: validRecipe() },
+    });
+    expect(publish.statusCode).toBe(201);
+
+    // The candidate exists (an admin can see it)...
+    const queue = await server.inject({
+      method: "GET",
+      url: "/admin/recipe-candidates",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(queue.json().items).toHaveLength(1);
+
+    // ...but replay's read path (GET /recipes/:verb/:domain) sees nothing.
+    const fetched = await server.inject({
+      method: "GET",
+      url: "/recipes/get_api_key/example.com",
+    });
+    expect(fetched.statusCode).toBe(404);
+    expect(fetched.json().error).toBe("no_recipe_for_key");
+  });
+
   it("returns 404 for a key that was never published", async () => {
     const res = await server.inject({
       method: "GET",
@@ -143,12 +188,14 @@ describe("POST /recipes + GET /recipes/:verb/:domain", () => {
     expect(res.json().error).toBe("invalid_verb");
   });
 
-  it("round-trips a published recipe through GET", async () => {
+  it("SAFETY: a PROMOTED recipe IS resolvable via GET", async () => {
     await server.inject({
       method: "POST",
       url: "/recipes",
       payload: { recipe: validRecipe() },
     });
+    await promote("get_api_key", "example.com");
+
     const res = await server.inject({
       method: "GET",
       url: "/recipes/get_api_key/example.com",
@@ -161,7 +208,7 @@ describe("POST /recipes + GET /recipes/:verb/:domain", () => {
     expect(body.recipe.goal).toBe("Get an API key from Example");
   });
 
-  it("upserts on republish — same key, new content overwrites rather than conflicting", async () => {
+  it("upserts the candidate on republish — same key, new content overwrites rather than conflicting", async () => {
     await server.inject({
       method: "POST",
       url: "/recipes",
@@ -173,6 +220,7 @@ describe("POST /recipes + GET /recipes/:verb/:domain", () => {
       payload: { recipe: validRecipe({ goal: "second version" }) },
     });
     expect(second.statusCode).toBe(201);
+    await promote("get_api_key", "example.com");
     const res = await server.inject({
       method: "GET",
       url: "/recipes/get_api_key/example.com",
@@ -180,19 +228,28 @@ describe("POST /recipes + GET /recipes/:verb/:domain", () => {
     expect(res.json().recipe.goal).toBe("second version");
   });
 
-  it("cross-user reuse: a second, independent server backed by the same store resolves what the first published", async () => {
+  it("cross-user reuse: a second, independent server backed by the same stores resolves the promoted recipe", async () => {
     // Simulates User A's install publishing (via its server/client) and
     // User B's install — a wholly separate process with no local recipe —
-    // fetching from the shared registry.
-    const publisher = await buildServer({ recipeStore: store });
+    // fetching from the shared registry, once a promotion has happened.
+    const publisher = await buildServer({
+      recipeStore: store,
+      recipeCandidateStore: candidateStore,
+      adminBearer: ADMIN_BEARER,
+    });
     const publish = await publisher.inject({
       method: "POST",
       url: "/recipes",
       payload: { recipe: validRecipe() },
     });
     expect(publish.statusCode).toBe(201);
+    await promote("get_api_key", "example.com");
 
-    const reader = await buildServer({ recipeStore: store });
+    const reader = await buildServer({
+      recipeStore: store,
+      recipeCandidateStore: candidateStore,
+      adminBearer: ADMIN_BEARER,
+    });
     const fetched = await reader.inject({
       method: "GET",
       url: "/recipes/get_api_key/example.com",

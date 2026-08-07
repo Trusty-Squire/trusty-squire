@@ -145,10 +145,14 @@ async function autoPromoteProvision(sessionId: string): Promise<string> {
 }
 
 // replay-registry-share — after `operate_remember` writes a recipe locally,
-// best-effort publish it to the shared registry so the NEXT install to visit
-// this (verb, eTLD+1) reuses it instead of driving cold. Never fails the
-// local save: every outcome (including "not eligible to share") is just a
-// status string in the tool's result trail. The eligibility gate
+// best-effort SUBMIT it to the shared registry's candidate pool so the NEXT
+// install to visit this (verb, eTLD+1) can eventually reuse it — but only
+// once an admin-bearer-gated promotion (routes/admin-recipes.ts on the
+// registry, normally the housekeeper) has vetted and promoted it. A
+// submitted candidate is NOT yet replayable by anyone; operate_use only
+// ever reads promoted recipes (see resolveRecipeForTask below). Never fails
+// the local save: every outcome (including "not eligible to share") is just
+// a status string in the tool's result trail. The eligibility gate
 // (isRecipeShareEligible) runs inside publishRecipe — this function never
 // second-guesses it.
 export async function publishRecipeToRegistry(file: string): Promise<string> {
@@ -159,7 +163,7 @@ export async function publishRecipeToRegistry(file: string): Promise<string> {
     const client = clientFromEnv(accountId);
     if (client === null) return "skipped:no_registry";
     const outcome = await client.publishRecipe(recipe);
-    if (outcome.kind === "ok") return `published:${outcome.key}`;
+    if (outcome.kind === "ok") return `submitted:${outcome.key}`;
     if (outcome.kind === "not_share_eligible") {
       return `not_shared:${outcome.reasons.join("; ").slice(0, 300)}`;
     }
@@ -172,9 +176,12 @@ export async function publishRecipeToRegistry(file: string): Promise<string> {
 // replay-registry-share — the cross-user reuse path. Local storage stays the
 // primary, zero-latency lookup (unchanged single-user behavior); only on a
 // LOCAL miss do we ask the shared registry, so an install with its own
-// recipe never pays a network round trip it didn't have before. A registry
-// miss or an unreachable registry re-throws the ORIGINAL local error so the
-// caller's existing cold-start fallback is untouched.
+// recipe never pays a network round trip it didn't have before. The
+// registry only ever returns a PROMOTED (live) recipe — a key with just a
+// pending candidate 404s exactly like a key nobody has ever written to. A
+// registry miss (promoted or not) or an unreachable registry re-throws the
+// ORIGINAL local error so the caller's existing cold-start fallback is
+// untouched.
 export async function resolveRecipeForTask(verb: OperatorVerb, serviceUrl: string): Promise<OperatorRecipe> {
   try {
     return await readRecipeForTask(verb, serviceUrl);

@@ -540,21 +540,40 @@ the same site.
   false negatives. Applied **client-side** (`SkillRegistryClient.publishRecipe`,
   before the network call) **and server-side** (`POST /recipes`, defense in
   depth against a stale/bypassed client) — never only one.
-- **Registry storage is deliberately minimal** — `OperatorRecipeRecord`
-  (`apps/registry/prisma/schema.prisma`) + `apps/registry/src/recipe-store.ts`
-  + `routes/recipes.ts` (`POST /recipes`, `GET /recipes/:verb/:domain`).
-  No signing, no health counters, no promotion/demotion lifecycle like
-  Skills have — last-write-wins per key, the eligibility gate is the only
-  trust boundary. Don't graft Skill's verifier/demotion machinery onto this
-  without a real need; it was deliberately left out.
+- **Registry storage is candidate + promoted-live, NOT last-write-wins-to-live.**
+  `POST /recipes` is unauthenticated (only the eligibility gate stands
+  between a caller and a write), so it writes ONLY to
+  `OperatorRecipeCandidateRecord` — never replayed by anyone. `operate_use`
+  / `GET /recipes/:verb/:domain` read ONLY `OperatorRecipeRecord`, the live
+  table, which is written ONLY by the admin-bearer-gated
+  `POST /admin/recipes/:verb/:domain/promote` (`routes/admin-recipes.ts`,
+  mirrors the Skill flow's `/admin/verifier/queue` +
+  `/admin/skills/:id/verifier-outcome` shape). An unauthenticated candidate
+  write can therefore never steer another user's replay browser until a
+  promotion decision has vetted its navigation targets
+  (`entry_url`/`allowed_hosts`/`goto` templates) — safe by construction,
+  not by trust in the write path. Two stores: `recipe-store.ts` (live) +
+  `recipe-candidate-store.ts` (candidate), each with memory + Prisma
+  implementations. **The housekeeper-side wiring to actually call
+  `promote` after vetting is NOT done** — the housekeeper lives in the
+  separate closed-source `Trusty-Squire/trusty-squire-housekeeper` repo
+  (see "Housekeeper" below), which this monorepo checkout can't reach.
+  Until that lands, an operator drives `/admin/recipes/*` directly with
+  the admin bearer. Don't relax this back to direct-write last-write-wins
+  without a real need; it was a deliberate captain-level correction to an
+  earlier direct-write design (no-mistakes review caught the poisoning
+  risk).
 - **Client wiring**: `SkillRegistryClient` (`apps/mcp/src/skill-registry-client.ts`)
   gained `fetchRecipe`/`publishRecipe` — same client, same retry/timeout/
   fail-open/cache infra as the Skill methods, not a parallel transport.
+  `publishRecipe` submits a candidate, it does not publish live.
   `apps/mcp/src/tools/provision-drive.ts` — `publishRecipeToRegistry` (fires
   after `operate_remember` writes locally, fire-and-forget, never fails the
-  local save) and `resolveRecipeForTask` (local read first — zero latency
-  for an existing single-user recipe — registry fetch only on a local miss,
-  falls through to cold driving on registry miss/unavailable).
+  local save; status string is `submitted:<key>`, not `published:<key>`)
+  and `resolveRecipeForTask` (local read first — zero latency for an
+  existing single-user recipe — registry fetch only on a local miss, which
+  only ever returns a promoted recipe; falls through to cold driving on
+  registry miss/unavailable).
 - Two **out-of-scope, separately-tracked** follow-ups this deliberately does
   NOT do: fill-time role safety (label-swap wrong-fill — a different
   concern from storage/keying) and per-leg checkout-shape signatures on top

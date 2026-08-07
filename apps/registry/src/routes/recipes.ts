@@ -1,17 +1,23 @@
 // HTTP routes for shared Operator Recipes (replay-registry-share). Two
-// endpoints:
+// endpoints, split across a candidate/live trust boundary:
 //
-//   POST /recipes             — publish a recipe for its (verb, domain) key
-//   GET  /recipes/:verb/:domain — fetch the recipe stored for a key
+//   POST /recipes             — submit a CANDIDATE for its (verb, domain) key
+//   GET  /recipes/:verb/:domain — fetch the LIVE (promoted) recipe for a key
 //
-// Deliberately minimal compared to routes/skills.ts: no signing, no
-// health-counter/promotion lifecycle. The trust boundary is the
-// share-eligibility gate (isRecipeShareEligible) — applied by the mcp
-// client BEFORE it ever calls this route, and re-applied here as
-// defense-in-depth so a buggy/bypassed client can't smuggle a
-// user-specific literal or an earned credential into the shared registry.
-// A rejected publish is a 400, not a 500 — it's an expected outcome for
-// any recipe that isn't safely shareable, and the caller falls back to
+// POST is unauthenticated (only the isRecipeShareEligible gate stands
+// between a caller and a write) and writes ONLY to the candidate store —
+// never to the live store GET reads from. A candidate is never replayed,
+// so unauthenticated last-write-wins to it is safe by construction: the
+// worst an attacker can do is overwrite a candidate nobody is serving yet.
+// Promoting a candidate to live is a SEPARATE, admin-bearer-gated step —
+// see routes/admin-recipes.ts. This is the same candidate + promotion
+// shape the Skill registry uses (pending-review → active), simplified for
+// recipes' narrower needs. See docs/ARCHITECTURE.md.
+//
+// The eligibility gate (isRecipeShareEligible) is still applied here as
+// defense-in-depth against a buggy/bypassed client — a candidate that
+// leaks PII/secrets is refused just as it would be at the live tier. A
+// rejected publish is a 400, not a 500 — the caller falls back to
 // local-only storage.
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify";
@@ -22,9 +28,13 @@ import {
   type OperatorRecipe,
 } from "@trusty-squire/recipe-schema";
 import type { OperatorRecipeStore } from "../recipe-store.js";
+import type { OperatorRecipeCandidateStore } from "../recipe-candidate-store.js";
 
 export interface RecipesRouteDeps {
+  // The live/promoted store — GET reads only from here.
   store: OperatorRecipeStore;
+  // The candidate store — POST writes only here.
+  candidateStore: OperatorRecipeCandidateStore;
 }
 
 interface PublishRecipeBody {
@@ -71,8 +81,8 @@ export const registerRecipesRoute: FastifyPluginAsync<RecipesRouteDeps> = async 
 
     // Re-run the share-eligibility gate server-side. The client is
     // expected to have already refused to publish an ineligible recipe —
-    // this is the backstop that keeps the shared registry safe even if a
-    // client is buggy, stale, or bypassed entirely.
+    // this is the backstop that keeps even the CANDIDATE pool safe even
+    // if a client is buggy, stale, or bypassed entirely.
     const eligibility = isRecipeShareEligible(recipe);
     if (!eligibility.eligible) {
       return reply.code(400).send({
@@ -82,7 +92,7 @@ export const registerRecipesRoute: FastifyPluginAsync<RecipesRouteDeps> = async 
       });
     }
 
-    const record = await opts.store.upsert({
+    const record = await opts.candidateStore.upsert({
       verb: recipe.verb,
       domain: recipe.domain,
       recipe,
@@ -92,10 +102,15 @@ export const registerRecipesRoute: FastifyPluginAsync<RecipesRouteDeps> = async 
       key: record.key,
       verb: record.verb,
       domain: record.domain,
+      status: "pending-review",
     });
   });
 
   // ── GET /recipes/:verb/:domain ──────────────────────────────────
+  // Reads ONLY the live/promoted store. A key with only a pending
+  // candidate — no promoted row yet — 404s exactly like a key nobody has
+  // ever written to; the caller (operate_use) falls back to local storage
+  // or cold driving either way.
   fastify.get<{ Params: { verb: string; domain: string } }>(
     "/recipes/:verb/:domain",
     async (req, reply) => {

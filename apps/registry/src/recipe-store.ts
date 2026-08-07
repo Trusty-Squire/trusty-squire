@@ -1,11 +1,13 @@
-// Storage layer for shared Operator Recipes — the registry-backed half of
-// "recipe recorded on one install is reused by the next install to visit
-// the same site." Deliberately minimal: no health counters, no
-// promotion/demotion lifecycle, no signing. A recipe is a MAP (never a
-// recording of one user's data — see isRecipeShareEligible in
-// @trusty-squire/recipe-schema), so the trust model is the same
-// share-eligibility gate applied both client-side (before publish) and
-// here (before persistence) — not a verifier replay loop like Skills.
+// Storage layer for the LIVE / promoted half of shared Operator Recipes —
+// the registry-backed side of "recipe recorded on one install is reused by
+// the next install to visit the same site." `operate_use` and
+// `GET /recipes/:verb/:domain` read ONLY this store; the only writer is
+// the admin-bearer-gated promotion route (see routes/admin-recipes.ts).
+// Unauthenticated `POST /recipes` writes go to the SEPARATE candidate store
+// (recipe-candidate-store.ts) instead — a recipe never becomes replayable
+// just by being posted here, only by being promoted. See
+// docs/ARCHITECTURE.md and the OperatorRecipeRecord model comment in
+// schema.prisma.
 //
 // Two implementations live alongside this interface:
 //   - InMemoryOperatorRecipeStore (recipe-store-memory.ts)
@@ -20,27 +22,35 @@ export interface OperatorRecipeStoreRecord {
   domain: string;
   payload: OperatorRecipe;
   schema_version: number;
-  created_at: Date;
+  promoted_at: Date;
+  promoted_by: string;
   updated_at: Date;
 }
 
-export interface UpsertOperatorRecipeInput {
+export interface PromoteOperatorRecipeInput {
   verb: string;
   domain: string;
   recipe: OperatorRecipe;
+  // Free-text identity of whoever/whatever promoted this — audit trail
+  // only, not an auth mechanism (the admin bearer is the actual gate).
+  promotedBy: string;
 }
 
 export interface OperatorRecipeStore {
   /**
-   * Publish (or replace) the recipe for a (verb, domain) key. Last-write-
-   * wins — there is no versioning or review gate; the client-side +
-   * server-side share-eligibility check is the only trust boundary.
+   * Promote a recipe live for a (verb, domain) key. The ONLY way a row
+   * enters this store — there is no direct/unauthenticated write path.
+   * Last-write-wins per key across successive promotions (e.g. a
+   * corrected re-promotion supersedes an earlier one); the promotion
+   * route, not this store, is responsible for deciding a promotion is
+   * warranted.
    */
-  upsert(input: UpsertOperatorRecipeInput): Promise<OperatorRecipeStoreRecord>;
+  promote(input: PromoteOperatorRecipeInput): Promise<OperatorRecipeStoreRecord>;
 
   /**
-   * Fetch the recipe stored for a (verb, domain) key. Returns null when
-   * no recipe has ever been published for that key.
+   * Fetch the live recipe for a (verb, domain) key. Returns null when no
+   * recipe has ever been promoted for that key — including when a
+   * candidate exists but hasn't been promoted yet.
    */
   findByKey(verb: string, domain: string): Promise<OperatorRecipeStoreRecord | null>;
 }

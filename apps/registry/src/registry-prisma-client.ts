@@ -20,8 +20,11 @@ export interface RegistryPrismaClient {
   serviceState: ServiceStateDelegate;
   // Memory-overhaul Phase 4 — the drainable failure ledger.
   openIssue: OpenIssueDelegate;
-  // Shared Operator Recipes (replay-registry-share).
+  // Shared Operator Recipes (replay-registry-share) — the live/promoted
+  // table (operate_use / GET /recipes reads only this) and the candidate
+  // table (POST /recipes writes only this; never replayed).
   operatorRecipeRecord: OperatorRecipeRecordDelegate;
+  operatorRecipeCandidateRecord: OperatorRecipeCandidateRecordDelegate;
 }
 
 interface OperatorRecipeRecordRow {
@@ -30,7 +33,8 @@ interface OperatorRecipeRecordRow {
   domain: string;
   payload_json: unknown;
   schema_version: number;
-  created_at: Date;
+  promoted_at: Date;
+  promoted_by: string;
   updated_at: Date;
 }
 
@@ -41,6 +45,33 @@ interface OperatorRecipeRecordDelegate {
     update: Record<string, unknown>;
   }): Promise<OperatorRecipeRecordRow>;
   findUnique(args: { where: Record<string, unknown> }): Promise<OperatorRecipeRecordRow | null>;
+}
+
+interface OperatorRecipeCandidateRecordRow {
+  key: string;
+  verb: string;
+  domain: string;
+  payload_json: unknown;
+  schema_version: number;
+  submitted_at: Date;
+  updated_at: Date;
+}
+
+interface OperatorRecipeCandidateRecordDelegate {
+  upsert(args: {
+    where: Record<string, unknown>;
+    create: Record<string, unknown>;
+    update: Record<string, unknown>;
+  }): Promise<OperatorRecipeCandidateRecordRow>;
+  findUnique(args: {
+    where: Record<string, unknown>;
+  }): Promise<OperatorRecipeCandidateRecordRow | null>;
+  findMany(args: {
+    orderBy?: Record<string, unknown>;
+    take?: number;
+  }): Promise<OperatorRecipeCandidateRecordRow[]>;
+  delete(args: { where: Record<string, unknown> }): Promise<OperatorRecipeCandidateRecordRow>;
+  deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
 }
 
 interface OpenIssueRow {
