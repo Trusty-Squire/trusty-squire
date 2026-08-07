@@ -5,9 +5,13 @@
 // Coverage:
 //   - 503 when REGISTRY_ADMIN_BEARER is unset (admin not configured)
 //   - 401 when the bearer is wrong or missing
-//   - GET /admin/recipe-candidates lists pending candidates, oldest first
+//   - GET /admin/recipe-candidates lists pending candidates, oldest first,
+//     each with a sha256 content_digest
 //   - POST /admin/recipes/:verb/:domain/promote moves a candidate live and
 //     removes it from the candidate queue
+//   - promote requires the reviewed content_digest (400 without it) and
+//     refuses with 409 not_current when the candidate was overwritten after
+//     review — the reviewed bytes, not the slot, are what get promoted
 //   - promote re-checks share-eligibility and refuses an ineligible candidate
 //   - 404 promoting/rejecting an unknown (verb, domain) key
 //   - POST /admin/recipes/:verb/:domain/reject discards a candidate without
@@ -53,6 +57,24 @@ describe("admin recipe-promotion routes", () => {
     store = new InMemoryOperatorRecipeStore();
     candidateStore = new InMemoryOperatorRecipeCandidateStore();
   });
+
+  async function queuedDigest(
+    server: Awaited<ReturnType<typeof buildServer>>,
+    verb: string,
+    domain: string,
+  ): Promise<string> {
+    const queue = await server.inject({
+      method: "GET",
+      url: "/admin/recipe-candidates",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    const item = queue
+      .json()
+      .items.find((i: { verb: string; domain: string }) => i.verb === verb && i.domain === domain);
+    expect(item).toBeDefined();
+    expect(item.content_digest).toMatch(/^[0-9a-f]{64}$/);
+    return item.content_digest;
+  }
 
   it("returns 503 when the admin bearer is not configured", async () => {
     const server = await buildServer({ recipeStore: store, recipeCandidateStore: candidateStore });
@@ -120,11 +142,12 @@ describe("admin recipe-promotion routes", () => {
       payload: { recipe: validRecipe() },
     });
 
+    const digest = await queuedDigest(server, "get_api_key", "example.com");
     const promote = await server.inject({
       method: "POST",
       url: "/admin/recipes/get_api_key/example.com/promote",
       headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { promoted_by: "housekeeper-test" },
+      payload: { promoted_by: "housekeeper-test", content_digest: digest },
     });
     expect(promote.statusCode).toBe(200);
     const promoteBody = promote.json();
@@ -163,10 +186,12 @@ describe("admin recipe-promotion routes", () => {
       }),
     });
 
+    const digest = await queuedDigest(server, "get_api_key", "example.com");
     const promote = await server.inject({
       method: "POST",
       url: "/admin/recipes/get_api_key/example.com/promote",
       headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+      payload: { content_digest: digest },
     });
     expect(promote.statusCode).toBe(400);
     expect(promote.json().error).toBe("not_share_eligible");
@@ -174,6 +199,78 @@ describe("admin recipe-promotion routes", () => {
     // Still not live.
     const live = await server.inject({ method: "GET", url: "/recipes/get_api_key/example.com" });
     expect(live.statusCode).toBe(404);
+  });
+
+  it("refuses to promote without the reviewed content_digest", async () => {
+    const server = await buildServer({
+      recipeStore: store,
+      recipeCandidateStore: candidateStore,
+      adminBearer: ADMIN_BEARER,
+    });
+    await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: validRecipe() },
+    });
+
+    const promote = await server.inject({
+      method: "POST",
+      url: "/admin/recipes/get_api_key/example.com/promote",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+      payload: { promoted_by: "housekeeper-test" },
+    });
+    expect(promote.statusCode).toBe(400);
+    expect(promote.json().error).toBe("missing_content_digest");
+
+    const live = await server.inject({ method: "GET", url: "/recipes/get_api_key/example.com" });
+    expect(live.statusCode).toBe(404);
+  });
+
+  it("SAFETY: 409s a promote whose candidate was overwritten after review, promoting nothing", async () => {
+    const server = await buildServer({
+      recipeStore: store,
+      recipeCandidateStore: candidateStore,
+      adminBearer: ADMIN_BEARER,
+    });
+    await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: validRecipe({ goal: "reviewed version" }) },
+    });
+    const reviewedDigest = await queuedDigest(server, "get_api_key", "example.com");
+
+    // An unauthenticated writer swaps the slot's content between review
+    // and promote.
+    await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: {
+        recipe: validRecipe({
+          goal: "swapped after review",
+          entry_url: "https://attacker.example/phish",
+        }),
+      },
+    });
+
+    const promote = await server.inject({
+      method: "POST",
+      url: "/admin/recipes/get_api_key/example.com/promote",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+      payload: { content_digest: reviewedDigest },
+    });
+    expect(promote.statusCode).toBe(409);
+    expect(promote.json().error).toBe("not_current");
+
+    // Nothing went live, and the (swapped) candidate is still queued for
+    // a fresh review.
+    const live = await server.inject({ method: "GET", url: "/recipes/get_api_key/example.com" });
+    expect(live.statusCode).toBe(404);
+    const queue = await server.inject({
+      method: "GET",
+      url: "/admin/recipe-candidates",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    expect(queue.json().items).toHaveLength(1);
   });
 
   it("returns 404 promoting or rejecting an unknown key", async () => {

@@ -21,6 +21,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { OperatorRecipe } from "@trusty-squire/recipe-schema";
 import { buildServer } from "../server.js";
+import { RECIPE_SUBMIT_IP_HOURLY_LIMIT } from "../routes/recipes.js";
 import { InMemoryOperatorRecipeStore } from "../recipe-store-memory.js";
 import { InMemoryOperatorRecipeCandidateStore } from "../recipe-candidate-store-memory.js";
 
@@ -73,10 +74,20 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
   });
 
   async function promote(verb: string, domain: string): Promise<void> {
+    const queue = await server.inject({
+      method: "GET",
+      url: "/admin/recipe-candidates",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    const item = queue
+      .json()
+      .items.find((i: { verb: string; domain: string }) => i.verb === verb && i.domain === domain);
+    expect(item).toBeDefined();
     const res = await server.inject({
       method: "POST",
       url: `/admin/recipes/${verb}/${domain}/promote`,
       headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+      payload: { content_digest: item.content_digest },
     });
     expect(res.statusCode).toBe(200);
   }
@@ -106,6 +117,44 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
     });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toBe("schema_validation_failed");
+  });
+
+  it("rejects a recipe whose domain is not a plausible hostname with 400", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: validRecipe({ domain: "not-a-hostname" }) },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_domain");
+  });
+
+  it("rate-limits candidate submissions per IP with 429, without affecting other IPs", async () => {
+    for (let i = 0; i < RECIPE_SUBMIT_IP_HOURLY_LIMIT; i += 1) {
+      const res = await server.inject({
+        method: "POST",
+        url: "/recipes",
+        headers: { "fly-client-ip": "203.0.113.7" },
+        payload: { recipe: validRecipe() },
+      });
+      expect(res.statusCode).toBe(201);
+    }
+    const throttled = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      headers: { "fly-client-ip": "203.0.113.7" },
+      payload: { recipe: validRecipe() },
+    });
+    expect(throttled.statusCode).toBe(429);
+    expect(throttled.json()).toMatchObject({ error: "rate_limited", scope: "ip" });
+
+    const otherIp = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      headers: { "fly-client-ip": "198.51.100.9" },
+      payload: { recipe: validRecipe() },
+    });
+    expect(otherIp.statusCode).toBe(201);
   });
 
   it("rejects a recipe missing (verb, domain) with 400", async () => {

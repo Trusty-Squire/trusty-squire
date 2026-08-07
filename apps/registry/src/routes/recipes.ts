@@ -20,7 +20,7 @@
 // rejected publish is a 400, not a 500 — the caller falls back to
 // local-only storage.
 
-import type { FastifyInstance, FastifyPluginAsync } from "fastify";
+import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import {
   OperatorVerbSchema,
   parseOperatorRecipe,
@@ -29,6 +29,43 @@ import {
 } from "@trusty-squire/recipe-schema";
 import type { OperatorRecipeStore } from "../recipe-store.js";
 import type { OperatorRecipeCandidateStore } from "../recipe-candidate-store.js";
+
+// Per-IP rolling-hour cap on candidate submission. POST /recipes is
+// unauthenticated and every accepted body upserts a DB row, so without a cap
+// a single source can flood candidate storage and drown the oldest-first
+// admin review queue. A legit install submits one recipe per completed
+// operator task — a handful per hour at most — so 30 is generous. Same
+// sliding-window style as UPLOAD_RATE_LIMIT_PER_HOUR
+// (extract-failure-store.ts); in-memory / single-instance like the API's
+// INSTALL_IP_HOURLY_LIMIT backstop.
+export const RECIPE_SUBMIT_IP_HOURLY_LIMIT = 30;
+const RECIPE_SUBMIT_WINDOW_MS = 60 * 60 * 1000;
+
+// Real client IP behind Fly's proxy — req.ip is the proxy, so key off
+// fly-client-ip, then the first x-forwarded-for hop (same resolution the
+// API's install route uses).
+function clientIp(req: FastifyRequest): string {
+  const fly = req.headers["fly-client-ip"];
+  if (typeof fly === "string" && fly.trim().length > 0) return fly.trim();
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) return xff.split(",")[0]!.trim();
+  return req.ip ?? "unknown";
+}
+
+// Cheap hostname-plausibility check on the recipe's (eTLD+1) domain key —
+// not DNS or PSL registrability, just "could this be a registrable
+// hostname": dot-separated labels of [a-z0-9-] without edge hyphens, and an
+// alphabetic TLD. A legit client derives the domain from a real URL, so
+// anything this rejects is junk that would only pollute the candidate pool.
+const DOMAIN_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+export function isPlausibleRecipeDomain(domain: string): boolean {
+  if (domain.length === 0 || domain.length > 253) return false;
+  const labels = domain.split(".");
+  if (labels.length < 2) return false;
+  if (!labels.every((label) => DOMAIN_LABEL.test(label))) return false;
+  const tld = labels[labels.length - 1]!;
+  return /^[a-z]{2,}$/.test(tld) || tld.startsWith("xn--");
+}
 
 export interface RecipesRouteDeps {
   // The live/promoted store — GET reads only from here.
@@ -49,8 +86,30 @@ export const registerRecipesRoute: FastifyPluginAsync<RecipesRouteDeps> = async 
   fastify: FastifyInstance,
   opts,
 ) => {
+  const submitHits = new Map<string, number[]>();
+  function overSubmitRate(ip: string): boolean {
+    const nowMs = Date.now();
+    const cutoff = nowMs - RECIPE_SUBMIT_WINDOW_MS;
+    const recent = (submitHits.get(ip) ?? []).filter((t) => t > cutoff);
+    if (recent.length >= RECIPE_SUBMIT_IP_HOURLY_LIMIT) {
+      submitHits.set(ip, recent);
+      return true;
+    }
+    recent.push(nowMs);
+    submitHits.set(ip, recent);
+    return false;
+  }
+
   // ── POST /recipes ──────────────────────────────────────────────
   fastify.post<{ Body: PublishRecipeBody }>("/recipes", async (req, reply) => {
+    if (overSubmitRate(clientIp(req))) {
+      return reply.code(429).send({
+        ok: false,
+        error: "rate_limited",
+        scope: "ip",
+        limit_per_hour: RECIPE_SUBMIT_IP_HOURLY_LIMIT,
+      });
+    }
     const body = req.body;
     if (!isPublishRecipeBody(body)) {
       return reply.code(400).send({
@@ -76,6 +135,14 @@ export const registerRecipesRoute: FastifyPluginAsync<RecipesRouteDeps> = async 
         ok: false,
         error: "missing_key",
         detail: "A shared recipe must carry both verb and domain.",
+      });
+    }
+
+    if (!isPlausibleRecipeDomain(recipe.domain.toLowerCase())) {
+      return reply.code(400).send({
+        ok: false,
+        error: "invalid_domain",
+        detail: "The recipe domain is not a plausible hostname.",
       });
     }
 
