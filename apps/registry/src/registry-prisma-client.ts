@@ -20,6 +20,27 @@ export interface RegistryPrismaClient {
   serviceState: ServiceStateDelegate;
   // Memory-overhaul Phase 4 — the drainable failure ledger.
   openIssue: OpenIssueDelegate;
+  // Shared Operator Recipes (replay-registry-share).
+  operatorRecipeRecord: OperatorRecipeRecordDelegate;
+}
+
+interface OperatorRecipeRecordRow {
+  key: string;
+  verb: string;
+  domain: string;
+  payload_json: unknown;
+  schema_version: number;
+  created_at: Date;
+  updated_at: Date;
+}
+
+interface OperatorRecipeRecordDelegate {
+  upsert(args: {
+    where: Record<string, unknown>;
+    create: Record<string, unknown>;
+    update: Record<string, unknown>;
+  }): Promise<OperatorRecipeRecordRow>;
+  findUnique(args: { where: Record<string, unknown> }): Promise<OperatorRecipeRecordRow | null>;
 }
 
 interface OpenIssueRow {

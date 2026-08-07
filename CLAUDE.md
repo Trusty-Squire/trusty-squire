@@ -511,6 +511,56 @@ package would defeat the whole 0.7.0 thesis).
   path is honored without any env work. Set to `off` / `0` / `false`
   to suppress capture entirely.
 
+### Operator Recipe registry (replay-registry-share)
+
+A **second, distinct** shared-registry flow, alongside Skills — an
+Operator Recipe (`OperatorRecipeSchema`, `apps/mcp/src/bot/operator-recipe.ts`)
+is a `(verb, eTLD+1)`-keyed replay MAP captured by `operate_remember`, not
+a Skill. Historically local-only (`~/.trusty-squire/operator-recipes/`,
+override via `TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR`); now also shared so a
+recipe recorded on one install is reusable by the next install that visits
+the same site.
+
+- **Wire schema lives in `packages/recipe-schema`** (new package, mirrors
+  `@trusty-squire/skill-schema`'s role — shared by the mcp client and the
+  registry server). `apps/mcp/src/bot/operator-recipe.ts` re-exports it for
+  back-compat; only the local IO/render/bind/resolve logic stays there.
+  Needs its own npm-publish CI (`.github/workflows/release-recipe-schema.yml`,
+  mirrors `release-skill-schema.yml`) — its `workspace:*` pin must resolve
+  for real `npx @trusty-squire/mcp` installs.
+- **Cross-user safety gate: `isRecipeShareEligible`** (in recipe-schema).
+  A shared recipe must never carry a baked-in user-specific literal or an
+  earned credential. The schema already makes some of this unrepresentable
+  (secrets are always slot refs; `operate_pay` requires card provenance);
+  the gate is a conservative, pattern-based backstop for values the
+  record-time provenance tagging (`tagProvenanceValue`) didn't catch —
+  email/secret-shaped substrings anywhere, and name-/address-/phone-/
+  long-freeform-shaped literals on `type`/`select`/`set_phone_country`
+  actions. Biased toward false positives (recipe just stays local) over
+  false negatives. Applied **client-side** (`SkillRegistryClient.publishRecipe`,
+  before the network call) **and server-side** (`POST /recipes`, defense in
+  depth against a stale/bypassed client) — never only one.
+- **Registry storage is deliberately minimal** — `OperatorRecipeRecord`
+  (`apps/registry/prisma/schema.prisma`) + `apps/registry/src/recipe-store.ts`
+  + `routes/recipes.ts` (`POST /recipes`, `GET /recipes/:verb/:domain`).
+  No signing, no health counters, no promotion/demotion lifecycle like
+  Skills have — last-write-wins per key, the eligibility gate is the only
+  trust boundary. Don't graft Skill's verifier/demotion machinery onto this
+  without a real need; it was deliberately left out.
+- **Client wiring**: `SkillRegistryClient` (`apps/mcp/src/skill-registry-client.ts`)
+  gained `fetchRecipe`/`publishRecipe` — same client, same retry/timeout/
+  fail-open/cache infra as the Skill methods, not a parallel transport.
+  `apps/mcp/src/tools/provision-drive.ts` — `publishRecipeToRegistry` (fires
+  after `operate_remember` writes locally, fire-and-forget, never fails the
+  local save) and `resolveRecipeForTask` (local read first — zero latency
+  for an existing single-user recipe — registry fetch only on a local miss,
+  falls through to cold driving on registry miss/unavailable).
+- Two **out-of-scope, separately-tracked** follow-ups this deliberately does
+  NOT do: fill-time role safety (label-swap wrong-fill — a different
+  concern from storage/keying) and per-leg checkout-shape signatures on top
+  of the `(verb, eTLD+1)` key (cross-platform keying). Don't fold either in
+  without a specific ask.
+
 ### Goose / local-dev MCP install
 
 `npx @trusty-squire/mcp connect --target=goose` writes the extension to

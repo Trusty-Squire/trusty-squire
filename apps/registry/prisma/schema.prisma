@@ -18,8 +18,39 @@ datasource db {
   url      = env("REGISTRY_DATABASE_URL")
 }
 
-// SkillRecord — Tier-2 Learned Skills (0.7.0). Post-0.8 this is the
-// registry's only published-recipe table.
+// OperatorRecipeRecord — shared Operator Recipes, keyed by (verb, eTLD+1).
+// A recipe recorded by one install (operate_remember) becomes reusable by
+// the next install to visit the same site (operate_use), when the client-
+// side share-eligibility gate (isRecipeShareEligible in
+// @trusty-squire/recipe-schema) judged it to contain no baked-in
+// user-specific literal or earned credential. Deliberately minimal — no
+// health counters, no promotion/demotion lifecycle, no signing: last write
+// for a key wins, and the eligibility gate (re-checked server-side too) is
+// the only trust boundary. See docs/ARCHITECTURE.md.
+model OperatorRecipeRecord {
+  // `${verb}--${domain}`, e.g. "get_api_key--example.com".
+  key          String   @id
+
+  verb         String
+  domain       String
+
+  // The full OperatorRecipeSchema-validated JSON.
+  payload_json Json
+
+  schema_version Int
+
+  created_at   DateTime @default(now())
+  updated_at   DateTime @updatedAt
+
+  // Hot-path index: GET /recipes/:verb/:domain resolves by exact key
+  // already (the @id), but domain-only listing (future admin tooling)
+  // benefits from this too.
+  @@index([domain])
+}
+
+// SkillRecord — Tier-2 Learned Skills (0.7.0). Post-0.8 this was the
+// registry's only published-recipe table; OperatorRecipeRecord above is
+// the second (a distinct, simpler flow for operator-driver replay plans).
 //
 // `payload_json` carries the full SkillSchema-validated JSON. Health
 // counters live as columns rather than inside the JSON so atomic SQL

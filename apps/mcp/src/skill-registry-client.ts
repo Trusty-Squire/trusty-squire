@@ -31,6 +31,12 @@ import {
   parseSkill,
   type Skill,
 } from "@trusty-squire/skill-schema";
+import {
+  parseOperatorRecipe,
+  isRecipeShareEligible,
+  type OperatorRecipe,
+  type OperatorVerb,
+} from "@trusty-squire/recipe-schema";
 import type { ProvisionServiceState } from "./provision-gate.js";
 
 // ── Public API ───────────────────────────────────────────────────────
@@ -146,10 +152,76 @@ export type ServiceHealthOutcome =
   | { kind: "ok"; health: ServiceHealthResponse }
   | { kind: "unavailable"; reason: string };
 
+// Shared Operator Recipes (replay-registry-share) — a (verb, eTLD+1)-keyed
+// replay plan, distinct from a Skill. Fetched/published on the SAME
+// registry client (same base URL, same retry/timeout/fail-open/cache
+// infrastructure) rather than a parallel transport.
+
+export interface FetchRecipeResult {
+  recipe: OperatorRecipe;
+  key: string;
+  updated_at: string;
+}
+
+export type RecipeFetchOutcome =
+  | { kind: "found"; result: FetchRecipeResult }
+  | { kind: "not_found" }
+  | { kind: "unavailable"; reason: string };
+
+export type PublishRecipeOutcome =
+  | { kind: "ok"; key: string }
+  // The recipe failed the (client- or server-side) share-eligibility gate —
+  // never published. Not an error: the caller keeps the local copy exactly
+  // as before, it just never becomes a shared recipe.
+  | { kind: "not_share_eligible"; reasons: string[] }
+  | { kind: "unavailable"; reason: string };
+
+async function parseRecipeBody(response: Response): Promise<RecipeFetchOutcome> {
+  if (response.status === 404) return { kind: "not_found" };
+  if (!response.ok) {
+    return { kind: "unavailable", reason: `registry returned HTTP ${response.status}` };
+  }
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (err) {
+    return {
+      kind: "unavailable",
+      reason: `malformed JSON: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  if (typeof body !== "object" || body === null || !("recipe" in body)) {
+    return { kind: "unavailable", reason: "response missing recipe field" };
+  }
+  const envelope = body as { recipe: unknown; key?: string; updated_at?: string };
+  let recipe: OperatorRecipe;
+  try {
+    recipe = parseOperatorRecipe(envelope.recipe);
+  } catch (err) {
+    return {
+      kind: "unavailable",
+      reason: `recipe failed schema validation: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+  return {
+    kind: "found",
+    result: { recipe, key: envelope.key ?? "", updated_at: envelope.updated_at ?? "" },
+  };
+}
+
+function recipeCacheKey(verb: OperatorVerb, domain: string): string {
+  return `${verb}--${domain.toLowerCase()}`;
+}
+
 // ── Client ───────────────────────────────────────────────────────────
 
 interface CacheEntry {
   result: FetchSkillResult;
+  expiresAt: number;
+}
+
+interface RecipeCacheEntry {
+  result: FetchRecipeResult;
   expiresAt: number;
 }
 
@@ -218,6 +290,7 @@ export class SkillRegistryClient {
   private readonly cacheTtlMs: number;
   private readonly fetchFn: typeof globalThis.fetch;
   private readonly cache: Map<string, CacheEntry>;
+  private readonly recipeCache: Map<string, RecipeCacheEntry>;
 
   constructor(opts: SkillRegistryClientOpts) {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
@@ -226,6 +299,7 @@ export class SkillRegistryClient {
     this.cacheTtlMs = opts.cacheTtlMs ?? 5 * 60 * 1000;
     this.fetchFn = opts.fetchFn ?? globalThis.fetch;
     this.cache = new Map();
+    this.recipeCache = new Map();
   }
 
   /**
@@ -283,6 +357,78 @@ export class SkillRegistryClient {
       return { kind: "unavailable", reason: attempt.reason };
     }
     return await parseSkillBody(attempt.response);
+  }
+
+  /**
+   * Look up the shared recipe for a (verb, domain) key — the cross-user
+   * reuse path (replay-registry-share). Returns:
+   *
+   *   - `{kind:"found",result}`   — registry returned a valid recipe
+   *   - `{kind:"not_found"}`      — no recipe published for this key
+   *   - `{kind:"unavailable",..}` — network error, timeout, malformed
+   *                                  response, or schema-invalid payload
+   *
+   * Callers MUST treat `unavailable` the same as `not_found` — fall back
+   * to the local store or cold driving. This client never throws on
+   * transport-level failures.
+   */
+  async fetchRecipe(verb: OperatorVerb, domain: string, provisionId?: string): Promise<RecipeFetchOutcome> {
+    const cacheKey = recipeCacheKey(verb, domain);
+    const cached = this.readRecipeCache(cacheKey);
+    if (cached !== null) return { kind: "found", result: cached };
+
+    const url = `${this.baseUrl}/recipes/${encodeURIComponent(verb)}/${encodeURIComponent(domain.toLowerCase())}`;
+    const headers: Record<string, string> = { "x-account-id": this.accountId };
+    if (provisionId !== undefined) headers["x-provision-id"] = provisionId;
+    const attempt = await this.fetchGetWithRetry(url, headers);
+    if (attempt.kind === "err") {
+      return { kind: "unavailable", reason: attempt.reason };
+    }
+    const outcome = await parseRecipeBody(attempt.response);
+    if (outcome.kind === "found") this.writeRecipeCache(cacheKey, outcome.result);
+    return outcome;
+  }
+
+  /**
+   * Publish a recipe to the shared registry, keyed by (verb, domain).
+   * Re-runs the share-eligibility gate here (in addition to the caller's
+   * own check and the registry's own server-side re-check) so this is the
+   * single choke point every recipe publish passes through regardless of
+   * caller. Fire-and-forget at the caller level — a failure here must
+   * never fail the local `operate_remember` that produced the recipe;
+   * the local copy always stands on its own.
+   */
+  async publishRecipe(recipe: OperatorRecipe): Promise<PublishRecipeOutcome> {
+    if (recipe.verb === undefined || recipe.domain === undefined) {
+      return { kind: "not_share_eligible", reasons: ["recipe has no (verb, domain) key"] };
+    }
+    const eligibility = isRecipeShareEligible(recipe);
+    if (!eligibility.eligible) {
+      return { kind: "not_share_eligible", reasons: eligibility.reasons };
+    }
+    const attempt = await this.fetchPostWithRetry(
+      `${this.baseUrl}/recipes`,
+      { "content-type": "application/json", "x-account-id": this.accountId },
+      JSON.stringify({ recipe }),
+    );
+    if (attempt.kind === "err") {
+      return { kind: "unavailable", reason: attempt.reason };
+    }
+    const response = attempt.response;
+    if (!response.ok) {
+      try {
+        const body = (await response.json()) as { error?: string; reasons?: string[] };
+        if (body.error === "not_share_eligible") {
+          return { kind: "not_share_eligible", reasons: body.reasons ?? [] };
+        }
+      } catch {
+        // fall through to the generic unavailable below
+      }
+      return { kind: "unavailable", reason: `registry returned HTTP ${response.status}` };
+    }
+    const key = recipeCacheKey(recipe.verb, recipe.domain);
+    this.recipeCache.delete(key); // next fetch sees the fresh publish, not a stale miss
+    return { kind: "ok", key };
   }
 
   /**
@@ -538,6 +684,25 @@ export class SkillRegistryClient {
   private writeCache(service: string, result: FetchSkillResult): void {
     if (this.cacheTtlMs === 0) return;
     this.cache.set(service, {
+      result,
+      expiresAt: Date.now() + this.cacheTtlMs,
+    });
+  }
+
+  private readRecipeCache(key: string): FetchRecipeResult | null {
+    if (this.cacheTtlMs === 0) return null;
+    const entry = this.recipeCache.get(key);
+    if (entry === undefined) return null;
+    if (entry.expiresAt < Date.now()) {
+      this.recipeCache.delete(key);
+      return null;
+    }
+    return entry.result;
+  }
+
+  private writeRecipeCache(key: string, result: FetchRecipeResult): void {
+    if (this.cacheTtlMs === 0) return;
+    this.recipeCache.set(key, {
       result,
       expiresAt: Date.now() + this.cacheTtlMs,
     });

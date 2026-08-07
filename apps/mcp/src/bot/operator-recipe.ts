@@ -1,10 +1,11 @@
 // operator-recipe.ts — Phase A of "user-saved operator workflows as skills"
-// (docs/ARCHITECTURE.md). A LOCAL artifact (deliberately NOT the
-// registry Skill schema yet — that bump is Phase B) that captures a successful
-// operate run so it can be replayed by (verb, eTLD+1). Legacy named recipes
-// remain readable.
+// (docs/ARCHITECTURE.md). Local read/write/render/bind/resolve logic for
+// Operator Recipes. The wire schema itself (the part the registry also
+// needs to validate/store shared recipes) lives in the shared
+// @trusty-squire/recipe-schema package and is re-exported below so existing
+// importers of this module are unaffected.
 //
-// Three invariants baked in here:
+// Three invariants baked into the schema:
 //   1. Stable-attribute targeting only. A trace stores authored DOM/semantic
 //      hints, never a ref/coordinate; visible text is the unique-only last
 //      fallback because operator targets are heavy SPAs whose refs churn.
@@ -15,264 +16,64 @@
 //      silently succeeds on a run that didn't actually work — the anti-false-
 //      green principle (isCredentialNoise) one level up.
 
-import { z } from "zod";
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { getDomain } from "tldts";
+import {
+  OperatorVerbSchema,
+  RecipeHoleSchema,
+  RecipeValueSchema,
+  RecipeTargetSchema,
+  PostconditionSchema,
+  OperatorRecipeSchema,
+  operatorRecipeDomain,
+  operatorRecipeKey,
+  operatorRecipeKeyForDomain,
+  isRecipeShareEligible,
+  EmailAliasTemplatePattern,
+  type OperatorVerb,
+  type RecipeHole,
+  type RecipeValue,
+  type RecipeTarget,
+  type TraceAction,
+  type TraceEntry,
+  type SuccessSignal,
+  type Postcondition,
+  type SecretRef,
+  type OperatorRecipe,
+  type RecipeShareEligibility,
+} from "@trusty-squire/recipe-schema";
 import { filterByNearTextHint } from "./near-text-hint.js";
 
-// ── Schema ──────────────────────────────────────────────────────────
+// ── Schema (re-exported from @trusty-squire/recipe-schema; see there) ──
 
-export const OperatorVerbSchema = z.enum([
-  "purchase",
-  "get_api_key",
-  "signup",
-  "subscribe",
-  "cancel",
-  "login",
-  "book",
-  "reserve",
-  "renew",
-  "upgrade",
-  "downgrade",
-  "add_to_cart",
-  "checkout",
-  "download",
-  "configure",
-]);
-export type OperatorVerb = z.infer<typeof OperatorVerbSchema>;
-
-export const RecipeHoleSchema = z
-  .object({
-    hole: z
-      .string()
-      .regex(
-        /^(?:address|contact|credential|card)(?:\.[a-zA-Z0-9_-]+)?$|^(?:product_query|quantity)$/,
-      ),
-  })
-  .strict();
-export type RecipeHole = z.infer<typeof RecipeHoleSchema>;
-
-export const RecipeValueSchema = z.union([z.string().max(2000), RecipeHoleSchema]);
-export type RecipeValue = z.infer<typeof RecipeValueSchema>;
-
-export const RecipeTargetSchema = z
-  .object({
-    dom_hint: z
-      .object({
-        testid: z.string().max(200).optional(),
-        id: z.string().max(200).optional(),
-        name: z.string().max(200).optional(),
-      })
-      .strict()
-      .optional(),
-    role_hint: z.string().max(80).optional(),
-    accessible_name: z.string().max(200).optional(),
-    near_text_hint: z.string().max(200).optional(),
-    href_hint: z.string().max(2000).optional(),
-    css: z.string().max(2000).optional(),
-    // Deliberately last-resort. Replay accepts this only when it is unique.
-    visible_text: z.string().max(200).optional(),
-    // Locale-stable field-role signal recorded at capture time and re-checked
-    // at money-path fill. Prefer autocomplete tokens (given-name, family-name,
-    // …) over visible labels so EN→JP cross-locale reuse still works. Format
-    // is produced by localeStableFieldRole(); absence ⇒ no confident fill.
-    field_role: z.string().max(100).optional(),
-  })
-  .strict();
-export type RecipeTarget = z.infer<typeof RecipeTargetSchema>;
-
-const EmailHoleSchema = RecipeHoleSchema.shape.hole;
-const EmailAliasTemplatePattern = /\$\{EMAIL_ALIAS((?:_(?:URI|CSS))*)\}/g;
-
-function hasEmailAliasTemplate(value: string | undefined): boolean {
-  return value?.includes("${EMAIL_ALIAS") === true;
-}
-
-const PostconditionUrlSchema = z
-  .string()
-  .max(2000)
-  .refine((value) => {
-    try {
-      new URL(value.replace(EmailAliasTemplatePattern, "buyer@example.com"));
-      return true;
-    } catch {
-      return false;
-    }
-  }, "invalid URL");
-
-const TraceActionSchema = z
-  .object({
-    kind: z.enum([
-      "goto",
-      "click",
-      "js_click",
-      "type",
-      "press",
-      "oauth_click",
-      "oauth_settle",
-      "allow_host",
-      "type_secret",
-      "select",
-      "set_phone_country",
-      "operate_pay",
-      "scroll",
-      "extract",
-    ]),
-    // Legacy visible-text rail. New recordings also carry `target`; this stays
-    // for backwards compatibility and is the unique-only final fallback.
-    text_match: z.string().max(200).optional(),
-    target: RecipeTargetSchema.optional(),
-    email_hole: EmailHoleSchema.optional(),
-    // goto: a URL with optional ${VAR} templates for per-run identity.
-    url_template: z.string().max(2000).optional(),
-    // Value-bearing actions store either a non-secret literal or provenance
-    // hole. Secret/card actions carry only a hole; their raw values never land
-    // in the recipe.
-    value: RecipeValueSchema.optional(),
-    host: z.string().max(253).optional(),
-    slot: z.string().max(60).optional(),
-    direction: z.enum(["down", "up", "bottom", "top"]).optional(),
-    key: z.string().max(40).optional(),
-  })
-  .strict();
-export type TraceAction = z.infer<typeof TraceActionSchema>;
-
-const TraceEntrySchema = z
-  .object({
-    intent: z.string().max(200).optional(),
-    action: TraceActionSchema,
-  })
-  .strict();
-export type TraceEntry = z.infer<typeof TraceEntrySchema>;
-
-// A machine-checkable success signal, verifiable from a single page snapshot.
-const SuccessSignalSchema = z.union([
-  // A field/input whose label≈field_text holds a value at least N chars long
-  // (e.g. OAuth Playground's "Access token"). We check the LENGTH, never the
-  // value — the success signal must not leak the credential it proves.
-  z
-    .object({
-      field_text: z.string().min(1).max(120),
-      min_value_len: z.number().int().positive().max(4096),
-    })
-    .strict(),
-  // Visible page text contains this phrase.
-  z.object({ text_present: z.string().min(1).max(200) }).strict(),
-  // The current URL contains this substring (post-login path, etc.).
-  z.object({ url_contains: z.string().min(1).max(200) }).strict(),
-]);
-export type SuccessSignal = z.infer<typeof SuccessSignalSchema>;
-
-export const PostconditionSchema = z
-  .object({
-    // execute_capability: re-run/observe the capability now (synchronous).
-    // observe_artifact: navigate to probe_url, then check (Phase B paces this).
-    kind: z.enum(["execute_capability", "observe_artifact"]),
-    describe: z.string().min(1).max(300),
-    success_signal: SuccessSignalSchema,
-    probe_url: PostconditionUrlSchema.optional(),
-    email_hole: EmailHoleSchema.optional(),
-  })
-  .strict()
-  .superRefine((postcondition, ctx) => {
-    const urlContains =
-      "url_contains" in postcondition.success_signal
-        ? postcondition.success_signal.url_contains
-        : undefined;
-    if (
-      (hasEmailAliasTemplate(postcondition.probe_url) || hasEmailAliasTemplate(urlContains)) &&
-      postcondition.email_hole === undefined
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["email_hole"],
-        message: "known-email postcondition template lacks an attested source hole",
-      });
-    }
-  });
-export type Postcondition = z.infer<typeof PostconditionSchema>;
-
-const SecretRefSchema = z
-  .object({
-    slot: z.string().min(1).max(60),
-    sealed_from: z.string().max(120).optional(),
-    // Iron invariant: a recipe NEVER stores a secret value. This literal makes
-    // "the value is on disk" unrepresentable — a value-bearing field can't parse.
-    stored: z.literal(false),
-  })
-  .strict();
-export type SecretRef = z.infer<typeof SecretRefSchema>;
-
-export const OperatorRecipeSchema = z
-  .object({
-    name: z.string().min(1).max(80),
-    schema_version: z.literal(1),
-    goal: z.string().min(1).max(300),
-    // New prepared-statement key. Optional only so existing local v1 recipes
-    // remain readable; new keyed recordings always set both fields.
-    verb: OperatorVerbSchema.optional(),
-    domain: z.string().min(1).max(253).optional(),
-    // The canonical replay entry — the session's START url (the service_url
-    // passed to operate_start). Optional for back-compat with recipes saved
-    // before this field; recipeEntryUrl falls back to the first STABLE trace
-    // goto. This exists because inferring the entry from trace gotos picked up
-    // mid-flow single-use links (a verify-email URL became the entry, so the
-    // replay opened on an expired-token dead page — the plunk-recipe bug).
-    entry_url: z.string().max(2000).optional(),
-    entry_mode: z.literal("runtime_service_url").optional(),
-    allowed_hosts: z.array(z.string().max(253)).max(20).default([]),
-    trace: z.array(TraceEntrySchema).max(200),
-    secrets: z.array(SecretRefSchema).max(20).default([]),
-    postcondition: PostconditionSchema,
-  })
-  .strict()
-  .superRefine((recipe, ctx) => {
-    if ((recipe.verb === undefined) !== (recipe.domain === undefined)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "operator recipe verb and domain must be present together",
-      });
-    }
-    if (recipe.entry_mode === "runtime_service_url" && recipe.entry_url !== undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["entry_url"],
-        message: "runtime-resolved operator recipes cannot persist an entry URL",
-      });
-    }
-    recipe.trace.forEach((entry, index) => {
-      const value = entry.action.value;
-      if (
-        entry.action.kind === "operate_pay" &&
-        (value === undefined || typeof value === "string" || !/^card(?:\.|$)/.test(value.hole))
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["trace", index, "action", "value"],
-          message: "operate_pay requires card provenance",
-        });
-      }
-      if (value === undefined || typeof value === "string") return;
-      if (/^card(?:\.|$)/.test(value.hole) && entry.action.kind !== "operate_pay") {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["trace", index, "action", "value"],
-          message: "card provenance is only valid on operate_pay",
-        });
-      }
-      if (/^credential(?:\.|$)/.test(value.hole) && entry.action.kind !== "type_secret") {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["trace", index, "action", "value"],
-          message: "credential provenance is only valid on type_secret",
-        });
-      }
-    });
-  });
-export type OperatorRecipe = z.infer<typeof OperatorRecipeSchema>;
+export {
+  OperatorVerbSchema,
+  RecipeHoleSchema,
+  RecipeValueSchema,
+  RecipeTargetSchema,
+  PostconditionSchema,
+  OperatorRecipeSchema,
+  operatorRecipeDomain,
+  operatorRecipeKey,
+  operatorRecipeKeyForDomain,
+  isRecipeShareEligible,
+  EmailAliasTemplatePattern,
+};
+export type {
+  OperatorVerb,
+  RecipeHole,
+  RecipeValue,
+  RecipeTarget,
+  TraceAction,
+  TraceEntry,
+  SuccessSignal,
+  Postcondition,
+  SecretRef,
+  OperatorRecipe,
+  RecipeShareEligibility,
+};
 
 // ── Local IO ────────────────────────────────────────────────────────
 
@@ -296,22 +97,6 @@ function safeFileName(name: string): string {
   return `${slug.slice(0, 63)}-${digest}`;
 }
 
-const TENANT_HOST_SUFFIXES = ["myshopify.com", "notion.site"] as const;
-
-/** Public-Suffix-List-backed local recipe domain; registry service slugs are unrelated. */
-export function operatorRecipeDomain(url: string): string {
-  const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, "");
-  const tenantSuffix = TENANT_HOST_SUFFIXES.find(
-    (suffix) => hostname !== suffix && hostname.endsWith(`.${suffix}`),
-  );
-  if (tenantSuffix !== undefined) return hostname;
-  return getDomain(hostname, { allowPrivateDomains: false }) ?? hostname;
-}
-
-export function operatorRecipeKey(verb: OperatorVerb, url: string): string {
-  return `${verb}--${operatorRecipeDomain(url)}`;
-}
-
 export async function writeRecipe(recipe: OperatorRecipe): Promise<string> {
   // Validate (and, crucially, re-assert the no-stored-value invariant) before
   // anything reaches disk.
@@ -329,6 +114,11 @@ export async function writeRecipe(recipe: OperatorRecipe): Promise<string> {
 
 export async function readRecipe(name: string): Promise<OperatorRecipe> {
   const file = path.join(operatorRecipeDir(), `${safeFileName(name)}.json`);
+  return await readRecipeFromFile(file);
+}
+
+/** Read + parse a recipe from an exact file path (the shape `writeRecipe` returns). */
+export async function readRecipeFromFile(file: string): Promise<OperatorRecipe> {
   const raw = await fs.readFile(file, "utf8");
   return OperatorRecipeSchema.parse(JSON.parse(raw));
 }

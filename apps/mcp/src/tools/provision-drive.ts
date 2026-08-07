@@ -36,12 +36,16 @@ import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
   readRecipe,
   readRecipeForTask,
+  readRecipeFromFile,
   renderOperatorRecipeHint,
   recipeEntryUrl,
   fillTemplate,
+  operatorRecipeDomain,
   OperatorVerbSchema,
   RecipeHoleSchema,
   PostconditionSchema,
+  type OperatorVerb,
+  type OperatorRecipe,
 } from "../bot/operator-recipe.js";
 import { isMaskedDisplay } from "../bot/credential-shape.js";
 import { renderSkillHint, serviceSlugFromUrl } from "../bot/skill-hint.js";
@@ -137,6 +141,52 @@ async function autoPromoteProvision(sessionId: string): Promise<string> {
     return res.kind === "ok" ? `published:${res.status}` : `publish_failed:${res.reason}`;
   } catch (err) {
     return `error:${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+// replay-registry-share — after `operate_remember` writes a recipe locally,
+// best-effort publish it to the shared registry so the NEXT install to visit
+// this (verb, eTLD+1) reuses it instead of driving cold. Never fails the
+// local save: every outcome (including "not eligible to share") is just a
+// status string in the tool's result trail. The eligibility gate
+// (isRecipeShareEligible) runs inside publishRecipe — this function never
+// second-guesses it.
+export async function publishRecipeToRegistry(file: string): Promise<string> {
+  try {
+    const recipe = await readRecipeFromFile(file);
+    const accountId = await resolveAccountId();
+    if (accountId === undefined || accountId.length === 0) return "skipped:no_account";
+    const client = clientFromEnv(accountId);
+    if (client === null) return "skipped:no_registry";
+    const outcome = await client.publishRecipe(recipe);
+    if (outcome.kind === "ok") return `published:${outcome.key}`;
+    if (outcome.kind === "not_share_eligible") {
+      return `not_shared:${outcome.reasons.join("; ").slice(0, 300)}`;
+    }
+    return `unavailable:${outcome.reason}`;
+  } catch (err) {
+    return `error:${err instanceof Error ? err.message : String(err)}`;
+  }
+}
+
+// replay-registry-share — the cross-user reuse path. Local storage stays the
+// primary, zero-latency lookup (unchanged single-user behavior); only on a
+// LOCAL miss do we ask the shared registry, so an install with its own
+// recipe never pays a network round trip it didn't have before. A registry
+// miss or an unreachable registry re-throws the ORIGINAL local error so the
+// caller's existing cold-start fallback is untouched.
+export async function resolveRecipeForTask(verb: OperatorVerb, serviceUrl: string): Promise<OperatorRecipe> {
+  try {
+    return await readRecipeForTask(verb, serviceUrl);
+  } catch (localErr) {
+    const accountId = await resolveAccountId();
+    if (accountId === undefined || accountId.length === 0) throw localErr;
+    const client = clientFromEnv(accountId);
+    if (client === null) throw localErr;
+    const domain = operatorRecipeDomain(serviceUrl);
+    const outcome = await client.fetchRecipe(verb, domain, generateProvisionId());
+    if (outcome.kind !== "found") throw localErr;
+    return outcome.result.recipe;
   }
 }
 
@@ -984,13 +1034,16 @@ export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
     },
   },
   async handler(args) {
-    return await rememberRecipe(args.session_id, {
+    const result = await rememberRecipe(args.session_id, {
       name: args.name,
       goal: args.goal,
       postcondition: args.postcondition,
       verb: args.verb,
       inputs: args.inputs,
     });
+    // replay-registry-share — best-effort; never blocks or fails the local save.
+    const registryPublish = await publishRecipeToRegistry(result.file);
+    return { ...result, registry_publish: registryPublish };
   },
 };
 
@@ -1046,7 +1099,7 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
       recipe =
         args.name !== undefined
           ? await readRecipe(args.name)
-          : await readRecipeForTask(args.verb!, args.service_url!);
+          : await resolveRecipeForTask(args.verb!, args.service_url!);
     } catch (error) {
       // A keyed cache miss is the expected cold path, not a task failure.
       if (
