@@ -64,10 +64,14 @@ export function renderReportMarkdown(report: HarnessReport): string {
     `Mode: ${report.mode}; corpus: ${report.corpus.tasks} tasks (${report.corpus.repeat} repeat, ${report.corpus.novel} novel), ${report.corpus.drift_trials} drift trials.`,
     ...(repeatBaseline === undefined
       ? []
-      : [`Repeat cold baseline median: ${repeatBaseline.turns.toFixed(1)} turns, ${repeatBaseline.tokens.toFixed(0)} tokens, ${repeatBaseline.wall_clock_ms.toFixed(0)} ms.`]),
+      : [
+          `Repeat cold baseline median: ${repeatBaseline.turns.toFixed(1)} turns, ${repeatBaseline.tokens.toFixed(0)} tokens, ${repeatBaseline.wall_clock_ms.toFixed(0)} ms.`,
+        ]),
     ...(novelBaseline === undefined
       ? []
-      : [`Novel cold baseline median: ${novelBaseline.turns.toFixed(1)} turns, ${novelBaseline.tokens.toFixed(0)} tokens, ${novelBaseline.wall_clock_ms.toFixed(0)} ms.`]),
+      : [
+          `Novel cold baseline median: ${novelBaseline.turns.toFixed(1)} turns, ${novelBaseline.tokens.toFixed(0)} tokens, ${novelBaseline.wall_clock_ms.toFixed(0)} ms.`,
+        ]),
     `Cold baseline evidence: ${report.cold_baseline.recordings.length} driver-recorded tasks${baselineSources.length === 0 ? "" : ` via ${baselineSources.join(", ")}`}.`,
     "",
     "| Metric | Value | Threshold |",
@@ -88,7 +92,8 @@ export function renderReportMarkdown(report: HarnessReport): string {
                 ...evaluation.capture_failures.map((failure) => `- ${failure}`),
                 "",
               ]),
-          ...(evaluation.invalidated_reasons === undefined || evaluation.invalidated_reasons.length === 0
+          ...(evaluation.invalidated_reasons === undefined ||
+          evaluation.invalidated_reasons.length === 0
             ? []
             : [
                 "Invalidated measurements:",
@@ -97,8 +102,9 @@ export function renderReportMarkdown(report: HarnessReport): string {
               ]),
           "| Task | Observed vs expected divergence | Fallbacks | §2 verdict | Assessment |",
           "| --- | --- | ---: | --- | --- |",
-          ...evaluation.repeat_outcomes.map((outcome) =>
-            `| \`${outcome.task_id}\` | ${outcome.divergent_fields.length === 0 ? "none" : outcome.divergent_fields.join("; ")} | ${outcome.fallbacks} | ${outcome.verdict_class} | ${outcome.assessment ?? "—"} |`,
+          ...evaluation.repeat_outcomes.map(
+            (outcome) =>
+              `| \`${outcome.task_id}\` | ${outcome.divergent_fields.length === 0 ? "none" : outcome.divergent_fields.join("; ")} | ${outcome.fallbacks} | ${outcome.verdict_class} | ${outcome.assessment ?? "—"} |`,
           ),
           "",
           "Clean deterministic replays record zero LLM turns and tokens; fallback rescues record their measured Codex usage before replay resumes.",

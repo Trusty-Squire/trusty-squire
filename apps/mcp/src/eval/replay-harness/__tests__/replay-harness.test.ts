@@ -306,8 +306,9 @@ it("rejects a checkout artifact captured before the settled total", () => {
 });
 
 it("normalizes only the fallback model's explicit live-ref wrapper", () => {
-  expect(parseFallbackAction({ kind: "type", target: { ref: "@e:field_1" }, text: "Ada" }))
-    .toEqual({ kind: "type", target: "@e:field_1", text: "Ada" });
+  expect(parseFallbackAction({ kind: "type", target: { ref: "@e:field_1" }, text: "Ada" })).toEqual(
+    { kind: "type", target: "@e:field_1", text: "Ada" },
+  );
   expect(() => parseFallbackAction({ kind: "type", text: "Ada" })).toThrow(
     "fallback rescue target must be a string or { ref: string }",
   );
@@ -405,7 +406,9 @@ it("computes the true median when one speedup is infinite", () => {
 
 it("hands a fresh live checkout only post-checkout recipe actions", () => {
   const recipe = OperatorRecipeSchema.parse(
-    JSON.parse(readFileSync(join(corpusDir!, "traces", "whitejade-purchase-r0.recipe.json"), "utf8")),
+    JSON.parse(
+      readFileSync(join(corpusDir!, "traces", "whitejade-purchase-r0.recipe.json"), "utf8"),
+    ),
   );
   const { storefront, checkout } = splitTwoContextReplay(recipe);
   expect(storefront.trace.at(-1)?.action.target?.css).not.toBe("#checkout");

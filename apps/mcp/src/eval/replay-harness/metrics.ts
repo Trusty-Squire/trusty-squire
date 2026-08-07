@@ -51,10 +51,7 @@ function median(values: Speedup[]): Speedup {
   return Number.isFinite(result) ? result : "infinite";
 }
 
-function speedups(
-  hits: TaskObservation[],
-  field: "turns" | "tokens" | "wall_clock_ms",
-): Speedup[] {
+function speedups(hits: TaskObservation[], field: "turns" | "tokens" | "wall_clock_ms"): Speedup[] {
   return hits.map((hit) => speedup(hit.cold[field], hit.warm?.[field] ?? 0));
 }
 
@@ -78,9 +75,7 @@ export function computeMetrics(
     (trial) => trial.infrastructure_failure === undefined,
   );
   const moneyEscapes = observableMoneyTrials.filter(
-    (trial) =>
-      !trial.end_state_matches &&
-      trial.guard_action !== "abort",
+    (trial) => !trial.end_state_matches && trial.guard_action !== "abort",
   ).length;
   const caughtMoneyDrift = observableMoneyTrials.filter(
     (trial) =>

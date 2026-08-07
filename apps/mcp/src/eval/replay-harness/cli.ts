@@ -566,10 +566,7 @@ async function main(): Promise<void> {
         cold_recording: {
           task_id: task.task_id,
           ...task.cold_baseline,
-          end_state_matches: endStatesMatch(
-            task.cold_baseline.end_state,
-            task.expected_end_state,
-          ),
+          end_state_matches: endStatesMatch(task.cold_baseline.end_state, task.expected_end_state),
         },
         recipe_applied: true,
         end_state_matches: false,

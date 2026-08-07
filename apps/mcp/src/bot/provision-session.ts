@@ -1833,10 +1833,12 @@ export async function startHarnessProvisionSession(
   const allowedHosts: AllowedHostEntry[] = [
     ...(targetHost === null ? [] : [targetHost]),
     ...(opts.extraAllowedHosts ?? []),
-  ].filter((host, index, hosts) => hosts.indexOf(host) === index).map((host) => ({
-    host,
-    source: "start" as const,
-  }));
+  ]
+    .filter((host, index, hosts) => hosts.indexOf(host) === index)
+    .map((host) => ({
+      host,
+      source: "start" as const,
+    }));
   const session: Session = {
     id,
     browser: opts.browser,
@@ -1864,7 +1866,10 @@ export async function startHarnessProvisionSession(
   sessions.set(id, session);
   inFlight = true;
   try {
-    audit(id, "start_harness", { service_url: opts.serviceUrl, allowed_hosts: hostStrings(session) });
+    audit(id, "start_harness", {
+      service_url: opts.serviceUrl,
+      allowed_hosts: hostStrings(session),
+    });
     await opts.browser.goto(opts.serviceUrl);
     return { ...(await observeSession(session)), hint: opts.hint ?? "" };
   } catch (error) {

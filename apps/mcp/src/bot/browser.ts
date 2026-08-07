@@ -396,7 +396,10 @@ export function parseCheckoutAmounts(
       const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
       if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) continue;
       const minorDigits = currencyMinorDigits(currency);
-      if (pageCurrency === undefined && fallbackCurrencyScaleMismatches(match[3] ?? "", minorDigits)) {
+      if (
+        pageCurrency === undefined &&
+        fallbackCurrencyScaleMismatches(match[3] ?? "", minorDigits)
+      ) {
         continue;
       }
       const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
@@ -5810,7 +5813,8 @@ export class BrowserController {
     return await this.page.evaluate(() => {
       const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
       const visible = (element: Element): boolean => {
-        if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) return false;
+        if (!(element instanceof HTMLElement) || element.getClientRects().length === 0)
+          return false;
         const style = getComputedStyle(element);
         return style.display !== "none" && style.visibility !== "hidden";
       };
@@ -5880,9 +5884,13 @@ export class BrowserController {
     while (Date.now() < deadline) {
       const shippingReady = await this.page
         .evaluate(() => {
-          const labels = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]'))
+          const labels = Array.from(
+            document.querySelectorAll<HTMLInputElement>('input[type="radio"]'),
+          )
             .flatMap((input) => [
-              ...(input.labels === null ? [] : Array.from(input.labels, (label) => label.innerText)),
+              ...(input.labels === null
+                ? []
+                : Array.from(input.labels, (label) => label.innerText)),
               input.getAttribute("aria-label") ?? "",
               input.closest("label")?.textContent ?? "",
             ])
