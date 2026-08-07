@@ -1,10 +1,14 @@
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   CAPTURE_POLICY,
+  buildGroundingDiagnostic,
   buildCaptureEnvironment,
   buildCodexArguments,
   endStatesMatch,
   isAllowedTopLevelUrl,
+  sanitizeReplayHar,
   shouldBlockTopLevelNavigation,
   validateGroundedCapture,
 } from "../replay-capture-support.mjs";
@@ -46,13 +50,124 @@ function browserEvent(tool, currentUrl, snapshot, checkoutTotals = []) {
 }
 
 describe("replay baseline capture trust boundary", () => {
+  it("keeps checked-in replay artifacts free of session material", () => {
+    const corpus = resolve(import.meta.dirname, "../../../../corpus/shopping");
+    for (const taskId of [
+      "whitejade-purchase-r0",
+      "whitejade-purchase-r1",
+      "whitejade-purchase-r2",
+      "whitejade-purchase-r3",
+    ]) {
+      const har = readFileSync(resolve(corpus, `${taskId}.har`), "utf8");
+      expect(har).not.toMatch(/shop_pay_token|"name":"(?:set-)?cookie"/i);
+      expect(har).not.toMatch(
+        /https:\/\/shop\.app\/checkouts?\/(?!redacted(?:["?/#\\]|$))/i,
+      );
+      expect(har).not.toMatch(
+        /https:\/\/whitejade\.xyz\/checkouts\/(?!redacted(?:["?/#\\]|$))/i,
+      );
+      expect(har).not.toMatch(/(?:ur_verify|tracking_unique|tracking_visit)=/i);
+    }
+    expect(
+      existsSync(resolve(corpus, "traces/debug/whitejade-purchase-r0.grounding-failure.json")),
+    ).toBe(false);
+  });
+
+  it("removes session material from persisted HARs", () => {
+    const har = {
+      log: {
+        entries: [
+          {
+            request: {
+              url: "https://whitejade.xyz/cart?shop_pay_token=secret",
+              headers: [
+                { name: "Cookie", value: "session=secret" },
+                { name: "Accept", value: "text/html" },
+              ],
+              cookies: [{ name: "session", value: "secret" }],
+              queryString: [{ name: "shop_pay_token", value: "secret" }],
+            },
+            response: {
+              headers: [
+                { name: "Set-Cookie", value: "session=secret" },
+                {
+                  name: "Location",
+                  value: "https://whitejade.xyz/checkouts/cn/session/en-us?_r=secret",
+                },
+              ],
+              cookies: [{ name: "session", value: "secret" }],
+              redirectURL: "https://whitejade.xyz/checkouts/cn/session/en-us?_r=secret",
+              content: {
+                text: "redirect=https://whitejade.xyz/checkouts/cn/session/en-us?_su_rec=secret",
+              },
+            },
+          },
+        ],
+      },
+    };
+    const sanitized = sanitizeReplayHar(har);
+    const serialized = JSON.stringify(sanitized);
+    expect(serialized).not.toContain("secret");
+    expect(serialized).not.toMatch(/set-cookie|shop_pay_token/i);
+    expect(sanitized.log.entries[0].response.redirectURL).toBe(
+      "https://whitejade.xyz/checkouts/redacted",
+    );
+  });
+
+  it("drops redirecting cart posts with Shop checkout sessions", () => {
+    const redirect =
+      "https://shop.app/checkout/73057009775/cn/session/en-us/shoppay?" +
+      "tracking_unique=secret&ur_back_url=https%3A%2F%2Fwhitejade.xyz%2Fcheckouts%2Fcn%2Fsession%3F_r%3Dsecret&ur_verify=secret";
+    const har = {
+      log: {
+        entries: [
+          {
+            request: { method: "POST", url: "https://whitejade.xyz/cart" },
+            response: {
+              status: 302,
+              headers: [{ name: "Location", value: redirect }],
+              redirectURL: redirect,
+            },
+          },
+          {
+            request: { method: "GET", url: "https://whitejade.xyz/cart.js" },
+            response: { status: 200, headers: [], redirectURL: "" },
+          },
+        ],
+      },
+    };
+    const sanitized = sanitizeReplayHar(har);
+    expect(sanitized.log.entries).toHaveLength(1);
+    expect(JSON.stringify(sanitized)).not.toContain("secret");
+  });
+
+  it("hashes raw grounding evidence and redacts checkout URLs", () => {
+    const diagnostic = buildGroundingDiagnostic(
+      task,
+      [
+        {
+          tool: "browser_snapshot",
+          current_url: "https://whitejade.xyz/checkouts/cn/session/en-us?_r=secret",
+          snapshot: "The Glow Serum value=private",
+          checkout_totals: [{ label: "Total", amount: "$76.00" }],
+        },
+      ],
+      '{"private":"message"}',
+      "grounding failed",
+    );
+    expect(diagnostic.final_agent_message).toBeUndefined();
+    expect(diagnostic.observations[0].snapshot).toBeUndefined();
+    expect(diagnostic.observations[0].url).toBe("https://whitejade.xyz/checkouts/redacted");
+    expect(JSON.stringify(diagnostic)).not.toMatch(/private|session|secret/);
+  });
+
   it("requires exact totals and browser-grounded checkout evidence", () => {
     const endState = task.expected_end_state;
     const events = [
       browserEvent(
         "browser_open",
-        "https://whitejade.xyz/cart/53575613546607:1",
-        'RootWebArea "Cart" url="https://whitejade.xyz/cart/53575613546607:1" The Glow Serum $68.00',
+        task.entry_url,
+        `RootWebArea "Product" url="${task.entry_url}" The Glow Serum $68.00`,
       ),
       browserEvent(
         "browser_snapshot",
@@ -77,7 +192,7 @@ describe("replay baseline capture trust boundary", () => {
     );
   });
 
-  it("rejects checkout evidence split across separate observations", () => {
+  it("rejects checkout evidence with neither item nor settled total", () => {
     const splitTask = {
       ...task,
       task_id: "whitejade-purchase-r1",
@@ -100,7 +215,7 @@ describe("replay baseline capture trust boundary", () => {
       ),
     ];
     expect(() => validateGroundedCapture(events, splitTask.expected_end_state, splitTask)).toThrow(
-      "no single browser observation proves the expected end state",
+      "checkout review sequence did not prove the expected end state",
     );
   });
 
@@ -129,7 +244,28 @@ describe("replay baseline capture trust boundary", () => {
     ];
     expect(() =>
       validateGroundedCapture(events, pricedTask.expected_end_state, pricedTask),
-    ).toThrow("no single browser observation proves the expected end state");
+    ).toThrow("checkout review sequence did not prove the expected end state");
+  });
+
+  it("accepts checkout item evidence before the final shipping-settled labeled total", () => {
+    const events = [
+      browserEvent("browser_open", task.entry_url, `RootWebArea "Product" url="${task.entry_url}" The Glow Serum $68.00`),
+      browserEvent(
+        "browser_snapshot",
+        "https://whitejade.xyz/checkouts/cn/session",
+        'RootWebArea "Checkout" url="https://whitejade.xyz/checkouts/cn/session" The Glow Serum Payment controls: {"value":"replay-eval+whitejade-purchase-r0@trustysquire.ai"} {"value":"123 Test Street"} {"value":"10001"}',
+        [{ label: "Total", amount: "$68.00" }],
+      ),
+      browserEvent(
+        "browser_wait",
+        "https://whitejade.xyz/checkouts/cn/session",
+        'RootWebArea "Checkout" url="https://whitejade.xyz/checkouts/cn/session" Payment controls: {"value":"replay-eval+whitejade-purchase-r0@trustysquire.ai"} {"value":"123 Test Street"} {"value":"10001"}',
+        [{ label: "Total", amount: "$76.00" }],
+      ),
+    ];
+    expect(validateGroundedCapture(events, task.expected_end_state, task)).toMatchObject({
+      browser_observations: 3,
+    });
   });
 
   it("rejects evidence from outside the task domain", () => {

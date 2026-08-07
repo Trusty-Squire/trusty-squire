@@ -295,9 +295,10 @@ jobs:
         run: pnpm --filter '@trusty-squire/registry' prisma:generate
       - name: Build workspace dep dists
         run: pnpm -r --filter "./packages/**" --if-present build
-      # The replay engine is not present yet; this named gate records the
-      # all-cold baseline and runs the frozen stable-page drift battery first.
-      # Checkout is deliberately excluded here and runs live only against the
+      # Deterministic frozen-corpus gate: all-cold baseline + stable-page
+      # drift battery. The full warm evaluation (eval:replay, which bridges
+      # to the replay engine) is run explicitly, not in CI. Checkout is
+      # deliberately excluded here and runs live only against the
       # operator-owned whitejade test-mode store.
       - name: Replay-engine frozen corpus gate
         if: needs.secret-scan.outputs.replay_eval == 'true'

@@ -1628,6 +1628,10 @@ export interface StartOptions {
   api?: ApiClient;
 }
 
+export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "proxyUrl"> {
+  browser: BrowserController;
+}
+
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
 // acts as the user needs a LIVE Google session before it drives; absent /
 // expired / 2FA-challenged → hand back BEFORE the task starts, so the
@@ -1811,6 +1815,68 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     inFlight = false;
     touchWarmBrowser();
     throw err;
+  }
+}
+
+/** Start a normal guarded session on a caller-owned harness page. */
+export async function startHarnessProvisionSession(
+  opts: HarnessStartOptions,
+): Promise<Observation> {
+  const id = randomUUID();
+  if (starting || inFlight) {
+    throw new Error("operate_start refused: another operator session is already in flight");
+  }
+  if (opts.requireLiveIdentity === true) {
+    throw new Error("harness sessions cannot request live identity");
+  }
+  const targetHost = registrableHost(opts.serviceUrl);
+  const allowedHosts: AllowedHostEntry[] = [
+    ...(targetHost === null ? [] : [targetHost]),
+    ...(opts.extraAllowedHosts ?? []),
+  ]
+    .filter((host, index, hosts) => hosts.indexOf(host) === index)
+    .map((host) => ({
+      host,
+      source: "start" as const,
+    }));
+  const session: Session = {
+    id,
+    browser: opts.browser,
+    allowedHosts,
+    generation: 0,
+    secretSlots: new Map(),
+    sealedFieldKeys: new Set(),
+    lastElements: [],
+    prevObserve: null,
+    observeSnapshotFile: null,
+    actionTrace: [],
+    recordedValues: [],
+    committedSelectValues: new Map(),
+    captureRounds: [],
+    usedLocatorFallback: false,
+    recipeRejectionReason: null,
+    replayState: null,
+    startedAt: Date.now(),
+    hintServed: opts.hint !== undefined,
+    startUrl: opts.serviceUrl,
+    consentInboxRead: false,
+    userEmail: null,
+    ...(opts.api === undefined ? {} : { api: opts.api }),
+  };
+  sessions.set(id, session);
+  inFlight = true;
+  try {
+    audit(id, "start_harness", {
+      service_url: opts.serviceUrl,
+      allowed_hosts: hostStrings(session),
+    });
+    await opts.browser.goto(opts.serviceUrl);
+    return { ...(await observeSession(session)), hint: opts.hint ?? "" };
+  } catch (error) {
+    sessions.delete(id);
+    await opts.browser.close().catch(() => undefined);
+    inFlight = false;
+    throw error;
   }
 }
 
@@ -3493,6 +3559,13 @@ export async function rememberRecipe(
     postcondition: Postcondition;
     verb?: OperatorVerb;
     inputs: KnownRecipeInputs;
+    /**
+     * Opt into the already-supported runtime entry form when the caller has a
+     * fresh same-domain service URL for each replay.  The stored key/domain
+     * and all action/value provenance stay unchanged; recipeEntryUrl still
+     * rejects a cross-domain runtime URL.
+     */
+    entry_mode?: "runtime_service_url";
   },
 ): Promise<{
   file: string;
@@ -3525,6 +3598,9 @@ export async function rememberRecipe(
   const scrubbedStartUrl = scrubKnownEmail(session.startUrl, session.userEmail);
   const trace = traceWithVerifiedProvenance(session, opts.inputs);
   const postcondition = scrubRecipePostcondition(session, opts.postcondition, opts.inputs);
+  if (opts.entry_mode !== undefined && opts.verb === undefined) {
+    throw new Error("runtime recipe entry requires a keyed verb");
+  }
   const recipe: OperatorRecipe = {
     name: opts.name,
     schema_version: 1,
@@ -3534,7 +3610,9 @@ export async function rememberRecipe(
       : {}),
     // Canonical, stable replay entry — the page the session started at, never a
     // mid-flow single-use link inferred from the trace.
-    ...(isSingleUseUrl(session.startUrl) || scrubbedStartUrl !== session.startUrl
+    ...(opts.entry_mode === "runtime_service_url" ||
+    isSingleUseUrl(session.startUrl) ||
+    scrubbedStartUrl !== session.startUrl
       ? { entry_mode: "runtime_service_url" as const }
       : { entry_url: session.startUrl }),
     allowed_hosts: [...new Set(egressSeedHosts(session))],
@@ -4140,6 +4218,10 @@ export async function replayOperatorRecipe(
   recipe: OperatorRecipe,
   bindings: Readonly<Record<string, string>>,
   fromIndex = 0,
+  options: {
+    beforeStep?: (input: { step_index: number; action: TraceAction }) => Promise<void> | void;
+    beforeAction?: (input: { step_index: number; action: ProvisionAction }) => Promise<void> | void;
+  } = {},
 ): Promise<OperatorReplayResult> {
   const session = sessions.get(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -4227,6 +4309,7 @@ export async function replayOperatorRecipe(
   for (let i = fromIndex; i < recipe.trace.length; i += 1) {
     const step = recipe.trace[i] as TraceEntry;
     const recorded = step.action;
+    await options.beforeStep?.({ step_index: i, action: recorded });
     let action: ProvisionAction;
 
     if (recorded.kind === "extract") {
@@ -4355,6 +4438,7 @@ export async function replayOperatorRecipe(
       if (!transitionAttestation.ok) {
         return await humanRequired(transitionAttestation.reason, transitionAttestation.field);
       }
+      await options.beforeAction?.({ step_index: i, action });
       await act(sessionId, action, "none");
       replayed += 1;
       const expected = state.expectedFields.get(i);

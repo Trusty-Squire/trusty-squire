@@ -1,7 +1,10 @@
 # DESIGN — replay-engine eval harness
 
-Status: v1 implemented (2026-08-05) as a prerequisite deliverable, **before** the replay engine.
-The engine and its warm-path measurements remain absent by design. The checked-in corpus owns the
+Status: v1 harness implemented (2026-08-05); engine bridge implemented (2026-08-06). The harness
+now replays the captured prepared recipes through the production engine
+(`docs/DESIGN-replay-engine.md`) via `pnpm -F @trusty-squire/mcp eval:replay`. The checked-in
+measured report at [`apps/mcp/replay-eval-output/`](../apps/mcp/replay-eval-output/report.md) owns
+the current warm evidence and SHIP/NO-SHIP verdict. The checked-in corpus owns the
 frozen all-cold evidence; [`corpus/shopping/capture-log.json`](../corpus/shopping/capture-log.json)
 owns the target, captured, and skipped task counts.
 Related: prepared-statement recipe design (gbrain `trusty-squire-shape-cache-design-2026-08-04`),
@@ -18,9 +21,11 @@ It must emit a single go/no-go:
 > The last clause is a **veto** — any escaped wrong-outcome on the money path fails the build
 > regardless of speed.
 
-The v1 reporter also returns `NO-SHIP` when a novel task false-hits or an applied recipe lacks a
-warm sample. These are completeness invariants around the same predicate, not extra performance
-thresholds.
+The reporter also returns `NO-SHIP` when a novel task false-hits, an applied recipe lacks a warm
+sample, a structured infrastructure failure occurs, or a required repeat capture artifact is
+unavailable. These are completeness invariants around the same predicate, not extra performance
+thresholds — an unavailable sample is never scored as an escape, but it can never be scored as a
+pass either.
 
 ## 2. The governing principle: a fallback is NOT a failure
 
@@ -70,7 +75,7 @@ robust metric. Wall-clock reported as a secondary.
 | `task_success` | share of hits with `end_state == expected` (fallbacks allowed) | ≥ 98% |
 | `fallback_rate` | `steps_rescued / total_steps` | reported (cost driver) |
 | **`money_escape`** | replays where a mismatched recipe produced `end_state != expected` (wrong item/total/recipient) the guard did **not** abort | **= 0 (veto)** |
-| `drift_catch_rate` | money-affecting mutations the guard correctly aborted/fell-back | **= 100%** |
+| `drift_catch_rate` | money-affecting mutations the guard **aborted** with the independent total-verify oracle agreeing and the price guard causally credited (a fallback or an uncredited abort does NOT count as a catch; an infrastructure-failed trial counts against the rate) | **= 100%** |
 | `recipe_survival` | recipes still replaying clean at T+7d / T+30d (housekeeper) | reported |
 
 ## 5. The corpus (`corpus/shopping/`)
@@ -88,6 +93,7 @@ One task record per file (JSON), same directory convention as onboarding capture
     "product_variant_id": "53575613546607",
     "product_price_cents": 6800,
     "address": {…},
+    "contact": {…},
     "card_ref": "whitejade-test-card"
   },
   "expected_end_state": {                     // GROUND TRUTH, programmatically checkable
@@ -102,7 +108,8 @@ One task record per file (JSON), same directory convention as onboarding capture
     "tokens": 227750,
     "wall_clock_ms": 69147,
     "end_state": {…},
-    "provenance": {…}
+    "provenance": {…}                          // incl. trace_artifact + checkout_artifact
+                                               // pointers into corpus/shopping/traces/
   },
   "capture": { "status": "captured", "captured_at": "2026-08-04T21:05:00Z" }
 }
@@ -173,9 +180,13 @@ frozen cleanly are logged as skipped in `capture-log.json`; they do not enter th
 
 ## 7. The runner (data flow)
 
-The diagram below is the post-engine flow the v1 interfaces are designed to measure. Today the
-frozen gate executes the all-cold baseline and drift battery, reports zero warm measurements, and
-therefore emits `NO-SHIP`. It does not synthesize or replay a recipe.
+The `eval:replay` CLI now executes this flow end to end: it loads the per-task prepared recipe
+captured during the cold run (`corpus/shopping/traces/*.recipe.json`), splits it at the
+storefront→checkout boundary (`two-context-handoff.ts`), replays the storefront prefix in a frozen
+HAR context and the checkout suffix in a fresh live JS-enabled context via a whitejade cart
+permalink, drives both through the production engine adapter, then runs the drift battery. The
+deterministic CI gate (`pnpm -F @trusty-squire/mcp test replay-harness`) still exercises only the
+frozen corpus tests; the warm evaluation is run explicitly and its report checked in.
 
 ```
  for each task in corpus:
@@ -205,8 +216,8 @@ review DOM) against `expected_end_state`. Money veto asserts `observed_total == 
 - **CI gate** (frozen HAR corpus, harness/corpus changes now and every future engine change): emits
   the metrics table §4 + a single
   `SHIP / NO-SHIP` line applying the §1 predicate. `money_escape > 0` or `drift_catch_rate < 100%`
-  → NO-SHIP, loud. Before the engine exists, the checked-in all-cold baseline intentionally reports
-  `NO-SHIP` because there are no replay speedups or warm samples.
+  → NO-SHIP, loud. The measured warm run lives in `apps/mcp/replay-eval-output/` — that report,
+  not this document, owns the current verdict and any invalidated-measurement caveats.
 - **Periodic realism pass** (future, after the replay engine and Admin API readback are available):
   same metrics on live sites incl. `live_only`; catches drift the frozen corpus cannot and feeds
   `recipe_survival` plus housekeeper demotion tuning.
@@ -225,13 +236,21 @@ The reporter renders one JSON document plus one markdown summary.
 ## 10. Implemented v1 layout
 
 1. `apps/mcp/src/eval/replay-harness/` — corpus loader, baseline runner, metrics, reporter, native-HAR
-   substrate, and the six-mutation drift battery.
+   substrate, the six-mutation drift battery, the engine adapter (`engine-adapter.ts`), the
+   storefront/checkout split (`two-context-handoff.ts`), and the warm-evaluation CLI (`cli.ts`).
 2. `corpus/shopping/` — all four whitejade products for repeat/money cases; deathwish, allbirds,
-   brooklinen, colourpop, and tentree for novel MISS cases only.
+   brooklinen, colourpop, and tentree for novel MISS cases only. `corpus/shopping/traces/` holds the
+   per-task captured prepared recipes (`*.recipe.json`) and settled checkout artifacts
+   (`*.checkout.json`) the warm evaluation replays.
 3. `apps/mcp/scripts/capture-replay-baseline.mjs` — constrained real-LLM cold capture; run with
-   `pnpm -F @trusty-squire/mcp eval:replay:capture`.
-4. `.github/workflows/ci.yml` — runs the deterministic frozen gate for harness, corpus, and future
-   replay-engine paths.
+   `pnpm -F @trusty-squire/mcp eval:replay:capture`. `apps/mcp/scripts/record-replay-storefront-har.mjs`
+   refreshes the frozen storefront HARs by replaying the persisted recipes (session-keyed checkout
+   traffic is stripped before persistence).
+4. `apps/mcp/src/eval/replay-harness/cli.ts` — the full warm evaluation; run with
+   `pnpm -F @trusty-squire/mcp eval:replay`. Writes `report.json` + `report.md` to
+   `apps/mcp/replay-eval-output/` (scratch state under `apps/mcp/.replay-eval/` is not committed).
+5. `.github/workflows/ci.yml` — runs the deterministic frozen gate for harness, corpus, and
+   replay-engine paths; the warm evaluation is not run in CI.
 
-The all-cold baseline is recorded before the replay engine, so future speedup and correctness deltas
-are measured against driver-recorded evidence rather than estimates.
+The all-cold baseline was recorded before the replay engine, so speedup and correctness deltas are
+measured against driver-recorded evidence rather than estimates.

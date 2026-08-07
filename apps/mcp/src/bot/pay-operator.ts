@@ -238,6 +238,20 @@ function logPaymentReviewLifecycle(event: Record<string, string>): void {
   process.stderr.write(`${JSON.stringify(event)}\n`);
 }
 
+/** The signed-payment drift check, reusable before the approval ceremony begins. */
+export function checkoutSummaryMatches(
+  expected: CheckoutSummary,
+  observed: CheckoutSummary | undefined,
+): boolean {
+  return (
+    observed !== undefined &&
+    observed.amount_cents === expected.amount_cents &&
+    observed.currency === expected.currency &&
+    observed.merchant === expected.merchant &&
+    observed.checkout_origin === expected.checkout_origin
+  );
+}
+
 export async function executeOperatePay(
   args: OperatePayArgs,
   api: ApiClient,
@@ -633,13 +647,7 @@ export async function executeOperatePay(
       } catch {
         live = undefined;
       }
-      if (
-        live === undefined ||
-        live.amount_cents !== checkout.amount_cents ||
-        live.currency !== checkout.currency ||
-        live.merchant !== checkout.merchant ||
-        live.checkout_origin !== checkout.checkout_origin
-      ) {
+      if (!checkoutSummaryMatches(checkout, live)) {
         return {
           status: "payment_amount_mismatch",
           approval_url: approvalUrl,

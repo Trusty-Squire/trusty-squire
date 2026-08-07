@@ -1,0 +1,184 @@
+{
+  "name": "replay-eval-whitejade-purchase-r1",
+  "schema_version": 1,
+  "goal": "Reach review for The Recovery Crème without payment",
+  "verb": "purchase",
+  "domain": "whitejade.xyz",
+  "entry_mode": "runtime_service_url",
+  "allowed_hosts": [
+    "whitejade.xyz",
+    "www.whitejade.xyz"
+  ],
+  "trace": [
+    {
+      "action": {
+        "kind": "click",
+        "text_match": "form:decrease-quantity-increase-quantity-add-to-cart- > button:add",
+        "target": {
+          "dom_hint": {
+            "testid": "standalone-add-to-cart",
+            "name": "add"
+          },
+          "role_hint": "button",
+          "accessible_name": "Decrease quantity Increase quantity",
+          "css": "[data-testid=\"standalone-add-to-cart\"]",
+          "visible_text": "Add to cart"
+        }
+      }
+    },
+    {
+      "action": {
+        "kind": "click",
+        "text_match": "header:cart-1 > button:cart",
+        "target": {
+          "dom_hint": {
+            "testid": "cart-drawer-trigger"
+          },
+          "role_hint": "button",
+          "accessible_name": "Cart",
+          "css": "[data-testid=\"cart-drawer-trigger\"]",
+          "visible_text": "Cart 1"
+        }
+      }
+    },
+    {
+      "action": {
+        "kind": "click",
+        "text_match": "dialog:cart-1 > button:checkout",
+        "target": {
+          "dom_hint": {
+            "id": "checkout",
+            "name": "checkout"
+          },
+          "role_hint": "button",
+          "accessible_name": "Apply a discount code",
+          "near_text_hint": "Apply",
+          "css": "#checkout",
+          "visible_text": "Check out"
+        }
+      }
+    },
+    {
+      "action": {
+        "kind": "type",
+        "text_match": "section:contact > input:email",
+        "target": {
+          "dom_hint": {
+            "id": "email",
+            "name": "email"
+          },
+          "role_hint": "textbox",
+          "accessible_name": "Email",
+          "near_text_hint": "Sign in",
+          "css": "#email"
+        },
+        "value": {
+          "hole": "contact.email"
+        }
+      }
+    },
+    {
+      "action": {
+        "kind": "type",
+        "text_match": "section:shipping-method > input:first-name",
+        "target": {
+          "dom_hint": {
+            "id": "TextFieldP0-53",
+            "name": "firstName"
+          },
+          "role_hint": "textbox",
+          "accessible_name": "First name",
+          "near_text_hint": "United States",
+          "css": "#TextFieldP0-53"
+        },
+        "value": {
+          "hole": "contact.first_name"
+        }
+      }
+    },
+    {
+      "action": {
+        "kind": "type",
+        "text_match": "section:shipping-method > input:last-name",
+        "target": {
+          "dom_hint": {
+            "id": "TextFieldP0-54",
+            "name": "lastName"
+          },
+          "role_hint": "textbox",
+          "accessible_name": "Last name",
+          "near_text_hint": "United States",
+          "css": "#TextFieldP0-54"
+        },
+        "value": {
+          "hole": "contact.last_name"
+        }
+      }
+    },
+    {
+      "action": {
+        "kind": "type",
+        "text_match": "section:shipping-method > combobox:address",
+        "target": {
+          "dom_hint": {
+            "id": "shipping-address1",
+            "name": "address1"
+          },
+          "role_hint": "combobox",
+          "accessible_name": "Address",
+          "near_text_hint": "United States",
+          "css": "#shipping-address1"
+        },
+        "value": {
+          "hole": "address.line1"
+        }
+      }
+    },
+    {
+      "action": {
+        "kind": "type",
+        "text_match": "section:shipping-method > input:city",
+        "target": {
+          "dom_hint": {
+            "id": "TextFieldP0-61",
+            "name": "city"
+          },
+          "role_hint": "textbox",
+          "accessible_name": "City",
+          "near_text_hint": "State",
+          "css": "#TextFieldP0-61"
+        },
+        "value": {
+          "hole": "address.region"
+        }
+      }
+    },
+    {
+      "action": {
+        "kind": "type",
+        "text_match": "section:shipping-method > input:zip-code",
+        "target": {
+          "dom_hint": {
+            "id": "TextFieldP0-63",
+            "name": "postalCode"
+          },
+          "role_hint": "textbox",
+          "accessible_name": "ZIP code",
+          "near_text_hint": "State",
+          "css": "#TextFieldP0-63"
+        },
+        "value": {
+          "hole": "address.postal_code"
+        }
+      }
+    }
+  ],
+  "secrets": [],
+  "postcondition": {
+    "kind": "execute_capability",
+    "describe": "checkout review is reached without payment",
+    "success_signal": {
+      "url_contains": "/checkouts/"
+    }
+  }
+}
