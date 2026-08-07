@@ -50,7 +50,7 @@
     "test": "vitest run",
     "test:cov": "vitest run --coverage",
     "eval:replay:capture": "node scripts/capture-replay-baseline.mjs",
-    "eval:replay": "pnpm run build && node dist/eval/replay-harness/cli.js",
+    "eval:replay": "tsx src/eval/replay-harness/cli.ts",
     "smoke:opencode": "node scripts/smoke-opencode.mjs",
     "dev:server": "tsx src/bin.ts server",
     "install:dev": "tsx src/bin.ts install",
