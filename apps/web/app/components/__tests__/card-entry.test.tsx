@@ -58,32 +58,38 @@ describe("CardEntry — the shared sensitive add-card flow", () => {
     );
   });
 
-  it("derives brand + last4 in the browser and sends only those (never the PAN)", async () => {
-    api.apiPost.mockResolvedValue({ id: "card_new" });
-    const onSaved = vi.fn();
-    render(<CardEntry onSaved={onSaved} />);
-    await waitFor(() => expect(screen.getByLabelText("Card number")).toBeTruthy());
+  // userEvent typing across 9 fields exceeds the 5s default when the whole
+  // workspace's suites run in parallel and starve the CPU.
+  it(
+    "derives brand + last4 in the browser and sends only those (never the PAN)",
+    { timeout: 30_000 },
+    async () => {
+      api.apiPost.mockResolvedValue({ id: "card_new" });
+      const onSaved = vi.fn();
+      render(<CardEntry onSaved={onSaved} />);
+      await waitFor(() => expect(screen.getByLabelText("Card number")).toBeTruthy());
 
-    const user = userEvent.setup();
-    await user.type(screen.getByLabelText("Label"), "Personal");
-    await user.type(screen.getByLabelText("Card number"), "4242 4242 4242 4242");
-    await user.type(screen.getByLabelText("Expiration"), "12 / 45");
-    await user.type(screen.getByLabelText("Name on card"), "A Tester");
-    await user.type(screen.getByLabelText("CVV"), "123");
-    await user.type(screen.getByLabelText("Address line 1"), "1 Main St");
-    await user.type(screen.getByLabelText("City"), "Townsville");
-    await user.type(screen.getByLabelText("Postal code"), "12345");
-    await user.selectOptions(screen.getByLabelText("Country"), "US");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+      const user = userEvent.setup();
+      await user.type(screen.getByLabelText("Label"), "Personal");
+      await user.type(screen.getByLabelText("Card number"), "4242 4242 4242 4242");
+      await user.type(screen.getByLabelText("Expiration"), "12 / 45");
+      await user.type(screen.getByLabelText("Name on card"), "A Tester");
+      await user.type(screen.getByLabelText("CVV"), "123");
+      await user.type(screen.getByLabelText("Address line 1"), "1 Main St");
+      await user.type(screen.getByLabelText("City"), "Townsville");
+      await user.type(screen.getByLabelText("Postal code"), "12345");
+      await user.selectOptions(screen.getByLabelText("Country"), "US");
+      await user.click(screen.getByRole("button", { name: "Save" }));
 
-    await waitFor(() => expect(api.apiPost).toHaveBeenCalledTimes(1));
-    const [path, body] = api.apiPost.mock.calls[0] as [string, Record<string, unknown>];
-    expect(path).toBe("/v1/vault/e2e");
-    expect(body.brand).toBe("Visa");
-    expect(body.last4).toBe("4242");
-    // The full PAN must never leave the browser in the request body.
-    expect(JSON.stringify(body)).not.toContain("4242 4242 4242 4242");
-    expect(JSON.stringify(body)).not.toContain("4242424242424242");
-    expect(onSaved).toHaveBeenCalledWith({ id: "card_new" });
-  });
+      await waitFor(() => expect(api.apiPost).toHaveBeenCalledTimes(1));
+      const [path, body] = api.apiPost.mock.calls[0] as [string, Record<string, unknown>];
+      expect(path).toBe("/v1/vault/e2e");
+      expect(body.brand).toBe("Visa");
+      expect(body.last4).toBe("4242");
+      // The full PAN must never leave the browser in the request body.
+      expect(JSON.stringify(body)).not.toContain("4242 4242 4242 4242");
+      expect(JSON.stringify(body)).not.toContain("4242424242424242");
+      expect(onSaved).toHaveBeenCalledWith({ id: "card_new" });
+    },
+  );
 });

@@ -54,6 +54,7 @@ import {
   hasRecipeTargetCandidate,
   isSingleUseUrl,
   knownRecipeInputValue,
+  localeStableFieldRole,
   operatorRecipeDomain,
   resolveRecipeFieldTarget,
   resolveRecipeRepairTarget,
@@ -3093,6 +3094,9 @@ export function recipeTargetFor(
   const domHint = pickStableDomHint(el);
   const hrefHint = pickHrefHint(el);
   const scrub = (value: string): string => scrubKnownEmail(value, userEmail);
+  // Locale-stable role for money-path fill safety (autocomplete > data-role >
+  // distinguishing input type). Never label text — labels flip under i18n.
+  const fieldRole = localeStableFieldRole(el);
   return {
     ...(domHint !== undefined
       ? {
@@ -3113,6 +3117,7 @@ export function recipeTargetFor(
     ...(el.visibleText !== null && el.visibleText.length > 0
       ? { visible_text: scrub(el.visibleText) }
       : {}),
+    ...(fieldRole !== null ? { field_role: fieldRole } : {}),
   };
 }
 

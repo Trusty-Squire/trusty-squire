@@ -69,7 +69,12 @@ an ordered resolver, not fingerprint scoring or weighted matching.
 
 Before every deterministic target action, replay refreshes the live inventory
 and resolves the target structurally. Provenance-bearing money fields use the
-stricter `testid`/`id` resolution rail for value verification.
+stricter `testid`/`id` resolution rail for value verification, and additionally
+require a locale-stable field-role match: recording captures a `field_role`
+token per field (autocomplete token first, then `data-field-role`/`data-role`,
+then a distinguishing input type — never visible label text, which flips under
+i18n), and the fill commits only when the live field derives the same role. A
+missing or mismatched role signal is a miss, never a confident fill.
 
 ## Replay and repair
 
@@ -95,13 +100,16 @@ The replay money path covers purchase, subscribe, checkout, renew, upgrade,
 book, and reserve recipes. Its additional invariants are:
 
 1. Every deterministic target action passes a fresh structural resolution.
-2. Every injected address, contact, and quantity value is checked against the
+2. A recipe value is committed to a field only when the live field's
+   locale-stable role matches the recorded `field_role` (see Stable targets);
+   role mismatch or absence downgrades the step to a miss for host repair.
+3. Every injected address, contact, and quantity value is checked against the
    live field immediately after the action and across state-changing
    transitions while the field remains mounted.
-3. A host-repaired money field must identify the issued step and hole, supply
+4. A host-repaired money field must identify the issued step and hole, supply
    the same value, match the recorded or uniquely equivalent target, and pass a
    fresh live-value check.
-4. Missing or mismatched fields return `human_required`; `operate_pay` refuses
+5. Missing or mismatched fields return `human_required`; `operate_pay` refuses
    to run until all replay field guards are satisfied and rechecks mounted
    fields immediately before payment.
 

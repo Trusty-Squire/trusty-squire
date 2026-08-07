@@ -25,6 +25,7 @@ import {
   bindRecipeTarget,
   bindRecipeValue,
   cssEscapeRecipeValue,
+  localeStableFieldRole,
   verifyFilledFieldValues,
   type OperatorRecipe,
 } from "../operator-recipe.js";
@@ -218,17 +219,20 @@ describe("ordered target fallback", () => {
       name: "city",
       ariaLabel: "City",
       selector: "#billing-city",
+      autocomplete: "address-level2",
     };
     expect(
       resolveRecipeFieldTarget([billing], {
         dom_hint: { testid: "shipping-city", name: "city" },
         accessible_name: "City",
+        field_role: "ac:address-level2",
       }),
     ).toBeNull();
     expect(
       resolveRecipeFieldTarget([billing], {
         dom_hint: { name: "city" },
         accessible_name: "City",
+        field_role: "ac:address-level2",
       }),
     ).toBeNull();
     expect(
@@ -236,6 +240,7 @@ describe("ordered target fallback", () => {
         dom_hint: { testid: "shipping-city" },
         role_hint: "textbox",
         accessible_name: "City",
+        field_role: "ac:address-level2",
       }),
     ).toBeNull();
     expect(
@@ -245,6 +250,7 @@ describe("ordered target fallback", () => {
           dom_hint: { name: "city" },
           accessible_name: "City",
           near_text_hint: "Shipping",
+          field_role: "ac:address-level2",
         },
       ),
     ).toBeNull();
@@ -254,6 +260,175 @@ describe("ordered target fallback", () => {
         accessible_name: "City",
       })?.element.selector,
     ).toBe("#billing-city");
+  });
+});
+
+describe("locale-stable field role (money-path fill guard)", () => {
+  it("derives role from autocomplete, then data-role, then distinguishing type", () => {
+    expect(localeStableFieldRole({ autocomplete: "shipping given-name" })).toBe("ac:given-name");
+    expect(localeStableFieldRole({ autocomplete: "family-name" })).toBe("ac:family-name");
+    expect(localeStableFieldRole({ autocomplete: "on", type: "email" })).toBe("type:email");
+    expect(localeStableFieldRole({ autocomplete: null, type: "text", dataRole: "ship-city" })).toBe(
+      "data:ship-city",
+    );
+    expect(localeStableFieldRole({ autocomplete: null, type: "text" })).toBeNull();
+  });
+
+  it("skips the webauthn modifier token so annotated fields keep distinct roles", () => {
+    expect(localeStableFieldRole({ autocomplete: "username webauthn" })).toBe("ac:username");
+    expect(localeStableFieldRole({ autocomplete: "one-time-code webauthn" })).toBe(
+      "ac:one-time-code",
+    );
+  });
+
+  it("never wrong-fills when first/last labels swap under stable ids (report mutation #4)", () => {
+    // Verbatim from shape-partial-match-safety report: ids/names unchanged,
+    // only labels swapped. Without a matching field_role the fill is a miss.
+    const firstNameBox = {
+      testId: null,
+      id: "TextFieldP0-53",
+      name: "firstName",
+      labelText: "Last name", // swapped
+      selector: "#TextFieldP0-53",
+      value: "",
+      type: "text",
+      autocomplete: null as string | null,
+    };
+    const lastNameBox = {
+      testId: null,
+      id: "TextFieldP0-54",
+      name: "lastName",
+      labelText: "First name", // swapped
+      selector: "#TextFieldP0-54",
+      value: "",
+      type: "text",
+      autocomplete: null as string | null,
+    };
+    const elements = [firstNameBox, lastNameBox];
+    // Recipe recorded without field_role (no stable signal at capture) → miss.
+    expect(
+      resolveRecipeFieldTarget(elements, {
+        dom_hint: { id: "TextFieldP0-53" },
+        accessible_name: "First name",
+      }),
+    ).toBeNull();
+    // Even with a recorded role, live has no role signal → miss (safe by default).
+    expect(
+      resolveRecipeFieldTarget(elements, {
+        dom_hint: { id: "TextFieldP0-53" },
+        accessible_name: "First name",
+        field_role: "ac:given-name",
+      }),
+    ).toBeNull();
+    // Guard reports missing, never clean on a value that landed in the wrong box.
+    expect(
+      verifyFilledFieldValues(elements, [
+        {
+          target: {
+            dom_hint: { id: "TextFieldP0-53" },
+            accessible_name: "First name",
+            field_role: "ac:given-name",
+          },
+          expected: "Jordan",
+          hole: "address.first_name",
+        },
+      ]),
+    ).toEqual({ ok: false, reason: "field_missing", field: "address.first_name" });
+  });
+
+  it("misses when id still resolves but autocomplete role drifted", () => {
+    const element = {
+      id: "TextFieldP0-53",
+      name: "firstName",
+      labelText: "First name",
+      selector: "#TextFieldP0-53",
+      value: "",
+      type: "text",
+      autocomplete: "family-name", // role no longer matches the recorded hole
+    };
+    expect(
+      resolveRecipeFieldTarget([element], {
+        dom_hint: { id: "TextFieldP0-53" },
+        accessible_name: "First name",
+        field_role: "ac:given-name",
+      }),
+    ).toBeNull();
+  });
+
+  it("fills when role token matches even if visible label differs (EN→JP cross-locale)", () => {
+    // Proven behavior: EN-recorded plan replays on a Japanese page with
+    // reversed field order — identity is the autocomplete token, not the label.
+    const jpGivenName = {
+      id: "TextFieldP0-54", // order reversed vs EN recording
+      name: "firstName",
+      labelText: "名", // Japanese "given name"
+      selector: "#TextFieldP0-54",
+      value: "",
+      type: "text",
+      autocomplete: "given-name",
+    };
+    const jpFamilyName = {
+      id: "TextFieldP0-53",
+      name: "lastName",
+      labelText: "姓",
+      selector: "#TextFieldP0-53",
+      value: "Jordan",
+      type: "text",
+      autocomplete: "family-name",
+    };
+    const resolution = resolveRecipeFieldTarget([jpFamilyName, jpGivenName], {
+      dom_hint: { id: "TextFieldP0-54" },
+      accessible_name: "First name", // EN label from recording — must not be required
+      field_role: "ac:given-name",
+    });
+    expect(resolution?.element.selector).toBe("#TextFieldP0-54");
+    expect(
+      verifyFilledFieldValues(
+        [{ ...jpGivenName, value: "Jordan" }, jpFamilyName],
+        [
+          {
+            target: {
+              dom_hint: { id: "TextFieldP0-54" },
+              accessible_name: "First name",
+              field_role: "ac:given-name",
+            },
+            expected: "Jordan",
+            hole: "address.first_name",
+          },
+        ],
+      ),
+    ).toEqual({ ok: true });
+  });
+
+  it("happy path unchanged when role tokens match", () => {
+    const element = {
+      testId: "shipping-city",
+      id: "city",
+      name: "city",
+      labelText: "City",
+      selector: "#city",
+      value: "Queens",
+      type: "text",
+      autocomplete: "address-level2",
+    };
+    expect(
+      resolveRecipeFieldTarget([element], {
+        dom_hint: { testid: "shipping-city" },
+        field_role: "ac:address-level2",
+      })?.element.selector,
+    ).toBe("#city");
+    expect(
+      verifyFilledFieldValues(
+        [element],
+        [
+          {
+            target: { dom_hint: { testid: "shipping-city" }, field_role: "ac:address-level2" },
+            expected: "Queens",
+            hole: "address.city",
+          },
+        ],
+      ),
+    ).toEqual({ ok: true });
   });
 });
 
@@ -444,12 +619,17 @@ describe("provenance holes", () => {
 });
 
 describe("money-path field-value guard", () => {
-  const target = { dom_hint: { testid: "shipping-city" }, visible_text: "City" };
+  const target = {
+    dom_hint: { testid: "shipping-city" },
+    visible_text: "City",
+    field_role: "ac:address-level2",
+  };
   const element = {
     testId: "shipping-city",
     selector: "#city",
     value: "Queens",
     visibleText: null,
+    autocomplete: "address-level2",
   };
 
   it("passes only on exact injected values", () => {
@@ -459,16 +639,35 @@ describe("money-path field-value guard", () => {
   });
 
   it("verifies selects by their committed option label", () => {
+    const countryTarget = {
+      dom_hint: { testid: "shipping-city" },
+      field_role: "ac:country",
+    };
+    const countryEl = { ...element, autocomplete: "country" };
     expect(
       verifyFilledFieldValues(
-        [{ ...element, value: "US", selectedOptionText: "United States" }],
-        [{ target, expected: "United States", hole: "address.country", kind: "select" }],
+        [{ ...countryEl, value: "US", selectedOptionText: "United States" }],
+        [
+          {
+            target: countryTarget,
+            expected: "United States",
+            hole: "address.country",
+            kind: "select",
+          },
+        ],
       ),
     ).toEqual({ ok: true });
     expect(
       verifyFilledFieldValues(
-        [{ ...element, value: null, visibleText: "United States" }],
-        [{ target, expected: "United States", hole: "address.country", kind: "select" }],
+        [{ ...countryEl, value: null, visibleText: "United States" }],
+        [
+          {
+            target: countryTarget,
+            expected: "United States",
+            hole: "address.country",
+            kind: "select",
+          },
+        ],
       ),
     ).toEqual({ ok: true });
   });

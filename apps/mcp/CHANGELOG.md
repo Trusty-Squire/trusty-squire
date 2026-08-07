@@ -1,11 +1,35 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.8 (2026-08-07)
+
+- release(mcp): 1.1.8-rc.1
+- fix: ground payment currency and harden approval relays (#439)
+- fix: make payment approvals durable and single-passkey (#438)
+- fix(mcp): name invalid argument fields (#437)
+- docs: route feature PRs through staging, not main (#436)
+
 ## 1.1.8-rc.1 (2026-08-07)
 
 - fix: ground payment currency and harden approval relays (#439)
 - fix: make payment approvals durable and single-passkey (#438)
 - fix(mcp): name invalid argument fields (#437)
 - docs: route feature PRs through staging, not main (#436)
+
+## 1.1.7 (2026-08-05)
+
+- release(mcp): 1.1.7-rc.1 (#434)
+- feat: add two-stage passkey verification to payment approvals (#432)
+- feat(mcp): add secure prepared recipe replay (#431)
+- feat(mcp): hand off PayPal checkouts before payment approval (#430)
+- feat(mcp): reuse warm browser across operate sessions (#429)
+- test(mcp): add replay-engine evaluation harness (#428)
+- fix(mcp): type combined card expiry as digits (#427)
+- Reduce duplicate Actions usage (#425)
+- fix(security): harden Resend key scanning (#423)
+- fix(api): stabilize egress access and grant rate limits (#424)
+- fix(api): report honest hourly vault audit activity (#422)
+- fix(mcp): drive nth-chain native selects (#416)
+- fix: retry stale registry installs during verification (#421)
 
 ## 1.1.7-rc.1 (2026-08-05)
 
