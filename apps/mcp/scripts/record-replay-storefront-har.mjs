@@ -10,7 +10,7 @@ import { resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { chromium } from "playwright";
 import { OperatorRecipeSchema } from "../dist/bot/operator-recipe.js";
-import { replayRecipeOnHarnessPage } from "../dist/eval/replay-harness/engine-adapter.js";
+import { parseFallbackAction, replayRecipeOnHarnessPage } from "../dist/eval/replay-harness/engine-adapter.js";
 import { sanitizeReplayHar } from "./replay-capture-support.mjs";
 
 const root = resolve(import.meta.dirname, "../../..");
@@ -60,6 +60,8 @@ function retainFrozenStorefrontEntry(entry) {
 async function measuredRescue(input) {
   const prompt = [
     "Return only JSON for one safe browser repair action.",
+    "Allowed kinds: click, js_click, type, select, set_phone_country, goto, press, scroll.",
+    'For every click, js_click, type, or select, set target to the literal live ref string: {"target":"@e:…"}. Do not wrap it in an object.',
     "Never enter payment, submit an order, request a card, or click a final payment control.",
     `Missed step: ${JSON.stringify({ step_index: input.step_index, reason: input.reason, action: input.action })}`,
     `Bindings: ${JSON.stringify(input.bindings)}`,
@@ -81,7 +83,7 @@ async function measuredRescue(input) {
     throw new Error("fallback rescue returned no measured action");
   }
   return {
-    action: JSON.parse(raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")),
+    action: parseFallbackAction(JSON.parse(raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, ""))),
     turns: 1,
     tokens: usage.input_tokens + usage.output_tokens,
   };

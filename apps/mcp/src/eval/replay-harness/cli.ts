@@ -563,9 +563,17 @@ async function main(): Promise<void> {
           tokens: task.cold_baseline.tokens,
           wall_clock_ms: task.cold_baseline.wall_clock_ms,
         },
+        cold_recording: {
+          task_id: task.task_id,
+          ...task.cold_baseline,
+          end_state_matches: endStatesMatch(
+            task.cold_baseline.end_state,
+            task.expected_end_state,
+          ),
+        },
         recipe_applied: true,
         end_state_matches: false,
-        fallbacks: 1,
+        fallbacks: 0,
         total_steps: prepared.recipe.trace.length,
         warm_unavailable_reason: error instanceof Error ? error.message : String(error),
       });
