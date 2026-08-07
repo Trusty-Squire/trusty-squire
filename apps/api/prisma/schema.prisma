@@ -350,6 +350,18 @@ model PendingPaymentApproval {
   status          String
   jws             String?
   sealed_card     String?
+  // Short-lived durable review and final relays. The card remains encrypted to
+  // the operator; plaintext never reaches this record.
+  review_jws                   String?
+  review_sealed_card           String?
+  review_candidate_fingerprint String?
+  review_phase                 String?
+  review_expires_at            DateTime?
+  submission_jws               String?
+  submission_sealed_card       String?
+  submission_candidate_fingerprint String?
+  submission_phase             String?
+  submission_expires_at        DateTime?
   created_at      DateTime @default(now())
   expires_at      DateTime
 

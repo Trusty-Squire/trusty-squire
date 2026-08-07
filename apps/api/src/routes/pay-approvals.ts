@@ -2,6 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
+import { formatCurrencyAmount } from "../services/money.js";
 import { sendTelegramMessage } from "../services/telegram.js";
 
 // Web base for the approval link sent to Telegram. Reuses PWA_BASE_URL
@@ -140,106 +141,66 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
 }> = async (fastify, opts) => {
   type Submission = z.infer<typeof approveBody>;
-  type SubmissionWaiter = {
-    accountId: string;
-    resolve: (submission: Submission | null) => void;
-    timer: ReturnType<typeof setTimeout>;
-  };
-  type ReviewConfirmationWaiter = {
-    accountId: string;
-    fingerprint: string;
-    resolve: (confirmed: boolean) => void;
-    timer: ReturnType<typeof setTimeout>;
-  };
-  const submissionWaiters = new Map<string, SubmissionWaiter>();
-  const reviewConfirmationWaiters = new Map<string, ReviewConfirmationWaiter>();
+  const reviewTtlMs = 15_000;
+  const relayPollIntervalMs = 1_000;
+  const sleep = async (ms: number): Promise<void> =>
+    await new Promise((resolve) => setTimeout(resolve, ms));
 
   const submissionFingerprint = (submission: Submission): string =>
     createHash("sha256")
       .update(JSON.stringify([submission.jws, submission.sealed_card]))
       .digest("base64url");
 
-  const waitForSubmission = async (id: string, accountId: string): Promise<Submission | null> =>
-    await new Promise<Submission | null>((resolve) => {
-      const previous = submissionWaiters.get(id);
-      if (previous !== undefined) {
-        clearTimeout(previous.timer);
-        previous.resolve(null);
-      }
-      let waiter: SubmissionWaiter;
-      const timer = setTimeout(() => {
-        if (submissionWaiters.get(id) === waiter) submissionWaiters.delete(id);
-        resolve(null);
-      }, 15_000);
-      waiter = { accountId, resolve, timer };
-      submissionWaiters.set(id, waiter);
-    });
+  const event = (
+    name: string,
+    record: ApprovalRecord,
+    fingerprint: string | null,
+    failureCode: string,
+  ) =>
+    fastify.log.info(
+      {
+        event: name,
+        approval_id: record.id,
+        candidate_fingerprint: fingerprint,
+        account_hash: createHash("sha256").update(record.accountId).digest("base64url"),
+        machine_id: process.env.FLY_MACHINE_ID ?? "unknown",
+        release_id: process.env.FLY_IMAGE_REF ?? process.env.RELEASE_ID ?? "unknown",
+        failure_code: failureCode,
+      },
+      "payment review lifecycle",
+    );
 
-  const deliverSubmission = (id: string, accountId: string, submission: Submission): boolean => {
-    const waiter = submissionWaiters.get(id);
-    if (waiter === undefined || waiter.accountId !== accountId) return false;
-    submissionWaiters.delete(id);
-    clearTimeout(waiter.timer);
-    waiter.resolve(submission);
-    return true;
-  };
-
-  const waitForReviewConfirmation = (
-    id: string,
-    accountId: string,
-    submission: Submission,
-  ): Promise<boolean> | null => {
-    if (reviewConfirmationWaiters.has(id)) return null;
-    return new Promise<boolean>((resolve) => {
-      let waiter: ReviewConfirmationWaiter;
-      const timer = setTimeout(() => {
-        if (reviewConfirmationWaiters.get(id) === waiter) {
-          reviewConfirmationWaiters.delete(id);
-        }
-        resolve(false);
-      }, 15_000);
-      waiter = {
+  const waitForSubmission = async (id: string, accountId: string): Promise<Submission | null> => {
+    const deadline = Date.now() + reviewTtlMs;
+    while (Date.now() < deadline) {
+      const candidate = await opts.deps.pendingPaymentApprovalStore.getRelayCandidateForAccount(
+        id,
         accountId,
-        fingerprint: submissionFingerprint(submission),
-        resolve,
-        timer,
-      };
-      reviewConfirmationWaiters.set(id, waiter);
-    });
+        opts.deps.now?.() ?? new Date(),
+      );
+      if (candidate !== null) return { jws: candidate.jws, sealed_card: candidate.sealedCard };
+      await sleep(relayPollIntervalMs);
+    }
+    return null;
   };
 
-  const finishReviewConfirmation = (
+  const waitForReviewConfirmation = async (
     id: string,
     accountId: string,
-    submission: Submission,
-    confirmed: boolean,
-  ): boolean => {
-    const waiter = reviewConfirmationWaiters.get(id);
-    if (
-      waiter === undefined ||
-      waiter.accountId !== accountId ||
-      waiter.fingerprint !== submissionFingerprint(submission)
-    ) {
-      return false;
+    fingerprint: string,
+  ): Promise<boolean> => {
+    const deadline = Date.now() + reviewTtlMs;
+    while (Date.now() < deadline) {
+      const relay = await opts.deps.pendingPaymentApprovalStore.getReviewRelayForAccount(
+        id,
+        accountId,
+        opts.deps.now?.() ?? new Date(),
+      );
+      if (relay?.phase === "confirmed" && relay.fingerprint === fingerprint) return true;
+      await sleep(relayPollIntervalMs);
     }
-    reviewConfirmationWaiters.delete(id);
-    clearTimeout(waiter.timer);
-    waiter.resolve(confirmed);
-    return true;
+    return false;
   };
-
-  fastify.addHook("onClose", async () => {
-    for (const waiter of submissionWaiters.values()) {
-      clearTimeout(waiter.timer);
-      waiter.resolve(null);
-    }
-    submissionWaiters.clear();
-    for (const waiter of reviewConfirmationWaiters.values()) {
-      clearTimeout(waiter.timer);
-      waiter.resolve(false);
-    }
-    reviewConfirmationWaiters.clear();
-  });
 
   fastify.get("/v1/pay/config", { preHandler: opts.requireAgent }, async (req, reply) => {
     if (req.auth!.kind !== "agent") return;
@@ -286,9 +247,9 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     // Telegram error must never delay or fail the approval response.
     const account = await opts.deps.accountStore.findAccountById(auth.account_id);
     if (account?.telegram_chat_id != null) {
-      const amount = (parsed.data.amount_cents / 100).toFixed(2);
+      const amount = formatCurrencyAmount(parsed.data.amount_cents, parsed.data.currency);
       const text =
-        `Trusty Squire — approve ${parsed.data.currency} ${amount} to ${parsed.data.merchant}\n` +
+        `Trusty Squire — approve ${amount} to ${parsed.data.merchant}\n` +
         `${webBaseUrl()}/vault/pay/${id}`;
       void sendTelegramMessage(account.telegram_chat_id, text).catch(() => {});
     }
@@ -315,9 +276,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       if (account?.telegram_chat_id != null) {
         const text =
           "🔐 3-D Secure required — complete the challenge in the open checkout browser to finish your " +
-          record.currency +
-          " " +
-          (record.amountCents / 100).toFixed(2) +
+          formatCurrencyAmount(record.amountCents, record.currency) +
           " payment to " +
           record.merchant +
           ".";
@@ -346,6 +305,8 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         req.auth!.kind === "agent" && req.query.wait_for_submission === "1" && status === "pending"
           ? await waitForSubmission(record.id, record.accountId)
           : null;
+      if (submission !== null)
+        event("candidate_delivered", record, submissionFingerprint(submission), "ok");
       return reply.code(200).send({
         id: record.id,
         status,
@@ -391,8 +352,19 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     return reply.code(200).send({
       id: record.id,
       status,
+      // Capability-link disclosure: these are the exact server-stored values
+      // the later, single payment mandate must bind. No card data is included.
+      merchant: record.merchant,
+      checkout_origin: record.checkoutOrigin,
+      amount_cents: record.amountCents,
+      currency: record.currency,
+      nonce: record.nonce,
       card_ref: record.cardRef,
       operator_pubkey: record.operatorPubkey,
+      item: record.item,
+      reason: record.reason,
+      agent: record.agent,
+      expires_at: record.expiresAt.toISOString(),
       approval_payload_sha256: payloadHash?.toString("base64url") ?? null,
       card: card === null ? null : { blob: card.blob },
     });
@@ -484,23 +456,29 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       reply.code(403).send({ error: "payment_approval_binding_mismatch" });
       return;
     }
-    const reviewConfirmation =
-      binding === "review"
-        ? waitForReviewConfirmation(req.params.id, record.accountId, parsed.data)
-        : null;
-    if (binding === "review" && reviewConfirmation === null) {
-      reply.code(409).send({ error: "payment_review_in_progress" });
-      return;
-    }
-    if (!deliverSubmission(req.params.id, record.accountId, parsed.data)) {
-      if (reviewConfirmation !== null) {
-        finishReviewConfirmation(req.params.id, record.accountId, parsed.data, false);
+    if (binding === "review") {
+      const fingerprint = submissionFingerprint(parsed.data);
+      const submitted = await opts.deps.pendingPaymentApprovalStore.submitReviewCandidate(
+        record.id,
+        record.accountId,
+        { jws: parsed.data.jws, sealedCard: parsed.data.sealed_card, fingerprint },
+        new Date(Math.min(record.expiresAt.getTime(), now.getTime() + reviewTtlMs)),
+        now,
+      );
+      if (submitted === "in_progress") {
+        event("review_submitted", record, fingerprint, "in_progress");
+        reply.code(409).send({ error: "payment_review_in_progress" });
+        return;
       }
-      reply.code(409).send({ error: "payment_operator_unavailable" });
-      return;
-    }
-    if (reviewConfirmation !== null) {
-      if (!(await reviewConfirmation)) {
+      if (submitted !== "submitted") {
+        event("review_submitted", record, fingerprint, "not_pending");
+        reply.code(409).send({ error: "payment_approval_not_pending" });
+        return;
+      }
+      event("review_wait_created", record, fingerprint, "ok");
+      event("review_submitted", record, fingerprint, "ok");
+      if (!(await waitForReviewConfirmation(record.id, record.accountId, fingerprint))) {
+        event("timeout", record, fingerprint, "review_confirm_timeout");
         reply.code(409).send({ error: "payment_review_not_verified" });
         return;
       }
@@ -543,6 +521,23 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         card: { brand: card.brand, last4: card.last4 },
       });
     }
+    const submittedAt = opts.deps.now?.() ?? new Date();
+    const fingerprint = submissionFingerprint(parsed.data);
+    const submitted = await opts.deps.pendingPaymentApprovalStore.submitCandidate(
+      record.id,
+      record.accountId,
+      { jws: parsed.data.jws, sealedCard: parsed.data.sealed_card, fingerprint },
+      new Date(Math.min(record.expiresAt.getTime(), submittedAt.getTime() + reviewTtlMs)),
+      submittedAt,
+    );
+    if (submitted === "in_progress") {
+      reply.code(409).send({ error: "payment_approval_in_progress" });
+      return;
+    }
+    if (submitted !== "submitted") {
+      reply.code(409).send({ error: "payment_approval_not_pending" });
+      return;
+    }
     return reply.code(202).send({ status: "pending" });
   });
 
@@ -570,18 +565,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         reply.code(409).send({ error: "card_required" });
         return;
       }
-      if (record.status !== "pending") {
-        const sameApprovedSubmission =
-          record.status === "approved" &&
-          record.jws === parsed.data.jws &&
-          record.sealedCard === parsed.data.sealed_card;
-        if (sameApprovedSubmission) {
-          return reply.code(200).send({ status: "approved" });
-        }
+      if (record.status !== "pending" && record.status !== "approved") {
         reply.code(409).send({ error: "payment_approval_candidate_changed" });
         return;
       }
-      if (record.expiresAt <= now) {
+      if (record.status === "pending" && record.expiresAt <= now) {
         reply.code(409).send({ error: "payment_approval_expired" });
         return;
       }
@@ -591,20 +579,33 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         return;
       }
       if (binding === "review") {
-        if (!finishReviewConfirmation(req.params.id, auth.account_id, parsed.data, true)) {
+        if (record.status !== "pending") {
           reply.code(409).send({ error: "payment_approval_candidate_changed" });
           return;
         }
+        const fingerprint = submissionFingerprint(parsed.data);
+        event("review_confirm_received", record, fingerprint, "ok");
+        const result = await opts.deps.pendingPaymentApprovalStore.confirmReviewCandidate(
+          req.params.id,
+          auth.account_id,
+          fingerprint,
+          now,
+        );
+        if (result !== "confirmed") {
+          event("review_confirm_rejected", record, fingerprint, result);
+          reply.code(409).send({ error: "payment_approval_candidate_changed" });
+          return;
+        }
+        event("review_confirm_matched", record, fingerprint, "ok");
         return reply.code(200).send({ status: "verified" });
       }
-      const confirmed = await opts.deps.pendingPaymentApprovalStore.approveForAccount(
+      const confirmed = await opts.deps.pendingPaymentApprovalStore.confirmCandidateForAccount(
         req.params.id,
         auth.account_id,
-        parsed.data.jws,
-        parsed.data.sealed_card,
+        submissionFingerprint(parsed.data),
         now,
       );
-      if (!confirmed) {
+      if (confirmed !== "confirmed") {
         reply.code(409).send({ error: "payment_approval_candidate_changed" });
         return;
       }

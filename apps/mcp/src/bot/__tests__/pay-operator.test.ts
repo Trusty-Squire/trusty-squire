@@ -33,6 +33,7 @@ const SYNTHETIC_CARD = {
 type Mode =
   | "happy"
   | "review_then_happy"
+  | "review_wrong_issuer"
   | "confirm_response_lost"
   | "confirm_response_lost_changed"
   | "junk_then_happy"
@@ -131,7 +132,8 @@ async function harness(
       };
       const canonical = canonicalize(payload)!;
       const aad = createHash("sha256").update(canonical, "utf8").digest();
-      const reviewCandidate = mode === "review_then_happy" && approvalPolls === 1;
+      const reviewCandidate =
+        (mode === "review_then_happy" || mode === "review_wrong_issuer") && approvalPolls === 1;
       const reviewCanonical = canonicalize({
         approval_id: "approval_test",
         approval_payload_sha256: aad.toString("base64url"),
@@ -148,7 +150,9 @@ async function harness(
       })
         .setProtectedHeader({ alg: "RS256", kid: "test-key" })
         .setIssuer(
-          mode === "wrong_issuer" ? "https://other-issuer.example" : "https://vouchflow.dev",
+          mode === "wrong_issuer" || mode === "review_wrong_issuer"
+            ? "https://other-issuer.example"
+            : "https://vouchflow.dev",
         )
         .setAudience(mode === "wrong_audience" ? "other-customer" : "customer_test")
         .sign(privateKey);
@@ -186,13 +190,20 @@ async function harness(
       if (mode === "review_then_happy" && confirmationBodies.length === 1) {
         return Response.json({ status: "verified" });
       }
-      confirmedCandidate =
-        mode === "confirm_response_lost_changed"
-          ? { ...body, sealed_card: "different-candidate" }
-          : body;
-      if (mode === "confirm_response_lost" || mode === "confirm_response_lost_changed") {
+      if (
+        (mode === "confirm_response_lost" || mode === "confirm_response_lost_changed") &&
+        confirmationBodies.length === 1
+      ) {
+        confirmedCandidate =
+          mode === "confirm_response_lost_changed"
+            ? { ...body, sealed_card: "different-candidate" }
+            : body;
         throw new TypeError("confirm response lost");
       }
+      if (mode === "confirm_response_lost_changed") {
+        return Response.json({ error: "payment_approval_candidate_changed" }, { status: 409 });
+      }
+      confirmedCandidate = body;
       return Response.json({ status: "approved" });
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/notify-3ds") && init?.method === "POST") {
@@ -270,6 +281,60 @@ async function harness(
 }
 
 describe("operate_pay", () => {
+  it.each([
+    ["payment_checkout_currency_unresolved_scale_mismatch", "fallback_currency_scale_mismatch"],
+    ["payment_checkout_currency_unresolved", "checkout_currency_unrecognized"],
+  ])(
+    "does not mint an approval for checkout currency grounding failure %s",
+    async (error, reason) => {
+      const approvalBodies: Array<Record<string, unknown>> = [];
+      const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+        const url =
+          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+        if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
+          return Response.json({ vouchflow_audience: "customer_test" });
+        }
+        if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+          approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        }
+        return Response.json({ error: "unexpected_request" }, { status: 500 });
+      }) as typeof fetch;
+      const api = new ApiClient({
+        apiBaseUrl: "https://api.test",
+        registryBaseUrl: "https://registry.test",
+        agentSessionToken: "synthetic-session-token",
+        fetch: fetchMock,
+      });
+      const browser: PaymentBrowser = {
+        isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
+        readCheckoutSummary: vi.fn().mockRejectedValue(new Error(error)),
+        currentUrl: vi.fn().mockReturnValue("https://flowers.example.test/checkout"),
+        fillAndSubmitCheckout: vi.fn(),
+        waitForThreeDsResolution: vi.fn(),
+      };
+
+      await expect(
+        executeOperatePay(
+          {
+            card_ref: "card_test",
+            merchant: "Japan Flower Shop",
+            amount_cents: 9_845,
+            currency: "JPY",
+            item: "Flowers",
+            reason: "Gift",
+          },
+          api,
+          browser,
+          { vouchflowExpectedAudience: "customer_test" },
+        ),
+      ).resolves.toEqual({
+        status: "payment_checkout_currency_unresolved",
+        reason,
+      });
+      expect(approvalBodies).toEqual([]);
+    },
+  );
+
   it("verifies the mandate, opens the card, fills the checkout, and audits last4 only", async () => {
     const {
       result,
@@ -319,6 +384,17 @@ describe("operate_pay", () => {
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
   });
 
+  it("surfaces a rejected review issuer instead of silently polling", async () => {
+    const { result, filledCards, confirmationBodies } = await harness("review_wrong_issuer");
+
+    expect(result).toMatchObject({
+      status: "payment_review_verification_failed",
+      reason: "mandate_verification_failed",
+    });
+    expect(confirmationBodies).toHaveLength(0);
+    expect(filledCards).toHaveLength(0);
+  });
+
   it("ignores a junk pending seal and confirms a valid replacement", async () => {
     const { result, filledCards, confirmationBodies } = await harness("junk_then_happy");
 
@@ -333,7 +409,8 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
-    expect(confirmationBodies).toHaveLength(1);
+    expect(confirmationBodies).toHaveLength(2);
+    expect(confirmationBodies[1]).toEqual(confirmationBodies[0]);
   });
 
   it("does not reconcile a lost response to a different approved candidate", async () => {

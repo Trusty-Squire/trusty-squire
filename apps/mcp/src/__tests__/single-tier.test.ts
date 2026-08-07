@@ -69,3 +69,51 @@ describe("MCP client identity", () => {
     }
   });
 });
+
+describe("MCP tool argument validation", () => {
+  it("names every missing required field", async () => {
+    const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
+    const server = await buildServer(api);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "validation-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({ name: "operate_pay", arguments: {} });
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([
+        { type: "text", text: "invalid arguments: item: Required; reason: Required" },
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("preserves schema-level refinement messages", async () => {
+    const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
+    const server = await buildServer(api);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    const client = new Client({ name: "validation-test", version: "1.0.0" });
+    await client.connect(clientTransport);
+
+    try {
+      const result = await client.callTool({
+        name: "operate_pay",
+        arguments: {
+          item: "Test item",
+          reason: "Test reason",
+          card_ref: "card_1",
+          card_label: "Personal",
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.content).toEqual([
+        { type: "text", text: "invalid arguments: Provide at most one of card_ref or card_label" },
+      ]);
+    } finally {
+      await client.close();
+    }
+  });
+});

@@ -1,5 +1,20 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.8 (2026-08-07)
+
+- release(mcp): 1.1.8-rc.1
+- fix: ground payment currency and harden approval relays (#439)
+- fix: make payment approvals durable and single-passkey (#438)
+- fix(mcp): name invalid argument fields (#437)
+- docs: route feature PRs through staging, not main (#436)
+
+## 1.1.8-rc.1 (2026-08-07)
+
+- fix: ground payment currency and harden approval relays (#439)
+- fix: make payment approvals durable and single-passkey (#438)
+- fix(mcp): name invalid argument fields (#437)
+- docs: route feature PRs through staging, not main (#436)
+
 ## 1.1.7 (2026-08-05)
 
 - release(mcp): 1.1.7-rc.1 (#434)
@@ -18,6 +33,9 @@
 
 ## 1.1.7-rc.1 (2026-08-05)
 
+- **Breaking: `operate_pay` now requires `item` and `reason`.** They were optional
+  in 1.1.6; callers that pass neither now receive a validation error because both
+  fields are bound into the approval and passkey purchase mandate.
 - feat: add two-stage passkey verification to payment approvals (#432)
 - feat(mcp): add secure prepared recipe replay (#431)
 - feat(mcp): hand off PayPal checkouts before payment approval (#430)

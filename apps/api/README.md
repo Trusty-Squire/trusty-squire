@@ -39,10 +39,10 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send a Telegram 3-D Secure nudge to the account's linked chat and return `{ sent }` |
 | `GET` | `/v1/pay/approvals/:id` | web/agent | Poll an account-owned payment approval |
-| `GET` | `/v1/pay/approvals/:id/ceremony` | none | Return only the opaque PRF/HPKE ceremony inputs for a pending approval |
+| `GET` | `/v1/pay/approvals/:id/ceremony` | none | Return the canonical purchase display plus opaque PRF/HPKE inputs for a pending approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
-| `POST` | `/v1/pay/approvals/:id/approve` | none | Relay an opaque review or final approval seal to the waiting account operator without persisting it |
-| `POST` | `/v1/pay/approvals/:id/confirm` | agent | Release review details or persist a final approval after operator verification |
+| `POST` | `/v1/pay/approvals/:id/approve` | none | Stage a fingerprinted opaque review or final candidate in the short-TTL account relay |
+| `POST` | `/v1/pay/approvals/:id/confirm` | agent | Confirm the exact operator-verified candidate for the authenticated account |
 | `GET` | `/health` | none | Liveness |
 
 Client-encrypted card creation accepts optional plaintext `brand` and `last4`
@@ -75,14 +75,26 @@ approval follows the server-enforced seal → bind → approve order. Binding is
 pending-only, write-once, rejects an expired approval, and accepts only an
 `E2ECredential` owned by the same account; an unknown or foreign card returns
 `404`. Approving before a card is bound returns
-`409 { "error": "card_required" }`. The unauthenticated ceremony response
-contains only the approval id, status, bound card reference, operator public key,
-an opaque approval payload digest, and the encrypted card blob. An enrolled
-passkey holder submits a review seal without a web session; payment details and
-card display metadata are returned only after the authenticated operator verifies
-that approval-bound PRF/HPKE seal. Neither review nor final submissions are staged
-on the approval row. Review confirmation releases details without mutation; final
-confirmation persists the verified mandate, sealed card, and approved status.
+`409 { "error": "card_required" }`. The unauthenticated ceremony response is a
+capability-link disclosure of the exact server-recorded merchant, checkout origin,
+amount, currency, nonce, item, reason, requesting agent, and expiry. It also
+contains the approval id and status, bound card reference, operator public key,
+opaque approval-payload digest, and encrypted card blob, but no card display
+metadata. The anonymous approval shell renders those canonical values before one
+payment-context passkey action signs them, derives the card key, and seals the card
+to the operator.
+
+`POST /approve` accepts a server-bound JWS and operator-sealed ciphertext only
+while the approval is pending. It stores the candidate, its SHA-256 fingerprint,
+phase, and an at-most-15-second expiry in the account-owned Postgres row so an
+authenticated agent polling through a different API worker can receive it.
+`POST /confirm` must use the same account and exact delivered fingerprint. A
+successful final confirmation atomically marks the approval approved and clears
+all staged JWS and ciphertext; an idempotent repeat for that fingerprint is
+accepted during the relay TTL. Review-format candidates are compatibility-only:
+their successful confirmation clears the staged bytes but leaves the approval
+pending, so a review seal is never final approval. Wrong-account, changed,
+undelivered, or expired candidates fail closed.
 
 ## Auth model
 

@@ -260,7 +260,7 @@ describe("payment approval relay", () => {
     });
   });
 
-  it("exposes only opaque cryptographic inputs before passkey authentication", async () => {
+  it("discloses server-record payment details but never card data before authorization", async () => {
     const cardId = await createOwnedCard(webCookie);
     const created = await createApproval(cardId);
     const response = await server.inject({
@@ -268,23 +268,20 @@ describe("payment approval relay", () => {
       url: `/v1/pay/approvals/${created.id}/ceremony`,
     });
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toEqual({
+    expect(response.json()).toMatchObject({
       id: created.id,
       status: "pending",
+      merchant: "Synthetic Books",
+      checkout_origin: "https://checkout.synthetic.test",
+      amount_cents: 2599,
+      currency: "USD",
+      item: "Synthetic Book",
+      reason: "Synthetic test purchase",
       card_ref: cardId,
       operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
       approval_payload_sha256: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
-      card: {
-        blob: '{ "ciphertext": "synthetic-sealed-card" }',
-      },
     });
-    expect(JSON.stringify(response.json())).not.toContain("Synthetic Books");
     expect(JSON.stringify(response.json())).not.toContain("4242");
-    expect(response.json()).not.toHaveProperty("merchant");
-    expect(response.json()).not.toHaveProperty("amount_cents");
-    expect(response.json()).not.toHaveProperty("item");
-    expect(response.json()).not.toHaveProperty("reason");
-    expect(response.json()).not.toHaveProperty("agent");
   });
 
   it("releases details without a session only after operator review verification", async () => {
@@ -378,6 +375,45 @@ describe("payment approval relay", () => {
     });
     expect(confirmed.statusCode).toBe(200);
     expect(confirmed.json()).toEqual({ status: "approved" });
+  });
+
+  it("settles a review confirmation received by a distinct API worker", async () => {
+    const cardId = await createOwnedCard(webCookie);
+    const created = await createApproval(cardId);
+    const ceremony = (
+      await server.inject({ method: "GET", url: `/v1/pay/approvals/${created.id}/ceremony` })
+    ).json() as {
+      id: string;
+      card_ref: string;
+      operator_pubkey: string;
+      approval_payload_sha256: string;
+    };
+    const review = makeReviewSubmission(ceremony);
+    const workerB = await buildServer({ deps });
+    try {
+      const reviewer = workerB.inject({
+        method: "POST",
+        url: `/v1/pay/approvals/${created.id}/approve`,
+        payload: review,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const delivered = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}?wait_for_submission=1`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      });
+      expect(delivered.json()).toMatchObject(review);
+      const confirmed = await server.inject({
+        method: "POST",
+        url: `/v1/pay/approvals/${created.id}/confirm`,
+        headers: { authorization: `Bearer ${agentToken}` },
+        payload: review,
+      });
+      expect(confirmed.json()).toEqual({ status: "verified" });
+      expect((await reviewer).statusCode).toBe(200);
+    } finally {
+      await workerB.close();
+    }
   });
 
   it("stores item/reason and the MCP client requester header", async () => {
@@ -475,7 +511,7 @@ describe("payment approval relay", () => {
     expect(response.json()).toEqual({});
   });
 
-  it("does not persist any candidate before the agent confirms a verified seal", async () => {
+  it("durably retains an operator-sealed candidate until the agent confirms it", async () => {
     const created = await createApproval();
     const forged = { ...makeSubmission(created), sealed_card: "junk-seal" };
     const noOperator = await server.inject({
@@ -483,8 +519,7 @@ describe("payment approval relay", () => {
       url: `/v1/pay/approvals/${created.id}/approve`,
       payload: forged,
     });
-    expect(noOperator.statusCode).toBe(409);
-    expect(noOperator.json()).toEqual({ error: "payment_operator_unavailable" });
+    expect(noOperator.statusCode).toBe(202);
 
     const afterForgery = await server.inject({
       method: "GET",
@@ -497,9 +532,21 @@ describe("payment approval relay", () => {
       sealed_card: null,
     });
 
-    const relayedForgery = await relaySubmission(created.id, forged);
-    expect(relayedForgery.approvalStatus).toBe(202);
-    expect(relayedForgery.relayed).toMatchObject(forged);
+    const relayedForgery = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}?wait_for_submission=1`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(relayedForgery.statusCode).toBe(200);
+    expect(relayedForgery.json()).toMatchObject(forged);
+
+    const redeliveredForgery = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}?wait_for_submission=1`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(redeliveredForgery.statusCode).toBe(200);
+    expect(redeliveredForgery.json()).toMatchObject(forged);
 
     const afterRelay = await server.inject({
       method: "GET",
@@ -508,6 +555,7 @@ describe("payment approval relay", () => {
     });
     expect(afterRelay.json()).toMatchObject({ status: "pending", jws: null, sealed_card: null });
 
+    nowMs += 15_001;
     const verified = { ...makeSubmission(created), sealed_card: "verified-seal" };
     const relayedVerified = await relaySubmission(created.id, verified);
     expect(relayedVerified.approvalStatus).toBe(202);
@@ -521,6 +569,17 @@ describe("payment approval relay", () => {
     });
     expect(wrongAccountConfirm.statusCode).toBe(404);
     expect(wrongAccountConfirm.json()).toEqual({ error: "payment_approval_not_found" });
+
+    const changedCandidateConfirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { ...verified, sealed_card: "different-seal" },
+    });
+    expect(changedCandidateConfirm.statusCode).toBe(409);
+    expect(changedCandidateConfirm.json()).toEqual({
+      error: "payment_approval_candidate_changed",
+    });
 
     const confirm = await server.inject({
       method: "POST",
@@ -540,6 +599,21 @@ describe("payment approval relay", () => {
     expect(repeatedConfirm.statusCode).toBe(200);
     expect(repeatedConfirm.json()).toEqual({ status: "approved" });
 
+    const stored = await deps.pendingPaymentApprovalStore.getById(created.id);
+    expect(stored).toMatchObject({
+      status: "approved",
+      jws: null,
+      sealedCard: null,
+      reviewJws: null,
+      reviewSealedCard: null,
+      submissionJws: null,
+      submissionSealedCard: null,
+      submissionPhase: "confirmed",
+      submissionCandidateFingerprint: createHash("sha256")
+        .update(JSON.stringify([verified.jws, verified.sealed_card]))
+        .digest("base64url"),
+    });
+
     const final = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}`,
@@ -547,8 +621,8 @@ describe("payment approval relay", () => {
     });
     expect(final.json()).toMatchObject({
       status: "approved",
-      jws: verified.jws,
-      sealed_card: verified.sealed_card,
+      jws: null,
+      sealed_card: null,
     });
   });
 
@@ -590,6 +664,36 @@ describe("payment approval relay", () => {
     expect(body.text).toContain(`/vault/pay/${created.id}`);
   });
 
+  it("formats zero-decimal approval currencies without fake cents in Telegram", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+
+    const response = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${agentToken}`, "x-squire-agent-identity": "Hermes" },
+      payload: {
+        merchant: "Japan Flower Shop",
+        checkout_origin: "https://flowers.example.test",
+        amount_cents: 9845,
+        currency: "JPY",
+        card_ref: "card_synthetic_1",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: "Flowers",
+        reason: "Synthetic test purchase",
+      },
+    });
+    expect(response.statusCode).toBe(201);
+
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.text).toContain("JPY 9845");
+    expect(body.text).not.toContain("JPY 98.45");
+  });
+
   it("does not push to Telegram when the account has no linked chat", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", fetchMock);
@@ -622,6 +726,44 @@ describe("payment approval relay", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.text).toContain("Synthetic Books");
     expect(body.text).toContain("USD 25.99");
+  });
+
+  it("formats zero-decimal currencies without fake cents in 3-D Secure Telegram messages", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", fetchMock);
+    vi.stubEnv("TELEGRAM_BOT_TOKEN", "synthetic-bot-token");
+    const account = await deps.accountStore.findAccountByEmail("payer@example.test");
+    await deps.accountStore.setTelegramChatId(account!.id, "555000111");
+
+    const created = await server.inject({
+      method: "POST",
+      url: "/v1/pay/approvals",
+      headers: { authorization: `Bearer ${agentToken}`, "x-squire-agent-identity": "Hermes" },
+      payload: {
+        merchant: "Japan Flower Shop",
+        checkout_origin: "https://flowers.example.test",
+        amount_cents: 9845,
+        currency: "JPY",
+        card_ref: "card_synthetic_1",
+        operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+        item: "Flowers",
+        reason: "Synthetic test purchase",
+      },
+    });
+    expect(created.statusCode).toBe(201);
+    fetchMock.mockClear();
+
+    const response = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${(created.json() as { id: string }).id}/notify-3ds`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+
+    expect(response.statusCode).toBe(200);
+    const [, init] = fetchMock.mock.calls[0]!;
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.text).toContain("JPY 9845");
+    expect(body.text).not.toContain("JPY 98.45");
   });
 
   it("does not notify Telegram about 3-D Secure without a linked chat", async () => {

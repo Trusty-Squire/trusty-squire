@@ -205,12 +205,19 @@ export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescr
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
   $: "USD",
+  US$: "USD",
   "€": "EUR",
   "£": "GBP",
   "¥": "JPY",
+  "₩": "KRW",
+  円: "JPY",
+  ZŁ: "PLN",
 };
 
-function currencyMinorDigits(currency: string): number {
+const CHECKOUT_CURRENCY_CODES = new Set(Intl.supportedValuesOf("currency"));
+const UNRESOLVED_CURRENCY_NOTATIONS = new Set(["KR"]);
+
+export function currencyMinorDigits(currency: string): number {
   return new Intl.NumberFormat(undefined, {
     style: "currency",
     currency,
@@ -251,32 +258,113 @@ function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-export function parseCheckoutAmount(
+const checkoutTotalPattern =
+  /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9][0-9.,]*)(?:\s*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)]))?/giu;
+
+interface CheckoutAmountParseResult {
+  amount: { amount_cents: number; currency: string } | null;
+  currencyUnresolved: boolean;
+  fallbackCurrencyScaleMismatch: boolean;
+}
+
+function resolveCheckoutCurrencyToken(token: string | undefined): string | undefined {
+  if (token === undefined) return undefined;
+  const upper = token.toUpperCase();
+  if (CHECKOUT_CURRENCY_CODES.has(upper)) return upper;
+  const codeWithSymbol = upper.match(/^([A-Z]{3})(\p{Sc})$/u);
+  const code = codeWithSymbol?.[1];
+  const symbol = codeWithSymbol?.[2];
+  if (
+    code !== undefined &&
+    symbol !== undefined &&
+    CHECKOUT_CURRENCY_CODES.has(code) &&
+    CURRENCY_SYMBOLS[symbol] === code
+  ) {
+    return code;
+  }
+  return CURRENCY_SYMBOLS[token] ?? CURRENCY_SYMBOLS[upper];
+}
+
+interface CheckoutCurrencyTokenResult {
+  currency: string | undefined;
+  unresolved: boolean;
+}
+
+function classifyCheckoutCurrencyToken(token: string | undefined): CheckoutCurrencyTokenResult {
+  if (token === undefined) return { currency: undefined, unresolved: false };
+  const currency = resolveCheckoutCurrencyToken(token);
+  return {
+    currency,
+    unresolved:
+      currency === undefined &&
+      (/\p{Sc}/u.test(token) || UNRESOLVED_CURRENCY_NOTATIONS.has(token.toUpperCase())),
+  };
+}
+
+// A lone separator with three trailing digits is ambiguous: it can be either a
+// group ("1,000") or, for a three-minor-unit currency, a fraction ("1.000").
+// Preserve the existing parser's handling of that case. Shorter trailing groups
+// are an unambiguous displayed fractional scale and must agree with a fallback
+// currency before that fallback can label the checkout.
+function fallbackCurrencyScaleMismatches(raw: string, minorDigits: number): boolean {
+  const value = raw.replace(/\s/g, "");
+  const comma = value.lastIndexOf(",");
+  const dot = value.lastIndexOf(".");
+  const separator = Math.max(comma, dot);
+  if (separator < 0) return false;
+
+  const fractionLength = value.length - separator - 1;
+  if (fractionLength === 3 && (comma < 0 || dot < 0)) return false;
+  return fractionLength > minorDigits;
+}
+
+function parseCheckoutAmountResult(
   texts: readonly string[],
   fallbackCurrency?: string,
-): { amount_cents: number; currency: string } | null {
-  const totalPattern =
-    /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK)\s*)?([$€£¥])?\s*([0-9][0-9.,]*)(?:\s*(USD|EUR|GBP|CAD|AUD|JPY|NZD|CHF|SEK|NOK|DKK))?/gi;
+): CheckoutAmountParseResult {
+  let currencyUnresolved = false;
+  let fallbackCurrencyScaleMismatch = false;
   for (const text of texts) {
-    totalPattern.lastIndex = 0;
-    for (const match of text.matchAll(totalPattern)) {
-      const currency = (
-        match[1] ??
-        match[4] ??
-        CURRENCY_SYMBOLS[match[2] ?? ""] ??
-        fallbackCurrency
-      )?.toUpperCase();
+    checkoutTotalPattern.lastIndex = 0;
+    for (const match of text.matchAll(checkoutTotalPattern)) {
+      const prefix = classifyCheckoutCurrencyToken(match[1]);
+      const symbol = classifyCheckoutCurrencyToken(match[2]);
+      const suffix = classifyCheckoutCurrencyToken(match[4]);
+      if (prefix.unresolved || symbol.unresolved || suffix.unresolved) {
+        currencyUnresolved = true;
+        continue;
+      }
+      const pageCurrency = prefix.currency ?? suffix.currency ?? symbol.currency;
+      const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
       if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) continue;
       const minorDigits = currencyMinorDigits(currency);
+      if (
+        pageCurrency === undefined &&
+        fallbackCurrencyScaleMismatches(match[3] ?? "", minorDigits)
+      ) {
+        fallbackCurrencyScaleMismatch = true;
+        continue;
+      }
       const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
       if (amount === null) continue;
       const scale = 10 ** minorDigits;
       const minor = Math.round(amount * scale);
       if (Math.abs(amount * scale - minor) > 1e-6) continue;
-      return { amount_cents: minor, currency };
+      return {
+        amount: { amount_cents: minor, currency },
+        currencyUnresolved,
+        fallbackCurrencyScaleMismatch,
+      };
     }
   }
-  return null;
+  return { amount: null, currencyUnresolved, fallbackCurrencyScaleMismatch };
+}
+
+export function parseCheckoutAmount(
+  texts: readonly string[],
+  fallbackCurrency?: string,
+): { amount_cents: number; currency: string } | null {
+  return parseCheckoutAmountResult(texts, fallbackCurrency).amount;
 }
 
 function merchantFromPage(title: string, siteName: string, url: string): string {
@@ -5608,7 +5696,14 @@ export class BrowserController {
             await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
         ),
     );
-    const amount = parseCheckoutAmount(texts, fallbackCurrency);
+    const parsedAmount = parseCheckoutAmountResult(texts, fallbackCurrency);
+    if (parsedAmount.currencyUnresolved) {
+      throw new Error("payment_checkout_currency_unresolved");
+    }
+    if (parsedAmount.fallbackCurrencyScaleMismatch) {
+      throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
+    }
+    const amount = parsedAmount.amount;
     if (amount === null) throw new Error("payment_checkout_total_not_found");
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),

@@ -158,6 +158,16 @@ interface PendingPaymentApprovalRow {
   status: string;
   jws: string | null;
   sealed_card: string | null;
+  review_jws: string | null;
+  review_sealed_card: string | null;
+  review_candidate_fingerprint: string | null;
+  review_phase: string | null;
+  review_expires_at: Date | null;
+  submission_jws: string | null;
+  submission_sealed_card: string | null;
+  submission_candidate_fingerprint: string | null;
+  submission_phase: string | null;
+  submission_expires_at: Date | null;
   created_at: Date;
   expires_at: Date;
 }
@@ -348,7 +358,7 @@ export interface ApiPrismaClient {
     create(args: { data: Record<string, unknown>; select: { id: true } }): Promise<{ id: string }>;
     findFirst(args: {
       where: Record<string, unknown>;
-      select?: { id: true };
+      select?: Record<string, boolean>;
     }): Promise<PendingPaymentApprovalRow | null>;
     updateMany(args: {
       where: Record<string, unknown>;

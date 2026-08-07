@@ -62,6 +62,18 @@ const EVENTS = [
     last4: "4242",
   },
   {
+    id: "e5",
+    type: "vault.payment_executed",
+    emitted_at: "2026-07-20T12:30:00.000Z",
+    reference: "pay://p2",
+    requester: "agent",
+    merchant: "Japan Flower Shop",
+    amount_cents: 9845,
+    currency: "JPY",
+    last4: "4242",
+    payment_status: "approved",
+  },
+  {
     id: "e4",
     type: "vault.grant_minted",
     emitted_at: "2026-07-20T13:00:00.000Z",
@@ -94,8 +106,10 @@ describe("activity timeline — card / payment / grant events", () => {
 
   it("renders a payment row with merchant + amount + last4, never a PAN", async () => {
     const { container } = render(<ActivityPage />);
-    await waitFor(() => expect(screen.getByText("Payment")).toBeTruthy());
+    await waitFor(() => expect(screen.getAllByText("Payment")).toHaveLength(2));
     expect(screen.getByText("Synthetic Books — USD 12.34 ··4242")).toBeTruthy();
+    expect(screen.getByText("Japan Flower Shop — JPY 9845 ··4242")).toBeTruthy();
+    expect(container.textContent).not.toContain("JPY 98.45");
     // Only ever four trailing digits — no 15/16-digit number anywhere.
     expect(container.textContent).not.toMatch(/\d{15,16}/);
   });
