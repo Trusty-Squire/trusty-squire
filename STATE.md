@@ -757,6 +757,54 @@ door-check and showing a direct-block rate that justifies it.**
 
 ---
 
+## `myglobalflowers.com` — checkout (not signup) driving notes (2026-08-07)
+
+Not a discovery-service wall — a **checkout** target (`operate_pay` capability
+work, legacy-postback-style `/orders/create` form). Two symptoms reported by a
+prior run, both re-tested live and **FALSIFIED as operator/code bugs**:
+
+### ✗ FALSIFIED: "Fields marked with an asterisk (*) are required" is a validator/event bug
+The four asterisked fields (email, phone, recipient phone, delivery date) were
+genuinely filled and validated fine. The actual empty field was the **delivery
+ADDRESS autocomplete** (`data-testid="delivery-address-input"`) — it has no
+visible asterisk, and its placeholder text (the city name, e.g. "Miami") looks
+identical to a real value in `el_table`'s `label` column, but its `value_len`
+is absent when empty. `operate_act{type}` into it opens a suggestion dropdown;
+the field only registers as filled once a suggestion `li[role=option]` is
+**clicked** — typing alone leaves the underlying place-object null and the
+whole form rejects with the generic asterisk banner. Fix: `type` the street
+address, then `click` the matching suggestion, THEN submit. No code change —
+existing `type`/`click` primitives handle this correctly once you fill the
+right field.
+
+### ✗ FALSIFIED: "the city selector triggers a page reload that clears the cart"
+Reproduced the interaction (checkout's in-form `creating-order-city-selector`
+→ pick a different city from the `select-city-multiselect` list) on a live
+cart. The **cart survives** — same line item, repriced for the new city
+(confirmed `Elegance in Bloom` $65→$147 across NYC→Chicago, item persisted).
+What actually happens: the `/orders/create` SPA does a full client-side
+re-fetch and the page goes **transiently blank** (`Order registration`
+heading, no fields, no Order Summary) for one observe cycle before it
+re-hydrates with the new city's fields and prices. A crew that reads that one
+blank observation as "the cart got cleared" is looking at a
+still-in-flight render, not data loss. Fix: after a city change, re-`goto` (or
+re-`observe`) the checkout URL once more before concluding anything is empty
+— no code change needed.
+
+### ✓ CRACKED end-to-end (2026-08-07): pay-ready reached
+NYC, "Evening in Venice" mixed bouquet ($93.00 exactly — catalog prices here
+are per-city and shift call-to-call, so hunting a specific dollar figure means
+checking several cities/sizes, not assuming a static catalog). Full sequence:
+add to cart (remove any stale leftover item via the cart row's price button →
+confirm "Yes, remove") → `/orders/create` → fill name/email/phone/recipient/
+recipient-phone/date with plain `type` → fill delivery address via
+`type` + click the suggestion → `click` "Place Order And Proceed To Payment"
+→ lands on `/orders/payment` (order accepted, PayPal/Card selector shown,
+**no payment submitted**). Zero operator code changes required — this was a
+pure-driving fix.
+
+---
+
 ## Confirmed-real fixes (green, reproduced)
 
 These produced full signups (extracted credentials) and several reproduced
