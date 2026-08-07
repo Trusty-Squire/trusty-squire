@@ -1,2 +1,6 @@
 # Generated from the repository-root README by the package lifecycle.
 /README.md
+
+# Scratch working directory for `pnpm run eval:replay` (drift-mutated HARs,
+# ephemeral recipe cache) — replay-eval-output/ holds the persisted report.
+/.replay-eval/

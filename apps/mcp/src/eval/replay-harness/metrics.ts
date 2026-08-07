@@ -3,6 +3,7 @@ import type {
   HarnessMetrics,
   HarnessReport,
   HarnessThresholds,
+  Speedup,
   TaskObservation,
 } from "./types.js";
 
@@ -18,7 +19,25 @@ function ratio(numerator: number, denominator: number): number {
   return denominator > 0 ? numerator / denominator : 0;
 }
 
-function median(values: number[]): number {
+function speedup(numerator: number, denominator: number): Speedup {
+  if (denominator > 0) return numerator / denominator;
+  return numerator > 0 ? "infinite" : 0;
+}
+
+function netSpeedup(hitRate: number, hitSpeedup: Speedup): Speedup {
+  if (hitRate === 0) return 0;
+  return hitSpeedup === "infinite" ? "infinite" : hitRate * hitSpeedup;
+}
+
+function below(value: Speedup, threshold: number): boolean {
+  return value !== "infinite" && value < threshold;
+}
+
+function printable(value: Speedup): string {
+  return value === "infinite" ? "∞" : value.toFixed(2);
+}
+
+function medianNumber(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
@@ -26,8 +45,17 @@ function median(values: number[]): number {
   return ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2;
 }
 
-function speedups(hits: TaskObservation[], field: "turns" | "tokens" | "wall_clock_ms"): number[] {
-  return hits.map((hit) => ratio(hit.cold[field], hit.warm?.[field] ?? 0));
+function median(values: Speedup[]): Speedup {
+  const numeric = values.map((value) => (value === "infinite" ? Number.POSITIVE_INFINITY : value));
+  const result = medianNumber(numeric);
+  return Number.isFinite(result) ? result : "infinite";
+}
+
+function speedups(
+  hits: TaskObservation[],
+  field: "turns" | "tokens" | "wall_clock_ms",
+): Speedup[] {
+  return hits.map((hit) => speedup(hit.cold[field], hit.warm?.[field] ?? 0));
 }
 
 export function computeMetrics(
@@ -46,22 +74,28 @@ export function computeMetrics(
   const totalSteps = completeHits.reduce((sum, hit) => sum + hit.total_steps, 0);
   const fallbacks = completeHits.reduce((sum, hit) => sum + hit.fallbacks, 0);
   const moneyTrials = drift.filter((trial) => trial.money_affecting);
-  const moneyEscapes = moneyTrials.filter(
-    (trial) => !trial.end_state_matches && trial.guard_action !== "abort",
-  ).length;
-  const caughtMoneyDrift = moneyTrials.filter(
+  const observableMoneyTrials = moneyTrials.filter(
+    (trial) => trial.infrastructure_failure === undefined,
+  );
+  const moneyEscapes = observableMoneyTrials.filter(
     (trial) =>
-      trial.guard_action === "abort" ||
-      (trial.guard_action === "fallback" && trial.end_state_matches),
+      !trial.end_state_matches &&
+      trial.guard_action !== "abort",
+  ).length;
+  const caughtMoneyDrift = observableMoneyTrials.filter(
+    (trial) =>
+      trial.guard_action === "abort" &&
+      trial.total_verify_oracle === "abort" &&
+      trial.price_guard_causal === true,
   ).length;
 
   return {
     speedup_on_hit: speedupOnHit,
     hit_rate: hitRate,
     net_speedup: {
-      turns: hitRate * speedupOnHit.turns,
-      tokens: hitRate * speedupOnHit.tokens,
-      wall_clock: hitRate * speedupOnHit.wall_clock,
+      turns: netSpeedup(hitRate, speedupOnHit.turns),
+      tokens: netSpeedup(hitRate, speedupOnHit.tokens),
+      wall_clock: netSpeedup(hitRate, speedupOnHit.wall_clock),
     },
     clean_replay_correctness: ratio(
       hits.filter((hit) => hit.warm !== undefined && hit.end_state_matches && hit.fallbacks === 0)
@@ -69,8 +103,8 @@ export function computeMetrics(
       hits.length,
     ),
     task_success: ratio(
-      hits.filter((hit) => hit.warm !== undefined && hit.end_state_matches).length,
-      hits.length,
+      realistic.filter((task) => task.warm !== undefined && task.end_state_matches).length,
+      realistic.length,
     ),
     fallback_rate: ratio(fallbacks, totalSteps),
     money_escape: moneyEscapes,
@@ -81,6 +115,9 @@ export function computeMetrics(
         .length,
       missing_warm_samples: tasks.filter((task) => task.recipe_applied && task.warm === undefined)
         .length,
+      infrastructure_failures:
+        tasks.filter((task) => task.warm_unavailable_reason !== undefined).length +
+        drift.filter((trial) => trial.infrastructure_failure !== undefined).length,
     },
   };
 }
@@ -92,24 +129,30 @@ export function buildHarnessReport(
     generatedAt?: string;
     thresholds?: HarnessThresholds;
     mode?: HarnessReport["mode"];
+    evaluation?: HarnessReport["evaluation"];
   } = {},
 ): HarnessReport {
   const thresholds = options.thresholds ?? DEFAULT_THRESHOLDS;
   const metrics = computeMetrics(tasks, drift);
   const reasons: string[] = [];
-  if (metrics.net_speedup.turns < thresholds.net_speedup) {
+  if (below(metrics.net_speedup.turns, thresholds.net_speedup)) {
     reasons.push(
-      `net speedup ${metrics.net_speedup.turns.toFixed(2)}x < ${thresholds.net_speedup.toFixed(2)}x`,
+      `net speedup ${printable(metrics.net_speedup.turns)}x < ${thresholds.net_speedup.toFixed(2)}x`,
     );
   }
-  if (metrics.net_speedup.tokens < thresholds.net_speedup) {
+  if (below(metrics.net_speedup.tokens, thresholds.net_speedup)) {
     reasons.push(
-      `net token speedup ${metrics.net_speedup.tokens.toFixed(2)}x < ${thresholds.net_speedup.toFixed(2)}x`,
+      `net token speedup ${printable(metrics.net_speedup.tokens)}x < ${thresholds.net_speedup.toFixed(2)}x`,
     );
   }
   if (metrics.clean_replay_correctness < thresholds.clean_replay_correctness) {
     reasons.push(
       `clean replay correctness ${(metrics.clean_replay_correctness * 100).toFixed(2)}% < ${(thresholds.clean_replay_correctness * 100).toFixed(2)}%`,
+    );
+  }
+  if (metrics.task_success < thresholds.task_success) {
+    reasons.push(
+      `task success ${(metrics.task_success * 100).toFixed(2)}% < ${(thresholds.task_success * 100).toFixed(2)}%`,
     );
   }
   if (metrics.money_escape > thresholds.money_escape) {
@@ -130,6 +173,16 @@ export function buildHarnessReport(
       `incomplete replay invariant: ${metrics.invariants.missing_warm_samples} applied recipe(s) missing warm samples`,
     );
   }
+  if (metrics.invariants.infrastructure_failures > 0) {
+    reasons.push(
+      `infrastructure invariant: ${metrics.invariants.infrastructure_failures} structured infrastructure failure(s)`,
+    );
+  }
+  if ((options.evaluation?.capture_failures.length ?? 0) > 0) {
+    reasons.push(
+      `capture artifact invariant: ${options.evaluation?.capture_failures.length ?? 0} required repeat capture(s) unavailable`,
+    );
+  }
   return {
     schema_version: 1,
     mode: options.mode ?? "replay-eval",
@@ -143,9 +196,9 @@ export function buildHarnessReport(
     cold_baseline: {
       tasks: tasks.length,
       median: {
-        turns: median(tasks.map((task) => task.cold.turns)),
-        tokens: median(tasks.map((task) => task.cold.tokens)),
-        wall_clock_ms: median(tasks.map((task) => task.cold.wall_clock_ms)),
+        turns: medianNumber(tasks.map((task) => task.cold.turns)),
+        tokens: medianNumber(tasks.map((task) => task.cold.tokens)),
+        wall_clock_ms: medianNumber(tasks.map((task) => task.cold.wall_clock_ms)),
       },
       total: {
         turns: tasks.reduce((sum, task) => sum + task.cold.turns, 0),
@@ -160,5 +213,6 @@ export function buildHarnessReport(
     metrics,
     decision: reasons.length === 0 ? "SHIP" : "NO-SHIP",
     reasons,
+    ...(options.evaluation === undefined ? {} : { evaluation: options.evaluation }),
   };
 }

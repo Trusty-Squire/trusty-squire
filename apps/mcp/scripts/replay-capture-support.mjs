@@ -63,6 +63,137 @@ export function shouldBlockTopLevelNavigation(request, allowedHosts) {
   );
 }
 
+const SENSITIVE_ARTIFACT_NAME =
+  /cookie|authorization|(?:^|[-_])(?:token|session|csrf|xsrf)(?:$|[-_])/i;
+const SENSITIVE_ARTIFACT_QUERY =
+  /^(?:shop_pay_token|checkout_token|token|access_token|refresh_token|session|session_id|auth|authorization|_r|_su_rec|ur_back_url|ur_verify|tracking_unique|tracking_visit)$/i;
+
+function isShopCheckoutUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.hostname.toLowerCase() === "shop.app" && /\/checkouts?\//i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+function isSensitiveCartRedirect(entry) {
+  const request = entry?.request;
+  const response = entry?.response;
+  if (String(request?.method ?? "").toUpperCase() !== "POST") return false;
+  try {
+    if (new URL(String(request?.url ?? "")).pathname !== "/cart") return false;
+  } catch {
+    return false;
+  }
+  const redirects = [
+    response?.redirectURL,
+    ...(Array.isArray(response?.headers)
+      ? response.headers
+          .filter((header) => String(header?.name ?? "").toLowerCase() === "location")
+          .map((header) => header?.value)
+      : []),
+  ];
+  return redirects.some((value) => isShopCheckoutUrl(String(value ?? "")));
+}
+
+export function sanitizeArtifactUrl(value) {
+  try {
+    const parsed = new URL(value);
+    const checkoutPath = parsed.pathname.match(/\/checkouts?\//i);
+    if (checkoutPath?.index !== undefined) {
+      parsed.pathname = `${parsed.pathname.slice(0, checkoutPath.index + checkoutPath[0].length)}redacted`;
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.href;
+    }
+    for (const name of [...parsed.searchParams.keys()]) {
+      if (SENSITIVE_ARTIFACT_QUERY.test(name)) parsed.searchParams.delete(name);
+    }
+    return parsed.href;
+  } catch {
+    return value;
+  }
+}
+
+function sanitizeArtifactText(value) {
+  return value
+    .replace(/https?:\/\/[^\s"'<>\\]+/gi, (url) => sanitizeArtifactUrl(url))
+    .replace(
+      /((?:shop_pay_token|checkout_token|access_token|refresh_token|session_id|authorization|_su_rec|_r)=)[^&\s"'<>\\]*/gi,
+      "$1redacted",
+    );
+}
+
+function sanitizeHarHeaders(headers) {
+  if (!Array.isArray(headers)) return [];
+  return headers
+    .filter((header) => !SENSITIVE_ARTIFACT_NAME.test(String(header?.name ?? "")))
+    .map((header) => ({
+      ...header,
+      value: sanitizeArtifactText(String(header?.value ?? "")),
+    }));
+}
+
+export function sanitizeReplayHar(har) {
+  if (har === null || typeof har !== "object" || !Array.isArray(har.log?.entries)) {
+    throw new Error("invalid HAR artifact");
+  }
+  har.log.entries = har.log.entries.filter((entry) => !isSensitiveCartRedirect(entry));
+  for (const entry of har.log.entries) {
+    const request = entry.request ?? {};
+    request.url = sanitizeArtifactUrl(String(request.url ?? ""));
+    request.headers = sanitizeHarHeaders(request.headers);
+    request.cookies = [];
+    if (Array.isArray(request.queryString)) {
+      request.queryString = request.queryString.filter(
+        (parameter) => !SENSITIVE_ARTIFACT_QUERY.test(String(parameter?.name ?? "")),
+      );
+    }
+    if (request.postData !== undefined) {
+      if (typeof request.postData.text === "string") {
+        request.postData.text = sanitizeArtifactText(request.postData.text);
+      }
+      if (Array.isArray(request.postData.params)) {
+        request.postData.params = request.postData.params.filter(
+          (parameter) => !SENSITIVE_ARTIFACT_NAME.test(String(parameter?.name ?? "")),
+        );
+      }
+    }
+    entry.request = request;
+
+    const response = entry.response ?? {};
+    response.headers = sanitizeHarHeaders(response.headers);
+    response.cookies = [];
+    response.redirectURL = sanitizeArtifactUrl(String(response.redirectURL ?? ""));
+    if (typeof response.content?.text === "string") {
+      response.content.text = sanitizeArtifactText(response.content.text);
+    }
+    entry.response = response;
+  }
+  return har;
+}
+
+export function buildGroundingDiagnostic(task, observations, final, reason) {
+  const expectedTitles = task.expected_end_state.line_items.map((item) => item.title_contains);
+  return {
+    schema_version: 1,
+    task_id: task.task_id,
+    status: "grounding_failed",
+    reason,
+    final_agent_message_sha256: createHash("sha256").update(final).digest("hex"),
+    observations: observations.map((observation) => ({
+      tool: observation.tool,
+      url: sanitizeArtifactUrl(observation.current_url),
+      checkout_totals: observation.checkout_totals,
+      captured_line_items: expectedTitles.filter((title) =>
+        observation.snapshot.toLowerCase().includes(title.toLowerCase()),
+      ),
+      snapshot_sha256: createHash("sha256").update(observation.snapshot).digest("hex"),
+    })),
+  };
+}
+
 export function currentUrlFromSnapshot(snapshot) {
   const match = snapshot.match(/RootWebArea[^\n]*\burl="([^"]+)"/);
   if (match?.[1] === undefined) throw new Error("browser snapshot is missing its top-level URL");
@@ -130,6 +261,15 @@ function completedBrowserCalls(events) {
   });
 }
 
+/**
+ * Failure diagnostics retain the actual constrained-browser observations.  The
+ * success path still hashes evidence; this returns no invented interpretation
+ * and is used only to explain a rejected grounding attempt.
+ */
+export function captureBrowserObservations(events) {
+  return completedBrowserCalls(events);
+}
+
 function evidenceContainsMoney(evidence, cents) {
   const dollars = Math.floor(cents / 100);
   const alternatives = [...new Set([String(dollars), dollars.toLocaleString("en-US")])]
@@ -172,10 +312,7 @@ export function validateGroundedCapture(events, endState, task) {
     );
   }
 
-  const startUrl =
-    task.bucket === "repeat"
-      ? `https://whitejade.xyz/cart/${encodeURIComponent(task.params.product_variant_id)}:1`
-      : task.entry_url;
+  const startUrl = task.entry_url;
   const allowedHosts = allowedHostsFor(startUrl);
   for (const call of calls) {
     if (!isAllowedTopLevelUrl(call.current_url, allowedHosts)) {
@@ -190,30 +327,46 @@ export function validateGroundedCapture(events, endState, task) {
     const snapshot = call.snapshot.toLowerCase();
     return expectedTitles.every((title) => snapshot.includes(title));
   };
-  const reachedExpectedState = calls.some((call) => {
-    const url = new URL(call.current_url);
-    if (task.expected_end_state.reached === "checkout_review") {
-      const emailValue = `"value":"replay-eval+${task.task_id}@trustysquire.ai"`;
-      const reviewMarker =
+  const reachedExpectedState = (() => {
+    if (task.expected_end_state.reached !== "checkout_review") {
+      return calls.some((call) => {
+        const url = new URL(call.current_url);
+        return (
+          url.pathname.includes("/products/") &&
+          observationHasExpectedTitles(call) &&
+          evidenceContainsMoney(call.snapshot, task.expected_end_state.total_cents)
+        );
+      });
+    }
+    // Shopify initially renders the subtotal as a labeled Total, then updates
+    // shipping and the final total after address/method resolution.  A title
+    // can disappear from the later compact snapshot, so prove checkout review
+    // over the sequence: item evidence and review form evidence may precede the
+    // *final* labeled total, but the final total itself must be exact.
+    const checkoutCalls = calls.filter((call) =>
+      new URL(call.current_url).pathname.includes("/checkouts/"),
+    );
+    const emailValue = `"value":"replay-eval+${task.task_id}@trustysquire.ai"`;
+    const reviewObserved = checkoutCalls.some(
+      (call) =>
         call.snapshot.includes(emailValue) &&
         /"value":"123 Test St(?:reet)?(?:[",])/i.test(call.snapshot) &&
         call.snapshot.includes('"value":"10001"') &&
-        /payment|pay\s*now|billing address|review order/i.test(call.snapshot);
-      return (
-        url.pathname.includes("/checkouts/") &&
-        reviewMarker &&
-        observationHasExpectedTitles(call) &&
-        labeledCheckoutTotal(call) === task.expected_end_state.total_cents
-      );
-    }
-    return (
-      url.pathname.includes("/products/") &&
-      observationHasExpectedTitles(call) &&
-      evidenceContainsMoney(call.snapshot, task.expected_end_state.total_cents)
+        /payment|pay\s*now|billing address|review order/i.test(call.snapshot),
     );
-  });
+    const itemObserved = checkoutCalls.some(observationHasExpectedTitles);
+    const labeledTotals = checkoutCalls
+      .map(labeledCheckoutTotal)
+      .filter((total) => total !== undefined);
+    const settledTotal = labeledTotals.at(-1);
+    return (
+      reviewObserved &&
+      itemObserved &&
+      settledTotal === task.expected_end_state.total_cents
+    );
+  })();
   if (!reachedExpectedState) {
-    throw new Error(`${task.task_id}: no single browser observation proves the expected end state`);
+    throw new Error(`${task.task_id}: checkout review sequence did not prove the expected end state`);
   }
 
   const evidence = calls
@@ -275,7 +428,7 @@ export function buildCodexArguments({
     "-c",
     `mcp_servers.replay_browser.command=${tomlString(process.execPath)}`,
     "-c",
-    `mcp_servers.replay_browser.args=[${tomlString(mcpServerPath)}]`,
+    `mcp_servers.replay_browser.args=[${tomlString("--import=tsx")},${tomlString(mcpServerPath)}]`,
     "-c",
     `mcp_servers.replay_browser.env.REPLAY_CAPTURE_BROWSER_CONFIG=${tomlString(JSON.stringify(browserConfig))}`,
     "-c",
@@ -289,7 +442,7 @@ export function buildCodexArguments({
     "-c",
     'mcp_servers.replay_browser.default_tools_approval_mode="approve"',
     "-c",
-    'mcp_servers.replay_browser.enabled_tools=["browser_open","browser_snapshot","browser_click","browser_fill","browser_select","browser_press","browser_scroll","browser_wait"]',
+    'mcp_servers.replay_browser.enabled_tools=["browser_open","browser_snapshot","browser_click","browser_fill","browser_select","browser_press","browser_scroll","browser_wait","browser_finalize_recipe"]',
     ...disabledMcpServers.flatMap((name) => ["-c", `mcp_servers.${name}.enabled=false`]),
     "-m",
     model,

@@ -1,0 +1,432 @@
+{
+  "schema_version": 1,
+  "mode": "replay-eval",
+  "generated_at": "2026-08-07T13:52:54.789Z",
+  "corpus": {
+    "tasks": 9,
+    "repeat": 4,
+    "novel": 5,
+    "drift_trials": 24
+  },
+  "cold_baseline": {
+    "tasks": 9,
+    "median": {
+      "turns": 3,
+      "tokens": 167984,
+      "wall_clock_ms": 55625
+    },
+    "total": {
+      "turns": 85,
+      "tokens": 2013353,
+      "wall_clock_ms": 486958
+    },
+    "recordings": [
+      {
+        "task_id": "whitejade-purchase-r2",
+        "turns": 23,
+        "tokens": 367569,
+        "wall_clock_ms": 87338,
+        "end_state": {
+          "line_items": [
+            {
+              "title_contains": "Collagen Glow Sheet Mask",
+              "qty": 1
+            }
+          ],
+          "total_cents": 2700,
+          "reached": "checkout_review"
+        },
+        "provenance": {
+          "source": "driver",
+          "driver": "codex-exec+constrained-browser-mcp",
+          "model": "gpt-5.6-sol",
+          "recorded_at": "2026-08-05T06:03:58.813Z",
+          "browser_observations": 15,
+          "evidence_sha256": "4586544bc53a465343a2746fcc2fac2151e6bc5797c7ff7c965d9dc8f36af1fa",
+          "capture_policy": "read-only-playwright-mcp-v3",
+          "trace_artifact": "traces/whitejade-purchase-r2.recipe.json",
+          "checkout_artifact": "traces/whitejade-purchase-r2.checkout.json"
+        },
+        "end_state_matches": true
+      },
+      {
+        "task_id": "whitejade-purchase-r0",
+        "turns": 13,
+        "tokens": 227750,
+        "wall_clock_ms": 69147,
+        "end_state": {
+          "line_items": [
+            {
+              "title_contains": "The Glow Serum",
+              "qty": 1
+            }
+          ],
+          "total_cents": 7600,
+          "reached": "checkout_review"
+        },
+        "provenance": {
+          "source": "driver",
+          "driver": "codex-exec+constrained-browser-mcp",
+          "model": "gpt-5.6-sol",
+          "recorded_at": "2026-08-05T06:00:39.710Z",
+          "browser_observations": 12,
+          "evidence_sha256": "ff3dd38fe9a9fa7a3cde489d839be3122f6fe72fbc5cf2ec01ee1d97c9d7ebcb",
+          "capture_policy": "read-only-playwright-mcp-v3",
+          "trace_artifact": "traces/whitejade-purchase-r0.recipe.json",
+          "checkout_artifact": "traces/whitejade-purchase-r0.checkout.json"
+        },
+        "end_state_matches": true
+      },
+      {
+        "task_id": "whitejade-purchase-r1",
+        "turns": 20,
+        "tokens": 641810,
+        "wall_clock_ms": 96930,
+        "end_state": {
+          "line_items": [
+            {
+              "title_contains": "The Recovery Crème",
+              "qty": 1
+            }
+          ],
+          "total_cents": 8800,
+          "reached": "checkout_review"
+        },
+        "provenance": {
+          "source": "driver",
+          "driver": "codex-exec+constrained-browser-mcp",
+          "model": "gpt-5.6-sol",
+          "recorded_at": "2026-08-05T06:02:23.251Z",
+          "browser_observations": 13,
+          "evidence_sha256": "b7fca94eb9b27036ff3e4b5a91dc51c85c2e69f84bdb3fbc2eac0da91e608f68",
+          "capture_policy": "read-only-playwright-mcp-v3",
+          "trace_artifact": "traces/whitejade-purchase-r1.recipe.json",
+          "checkout_artifact": "traces/whitejade-purchase-r1.checkout.json"
+        },
+        "end_state_matches": true
+      },
+      {
+        "task_id": "whitejade-purchase-r3",
+        "turns": 18,
+        "tokens": 303799,
+        "wall_clock_ms": 90702,
+        "end_state": {
+          "line_items": [
+            {
+              "title_contains": "Red Light Face Mask",
+              "qty": 1
+            }
+          ],
+          "total_cents": 10900,
+          "reached": "checkout_review"
+        },
+        "provenance": {
+          "source": "driver",
+          "driver": "codex-exec+constrained-browser-mcp",
+          "model": "gpt-5.6-sol",
+          "recorded_at": "2026-08-05T06:05:39.470Z",
+          "browser_observations": 14,
+          "evidence_sha256": "e414ae67328e99a13350f8e6f4bc882f424edd83cb47e557f05a89cb7c5cb704",
+          "capture_policy": "read-only-playwright-mcp-v3",
+          "trace_artifact": "traces/whitejade-purchase-r3.recipe.json",
+          "checkout_artifact": "traces/whitejade-purchase-r3.checkout.json"
+        },
+        "end_state_matches": true
+      },
+      {
+        "task_id": "allbirds-purchase-n0",
+        "turns": 2,
+        "tokens": 72519,
+        "wall_clock_ms": 22868,
+        "end_state": {
+          "line_items": [
+            {
+              "title_contains": "Men's Tree Runner NZ",
+              "qty": 1
+            }
+          ],
+          "total_cents": 10000,
+          "reached": "product_page"
+        },
+        "provenance": {
+          "source": "driver",
+          "driver": "codex-exec+constrained-browser-mcp",
+          "model": "gpt-5.6-sol",
+          "recorded_at": "2026-08-05T05:32:06.651Z",
+          "browser_observations": 1,
+          "evidence_sha256": "5e81bb49bae47be5faae256c1a5ed4f1e1d1726ad0405458019143327a21cf2a",
+          "capture_policy": "read-only-playwright-mcp-v2"
+        },
+        "end_state_matches": true
+      },
+      {
+        "task_id": "brooklinen-purchase-n0",
+        "turns": 3,
+        "tokens": 167984,
+        "wall_clock_ms": 55625,
+        "end_state": {
+          "line_items": [
+            {
+              "title_contains": "Classic Percale Core Sheet Set",
+              "qty": 1
+            }
+          ],
+          "total_cents": 13515,
+          "reached": "product_page"
+        },
+        "provenance": {
+          "source": "driver",
+          "driver": "codex-exec+constrained-browser-mcp",
+          "model": "gpt-5.6-sol",
+          "recorded_at": "2026-08-05T05:33:02.334Z",
+          "browser_observations": 2,
+          "evidence_sha256": "b19e81810de71a6f1482218c40da820372da70da3e9be814bc76c3b6387222d1",
+          "capture_policy": "read-only-playwright-mcp-v2"
+        },
+        "end_state_matches": true
+      },
+      {
+        "task_id": "colourpop-purchase-n0",
+        "turns": 2,
+        "tokens": 92562,
+        "wall_clock_ms": 28503,
+        "end_state": {
+          "line_items": [
+            {
+              "title_contains": "Infinite Possibilities",
+              "qty": 1
+            }
+          ],
+          "total_cents": 10800,
+          "reached": "product_page"
+        },
+        "provenance": {
+          "source": "driver",
+          "driver": "codex-exec+constrained-browser-mcp",
+          "model": "gpt-5.6-sol",
+          "recorded_at": "2026-08-05T05:33:30.903Z",
+          "browser_observations": 1,
+          "evidence_sha256": "9b23a3ef6ce3a0e1227ca70ae85b82f012d4ff2b58d80ed3c8efb76481d15e8b",
+          "capture_policy": "read-only-playwright-mcp-v2"
+        },
+        "end_state_matches": true
+      },
+      {
+        "task_id": "deathwish-purchase-n0",
+        "turns": 2,
+        "tokens": 69375,
+        "wall_clock_ms": 19541,
+        "end_state": {
+          "line_items": [
+            {
+              "title_contains": "Chocolate Hazelnut Coffee",
+              "qty": 1
+            }
+          ],
+          "total_cents": 1999,
+          "reached": "product_page"
+        },
+        "provenance": {
+          "source": "driver",
+          "driver": "codex-exec+constrained-browser-mcp",
+          "model": "gpt-5.6-sol",
+          "recorded_at": "2026-08-05T05:40:10.560Z",
+          "browser_observations": 1,
+          "evidence_sha256": "e2c934934bea0c2f53ebe8dacc0ff90a5bedbf65088e228e92a8e84ed3c6c52c",
+          "capture_policy": "read-only-playwright-mcp-v2"
+        },
+        "end_state_matches": true
+      },
+      {
+        "task_id": "tentree-purchase-n0",
+        "turns": 2,
+        "tokens": 69985,
+        "wall_clock_ms": 16304,
+        "end_state": {
+          "line_items": [
+            {
+              "title_contains": "Ruxton Packable Backpack",
+              "qty": 1
+            }
+          ],
+          "total_cents": 7800,
+          "reached": "product_page"
+        },
+        "provenance": {
+          "source": "driver",
+          "driver": "codex-exec+constrained-browser-mcp",
+          "model": "gpt-5.6-sol",
+          "recorded_at": "2026-08-05T05:40:32.414Z",
+          "browser_observations": 1,
+          "evidence_sha256": "7fb51c690233c5ea8e7daa034e2039319451ad5c6fbe5f3a1c951f5c661dee39",
+          "capture_policy": "read-only-playwright-mcp-v2"
+        },
+        "end_state_matches": true
+      }
+    ]
+  },
+  "thresholds": {
+    "net_speedup": 5,
+    "clean_replay_correctness": 0.9,
+    "task_success": 0.98,
+    "drift_catch_rate": 1,
+    "money_escape": 0
+  },
+  "metrics": {
+    "speedup_on_hit": {
+      "turns": "infinite",
+      "tokens": "infinite",
+      "wall_clock": 4.119828040859858
+    },
+    "hit_rate": 0.75,
+    "net_speedup": {
+      "turns": "infinite",
+      "tokens": "infinite",
+      "wall_clock": 3.0898710306448933
+    },
+    "clean_replay_correctness": 0,
+    "task_success": 0,
+    "fallback_rate": 0,
+    "money_escape": 0,
+    "drift_catch_rate": 0,
+    "recipe_survival": {
+      "t7d": null,
+      "t30d": null
+    },
+    "invariants": {
+      "novel_false_hits": 0,
+      "missing_warm_samples": 1,
+      "infrastructure_failures": 8
+    }
+  },
+  "decision": "NO-SHIP",
+  "reasons": [
+    "clean replay correctness 0.00% < 90.00%",
+    "task success 0.00% < 98.00%",
+    "drift catch rate 0.00% < 100.00%",
+    "incomplete replay invariant: 1 applied recipe(s) missing warm samples",
+    "infrastructure invariant: 8 structured infrastructure failure(s)",
+    "capture artifact invariant: 1 required repeat capture(s) unavailable"
+  ],
+  "evaluation": {
+    "cold_baseline_by_bucket": {
+      "repeat": {
+        "turns": 19,
+        "tokens": 335684,
+        "wall_clock_ms": 89020
+      },
+      "novel": {
+        "turns": 2,
+        "tokens": 72519,
+        "wall_clock_ms": 22868
+      }
+    },
+    "capture_failures": [
+      "whitejade-purchase-r2: whitejade-purchase-r2: checkout artifact total 1900 does not match settled expected total 2700"
+    ],
+    "repeat_outcomes": [
+      {
+        "task_id": "whitejade-purchase-r0",
+        "expected_end_state": {
+          "line_items": [
+            {
+              "title_contains": "The Glow Serum",
+              "qty": 1
+            }
+          ],
+          "total_cents": 7600,
+          "reached": "checkout_review"
+        },
+        "observed_end_state": {
+          "line_items": [],
+          "total_cents": -1,
+          "reached": "unobserved"
+        },
+        "divergent_fields": [
+          "total_cents observed -1, expected 7600",
+          "reached observed unobserved, expected checkout_review",
+          "line_items observed [], expected [{\"title_contains\":\"The Glow Serum\",\"qty\":1}]"
+        ],
+        "fallbacks": 0,
+        "verdict_class": "guarded_abort"
+      },
+      {
+        "task_id": "whitejade-purchase-r1",
+        "expected_end_state": {
+          "line_items": [
+            {
+              "title_contains": "The Recovery Crème",
+              "qty": 1
+            }
+          ],
+          "total_cents": 8800,
+          "reached": "checkout_review"
+        },
+        "observed_end_state": {
+          "line_items": [],
+          "total_cents": -1,
+          "reached": "unobserved"
+        },
+        "divergent_fields": [
+          "total_cents observed -1, expected 8800",
+          "reached observed unobserved, expected checkout_review",
+          "line_items observed [], expected [{\"title_contains\":\"The Recovery Crème\",\"qty\":1}]"
+        ],
+        "fallbacks": 1,
+        "verdict_class": "infrastructure",
+        "assessment": "infrastructure failure (not a money escape): fallback rescue exited 1: "
+      },
+      {
+        "task_id": "whitejade-purchase-r2",
+        "expected_end_state": {
+          "line_items": [
+            {
+              "title_contains": "Collagen Glow Sheet Mask",
+              "qty": 1
+            }
+          ],
+          "total_cents": 2700,
+          "reached": "checkout_review"
+        },
+        "observed_end_state": {
+          "line_items": [],
+          "total_cents": -1,
+          "reached": "unobserved"
+        },
+        "divergent_fields": [
+          "total_cents observed -1, expected 2700",
+          "reached observed unobserved, expected checkout_review",
+          "line_items observed [], expected [{\"title_contains\":\"Collagen Glow Sheet Mask\",\"qty\":1}]"
+        ],
+        "fallbacks": 0,
+        "verdict_class": "infrastructure",
+        "assessment": "capture artifact unavailable: whitejade-purchase-r2: checkout artifact total 1900 does not match settled expected total 2700 (not a money escape)"
+      },
+      {
+        "task_id": "whitejade-purchase-r3",
+        "expected_end_state": {
+          "line_items": [
+            {
+              "title_contains": "Red Light Face Mask",
+              "qty": 1
+            }
+          ],
+          "total_cents": 10900,
+          "reached": "checkout_review"
+        },
+        "observed_end_state": {
+          "line_items": [],
+          "total_cents": -1,
+          "reached": "unobserved"
+        },
+        "divergent_fields": [
+          "total_cents observed -1, expected 10900",
+          "reached observed unobserved, expected checkout_review",
+          "line_items observed [], expected [{\"title_contains\":\"Red Light Face Mask\",\"qty\":1}]"
+        ],
+        "fallbacks": 0,
+        "verdict_class": "guarded_abort"
+      }
+    ]
+  }
+}

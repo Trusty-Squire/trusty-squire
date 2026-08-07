@@ -1,8 +1,17 @@
 import { chromium } from "playwright";
+import { writeFileSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { isAllowedTopLevelUrl, shouldBlockTopLevelNavigation } from "./replay-capture-support.mjs";
+import { BrowserController } from "../src/bot/browser.ts";
+import {
+  act,
+  finishProvisionSession,
+  observe,
+  rememberRecipe,
+  startHarnessProvisionSession,
+} from "../src/bot/provision-session.ts";
 
 const config = JSON.parse(process.env.REPLAY_CAPTURE_BROWSER_CONFIG ?? "null");
 if (
@@ -10,7 +19,9 @@ if (
   typeof config !== "object" ||
   typeof config.start_url !== "string" ||
   !Array.isArray(config.allowed_hosts) ||
-  !config.allowed_hosts.every((host) => typeof host === "string")
+  !config.allowed_hosts.every((host) => typeof host === "string") ||
+  typeof config.recipe_dir !== "string" ||
+  typeof config.task_id !== "string"
 ) {
   throw new Error("invalid replay capture browser configuration");
 }
@@ -19,6 +30,11 @@ if (!isAllowedTopLevelUrl(config.start_url, config.allowed_hosts)) {
 }
 
 const tools = [
+  {
+    name: "browser_finalize_recipe",
+    description: "Verify checkout review and persist the native prepared recipe trace.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false },
+  },
   {
     name: "browser_open",
     description: "Open the configured task URL and return a browser snapshot.",
@@ -110,8 +126,14 @@ let browser;
 let context;
 let page;
 let opened = false;
+let finalized = false;
+let finalizedRecipe;
+let sessionId;
+let controller;
 let generation = 0;
 let references = new Map();
+let checkoutItemObserved = false;
+let checkoutReviewObserved = false;
 
 function assertObject(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -141,6 +163,14 @@ async function launchBrowser() {
   if (browser !== undefined) return;
   browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
   context = await browser.newContext({ acceptDownloads: false, serviceWorkers: "block" });
+  // The constrained MCP runs TypeScript source through tsx.  Recent esbuild
+  // output wraps callbacks passed to page.evaluate in `__name(...)`; that
+  // helper exists in Node but not in the browser execution world.  Install the
+  // identity form before any navigation so production BrowserController
+  // evaluators retain their normal browser-side behavior.
+  await context.addInitScript(() => {
+    globalThis.__name ??= (fn) => fn;
+  });
   await context.route("**/*", async (route) => {
     const request = route.request();
     let isMainFrame = false;
@@ -178,10 +208,8 @@ async function snapshot() {
   const title = await page.title();
   const url = page.url();
   if (!safeAllowedUrl(url)) throw new Error(`top-level navigation blocked: ${url}`);
-  const body = await page
-    .locator("body")
-    .ariaSnapshot({ timeout: 5000 })
-    .catch(async () => page.locator("body").innerText({ timeout: 5000 }));
+  const observation = sessionId === undefined ? undefined : await observe(sessionId, "full");
+  const body = observation?.text ?? "";
   const checkoutTotals = await page.locator("body").evaluate((root) => {
     const normalize = (value) => value.replace(/\s+/g, " ").trim();
     const moneyPattern = /\$\s*\d[\d,]*(?:\.\d{2})?/g;
@@ -216,40 +244,24 @@ async function snapshot() {
         ) === index,
     );
   });
-  const controls = page.locator(
-    'a[href]:visible,button:visible,input:visible,select:visible,textarea:visible,[role="button"]:visible,[role="link"]:visible,[role="checkbox"]:visible,[role="radio"]:visible,[role="option"]:visible,[role="menuitem"]:visible,[contenteditable="true"]:visible',
-  );
-  const count = Math.min(await controls.count(), 250);
+  const controls = (observation?.elements ?? []).slice(0, 250);
+  const count = controls.length;
   const descriptions = [];
   for (let index = 0; index < count; index += 1) {
-    const handle = await controls.nth(index).elementHandle();
-    if (handle === null) continue;
-    const details = await handle.evaluate((element) => {
-      const html = element;
-      const labels = "labels" in html && html.labels ? [...html.labels] : [];
-      const label =
-        element.getAttribute("aria-label") ||
-        labels.map((item) => item.textContent ?? "").join(" ") ||
-        element.getAttribute("placeholder") ||
-        element.textContent ||
-        element.getAttribute("name") ||
-        element.getAttribute("type") ||
-        element.tagName;
-      const value = "value" in html ? String(html.value ?? "") : "";
-      const href = element instanceof HTMLAnchorElement ? element.href : "";
-      return {
-        tag: element.tagName.toLowerCase(),
-        role: element.getAttribute("role") ?? "",
-        type: element.getAttribute("type") ?? "",
-        label: label.replace(/\s+/g, " ").trim().slice(0, 200),
-        value: value.slice(0, 240),
-        href,
-        target: element.getAttribute("target") ?? "",
-        disabled: "disabled" in html && Boolean(html.disabled),
-      };
-    });
+    const element = controls[index];
+    const details = {
+      ref: element.ref,
+      tag: element.tag,
+      role: element.role ?? "",
+      type: element.type ?? "",
+      label: element.label,
+      value: element.value ?? "",
+      href: element.href ?? "",
+      target: "",
+      disabled: false,
+    };
     const ref = `@r${generation}:${index + 1}`;
-    references.set(ref, { handle, details });
+    references.set(ref, { details });
     descriptions.push(`${ref} ${JSON.stringify(details)}`);
   }
   const rendered = [
@@ -258,7 +270,85 @@ async function snapshot() {
     "controls:",
     ...descriptions,
   ].join("\n");
-  return { ok: true, current_url: url, snapshot: rendered, checkout_totals: checkoutTotals };
+  const result = { ok: true, current_url: url, snapshot: rendered, checkout_totals: checkoutTotals };
+  await maybeFinalizeCapturedRecipe(result);
+  return result;
+}
+
+function cents(amount) {
+  const match = /^\$\s*(\d[\d,]*)(?:\.(\d{2}))?$/.exec(amount);
+  return match === null
+    ? undefined
+    : Number(match[1].replaceAll(",", "")) * 100 + Number(match[2] ?? "0");
+}
+
+async function finalizeCapturedRecipe() {
+  if (finalized) return finalizedRecipe;
+  const current = await observe(sessionId, "full");
+  if (!new URL(current.url).pathname.startsWith("/checkouts/")) {
+    throw new Error("recipe capture has not reached checkout review");
+  }
+  const checkout = await controller.readSettledCheckoutReviewSummary("USD");
+  if (checkout === undefined || checkout.amount_cents !== config.expected_total_cents) {
+    throw new Error("checkout review did not settle at the expected total");
+  }
+  finalizedRecipe = await rememberRecipe(sessionId, {
+    name: `replay-eval-${config.task_id}`,
+    goal: `Reach review for ${config.product_query} without payment`,
+    verb: "purchase",
+    // Repeat tasks intentionally exercise the production recipe's supported
+    // runtime-service-url entry form.  The native trace remains untouched;
+    // this binds the requested same-domain product at lookup/replay time.
+    entry_mode: "runtime_service_url",
+    inputs: config.inputs,
+    // The capture gate below has already verified the review sequence and
+    // final total.  The local recipe postcondition remains a stable, current
+    // page fact rather than depending on a title omitted by checkout's compact
+    // late-state rendering.
+    postcondition: {
+      kind: "execute_capability",
+      describe: "checkout review is reached without payment",
+      success_signal: { url_contains: "/checkouts/" },
+    },
+  });
+  writeFileSync(config.checkout_file, `${JSON.stringify(checkout, null, 2)}\n`);
+  finalized = true;
+  return finalizedRecipe;
+}
+
+async function maybeFinalizeCapturedRecipe(result) {
+  if (config.expected_total_cents === undefined || finalized || !result.current_url.includes("/checkouts/")) {
+    return;
+  }
+  checkoutItemObserved ||= result.snapshot
+    .toLowerCase()
+    .includes(String(config.expected_title ?? "").toLowerCase());
+  checkoutReviewObserved ||=
+    result.snapshot.includes(`"value":"replay-eval+${config.task_id}@trustysquire.ai"`) &&
+    /"value":"123 Test St(?:reet)?(?:[",])/i.test(result.snapshot) &&
+    result.snapshot.includes('"value":"10001"') &&
+    /payment|pay\s*now|billing address|review order/i.test(result.snapshot);
+  const finalTotal = result.checkout_totals
+    .map((total) => cents(total.amount))
+    .filter((total) => total !== undefined)
+    .at(-1);
+  if (
+    checkoutItemObserved &&
+    checkoutReviewObserved &&
+    finalTotal === config.expected_total_cents
+  ) {
+    await finalizeCapturedRecipe();
+  }
+}
+
+function provenanceFor(value) {
+  if (value === config.inputs?.product_query) return "product_query";
+  for (const group of ["address", "contact"]) {
+    for (const [field, candidate] of Object.entries(config.inputs?.[group] ?? {})) {
+      if (candidate === value) return `${group}.${field}`;
+    }
+  }
+  return undefined;
 }
 
 function assertClickIsAllowed(target) {
@@ -284,7 +374,14 @@ async function runTool(name, rawArguments) {
     if (opened) throw new Error("browser_open may only be called once");
     opened = true;
     await launchBrowser();
-    await page.goto(config.start_url, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = config.recipe_dir;
+    controller = BrowserController.fromHarnessPage(page);
+    const started = await startHarnessProvisionSession({
+      browser: controller,
+      serviceUrl: config.start_url,
+      extraAllowedHosts: config.allowed_hosts,
+    });
+    sessionId = started.session_id;
     return snapshot();
   }
   if (!opened || page === undefined) throw new Error("browser_open must be called first");
@@ -292,7 +389,7 @@ async function runTool(name, rawArguments) {
   if (name === "browser_click") {
     const target = assertRef(args.ref);
     assertClickIsAllowed(target);
-    await target.handle.click({ timeout: 10_000 });
+    await act(sessionId, { kind: "click", target: target.details.ref }, "none");
     return snapshot();
   }
   if (name === "browser_fill") {
@@ -300,7 +397,12 @@ async function runTool(name, rawArguments) {
     if (typeof args.text !== "string" || args.text.length < 1 || args.text.length > 240) {
       throw new Error("invalid fill text");
     }
-    await target.handle.fill(args.text, { timeout: 10_000 });
+    const provenance = provenanceFor(args.text);
+    await act(
+      sessionId,
+      { kind: "type", target: target.details.ref, text: args.text, ...(provenance === undefined ? {} : { provenance: { hole: provenance } }) },
+      "none",
+    );
     return snapshot();
   }
   if (name === "browser_select") {
@@ -308,20 +410,25 @@ async function runTool(name, rawArguments) {
     if (typeof args.label !== "string" || args.label.length < 1 || args.label.length > 120) {
       throw new Error("invalid option label");
     }
-    await target.handle.selectOption({ label: args.label }, { timeout: 10_000 });
+    const provenance = provenanceFor(args.label);
+    await act(
+      sessionId,
+      { kind: "select", target: target.details.ref, text: args.label, ...(provenance === undefined ? {} : { provenance: { hole: provenance } }) },
+      "none",
+    );
     return snapshot();
   }
   if (name === "browser_press") {
     const allowed = ["Tab", "Escape", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
     if (!allowed.includes(args.key)) throw new Error("submitting key is blocked");
-    await page.keyboard.press(args.key);
+    await act(sessionId, { kind: "press", key: args.key }, "none");
     return snapshot();
   }
   if (name === "browser_scroll") {
     if (args.direction !== "up" && args.direction !== "down") {
       throw new Error("invalid scroll direction");
     }
-    await page.mouse.wheel(0, args.direction === "down" ? 700 : -700);
+    await act(sessionId, { kind: "scroll", direction: args.direction }, "none");
     return snapshot();
   }
   if (name === "browser_wait") {
@@ -338,10 +445,17 @@ async function runTool(name, rawArguments) {
     }
     return snapshot();
   }
+  if (name === "browser_finalize_recipe") {
+    const saved = await finalizeCapturedRecipe();
+    return { ...(await snapshot()), recipe: saved };
+  }
   throw new Error(`unknown browser tool: ${name}`);
 }
 
 async function closeBrowser() {
+  if (sessionId !== undefined) await finishProvisionSession(sessionId).catch(() => undefined);
+  sessionId = undefined;
+  controller = undefined;
   await browser?.close().catch(() => undefined);
   browser = undefined;
   context = undefined;
@@ -359,6 +473,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const result = await runTool(request.params.name, request.params.arguments);
     return { content: [{ type: "text", text: JSON.stringify(result) }] };
   } catch (error) {
+    // The constrained driver receives the same message as structured tool
+    // output; stderr preserves the full stack for capture diagnostics.
+    process.stderr.write(
+      `[replay-capture-browser] ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`,
+    );
     return {
       isError: true,
       content: [

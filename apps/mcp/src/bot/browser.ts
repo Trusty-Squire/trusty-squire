@@ -157,6 +157,10 @@ export interface CheckoutSummary {
   currency: string;
 }
 
+export interface CheckoutReviewSummary extends CheckoutSummary {
+  line_items: Array<{ title: string; quantity: number }>;
+}
+
 export interface CheckoutCard {
   pan: string;
   exp_month: string;
@@ -365,6 +369,45 @@ export function parseCheckoutAmount(
   fallbackCurrency?: string,
 ): { amount_cents: number; currency: string } | null {
   return parseCheckoutAmountResult(texts, fallbackCurrency).amount;
+}
+
+/**
+ * Like parseCheckoutAmount but returns every currency-guard-clean match
+ * instead of the first — checkout review pages can show a pre-shipping
+ * subtotal before the final labeled total, so the caller needs the full
+ * sequence to pick the settled one. Reuses the same regex and currency-guard
+ * helpers as parseCheckoutAmountResult (unresolved-currency and
+ * fallback-scale-mismatch matches are skipped identically), just without the
+ * single-result early return.
+ */
+export function parseCheckoutAmounts(
+  texts: readonly string[],
+  fallbackCurrency?: string,
+): Array<{ amount_cents: number; currency: string }> {
+  const amounts: Array<{ amount_cents: number; currency: string }> = [];
+  for (const text of texts) {
+    checkoutTotalPattern.lastIndex = 0;
+    for (const match of text.matchAll(checkoutTotalPattern)) {
+      const prefix = classifyCheckoutCurrencyToken(match[1]);
+      const symbol = classifyCheckoutCurrencyToken(match[2]);
+      const suffix = classifyCheckoutCurrencyToken(match[4]);
+      if (prefix.unresolved || symbol.unresolved || suffix.unresolved) continue;
+      const pageCurrency = prefix.currency ?? suffix.currency ?? symbol.currency;
+      const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
+      if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) continue;
+      const minorDigits = currencyMinorDigits(currency);
+      if (pageCurrency === undefined && fallbackCurrencyScaleMismatches(match[3] ?? "", minorDigits)) {
+        continue;
+      }
+      const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
+      if (amount === null) continue;
+      const scale = 10 ** minorDigits;
+      const minor = Math.round(amount * scale);
+      if (Math.abs(amount * scale - minor) > 1e-6) continue;
+      amounts.push({ amount_cents: minor, currency });
+    }
+  }
+  return amounts;
 }
 
 function merchantFromPage(title: string, siteName: string, url: string): string {
@@ -1162,6 +1205,10 @@ export class BrowserController {
 
   private readonly profileDir: string;
 
+  // The replay harness owns this context so it can route the storefront from a
+  // HAR, then remove that route before checkout becomes live.
+  private harnessAttachedPage = false;
+
   // T6/T7 — OAuth handshake bookkeeping. When startOAuth() adopts a
   // popup window as the active page, the original product page is
   // parked here so settleAfterOAuth() can switch back to it once the
@@ -1195,6 +1242,17 @@ export class BrowserController {
     this.profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
     this.proxyOverride =
       opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
+  }
+
+  /** Attach normal controller behavior to a harness-owned Playwright page. */
+  static fromHarnessPage(page: Page): BrowserController {
+    const controller = new BrowserController({ humanize: false });
+    controller.context = page.context();
+    controller.page = page;
+    controller.primaryPage = page;
+    controller.harnessAttachedPage = true;
+    controller.launchedMode = "headless";
+    return controller;
   }
 
   // Per-launch egress override (verify-fleet identities each get their own IP).
@@ -5712,6 +5770,152 @@ export class BrowserController {
     };
   }
 
+  /**
+   * Read a settled checkout-review amount.  Checkout pages can retain an
+   * earlier subtotal while asynchronously replacing the final labeled total;
+   * the harness calls this only after it has proved a shipping method is
+   * present, then requires this value to remain stable across two reads.
+   * Payment continues to use readCheckoutSummary's original first-read
+   * contract; this is a review-only, pre-payment reader.
+   */
+  async readCheckoutReviewSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const identity = await page.evaluate(() => ({
+      title: document.title,
+      siteName:
+        document.querySelector<HTMLMetaElement>('meta[property="og:site_name"]')?.content ??
+        document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
+        "",
+    }));
+    const texts = await Promise.all(
+      page
+        .frames()
+        .map(
+          async (frame) =>
+            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+        ),
+    );
+    const amount = parseCheckoutAmounts(texts, fallbackCurrency).at(-1);
+    if (amount === undefined) throw new Error("payment_checkout_total_not_found");
+    return {
+      merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
+      checkout_origin: new URL(page.url()).origin,
+      ...amount,
+    };
+  }
+
+  async readCheckoutReviewLineItems(): Promise<Array<{ title: string; quantity: number }>> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
+      const visible = (element: Element): boolean => {
+        if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) return false;
+        const style = getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden";
+      };
+      const quantityIn = (container: Element): number | undefined => {
+        const field = Array.from(
+          container.querySelectorAll<HTMLInputElement>(
+            'input[name*="quantity" i], input[aria-label*="quantity" i], select[name*="quantity" i]',
+          ),
+        ).find(visible);
+        const fieldValue = field?.value === undefined ? Number.NaN : Number(field.value);
+        if (Number.isInteger(fieldValue) && fieldValue > 0) return fieldValue;
+        const text = normalize(container.textContent ?? "");
+        const labeled = /\bquantity\s*:?[\s\n]*(\d+)\b/i.exec(text)?.[1];
+        const parsed = Number(labeled);
+        return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+      };
+      const titleFrom = (container: Element): string | undefined => {
+        const candidates = [
+          ...Array.from(
+            container.querySelectorAll<HTMLElement>(
+              'a[href*="/products/"], [data-testid*="title" i], [class*="title" i], h1, h2, h3, h4, td, [role="cell"]',
+            ),
+            (element) => normalize(element.innerText),
+          ),
+          ...Array.from(container.querySelectorAll<HTMLImageElement>("img[alt]"), (image) =>
+            normalize(image.alt),
+          ),
+        ];
+        return candidates.find(
+          (candidate) =>
+            candidate.length > 0 &&
+            candidate.length <= 240 &&
+            !/^product(?: image| information)?$/i.test(candidate) &&
+            !/^quantity\b/i.test(candidate) &&
+            !/^\$|\$\s*\d/.test(candidate),
+        );
+      };
+      const rows = Array.from(
+        document.querySelectorAll(
+          'tr, [role="row"], [data-testid*="line-item" i], [data-testid*="product" i], [class*="line-item" i], [class*="product" i]',
+        ),
+      ).filter(visible);
+      const observed = rows.flatMap((row) => {
+        const quantity = quantityIn(row);
+        const title = titleFrom(row);
+        return quantity === undefined || title === undefined
+          ? []
+          : [{ title, quantity, size: normalize(row.textContent ?? "").length }];
+      });
+      const byTitle = new Map<string, { title: string; quantity: number; size: number }>();
+      for (const item of observed) {
+        const key = item.title.toLowerCase();
+        const previous = byTitle.get(key);
+        if (previous === undefined || item.size < previous.size) byTitle.set(key, item);
+      }
+      return [...byTitle.values()].map(({ title, quantity }) => ({ title, quantity }));
+    });
+  }
+
+  async readSettledCheckoutReviewSummary(
+    fallbackCurrency?: string,
+    timeoutMs = 12_000,
+  ): Promise<CheckoutReviewSummary | undefined> {
+    if (!this.page) throw new Error("Browser not started");
+    const deadline = Date.now() + timeoutMs;
+    let previous: CheckoutReviewSummary | undefined;
+    while (Date.now() < deadline) {
+      const shippingReady = await this.page
+        .evaluate(() => {
+          const labels = Array.from(document.querySelectorAll<HTMLInputElement>('input[type="radio"]'))
+            .flatMap((input) => [
+              ...(input.labels === null ? [] : Array.from(input.labels, (label) => label.innerText)),
+              input.getAttribute("aria-label") ?? "",
+              input.closest("label")?.textContent ?? "",
+            ])
+            .map((label) => label.replace(/\s+/g, " ").trim())
+            .filter((label) => label.length > 0 && !/loading/i.test(label));
+          return (
+            /\bdelivery\b|\bshipping\b/i.test(document.body?.innerText ?? "") &&
+            labels.some((label) => /\b(?:standard|express|shipping|delivery|pickup)\b/i.test(label))
+          );
+        })
+        .catch(() => false);
+      if (shippingReady) {
+        const current = await Promise.all([
+          this.readCheckoutReviewSummary(fallbackCurrency),
+          this.readCheckoutReviewLineItems(),
+        ])
+          .then(([summary, line_items]) => ({ ...summary, line_items }))
+          .catch(() => undefined);
+        if (
+          current !== undefined &&
+          current.line_items.length > 0 &&
+          previous !== undefined &&
+          JSON.stringify(current) === JSON.stringify(previous)
+        ) {
+          return current;
+        }
+        previous = current;
+      }
+      await this.page.waitForTimeout(250);
+    }
+    return undefined;
+  }
+
   async isPayPalHostedCheckout(): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
     const iframeDescriptors = await this.page.evaluate(() =>
@@ -9042,6 +9246,14 @@ export class BrowserController {
   }
 
   async close(): Promise<void> {
+    if (this.harnessAttachedPage) {
+      this.page = null;
+      this.primaryPage = null;
+      this.oauthProductPage = null;
+      this.oauthNetLog = [];
+      this.context = null;
+      return;
+    }
     // Each step is best-effort and independent: a throw closing the page
     // or context must NOT skip the Xvfb teardown below, or the virtual
     // display leaks (orphaned Xvfb procs pile up over a long-lived MCP

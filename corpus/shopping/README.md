@@ -11,6 +11,13 @@ in Shopify test mode through `runLiveWhitejadeCheckout`.
 target, every captured task, aggregate skipped counts with reasons, and the
 live-verified checkout-review totals and completion gap.
 
+`traces/` holds each repeat task's captured prepared recipe
+(`<task-id>.recipe.json`) and settled checkout artifact
+(`<task-id>.checkout.json`), referenced from the record's
+`cold_baseline.provenance` and replayed by the warm evaluation
+(`pnpm -F @trusty-squire/mcp eval:replay` — see
+`docs/DESIGN-replay-eval-harness.md` §10).
+
 Re-run the constrained all-cold capture from the MCP package:
 
 ```bash

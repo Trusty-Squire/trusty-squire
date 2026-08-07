@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -6,8 +6,10 @@ import { homedir } from "node:os";
 import { parse as parseToml } from "smol-toml";
 import {
   allowedHostsFor,
+  buildGroundingDiagnostic,
   buildCaptureEnvironment,
   buildCodexArguments,
+  captureBrowserObservations,
   isEndState,
   validateGroundedCapture,
 } from "./replay-capture-support.mjs";
@@ -17,6 +19,7 @@ const DRIVER = "codex-exec+constrained-browser-mcp";
 const CORPUS_DIR = resolve(process.cwd(), "../../corpus/shopping");
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const MCP_SERVER = resolve(SCRIPT_DIR, "replay-capture-browser-mcp.mjs");
+const TRACE_DIR = resolve(CORPUS_DIR, "traces");
 
 function executableEntry(name) {
   for (const directory of (process.env.PATH ?? "").split(delimiter)) {
@@ -54,9 +57,6 @@ function taskFiles() {
 }
 
 function startUrl(task) {
-  if (task.bucket === "repeat") {
-    return `https://whitejade.xyz/cart/${encodeURIComponent(task.params.product_variant_id)}:1`;
-  }
   return task.entry_url;
 }
 
@@ -68,6 +68,39 @@ function finalMessage(events) {
   return raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
 }
 
+function browserToolFailures(events) {
+  return events.flatMap((event) => {
+    if (event.type !== "item.completed" || event.item?.type !== "mcp_tool_call") return [];
+    const raw = event.item.result ?? event.item.output ?? event.item.content;
+    const text =
+      typeof raw === "string"
+        ? raw
+        : typeof raw?.text === "string"
+          ? raw.text
+          : typeof raw?.content?.[0]?.text === "string"
+            ? raw.content[0].text
+            : "";
+    try {
+      const parsed = JSON.parse(text);
+      return parsed?.ok === false && typeof parsed.error === "string"
+        ? [`${event.item.tool ?? event.item.name ?? "browser tool"}: ${parsed.error}`]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function writeGroundingDebugArtifact(task, events, final, reason) {
+  const observations = captureBrowserObservations(events);
+  const diagnostic = buildGroundingDiagnostic(task, observations, final, reason);
+  const debugDir = resolve(TRACE_DIR, "debug");
+  mkdirSync(debugDir, { recursive: true });
+  const path = resolve(debugDir, `${task.task_id}.grounding-failure.json`);
+  writeFileSync(path, `${JSON.stringify(diagnostic, null, 2)}\n`);
+  return path;
+}
+
 function promptFor(task) {
   const initialUrl = startUrl(task);
   const browserRules =
@@ -75,7 +108,7 @@ function promptFor(task) {
   const outputRules =
     "Return only JSON with task_id, line_items as [{title_contains,qty}], total_cents as an integer, and reached.";
   if (task.bucket === "repeat") {
-    return `${browserRules}\nTask ${task.task_id}: buy one ${task.params.product_query}. Open ${initialUrl}. Use guest checkout with synthetic contact replay-eval+${task.task_id}@trustysquire.ai, Replay Evaluation, 123 Test Street, New York, NY 10001, US, 2125550100. Reach the checkout review/payment page, observe line item, quantity, subtotal, shipping, and total, then stop before payment. Do not infer or calculate the total; report the displayed total. Set reached to checkout_review. ${outputRules}`;
+    return `${browserRules}\nTask ${task.task_id}: buy one ${task.params.product_query}. Open ${initialUrl}. Use guest checkout with synthetic contact replay-eval+${task.task_id}@trustysquire.ai, Replay Evaluation, 123 Test Street, New York, NY 10001, US, 2125550100. Reach the checkout review/payment page, observe line item, quantity, subtotal, shipping, and total, then stop before payment. Do not infer or calculate the total; report the displayed total. Set reached to checkout_review. Once the exact review state is visible, call browser_finalize_recipe exactly once before returning. ${outputRules}`;
   }
   return `${browserRules}\nTask ${task.task_id}: inspect ${task.params.product_query}. Open ${initialUrl}. This novel MISS baseline stops at the product page. If browser_open shows the requested title and its product price, report them immediately without clicking, scrolling, dismissing overlays, or navigating. Use quantity one and do not add to cart. Set reached to product_page. ${outputRules}`;
 }
@@ -85,6 +118,29 @@ function captureTask(task) {
   const browserConfig = {
     start_url: initialUrl,
     allowed_hosts: allowedHostsFor(initialUrl),
+    task_id: task.task_id,
+    product_query: task.params.product_query,
+    expected_title: task.expected_end_state.line_items[0]?.title_contains,
+    expected_total_cents: task.expected_end_state.total_cents,
+    recipe_dir: resolve(TRACE_DIR, `.capture-${task.task_id}`),
+    checkout_file: resolve(TRACE_DIR, `.capture-${task.task_id}`, "checkout.json"),
+    inputs: {
+      product_query: task.params.product_query,
+      address: {
+        country: "United States",
+        region: "New York",
+        postal_code: task.params.address.postal_code,
+        line1: "123 Test Street",
+        city: "New York",
+      },
+      contact: {
+        email: `replay-eval+${task.task_id}@trustysquire.ai`,
+        name: "Replay Evaluation",
+        first_name: "Replay",
+        last_name: "Evaluation",
+        phone: "2125550100",
+      },
+    },
   };
   const started = Date.now();
   const result = spawnSync(
@@ -121,10 +177,12 @@ function captureTask(task) {
   ).length;
   const final = finalMessage(events);
   const parsed = JSON.parse(final);
-  if (!isEndState(parsed))
+  if (!isEndState(parsed)) {
+    const failures = browserToolFailures(events);
     throw new Error(
-      `${task.task_id}: driver returned an invalid end state (${final.slice(0, 1000)}; ${result.stderr.trim().slice(-2000)})`,
+      `${task.task_id}: driver returned an invalid end state (${final.slice(0, 1000)}; ${[...failures, result.stderr.trim()].filter(Boolean).join("; ").slice(-4000)})`,
     );
+  }
   const endState = {
     line_items: parsed.line_items,
     total_cents: parsed.total_cents,
@@ -132,7 +190,32 @@ function captureTask(task) {
   };
   if (parsed.task_id !== task.task_id)
     throw new Error(`${task.task_id}: driver returned wrong task`);
-  const browserEvidence = validateGroundedCapture(events, endState, task);
+  let browserEvidence;
+  try {
+    browserEvidence = validateGroundedCapture(events, endState, task);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const debugPath = writeGroundingDebugArtifact(task, events, final, reason);
+    throw new Error(`${reason}; grounding_debug_artifact=${debugPath}`);
+  }
+  let traceArtifact;
+  let checkoutArtifact;
+  if (task.bucket === "repeat") {
+    const recipePath = resolve(browserConfig.recipe_dir, "purchase--whitejade.xyz.json");
+    if (!existsSync(recipePath)) throw new Error(`${task.task_id}: native recipe artifact missing`);
+    mkdirSync(TRACE_DIR, { recursive: true });
+    traceArtifact = resolve(TRACE_DIR, `${task.task_id}.recipe.json`);
+    writeFileSync(traceArtifact, readFileSync(recipePath, "utf8"));
+    checkoutArtifact = resolve(TRACE_DIR, `${task.task_id}.checkout.json`);
+    writeFileSync(checkoutArtifact, readFileSync(browserConfig.checkout_file, "utf8"));
+    const taskFile = resolve(CORPUS_DIR, `${task.task_id}.json`);
+    const persistedTask = JSON.parse(readFileSync(taskFile, "utf8"));
+    persistedTask.cold_baseline.provenance.trace_artifact =
+      `traces/${task.task_id}.recipe.json`;
+    persistedTask.cold_baseline.provenance.checkout_artifact =
+      `traces/${task.task_id}.checkout.json`;
+    writeFileSync(taskFile, `${JSON.stringify(persistedTask, null, 2)}\n`);
+  }
   return {
     task_id: task.task_id,
     turns: toolCalls + 1,
@@ -145,17 +228,35 @@ function captureTask(task) {
       model: MODEL,
       recorded_at: new Date().toISOString(),
       ...browserEvidence,
+      ...(traceArtifact === undefined
+        ? {}
+        : {
+            trace_artifact: `traces/${task.task_id}.recipe.json`,
+            checkout_artifact: `traces/${task.task_id}.checkout.json`,
+          }),
     },
   };
 }
 
 const recordings = [];
+const failures = [];
 for (const task of taskFiles()) {
   process.stderr.write(`[replay-capture] ${task.task_id}\n`);
-  const recording = captureTask(task);
-  recordings.push(recording);
-  process.stderr.write(`[replay-record] ${JSON.stringify(recording)}\n`);
+  try {
+    const recording = captureTask(task);
+    recordings.push(recording);
+    process.stderr.write(`[replay-record] ${JSON.stringify(recording)}\n`);
+  } catch (error) {
+    const failure = {
+      task_id: task.task_id,
+      reason: error instanceof Error ? error.message : String(error),
+    };
+    failures.push(failure);
+    // A failed constrained capture is evidence of an unavailable sample, never
+    // permission to synthesize a trace or substitute a scripted walk.
+    process.stderr.write(`[replay-capture-failure] ${JSON.stringify(failure)}\n`);
+  }
 }
 process.stdout.write(
-  `${JSON.stringify({ schema_version: 1, driver: DRIVER, model: MODEL, recordings }, null, 2)}\n`,
+  `${JSON.stringify({ schema_version: 1, driver: DRIVER, model: MODEL, recordings, failures }, null, 2)}\n`,
 );
