@@ -603,3 +603,41 @@ describe("setPhoneCountry — real Chromium widget fixtures", () => {
     }
   }, 30000);
 });
+
+// extractVisibleText's own comment claims it "reflects what a user would
+// actually see" — innerText excludes display:none/visibility:hidden but NOT
+// opacity:0, so the RPNI fixture's opacity:0 country <select> (real pattern,
+// found live on a Shopify checkout) dumped all 12 option names into the page
+// text. Left unfixed that floods/truncates the text a host reads to decide
+// what's on the page.
+describe("extractVisibleText — opacity:0 elements excluded", () => {
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("omits an opacity:0 native <select>'s options from page text", async () => {
+    const { ctrl, page } = await pageFor(RPNI_FIXTURE);
+    try {
+      const text = await ctrl.extractVisibleText();
+      for (const row of ISO_ROWS) {
+        if (row.name === "United States") continue; // visible flag placeholder text
+        expect(text).not.toContain(row.name);
+      }
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("still includes ordinary visible text", async () => {
+    const { ctrl, page } = await pageFor(RPNI_FIXTURE);
+    try {
+      const text = await ctrl.extractVisibleText();
+      expect(text).toContain("US"); // the visible flag placeholder
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+});
