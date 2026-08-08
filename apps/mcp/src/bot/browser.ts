@@ -2755,15 +2755,15 @@ export class BrowserController {
   }
 
   // Resolve a locator-form operate_act target (`text=…` / `css=…`) DIRECTLY
-  // against the live page, bypassing the extracted-inventory list. This is the
-  // escape hatch for a control the inventory never emitted: a bare click-handler
-  // <div> with no role/label/testid that the SELECTOR walk skips and that the
-  // card scan drops once its MAX_CARDS budget is spent on earlier cursor:pointer
+  // against a live page/frame document, bypassing the extracted-inventory list.
+  // This is the escape hatch for a control the inventory never emitted: a bare
+  // click-handler <div> with no role/label/testid that the SELECTOR walk skips,
+  // or a typeable control missing from the inventory. The card scan can also
+  // drop a control once its MAX_CARDS budget is spent on earlier cursor:pointer
   // divs (Casetify's Add-To-Cart is element #45 of the eligible cards; the cap is
-  // 16). Because there is no ref for such an element, `text=`/`css=` is the only
-  // way the host can click it.
+  // 16). With no ref, `text=`/`css=` is the only host-addressable target.
   //
-  // Resolution rules (kept deliberately strict so the click can't land on the
+  // Resolution rules (kept deliberately strict so the action can't land on the
   // wrong element):
   //   • text mode — matches an element whose rendered text (innerText, so hidden
   //     descendants don't leak) equals (or, if nothing equals, contains) the
@@ -2779,7 +2779,8 @@ export class BrowserController {
   //     with the candidate texts so the host can disambiguate. Exactly 1 returns
   //     a live ElementHandle to the winner. The caller acts through the handle
   //     (never a DOM-visible marker), so a page MutationObserver cannot re-aim
-  //     the click at a decoy between resolution and click, and disposes it after.
+  //     the action at a decoy between resolution and dispatch, and disposes it
+  //     after.
   private async resolveTargetInContext(
     ctx: Page | Frame,
     mode: "text" | "css",

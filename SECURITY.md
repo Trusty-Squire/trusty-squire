@@ -155,8 +155,11 @@ audit retention window, which defaults to 365 days.
 - The **MCP server** may store a secret and use it through controlled tools.
 - The **agent** may see credential metadata, field names, masked values, and
   vault references — but **cannot read plaintext values** from the vault.
-- **Sealed slots** let browser automation type a secret (e.g. a password) into an
-  allowed login host without the agent ever reading the slot's contents.
+- **Sealed slots** let browser automation type a secret (e.g. a password) into
+  the main document or a child frame on that page's own registrable domain
+  without the agent ever reading the slot's contents. A raw slot value is
+  refused for every cross-domain or opaque frame, even when that frame's host is
+  otherwise allowed for navigation or OAuth.
 - **Egress grants** inject a secret into an outbound provider request only for
   allowed hosts and configured auth shapes.
 - **Audit logs** record operations and metadata, not secret values.

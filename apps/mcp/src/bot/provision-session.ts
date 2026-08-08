@@ -198,7 +198,8 @@ export interface Observation {
   // COMPACT-mode element inventory as a tab-delimited table (docs/DESIGN-observe-
   // compact.md § Phase 4). The first line is a tab-joined HEADER naming the
   // columns present in this emit (a subset of ref,label,tag,role,type,value_len,
-  // checked,href,testId,topmost,occluded_by, always starting ref,label,tag);
+  // checked,href,testId,topmost,occluded_by,frame_origin, always starting
+  // ref,label,tag);
   // each following line is ONE element, tab-joined cells in header order. An
   // empty cell means the field is absent for that element. Tab, newline,
   // carriage-return and backslash inside a cell are backslash-escaped (\t \n \r
@@ -435,7 +436,7 @@ interface Session {
   // gate spend a VAULTED 2Captcha key through the injecting proxy instead of a
   // raw env key. Undefined → the gate falls back to TWOCAPTCHA_API_KEY.
   api?: ApiClient;
-  // Set when a step used the text=/css= locator click fallback. Such a click
+  // Set when a step used the text=/css= locator action fallback. Such an action
   // resolves off-inventory, so it cannot be synthesized into a portable skill
   // step — this flag suppresses auto-promotion so no silently-incomplete skill
   // ships (captureAndPromoteSession).
@@ -843,12 +844,14 @@ function parseProvisionRef(target: string): { id: string; ordinal: number | null
 }
 
 // A locator-form target the host supplies when NO `@e:` ref exists for the
-// control it needs to act on — a bare click-handler <div> the inventory never
-// emitted (no role/label/testid, and past the card-scan cap). Two forms:
-//   text="Add To Cart"  (quotes optional) — clickable element whose text matches
+// control it needs to act on — for example, a bare click-handler <div> the
+// inventory never emitted (no role/label/testid, and past the card-scan cap).
+// Two forms:
+//   text="Add To Cart"  (quotes optional) — matching clickable/typeable element
 //   css=#some-id                          — a raw CSS selector
-// Resolved directly against the live page by BrowserController.resolvePageTarget,
-// NOT against the extracted-element inventory (which by definition lacks it).
+// Resolved directly across live ordinary page/frame documents by
+// BrowserController.resolvePageTarget, NOT against the extracted-element
+// inventory (which by definition lacks it).
 export type LocatorTarget = { mode: "text" | "css"; value: string };
 
 export function parseLocatorTarget(target: string): LocatorTarget | null {
@@ -3042,10 +3045,10 @@ export async function act(
         // guard couldn't see through — clicking "Save product" in live mode via
         // css=#submit. Re-run it against compact safety signals computed from the
         // resolved control now that we know what the locator actually points at.
-        // Mark the session non-promotable BEFORE the click: a locator click can't
+        // Mark the session non-promotable BEFORE the action: a locator action can't
         // be replayed from the inventory (the element was never in it), so a
         // skill synthesized from this run would silently omit the step. Setting
-        // it up front means a click that lands but then throws still can't leave
+        // it up front means an action that lands but then throws still can't leave
         // the session promotable (see captureAndPromoteSession) (codex).
         try {
           const resolvedBlock = shouldBlockUnsafeProvisionSignals(pageText, resolved.safetySignals);
@@ -3691,9 +3694,9 @@ export async function captureAndPromoteSession(
 ): Promise<PromoteResult | { kind: "skipped"; reason: string }> {
   const session = sessionForCall(sessionId);
   if (session === undefined) return { kind: "skipped", reason: "unknown_session" };
-  // A run that used the text=/css= locator click fallback hit a control with no
+  // A run that used the text=/css= locator action fallback hit a control with no
   // inventory ref; the synthesizer can't represent that step, so promoting would
-  // ship a skill missing a click. Skip rather than emit a silently-broken skill.
+  // ship a skill missing an action. Skip rather than emit a silently-broken skill.
   if (session.usedLocatorFallback) {
     return { kind: "skipped", reason: "locator_fallback_unrepresentable" };
   }

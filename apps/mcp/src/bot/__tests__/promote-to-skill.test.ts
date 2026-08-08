@@ -105,7 +105,7 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
           },
         ],
       },
-    ] as any;
+    ] as unknown as Parameters<typeof stableSignupEntryUrl>[1];
     const loginRounds = [
       {
         observed: {
@@ -116,7 +116,7 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
         },
         inventory: [{ selector: "#password", labelText: "Password" }],
       },
-    ] as any;
+    ] as unknown as Parameters<typeof stableSignupEntryUrl>[1];
 
     expect(stableSignupEntryUrl("https://app.mor.org/signin", signupRounds)).toBe(
       "https://app.mor.org/signup",

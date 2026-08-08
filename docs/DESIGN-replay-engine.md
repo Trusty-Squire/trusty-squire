@@ -109,6 +109,12 @@ When an earlier tier has multiple matches, `near_text_hint` may narrow that tier
 to one element. Visible text is always the unique-only final fallback. This is
 an ordered resolver, not fingerprint scoring or weighted matching.
 
+A target observed inside a child frame also records `frame_origin` and its
+nested `frame_path`. Replay first restricts the fresh inventory to that exact
+frame scope, then applies the same ordered target resolver. The action still
+passes the live frame-origin domain guard; recording frame scope never grants a
+host or permits `type_secret` to cross the page's registrable domain.
+
 Before every deterministic target action, replay refreshes the live inventory
 and resolves the target structurally. Provenance-bearing money fields use the
 stricter `testid`/`id` resolution rail for value verification, and additionally

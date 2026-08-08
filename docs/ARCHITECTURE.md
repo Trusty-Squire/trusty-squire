@@ -121,7 +121,8 @@ The important boundaries are:
 - The agent can see credential metadata, field names, masked values, and vault
   references.
 - The agent cannot read plaintext values back from the vault.
-- Browser automation can type sealed slot values into allowed login hosts.
+- Browser automation obeys the sealed-slot target-origin boundary defined in
+  [`SECURITY.md`](../SECURITY.md#trust-boundaries).
 - Egress grants can inject secrets into provider calls only for allowed hosts
   and configured auth shapes.
 - Audit logs record operations and metadata, not secret values.
@@ -207,11 +208,15 @@ capture -> synthesize -> sign -> publish -> verify -> active
 - Verification replays the flow before it becomes active.
 - Active skills serve future provisions faster and with less exploration.
 
-Only inventory-backed actions are promotable. A session can still complete by
-using `operate_act` with a live `text=…` or `css=…` locator when a visible
-control has no observed ref, but that off-inventory click cannot be synthesized
-into a portable skill step. Such a session is therefore skipped by
-auto-promotion and cannot be saved as an operator recipe.
+DOM-target actions are promotable into registry Skills only when they are
+main-frame and inventory-backed; modeled navigation retains its existing domain
+lock. A session can still complete by using `operate_act` with a live `text=…`
+or `css=…` locator when a visible control has no observed ref, but an
+off-inventory action cannot be synthesized into a portable step. Such a session
+is skipped by auto-promotion and cannot be saved as an operator recipe.
+Inventory-backed frame actions can be saved in an operator recipe with their
+exact frame origin and nested path, but auto-promotion rejects them until Skill
+replay has a guarded frame consumer.
 
 The same captures must produce byte-identical skills. Promotion must not depend
 on clocks, random numbers, or plaintext credentials.
@@ -221,7 +226,8 @@ on clocks, random numbers, or plaintext credentials.
 The browser layer supports several captcha classes, including visible
 reCAPTCHA, invisible reCAPTCHA, hCaptcha, and Turnstile. Solver use is gated by
 configuration and treated as a bounded fallback, not as proof that an account
-was created.
+was created. Their challenge-frame internals are excluded from the ordinary
+element inventory and remain owned by this dedicated captcha flow.
 
 The provisioning loop distinguishes:
 

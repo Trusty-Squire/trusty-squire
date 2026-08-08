@@ -177,9 +177,17 @@ for the system and data flows.
 ## MCP tools
 
 - `operate_start`, `operate_observe`, and `operate_act` open a website, inspect
-  the current state, and perform one browser action at a time. If a visible
-  control has no observed ref, `click` and `js_click` can target its live
-  `text=…` or `css=…` locator; that one-off fallback is not replayable.
+  the current state, and perform one browser action at a time. Ordinary controls
+  inside same- and cross-origin frames are included in observations with a
+  `frame_origin`; known captcha challenge frames stay behind the dedicated
+  captcha flow. Frame refs and live `text=…`/`css=…` locators preserve that
+  boundary: same-registrable-domain frames are reachable, cross-domain frames
+  must pass the same domain scope as `goto`/`allow_host`, opaque frames are
+  refused, and `type_secret` never targets any cross-domain frame. Frame refs
+  currently support `click`, `js_click`, `type`, and `type_secret`; `select`,
+  `upload`, and `oauth_click` fail closed. If a visible control has no observed
+  ref, the four supported action kinds can use a live locator; that one-off
+  fallback is not replayable.
 - `operate_extract` captures a generated credential into a sealed slot or the vault.
 - `operate_remember` saves a postcondition-verified local recipe under a closed
   task verb plus the service's registrable domain. It records stable target
