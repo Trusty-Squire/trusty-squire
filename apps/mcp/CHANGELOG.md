@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.2 (2026-08-08)
+
+- _summarize the changes_
+
 ## 1.1.9-rc.1 (2026-08-08)
 
 - fix(mcp): commit-or-stop autocomplete handling for typed checkout fields (#451)
