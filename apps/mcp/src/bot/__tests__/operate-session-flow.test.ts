@@ -1234,6 +1234,28 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     expect(result.status).toBe("domain_lock_violation");
   });
 
+  it.each([
+    "https://accounts.google.com/o/oauth2/auth",
+    "https://recipe-escape.firebaseapp.com/__/auth/handler",
+  ])("SAFETY: refuses a pre-approved session auth host outside the recipe domain: %s", async (url) => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [{ action: { kind: "goto", url_template: url } }],
+      }),
+      {},
+    );
+    expect(result).toMatchObject({
+      status: "domain_lock_violation",
+      step_index: 0,
+      recipe_domain: "example.com",
+    });
+    expect(h.gotos).not.toContain(url);
+  });
+
   it("allows a goto step to a subdomain of the recipe's own domain", async () => {
     h.elements = [];
     const started = await startProvisionSession({

@@ -54,6 +54,7 @@ import {
   hasRecipeTargetCandidate,
   isSingleUseUrl,
   isCheckoutShapeKey,
+  isSameRecipeDomain,
   knownRecipeInputValue,
   localeStableFieldRole,
   operatorRecipeDomain,
@@ -3988,8 +3989,8 @@ export type OperatorReplayResult =
     }
   | {
       // replay-serve-live-domainlock — a goto/allow_host step's resolved
-      // target does not resolve to the recipe's own eTLD+1 (or a known
-      // identity-provider host). Distinct from fallback_required: this is
+      // target does not resolve to the recipe's own eTLD+1. Distinct from
+      // fallback_required: this is
       // NEVER resumable — the fail-closed payment gate shuts exactly like
       // human_required, and the host must abandon this recipe's replay and
       // drive the remainder cold. Prevents a tampered/malicious shared
@@ -4170,13 +4171,11 @@ function markReplayFailure(
 }
 
 // replay-serve-live-domainlock — checks a replay-bound goto/allow_host
-// target against the recipe's own eTLD+1. The fixed DEFAULT_AUTH_HOSTS and
-// firebaseapp.com/web.app exceptions are an intentional trusted boundary,
-// shared with the ordinary session goto gate through hostAllowed; arbitrary
-// off-domain hosts remain blocked. Checkout-shape recipes cannot execute
-// goto/allow_host actions because they have no site domain.
+// target against the recipe's own eTLD+1. Unlike the ordinary session goto
+// gate, recipe replay has no auth-host exceptions. Checkout-shape recipes
+// cannot execute goto/allow_host actions because they have no site domain.
 function replayTargetWithinRecipeDomain(url: string, recipeDomain: string): boolean {
-  return hostAllowed(url, [recipeDomain]);
+  return isSameRecipeDomain(url, recipeDomain);
 }
 
 function markReplayDomainLockViolation(session: Session, host: string, recipeDomain: string): void {
