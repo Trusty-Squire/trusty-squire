@@ -53,6 +53,7 @@ import {
   fillTemplate,
   hasRecipeTargetCandidate,
   isSingleUseUrl,
+  isCheckoutShapeKey,
   knownRecipeInputValue,
   localeStableFieldRole,
   operatorRecipeDomain,
@@ -3984,6 +3985,20 @@ export type OperatorReplayResult =
       leg: "checkout";
       from_step_index: number;
       reason: string;
+    }
+  | {
+      // replay-serve-live-domainlock — a goto/allow_host step's resolved
+      // target does not resolve to the recipe's own eTLD+1 (or a known
+      // identity-provider host). Distinct from fallback_required: this is
+      // NEVER resumable — the fail-closed payment gate shuts exactly like
+      // human_required, and the host must abandon this recipe's replay and
+      // drive the remainder cold. Prevents a tampered/malicious shared
+      // recipe from steering the browser to an attacker origin.
+      status: "domain_lock_violation";
+      observation: Observation;
+      step_index: number;
+      host: string;
+      recipe_domain: string;
     };
 
 function replayTarget(action: TraceAction): RecipeTarget | null {
@@ -4152,6 +4167,26 @@ function markReplayFailure(
   session.replayState.paymentGuard = "failed";
   session.replayState.failure = { reason, field };
   audit(session.id, "replay_field_value_guard", { ok: false, reason, field });
+}
+
+// replay-serve-live-domainlock — checks a replay-bound goto/allow_host
+// target against the recipe's own eTLD+1, allowing the recipe's site (and
+// subdomains) plus the same identity-provider/auth-handler hosts the
+// ordinary session goto gate exempts (hostAllowed). A checkout-shape-keyed
+// recipe (replay-per-leg-signature) has no single site to lock to — see
+// the module note on OperatorReplayResult — so it's exempt.
+function replayTargetWithinRecipeDomain(url: string, recipeDomain: string): boolean {
+  return hostAllowed(url, [recipeDomain]);
+}
+
+function markReplayDomainLockViolation(session: Session, host: string, recipeDomain: string): void {
+  rejectRecipeRecording(
+    session,
+    `replay refused: "${host}" is outside the recipe's own domain "${recipeDomain}"`,
+  );
+  if (session.replayState === null) return;
+  session.replayState.paymentGuard = "failed";
+  audit(session.id, "replay_domain_lock_violation", { host, recipe_domain: recipeDomain });
 }
 
 function verifyReplayFieldInElements(
@@ -4625,6 +4660,21 @@ export async function replayOperatorRecipe(
     };
   };
 
+  const recipeDomain = recipe.domain;
+  const domainLockViolation = async (
+    stepIndex: number,
+    host: string,
+  ): Promise<OperatorReplayResult> => {
+    markReplayDomainLockViolation(session, host, recipeDomain);
+    return {
+      status: "domain_lock_violation",
+      observation: await observe(sessionId),
+      step_index: stepIndex,
+      host,
+      recipe_domain: recipeDomain,
+    };
+  };
+
   for (let i = fromIndex; i < recipe.trace.length; i += 1) {
     const step = recipe.trace[i] as TraceEntry;
     const recorded = step.action;
@@ -4657,10 +4707,28 @@ export async function replayOperatorRecipe(
       if (filled.missing.length > 0) {
         return await fallback(step, i, `missing bindings: ${filled.missing.join(", ")}`);
       }
+      if (
+        !isCheckoutShapeKey(recipeDomain) &&
+        !replayTargetWithinRecipeDomain(filled.url, recipeDomain)
+      ) {
+        let host: string;
+        try {
+          host = new URL(filled.url).hostname;
+        } catch {
+          host = filled.url;
+        }
+        return await domainLockViolation(i, host);
+      }
       action = { kind: "goto", url: filled.url };
     } else if (recorded.kind === "allow_host") {
       if (recorded.host === undefined) {
         return await fallback(step, i, "allow_host step has no host");
+      }
+      if (
+        !isCheckoutShapeKey(recipeDomain) &&
+        !replayTargetWithinRecipeDomain(`https://${recorded.host}`, recipeDomain)
+      ) {
+        return await domainLockViolation(i, recorded.host);
       }
       action = { kind: "allow_host", host: recorded.host };
     } else if (recorded.kind === "press") {

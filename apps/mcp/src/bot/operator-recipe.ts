@@ -35,6 +35,9 @@ import {
   checkoutShapeKey,
   operatorRecipeKeyForCheckoutShape,
   isRecipeShareEligible,
+  isSameRecipeDomain,
+  recipeDomainLockViolations,
+  isRecipeDomainLocked,
   EmailAliasTemplatePattern,
   type OperatorVerb,
   type RecipeHole,
@@ -47,6 +50,7 @@ import {
   type SecretRef,
   type OperatorRecipe,
   type RecipeShareEligibility,
+  type RecipeDomainLockViolation,
 } from "@trusty-squire/recipe-schema";
 import { filterByNearTextHint } from "./near-text-hint.js";
 
@@ -67,6 +71,9 @@ export {
   checkoutShapeKey,
   operatorRecipeKeyForCheckoutShape,
   isRecipeShareEligible,
+  isSameRecipeDomain,
+  recipeDomainLockViolations,
+  isRecipeDomainLocked,
   EmailAliasTemplatePattern,
 };
 export type {
@@ -81,6 +88,7 @@ export type {
   SecretRef,
   OperatorRecipe,
   RecipeShareEligibility,
+  RecipeDomainLockViolation,
 };
 
 // ── Local IO ────────────────────────────────────────────────────────

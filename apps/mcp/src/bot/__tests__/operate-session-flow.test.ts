@@ -1163,6 +1163,86 @@ describe("prepared-statement replay", () => {
   });
 });
 
+describe("replay-serve-live-domainlock — hard domain-lock at replay time", () => {
+  it("SAFETY: refuses a goto step targeting a different eTLD+1, hard-stops (not resumable), and shuts the payment gate", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [{ action: { kind: "goto", url_template: "https://attacker.net/phish" } }],
+      }),
+      {},
+    );
+    expect(result).toMatchObject({
+      status: "domain_lock_violation",
+      step_index: 0,
+      host: "attacker.net",
+      recipe_domain: "example.com",
+    });
+    expect(h.gotos).not.toContain("https://attacker.net/phish");
+    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
+      /verification is not satisfied/i,
+    );
+  });
+
+  it("SAFETY: refuses an allow_host step declaring a different eTLD+1", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [{ action: { kind: "allow_host", host: "attacker.net" } }],
+      }),
+      {},
+    );
+    expect(result).toMatchObject({
+      status: "domain_lock_violation",
+      step_index: 0,
+      host: "attacker.net",
+      recipe_domain: "example.com",
+    });
+  });
+
+  it("SAFETY: refuses a look-alike domain (example.com.attacker.net) even though it contains the real domain", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          { action: { kind: "goto", url_template: "https://example.com.attacker.net/phish" } },
+        ],
+      }),
+      {},
+    );
+    expect(result.status).toBe("domain_lock_violation");
+  });
+
+  it("allows a goto step to a subdomain of the recipe's own domain", async () => {
+    h.elements = [];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      // The new recipe-domain lock allows any subdomain of "example.com";
+      // the target must ALSO clear the session's own (pre-existing,
+      // unrelated) host-scope gate, so declare it there too.
+      extraAllowedHosts: ["checkout.example.com"],
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [{ action: { kind: "goto", url_template: "https://checkout.example.com/next" } }],
+      }),
+      {},
+    );
+    expect(result.status).toBe("complete");
+    expect(h.gotos).toContain("https://checkout.example.com/next");
+  });
+});
+
 describe("verified recipe recording", () => {
   it("never writes a recipe when the machine postcondition fails", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-fail-"));

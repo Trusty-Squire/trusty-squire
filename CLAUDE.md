@@ -511,7 +511,7 @@ package would defeat the whole 0.7.0 thesis).
   path is honored without any env work. Set to `off` / `0` / `false`
   to suppress capture entirely.
 
-### Operator Recipe registry (replay-registry-share)
+### Operator Recipe registry (replay-serve-live-domainlock)
 
 A **second, distinct** shared-registry flow, alongside Skills — an
 Operator Recipe (`OperatorRecipeSchema`, `apps/mcp/src/bot/operator-recipe.ts`)
@@ -528,7 +528,60 @@ the same site.
   Needs its own npm-publish CI (`.github/workflows/release-recipe-schema.yml`,
   mirrors `release-skill-schema.yml`) — its `workspace:*` pin must resolve
   for real `npx @trusty-squire/mcp` installs.
-- **Cross-user safety gate: `isRecipeShareEligible`** (in recipe-schema).
+- **A recipe serves LIVE the moment `POST /recipes` accepts it — no
+  candidate/promotion tier.** This replaced an earlier candidate +
+  housekeeper-vetted-promotion design (a captain-level correction at the
+  time, driven by a no-mistakes poisoning-risk finding); it was simplified
+  back to direct-write because the housekeeper-side promotion wiring was
+  never actually built (an operator would have had to hand-drive
+  `/admin/recipes/*` indefinitely) and a stronger, structural control now
+  stands in the promotion gate's place — see the domain-lock bullet below.
+  One store (`recipe-store.ts`, `OperatorRecipeRecord`, memory + Prisma
+  impls) — `upsert()` is the only write path, `POST /recipes` calls it
+  directly. `GET /recipes/:verb/:domain` reads whatever was last written.
+  `POST /recipes` is additionally backstopped by a per-IP rolling-hour rate
+  limit (`RECIPE_SUBMIT_IP_HOURLY_LIMIT`, `routes/recipes.ts`) — the DoS
+  protection is all that's left of the old write-side gate.
+- **Cross-user safety is now carried by the HARD DOMAIN-LOCK
+  (`recipeDomainLockViolations`/`isSameRecipeDomain`, in recipe-schema) —
+  the primary control, not a secondary one.** A recipe may only ever drive
+  the exact site it was recorded for: `entry_url`, every `allowed_hosts`
+  entry, and every `goto`/`allow_host` trace target must resolve to the
+  SAME registrable domain (eTLD+1, via the same PSL-aware
+  `operatorRecipeDomain` the key itself is built from) as the recipe's own
+  `domain` — a subdomain is allowed, a different eTLD+1 or a look-alike
+  (`example.com.attacker.net`) is not. Enforced at BOTH ends:
+  - **Write time** — `POST /recipes` (`routes/recipes.ts`) rejects
+    (`400 domain_lock_violation`, never stores) any recipe that fails this,
+    checked before `isRecipeShareEligible`. `SkillRegistryClient.publishRecipe`
+    re-runs the same check client-side first (mirrors how
+    `isRecipeShareEligible` is checked on both sides) so an obviously-bad
+    submission never makes the round trip.
+  - **Replay time** — defense in depth against a tampered local file, a
+    stale registry, or a recipe fetched before this shipped.
+    `provisionUseTool` (`tools/provision-drive.ts`,
+    `recipeDomainLockViolationForReplay`) re-checks the resolved entry URL
+    + `allowed_hosts` before ever starting a session, hard-stopping to a
+    cold-driven session (`replay.status: "domain_lock_violation"`) instead
+    of trusting a tampered target. `replayOperatorRecipe`
+    (`bot/provision-session.ts`) re-checks every `goto`/`allow_host` STEP
+    as it executes (`hostAllowed(url, [recipe.domain])` — same helper the
+    ordinary session goto-gate uses, so the recipe's site + its subdomains
+    + the standard identity-provider hosts (`DEFAULT_AUTH_HOSTS`,
+    `*.firebaseapp.com`/`*.web.app`) are allowed, nothing else). A
+    violation is a NEW terminal `OperatorReplayResult` status
+    (`domain_lock_violation`) — never resumable, shuts the fail-closed
+    payment gate exactly like `human_required` does
+    (`markReplayDomainLockViolation`).
+  - **Exempt for a checkout-shape-keyed recipe**
+    (`isCheckoutShapeKey(recipe.domain)` — replay-per-leg-signature, next
+    section): its pseudo-domain is a field-set hash, not a site, and the
+    whole point of that flow is cross-store reuse. Its `allowed_hosts` is
+    never consumed to widen a replay session's scope
+    (`operate_use{leg:"checkout"}` replays against an already-open
+    session's own page), so the ordinary session host-scope gate already
+    protects it without a domain to lock to.
+- **Cross-user safety gate 2: `isRecipeShareEligible`** (in recipe-schema).
   A shared recipe must never carry a baked-in user-specific literal or an
   earned credential. The schema already makes some of this unrepresentable
   (secrets are always slot refs; `operate_pay` requires card provenance);
@@ -539,47 +592,20 @@ the same site.
   actions. Biased toward false positives (recipe just stays local) over
   false negatives. Applied **client-side** (`SkillRegistryClient.publishRecipe`,
   before the network call) **and server-side** (`POST /recipes`, defense in
-  depth against a stale/bypassed client) — never only one.
-- **Registry storage is candidate + promoted-live, NOT last-write-wins-to-live.**
-  `POST /recipes` is unauthenticated (only the eligibility gate stands
-  between a caller and a write), so it writes ONLY to
-  `OperatorRecipeCandidateRecord` — never replayed by anyone. `operate_use`
-  / `GET /recipes/:verb/:domain` read ONLY `OperatorRecipeRecord`, the live
-  table, which is written ONLY by the admin-bearer-gated
-  `POST /admin/recipes/:verb/:domain/promote` (`routes/admin-recipes.ts`,
-  mirrors the Skill flow's `/admin/verifier/queue` +
-  `/admin/skills/:id/verifier-outcome` shape). An unauthenticated candidate
-  write can therefore never steer another user's replay browser until a
-  promotion decision has vetted its navigation targets
-  (`entry_url`/`allowed_hosts`/`goto` templates) — safe by construction,
-  not by trust in the write path. Promotion is pinned to the reviewed
-  CONTENT, not the slot: `GET /admin/recipe-candidates` surfaces a sha256
-  `content_digest` per candidate and `promote` requires echoing it (409
-  `not_current` if an unauthenticated re-submit overwrote the slot after
-  review). `POST /recipes` is additionally backstopped by a per-IP
-  rolling-hour rate limit and a domain-plausibility check
-  (`routes/recipes.ts`). Two stores: `recipe-store.ts` (live) +
-  `recipe-candidate-store.ts` (candidate), each with memory + Prisma
-  implementations. **The housekeeper-side wiring to actually call
-  `promote` after vetting is NOT done** — the housekeeper lives in the
-  separate closed-source `Trusty-Squire/trusty-squire-housekeeper` repo
-  (see "Housekeeper" below), which this monorepo checkout can't reach.
-  Until that lands, an operator drives `/admin/recipes/*` directly with
-  the admin bearer. Don't relax this back to direct-write last-write-wins
-  without a real need; it was a deliberate captain-level correction to an
-  earlier direct-write design (no-mistakes review caught the poisoning
-  risk).
+  depth against a stale/bypassed client) — never only one, and always AFTER
+  the domain-lock check (a recipe that fails domain-lock never reaches it).
 - **Client wiring**: `SkillRegistryClient` (`apps/mcp/src/skill-registry-client.ts`)
   gained `fetchRecipe`/`publishRecipe` — same client, same retry/timeout/
   fail-open/cache infra as the Skill methods, not a parallel transport.
-  `publishRecipe` submits a candidate, it does not publish live.
+  `publishRecipe` publishes LIVE — a domain-lock or share-eligibility
+  failure both surface as the same `not_share_eligible` outcome (reasons
+  array); the caller doesn't need to distinguish why a recipe stayed local.
   `apps/mcp/src/tools/provision-drive.ts` — `publishRecipeToRegistry` (fires
   after `operate_remember` writes locally, fire-and-forget, never fails the
-  local save; status string is `submitted:<key>`, not `published:<key>`)
-  and `resolveRecipeForTask` (local read first — zero latency for an
-  existing single-user recipe — registry fetch only on a local miss, which
-  only ever returns a promoted recipe; falls through to cold driving on
-  registry miss/unavailable).
+  local save; status string is `published:<key>`) and `resolveRecipeForTask`
+  (local read first — zero latency for an existing single-user recipe —
+  registry fetch only on a local miss; falls through to cold driving on
+  registry miss/unavailable or a domain-lock violation).
 - Two follow-ups this deliberately did NOT do, tracked separately: fill-time
   role safety (label-swap wrong-fill — landed as `replay-fill-role-guard`,
   see `localeStableFieldRole`/`fieldRoleMatches` in `operator-recipe.ts`) and
@@ -588,7 +614,7 @@ the same site.
 
 ### Per-leg recipe resolution + checkout shape signature (replay-per-leg-signature)
 
-Builds on replay-registry-share above: resolves a recipe once **per leg**
+Builds on replay-serve-live-domainlock above: resolves a recipe once **per leg**
 (catalog/storefront vs. checkout) instead of once at task entry, and keys
 the checkout leg by the checkout page's own field-name-set signature
 instead of domain — so a checkout recipe recorded on one store replays on
@@ -625,7 +651,7 @@ own signature; Shopify↔WooCommerce mutual discrimination holds, 0 overlap).
   keyed by the LIVE checkout page's signature at `operate_remember` time
   (`BrowserController.extractCheckoutFieldNames`, deliberately reading
   `type=hidden` fields that `extractInteractiveElements` deliberately
-  skips). Both publish to the registry candidate pool independently
+  skips). Both publish to the registry independently, live on write
   (`operate_remember`'s `checkout_leg_registry_publish`).
 - **Independent replay entry point:** `operate_use{verb, session_id,
   leg:"checkout"}` (no `service_url`) resolves+replays just the checkout

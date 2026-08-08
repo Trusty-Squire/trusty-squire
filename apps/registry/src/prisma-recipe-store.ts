@@ -1,9 +1,9 @@
-// Prisma-backed LIVE OperatorRecipeStore. Used by the production server.
-// Tests use InMemoryOperatorRecipeStore. Mirrors prisma-skill-store.ts's
-// role for the separate Skill flow, but without any of that flow's
-// health-counter machinery — a promoted recipe is last-write-wins across
-// successive promotions, gated by the admin-bearer promotion route rather
-// than a verifier replay loop.
+// Prisma-backed OperatorRecipeStore. Used by the production server. Tests
+// use InMemoryOperatorRecipeStore. Mirrors prisma-skill-store.ts's role for
+// the separate Skill flow, but without any of that flow's health-counter
+// machinery — a recipe is last-write-wins, gated by the domain-lock +
+// share-eligibility checks in routes/recipes.ts rather than a verifier
+// replay loop.
 
 import { parseOperatorRecipe } from "@trusty-squire/recipe-schema";
 import { createRegistryPrismaClient, type RegistryPrismaClient } from "./registry-prisma-client.js";
@@ -11,7 +11,7 @@ import {
   recipeStoreKey,
   type OperatorRecipeStore,
   type OperatorRecipeStoreRecord,
-  type PromoteOperatorRecipeInput,
+  type UpsertOperatorRecipeInput,
 } from "./recipe-store.js";
 
 export class PrismaOperatorRecipeStore implements OperatorRecipeStore {
@@ -33,7 +33,7 @@ export class PrismaOperatorRecipeStore implements OperatorRecipeStore {
     await this.client.$disconnect();
   }
 
-  async promote(input: PromoteOperatorRecipeInput): Promise<OperatorRecipeStoreRecord> {
+  async upsert(input: UpsertOperatorRecipeInput): Promise<OperatorRecipeStoreRecord> {
     const key = recipeStoreKey(input.verb, input.domain);
     const domain = input.domain.toLowerCase();
     const now = new Date();
@@ -45,8 +45,6 @@ export class PrismaOperatorRecipeStore implements OperatorRecipeStore {
         domain,
         payload_json: input.recipe,
         schema_version: input.recipe.schema_version,
-        promoted_at: now,
-        promoted_by: input.promotedBy,
         updated_at: now,
       },
       update: {
@@ -54,8 +52,6 @@ export class PrismaOperatorRecipeStore implements OperatorRecipeStore {
         domain,
         payload_json: input.recipe,
         schema_version: input.recipe.schema_version,
-        promoted_at: now,
-        promoted_by: input.promotedBy,
         updated_at: now,
       },
     });
@@ -65,8 +61,7 @@ export class PrismaOperatorRecipeStore implements OperatorRecipeStore {
       domain: row.domain,
       payload: parseOperatorRecipe(row.payload_json),
       schema_version: row.schema_version,
-      promoted_at: row.promoted_at,
-      promoted_by: row.promoted_by,
+      submitted_at: row.submitted_at,
       updated_at: row.updated_at,
     };
   }
@@ -82,8 +77,7 @@ export class PrismaOperatorRecipeStore implements OperatorRecipeStore {
       domain: row.domain,
       payload: parseOperatorRecipe(row.payload_json),
       schema_version: row.schema_version,
-      promoted_at: row.promoted_at,
-      promoted_by: row.promoted_by,
+      submitted_at: row.submitted_at,
       updated_at: row.updated_at,
     };
   }

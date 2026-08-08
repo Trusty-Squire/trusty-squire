@@ -1,22 +1,26 @@
 // Integration tests for the shared Operator Recipe registry endpoints
-// (replay-registry-share). Each test boots buildServer() with in-memory
-// stores and hits the routes via fastify.inject() — no real network, no DB.
+// (replay-serve-live-domainlock). Each test boots buildServer() with an
+// in-memory store and hits the routes via fastify.inject() — no real
+// network, no DB.
 //
 // Coverage targets:
-//   - POST /recipes writes a CANDIDATE (pending-review) and returns 201
+//   - POST /recipes writes the recipe LIVE and returns 201
+//   - a write is IMMEDIATELY resolvable via GET — no promotion step
 //   - POST /recipes rejects a malformed recipe with 400
 //   - POST /recipes rejects a recipe missing (verb, domain) with 400
 //   - POST /recipes rejects a not-share-eligible recipe with 400
 //     (server-side re-check — defense in depth against a bypassed client)
-//   - A write that lands as a candidate is NOT resolvable via GET
-//     (the core safety property: replay never reads an unpromoted candidate)
-//   - GET /recipes/:verb/:domain returns 404 for a key nobody has ever written
+//   - POST /recipes rejects a DOMAIN-LOCK violation with 400, and never
+//     stores it — entry_url, allowed_hosts, and goto/allow_host targets
+//     outside the recipe's own eTLD+1 are all covered, including a
+//     subdomain (allowed) vs. a different eTLD+1 vs. a look-alike domain
+//   - GET /recipes/:verb/:domain returns 404 for a key nobody has ever
+//     written
 //   - GET /recipes/:verb/:domain rejects an unknown verb with 400
-//   - A PROMOTED recipe IS resolvable via GET
-//   - POST /recipes upserts the candidate — republishing overwrites, not conflicts
-//   - Cross-user reuse: a SECOND server instance backed by the SAME stores
-//     resolves the promoted recipe the first instance's candidate became
-//     (no local state shared between the two "installs")
+//   - POST /recipes upserts — republishing overwrites, not conflicts
+//   - Cross-user reuse: a SECOND server instance backed by the SAME store
+//     resolves the recipe the first instance wrote (no local state shared
+//     between the two "installs")
 
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -27,9 +31,6 @@ import {
 import { buildServer } from "../server.js";
 import { RECIPE_SUBMIT_IP_HOURLY_LIMIT } from "../routes/recipes.js";
 import { InMemoryOperatorRecipeStore } from "../recipe-store-memory.js";
-import { InMemoryOperatorRecipeCandidateStore } from "../recipe-candidate-store-memory.js";
-
-const ADMIN_BEARER = "test-admin-bearer-recipes-9f8e7d6c";
 
 function validRecipe(overrides: Partial<OperatorRecipe> = {}): OperatorRecipe {
   const base: OperatorRecipe = {
@@ -62,41 +63,16 @@ function validRecipe(overrides: Partial<OperatorRecipe> = {}): OperatorRecipe {
   return { ...base, ...overrides };
 }
 
-describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", () => {
+describe("POST /recipes (serves live) + GET /recipes/:verb/:domain", () => {
   let store: InMemoryOperatorRecipeStore;
-  let candidateStore: InMemoryOperatorRecipeCandidateStore;
   let server: Awaited<ReturnType<typeof buildServer>>;
 
   beforeEach(async () => {
     store = new InMemoryOperatorRecipeStore();
-    candidateStore = new InMemoryOperatorRecipeCandidateStore();
-    server = await buildServer({
-      recipeStore: store,
-      recipeCandidateStore: candidateStore,
-      adminBearer: ADMIN_BEARER,
-    });
+    server = await buildServer({ recipeStore: store });
   });
 
-  async function promote(verb: string, domain: string): Promise<void> {
-    const queue = await server.inject({
-      method: "GET",
-      url: "/admin/recipe-candidates",
-      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-    });
-    const item = queue
-      .json()
-      .items.find((i: { verb: string; domain: string }) => i.verb === verb && i.domain === domain);
-    expect(item).toBeDefined();
-    const res = await server.inject({
-      method: "POST",
-      url: `/admin/recipes/${verb}/${domain}/promote`,
-      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { content_digest: item.content_digest },
-    });
-    expect(res.statusCode).toBe(200);
-  }
-
-  it("publishes an eligible recipe as a pending-review CANDIDATE and returns 201", async () => {
+  it("writes a recipe LIVE and returns 201", async () => {
     const res = await server.inject({
       method: "POST",
       url: "/recipes",
@@ -109,8 +85,28 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
       key: "get_api_key--example.com",
       verb: "get_api_key",
       domain: "example.com",
-      status: "pending-review",
+      status: "live",
     });
+  });
+
+  it("SAFETY: a write is immediately resolvable via GET — no promotion step", async () => {
+    const publish = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: validRecipe() },
+    });
+    expect(publish.statusCode).toBe(201);
+
+    const fetched = await server.inject({
+      method: "GET",
+      url: "/recipes/get_api_key/example.com",
+    });
+    expect(fetched.statusCode).toBe(200);
+    const body = fetched.json();
+    expect(body.ok).toBe(true);
+    expect(body.recipe.domain).toBe("example.com");
+    expect(body.recipe.verb).toBe("get_api_key");
+    expect(body.recipe.goal).toBe("Get an API key from Example");
   });
 
   it("rejects a malformed recipe with 400", async () => {
@@ -133,7 +129,7 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
     expect(res.json().error).toBe("invalid_domain");
   });
 
-  it("rate-limits candidate submissions per IP with 429, without affecting other IPs", async () => {
+  it("rate-limits submissions per IP with 429, without affecting other IPs", async () => {
     for (let i = 0; i < RECIPE_SUBMIT_IP_HOURLY_LIMIT; i += 1) {
       const res = await server.inject({
         method: "POST",
@@ -196,31 +192,9 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
     const body = res.json();
     expect(body.error).toBe("not_share_eligible");
     expect(body.reasons.some((r: string) => r.includes("name"))).toBe(true);
-  });
 
-  it("SAFETY: a write that lands as a candidate is NOT resolvable via GET until promoted", async () => {
-    const publish = await server.inject({
-      method: "POST",
-      url: "/recipes",
-      payload: { recipe: validRecipe() },
-    });
-    expect(publish.statusCode).toBe(201);
-
-    // The candidate exists (an admin can see it)...
-    const queue = await server.inject({
-      method: "GET",
-      url: "/admin/recipe-candidates",
-      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-    });
-    expect(queue.json().items).toHaveLength(1);
-
-    // ...but replay's read path (GET /recipes/:verb/:domain) sees nothing.
-    const fetched = await server.inject({
-      method: "GET",
-      url: "/recipes/get_api_key/example.com",
-    });
-    expect(fetched.statusCode).toBe(404);
-    expect(fetched.json().error).toBe("no_recipe_for_key");
+    const live = await server.inject({ method: "GET", url: "/recipes/get_api_key/example.com" });
+    expect(live.statusCode).toBe(404);
   });
 
   it("returns 404 for a key that was never published", async () => {
@@ -241,27 +215,7 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
     expect(res.json().error).toBe("invalid_verb");
   });
 
-  it("SAFETY: a PROMOTED recipe IS resolvable via GET", async () => {
-    await server.inject({
-      method: "POST",
-      url: "/recipes",
-      payload: { recipe: validRecipe() },
-    });
-    await promote("get_api_key", "example.com");
-
-    const res = await server.inject({
-      method: "GET",
-      url: "/recipes/get_api_key/example.com",
-    });
-    expect(res.statusCode).toBe(200);
-    const body = res.json();
-    expect(body.ok).toBe(true);
-    expect(body.recipe.domain).toBe("example.com");
-    expect(body.recipe.verb).toBe("get_api_key");
-    expect(body.recipe.goal).toBe("Get an API key from Example");
-  });
-
-  it("upserts the candidate on republish — same key, new content overwrites rather than conflicting", async () => {
+  it("upserts on republish — same key, new content overwrites rather than conflicting", async () => {
     await server.inject({
       method: "POST",
       url: "/recipes",
@@ -273,7 +227,6 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
       payload: { recipe: validRecipe({ goal: "second version" }) },
     });
     expect(second.statusCode).toBe(201);
-    await promote("get_api_key", "example.com");
     const res = await server.inject({
       method: "GET",
       url: "/recipes/get_api_key/example.com",
@@ -281,28 +234,19 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
     expect(res.json().recipe.goal).toBe("second version");
   });
 
-  it("cross-user reuse: a second, independent server backed by the same stores resolves the promoted recipe", async () => {
+  it("cross-user reuse: a second, independent server backed by the same store resolves the recipe", async () => {
     // Simulates User A's install publishing (via its server/client) and
     // User B's install — a wholly separate process with no local recipe —
-    // fetching from the shared registry, once a promotion has happened.
-    const publisher = await buildServer({
-      recipeStore: store,
-      recipeCandidateStore: candidateStore,
-      adminBearer: ADMIN_BEARER,
-    });
+    // fetching from the shared registry.
+    const publisher = await buildServer({ recipeStore: store });
     const publish = await publisher.inject({
       method: "POST",
       url: "/recipes",
       payload: { recipe: validRecipe() },
     });
     expect(publish.statusCode).toBe(201);
-    await promote("get_api_key", "example.com");
 
-    const reader = await buildServer({
-      recipeStore: store,
-      recipeCandidateStore: candidateStore,
-      adminBearer: ADMIN_BEARER,
-    });
+    const reader = await buildServer({ recipeStore: store });
     const fetched = await reader.inject({
       method: "GET",
       url: "/recipes/get_api_key/example.com",
@@ -312,13 +256,97 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
   });
 });
 
+// replay-serve-live-domainlock — the hard domain-lock is now the primary
+// safety control now that a write is live immediately. Every entry_url,
+// allowed_hosts entry, and goto/allow_host target must resolve to the
+// recipe's own eTLD+1.
+describe("POST /recipes — hard domain-lock", () => {
+  let store: InMemoryOperatorRecipeStore;
+  let server: Awaited<ReturnType<typeof buildServer>>;
+
+  beforeEach(async () => {
+    store = new InMemoryOperatorRecipeStore();
+    server = await buildServer({ recipeStore: store });
+  });
+
+  async function expectRejected(recipe: OperatorRecipe): Promise<void> {
+    const res = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("domain_lock_violation");
+    const live = await server.inject({
+      method: "GET",
+      url: `/recipes/${recipe.verb}/${recipe.domain}`,
+    });
+    expect(live.statusCode).toBe(404);
+  }
+
+  it("allows a subdomain of the recipe's own domain in entry_url and allowed_hosts", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: {
+        recipe: validRecipe({
+          entry_url: "https://checkout.example.com/start",
+          allowed_hosts: ["accounts.example.com"],
+          trace: [
+            { action: { kind: "goto", url_template: "https://sub.example.com/next" } },
+            { action: { kind: "click", text_match: "Continue" } },
+            { action: { kind: "extract", slot: "api_key" } },
+          ],
+        }),
+      },
+    });
+    expect(res.statusCode).toBe(201);
+  });
+
+  it("SAFETY: rejects an entry_url on a different eTLD+1", async () => {
+    await expectRejected(validRecipe({ entry_url: "https://attacker.net/signup" }));
+  });
+
+  it("SAFETY: rejects a look-alike domain in entry_url (example.com.attacker.net)", async () => {
+    await expectRejected(validRecipe({ entry_url: "https://example.com.attacker.net/signup" }));
+  });
+
+  it("SAFETY: rejects an off-domain allowed_hosts entry", async () => {
+    await expectRejected(validRecipe({ allowed_hosts: ["attacker.net"] }));
+  });
+
+  it("SAFETY: rejects an off-domain goto url_template in the trace", async () => {
+    await expectRejected(
+      validRecipe({
+        trace: [
+          { action: { kind: "goto", url_template: "https://example.com/signup" } },
+          { action: { kind: "goto", url_template: "https://attacker.net/phish" } },
+          { action: { kind: "extract", slot: "api_key" } },
+        ],
+      }),
+    );
+  });
+
+  it("SAFETY: rejects an off-domain allow_host action in the trace", async () => {
+    await expectRejected(
+      validRecipe({
+        trace: [
+          { action: { kind: "goto", url_template: "https://example.com/signup" } },
+          { action: { kind: "allow_host", host: "attacker.net" } },
+          { action: { kind: "extract", slot: "api_key" } },
+        ],
+      }),
+    );
+  });
+});
+
 // replay-per-leg-signature — the checkout-leg key slot holds a
 // `shape:<sha256 hex>` pseudo-domain (checkoutShapeKey in
 // @trusty-squire/recipe-schema) instead of a real eTLD+1. Same routes, same
-// candidate/promote flow, same stores — only the key's shape differs.
+// store, serves live the same way — only the key's shape differs, and the
+// domain-lock is exempt (no single site to lock a cross-store recipe to).
 describe("POST /recipes + GET /recipes/:verb/:domain with a checkout-leg shape key", () => {
   let store: InMemoryOperatorRecipeStore;
-  let candidateStore: InMemoryOperatorRecipeCandidateStore;
   let server: Awaited<ReturnType<typeof buildServer>>;
   const shapeKey = checkoutShapeKey(checkoutFieldSetSignature(["email", "firstName", "lastName"])!);
 
@@ -351,41 +379,17 @@ describe("POST /recipes + GET /recipes/:verb/:domain with a checkout-leg shape k
 
   beforeEach(async () => {
     store = new InMemoryOperatorRecipeStore();
-    candidateStore = new InMemoryOperatorRecipeCandidateStore();
-    server = await buildServer({
-      recipeStore: store,
-      recipeCandidateStore: candidateStore,
-      adminBearer: ADMIN_BEARER,
-    });
+    server = await buildServer({ recipeStore: store });
   });
 
-  async function promote(verb: string, domain: string): Promise<void> {
-    const queue = await server.inject({
-      method: "GET",
-      url: "/admin/recipe-candidates",
-      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-    });
-    const item = queue
-      .json()
-      .items.find((i: { verb: string; domain: string }) => i.verb === verb && i.domain === domain);
-    expect(item).toBeDefined();
-    const res = await server.inject({
-      method: "POST",
-      url: `/admin/recipes/${verb}/${domain}/promote`,
-      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
-      payload: { content_digest: item.content_digest },
-    });
-    expect(res.statusCode).toBe(200);
-  }
-
-  it("accepts a shape: key as a plausible domain (not rejected as invalid_domain)", async () => {
+  it("accepts a shape: key as a plausible domain (not rejected as invalid_domain) and serves live", async () => {
     const res = await server.inject({
       method: "POST",
       url: "/recipes",
       payload: { recipe: checkoutLegRecipe() },
     });
     expect(res.statusCode).toBe(201);
-    expect(res.json()).toMatchObject({ ok: true, domain: shapeKey, status: "pending-review" });
+    expect(res.json()).toMatchObject({ ok: true, domain: shapeKey, status: "live" });
   });
 
   it("still rejects a malformed shape: key (not real hex) as an implausible domain", async () => {
@@ -398,14 +402,13 @@ describe("POST /recipes + GET /recipes/:verb/:domain with a checkout-leg shape k
     expect(res.json().error).toBe("invalid_domain");
   });
 
-  it("cross-domain reuse: a checkout-leg recipe published+promoted under a shape key resolves via GET with the URL-encoded key, independent of any real store domain", async () => {
+  it("cross-domain reuse: a checkout-leg recipe published under a shape key resolves via GET with the URL-encoded key, independent of any real store domain", async () => {
     const publish = await server.inject({
       method: "POST",
       url: "/recipes",
       payload: { recipe: checkoutLegRecipe() },
     });
     expect(publish.statusCode).toBe(201);
-    await promote("purchase", shapeKey);
 
     // A "different store" resolving the SAME signature — the key alone
     // decides the hit, with no reference to which domain recorded it.
@@ -425,7 +428,6 @@ describe("POST /recipes + GET /recipes/:verb/:domain with a checkout-leg shape k
       url: "/recipes",
       payload: { recipe: checkoutLegRecipe() },
     });
-    await promote("purchase", shapeKey);
 
     const otherShapeKey = checkoutShapeKey(
       checkoutFieldSetSignature(["billing_first_name", "billing_address_1", "billing_phone"])!,
@@ -435,5 +437,14 @@ describe("POST /recipes + GET /recipes/:verb/:domain with a checkout-leg shape k
       url: `/recipes/purchase/${encodeURIComponent(otherShapeKey)}`,
     });
     expect(fetched.statusCode).toBe(404);
+  });
+
+  it("the domain-lock is exempt for a shape-keyed recipe: allowed_hosts from the recording store is not rejected", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: checkoutLegRecipe({ allowed_hosts: ["storeA.example"] }) },
+    });
+    expect(res.statusCode).toBe(201);
   });
 });

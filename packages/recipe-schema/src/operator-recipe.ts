@@ -356,6 +356,93 @@ export function operatorRecipeKeyForCheckoutShape(verb: OperatorVerb, signature:
   return operatorRecipeKeyForDomain(verb, checkoutShapeKey(signature));
 }
 
+// ── Hard domain-lock (replay-serve-live-domainlock) ─────────────────────
+//
+// A recipe may only ever drive the exact site it was recorded for. This is
+// the PRIMARY safety control for the shared registry now that a recipe
+// serves live the moment it's written (no housekeeper-vetted promotion
+// gate stands between an untrusted write and another user's replay
+// browser — see routes/recipes.ts). Enforced at both write time (server-
+// side, defense in depth against a bypassed client) and replay time (the
+// mcp client, before any goto/allow_host actually executes).
+//
+// Deliberately does NOT apply to a checkout-shape-keyed recipe
+// (isCheckoutShapeKey(recipe.domain) — replay-per-leg-signature): that
+// pseudo-domain is a field-set hash, not a site, and the whole point of
+// that flow is cross-store reuse. Its allowed_hosts is never consumed to
+// widen a replay session's scope (operate_use{leg:"checkout"} replays
+// against an already-open session's own page), so the ordinary session
+// host-scope gate (hostAllowed in provision-session.ts) already protects
+// it without a domain to lock to.
+
+export interface RecipeDomainLockViolation {
+  /** Which field failed — "entry_url", "allowed_hosts[N]", "trace[N].action.url_template", etc. */
+  field: string;
+  detail: string;
+}
+
+/**
+ * True when `candidate` (a bare host or a full URL) resolves to the SAME
+ * registrable domain (eTLD+1) as `recipeDomain` — reusing the exact
+ * PSL-aware derivation (operatorRecipeDomain) the recipe's own key is
+ * built from, so a subdomain of the recipe's site is allowed and an
+ * unrelated or look-alike domain (e.g. "example.com.attacker.net") is
+ * not. A templated host (`${VAR}` inside the hostname itself, as opposed
+ * to the path/query) can never satisfy this — a legitimate recorder only
+ * templates path/query values (email aliases, ids), never the host.
+ */
+export function isSameRecipeDomain(candidate: string, recipeDomain: string): boolean {
+  const asUrl = candidate.includes("://") ? candidate : `https://${candidate}`;
+  let hostname: string;
+  try {
+    hostname = new URL(asUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (hostname.length === 0 || hostname.includes("$")) return false;
+  try {
+    return operatorRecipeDomain(asUrl) === recipeDomain.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Full-recipe domain-lock audit: every entry_url, allowed_hosts entry, and
+ * goto/allow_host navigation target (including templated URLs) must
+ * resolve to the recipe's own eTLD+1. Returns an empty array when the
+ * recipe is clean. A recipe with no (verb, domain) key, or a checkout-
+ * shape-keyed one, has nothing to lock to and always returns clean — see
+ * the module comment above.
+ */
+export function recipeDomainLockViolations(recipe: OperatorRecipe): RecipeDomainLockViolation[] {
+  const violations: RecipeDomainLockViolation[] = [];
+  if (recipe.domain === undefined || isCheckoutShapeKey(recipe.domain)) return violations;
+  const domain = recipe.domain.toLowerCase();
+
+  const checkHost = (raw: string, field: string): void => {
+    if (!isSameRecipeDomain(raw, domain)) {
+      violations.push({ field, detail: `"${raw}" is outside the recipe's own domain "${domain}"` });
+    }
+  };
+
+  if (recipe.entry_url !== undefined) checkHost(recipe.entry_url, "entry_url");
+  recipe.allowed_hosts.forEach((host, i) => checkHost(host, `allowed_hosts[${i}]`));
+  recipe.trace.forEach((entry, i) => {
+    if (entry.action.kind === "goto" && entry.action.url_template !== undefined) {
+      checkHost(entry.action.url_template, `trace[${i}].action.url_template`);
+    }
+    if (entry.action.kind === "allow_host" && entry.action.host !== undefined) {
+      checkHost(entry.action.host, `trace[${i}].action.host`);
+    }
+  });
+  return violations;
+}
+
+export function isRecipeDomainLocked(recipe: OperatorRecipe): boolean {
+  return recipeDomainLockViolations(recipe).length === 0;
+}
+
 // ── Cross-user share eligibility ───────────────────────────────────────
 //
 // A shared recipe is a PLAN, never a recording of one user's data. Every

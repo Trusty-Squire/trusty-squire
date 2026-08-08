@@ -8,6 +8,9 @@ import {
   isCheckoutShapeKey,
   checkoutShapeKey,
   operatorRecipeKeyForCheckoutShape,
+  isSameRecipeDomain,
+  recipeDomainLockViolations,
+  isRecipeDomainLocked,
   type OperatorRecipe,
 } from "../operator-recipe.js";
 
@@ -504,5 +507,128 @@ describe("checkout-shape key helpers (replay-per-leg-signature)", () => {
     expect(operatorRecipeKeyForCheckoutShape("purchase", sig)).toBe(
       `purchase--${checkoutShapeKey(sig)}`,
     );
+  });
+});
+
+describe("isSameRecipeDomain (replay-serve-live-domainlock)", () => {
+  it("accepts the exact domain and any subdomain of it", () => {
+    expect(isSameRecipeDomain("example.com", "example.com")).toBe(true);
+    expect(isSameRecipeDomain("https://example.com/path", "example.com")).toBe(true);
+    expect(isSameRecipeDomain("checkout.example.com", "example.com")).toBe(true);
+    expect(isSameRecipeDomain("https://a.b.example.com/x", "example.com")).toBe(true);
+  });
+
+  it("rejects a different eTLD+1", () => {
+    expect(isSameRecipeDomain("attacker.net", "example.com")).toBe(false);
+    expect(isSameRecipeDomain("https://attacker.net/signup", "example.com")).toBe(false);
+  });
+
+  it("rejects a look-alike domain that merely contains the real one as a substring", () => {
+    expect(isSameRecipeDomain("example.com.attacker.net", "example.com")).toBe(false);
+    expect(isSameRecipeDomain("notexample.com", "example.com")).toBe(false);
+    expect(isSameRecipeDomain("example.com.evil.com", "example.com")).toBe(false);
+  });
+
+  it("rejects a templated host — a legitimate recorder only templates path/query", () => {
+    expect(isSameRecipeDomain("https://${HOST}/signup", "example.com")).toBe(false);
+  });
+
+  it("rejects an unparseable candidate", () => {
+    expect(isSameRecipeDomain("not a url at all ://", "example.com")).toBe(false);
+  });
+});
+
+describe("recipeDomainLockViolations / isRecipeDomainLocked (replay-serve-live-domainlock)", () => {
+  function lockedRecipe(overrides: Partial<OperatorRecipe> = {}): OperatorRecipe {
+    return baseRecipe({
+      domain: "example.com",
+      entry_url: "https://example.com/signup",
+      allowed_hosts: [],
+      trace: [
+        { action: { kind: "goto", url_template: "https://example.com/signup" } },
+        { action: { kind: "extract", slot: "api_key" } },
+      ],
+      ...overrides,
+    });
+  }
+
+  it("a clean recipe has no violations", () => {
+    const recipe = lockedRecipe();
+    expect(recipeDomainLockViolations(recipe)).toEqual([]);
+    expect(isRecipeDomainLocked(recipe)).toBe(true);
+  });
+
+  it("allows a subdomain in entry_url and allowed_hosts", () => {
+    const recipe = lockedRecipe({
+      entry_url: "https://checkout.example.com/signup",
+      allowed_hosts: ["accounts.example.com"],
+    });
+    expect(recipeDomainLockViolations(recipe)).toEqual([]);
+  });
+
+  it("flags an off-domain entry_url", () => {
+    const recipe = lockedRecipe({ entry_url: "https://attacker.net/signup" });
+    const violations = recipeDomainLockViolations(recipe);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.field).toBe("entry_url");
+    expect(isRecipeDomainLocked(recipe)).toBe(false);
+  });
+
+  it("flags a look-alike domain in entry_url", () => {
+    const recipe = lockedRecipe({ entry_url: "https://example.com.attacker.net/signup" });
+    expect(recipeDomainLockViolations(recipe)).toHaveLength(1);
+  });
+
+  it("flags an off-domain allowed_hosts entry", () => {
+    const recipe = lockedRecipe({ allowed_hosts: ["example.com", "attacker.net"] });
+    const violations = recipeDomainLockViolations(recipe);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.field).toBe("allowed_hosts[1]");
+  });
+
+  it("flags an off-domain goto url_template in the trace", () => {
+    const recipe = lockedRecipe({
+      trace: [
+        { action: { kind: "goto", url_template: "https://example.com/signup" } },
+        { action: { kind: "goto", url_template: "https://attacker.net/phish" } },
+        { action: { kind: "extract", slot: "api_key" } },
+      ],
+    });
+    const violations = recipeDomainLockViolations(recipe);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.field).toBe("trace[1].action.url_template");
+  });
+
+  it("flags an off-domain allow_host action in the trace", () => {
+    const recipe = lockedRecipe({
+      trace: [
+        { action: { kind: "goto", url_template: "https://example.com/signup" } },
+        { action: { kind: "allow_host", host: "attacker.net" } },
+        { action: { kind: "extract", slot: "api_key" } },
+      ],
+    });
+    const violations = recipeDomainLockViolations(recipe);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]!.field).toBe("trace[1].action.host");
+  });
+
+  it("is exempt for a checkout-shape-keyed recipe — no single site to lock to", () => {
+    const sig = checkoutFieldSetSignature(SHOPIFY_CHECKOUT_FIELDS)!;
+    const recipe = baseRecipe({
+      domain: checkoutShapeKey(sig),
+      entry_url: undefined,
+      allowed_hosts: ["storeA.example", "totally-unrelated.example"],
+      trace: [{ action: { kind: "allow_host", host: "unrelated-either.example" } }],
+    });
+    expect(recipeDomainLockViolations(recipe)).toEqual([]);
+  });
+
+  it("is exempt for a recipe with no (verb, domain) key", () => {
+    const recipe = baseRecipe({
+      verb: undefined,
+      domain: undefined,
+      entry_url: "https://attacker.net/signup",
+    });
+    expect(recipeDomainLockViolations(recipe)).toEqual([]);
   });
 });

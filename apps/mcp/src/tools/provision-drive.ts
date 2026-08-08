@@ -44,6 +44,8 @@ import {
   fillTemplate,
   operatorRecipeDomain,
   checkoutShapeKey,
+  isCheckoutShapeKey,
+  isSameRecipeDomain,
   OperatorVerbSchema,
   RecipeHoleSchema,
   PostconditionSchema,
@@ -147,17 +149,17 @@ async function autoPromoteProvision(sessionId: string): Promise<string> {
   }
 }
 
-// replay-registry-share — after `operate_remember` writes a recipe locally,
-// best-effort SUBMIT it to the shared registry's candidate pool so the NEXT
-// install to visit this (verb, eTLD+1) can eventually reuse it — but only
-// once an admin-bearer-gated promotion (routes/admin-recipes.ts on the
-// registry, normally the housekeeper) has vetted and promoted it. A
-// submitted candidate is NOT yet replayable by anyone; operate_use only
-// ever reads promoted recipes (see resolveRecipeForTask below). Never fails
-// the local save: every outcome (including "not eligible to share") is just
-// a status string in the tool's result trail. The eligibility gate
-// (isRecipeShareEligible) runs inside publishRecipe — this function never
-// second-guesses it.
+// replay-serve-live-domainlock — after `operate_remember` writes a recipe
+// locally, best-effort PUBLISH it to the shared registry so the NEXT
+// install to visit this (verb, eTLD+1) can immediately reuse it — a
+// recipe serves live the moment the registry accepts it; there is no
+// candidate/promotion tier. What stands between this write and steering
+// another user's browser is the domain-lock + share-eligibility gates
+// (both re-checked server-side; see routes/recipes.ts). Never fails the
+// local save: every outcome (including "not eligible to share") is just a
+// status string in the tool's result trail. The eligibility gate
+// (isRecipeShareEligible) and domain-lock (recipeDomainLockViolations) run
+// inside publishRecipe — this function never second-guesses them.
 export async function publishRecipeToRegistry(file: string): Promise<string> {
   try {
     const recipe = await readRecipeFromFile(file);
@@ -166,7 +168,7 @@ export async function publishRecipeToRegistry(file: string): Promise<string> {
     const client = clientFromEnv(accountId);
     if (client === null) return "skipped:no_registry";
     const outcome = await client.publishRecipe(recipe);
-    if (outcome.kind === "ok") return `submitted:${outcome.key}`;
+    if (outcome.kind === "ok") return `published:${outcome.key}`;
     if (outcome.kind === "not_share_eligible") {
       return `not_shared:${outcome.reasons.join("; ").slice(0, 300)}`;
     }
@@ -176,15 +178,16 @@ export async function publishRecipeToRegistry(file: string): Promise<string> {
   }
 }
 
-// replay-registry-share — the cross-user reuse path. Local storage stays the
-// primary, zero-latency lookup (unchanged single-user behavior); only on a
-// LOCAL miss do we ask the shared registry, so an install with its own
-// recipe never pays a network round trip it didn't have before. The
-// registry only ever returns a PROMOTED (live) recipe — a key with just a
-// pending candidate 404s exactly like a key nobody has ever written to. A
-// registry miss (promoted or not) or an unreachable registry re-throws the
-// ORIGINAL local error so the caller's existing cold-start fallback is
-// untouched.
+// replay-serve-live-domainlock — the cross-user reuse path. Local storage
+// stays the primary, zero-latency lookup (unchanged single-user behavior);
+// only on a LOCAL miss do we ask the shared registry, so an install with
+// its own recipe never pays a network round trip it didn't have before.
+// The registry returns whatever was last written for the key — safety
+// against a tampered/malicious shared recipe comes from the domain-lock
+// re-checked at replay time (see recipeAllowedEntryAndHosts below), not
+// from a vetting step before the fetch. A registry miss or an unreachable
+// registry re-throws the ORIGINAL local error so the caller's existing
+// cold-start fallback is untouched.
 export async function resolveRecipeForTask(
   verb: OperatorVerb,
   serviceUrl: string,
@@ -227,6 +230,28 @@ export async function resolveCheckoutLegRecipe(
     );
     return outcome.kind === "found" ? outcome.result.recipe : null;
   }
+}
+
+// replay-serve-live-domainlock — replay-time re-check of the same hard
+// domain-lock the registry enforces at write time (recipeDomainLockViolations
+// in @trusty-squire/recipe-schema). Defense in depth: covers a locally-
+// tampered file, a stale registry that skipped the check, or a recipe
+// fetched before this enforcement shipped. Returns null when clean, or a
+// human-readable reason when the recipe's resolved entry or any declared
+// allowed_hosts entry would leave its own eTLD+1. A checkout-shape-keyed
+// recipe (replay-per-leg-signature) has no single site to lock to and is
+// never widened via allowed_hosts at replay (see useCheckoutLegRecipe), so
+// it's exempt — same scoping the registry's write-time check uses.
+function recipeDomainLockViolationForReplay(recipe: OperatorRecipe, entryUrl: string): string | null {
+  if (recipe.domain === undefined || isCheckoutShapeKey(recipe.domain)) return null;
+  if (!isSameRecipeDomain(entryUrl, recipe.domain)) {
+    return `entry "${entryUrl}" is outside the recipe's own domain "${recipe.domain}"`;
+  }
+  const badHost = recipe.allowed_hosts.find((host) => !isSameRecipeDomain(host, recipe.domain!));
+  if (badHost !== undefined) {
+    return `allowed_hosts entry "${badHost}" is outside the recipe's own domain "${recipe.domain}"`;
+  }
+  return null;
 }
 
 const startSchema = z.object({
@@ -1080,11 +1105,11 @@ export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
       verb: args.verb,
       inputs: args.inputs,
     });
-    // replay-registry-share — best-effort; never blocks or fails the local save.
+    // replay-serve-live-domainlock — best-effort; never blocks or fails the local save.
     const registryPublish = await publishRecipeToRegistry(result.file);
     // replay-per-leg-signature — the checkout-leg recipe (when this session's
-    // trace had one) publishes through the exact same candidate-pool path,
-    // under its own shape-keyed domain slot. Also best-effort.
+    // trace had one) publishes through the exact same path, under its own
+    // shape-keyed domain slot. Also best-effort.
     const checkoutLegRegistryPublish =
       result.checkout_leg_file !== undefined
         ? await publishRecipeToRegistry(result.checkout_leg_file)
@@ -1196,7 +1221,9 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
     "hole values and executes each step through ordered target fallback. A single miss " +
     "returns replay.status='fallback_required' with that step and next_index; repair only " +
     "that step, then call operate_use again with the same params plus session_id + " +
-    "resume_from=next_index. " +
+    "resume_from=next_index. A recipe whose entry or declared hosts would leave its own " +
+    "site (a tampered or malicious shared recipe) is refused outright: " +
+    "replay.status='domain_lock_violation', and driving continues cold. " +
     "Money-path completion deterministically verifies every injected address/contact/qty field. " +
     "Pass verb + session_id + leg:'checkout' (no service_url) to resolve+replay just the " +
     "CHECKOUT leg against an already-open session's current page — keyed by the checkout page's " +
@@ -1270,6 +1297,33 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
         `operator-recipe "${recipe.name}" needs params: ${missing.join(", ")} — ` +
           `pass them as operate_use{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
       );
+    }
+    const domainLockViolation = recipeDomainLockViolationForReplay(recipe, url);
+    if (domainLockViolation !== null) {
+      // Hard stop — never start or continue a session with this recipe.
+      // Same "can't cold-start over an existing call shape" guard the
+      // cache-miss branch above uses; a resume/named/leg-less call just
+      // throws instead of silently retargeting.
+      if (
+        args.name !== undefined ||
+        args.service_url === undefined ||
+        args.session_id !== undefined
+      ) {
+        throw new Error(`operator-recipe "${recipe.name}" refused: ${domainLockViolation}`);
+      }
+      const cold = await startProvisionSession({
+        serviceUrl: args.service_url,
+        consentInboxRead: await readInboxConsent(),
+        ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
+      });
+      if (cold.needs_user !== undefined) return cold;
+      return {
+        ...cold,
+        replay: {
+          status: "domain_lock_violation" as const,
+          reason: domainLockViolation,
+        },
+      };
     }
     let sessionId = args.session_id;
     const legacyHintOnly = recipe.verb === undefined || recipe.domain === undefined;

@@ -34,6 +34,7 @@ import {
 import {
   parseOperatorRecipe,
   isRecipeShareEligible,
+  recipeDomainLockViolations,
   type OperatorRecipe,
   type OperatorVerb,
 } from "@trusty-squire/recipe-schema";
@@ -152,7 +153,7 @@ export type ServiceHealthOutcome =
   | { kind: "ok"; health: ServiceHealthResponse }
   | { kind: "unavailable"; reason: string };
 
-// Shared Operator Recipes (replay-registry-share) — a (verb, eTLD+1)-keyed
+// Shared Operator Recipes (replay-serve-live-domainlock) — a (verb, eTLD+1)-keyed
 // replay plan, distinct from a Skill. Fetched/published on the SAME
 // registry client (same base URL, same retry/timeout/fail-open/cache
 // infrastructure) rather than a parallel transport.
@@ -169,13 +170,12 @@ export type RecipeFetchOutcome =
   | { kind: "unavailable"; reason: string };
 
 export type PublishRecipeOutcome =
-  // Submitted to the registry's CANDIDATE pool — not yet replayable by
-  // anyone. It becomes live only once an admin-bearer-gated promotion
-  // (normally the housekeeper) vets and promotes it.
+  // Written to the registry — LIVE immediately, replayable by any install
+  // the instant this call returns ok (no candidate/promotion tier).
   | { kind: "ok"; key: string }
-  // The recipe failed the (client- or server-side) share-eligibility gate —
-  // never submitted. Not an error: the caller keeps the local copy exactly
-  // as before, it just never becomes a shared candidate.
+  // The recipe failed the (client- or server-side) share-eligibility gate
+  // or the hard domain-lock — never submitted. Not an error: the caller
+  // keeps the local copy exactly as before, it just never becomes shared.
   | { kind: "not_share_eligible"; reasons: string[] }
   | { kind: "unavailable"; reason: string };
 
@@ -364,7 +364,8 @@ export class SkillRegistryClient {
 
   /**
    * Look up the shared recipe for a (verb, domain) key — the cross-user
-   * reuse path (replay-registry-share). Returns:
+   * reuse path (replay-serve-live-domainlock). Serves whatever was last
+   * written for the key; there is no promotion tier to wait on. Returns:
    *
    *   - `{kind:"found",result}`   — registry returned a valid recipe
    *   - `{kind:"not_found"}`      — no recipe published for this key
@@ -397,14 +398,13 @@ export class SkillRegistryClient {
   }
 
   /**
-   * Submit a recipe to the shared registry's CANDIDATE pool, keyed by
-   * (verb, domain). This is NOT a live publish — `POST /recipes` is
-   * unauthenticated, so it only ever writes a candidate; a candidate is
-   * never replayed by anyone (including this same account) until an
-   * admin-bearer-gated promotion (routes/admin-recipes.ts on the
-   * registry, normally driven by the housekeeper) has vetted it. Re-runs
-   * the share-eligibility gate here (in addition to the caller's own
-   * check and the registry's own server-side re-check) so this is the
+   * Publish a recipe to the shared registry, keyed by (verb, domain).
+   * `POST /recipes` is unauthenticated and serves the write LIVE
+   * immediately — there is no candidate/promotion tier. What stands
+   * between this write and steering another user's replay browser is the
+   * hard domain-lock (recipeDomainLockViolations) plus the share-
+   * eligibility gate (isRecipeShareEligible), both re-run here (in
+   * addition to the registry's own server-side re-check) so this is the
    * single choke point every submission passes through regardless of
    * caller. Fire-and-forget at the caller level — a failure here must
    * never fail the local `operate_remember` that produced the recipe;
@@ -413,6 +413,13 @@ export class SkillRegistryClient {
   async publishRecipe(recipe: OperatorRecipe): Promise<PublishRecipeOutcome> {
     if (recipe.verb === undefined || recipe.domain === undefined) {
       return { kind: "not_share_eligible", reasons: ["recipe has no (verb, domain) key"] };
+    }
+    const domainLockViolations = recipeDomainLockViolations(recipe);
+    if (domainLockViolations.length > 0) {
+      return {
+        kind: "not_share_eligible",
+        reasons: domainLockViolations.map((v) => `${v.field}: ${v.detail}`),
+      };
     }
     const eligibility = isRecipeShareEligible(recipe);
     if (!eligibility.eligible) {
@@ -429,9 +436,19 @@ export class SkillRegistryClient {
     const response = attempt.response;
     if (!response.ok) {
       try {
-        const body = (await response.json()) as { error?: string; reasons?: string[] };
+        const body = (await response.json()) as {
+          error?: string;
+          reasons?: string[];
+          violations?: Array<{ field: string; detail: string }>;
+        };
         if (body.error === "not_share_eligible") {
           return { kind: "not_share_eligible", reasons: body.reasons ?? [] };
+        }
+        if (body.error === "domain_lock_violation") {
+          return {
+            kind: "not_share_eligible",
+            reasons: (body.violations ?? []).map((v) => `${v.field}: ${v.detail}`),
+          };
         }
       } catch {
         // fall through to the generic unavailable below
