@@ -26,11 +26,7 @@
 // replay so the next attempt re-fetches in case a remediation was
 // just published.
 
-import {
-  canonicalizeServiceSlug,
-  parseSkill,
-  type Skill,
-} from "@trusty-squire/skill-schema";
+import { canonicalizeServiceSlug, parseSkill, type Skill } from "@trusty-squire/skill-schema";
 import {
   parseOperatorRecipe,
   isRecipeShareEligible,
@@ -245,12 +241,7 @@ async function parseSkillBody(response: Response): Promise<SkillFetchOutcome> {
       reason: `malformed JSON: ${err instanceof Error ? err.message : String(err)}`,
     };
   }
-  if (
-    typeof body !== "object" ||
-    body === null ||
-    !("skill" in body) ||
-    !("signed_by" in body)
-  ) {
+  if (typeof body !== "object" || body === null || !("skill" in body) || !("signed_by" in body)) {
     return { kind: "unavailable", reason: "response missing skill or signed_by fields" };
   }
   const envelope = body as {
@@ -318,10 +309,7 @@ export class SkillRegistryClient {
    * Callers MUST treat `unavailable` as "fall through to the universal
    * bot." This client never throws on transport-level failures.
    */
-  async fetchActiveSkill(
-    service: string,
-    provisionId: string,
-  ): Promise<SkillFetchOutcome> {
+  async fetchActiveSkill(service: string, provisionId: string): Promise<SkillFetchOutcome> {
     const serviceSlug = canonicalizeServiceSlug(service);
     // Cache check first. A registry-unavailable outcome is NOT cached
     // — we want the next call to try again.
@@ -517,8 +505,7 @@ export class SkillRegistryClient {
     skill: Skill,
     signature: string,
   ): Promise<
-    | { kind: "ok"; skill_id: string; status: string }
-    | { kind: "unavailable"; reason: string }
+    { kind: "ok"; skill_id: string; status: string } | { kind: "unavailable"; reason: string }
   > {
     const attempt = await this.fetchPostWithRetry(
       `${this.baseUrl}/skills`,
@@ -561,10 +548,8 @@ export class SkillRegistryClient {
     peers: readonly string[] = [],
   ): Promise<ServiceHealthOutcome> {
     const serviceSlug = canonicalizeServiceSlug(service);
-    const peersQuery =
-      peers.length > 0 ? `?peers=${peers.map(encodeURIComponent).join(",")}` : "";
-    const url =
-      `${this.baseUrl}/v1/services/${encodeURIComponent(serviceSlug)}/health${peersQuery}`;
+    const peersQuery = peers.length > 0 ? `?peers=${peers.map(encodeURIComponent).join(",")}` : "";
+    const url = `${this.baseUrl}/v1/services/${encodeURIComponent(serviceSlug)}/health${peersQuery}`;
     const attempt = await this.fetchGetWithRetry(url, {
       "x-account-id": this.accountId,
     });
@@ -674,8 +659,12 @@ export class SkillRegistryClient {
           : {}),
         ...(input.signupUrl !== undefined ? { signup_url: input.signupUrl } : {}),
         ...(input.mode !== undefined ? { mode: input.mode } : {}),
-        ...(input.captchaKind !== undefined ? { captcha_kind: input.captchaKind.slice(0, 40) } : {}),
-        ...(input.captchaVariant !== undefined ? { captcha_variant: input.captchaVariant.slice(0, 40) } : {}),
+        ...(input.captchaKind !== undefined
+          ? { captcha_kind: input.captchaKind.slice(0, 40) }
+          : {}),
+        ...(input.captchaVariant !== undefined
+          ? { captcha_variant: input.captchaVariant.slice(0, 40) }
+          : {}),
         ...(input.captchaBlocked !== undefined ? { captcha_blocked: input.captchaBlocked } : {}),
         ...(input.provisionId !== undefined ? { provision_id: input.provisionId } : {}),
         ...(input.stepTrail !== undefined ? { step_trail: input.stepTrail } : {}),
@@ -771,9 +760,7 @@ export class SkillRegistryClient {
       }
       let response: Response;
       try {
-        response = await this.withTimeout(
-          this.fetchFn(url, { method: "GET", headers }),
-        );
+        response = await this.withTimeout(this.fetchFn(url, { method: "GET", headers }));
       } catch (err) {
         lastReason = `network error: ${err instanceof Error ? err.message : String(err)}`;
         continue;

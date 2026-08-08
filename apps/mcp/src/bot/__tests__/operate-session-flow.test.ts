@@ -1237,24 +1237,27 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
   it.each([
     "https://accounts.google.com/o/oauth2/auth",
     "https://recipe-escape.firebaseapp.com/__/auth/handler",
-  ])("SAFETY: refuses a pre-approved session auth host outside the recipe domain: %s", async (url) => {
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    const result = await replayOperatorRecipe(
-      started.session_id,
-      replayRecipe({
-        trace: [{ action: { kind: "goto", url_template: url } }],
-      }),
-      {},
-    );
-    expect(result).toMatchObject({
-      status: "domain_lock_violation",
-      step_index: 0,
-      recipe_domain: "example.com",
-    });
-    expect(h.gotos).not.toContain(url);
-  });
+  ])(
+    "SAFETY: refuses a pre-approved session auth host outside the recipe domain: %s",
+    async (url) => {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+      });
+      const result = await replayOperatorRecipe(
+        started.session_id,
+        replayRecipe({
+          trace: [{ action: { kind: "goto", url_template: url } }],
+        }),
+        {},
+      );
+      expect(result).toMatchObject({
+        status: "domain_lock_violation",
+        step_index: 0,
+        recipe_domain: "example.com",
+      });
+      expect(h.gotos).not.toContain(url);
+    },
+  );
 
   it("allows a goto step to a subdomain of the recipe's own domain", async () => {
     h.elements = [];
@@ -1333,10 +1336,7 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     await writeRecipe(recipe);
 
     await expect(
-      provisionUseTool.handler(
-        { name: `purchase--${shapeKey}` },
-        null as unknown as ApiClient,
-      ),
+      provisionUseTool.handler({ name: `purchase--${shapeKey}` }, null as unknown as ApiClient),
     ).rejects.toThrow(/checkout-leg recipe.*leg:"checkout"/i);
     expect(h.startCalls).toBe(0);
 
@@ -1351,11 +1351,11 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://store.example/checkout" });
-    const result = await provisionUseTool.handler(
+    const result = (await provisionUseTool.handler(
       { verb: "purchase", session_id: started.session_id, leg: "checkout", params: {} },
       null as unknown as ApiClient,
-    );
-    expect((result.replay as { status: string }).status).toBe("complete");
+    )) as { replay: { status: string } };
+    expect(result.replay.status).toBe("complete");
     expect(h.clickCalls).toBe(1);
 
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;

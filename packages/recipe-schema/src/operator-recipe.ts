@@ -358,13 +358,9 @@ export function operatorRecipeKeyForCheckoutShape(verb: OperatorVerb, signature:
 
 // ── Hard domain-lock (replay-serve-live-domainlock) ─────────────────────
 //
-// A recipe may only ever drive the exact site it was recorded for. This is
-// the PRIMARY safety control for the shared registry now that a recipe
-// serves live the moment it's written (no housekeeper-vetted promotion
-// gate stands between an untrusted write and another user's replay
-// browser — see routes/recipes.ts). Enforced at both write time (server-
-// side, defense in depth against a bypassed client) and replay time (the
-// mcp client, before any goto/allow_host actually executes).
+// A recipe may only ever drive the site it was recorded for. This is the
+// primary safety control for live shared-registry writes and is enforced at
+// both write time and replay time before any goto/allow_host executes.
 //
 // A checkout-shape-keyed recipe has no site domain to compare against, so
 // it is restricted to in-page field interaction: allowed_hosts and explicit
@@ -406,8 +402,7 @@ export function isSameRecipeDomain(candidate: string, recipeDomain: string): boo
     return false;
   }
   const candidateDomain = getDomain(hostname, { allowPrivateDomains: true }) ?? hostname;
-  const lockedDomain =
-    getDomain(recipeHostname, { allowPrivateDomains: true }) ?? recipeHostname;
+  const lockedDomain = getDomain(recipeHostname, { allowPrivateDomains: true }) ?? recipeHostname;
   return candidateDomain === lockedDomain;
 }
 

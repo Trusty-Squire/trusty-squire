@@ -17,6 +17,4 @@ npm install @trusty-squire/recipe-schema
 - `recipeDomainLockViolations`, `isSameRecipeDomain` — the write/replay domain-lock: ordinary recipes stay within their recorded registrable domain, while checkout-shape recipes cannot navigate or widen host scope.
 - `isRecipeShareEligible` — the cross-user share-eligibility gate: refuses recipes carrying user-specific or secret-shaped literals.
 
-`POST /recipes` serves an accepted recipe live immediately. Clients and the registry both apply the domain-lock and `isRecipeShareEligible` before the write; there is no candidate or promotion tier.
-
-The local record/replay engine that produces and consumes these recipes lives in the monorepo at `apps/mcp/src/bot/operator-recipe.ts` and is documented in [`docs/DESIGN-replay-engine.md`](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/DESIGN-replay-engine.md).
+The record, publish, and replay contract is documented in [`docs/DESIGN-replay-engine.md`](https://github.com/Trusty-Squire/trusty-squire/blob/main/docs/DESIGN-replay-engine.md); the local engine lives at `apps/mcp/src/bot/operator-recipe.ts`.

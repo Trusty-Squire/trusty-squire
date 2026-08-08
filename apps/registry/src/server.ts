@@ -24,19 +24,13 @@ import {
 } from "./extract-failure-store.js";
 import { InMemoryBotFailureStore } from "./bot-failure-store-memory.js";
 import type { BotFailureStore } from "./bot-failure-store.js";
-import {
-  InMemoryProvisionEventStore,
-  type ProvisionEventStore,
-} from "./provision-event-store.js";
+import { InMemoryProvisionEventStore, type ProvisionEventStore } from "./provision-event-store.js";
 import {
   InMemoryServiceStateStore,
   projectServiceState,
   type ServiceStateStore,
 } from "./service-state-store.js";
-import {
-  InMemoryOpenIssueStore,
-  type OpenIssueStore,
-} from "./open-issue-store.js";
+import { InMemoryOpenIssueStore, type OpenIssueStore } from "./open-issue-store.js";
 import { registerIssuesRoutes } from "./routes/issues.js";
 import { adminAuthFromEnv, type AdminAuthConfig } from "./admin-auth.js";
 
@@ -113,16 +107,11 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     bodyLimit: MAX_HTML_BYTES + MAX_SCREENSHOT_BYTES + 512 * 1024,
   });
   const skillStore = opts.skillStore ?? new InMemorySkillStore();
-  const extractFailureStore =
-    opts.extractFailureStore ?? new InMemoryExtractFailureStore();
-  const botFailureStore =
-    opts.botFailureStore ?? new InMemoryBotFailureStore();
-  const provisionEventStore =
-    opts.provisionEventStore ?? new InMemoryProvisionEventStore();
-  const serviceStateStore =
-    opts.serviceStateStore ?? new InMemoryServiceStateStore();
-  const openIssueStore =
-    opts.openIssueStore ?? new InMemoryOpenIssueStore();
+  const extractFailureStore = opts.extractFailureStore ?? new InMemoryExtractFailureStore();
+  const botFailureStore = opts.botFailureStore ?? new InMemoryBotFailureStore();
+  const provisionEventStore = opts.provisionEventStore ?? new InMemoryProvisionEventStore();
+  const serviceStateStore = opts.serviceStateStore ?? new InMemoryServiceStateStore();
+  const openIssueStore = opts.openIssueStore ?? new InMemoryOpenIssueStore();
   const recipeStore = opts.recipeStore ?? new InMemoryOperatorRecipeStore();
   // Dev/test default: an ephemeral key pair. Production injects a
   // long-lived signer through opts.signer at boot. The signer is
@@ -141,7 +130,10 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   let signer: ManifestSigner;
   if (opts.signer !== undefined) {
     signer = opts.signer;
-  } else if (process.env.ADAPTER_SIGNING_PRIVATE_KEY !== undefined && process.env.ADAPTER_SIGNING_PRIVATE_KEY.length > 0) {
+  } else if (
+    process.env.ADAPTER_SIGNING_PRIVATE_KEY !== undefined &&
+    process.env.ADAPTER_SIGNING_PRIVATE_KEY.length > 0
+  ) {
     signer = ManifestSigner.fromEnv(process.env, "registry");
   } else {
     const { privateKey } = generateKeyPairSync("ed25519");
@@ -160,8 +152,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
 
   const demotionWebhookUrl =
     opts.demotionWebhookUrl ?? process.env.TRUSTY_SQUIRE_DEMOTION_WEBHOOK_URL;
-  const skillVerifyPublicKey =
-    opts.skillVerifyPublicKey ?? process.env.SKILL_VERIFY_PUBLIC_KEY;
+  const skillVerifyPublicKey = opts.skillVerifyPublicKey ?? process.env.SKILL_VERIFY_PUBLIC_KEY;
   await fastify.register(registerSkillsRoute, {
     store: skillStore,
     signer,
@@ -204,10 +195,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
   fastify.addHook("onReady", async () => {
     if (opts.serviceStateStore === undefined) return; // in-mem default: nothing persisted yet
     try {
-      const demand = await provisionEventStore.demandByService(
-        60 * 86_400_000,
-        500,
-      );
+      const demand = await provisionEventStore.demandByService(60 * 86_400_000, 500);
       // Self-heal: drop legacy raw-string OPEN tickets before re-seeding with
       // the coarse-token key (the failure_kind-taxonomy fix). One-time effect
       // — normalized seeds never match, and resolved/wall human work is kept.
@@ -237,10 +225,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
         ) {
           // Create-only — the backfill replays history; it must NEVER reopen a
           // human-closed (wall/resolved) ticket on a restart.
-          const seeded = await openIssueStore.seedIfAbsent(
-            service,
-            projection.last_failure_kind,
-          );
+          const seeded = await openIssueStore.seedIfAbsent(service, projection.last_failure_kind);
           if (seeded !== null) seededIssues += 1;
         }
       }
@@ -261,9 +246,7 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     // Demand signal for the merged harvest queue (Decision 4).
     provisionEventStore,
     resolveAccountId,
-    ...(adminBearer !== undefined && adminBearer.length > 0
-      ? { adminBearer }
-      : {}),
+    ...(adminBearer !== undefined && adminBearer.length > 0 ? { adminBearer } : {}),
     ...(demotionWebhookUrl !== undefined ? { demotionWebhookUrl } : {}),
     ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
   });
@@ -284,13 +267,12 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
     provisionEventStore,
     extractFailureStore,
     adminAuth,
-    ...(adminBearer !== undefined && adminBearer.length > 0
-      ? { adminBearer }
-      : {}),
+    ...(adminBearer !== undefined && adminBearer.length > 0 ? { adminBearer } : {}),
     ...(opts.fetchFn !== undefined ? { fetchFn: opts.fetchFn } : {}),
     // Panel 1 funnel: the API base + dedicated read-only metrics token.
     // When the token is unset, Panel 1 renders registry-side stages only.
-    apiBase: opts.apiBase ?? process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev",
+    apiBase:
+      opts.apiBase ?? process.env.TRUSTY_SQUIRE_API_BASE ?? "https://trusty-squire-api.fly.dev",
     ...(funnelMetricsToken !== undefined && funnelMetricsToken.length > 0
       ? { funnelMetricsToken }
       : {}),
@@ -319,7 +301,10 @@ export async function buildServer(opts: BuildServerOpts = {}): Promise<ReturnTyp
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.REGISTRY_API_PORT ?? 3001);
   let serverOpts: BuildServerOpts = {};
-  if (process.env.REGISTRY_DATABASE_URL !== undefined && process.env.REGISTRY_DATABASE_URL.length > 0) {
+  if (
+    process.env.REGISTRY_DATABASE_URL !== undefined &&
+    process.env.REGISTRY_DATABASE_URL.length > 0
+  ) {
     const { PrismaSkillStore } = await import("./prisma-skill-store.js");
     const { PrismaExtractFailureStore } = await import("./prisma-extract-failure-store.js");
     const { PrismaBotFailureStore } = await import("./prisma-bot-failure-store.js");

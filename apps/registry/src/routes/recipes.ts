@@ -5,16 +5,16 @@
 //   GET  /recipes/:verb/:domain — fetch the live recipe for a key
 //
 // POST is unauthenticated — a recipe becomes replayable by any install the
-// instant this route accepts it. There is no candidate/promotion tier
-// (that housekeeper-vetted gate was retired — see CLAUDE.md). What stands
-// between an unauthenticated caller and steering another user's replay
-// browser is the HARD DOMAIN-LOCK (recipeDomainLockViolations): every
+// instant this route accepts it. There is no candidate/promotion tier.
+// The primary boundary between an unauthenticated write and another user's
+// replay browser is the HARD DOMAIN-LOCK (recipeDomainLockViolations): every
 // entry_url / allowed_hosts entry / goto+allow_host target must resolve to
 // the recipe's own eTLD+1, checked here and re-checked at replay time by
 // the mcp client. The share-eligibility gate (isRecipeShareEligible) is
 // the second layer, guarding against baked-in user data rather than
 // off-domain navigation. A rejected publish is a 400, not a 500 — the
-// caller falls back to local-only storage. See docs/ARCHITECTURE.md.
+// caller falls back to local-only storage. The complete contract is owned by
+// docs/DESIGN-replay-engine.md.
 
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import {

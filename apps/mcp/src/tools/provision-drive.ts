@@ -184,7 +184,7 @@ export async function publishRecipeToRegistry(file: string): Promise<string> {
 // its own recipe never pays a network round trip it didn't have before.
 // The registry returns whatever was last written for the key — safety
 // against a tampered/malicious shared recipe comes from the domain-lock
-// re-checked at replay time (see recipeAllowedEntryAndHosts below), not
+// re-checked at replay time (see recipeDomainLockViolationForReplay below), not
 // from a vetting step before the fetch. A registry miss or an unreachable
 // registry re-throws the ORIGINAL local error so the caller's existing
 // cold-start fallback is untouched.
@@ -238,11 +238,13 @@ export async function resolveCheckoutLegRecipe(
 // tampered file, a stale registry that skipped the check, or a recipe
 // fetched before this enforcement shipped. Returns null when clean, or a
 // human-readable reason when the recipe's resolved entry or any declared
-// allowed_hosts entry would leave its own eTLD+1. A checkout-shape-keyed
-// recipe (replay-per-leg-signature) has no single site to lock to and is
-// never widened via allowed_hosts at replay (see useCheckoutLegRecipe), so
-// it's exempt — same scoping the registry's write-time check uses.
-function recipeDomainLockViolationForReplay(recipe: OperatorRecipe, entryUrl: string): string | null {
+// allowed_hosts entry would leave its own eTLD+1. Checkout-shape recipes have
+// no entry or allowed hosts to check here; their field-only restriction is
+// enforced at write time and again while each replay step executes.
+function recipeDomainLockViolationForReplay(
+  recipe: OperatorRecipe,
+  entryUrl: string,
+): string | null {
   if (recipe.domain === undefined || isCheckoutShapeKey(recipe.domain)) return null;
   if (!isSameRecipeDomain(entryUrl, recipe.domain)) {
     return `entry "${entryUrl}" is outside the recipe's own domain "${recipe.domain}"`;
