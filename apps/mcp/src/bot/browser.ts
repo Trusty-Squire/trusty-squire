@@ -4332,6 +4332,56 @@ export class BrowserController {
     await this.wait(0.5);
   }
 
+  // ───────────── type-triggered autocomplete (3.1) ─────────────
+  // A free-text `type` into a Google-Places-style address field or a
+  // react-select/cmdk/Radix combobox can open the same kind of suggestion
+  // popup `select`'s selectFromCombobox() already knows how to drive — the
+  // difference is the host issued `type`, not an explicit `select`, so
+  // nothing today detects or commits the popup. These three methods reuse
+  // the exact open-detect/click machinery selectFromCombobox() uses; the
+  // match-or-stop decision of WHICH option (if any) to click lives in
+  // provision-session.ts (matchAutocompleteSuggestions), kept a pure
+  // function there so it's unit-testable without a browser.
+
+  /**
+   * Snapshot popups that already exist BEFORE typing — the suggestion popup
+   * can open mid-keystroke, so this must run before type(), not after.
+   */
+  async markPreexistingTypeSuggestionPopups(): Promise<void> {
+    await this.markComboboxPreexistingElements();
+  }
+
+  /**
+   * After typing into `selector`, detect whether a suggestion popup opened
+   * as a side effect and return its option texts in DOM order. Empty when
+   * no popup opened — `type` behaved as an ordinary text field and the
+   * caller should no-op.
+   */
+  async detectTypeSuggestionPopup(selector: string): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    await this.refreshComboboxMarkers(selector);
+    const options = this.page.locator("[data-ts-select-option-tier]");
+    const count = await options.count();
+    const texts: string[] = [];
+    for (let i = 0; i < count; i += 1) {
+      texts.push((await options.nth(i).innerText()).replace(/\s+/g, " ").trim());
+    }
+    return texts;
+  }
+
+  /** Click the option at `index` (as indexed by detectTypeSuggestionPopup). */
+  async commitTypeSuggestion(index: number): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const options = this.page.locator("[data-ts-select-option-tier]");
+    await this.clickComboboxOption(options.nth(index));
+  }
+
+  /** Clear popup-detection markers without committing anything (no popup, or
+   * the match-or-stop rule found zero/multiple candidates). */
+  async discardTypeSuggestionPopup(): Promise<void> {
+    await this.clearComboboxMarkers();
+  }
+
   // ───────────── humanization internals ─────────────
 
   // Click that mimics a real user: locate element, bezier-path the

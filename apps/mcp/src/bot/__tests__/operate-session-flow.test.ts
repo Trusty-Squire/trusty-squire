@@ -22,6 +22,10 @@ const h = vi.hoisted(() => ({
   clearElementsOnClick: false,
   clickValueMutation: null as { selector: string; value: string } | null,
   clickPhoneCountryMutation: null as string | null,
+  autocompleteSuggestions: [] as string[],
+  autocompleteCommitMutation: null as { selector: string; value: string } | null,
+  autocompleteCommitCalls: [] as number[],
+  clickCalls: 0,
   gotos: [] as string[],
   started: 0,
   startCalls: 0,
@@ -189,6 +193,21 @@ vi.mock("../browser.js", () => ({
         if (element.selector === selector) element.value = text;
       }
     }
+    async markPreexistingTypeSuggestionPopups(): Promise<void> {}
+    async detectTypeSuggestionPopup(_selector: string): Promise<string[]> {
+      return h.autocompleteSuggestions;
+    }
+    async commitTypeSuggestion(index: number): Promise<void> {
+      h.autocompleteCommitCalls.push(index);
+      if (h.autocompleteCommitMutation !== null) {
+        for (const element of h.elements as Array<Record<string, unknown>>) {
+          if (element.selector === h.autocompleteCommitMutation.selector) {
+            element.value = h.autocompleteCommitMutation.value;
+          }
+        }
+      }
+    }
+    async discardTypeSuggestionPopup(): Promise<void> {}
     async selectOption(selector: string, matcher?: string): Promise<string> {
       h.selected.push({ selector, matcher });
       let committed = matcher ?? "";
@@ -217,6 +236,7 @@ vi.mock("../browser.js", () => ({
       return h.phoneCountry !== null;
     }
     async click(): Promise<void> {
+      h.clickCalls += 1;
       if (h.clickValueMutation !== null) {
         for (const element of h.elements as Array<Record<string, unknown>>) {
           if (element.selector === h.clickValueMutation.selector) {
@@ -393,6 +413,10 @@ beforeEach(() => {
   h.clearElementsOnClick = false;
   h.clickValueMutation = null;
   h.clickPhoneCountryMutation = null;
+  h.autocompleteSuggestions = [];
+  h.autocompleteCommitMutation = null;
+  h.autocompleteCommitCalls = [];
+  h.clickCalls = 0;
   h.gotos = [];
   h.consentDismissCalls = 0;
   h.consentCta = null;
@@ -1147,7 +1171,12 @@ describe("verified recipe recording", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  it("never writes a cold trace after a checkout transition loses attestation", async () => {
+  // 3.3 — this is the cold (no replayState) path: no recipe is being
+  // replayed, so before the fix this transition would silently proceed
+  // (only disqualifying a future recipe save) and could submit with a lost
+  // money field. It must now block immediately, same halt shape as the
+  // replay path's human_required.
+  it("blocks a checkout transition immediately when it loses attestation, and still refuses to save if remembered anyway", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-transition-fail-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     h.elements = [
@@ -1163,7 +1192,9 @@ describe("verified recipe recording", () => {
     });
     h.clearElementsOnClick = true;
     h.clickValueMutation = { selector: "#city", value: "Brooklyn" };
-    await act(started.session_id, { kind: "click", target: "Continue" });
+    await expect(act(started.session_id, { kind: "click", target: "Continue" })).rejects.toThrow(
+      /money_field_unverified/i,
+    );
     h.visibleText = "Review order";
     await expect(
       provisionRememberTool.handler(
@@ -1778,6 +1809,113 @@ describe("verified recipe recording", () => {
 });
 afterEach(async () => {
   await closeAllProvisionSessions();
+});
+
+describe("3.3 — cold-path money-field guard actually blocks", () => {
+  it("blocks a transition click when a tagged money field silently went empty (no active replay)", async () => {
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "City",
+      text: "Queens",
+      provenance: { hole: "address.city" },
+    });
+    // Simulate the field silently going empty between fill and submit (a JS
+    // reset, an unrelated re-render) — session.replayState is still null,
+    // this is a first-time, no-recipe (cold) run.
+    (h.elements[0] as Record<string, unknown>).value = "";
+    await expect(act(started.session_id, { kind: "click", target: "Continue" })).rejects.toThrow(
+      /money_field_unverified/i,
+    );
+    // The guard ran BEFORE the switch statement — the click itself never fired.
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("lets the transition through when the recorded money field still matches", async () => {
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "City",
+      text: "Queens",
+      provenance: { hole: "address.city" },
+    });
+    await act(started.session_id, { kind: "click", target: "Continue" });
+    expect(h.clickCalls).toBe(1);
+  });
+});
+
+describe("3.1 — autocomplete-aware type fill", () => {
+  it("commits the single matching suggestion and verifies the underlying value actually committed", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    h.autocompleteCommitMutation = {
+      selector: "#address",
+      value: "350 5th Ave, New York, NY 10118, USA",
+    };
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
+    expect(h.typed).toEqual([{ selector: "#address", text: "350 5th Ave" }]);
+    expect(h.autocompleteCommitCalls).toEqual([0]);
+    expect((h.elements[0] as Record<string, unknown>).value).toBe(
+      "350 5th Ave, New York, NY 10118, USA",
+    );
+  });
+
+  it("no-ops when typing opens no suggestion popup (plain text field, unchanged behavior)", async () => {
+    h.elements = [elem({ testId: "shipping-name", labelText: "Name", selector: "#name" })];
+    h.autocompleteSuggestions = [];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Name", text: "Ada Lovelace" });
+    expect(h.autocompleteCommitCalls).toEqual([]);
+    expect((h.elements[0] as Record<string, unknown>).value).toBe("Ada Lovelace");
+  });
+
+  it("stops on an ambiguous autocomplete match instead of guessing", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = [
+      "350 5th Ave, New York, NY 10118, USA",
+      "350 5th Avenue, Brooklyn, NY 11215, USA",
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/autocomplete_commit_required/i);
+    expect(h.autocompleteCommitCalls).toEqual([]);
+    // Never a confident wrong commit — the field still holds only what was
+    // typed, not a guessed option.
+    expect((h.elements[0] as Record<string, unknown>).value).toBe("350 5th Ave");
+  });
+
+  it("stops when a popup opened but no suggestion matches the typed text", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["1 Infinite Loop, Cupertino, CA 95014, USA"];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/autocomplete_commit_required/i);
+    expect(h.autocompleteCommitCalls).toEqual([]);
+  });
+
+  it("throws when a commit click lands but the underlying value never actually changed", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    // No autocompleteCommitMutation configured — the click "lands" (per the
+    // mock's commitTypeSuggestion) but the field's live value never changes,
+    // simulating a widget whose onSelect didn't actually fire.
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/did not take/i);
+    expect(h.autocompleteCommitCalls).toEqual([0]);
+  });
 });
 
 describe("operate_start — consent-overlay auto-dismiss", () => {

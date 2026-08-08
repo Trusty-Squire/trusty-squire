@@ -37,6 +37,7 @@ import {
   buildVerificationSearchQuery,
   makeTwoCaptchaVaultProxy,
   toCompactElement,
+  matchAutocompleteSuggestions,
 } from "../provision-session.js";
 import {
   looksLikeCodeIdentifier,
@@ -336,6 +337,42 @@ describe("resolveTarget", () => {
     expect(secondRef).toMatch(/_2$/);
     expect(firstRef).not.toBe(secondRef);
     expect(resolveTarget(twins, secondRef)?.id).toBe("second");
+  });
+});
+
+describe("matchAutocompleteSuggestions (3.1 — match-or-stop rule, pure)", () => {
+  it("matches exactly one option when the typed text is a prefix of its normalized text", () => {
+    expect(
+      matchAutocompleteSuggestions("350 5th Ave", ["350 5th Ave, New York, NY 10118, USA"]),
+    ).toEqual([0]);
+  });
+
+  it("is case- and whitespace-insensitive", () => {
+    expect(
+      matchAutocompleteSuggestions("  350   5TH ave ", ["350 5th Ave, New York, NY 10118, USA"]),
+    ).toEqual([0]);
+  });
+
+  it("never matches on a bare substring anywhere in the string — prefix only", () => {
+    // "5th Ave" appears inside the option's text but is not a PREFIX of it —
+    // must miss, not match. A substring match is exactly the loose rule the
+    // field-role guard (PR #447) exists to avoid on money-path fields.
+    expect(
+      matchAutocompleteSuggestions("5th Ave", ["350 5th Ave, New York, NY 10118, USA"]),
+    ).toEqual([]);
+  });
+
+  it("returns every candidate when the typed text is an ambiguous prefix of more than one option", () => {
+    expect(
+      matchAutocompleteSuggestions("350 5th Ave", [
+        "350 5th Ave, New York, NY 10118, USA",
+        "350 5th Avenue, Brooklyn, NY 11215, USA",
+      ]),
+    ).toEqual([0, 1]);
+  });
+
+  it("returns no candidates for empty typed text", () => {
+    expect(matchAutocompleteSuggestions("", ["anything"])).toEqual([]);
   });
 });
 

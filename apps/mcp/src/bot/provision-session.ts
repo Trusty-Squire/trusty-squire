@@ -881,6 +881,79 @@ export class AmbiguousProvisionTargetError extends Error {
   }
 }
 
+// A `type` into an autocomplete field (Google-Places-style address picker,
+// react-select/cmdk/Radix combobox) opened a suggestion popup, but the typed
+// text didn't resolve to exactly one option — same "N candidates matched,
+// stop and ask, never guess" shape as AmbiguousProvisionTargetError. Zero
+// candidates and >1 candidates are both a stop, never a confident wrong
+// commit (see matchAutocompleteSuggestions).
+export class AutocompleteCommitRequiredError extends Error {
+  readonly code = "autocomplete_commit_required";
+
+  constructor(
+    readonly typedText: string,
+    readonly candidates: readonly string[],
+  ) {
+    super(
+      candidates.length === 0
+        ? `autocomplete_commit_required: typing "${typedText}" opened a suggestion list but no ` +
+            `visible option started with the typed text. Retry with text that matches a suggestion, ` +
+            `or issue an explicit select/click on the option you want.`
+        : `autocomplete_commit_required: typing "${typedText}" matched ${candidates.length} ` +
+            `suggestions, not one. Narrow the typed text or issue an explicit select/click: ` +
+            `${candidates.slice(0, 8).join(", ")}`,
+    );
+  }
+}
+
+// 3.3 — the money-path field guard, made to actually block on a cold (no
+// replay) run. verifyFilledFieldValues already reads the right signal (live
+// DOM value vs. what was recorded) at the right time (before/after a
+// transition action); before this, a mismatch only disqualified the session
+// from recipe capture (rejectRecipeRecording) and let the click proceed
+// anyway. Same shape as the replay path's field_missing/field_value_mismatch
+// human_required halt (attestReplayFieldsBeforeTransition).
+export class MoneyFieldVerificationError extends Error {
+  readonly code = "money_field_unverified";
+
+  constructor(
+    readonly reason: "field_missing" | "field_value_mismatch",
+    readonly field: string,
+  ) {
+    super(
+      `money_field_unverified: "${field}" ${
+        reason === "field_missing"
+          ? "is no longer present on the page"
+          : "no longer matches the value that was typed/selected"
+      }. Re-fill it (operate_act{type/select, target, text, provenance:{hole:"${field}"}}) before retrying this transition.`,
+    );
+  }
+}
+
+function normalizeAutocompleteText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+// Match-or-stop rule for 3.1 — pure and unit-testable without a browser. A
+// suggestion is a candidate iff the typed text (normalized) is a prefix of
+// the option's normalized text (e.g. "350 5th Ave" → "350 5th Ave, New York,
+// NY 10118, USA"). Deliberately NOT a bare substring match anywhere in the
+// string — too loose, invites the label-swap-class wrong-fill the field-role
+// guard (PR #447) exists to prevent. Returns the indices of matching options;
+// the caller commits only when there is exactly one.
+export function matchAutocompleteSuggestions(
+  typedText: string,
+  optionTexts: readonly string[],
+): number[] {
+  const typed = normalizeAutocompleteText(typedText);
+  if (typed.length === 0) return [];
+  const indices: number[] = [];
+  optionTexts.forEach((text, index) => {
+    if (normalizeAutocompleteText(text).startsWith(typed)) indices.push(index);
+  });
+  return indices;
+}
+
 function elementTargetKeys(el: InteractiveElement): string[] {
   return [el.screenPath ?? null, el.testId ?? null, elementRef(el)].flatMap((s) => {
     const v = (s ?? "").replace(/\s+/g, " ").trim();
@@ -2881,7 +2954,39 @@ export async function act(
       else if (action.kind === "js_click") await browser.clickViaJs(el.selector);
       else if (action.kind === "type") {
         session.committedSelectValues.delete(el.selector);
+        // 3.1 — a Google-Places-style address field or a react-select/cmdk/
+        // Radix combobox can open a suggestion popup as a side effect of
+        // typing, not just of an explicit `select`. Snapshot pre-existing
+        // popups BEFORE typing (it can open mid-keystroke), then detect what
+        // opened afterward.
+        await browser.markPreexistingTypeSuggestionPopups();
         await browser.type(el.selector, action.text);
+        const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
+        if (suggestionTexts.length > 0) {
+          const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
+          if (candidates.length !== 1) {
+            await browser.discardTypeSuggestionPopup();
+            throw new AutocompleteCommitRequiredError(action.text, suggestionTexts.slice(0, 8));
+          }
+          const preCommit = await browser.extractInteractiveElements();
+          const preCommitValue = preCommit.find((e) => e.selector === el.selector)?.value ?? "";
+          await browser.commitTypeSuggestion(candidates[0]!);
+          // Never trust that a click "looked right" — re-read the field's
+          // live DOM value (not just that suggestion text was visible) and
+          // require it to have actually changed from what typing alone left
+          // behind. Same hard constraint as the field-role guard (PR #447):
+          // a miss is a stop, never a silent pass-through on a value that
+          // never really committed.
+          const afterCommit = await browser.extractInteractiveElements();
+          session.lastElements = afterCommit;
+          const committedValue = afterCommit.find((e) => e.selector === el.selector)?.value ?? "";
+          if (committedValue.length === 0 || committedValue === preCommitValue) {
+            throw new Error(
+              `autocomplete commit for "${action.text}" did not take — the field's underlying ` +
+                `value is still "${committedValue}" after selecting "${suggestionTexts[candidates[0]!]}".`,
+            );
+          }
+        }
       } else if (action.kind === "upload") {
         await browser.uploadFile(el.selector, action.path);
         audit(sessionId, "upload", {
@@ -4244,7 +4349,7 @@ async function attestRecordedFieldsBeforeTransition(
         session,
         `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
       );
-      return [];
+      throw new MoneyFieldVerificationError(guard.reason, expected.hole);
     }
   }
   return fields;
@@ -4266,7 +4371,7 @@ async function verifyRecordedFieldsAfterTransition(
         session,
         `checkout transition could not be attested (${expected.hole}: field_missing)`,
       );
-      return;
+      throw new MoneyFieldVerificationError("field_missing", expected.hole);
     }
     const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
@@ -4274,7 +4379,7 @@ async function verifyRecordedFieldsAfterTransition(
         session,
         `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
       );
-      return;
+      throw new MoneyFieldVerificationError(guard.reason, expected.hole);
     }
   }
 }
