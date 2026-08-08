@@ -1,8 +1,9 @@
 # DESIGN — local prepared-statement replay engine
 
-Status: implemented (2026-08-05). This document owns the local operator-recipe
-contract. Registry Skills and their `serviceSlugFromUrl` key remain a separate
-system; `DESIGN-operator-hints.md` owns how those Skills guide the host.
+Status: implemented (2026-08-05). This document owns the local and shared
+operator-recipe contract. Registry Skills and their `serviceSlugFromUrl` key
+remain a separate system; `DESIGN-operator-hints.md` owns how those Skills guide
+the host.
 
 ## Purpose
 
@@ -24,9 +25,9 @@ The local key is `(verb, eTLD+1)`:
 - Tenant subdomains under `myshopify.com` and `notion.site` retain the full host.
 - Recipes are local files under `~/.trusty-squire/operator-recipes/`, or the
   directory selected by `TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR`. Share-eligible
-  recipes are additionally submitted to the shared registry's candidate pool
-  and, once promoted, served to other installs on a local miss — CLAUDE.md
-  §"Operator Recipe registry (replay-registry-share)" owns that flow.
+  recipes are additionally written live to the shared registry and are served
+  immediately to other installs on a local miss. See [Shared registry and
+  domain lock](#shared-registry-and-domain-lock).
 - A money-path recording additionally saves its checkout leg as a second,
   narrower recipe in the same store, keyed by the live checkout page's
   field-name-set signature (`checkoutShapeKey` → `shape:<sha256>` in the
@@ -35,6 +36,37 @@ The local key is `(verb, eTLD+1)`:
   checkout shape signature (replay-per-leg-signature)" owns that flow.
 
 This key does not alter registry Skill lookup or `serviceSlugFromUrl`.
+
+## Shared registry and domain lock
+
+Every closed recipe verb is eligible for sharing. After `operate_remember`
+writes locally, the client best-effort publishes a recipe that passes both the
+domain lock and share-eligibility gate. `POST /recipes` is unauthenticated and
+rate-limited per source IP; it repeats both checks, then upserts directly into
+the single served store. `GET /recipes/:verb/:domain` can resolve that write
+immediately. There is no candidate store, promotion step, or promote-time
+content pin.
+
+The domain lock is the primary cross-user navigation boundary. Using a
+private-suffix-aware registrable-domain comparison, `entry_url`, every
+`allowed_hosts` entry, and every explicit `goto` or `allow_host` target must
+remain on the recipe's domain. Subdomains of that domain are accepted;
+different registrable domains, look-alikes, and templates in a hostname are
+rejected. The client checks before publishing, the registry checks before
+storing, and replay checks the resolved entry and allowed hosts before opening
+a session and each explicit navigation step before executing it. A replay-time
+violation is terminal for that recipe, fails the payment gate, and falls back
+to cold driving when the call shape permits a cold start.
+
+Checkout-shape recipes have no site domain. They therefore cannot declare an
+entry URL, widen `allowed_hosts`, or contain `goto`/`allow_host` actions; they
+may only interact with the already-open checkout page.
+
+The share-eligibility gate remains a separate privacy boundary: personal data
+is represented only as typed holes and is filled from the replaying user's own
+inputs. Earned credential values never enter a shared recipe; only sealed slot
+references may appear. The field-role checks and all money-path guards described
+below apply unchanged.
 
 ## Recording contract
 
@@ -106,6 +138,9 @@ host-driven. After repairing that step, the host calls `operate_use` with the
 same recipe bindings, `session_id`, and `resume_from = next_index`; replay checks
 the continuation against the same recipe and bindings, then continues.
 
+Organic redirects and OAuth popups remain outside the explicit-action domain
+lock and follow the existing session navigation model.
+
 The saved postcondition is bound from the active replay's parameters before
 `operate_finish_task` verifies it.
 
@@ -139,7 +174,8 @@ The existing `operate_pay` phone approval, passkey mandate, card injection,
 
 | Contract | Authoritative implementation |
 |---|---|
-| Wire schema (verb enum, PSL key, holes, share-eligibility gate) | `packages/recipe-schema/src/operator-recipe.ts` |
+| Wire schema (verb enum, PSL key, holes, domain lock, share-eligibility gate) | `packages/recipe-schema/src/operator-recipe.ts` |
+| Shared recipe write/read routes and submission rate limit | `apps/registry/src/routes/recipes.ts` |
 | Local persistence, render/bind, target resolver | `apps/mcp/src/bot/operator-recipe.ts` |
 | Action-time provenance, verified recording, replay, repair, field guards | `apps/mcp/src/bot/provision-session.ts` |
 | Public `operate_remember` / `operate_use` contracts | `apps/mcp/src/tools/provision-drive.ts` |

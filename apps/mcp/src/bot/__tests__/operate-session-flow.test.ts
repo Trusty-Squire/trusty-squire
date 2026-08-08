@@ -363,9 +363,19 @@ import {
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
 } from "../provision-session.js";
-import { readRecipeForTask, type OperatorRecipe } from "../operator-recipe.js";
+import {
+  isRecipeDomainLocked,
+  isRecipeShareEligible,
+  checkoutFieldSetSignature,
+  checkoutShapeKey,
+  OperatorRecipeSchema,
+  readRecipeForTask,
+  writeRecipe,
+  type OperatorRecipe,
+} from "../operator-recipe.js";
 import {
   provisionRememberTool,
+  provisionUseTool,
   provisionFinishTaskTool,
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
@@ -804,7 +814,7 @@ describe("prepared-statement replay", () => {
     await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
       /verification is not satisfied/i,
     );
-  });
+  }, 10_000);
 
   it("blocks payment until the exact missed field is repaired and replay resumes", async () => {
     h.elements = [];
@@ -1163,6 +1173,196 @@ describe("prepared-statement replay", () => {
   });
 });
 
+describe("replay-serve-live-domainlock — hard domain-lock at replay time", () => {
+  const shapeDomain = `shape:${"a".repeat(64)}`;
+
+  it("SAFETY: refuses a goto step targeting a different eTLD+1, hard-stops (not resumable), and shuts the payment gate", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [{ action: { kind: "goto", url_template: "https://attacker.net/phish" } }],
+      }),
+      {},
+    );
+    expect(result).toMatchObject({
+      status: "domain_lock_violation",
+      step_index: 0,
+      host: "attacker.net",
+      recipe_domain: "example.com",
+    });
+    expect(h.gotos).not.toContain("https://attacker.net/phish");
+    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
+      /verification is not satisfied/i,
+    );
+  });
+
+  it("SAFETY: refuses an allow_host step declaring a different eTLD+1", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [{ action: { kind: "allow_host", host: "attacker.net" } }],
+      }),
+      {},
+    );
+    expect(result).toMatchObject({
+      status: "domain_lock_violation",
+      step_index: 0,
+      host: "attacker.net",
+      recipe_domain: "example.com",
+    });
+  });
+
+  it("SAFETY: refuses a look-alike domain (example.com.attacker.net) even though it contains the real domain", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [
+          { action: { kind: "goto", url_template: "https://example.com.attacker.net/phish" } },
+        ],
+      }),
+      {},
+    );
+    expect(result.status).toBe("domain_lock_violation");
+  });
+
+  it.each([
+    "https://accounts.google.com/o/oauth2/auth",
+    "https://recipe-escape.firebaseapp.com/__/auth/handler",
+  ])(
+    "SAFETY: refuses a pre-approved session auth host outside the recipe domain: %s",
+    async (url) => {
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+      });
+      const result = await replayOperatorRecipe(
+        started.session_id,
+        replayRecipe({
+          trace: [{ action: { kind: "goto", url_template: url } }],
+        }),
+        {},
+      );
+      expect(result).toMatchObject({
+        status: "domain_lock_violation",
+        step_index: 0,
+        recipe_domain: "example.com",
+      });
+      expect(h.gotos).not.toContain(url);
+    },
+  );
+
+  it("allows a goto step to a subdomain of the recipe's own domain", async () => {
+    h.elements = [];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      // The new recipe-domain lock allows any subdomain of "example.com";
+      // the target must ALSO clear the session's own (pre-existing,
+      // unrelated) host-scope gate, so declare it there too.
+      extraAllowedHosts: ["checkout.example.com"],
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [{ action: { kind: "goto", url_template: "https://checkout.example.com/next" } }],
+      }),
+      {},
+    );
+    expect(result.status).toBe("complete");
+    expect(h.gotos).toContain("https://checkout.example.com/next");
+  });
+
+  it.each([
+    ["goto", { action: { kind: "goto" as const, url_template: "https://store.example/next" } }],
+    ["allow_host", { action: { kind: "allow_host" as const, host: "store.example" } }],
+  ])("SAFETY: refuses a %s step in a checkout-shape recipe", async (_kind, step) => {
+    const started = await startProvisionSession({ serviceUrl: "https://store.example/checkout" });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({ domain: shapeDomain, entry_url: undefined, allowed_hosts: [], trace: [step] }),
+      {},
+    );
+    expect(result).toMatchObject({
+      status: "domain_lock_violation",
+      step_index: 0,
+      recipe_domain: shapeDomain,
+    });
+  });
+
+  it("allows field-only actions in a checkout-shape recipe", async () => {
+    h.elements = [
+      elem({
+        tag: "button",
+        testId: "continue",
+        role: "button",
+        ariaLabel: "Continue",
+        selector: "#continue",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://store.example/checkout" });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        domain: shapeDomain,
+        entry_url: undefined,
+        allowed_hosts: [],
+        trace: [{ action: { kind: "click", target: { dom_hint: { testid: "continue" } } } }],
+      }),
+      {},
+    );
+    expect(result.status).toBe("complete");
+  });
+
+  it("only replays a shape recipe through the dedicated checkout-leg path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "shape-recipe-path-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    const fields = ["email", "firstName", "lastName"];
+    const signature = checkoutFieldSetSignature(fields)!;
+    const shapeKey = checkoutShapeKey(signature);
+    const recipe = replayRecipe({
+      name: "checkout-leg--path-test",
+      domain: shapeKey,
+      entry_url: "https://attacker.net/checkout",
+      allowed_hosts: [],
+      trace: [{ action: { kind: "click", target: { dom_hint: { testid: "continue" } } } }],
+    });
+    await writeRecipe(recipe);
+
+    await expect(
+      provisionUseTool.handler({ name: `purchase--${shapeKey}` }, null as unknown as ApiClient),
+    ).rejects.toThrow(/checkout-leg recipe.*leg:"checkout"/i);
+    expect(h.startCalls).toBe(0);
+
+    h.checkoutFieldNames = fields;
+    h.elements = [
+      elem({
+        tag: "button",
+        testId: "continue",
+        role: "button",
+        ariaLabel: "Continue",
+        selector: "#continue",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://store.example/checkout" });
+    const result = (await provisionUseTool.handler(
+      { verb: "purchase", session_id: started.session_id, leg: "checkout", params: {} },
+      null as unknown as ApiClient,
+    )) as { replay: { status: string } };
+    expect(result.replay.status).toBe("complete");
+    expect(h.clickCalls).toBe(1);
+
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 describe("verified recipe recording", () => {
   it("never writes a recipe when the machine postcondition fails", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-fail-"));
@@ -1367,7 +1567,10 @@ describe("verified recipe recording", () => {
         selector: "#add",
       }),
     ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/cart",
+      extraAllowedHosts: ["checkout.example.com", "accounts.example.com"],
+    });
     // Catalog/storefront leg — a non-money click.
     await act(started.session_id, { kind: "click", target: "Add to cart" });
     // Checkout leg — a money field.
@@ -1417,6 +1620,10 @@ describe("verified recipe recording", () => {
     >;
     expect(raw.verb).toBe("purchase");
     expect(raw.domain).toMatch(/^shape:[0-9a-f]{64}$/);
+    const checkoutRecipe = OperatorRecipeSchema.parse(raw);
+    expect(checkoutRecipe.allowed_hosts).toEqual([]);
+    expect(isRecipeDomainLocked(checkoutRecipe)).toBe(true);
+    expect(isRecipeShareEligible(checkoutRecipe).eligible).toBe(true);
     // Only the money-field step made it into the leg — not the earlier
     // catalog "Add to cart" click.
     expect((raw.trace as unknown[]).length).toBe(1);

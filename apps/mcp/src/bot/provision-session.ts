@@ -53,6 +53,8 @@ import {
   fillTemplate,
   hasRecipeTargetCandidate,
   isSingleUseUrl,
+  isCheckoutShapeKey,
+  isSameRecipeDomain,
   knownRecipeInputValue,
   localeStableFieldRole,
   operatorRecipeDomain,
@@ -3836,7 +3838,7 @@ async function rememberCheckoutLeg(
     goal: "Fill the checkout leg's fields",
     verb,
     domain: checkoutShapeKey(signature),
-    allowed_hosts: [...new Set(egressSeedHosts(session))],
+    allowed_hosts: [],
     trace: legTrace,
     secrets: [...legSlots].map((slot) => ({ slot, stored: false as const })),
     postcondition: checkoutLegPostcondition(legTrace),
@@ -3984,6 +3986,20 @@ export type OperatorReplayResult =
       leg: "checkout";
       from_step_index: number;
       reason: string;
+    }
+  | {
+      // replay-serve-live-domainlock — a goto/allow_host step's resolved
+      // target does not resolve to the recipe's own eTLD+1. Distinct from
+      // fallback_required: this is
+      // NEVER resumable — the fail-closed payment gate shuts exactly like
+      // human_required, and the host must abandon this recipe's replay and
+      // drive the remainder cold. Prevents a tampered/malicious shared
+      // recipe from steering the browser to an attacker origin.
+      status: "domain_lock_violation";
+      observation: Observation;
+      step_index: number;
+      host: string;
+      recipe_domain: string;
     };
 
 function replayTarget(action: TraceAction): RecipeTarget | null {
@@ -4152,6 +4168,24 @@ function markReplayFailure(
   session.replayState.paymentGuard = "failed";
   session.replayState.failure = { reason, field };
   audit(session.id, "replay_field_value_guard", { ok: false, reason, field });
+}
+
+// replay-serve-live-domainlock — checks a replay-bound goto/allow_host
+// target against the recipe's own eTLD+1. Unlike the ordinary session goto
+// gate, recipe replay has no auth-host exceptions. Checkout-shape recipes
+// cannot execute goto/allow_host actions because they have no site domain.
+function replayTargetWithinRecipeDomain(url: string, recipeDomain: string): boolean {
+  return isSameRecipeDomain(url, recipeDomain);
+}
+
+function markReplayDomainLockViolation(session: Session, host: string, recipeDomain: string): void {
+  rejectRecipeRecording(
+    session,
+    `replay refused: "${host}" is outside the recipe's own domain "${recipeDomain}"`,
+  );
+  if (session.replayState === null) return;
+  session.replayState.paymentGuard = "failed";
+  audit(session.id, "replay_domain_lock_violation", { host, recipe_domain: recipeDomain });
 }
 
 function verifyReplayFieldInElements(
@@ -4625,6 +4659,21 @@ export async function replayOperatorRecipe(
     };
   };
 
+  const recipeDomain = recipe.domain;
+  const domainLockViolation = async (
+    stepIndex: number,
+    host: string,
+  ): Promise<OperatorReplayResult> => {
+    markReplayDomainLockViolation(session, host, recipeDomain);
+    return {
+      status: "domain_lock_violation",
+      observation: await observe(sessionId),
+      step_index: stepIndex,
+      host,
+      recipe_domain: recipeDomain,
+    };
+  };
+
   for (let i = fromIndex; i < recipe.trace.length; i += 1) {
     const step = recipe.trace[i] as TraceEntry;
     const recorded = step.action;
@@ -4644,6 +4693,11 @@ export async function replayOperatorRecipe(
     }
 
     if (recorded.kind === "goto") {
+      // This lock covers explicit goto/allow_host steps only. Organic redirects
+      // and OAuth popups remain governed by the existing session navigation model.
+      if (isCheckoutShapeKey(recipeDomain)) {
+        return await domainLockViolation(i, recorded.url_template ?? "<goto>");
+      }
       if (recorded.url_template === undefined) {
         return await fallback(step, i, "goto step has no URL");
       }
@@ -4657,10 +4711,25 @@ export async function replayOperatorRecipe(
       if (filled.missing.length > 0) {
         return await fallback(step, i, `missing bindings: ${filled.missing.join(", ")}`);
       }
+      if (!replayTargetWithinRecipeDomain(filled.url, recipeDomain)) {
+        let host: string;
+        try {
+          host = new URL(filled.url).hostname;
+        } catch {
+          host = filled.url;
+        }
+        return await domainLockViolation(i, host);
+      }
       action = { kind: "goto", url: filled.url };
     } else if (recorded.kind === "allow_host") {
+      if (isCheckoutShapeKey(recipeDomain)) {
+        return await domainLockViolation(i, recorded.host ?? "<allow_host>");
+      }
       if (recorded.host === undefined) {
         return await fallback(step, i, "allow_host step has no host");
+      }
+      if (!replayTargetWithinRecipeDomain(`https://${recorded.host}`, recipeDomain)) {
+        return await domainLockViolation(i, recorded.host);
       }
       action = { kind: "allow_host", host: recorded.host };
     } else if (recorded.kind === "press") {

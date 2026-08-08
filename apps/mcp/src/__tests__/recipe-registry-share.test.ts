@@ -1,13 +1,12 @@
-// End-to-end proof of replay-registry-share: a recipe recorded on one
-// install is reused by a SECOND, wholly independent install (its own local
-// recipe directory, no shared filesystem state) that visits the same
-// (verb, eTLD+1) key — ONLY after the registry's candidate has been
-// promoted to live. Drives the actual production orchestration functions
+// End-to-end proof of replay-serve-live-domainlock: a recipe recorded on
+// one install is reused by a SECOND, wholly independent install (its own
+// local recipe directory, no shared filesystem state) that visits the same
+// (verb, eTLD+1) key — the instant it's written, with no promotion step.
+// Drives the actual production orchestration functions
 // (resolveRecipeForTask / publishRecipeToRegistry in tools/provision-drive.ts)
-// against a mocked registry backend that mirrors the real two-tier wire
-// contract apps/registry/src/routes/recipes.ts + routes/admin-recipes.ts
-// serve (POST /recipes writes a candidate only; GET /recipes reads live
-// only; promotion is a separate admin-bearer-gated step) — the same
+// against a mocked registry backend that mirrors the real wire contract
+// apps/registry/src/routes/recipes.ts serves (POST /recipes writes and
+// serves live in one step; GET /recipes reads that same store) — the same
 // "inject a fetchFn, no network, no Fastify" strategy
 // skill-registry-client.test.ts already uses for the parallel Skill flow,
 // so this stays a client-side unit/integration test with no live browser
@@ -66,27 +65,16 @@ interface StoredRecipeEntry {
 }
 
 interface MockRegistryBackend {
-  candidates: Map<string, StoredRecipeEntry>;
   live: Map<string, StoredRecipeEntry>;
   fetchFn: typeof globalThis.fetch;
-  /** Simulates what the admin-bearer-gated promotion route does. */
-  promote(verb: string, domain: string): void;
 }
 
 /**
- * Mirrors the exact two-tier wire contract of
- * apps/registry/src/routes/recipes.ts: POST /recipes writes ONLY the
- * candidate map; GET /recipes/:verb/:domain reads ONLY the live map. The
- * `promote` helper stands in for the real registry's admin-bearer-gated
- * `POST /admin/recipes/:verb/:domain/promote` — this mcp-level test isn't
- * exercising the admin route's own auth/eligibility logic (that's covered
- * registry-side in apps/registry/src/__tests__/admin-recipes.test.ts); it
- * only needs an accurate stand-in for "a promotion happened" so the
- * client-side resolution path can be proven against both pre- and
- * post-promotion state.
+ * Mirrors the real registry's replay-serve-live-domainlock wire contract:
+ * POST /recipes writes directly into the one store GET /recipes reads —
+ * no candidate tier, no separate promotion call.
  */
 function makeMockRegistryBackend(): MockRegistryBackend {
-  const candidates = new Map<string, StoredRecipeEntry>();
   const live = new Map<string, StoredRecipeEntry>();
 
   const fetchFn = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -105,13 +93,13 @@ function makeMockRegistryBackend(): MockRegistryBackend {
         return json(400, { ok: false, error: "missing_key" });
       }
       const key = `${recipe.verb}--${recipe.domain.toLowerCase()}`;
-      candidates.set(key, { recipe, updated_at: new Date(0).toISOString() });
+      live.set(key, { recipe, updated_at: new Date(0).toISOString() });
       return json(201, {
         ok: true,
         key,
         verb: recipe.verb,
         domain: recipe.domain,
-        status: "pending-review",
+        status: "live",
       });
     }
 
@@ -119,7 +107,7 @@ function makeMockRegistryBackend(): MockRegistryBackend {
     if (method === "GET" && match) {
       const [, verb, rawDomain] = match;
       const key = `${verb}--${decodeURIComponent(rawDomain!).toLowerCase()}`;
-      const found = live.get(key); // LIVE only — a pending candidate is invisible here
+      const found = live.get(key);
       if (found === undefined) return json(404, { ok: false, error: "no_recipe_for_key" });
       return json(200, { ok: true, key, recipe: found.recipe, updated_at: found.updated_at });
     }
@@ -127,21 +115,10 @@ function makeMockRegistryBackend(): MockRegistryBackend {
     return json(404, { ok: false, error: "not_found" });
   }) as typeof globalThis.fetch;
 
-  return {
-    candidates,
-    live,
-    fetchFn,
-    promote(verb, domain) {
-      const key = `${verb}--${domain.toLowerCase()}`;
-      const candidate = candidates.get(key);
-      if (candidate === undefined) throw new Error(`no candidate for ${key} to promote`);
-      live.set(key, candidate);
-      candidates.delete(key);
-    },
-  };
+  return { live, fetchFn };
 }
 
-describe("cross-user recipe reuse via the shared registry (replay-registry-share)", () => {
+describe("cross-user recipe reuse via the shared registry (replay-serve-live-domainlock)", () => {
   let backend: MockRegistryBackend;
   let dirA: string;
   let dirB: string;
@@ -175,38 +152,17 @@ describe("cross-user recipe reuse via the shared registry (replay-registry-share
     rmSync(dirB, { recursive: true, force: true });
   });
 
-  it("SAFETY: install B cannot resolve install A's recipe while it's still just a candidate", async () => {
+  it("SAFETY: a recipe recorded on install A is resolvable by install B IMMEDIATELY — no promotion step", async () => {
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
     const recipe = makeRecipe();
     const file = await writeRecipe(recipe);
     const publishStatus = await publishRecipeToRegistry(file);
-    expect(publishStatus.startsWith("submitted:")).toBe(true);
-    expect(backend.candidates.size).toBe(1);
-    expect(backend.live.size).toBe(0);
+    expect(publishStatus.startsWith("published:")).toBe(true);
+    expect(backend.live.size).toBe(1);
 
-    // Install B: wholly independent, empty local store. No promotion has
-    // happened yet, so this must cold-miss exactly like the key was never
-    // written — the same "not resolvable by replay" property the registry
-    // route test proves server-side.
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
-    await expect(
-      resolveRecipeForTask("get_api_key", "https://example.com/signup"),
-    ).rejects.toThrow();
-  });
-
-  it("a recipe recorded on install A is reused by install B once promoted, and install B has no local copy", async () => {
-    // Install A records + submits.
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
-    const recipe = makeRecipe();
-    const file = await writeRecipe(recipe);
-    const publishStatus = await publishRecipeToRegistry(file);
-    expect(publishStatus.startsWith("submitted:")).toBe(true);
-
-    // A housekeeper (or operator) vets and promotes the candidate.
-    backend.promote("get_api_key", "example.com");
-
-    // Install B: a wholly independent, empty local store — proves the
-    // registry, not the filesystem, is what's serving this recipe.
+    // Install B: wholly independent, empty local store — proves the
+    // registry, not the filesystem, is what's serving this recipe, and
+    // that it's live the instant A published it.
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
     await expect(readRecipeForTask("get_api_key", "https://example.com/signup")).rejects.toThrow();
 
@@ -216,7 +172,7 @@ describe("cross-user recipe reuse via the shared registry (replay-registry-share
     expect(resolved.verb).toBe("get_api_key");
   });
 
-  it("a not-share-eligible recipe is never submitted, and install B still cold-misses", async () => {
+  it("a not-share-eligible recipe is never published, and install B still cold-misses", async () => {
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
     const recipe = makeRecipe({
       trace: [
@@ -226,8 +182,7 @@ describe("cross-user recipe reuse via the shared registry (replay-registry-share
             kind: "type",
             text_match: "Full name",
             // A literal that should have been a hole — must never reach the
-            // shared registry (isRecipeShareEligible's job), not even as a
-            // candidate.
+            // shared registry (isRecipeShareEligible's job).
             value: "Jordan Rivera",
           },
         },
@@ -236,13 +191,30 @@ describe("cross-user recipe reuse via the shared registry (replay-registry-share
     const file = await writeRecipe(recipe);
     const publishStatus = await publishRecipeToRegistry(file);
     expect(publishStatus.startsWith("not_shared:")).toBe(true);
-    expect(backend.candidates.size).toBe(0);
     expect(backend.live.size).toBe(0);
 
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
     await expect(
       resolveRecipeForTask("get_api_key", "https://example.com/signup"),
     ).rejects.toThrow();
+  });
+
+  it("SAFETY: a recipe whose entry_url leaves its own domain is never published", async () => {
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
+    const recipe = makeRecipe({ entry_url: "https://attacker.net/signup" });
+    const file = await writeRecipe(recipe);
+    const publishStatus = await publishRecipeToRegistry(file);
+    expect(publishStatus.startsWith("not_shared:")).toBe(true);
+    expect(backend.live.size).toBe(0);
+  });
+
+  it("SAFETY: a recipe whose allowed_hosts declares an off-domain host is never published", async () => {
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
+    const recipe = makeRecipe({ allowed_hosts: ["attacker.net"] });
+    const file = await writeRecipe(recipe);
+    const publishStatus = await publishRecipeToRegistry(file);
+    expect(publishStatus.startsWith("not_shared:")).toBe(true);
+    expect(backend.live.size).toBe(0);
   });
 
   it("an unreachable registry degrades to the local-miss error rather than blocking the flow", async () => {
@@ -275,10 +247,10 @@ describe("cross-user recipe reuse via the shared registry (replay-registry-share
 
 // replay-per-leg-signature — the checkout leg's own independent resolution
 // path (resolveCheckoutLegRecipe), keyed by field-name-set signature
-// instead of domain. Same mock registry backend/two-tier candidate+promote
-// contract as above; only the key shape differs (shape:<hash> instead of a
-// real eTLD+1), which the backend's generic verb/domain URL matching
-// already handles unchanged.
+// instead of domain. Same mock registry backend/serve-live contract as
+// above; only the key shape differs (shape:<hash> instead of a real
+// eTLD+1), which the backend's generic verb/domain URL matching already
+// handles unchanged.
 describe("cross-domain checkout-leg reuse via the shared registry (replay-per-leg-signature)", () => {
   let backend: MockRegistryBackend;
   let dirA: string;
@@ -355,16 +327,15 @@ describe("cross-domain checkout-leg reuse via the shared registry (replay-per-le
     rmSync(dirB, { recursive: true, force: true });
   });
 
-  it("a checkout-leg recipe recorded on store A resolves on a wholly different store B that computes the SAME field-name-set signature", async () => {
+  it("a checkout-leg recipe recorded on store A resolves immediately on a wholly different store B that computes the SAME field-name-set signature", async () => {
     const signature = checkoutFieldSetSignature(SHARED_CHECKOUT_FIELDS)!;
 
-    // Store A records + submits its checkout-leg recipe.
+    // Store A records + publishes its checkout-leg recipe.
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
     const recipe = makeCheckoutLegRecipe(signature);
     const file = await writeRecipe(recipe);
     const publishStatus = await publishRecipeToRegistry(file);
-    expect(publishStatus.startsWith("submitted:")).toBe(true);
-    backend.promote("purchase", `shape:${signature}`);
+    expect(publishStatus.startsWith("published:")).toBe(true);
 
     // Store B: a wholly independent local store, never wrote this recipe —
     // it computes the SAME signature (its checkout happens to share the
@@ -382,22 +353,10 @@ describe("cross-domain checkout-leg reuse via the shared registry (replay-per-le
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
     const file = await writeRecipe(makeCheckoutLegRecipe(signature));
     await publishRecipeToRegistry(file);
-    backend.promote("purchase", `shape:${signature}`);
 
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
     const unrelatedSignature = checkoutFieldSetSignature(UNRELATED_CHECKOUT_FIELDS)!;
     const resolved = await resolveCheckoutLegRecipe("purchase", unrelatedSignature);
-    expect(resolved).toBeNull();
-  });
-
-  it("SAFETY: a checkout-leg candidate is not resolvable until promoted", async () => {
-    const signature = checkoutFieldSetSignature(SHARED_CHECKOUT_FIELDS)!;
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
-    const file = await writeRecipe(makeCheckoutLegRecipe(signature));
-    await publishRecipeToRegistry(file);
-    // No promotion.
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
-    const resolved = await resolveCheckoutLegRecipe("purchase", signature);
     expect(resolved).toBeNull();
   });
 

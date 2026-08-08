@@ -356,6 +356,122 @@ export function operatorRecipeKeyForCheckoutShape(verb: OperatorVerb, signature:
   return operatorRecipeKeyForDomain(verb, checkoutShapeKey(signature));
 }
 
+// ── Hard domain-lock (replay-serve-live-domainlock) ─────────────────────
+//
+// A recipe may only ever drive the site it was recorded for. This is the
+// primary safety control for live shared-registry writes and is enforced at
+// both write time and replay time before any goto/allow_host executes.
+//
+// A checkout-shape-keyed recipe has no site domain to compare against, so
+// it is restricted to in-page field interaction: allowed_hosts and explicit
+// goto/allow_host trace actions are always violations.
+
+export interface RecipeDomainLockViolation {
+  /** Which field failed — "entry_url", "allowed_hosts[N]", "trace[N].action.url_template", etc. */
+  field: string;
+  detail: string;
+}
+
+/**
+ * True when `candidate` (a bare host or a full URL) resolves to the SAME
+ * registrable domain (eTLD+1) as `recipeDomain`, using private suffixes for
+ * this security boundary independently of storage-key derivation, so a
+ * subdomain of the recipe's site is allowed and an
+ * unrelated or look-alike domain (e.g. "example.com.attacker.net") is
+ * not. A templated host (`${VAR}` inside the hostname itself, as opposed
+ * to the path/query) can never satisfy this — a legitimate recorder only
+ * templates path/query values (email aliases, ids), never the host.
+ */
+export function isSameRecipeDomain(candidate: string, recipeDomain: string): boolean {
+  const asUrl = candidate.includes("://") ? candidate : `https://${candidate}`;
+  const recipeUrl = recipeDomain.includes("://") ? recipeDomain : `https://${recipeDomain}`;
+  let hostname: string;
+  let recipeHostname: string;
+  try {
+    hostname = new URL(asUrl).hostname.toLowerCase();
+    recipeHostname = new URL(recipeUrl).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (
+    hostname.length === 0 ||
+    recipeHostname.length === 0 ||
+    hostname.includes("$") ||
+    recipeHostname.includes("$")
+  ) {
+    return false;
+  }
+  const candidateDomain = getDomain(hostname, { allowPrivateDomains: true }) ?? hostname;
+  const lockedDomain = getDomain(recipeHostname, { allowPrivateDomains: true }) ?? recipeHostname;
+  return candidateDomain === lockedDomain;
+}
+
+/**
+ * Full-recipe domain-lock audit: every entry_url, allowed_hosts entry, and
+ * goto/allow_host navigation target (including templated URLs) must
+ * resolve to the recipe's own eTLD+1. Returns an empty array when the
+ * recipe is clean. A recipe with no (verb, domain) key has nothing to lock
+ * to. A checkout-shape-keyed recipe must not navigate or widen host scope.
+ */
+export function recipeDomainLockViolations(recipe: OperatorRecipe): RecipeDomainLockViolation[] {
+  const violations: RecipeDomainLockViolation[] = [];
+  if (recipe.domain === undefined) return violations;
+  if (isCheckoutShapeKey(recipe.domain)) {
+    if (recipe.entry_url !== undefined) {
+      violations.push({
+        field: "entry_url",
+        detail: "checkout-shape recipes cannot declare an entry point",
+      });
+    }
+    recipe.allowed_hosts.forEach((host, i) => {
+      violations.push({
+        field: `allowed_hosts[${i}]`,
+        detail: `checkout-shape recipes cannot widen host scope to "${host}"`,
+      });
+    });
+    recipe.trace.forEach((entry, i) => {
+      if (entry.action.kind === "goto") {
+        violations.push({
+          field: `trace[${i}].action.url_template`,
+          detail: "checkout-shape recipes cannot navigate",
+        });
+      }
+      if (entry.action.kind === "allow_host") {
+        violations.push({
+          field: `trace[${i}].action.host`,
+          detail: "checkout-shape recipes cannot widen host scope",
+        });
+      }
+    });
+    return violations;
+  }
+  const domain = recipe.domain.toLowerCase();
+
+  const checkHost = (raw: string, field: string): void => {
+    if (!isSameRecipeDomain(raw, domain)) {
+      violations.push({ field, detail: `"${raw}" is outside the recipe's own domain "${domain}"` });
+    }
+  };
+
+  if (recipe.entry_url !== undefined) checkHost(recipe.entry_url, "entry_url");
+  recipe.allowed_hosts.forEach((host, i) => checkHost(host, `allowed_hosts[${i}]`));
+  // This lock covers explicit goto/allow_host steps only. Organic redirects
+  // and OAuth popups remain governed by the existing session navigation model.
+  recipe.trace.forEach((entry, i) => {
+    if (entry.action.kind === "goto" && entry.action.url_template !== undefined) {
+      checkHost(entry.action.url_template, `trace[${i}].action.url_template`);
+    }
+    if (entry.action.kind === "allow_host" && entry.action.host !== undefined) {
+      checkHost(entry.action.host, `trace[${i}].action.host`);
+    }
+  });
+  return violations;
+}
+
+export function isRecipeDomainLocked(recipe: OperatorRecipe): boolean {
+  return recipeDomainLockViolations(recipe).length === 0;
+}
+
 // ── Cross-user share eligibility ───────────────────────────────────────
 //
 // A shared recipe is a PLAN, never a recording of one user's data. Every

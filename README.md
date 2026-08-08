@@ -185,12 +185,15 @@ for the system and data flows.
   task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs
   or plaintext secrets. Recipes that pass a share-eligibility check (no
-  personal or secret-shaped literals) are also submitted to the shared
-  registry, where an admin-vetted promotion can make them reusable by other
-  installs. `operate_use` binds new values and replays those steps, preferring
-  the local recipe and falling back to a promoted shared one; on one missed
-  step it returns a local repair point and can continue in the same session.
-  Older name-only recipes remain planning hints.
+  personal or secret-shaped literals) and a registrable-domain lock are also
+  written live to the shared registry, making them immediately reusable by
+  other installs without a promotion step. `operate_use` binds the replaying
+  user's own values and replays those steps, preferring the local recipe and
+  falling back to the shared one. A recipe cannot navigate outside the site it
+  was recorded for; normal keyed replay refuses a violation before navigation
+  and continues with cold driving. On one ordinary missed step, replay returns
+  a local repair point and can continue in the same session. Older name-only
+  recipes remain planning hints.
 - `list_payment_cards` returns saved-card labels and opaque references;
   `operate_pay` can use a selected card, the only card on file, or a just-in-time
   add-card approval, then fills the checkout and waits for the user to resolve

@@ -1,42 +1,37 @@
-// HTTP routes for shared Operator Recipes (replay-registry-share). Two
-// endpoints, split across a candidate/live trust boundary:
+// HTTP routes for shared Operator Recipes (replay-serve-live-domainlock).
+// Two endpoints:
 //
-//   POST /recipes             — submit a CANDIDATE for its (verb, domain) key
-//   GET  /recipes/:verb/:domain — fetch the LIVE (promoted) recipe for a key
+//   POST /recipes             — write a recipe LIVE for its (verb, domain) key
+//   GET  /recipes/:verb/:domain — fetch the live recipe for a key
 //
-// POST is unauthenticated (only the isRecipeShareEligible gate stands
-// between a caller and a write) and writes ONLY to the candidate store —
-// never to the live store GET reads from. A candidate is never replayed,
-// so unauthenticated last-write-wins to it is safe by construction: the
-// worst an attacker can do is overwrite a candidate nobody is serving yet.
-// Promoting a candidate to live is a SEPARATE, admin-bearer-gated step —
-// see routes/admin-recipes.ts. This is the same candidate + promotion
-// shape the Skill registry uses (pending-review → active), simplified for
-// recipes' narrower needs. See docs/ARCHITECTURE.md.
-//
-// The eligibility gate (isRecipeShareEligible) is still applied here as
-// defense-in-depth against a buggy/bypassed client — a candidate that
-// leaks PII/secrets is refused just as it would be at the live tier. A
-// rejected publish is a 400, not a 500 — the caller falls back to
-// local-only storage.
+// POST is unauthenticated — a recipe becomes replayable by any install the
+// instant this route accepts it. There is no candidate/promotion tier.
+// The primary boundary between an unauthenticated write and another user's
+// replay browser is the HARD DOMAIN-LOCK (recipeDomainLockViolations): every
+// entry_url / allowed_hosts entry / goto+allow_host target must resolve to
+// the recipe's own eTLD+1, checked here and re-checked at replay time by
+// the mcp client. The share-eligibility gate (isRecipeShareEligible) is
+// the second layer, guarding against baked-in user data rather than
+// off-domain navigation. A rejected publish is a 400, not a 500 — the
+// caller falls back to local-only storage. The complete contract is owned by
+// docs/DESIGN-replay-engine.md.
 
 import type { FastifyInstance, FastifyPluginAsync, FastifyRequest } from "fastify";
 import {
   OperatorVerbSchema,
   parseOperatorRecipe,
   isRecipeShareEligible,
+  recipeDomainLockViolations,
   isCheckoutShapeKey,
   type OperatorRecipe,
 } from "@trusty-squire/recipe-schema";
 import type { OperatorRecipeStore } from "../recipe-store.js";
-import type { OperatorRecipeCandidateStore } from "../recipe-candidate-store.js";
 
-// Per-IP rolling-hour cap on candidate submission. POST /recipes is
+// Per-IP rolling-hour cap on recipe submission. POST /recipes is
 // unauthenticated and every accepted body upserts a DB row, so without a cap
-// a single source can flood candidate storage and drown the oldest-first
-// admin review queue. A legit install submits one recipe per completed
-// operator task — a handful per hour at most — so 30 is generous. Same
-// sliding-window style as UPLOAD_RATE_LIMIT_PER_HOUR
+// a single source can flood the served pool. A legit install submits one
+// recipe per completed operator task — a handful per hour at most — so 30
+// is generous. Same sliding-window style as UPLOAD_RATE_LIMIT_PER_HOUR
 // (extract-failure-store.ts); in-memory / single-instance like the API's
 // INSTALL_IP_HOURLY_LIMIT backstop.
 export const RECIPE_SUBMIT_IP_HOURLY_LIMIT = 30;
@@ -57,7 +52,7 @@ function clientIp(req: FastifyRequest): string {
 // not DNS or PSL registrability, just "could this be a registrable
 // hostname": dot-separated labels of [a-z0-9-] without edge hyphens, and an
 // alphabetic TLD. A legit client derives the domain from a real URL, so
-// anything this rejects is junk that would only pollute the candidate pool.
+// anything this rejects is junk that would only pollute the served pool.
 //
 // replay-per-leg-signature: the key slot also accepts a CHECKOUT-LEG shape
 // key (`shape:<sha256 hex>`, see checkoutFieldSetSignature in
@@ -77,10 +72,7 @@ export function isPlausibleRecipeDomain(domain: string): boolean {
 }
 
 export interface RecipesRouteDeps {
-  // The live/promoted store — GET reads only from here.
   store: OperatorRecipeStore;
-  // The candidate store — POST writes only here.
-  candidateStore: OperatorRecipeCandidateStore;
 }
 
 interface PublishRecipeBody {
@@ -155,10 +147,23 @@ export const registerRecipesRoute: FastifyPluginAsync<RecipesRouteDeps> = async 
       });
     }
 
+    // The primary safety control: every navigation target the recipe could
+    // ever drive the browser to must stay on its own site. Checked BEFORE
+    // eligibility — a recipe that fails this can never become live
+    // regardless of how clean its data is.
+    const domainLockViolations = recipeDomainLockViolations(recipe);
+    if (domainLockViolations.length > 0) {
+      return reply.code(400).send({
+        ok: false,
+        error: "domain_lock_violation",
+        violations: domainLockViolations,
+      });
+    }
+
     // Re-run the share-eligibility gate server-side. The client is
     // expected to have already refused to publish an ineligible recipe —
-    // this is the backstop that keeps even the CANDIDATE pool safe even
-    // if a client is buggy, stale, or bypassed entirely.
+    // this is the backstop that keeps the served pool safe even if a
+    // client is buggy, stale, or bypassed entirely.
     const eligibility = isRecipeShareEligible(recipe);
     if (!eligibility.eligible) {
       return reply.code(400).send({
@@ -168,7 +173,7 @@ export const registerRecipesRoute: FastifyPluginAsync<RecipesRouteDeps> = async 
       });
     }
 
-    const record = await opts.candidateStore.upsert({
+    const record = await opts.store.upsert({
       verb: recipe.verb,
       domain: recipe.domain,
       recipe,
@@ -178,15 +183,14 @@ export const registerRecipesRoute: FastifyPluginAsync<RecipesRouteDeps> = async 
       key: record.key,
       verb: record.verb,
       domain: record.domain,
-      status: "pending-review",
+      status: "live",
     });
   });
 
   // ── GET /recipes/:verb/:domain ──────────────────────────────────
-  // Reads ONLY the live/promoted store. A key with only a pending
-  // candidate — no promoted row yet — 404s exactly like a key nobody has
-  // ever written to; the caller (operate_use) falls back to local storage
-  // or cold driving either way.
+  // A key nobody has ever written to 404s exactly like it always has; the
+  // caller (operate_use) falls back to local storage or cold driving
+  // either way.
   fastify.get<{ Params: { verb: string; domain: string } }>(
     "/recipes/:verb/:domain",
     async (req, reply) => {

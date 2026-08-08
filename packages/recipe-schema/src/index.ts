@@ -21,6 +21,9 @@ export {
   checkoutShapeKey,
   operatorRecipeKeyForCheckoutShape,
   isRecipeShareEligible,
+  isSameRecipeDomain,
+  recipeDomainLockViolations,
+  isRecipeDomainLocked,
   EmailAliasTemplatePattern,
 } from "./operator-recipe.js";
 export type {
@@ -35,4 +38,5 @@ export type {
   SecretRef,
   OperatorRecipe,
   RecipeShareEligibility,
+  RecipeDomainLockViolation,
 } from "./operator-recipe.js";
