@@ -50,7 +50,6 @@ import {
   bindRecipeTarget,
   bindRecipeValue,
   cssEscapeRecipeValue,
-  fieldRoleMatches,
   fillTemplate,
   hasRecipeTargetCandidate,
   isSingleUseUrl,
@@ -401,17 +400,6 @@ interface Session {
   // params only — sealed secret values stay in secretSlots, never the trace.
   actionTrace: TraceEntry[];
   recordedValues: RecordedValueSource[];
-  // Holes (e.g. "address.city") that unmounted as the RESULT of a
-  // successful navigating transition (see verifyRecordedFieldsAfterTransition)
-  // — suppressed from the cold-path money-field guard's future expectations
-  // ONLY. Deliberately NOT removed from recordedValues: that array is a
-  // push-only per-trace-step audit log traceWithVerifiedProvenance needs
-  // intact to verify/template every value-carrying step at operate_remember
-  // time, regardless of verb — pruning it there would let an unverified
-  // literal bake into a saved recipe untemplated on any non-MONEY_REPLAY_VERBS
-  // task. Cleared for a hole the moment a fresh value is recorded for it
-  // (recordTrace), so a later re-fill on a new page re-activates tracking.
-  unmountedMoneyHoles: Set<string>;
   committedSelectValues: Map<string, string>;
   // MEDIUM capture rounds for skill synthesis at verified success (docs/DESIGN-
   // operator-hints.md): inventory + action + url per step, no screenshots, raw
@@ -914,32 +902,6 @@ export class AutocompleteCommitRequiredError extends Error {
         : `autocomplete_commit_required: typing "${typedText}" matched ${candidates.length} ` +
             `suggestions, not one. Narrow the typed text or issue an explicit select/click: ` +
             `${candidates.slice(0, 8).join(", ")}`,
-    );
-  }
-}
-
-// 3.3 — the money-path field guard, made to actually block on a cold (no
-// replay) run. verifyFilledFieldValues already reads the right signal (live
-// DOM value vs. what was recorded) at the right time (before/after a
-// transition action); before this, a mismatch only disqualified the session
-// from recipe capture (rejectRecipeRecording) and let the click proceed
-// anyway. Same shape as the replay path's field_missing/field_value_mismatch
-// human_required halt (attestReplayFieldsBeforeTransition).
-export class MoneyFieldVerificationError extends Error {
-  readonly code = "money_field_unverified";
-
-  constructor(
-    readonly reason: "field_missing" | "field_value_mismatch",
-    readonly field: string,
-  ) {
-    super(
-      `money_field_unverified: "${field}" ${
-        reason === "field_missing"
-          ? "is no longer present on the page"
-          : "no longer matches the value that was typed/selected"
-      }. Re-fill it (operate_act{type/select, target, text, provenance:{hole:"${field}"}}) and ` +
-        `re-observe the page before taking any further action — do not assume it is safe to ` +
-        `repeat a transition that may have already run.`,
     );
   }
 }
@@ -1855,7 +1817,6 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     observeSnapshotFile: null,
     actionTrace: [],
     recordedValues: [],
-    unmountedMoneyHoles: new Set(),
     committedSelectValues: new Map(),
     captureRounds: [],
     usedLocatorFallback: false,
@@ -1948,7 +1909,6 @@ export async function startHarnessProvisionSession(
     observeSnapshotFile: null,
     actionTrace: [],
     recordedValues: [],
-    unmountedMoneyHoles: new Set(),
     committedSelectValues: new Map(),
     captureRounds: [],
     usedLocatorFallback: false,
@@ -2985,18 +2945,21 @@ export async function act(
           // opened afterward.
           await browser.markPreexistingTypeSuggestionPopups();
           await browser.type(el.selector, action.text);
-          // Cleanup (dismiss + clear our tracking markers) must run no
-          // matter how this resolves — no popup, an ambiguous stop, a
-          // failed commit, or success — mirroring selectFromCombobox's own
-          // try/finally. Scoping the try to only the suggestionTexts.length
-          // > 0 branch left the "preexisting" markers set by
+          // Cleanup (clear our tracking markers, and dismiss with Escape
+          // ONLY when a popup actually opened) must run no matter how this
+          // resolves — no popup, an ambiguous stop, a failed commit, or
+          // success — mirroring selectFromCombobox's own try/finally.
+          // Scoping the try to only the suggestionTexts.length > 0 branch
+          // left the "preexisting" markers set by
           // markPreexistingTypeSuggestionPopups uncleared on the no-popup
           // path; markComboboxPreexistingElements only ADDS markers, so a
           // stale one could exclude a genuine popup from detection on a
           // LATER type/select into the same element.
+          let popupDetected = false;
           try {
             const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
-            if (suggestionTexts.length > 0) {
+            popupDetected = suggestionTexts.length > 0;
+            if (popupDetected) {
               const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
               if (candidates.length !== 1) {
                 // Pass the MATCHED subset, not the full popup — passing every
@@ -3028,24 +2991,16 @@ export async function act(
                     `confirms the field now holds "${pickedText}" after selecting it.`,
                 );
               }
-              // Rewrite the completed action to the COMMITTED value (not the
-              // raw typed draft) before it reaches recordTrace/recordedValues
-              // — otherwise 3.3's money-field guard compares the field's live
-              // (committed) value against the raw typed text on the very
-              // next transition and false-blocks the field this step just
-              // correctly filled and verified. Known residual gap: when
-              // confirmAutocompleteCommitted's positive signal came from a
-              // NEARBY element rather than el.selector's own value (a
-              // react-select/cmdk widget whose search input stays empty
-              // after commit), 3.3's re-verification on the next transition
-              // still re-reads only el.selector's live value and can
-              // false-block — not fixed here; flagging rather than building
-              // new machinery beyond what was decided for this task.
+              // Rewrite the completed action to the COMMITTED value (not
+              // the raw typed draft) before it reaches
+              // recordTrace/recordedValues, so the recorded trace reflects
+              // what actually ended up on the page rather than the raw
+              // typed prefix.
               session.lastElements = await browser.extractInteractiveElements();
               completedAction = { ...action, text: pickedText };
             }
           } finally {
-            await browser.discardTypeSuggestionPopup();
+            await browser.discardTypeSuggestionPopup(popupDetected);
           }
         }
       } else if (action.kind === "upload") {
@@ -3404,10 +3359,6 @@ function recordTrace(
       ...(actionHole !== undefined ? { hole: actionHole } : {}),
       literal: action.kind === "set_phone_country" ? action.country : action.text,
     });
-    // A fresh value for this hole re-activates the cold-path money-field
-    // guard's tracking, even if an earlier value for the same hole was
-    // forgiven after unmounting on a prior navigating transition.
-    if (actionHole !== undefined) session.unmountedMoneyHoles.delete(actionHole);
   } else if (action.kind === "type_secret") {
     if (sensitiveSource === undefined) {
       throw new Error(`type_secret ${action.slot} lacks an action-time source attestation`);
@@ -4387,40 +4338,10 @@ function rejectRecipeRecording(session: Session, reason: string): void {
   session.recipeRejectionReason ??= reason;
 }
 
-// Suppress `hole` from the cold-path money-field guard's future
-// expectations — used when a money field unmounted as a RESULT of a
-// successful navigating transition (see verifyRecordedFieldsAfterTransition):
-// the click already fired, so blocking now can't prevent anything, and
-// leaving the expectation live would brick every LATER transition too
-// (recordedMoneyFields would keep expecting a field that no longer exists on
-// the new page/step). Deliberately does NOT touch session.recordedValues —
-// that array is the push-only per-trace-step audit log
-// traceWithVerifiedProvenance needs INTACT to verify/template every
-// value-carrying step at operate_remember time, for any verb (not just
-// MONEY_REPLAY_VERBS, which findUnprovenancedMoneyField only checks for).
-// Deleting the array entry would let an unverified literal bake into a
-// saved recipe untemplated on a non-money-verb task with no check catching
-// it. recordedMoneyFields reads this set to filter the live guard's
-// expectations only; recordTrace clears a hole from it the moment a fresh
-// value is recorded, so a later re-fill on a new page re-activates tracking.
-function forgiveUnmountedMoneyField(session: Session, hole: string): void {
-  session.unmountedMoneyHoles.add(hole);
-}
-
 function recordedMoneyFields(session: Session): ReplayExpectedField[] {
-  // Last-write-wins per hole. session.recordedValues is a push-only,
-  // per-trace-step audit log — traceWithVerifiedProvenance needs it intact
-  // (one entry per value-carrying step) to verify recipe writes — so the
-  // dedup happens HERE, at read time, not on the underlying array. Without
-  // it, a host correcting a typo (type "10001", notice the mistake, re-type
-  // "10118") leaves BOTH entries; the money-field guard would keep
-  // comparing the live value against the stale "10001" entry forever — an
-  // unrecoverable livelock, since re-filling only appends a third entry and
-  // nothing ever supersedes the first.
-  const byHole = new Map<string, ReplayExpectedField>();
+  const fields: ReplayExpectedField[] = [];
   for (const source of session.recordedValues) {
     if (source.hole === undefined || !REPLAY_VERIFIED_HOLE.test(source.hole)) continue;
-    if (session.unmountedMoneyHoles.has(source.hole)) continue;
     const action = session.actionTrace[source.traceIndex]?.action;
     if (
       action === undefined ||
@@ -4439,7 +4360,7 @@ function recordedMoneyFields(session: Session): ReplayExpectedField[] {
         target = null;
       }
     }
-    byHole.set(source.hole, {
+    fields.push({
       stepIndex: source.traceIndex,
       hole: source.hole,
       expected: source.literal,
@@ -4447,78 +4368,7 @@ function recordedMoneyFields(session: Session): ReplayExpectedField[] {
       kind: action.kind,
     });
   }
-  return [...byHole.values()];
-}
-
-// Presence resolution for the COLD path only — same identity restriction as
-// resolveRecipeFieldTarget (id/testid only, no fuzzy name/label match, so an
-// id drift can't smuggle a value via a looser match) but deliberately
-// WITHOUT the field_role requirement. resolveRecipeFieldTarget's field_role
-// gate exists for REPLAY, where "no role signal" must mean "no confident
-// fill" because the recorded target may be stale/from a different session.
-// On a cold run there is no prior session to drift from — record time and
-// verify time are the same page load — so requiring a role signal here only
-// punishes ordinary markup that never had an autocomplete/data-role
-// attribute, hard-blocking every cold checkout on such a site (see PR review
-// finding on commit 4773e14). The replay path is untouched.
-function resolveColdFieldPresence(
-  elements: readonly InteractiveElement[],
-  target: RecipeTarget,
-): { element: InteractiveElement } | null {
-  const resolution = resolveRecipeTarget(elements, target);
-  if (resolution === null) return null;
-  if (resolution.via !== "testid" && resolution.via !== "id") return null;
-  return { element: resolution.element };
-}
-
-// Cold-path field check: presence never requires a field_role match (see
-// resolveColdFieldPresence); VALUE correctness still requires the role to
-// match whenever one WAS recorded — preserving #447's wrong-fill protection
-// for the case that matters (a same-id field whose role visibly moved),
-// without a missing role forcing a false field_missing.
-function verifyColdFieldInElements(
-  elements: readonly InteractiveElement[],
-  expected: ReplayExpectedField,
-): { ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" } {
-  if (expected.target === null) {
-    return { ok: false, reason: "field_missing" };
-  }
-  const resolution = resolveColdFieldPresence(elements, expected.target);
-  if (resolution === null) return { ok: false, reason: "field_missing" };
-  if (
-    expected.target.field_role !== undefined &&
-    !fieldRoleMatches(expected.target.field_role, resolution.element)
-  ) {
-    return { ok: false, reason: "field_value_mismatch" };
-  }
-  const actual =
-    expected.kind === "select"
-      ? (resolution.element.selectedOptionText ??
-        resolution.element.value ??
-        resolution.element.visibleText ??
-        "")
-      : (resolution.element.value ?? "");
-  return actual === expected.expected
-    ? { ok: true }
-    : { ok: false, reason: "field_value_mismatch" };
-}
-
-// verifyColdFieldInElements has no target for set_phone_country (recordedMoneyFields
-// never builds one — phone country is resolved via a dedicated browser lookup, not a
-// regular field target), so it always fell through to field_missing for that kind.
-// Same async-verify-then-fall-through shape verifyReplayFieldWithElements already uses
-// for the replay path.
-async function verifyColdField(
-  session: Session,
-  expected: ReplayExpectedField,
-  elements: readonly InteractiveElement[],
-): Promise<{ ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" }> {
-  if (expected.kind === "set_phone_country") {
-    return (await session.browser.verifyPhoneCountry(expected.expected))
-      ? { ok: true }
-      : { ok: false, reason: "field_value_mismatch" };
-  }
-  return verifyColdFieldInElements(elements, expected);
+  return fields;
 }
 
 async function attestRecordedFieldsBeforeTransition(
@@ -4531,13 +4381,13 @@ async function attestRecordedFieldsBeforeTransition(
   const fresh = await session.browser.extractInteractiveElements();
   session.lastElements = fresh;
   for (const expected of fields) {
-    const guard = await verifyColdField(session, expected, fresh);
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
       rejectRecipeRecording(
         session,
         `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
       );
-      throw new MoneyFieldVerificationError(guard.reason, expected.hole);
+      return [];
     }
   }
   return fields;
@@ -4555,25 +4405,19 @@ async function verifyRecordedFieldsAfterTransition(
   session.lastElements = fresh;
   for (const expected of fields) {
     if (!(await isReplayFieldMounted(session, expected, fresh))) {
-      // The transition already fired and succeeded — we're reading
-      // POST-click state. A money field legitimately unmounts when a
-      // navigating transition (cart -> "Checkout", multi-step "Continue")
-      // moves to the next page/step; that is not a failure, and blocking
-      // here can't undo the click. Treat it as passed and drop it so it
-      // can't false-block a LATER transition too (the pre-transition
-      // attest, which runs BEFORE a click fires and can still prevent a
-      // bad submission, is unaffected — a field present-but-wrong there
-      // still blocks).
-      forgiveUnmountedMoneyField(session, expected.hole);
-      continue;
+      rejectRecipeRecording(
+        session,
+        `checkout transition could not be attested (${expected.hole}: field_missing)`,
+      );
+      return;
     }
-    const guard = await verifyColdField(session, expected, fresh);
+    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
     if (!guard.ok) {
       rejectRecipeRecording(
         session,
         `checkout transition could not be attested (${expected.hole}: ${guard.reason})`,
       );
-      throw new MoneyFieldVerificationError(guard.reason, expected.hole);
+      return;
     }
   }
 }

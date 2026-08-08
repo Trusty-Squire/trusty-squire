@@ -4379,16 +4379,23 @@ export class BrowserController {
   /**
    * Clean up after a type-triggered autocomplete interaction, regardless of
    * outcome (committed, ambiguous/zero-match stop, or a failed commit).
-   * Presses Escape to dismiss any still-open popup BEFORE clearing our own
-   * tracking markers — some widgets (Google Places classic's
-   * `.pac-container` in particular) never fully unmount, just toggle
-   * visibility, so a popup left open would otherwise be captured as
-   * "preexisting" the next time markPreexistingTypeSuggestionPopups
-   * snapshots the page (it snapshots by current visibility, not by who
-   * opened it), silently disabling detection on a host's very next retry.
+   * When `popupDetected` is true, presses Escape to dismiss any still-open
+   * popup BEFORE clearing our own tracking markers — some widgets (Google
+   * Places classic's `.pac-container` in particular) never fully unmount,
+   * just toggle visibility, so a popup left open would otherwise be
+   * captured as "preexisting" the next time
+   * markPreexistingTypeSuggestionPopups snapshots the page (it snapshots by
+   * current visibility, not by who opened it), silently disabling detection
+   * on a host's very next retry. When no popup was ever detected, Escape is
+   * skipped entirely: it commonly bubbles to close an enclosing modal/dialog
+   * too, so firing it when there was nothing to dismiss risks closing a
+   * dialog the typed-into field happens to live in (a cart-drawer quantity
+   * field, a login modal's email field, an address-edit modal) even though
+   * nothing needed dismissing. Marker clearing stays unconditional — it only
+   * removes our own tracking attributes, never touches page behavior.
    */
-  async discardTypeSuggestionPopup(): Promise<void> {
-    await this.pressKey("Escape");
+  async discardTypeSuggestionPopup(popupDetected: boolean): Promise<void> {
+    if (popupDetected) await this.pressKey("Escape");
     await this.clearComboboxMarkers();
   }
 

@@ -28,6 +28,7 @@ const h = vi.hoisted(() => ({
   autocompleteConfirmOverride: null as boolean | null,
   autocompleteConfirmCalls: [] as Array<{ selector: string; pickedText: string }>,
   autocompleteDiscardCalls: 0,
+  autocompleteDiscardPopupDetectedCalls: [] as boolean[],
   clickCalls: 0,
   gotos: [] as string[],
   started: 0,
@@ -210,8 +211,9 @@ vi.mock("../browser.js", () => ({
         }
       }
     }
-    async discardTypeSuggestionPopup(): Promise<void> {
+    async discardTypeSuggestionPopup(popupDetected: boolean): Promise<void> {
       h.autocompleteDiscardCalls += 1;
+      h.autocompleteDiscardPopupDetectedCalls.push(popupDetected);
     }
     async confirmAutocompleteCommitted(selector: string, pickedText: string): Promise<boolean> {
       h.autocompleteConfirmCalls.push({ selector, pickedText });
@@ -433,6 +435,7 @@ beforeEach(() => {
   h.autocompleteConfirmOverride = null;
   h.autocompleteConfirmCalls = [];
   h.autocompleteDiscardCalls = 0;
+  h.autocompleteDiscardPopupDetectedCalls = [];
   h.clickCalls = 0;
   h.gotos = [];
   h.consentDismissCalls = 0;
@@ -1188,108 +1191,6 @@ describe("verified recipe recording", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  // Gate-decision-2 fix (field-missing-hard-block): a money field that
-  // unmounts as a RESULT of a successful navigating transition (cart ->
-  // "Checkout", multi-step "Continue") must be treated as passed, not a
-  // brick — the click already fired, blocking after the fact can't prevent
-  // anything and would only false-block the NEXT transition too.
-  it("treats a money field that unmounted from a successful navigating transition as passed, and recipe save still succeeds since the value stays verifiable", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-nav-unmount-"));
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    h.elements = [
-      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "City",
-      text: "Queens",
-      provenance: { hole: "address.city" },
-    });
-    // The click navigates to the next page — the city field disappears as
-    // a SIDE EFFECT of that successful transition, not because anything
-    // went wrong.
-    h.clearElementsOnClick = true;
-    await expect(
-      act(started.session_id, { kind: "click", target: "Continue" }),
-    ).resolves.toBeDefined();
-    expect(h.clickCalls).toBe(1);
-    h.visibleText = "Review order";
-    // Forgiving the field for the LIVE guard's purposes never touched
-    // session.recordedValues — the recipe-save path still independently
-    // verifies/templates it against the declared authoritative input, so a
-    // value that matches still saves correctly.
-    await expect(
-      provisionRememberTool.handler(
-        {
-          session_id: started.session_id,
-          name: "nav-unmount",
-          goal: "Buy coffee",
-          verb: "purchase",
-          inputs: { address: { city: "Queens" } },
-          postcondition: {
-            kind: "execute_capability",
-            describe: "Ready to approve",
-            success_signal: { text_present: "Review order" },
-          },
-        },
-        null as unknown as ApiClient,
-      ),
-    ).resolves.toBeDefined();
-    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
-    rmSync(dir, { recursive: true, force: true });
-  });
-
-  // Gate-decision-2 review finding (prune-bakes-literals-into-nonmoney-
-  // recipes): forgiving an unmounted field for the live guard must NEVER
-  // let its value skip recipe-save-time verification — only
-  // MONEY_REPLAY_VERBS tasks get findUnprovenancedMoneyField's backstop, so
-  // pruning session.recordedValues (the earlier, wrong approach) would have
-  // let an unverified literal bake into a saved recipe untemplated on any
-  // OTHER verb with no check catching it. Proven here with a non-money verb
-  // and no matching declared input: the save must still fail.
-  it("still refuses to save an unmounted field's value with no matching declared input, even for a non-money verb", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-nav-unmount-nonmoney-"));
-    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    h.elements = [
-      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "City",
-      text: "Queens",
-      provenance: { hole: "address.city" },
-    });
-    h.clearElementsOnClick = true;
-    await act(started.session_id, { kind: "click", target: "Continue" });
-    h.visibleText = "Review order";
-    await expect(
-      provisionRememberTool.handler(
-        {
-          session_id: started.session_id,
-          name: "nav-unmount-nonmoney",
-          goal: "Set up a workspace",
-          // A verb OUTSIDE MONEY_REPLAY_VERBS — findUnprovenancedMoneyField
-          // would not even look at this recipe's trace.
-          verb: "signup",
-          inputs: {},
-          postcondition: {
-            kind: "execute_capability",
-            describe: "Ready to approve",
-            success_signal: { text_present: "Review order" },
-          },
-        },
-        null as unknown as ApiClient,
-      ),
-    ).rejects.toThrow(/no authoritative operate_remember input/i);
-    expect(readdirSync(dir)).toEqual([]);
-    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
-    rmSync(dir, { recursive: true, force: true });
-  });
-
   it("refuses to save an unprovenanced value action", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-unbound-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
@@ -1883,187 +1784,6 @@ afterEach(async () => {
   await closeAllProvisionSessions();
 });
 
-describe("3.3 — cold-path money-field guard actually blocks", () => {
-  it("blocks a transition click when a tagged money field silently went empty (no active replay)", async () => {
-    h.elements = [
-      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "City",
-      text: "Queens",
-      provenance: { hole: "address.city" },
-    });
-    // Simulate the field silently going empty between fill and submit (a JS
-    // reset, an unrelated re-render) — session.replayState is still null,
-    // this is a first-time, no-recipe (cold) run.
-    (h.elements[0] as Record<string, unknown>).value = "";
-    await expect(act(started.session_id, { kind: "click", target: "Continue" })).rejects.toThrow(
-      /money_field_unverified/i,
-    );
-    // The guard ran BEFORE the switch statement — the click itself never fired.
-    expect(h.clickCalls).toBe(0);
-  });
-
-  // Gate-decision-2 scoping guard: only a field that unmounts AS A RESULT
-  // of a successful navigating transition is forgiven (see the
-  // "verified recipe recording" describe block below). A field that
-  // vanishes for an unexplained reason BEFORE any click even fires is not
-  // that case — the pre-transition attest must still block it.
-  it("still blocks when a money field vanished for an unexplained reason before the click (not a transition side effect)", async () => {
-    h.elements = [
-      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "City",
-      text: "Queens",
-      provenance: { hole: "address.city" },
-    });
-    h.elements = h.elements.filter((e) => (e as Record<string, unknown>).selector !== "#city");
-    await expect(act(started.session_id, { kind: "click", target: "Continue" })).rejects.toThrow(
-      /money_field_unverified/i,
-    );
-    expect(h.clickCalls).toBe(0);
-  });
-
-  it("lets the transition through when the recorded money field still matches", async () => {
-    h.elements = [
-      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "City",
-      text: "Queens",
-      provenance: { hole: "address.city" },
-    });
-    await act(started.session_id, { kind: "click", target: "Continue" });
-    expect(h.clickCalls).toBe(1);
-  });
-
-  // Gate-decision fix (1): presence must not require a field_role match on
-  // the cold path — most real checkout forms don't set autocomplete/data-role
-  // on their address fields, and requiring one turned every correctly-filled
-  // role-less money field into a false field_missing block.
-  it("does not block a correctly-filled money field that has no autocomplete/data-role signal", async () => {
-    h.elements = [
-      // testId deliberately avoids every string the elem() helper uses to
-      // auto-derive an autocomplete token (city/country/email/phone/first/
-      // last) — this element records with NO field_role, on purpose.
-      elem({ testId: "shipping-town-field", labelText: "Town", selector: "#town", value: "" }),
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "Town",
-      text: "Queens",
-      provenance: { hole: "address.city" },
-    });
-    await expect(
-      act(started.session_id, { kind: "click", target: "Continue" }),
-    ).resolves.toBeDefined();
-    expect(h.clickCalls).toBe(1);
-  });
-
-  // Gate-decision-2 review finding (cold-set-phone-country-brick):
-  // verifyColdFieldInElements had no branch for set_phone_country (its
-  // recordedMoneyFields target is always null, phone country is resolved
-  // via a dedicated browser lookup, not a regular field target), so it fell
-  // through to an unconditional field_missing — a cold-path
-  // set_phone_country tagged with a money/contact provenance hole (the
-  // operate_act docs tell hosts to tag it) hard-blocked every transition
-  // regardless of whether the country was actually still set correctly.
-  it("verifies a cold-path set_phone_country field via verifyPhoneCountry instead of always treating it as missing", async () => {
-    h.elements = [
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "set_phone_country",
-      country: "Japan",
-      provenance: { hole: "contact.country" },
-    });
-    expect(h.phoneCountry).toBe("Japan");
-    await expect(
-      act(started.session_id, { kind: "click", target: "Continue" }),
-    ).resolves.toBeDefined();
-    expect(h.clickCalls).toBe(1);
-  });
-
-  it("still blocks a cold-path set_phone_country field whose country actually changed", async () => {
-    h.elements = [
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "set_phone_country",
-      country: "Japan",
-      provenance: { hole: "contact.country" },
-    });
-    // Simulate the widget's country silently reverting between fill and
-    // submit.
-    h.phoneCountry = "US";
-    await expect(act(started.session_id, { kind: "click", target: "Continue" })).rejects.toThrow(
-      /money_field_unverified/i,
-    );
-    expect(h.clickCalls).toBe(0);
-  });
-
-  // Gate-decision-2 fix (double-slice-undercounts-matches): the call site
-  // used to slice the matched subset to 8 before constructing the error,
-  // whose message ALSO slices for display — so with more than 8 matches the
-  // reported count was capped at 8 instead of the true count.
-  it("reports the true match count, not a display-capped count, when more than 8 suggestions match", async () => {
-    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
-    h.autocompleteSuggestions = Array.from(
-      { length: 12 },
-      (_, i) => `350 5th Ave Suite ${i}, New York, NY 10118, USA`,
-    );
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
-    ).rejects.toThrow(/matched 12 suggestions, not one/i);
-  });
-
-  // Gate-decision fix (2, part of "auto-fix"): recordedValues is a push-only
-  // audit log; without deduping at read time, a host correcting a typo left
-  // TWO entries for the same hole and the stale one blocked every future
-  // transition forever (the error's own "re-fill it" advice only appended a
-  // third, equally stuck, entry).
-  it("recovers after a host corrects a typo in a money field instead of livelocking", async () => {
-    h.elements = [
-      elem({ testId: "shipping-postal", labelText: "Postal Code", selector: "#postal", value: "" }),
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await act(started.session_id, {
-      kind: "type",
-      target: "Postal Code",
-      text: "10001",
-      provenance: { hole: "address.postal_code" },
-    });
-    // Host notices the mistake and re-types the correct value into the same
-    // field — session.recordedValues now holds TWO entries for this hole.
-    await act(started.session_id, {
-      kind: "type",
-      target: "Postal Code",
-      text: "10118",
-      provenance: { hole: "address.postal_code" },
-    });
-    await expect(
-      act(started.session_id, { kind: "click", target: "Continue" }),
-    ).resolves.toBeDefined();
-    expect(h.clickCalls).toBe(1);
-  });
-});
-
 describe("3.1 — autocomplete-aware type fill", () => {
   it("commits the single matching suggestion and verifies the underlying value actually committed", async () => {
     h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
@@ -2141,6 +1861,22 @@ describe("3.1 — autocomplete-aware type fill", () => {
     await expect(
       act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
     ).rejects.toThrow(/matched 2 suggestions, not one/i);
+  });
+
+  // Gate-decision-2 fix (double-slice-undercounts-matches): the call site
+  // used to slice the matched subset to 8 before constructing the error,
+  // whose message ALSO slices for display — so with more than 8 matches the
+  // reported count was capped at 8 instead of the true count.
+  it("reports the true match count, not a display-capped count, when more than 8 suggestions match", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = Array.from(
+      { length: 12 },
+      (_, i) => `350 5th Ave Suite ${i}, New York, NY 10118, USA`,
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/matched 12 suggestions, not one/i);
   });
 
   // Gate-decision-2 fix (incidental-popup-collateral): 3.1 must only
@@ -2273,14 +2009,37 @@ describe("3.1 — autocomplete-aware type fill", () => {
     expect(h.autocompleteDiscardCalls).toBe(1);
   });
 
-  // Gate-decision auto-fix: the committed value (not the raw typed draft)
-  // must be what recordTrace records, or 3.3's own new money-field guard
-  // blocks the very field this step just correctly filled and verified.
-  it("does not trip 3.3's money-field guard on the transition right after an autocomplete commit", async () => {
-    h.elements = [
-      elem({ testId: "shipping-address", labelText: "Address", selector: "#address" }),
-      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
-    ];
+  // Captain decision (unconditional-escape-closes-modals): Escape must only
+  // fire when a popup was actually detected — it commonly bubbles to close
+  // an enclosing modal/dialog too, so firing it when there was nothing to
+  // dismiss risks closing a dialog the field happens to live in (a
+  // cart-drawer quantity field, a login modal's email field, an
+  // address-edit modal).
+  it("tells the browser NOT to press Escape when no popup was ever detected", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = [];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
+    expect(h.autocompleteDiscardPopupDetectedCalls).toEqual([false]);
+  });
+
+  it("tells the browser to press Escape when a popup WAS detected", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    h.autocompleteCommitMutation = {
+      selector: "#address",
+      value: "350 5th Ave, New York, NY 10118, USA",
+    };
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
+    expect(h.autocompleteDiscardPopupDetectedCalls).toEqual([true]);
+  });
+
+  // The committed value (not the raw typed draft) must be what recordTrace
+  // records, so the saved trace reflects what actually ended up on the
+  // page.
+  it("records the committed value, not the raw typed draft, after a successful autocomplete commit", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
     h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
     h.autocompleteCommitMutation = {
       selector: "#address",
@@ -2293,10 +2052,9 @@ describe("3.1 — autocomplete-aware type fill", () => {
       text: "350 5th Ave",
       provenance: { hole: "address.line1" },
     });
-    await expect(
-      act(started.session_id, { kind: "click", target: "Continue" }),
-    ).resolves.toBeDefined();
-    expect(h.clickCalls).toBe(1);
+    expect((h.elements[0] as Record<string, unknown>).value).toBe(
+      "350 5th Ave, New York, NY 10118, USA",
+    );
   });
 });
 
