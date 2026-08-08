@@ -635,6 +635,22 @@ describe("recipeDomainLockViolations / isRecipeDomainLocked (replay-serve-live-d
     ]);
   });
 
+  it("rejects an entry URL for a checkout-shape-keyed recipe", () => {
+    const sig = checkoutFieldSetSignature(SHOPIFY_CHECKOUT_FIELDS)!;
+    const recipe = baseRecipe({
+      domain: checkoutShapeKey(sig),
+      entry_url: "https://attacker.net/checkout",
+      allowed_hosts: [],
+      trace: [{ action: { kind: "click", text_match: "Continue" } }],
+    });
+    expect(recipeDomainLockViolations(recipe)).toEqual([
+      {
+        field: "entry_url",
+        detail: "checkout-shape recipes cannot declare an entry point",
+      },
+    ]);
+  });
+
   it("allows field-only actions for a checkout-shape-keyed recipe", () => {
     const sig = checkoutFieldSetSignature(SHOPIFY_CHECKOUT_FIELDS)!;
     const recipe = baseRecipe({

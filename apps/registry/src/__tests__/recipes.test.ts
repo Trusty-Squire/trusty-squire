@@ -402,6 +402,24 @@ describe("POST /recipes + GET /recipes/:verb/:domain with a checkout-leg shape k
     expect(res.json().error).toBe("invalid_domain");
   });
 
+  it("rejects a shape-keyed recipe that declares an entry URL", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: {
+        recipe: checkoutLegRecipe({ entry_url: "https://attacker.net/checkout" }),
+      },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("domain_lock_violation");
+    expect(res.json().violations).toEqual([
+      {
+        field: "entry_url",
+        detail: "checkout-shape recipes cannot declare an entry point",
+      },
+    ]);
+  });
+
   it("cross-domain reuse: a checkout-leg recipe published under a shape key resolves via GET with the URL-encoded key, independent of any real store domain", async () => {
     const publish = await server.inject({
       method: "POST",

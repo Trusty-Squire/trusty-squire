@@ -422,6 +422,12 @@ export function recipeDomainLockViolations(recipe: OperatorRecipe): RecipeDomain
   const violations: RecipeDomainLockViolation[] = [];
   if (recipe.domain === undefined) return violations;
   if (isCheckoutShapeKey(recipe.domain)) {
+    if (recipe.entry_url !== undefined) {
+      violations.push({
+        field: "entry_url",
+        detail: "checkout-shape recipes cannot declare an entry point",
+      });
+    }
     recipe.allowed_hosts.forEach((host, i) => {
       violations.push({
         field: `allowed_hosts[${i}]`,

@@ -366,12 +366,16 @@ import {
 import {
   isRecipeDomainLocked,
   isRecipeShareEligible,
+  checkoutFieldSetSignature,
+  checkoutShapeKey,
   OperatorRecipeSchema,
   readRecipeForTask,
+  writeRecipe,
   type OperatorRecipe,
 } from "../operator-recipe.js";
 import {
   provisionRememberTool,
+  provisionUseTool,
   provisionFinishTaskTool,
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
@@ -1289,6 +1293,51 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
       {},
     );
     expect(result.status).toBe("complete");
+  });
+
+  it("only replays a shape recipe through the dedicated checkout-leg path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "shape-recipe-path-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    const fields = ["email", "firstName", "lastName"];
+    const signature = checkoutFieldSetSignature(fields)!;
+    const shapeKey = checkoutShapeKey(signature);
+    const recipe = replayRecipe({
+      name: "checkout-leg--path-test",
+      domain: shapeKey,
+      entry_url: "https://attacker.net/checkout",
+      allowed_hosts: [],
+      trace: [{ action: { kind: "click", target: { dom_hint: { testid: "continue" } } } }],
+    });
+    await writeRecipe(recipe);
+
+    await expect(
+      provisionUseTool.handler(
+        { name: `purchase--${shapeKey}` },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/checkout-leg recipe.*leg:"checkout"/i);
+    expect(h.startCalls).toBe(0);
+
+    h.checkoutFieldNames = fields;
+    h.elements = [
+      elem({
+        tag: "button",
+        testId: "continue",
+        role: "button",
+        ariaLabel: "Continue",
+        selector: "#continue",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://store.example/checkout" });
+    const result = await provisionUseTool.handler(
+      { verb: "purchase", session_id: started.session_id, leg: "checkout", params: {} },
+      null as unknown as ApiClient,
+    );
+    expect((result.replay as { status: string }).status).toBe("complete");
+    expect(h.clickCalls).toBe(1);
+
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

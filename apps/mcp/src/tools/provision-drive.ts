@@ -1283,6 +1283,11 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
         },
       };
     }
+    if (recipe.domain !== undefined && isCheckoutShapeKey(recipe.domain)) {
+      throw new Error(
+        `operator-recipe "${recipe.name}" is a checkout-leg recipe and can only be replayed via operate_use{leg:"checkout"}`,
+      );
+    }
     const entry = recipeEntryUrl(recipe, args.service_url);
     if (entry === null) {
       throw new Error(
