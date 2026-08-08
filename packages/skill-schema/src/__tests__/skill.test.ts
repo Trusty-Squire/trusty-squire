@@ -130,6 +130,44 @@ describe("SkillStepSchema — discriminated union", () => {
     ).toThrow();
   });
 
+  it("preserves frame scope on replayable target steps", () => {
+    const frame_scope = { origin: "https://checkout.example.com", path: "0/1" };
+    expect(SkillStepSchema.parse({ ...clickStep(), frame_scope })).toMatchObject({ frame_scope });
+    expect(
+      SkillStepSchema.parse({
+        kind: "fill",
+        label_hint: "Promo code",
+        value_template: "SAVE10",
+        frame_scope,
+        provenance: provenance(),
+      }),
+    ).toMatchObject({ frame_scope });
+    expect(
+      SkillStepSchema.parse({
+        kind: "select",
+        label_hint: "Shipping",
+        option_text: "Standard",
+        frame_scope,
+        provenance: provenance(),
+      }),
+    ).toMatchObject({ frame_scope });
+  });
+
+  it("rejects incomplete or malformed frame scope", () => {
+    expect(() =>
+      SkillStepSchema.parse({
+        ...clickStep(),
+        frame_scope: { origin: "https://checkout.example.com" },
+      }),
+    ).toThrow();
+    expect(() =>
+      SkillStepSchema.parse({
+        ...clickStep(),
+        frame_scope: { origin: "https://checkout.example.com", path: "../0" },
+      }),
+    ).toThrow();
+  });
+
   it("rejects a navigate step with a non-URL value", () => {
     expect(() =>
       SkillStepSchema.parse({
@@ -305,16 +343,12 @@ describe("SkillSchema — full skill record", () => {
 
   it("accepts oauth_provider: null (email/password signup)", () => {
     const base = minimalSkill() as Record<string, unknown>;
-    expect(
-      SkillSchema.parse({ ...base, oauth_provider: null }),
-    ).toBeTruthy();
+    expect(SkillSchema.parse({ ...base, oauth_provider: null })).toBeTruthy();
   });
 
   it("rejects an unknown status", () => {
     const base = minimalSkill() as Record<string, unknown>;
-    expect(() =>
-      SkillSchema.parse({ ...base, status: "forgotten" }),
-    ).toThrow();
+    expect(() => SkillSchema.parse({ ...base, status: "forgotten" })).toThrow();
   });
 
   it("accepts multiple credentials (forward-compat with Stripe-class)", () => {
@@ -338,16 +372,12 @@ describe("SkillSchema — full skill record", () => {
 
   it("rejects an unknown schema_version (E2 guard)", () => {
     const base = minimalSkill() as Record<string, unknown>;
-    expect(() =>
-      SkillSchema.parse({ ...base, schema_version: 99 }),
-    ).toThrow();
+    expect(() => SkillSchema.parse({ ...base, schema_version: 99 })).toThrow();
   });
 
   it("rejects extra top-level fields (.strict)", () => {
     const base = minimalSkill() as Record<string, unknown>;
-    expect(() =>
-      SkillSchema.parse({ ...base, malicious_extra_field: true }),
-    ).toThrow();
+    expect(() => SkillSchema.parse({ ...base, malicious_extra_field: true })).toThrow();
   });
 
   it("preserves status: pending-review (C11 gate)", () => {

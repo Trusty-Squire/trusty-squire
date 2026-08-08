@@ -796,6 +796,14 @@ function capturedElement(
   return captureInventory(inventory, scope).find((element) => element.selector === selector);
 }
 
+function promotedFrameScope(observed: PostVerifyStep): {
+  frame_scope?: { origin: string; path: string };
+} {
+  if (!("frame_origin" in observed) || !("frame_path" in observed)) return {};
+  if (observed.frame_origin === undefined || observed.frame_path === undefined) return {};
+  return { frame_scope: { origin: observed.frame_origin, path: observed.frame_path } };
+}
+
 // True when a captured `fill` is an email-verification CODE entry: the
 // value is a short numeric code AND the planner's reason describes a
 // verification/OTP step. Both signals are required — a 4-8 digit value
@@ -839,6 +847,7 @@ function translateStep(
   roundIndex: number,
   roundHtml: string,
 ): { kind: "ok"; step: SkillStep | null; steps?: SkillStep[] } | PromoteRejection {
+  const frameScope = promotedFrameScope(observed);
   switch (observed.kind) {
     case "done":
     case "wait":
@@ -878,6 +887,7 @@ function translateStep(
             provider: oauthProvider,
             text_match: hintResult.hint,
             ...(available.length > 1 ? { available } : {}),
+            ...frameScope,
             provenance,
           },
         };
@@ -894,6 +904,7 @@ function translateStep(
             : {}),
           ...(hintResult.href_hint !== undefined ? { href_hint: hintResult.href_hint } : {}),
           ...(hintResult.dom_hint !== undefined ? { dom_hint: hintResult.dom_hint } : {}),
+          ...frameScope,
           provenance,
         },
       };
@@ -915,6 +926,7 @@ function translateStep(
           step: {
             kind: "await_email_code",
             ...(otpHint.kind === "ok" ? { label_hint: otpHint.hint } : {}),
+            ...frameScope,
             provenance,
           },
         };
@@ -973,6 +985,7 @@ function translateStep(
             ? { near_text_hint: hintResult.near_text_hint }
             : {}),
           value_template: valueTemplate,
+          ...frameScope,
           provenance,
         },
       };
@@ -1008,6 +1021,7 @@ function translateStep(
             ? { near_text_hint: hintResult.near_text_hint }
             : {}),
           option_text: observed.option_text,
+          ...frameScope,
           provenance,
         },
       };
@@ -1031,6 +1045,7 @@ function translateStep(
             : {}),
           ...(hintResult.href_hint !== undefined ? { href_hint: hintResult.href_hint } : {}),
           ...(hintResult.dom_hint !== undefined ? { dom_hint: hintResult.dom_hint } : {}),
+          ...frameScope,
           provenance,
         },
       };

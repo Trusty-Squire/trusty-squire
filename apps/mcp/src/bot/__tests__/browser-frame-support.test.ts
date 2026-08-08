@@ -44,7 +44,12 @@ beforeAll(async () => {
     } else if (req.url === "/frame-same") {
       res.end(page_(`<button data-testid="same-frame-btn">Same Frame Button</button>`));
     } else if (req.url === "/frame-cross") {
-      res.end(page_(`<button data-testid="cross-frame-btn">Cross Frame Button</button>`));
+      res.end(
+        page_(
+          `<button data-testid="cross-frame-btn">Cross Frame Button</button>` +
+            `<input data-testid="cross-frame-input" aria-label="Promo code">`,
+        ),
+      );
     } else {
       res.statusCode = 404;
       res.end("not found");
@@ -162,6 +167,25 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
     }
   }, 30000);
 
+  it("surfaces a sandboxed srcdoc frame as opaque instead of inheriting the parent origin", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.setContent(
+        page_(
+          `<iframe sandbox="allow-scripts" srcdoc='<button data-testid="opaque-button">Opaque</button>'></iframe>`,
+        ),
+      );
+      await page.waitForTimeout(100);
+      const els = await ctrl.extractInteractiveElements();
+      const opaque = els.find((element) => element.testId === "opaque-button");
+      expect(opaque?.frameOrigin).toBe("null");
+      expect(opaque?.frameOpaque).toBe(true);
+      expect(opaque?.frameOrigin).not.toBe(`http://127.0.0.1:${port}`);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
   it("resolves locator targets in frames and reports cross-context ambiguity", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
@@ -177,6 +201,14 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       if (cssResolved.ok) {
         expect(cssResolved.frameTarget?.frameOrigin).toBe(`http://localhost:${port}`);
         await cssResolved.handle.dispose();
+      }
+      const typeResolved = await ctrl.resolvePageTarget("text", "Promo code", "type");
+      expect(typeResolved.ok).toBe(true);
+      if (typeResolved.ok) {
+        expect(typeResolved.frameTarget?.frameOrigin).toBe(`http://localhost:${port}`);
+        await ctrl.typeHandle(typeResolved.handle, "SAVE10");
+        expect(await typeResolved.handle.inputValue()).toBe("SAVE10");
+        await typeResolved.handle.dispose();
       }
       await page.evaluate(() => {
         const button = document.createElement("button");
@@ -248,6 +280,34 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
     }
   }, 30000);
 
+  it("refuses a stale frame target after the frame navigates to another origin", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      const same = (await ctrl.extractInteractiveElements()).find(
+        (element) => element.testId === "same-frame-btn",
+      );
+      expect(same).toBeDefined();
+      const liveFrame = page.frames().find((frame) => frame.url() === same?.frameUrl);
+      expect(liveFrame).toBeDefined();
+      await page.locator('iframe[title="same"]').evaluate((iframe, nextUrl) => {
+        (iframe as HTMLIFrameElement).src = nextUrl;
+      }, `http://localhost:${port}/frame-cross`);
+      await liveFrame?.waitForURL(`http://localhost:${port}/frame-cross`);
+      await expect(
+        ctrl.clickInFrame(
+          {
+            framePath: same?.framePath ?? "",
+            frameOrigin: same?.frameOrigin ?? "",
+            frameUrl: same?.frameUrl ?? "",
+          },
+          '[data-testid="cross-frame-btn"]',
+        ),
+      ).rejects.toThrow(/frame is no longer present/i);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
   it("skips a known captcha-challenge iframe — its content is not surfaced as el_table rows (regression: captcha handling unchanged)", async () => {
     const { ctrl, page } = await pageFor("about:blank");
     try {
@@ -269,6 +329,34 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       const els = await ctrl.extractInteractiveElements();
       expect(els.find((e) => e.testId === "main-btn")).toBeDefined();
       expect(els.find((e) => e.testId === "captcha-internal-btn")).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("skips blank descendants nested under a known captcha frame", async () => {
+    const { ctrl, page } = await pageFor("about:blank");
+    try {
+      await page.route("https://challenges.cloudflare.com/**", async (route) => {
+        await route.fulfill({
+          contentType: "text/html",
+          body: page_(
+            `<iframe srcdoc='<button data-testid="nested-captcha-btn">Verify nested</button>'></iframe>`,
+          ),
+        });
+      });
+      await page.setContent(
+        page_(
+          `<iframe src="https://challenges.cloudflare.com/turnstile/v0/challenge" width="300" height="65"></iframe>`,
+        ),
+      );
+      await page.waitForTimeout(500);
+      const els = await ctrl.extractInteractiveElements();
+      expect(els.find((element) => element.testId === "nested-captcha-btn")).toBeUndefined();
+      expect(await ctrl.resolvePageTarget("text", "Verify nested")).toMatchObject({
+        ok: false,
+        reason: "none",
+      });
     } finally {
       await page.close();
     }

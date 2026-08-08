@@ -74,10 +74,17 @@ const h = vi.hoisted(() => ({
         ok: true;
         text: string;
         safetySignals: { billingObject: boolean; accountSetup: boolean };
-        frameTarget?: { framePath: string; frameOrigin: string; frameUrl: string } | null;
+        frameTarget?: {
+          framePath: string;
+          frameOrigin: string;
+          frameUrl: string;
+          frameOpaque?: boolean;
+        } | null;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
   locatorClickCalls: 0,
+  locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
+  locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
 }));
 
@@ -286,16 +293,23 @@ vi.mock("../browser.js", () => ({
     async resolvePageTarget(
       _mode: string,
       _value: string,
+      intent = "click",
     ): Promise<
       | {
           ok: true;
           handle: { dispose: () => Promise<void> };
           text: string;
           safetySignals: { billingObject: boolean; accountSetup: boolean };
-          frameTarget: { framePath: string; frameOrigin: string; frameUrl: string } | null;
+          frameTarget: {
+            framePath: string;
+            frameOrigin: string;
+            frameUrl: string;
+            frameOpaque?: boolean;
+          } | null;
         }
       | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
     > {
+      h.locatorResolveIntents.push(intent);
       if (h.locatorResolve.ok) {
         return {
           ok: true,
@@ -316,6 +330,9 @@ vi.mock("../browser.js", () => ({
     }
     async jsClickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
+    }
+    async typeHandle(_handle: unknown, text: string, sealed = false): Promise<void> {
+      h.locatorTypeCalls.push({ text, sealed });
     }
     async uploadFile(selector: string, filePath: string): Promise<void> {
       h.uploads.push({ selector, filePath });
@@ -507,6 +524,8 @@ beforeEach(() => {
     safetySignals: { billingObject: false, accountSetup: false },
   };
   h.locatorClickCalls = 0;
+  h.locatorTypeCalls = [];
+  h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
 });
 
@@ -2507,6 +2526,83 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(h.locatorDisposeCalls).toBe(1);
   });
 
+  it("types through a frame locator only after the frame domain lock passes", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Promo code",
+      safetySignals: { billingObject: false, accountSetup: false },
+      frameTarget: {
+        framePath: "0",
+        frameOrigin: "https://checkout.example.com",
+        frameUrl: "https://checkout.example.com/widget",
+      },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    await act(obs.session_id, { kind: "type", target: "css=#promo", text: "SAVE10" });
+    expect(h.locatorResolveIntents).toContain("type");
+    expect(h.locatorTypeCalls).toEqual([{ text: "SAVE10", sealed: false }]);
+  });
+
+  it("blocks type and type_secret locators in untrusted frames", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Card number",
+      safetySignals: { billingObject: false, accountSetup: false },
+      frameTarget: {
+        framePath: "0",
+        frameOrigin: "https://evil-payments.test",
+        frameUrl: "https://evil-payments.test/widget",
+      },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    await expect(
+      act(obs.session_id, { kind: "type", target: "css=#card", text: "4111" }),
+    ).rejects.toThrow(/blocked by domain-scope/i);
+    stashSecretSlot(obs.session_id, "card", "4111111111111111");
+    await expect(
+      act(obs.session_id, { kind: "type_secret", target: "css=#card", slot: "card" }),
+    ).rejects.toThrow(/type_secret refused/i);
+    expect(h.locatorTypeCalls).toEqual([]);
+  });
+
+  it("refuses secret locator typing into an opaque sandboxed frame", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Password",
+      safetySignals: { billingObject: false, accountSetup: false },
+      frameTarget: {
+        framePath: "0",
+        frameOrigin: "null",
+        frameUrl: "about:srcdoc",
+        frameOpaque: true,
+      },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    stashSecretSlot(obs.session_id, "login", "s3cr3t");
+    await expect(
+      act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" }),
+    ).rejects.toThrow(/opaque frame/i);
+    expect(h.locatorTypeCalls).toEqual([]);
+  });
+
+  it("seals a same-domain type_secret locator before typing", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Password",
+      safetySignals: { billingObject: false, accountSetup: false },
+      frameTarget: {
+        framePath: "0",
+        frameOrigin: "https://auth.example.com",
+        frameUrl: "https://auth.example.com/login",
+      },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    stashSecretSlot(obs.session_id, "login", "s3cr3t");
+    await act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" });
+    expect(h.locatorResolveIntents).toContain("type");
+    expect(h.locatorTypeCalls).toEqual([{ text: "s3cr3t", sealed: true }]);
+  });
+
   it("refuses to remember a session that used a locator fallback", async () => {
     h.visibleText = "Product configurator";
     h.locatorResolve = {
@@ -3376,6 +3472,33 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     ).rejects.toThrow(/type_secret refused/i);
     expect(h.frameTypes).toEqual([]);
     expect(h.typed).toEqual([]);
+  });
+
+  it("refuses actions and secrets in an opaque frame", async () => {
+    h.elements = [
+      elem({
+        testId: "sandbox-password",
+        labelText: "Sandbox Password",
+        selector: "#password",
+        frameUrl: "about:srcdoc",
+        frameOrigin: "null",
+        frameOpaque: true,
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "click", target: "Sandbox Password" }),
+    ).rejects.toThrow(/blocked by domain-scope/i);
+    stashSecretSlot(started.session_id, "login", "s3cr3t-value");
+    await expect(
+      act(started.session_id, {
+        kind: "type_secret",
+        slot: "login",
+        target: "Sandbox Password",
+      }),
+    ).rejects.toThrow(/opaque frame/i);
+    expect(h.frameClicks).toEqual([]);
+    expect(h.frameTypes).toEqual([]);
   });
 
   it("type_secret into a same-registrable-domain frame is allowed", async () => {

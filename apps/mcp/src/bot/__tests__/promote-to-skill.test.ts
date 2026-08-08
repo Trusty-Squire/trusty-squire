@@ -15,10 +15,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseSkill, type Skill } from "@trusty-squire/skill-schema";
-import {
-  captureOnboardingRound,
-  type OnboardingRoundCapture,
-} from "../onboarding-capture.js";
+import { captureOnboardingRound, type OnboardingRoundCapture } from "../onboarding-capture.js";
 import {
   promoteToSkill,
   pickHrefHint,
@@ -33,9 +30,20 @@ import type { InteractiveElement } from "../browser.js";
 describe("ephemeral-identifier generalization (stuck-pending class)", () => {
   function link(href: string): InteractiveElement {
     return {
-      index: 0, tag: "a", type: null, id: null, name: null, placeholder: null,
-      ariaLabel: null, role: "link", labelText: null, visibleText: "open",
-      selector: "a", visible: true, inViewport: true, inConsentWidget: false,
+      index: 0,
+      tag: "a",
+      type: null,
+      id: null,
+      name: null,
+      placeholder: null,
+      ariaLabel: null,
+      role: "link",
+      labelText: null,
+      visibleText: "open",
+      selector: "a",
+      visible: true,
+      inViewport: true,
+      inConsentWidget: false,
       href,
     } as InteractiveElement;
   }
@@ -53,9 +61,9 @@ describe("ephemeral-identifier generalization (stuck-pending class)", () => {
   });
 
   it("generalizeCapturedUrl strips per-run session params (kinde class)", () => {
-    expect(generalizeCapturedUrl("https://app.kinde.com/register?psid=019e89eac2ca34fd&intent=business")).toBe(
-      "https://app.kinde.com/register?intent=business",
-    );
+    expect(
+      generalizeCapturedUrl("https://app.kinde.com/register?psid=019e89eac2ca34fd&intent=business"),
+    ).toBe("https://app.kinde.com/register?intent=business");
     expect(generalizeCapturedUrl("https://x.co/signup?redirect_to=%2Fsetup%2Fabc&plan=free")).toBe(
       "https://x.co/signup?plan=free",
     );
@@ -325,7 +333,13 @@ function idpOnlyRounds(service: string): OnboardingRoundCapture[] {
         screenshot: "data:image/png;base64,iVBORw0KGgo=",
       },
       inventory: [
-        inventoryElement({ index: 0, tag: "button", visibleText: "Google", selector: "button.g", role: "button" }),
+        inventoryElement({
+          index: 0,
+          tag: "button",
+          visibleText: "Google",
+          selector: "button.g",
+          role: "button",
+        }),
       ],
       observed: { kind: "click", selector: "button.g", reason: "Continue with Google" },
     },
@@ -342,11 +356,19 @@ function idpOnlyRounds(service: string): OnboardingRoundCapture[] {
         screenshot: "data:image/png;base64,iVBORw0KGgo=",
       },
       inventory: [
-        inventoryElement({ index: 0, tag: "button", visibleText: "Copy", selector: "button.copy", role: "button", ariaLabel: "Copy to clipboard" }),
+        inventoryElement({
+          index: 0,
+          tag: "button",
+          visibleText: "Copy",
+          selector: "button.copy",
+          role: "button",
+          ariaLabel: "Copy to clipboard",
+        }),
       ],
       observed: {
         kind: "extract",
-        reason: "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is shown in the credentials panel.",
+        reason:
+          "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is shown in the credentials panel.",
       },
     },
   ];
@@ -395,7 +417,12 @@ describe("promoteToSkill — confirmation-modal fill (pubnub class)", () => {
           screenshot: "data:image/png;base64,iVBORw0KGgo=",
         },
         inventory: [
-          inventoryElement({ index: 0, tag: "input", type: "text", selector: "div > div:nth-of-type(2) > div > input" }),
+          inventoryElement({
+            index: 0,
+            tag: "input",
+            type: "text",
+            selector: "div > div:nth-of-type(2) > div > input",
+          }),
         ],
         observed: {
           kind: "fill",
@@ -415,7 +442,14 @@ describe("promoteToSkill — confirmation-modal fill (pubnub class)", () => {
           screenshot: "data:image/png;base64,iVBORw0KGgo=",
         },
         inventory: [
-          inventoryElement({ index: 0, tag: "button", visibleText: "Copy", selector: "button.copy", role: "button", ariaLabel: "Copy to clipboard" }),
+          inventoryElement({
+            index: 0,
+            tag: "button",
+            visibleText: "Copy",
+            selector: "button.copy",
+            role: "button",
+            ariaLabel: "Copy to clipboard",
+          }),
         ],
         observed: {
           kind: "extract",
@@ -438,9 +472,21 @@ describe("promoteToSkill — confirmation-modal fill (pubnub class)", () => {
         service,
         round: 0,
         oauth: false,
-        state: { url: "https://x.com/new", title: "New", html: "<html><body><input></body></html>", screenshot: "data:image/png;base64,iVBORw0KGgo=" },
-        inventory: [inventoryElement({ index: 0, tag: "input", type: "text", selector: "div > input" })],
-        observed: { kind: "fill", selector: "div > input", value: "my-project-name", reason: "Name the project." },
+        state: {
+          url: "https://x.com/new",
+          title: "New",
+          html: "<html><body><input></body></html>",
+          screenshot: "data:image/png;base64,iVBORw0KGgo=",
+        },
+        inventory: [
+          inventoryElement({ index: 0, tag: "input", type: "text", selector: "div > input" }),
+        ],
+        observed: {
+          kind: "fill",
+          selector: "div > input",
+          value: "my-project-name",
+          reason: "Name the project.",
+        },
       },
     ];
     const { dir, runId } = setupCaptures(rounds);
@@ -484,6 +530,31 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     expect(result.skill.steps[0]!.kind).toBe("navigate");
     expect(result.skill.steps[1]!.kind).toBe("fill");
     expect(result.skill.steps[2]!.kind).toBe("extract_via_copy_button");
+  });
+
+  it("preserves a captured frame boundary on the promoted target step", () => {
+    const service = uniqueService();
+    const rounds = railwayRounds(service);
+    const frameScope = {
+      frameOrigin: "https://checkout.railway.com",
+      frameUrl: "https://checkout.railway.com/widget",
+      framePath: "0/1",
+    };
+    Object.assign(rounds[1]!.inventory[0]!, frameScope);
+    Object.assign(rounds[1]!.observed, {
+      frame_origin: frameScope.frameOrigin,
+      frame_path: frameScope.framePath,
+    });
+    const { dir, runId } = setupCaptures(rounds);
+    const result = promoteToSkill({ dir, service, run_id: runId });
+    if (result.kind !== "ok") throw new Error(`expected ok: ${JSON.stringify(result)}`);
+    const fill = result.skill.steps.find((step) => step.kind === "fill");
+    expect(fill).toMatchObject({
+      frame_scope: { origin: frameScope.frameOrigin, path: frameScope.framePath },
+    });
+    expect(parseSkill(result.skill).steps.find((step) => step.kind === "fill")).toMatchObject({
+      frame_scope: { origin: frameScope.frameOrigin, path: frameScope.framePath },
+    });
   });
 
   // rc.17 regression — generated unique names (the shape rc.15's
@@ -869,7 +940,9 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
             "<body>" +
             // 800 chars of nav/footer noise to push the UUID outside the
             // credential context's window.
-            "<nav>" + "x".repeat(800) + "</nav>" +
+            "<nav>" +
+            "x".repeat(800) +
+            "</nav>" +
             // The actual credential context sits much later in the
             // document.
             "<label>API Token</label>" +
@@ -1085,7 +1158,10 @@ describe("promoteToSkill — OAuth provider detection", () => {
             role: "button",
           }),
         ],
-        observed: { kind: "extract", reason: "api_key='opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44'" },
+        observed: {
+          kind: "extract",
+          reason: "api_key='opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44'",
+        },
       },
     ];
 
@@ -1125,7 +1201,7 @@ describe("promoteToSkill — OAuth provider detection", () => {
         state: {
           url: "https://example.com/signup",
           title: "Signup",
-          html: "<html><label>Company</label><input placeholder=\"Acme\"><button>Continue</button></html>",
+          html: '<html><label>Company</label><input placeholder="Acme"><button>Continue</button></html>',
           screenshot: "data:image/png;base64,iVBORw0KGgo=",
         },
         inventory: [
@@ -1150,7 +1226,7 @@ describe("promoteToSkill — OAuth provider detection", () => {
         state: {
           url: "https://example.com/signup",
           title: "Signup",
-          html: "<html><label>Company</label><input placeholder=\"Acme\"><button>Continue</button></html>",
+          html: '<html><label>Company</label><input placeholder="Acme"><button>Continue</button></html>',
           screenshot: "data:image/png;base64,iVBORw0KGgo=",
         },
         inventory: [
@@ -1166,7 +1242,12 @@ describe("promoteToSkill — OAuth provider detection", () => {
             role: "button",
           }),
         ],
-        observed: { kind: "fill", selector: "input.company", value: "Acme", reason: "Fill company" },
+        observed: {
+          kind: "fill",
+          selector: "input.company",
+          value: "Acme",
+          reason: "Fill company",
+        },
       },
       {
         service,
@@ -1175,7 +1256,7 @@ describe("promoteToSkill — OAuth provider detection", () => {
         state: {
           url: "https://example.com/signup",
           title: "Signup",
-          html: "<html><label>Company</label><input placeholder=\"Acme\"><button>Continue</button></html>",
+          html: '<html><label>Company</label><input placeholder="Acme"><button>Continue</button></html>',
           screenshot: "data:image/png;base64,iVBORw0KGgo=",
         },
         inventory: [
@@ -1233,7 +1314,7 @@ describe("promoteToSkill — OAuth provider detection", () => {
         state: {
           url: "https://example.com/register",
           title: "Register",
-          html: "<html><label>Email</label><input name=\"email\"></html>",
+          html: '<html><label>Email</label><input name="email"></html>',
           screenshot: "data:image/png;base64,iVBORw0KGgo=",
         },
         inventory: [
@@ -1282,7 +1363,9 @@ describe("promoteToSkill — OAuth provider detection", () => {
 
     if (result.kind !== "ok") throw new Error("expected ok");
     expect(result.skill.oauth_provider).toBeNull();
-    expect(result.skill.steps.some((s) => s.kind === "fill" && s.value_template === "${EMAIL_ALIAS}")).toBe(true);
+    expect(
+      result.skill.steps.some((s) => s.kind === "fill" && s.value_template === "${EMAIL_ALIAS}"),
+    ).toBe(true);
   });
 
   it("does not match 'GitTub' or other near-misses", () => {
@@ -1519,7 +1602,9 @@ describe("promoteToSkill — chain rejections", () => {
     // the synthesizer's first-step-navigate rule) + extract remain.
     const kinds = result.skill.steps.map((s) => s.kind);
     expect(kinds).not.toContain("click");
-    expect(kinds.some((k) => k === "extract_via_regex" || k === "extract_via_copy_button")).toBe(true);
+    expect(kinds.some((k) => k === "extract_via_regex" || k === "extract_via_copy_button")).toBe(
+      true,
+    );
   });
 
   it("surfaces the soft-drop rejection when no extract round follows (0.8.1)", () => {
@@ -2136,9 +2221,7 @@ function twitterMultiCredRounds(service: string): OnboardingRoundCapture[] {
         url: "https://developer.twitter.com/portal/keys",
         title: "Keys and tokens",
         html:
-          "<html><body>API Key Copy " +
-          "API Key Secret Copy " +
-          "Bearer Token Copy</body></html>",
+          "<html><body>API Key Copy " + "API Key Secret Copy " + "Bearer Token Copy</body></html>",
         screenshot: "data:image/png;base64,iVBORw0KGgo=",
       },
       inventory: [
@@ -2153,8 +2236,7 @@ function twitterMultiCredRounds(service: string): OnboardingRoundCapture[] {
       ],
       observed: {
         kind: "extract",
-        reason:
-          "API Key value visible in 'API Key' section: copy button beside it.",
+        reason: "API Key value visible in 'API Key' section: copy button beside it.",
       },
     },
     {
@@ -2226,9 +2308,7 @@ describe("promoteToSkill — multi-credential (Twitter-class)", () => {
 
     // Each extract step is the *_named variant referencing its credential.
     const extractSteps = result.skill.steps.filter(
-      (s) =>
-        s.kind === "extract_via_copy_button_named" ||
-        s.kind === "extract_via_regex_named",
+      (s) => s.kind === "extract_via_copy_button_named" || s.kind === "extract_via_regex_named",
     );
     expect(extractSteps).toHaveLength(3);
     for (const s of extractSteps) {
@@ -2273,7 +2353,9 @@ describe("promoteToSkill — multi-credential (Twitter-class)", () => {
     if (result.kind !== "ok") return;
 
     expect(result.skill.credentials).toHaveLength(3);
-    expect(result.skill.credentials.every((c) => c.visibility === "show_once_at_creation")).toBe(true);
+    expect(result.skill.credentials.every((c) => c.visibility === "show_once_at_creation")).toBe(
+      true,
+    );
   });
 
   it("collapses a re-extraction that derives the same produces (0.8.11)", () => {
@@ -2298,9 +2380,7 @@ describe("promoteToSkill — multi-credential (Twitter-class)", () => {
     const names = result.skill.credentials.map((c) => c.name).sort();
     expect(names).toEqual(["api_key", "bearer_token"]);
     const namedExtracts = result.skill.steps.filter(
-      (s) =>
-        s.kind === "extract_via_copy_button_named" ||
-        s.kind === "extract_via_regex_named",
+      (s) => s.kind === "extract_via_copy_button_named" || s.kind === "extract_via_regex_named",
     );
     expect(namedExtracts).toHaveLength(2);
   });
@@ -2326,9 +2406,7 @@ describe("promoteToSkill — multi-credential (Twitter-class)", () => {
     );
     expect(legacy.length).toBeGreaterThan(0);
     const named = result.skill.steps.filter(
-      (s) =>
-        s.kind === "extract_via_copy_button_named" ||
-        s.kind === "extract_via_regex_named",
+      (s) => s.kind === "extract_via_copy_button_named" || s.kind === "extract_via_regex_named",
     );
     expect(named).toHaveLength(0);
   });
@@ -2427,7 +2505,10 @@ describe("promoteToSkill — visibility detection", () => {
   it("marks show_once_at_creation on 'make sure to copy' phrasing", () => {
     const service = uniqueService();
     const { dir, runId } = setupCaptures(
-      showOnceRounds(service, "Make sure to copy this token now — you won't be able to see it again."),
+      showOnceRounds(
+        service,
+        "Make sure to copy this token now — you won't be able to see it again.",
+      ),
     );
     const result = promoteToSkill({ dir, service, run_id: runId });
     expect(result.kind).toBe("ok");
@@ -2480,12 +2561,12 @@ describe("promoteToSkill — stable-attribute fallback (0.8.3-rc.1, bug #4)", ()
             id: "_R_75klubsnimdb_",
             name: "terms",
             role: "checkbox",
-            selector: "input[name=\"terms\"]",
+            selector: 'input[name="terms"]',
           }),
         ],
         observed: {
           kind: "check",
-          selector: "input[name=\"terms\"]",
+          selector: 'input[name="terms"]',
           reason: "Accept terms",
         },
       },
@@ -3020,9 +3101,7 @@ describe("promoteToSkill — consecutive-duplicate dedup", () => {
     );
     expect(legacyExtracts).toHaveLength(1);
     const namedExtracts = result.skill.steps.filter(
-      (s) =>
-        s.kind === "extract_via_copy_button_named" ||
-        s.kind === "extract_via_regex_named",
+      (s) => s.kind === "extract_via_copy_button_named" || s.kind === "extract_via_regex_named",
     );
     expect(namedExtracts).toHaveLength(0);
   });
@@ -3032,7 +3111,9 @@ describe("pickHrefHint", () => {
   it("returns the path of a nav link's href (axiom Settings)", async () => {
     const { pickHrefHint } = await import("../promote-to-skill.js");
     expect(
-      pickHrefHint(inventoryElement({ tag: "a", ariaLabel: "Settings", href: "/ts-6689-z0as/settings" })),
+      pickHrefHint(
+        inventoryElement({ tag: "a", ariaLabel: "Settings", href: "/ts-6689-z0as/settings" }),
+      ),
     ).toBe("/ts-6689-z0as/settings");
   });
   it("reduces an absolute href to its pathname", async () => {
@@ -3103,7 +3184,10 @@ describe("pickHrefHint", () => {
             role: "button",
           }),
         ],
-        observed: { kind: "extract", reason: "api_key='opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44'" },
+        observed: {
+          kind: "extract",
+          reason: "api_key='opk_3181b37872f7f1aaf4ebd1ba7ebc7e219fd2948b44'",
+        },
       },
     ];
 
@@ -3143,7 +3227,9 @@ describe("synthesizeLabeledExtractSteps (Phase-E multi-cred explode)", () => {
     ]);
     expect(steps!.every((s) => s.kind === "extract_labeled")).toBe(true);
     // label_hint is the space-separated form the page renders.
-    const appId = steps!.find((s) => s.kind === "extract_labeled" && s.produces === "application_id");
+    const appId = steps!.find(
+      (s) => s.kind === "extract_labeled" && s.produces === "application_id",
+    );
     expect(appId && appId.kind === "extract_labeled" && appId.label_hint).toBe("application id");
   });
   it("collapses labels that share the same value (pusher secret/api_secret/app_secret → one)", async () => {
@@ -3157,8 +3243,7 @@ describe("synthesizeLabeledExtractSteps (Phase-E multi-cred explode)", () => {
         "and secret='examplesecret0001' and api_secret='examplesecret0001' " +
         "and app_secret='examplesecret0001'",
     };
-    const pageText =
-      "App ID example1000001 Key examplekey1234567890 Secret examplesecret0001";
+    const pageText = "App ID example1000001 Key examplekey1234567890 Secret examplesecret0001";
     const steps = synthesizeLabeledExtractSteps(observed, pageText, prov);
     expect(steps).not.toBeNull();
     const produces = steps!.map((s) => (s.kind === "extract_labeled" ? s.produces : s.kind));
@@ -3218,9 +3303,24 @@ describe("collapseConsecutiveDuplicateSteps (porter ×N noise)", () => {
   it("keeps consecutive clicks that differ in text_match (real flow)", async () => {
     const { collapseConsecutiveDuplicateSteps } = await import("../promote-to-skill.js");
     const steps = [
-      { kind: "click" as const, text_match: "Account settings", role_hint: "button" as const, provenance: prov },
-      { kind: "click" as const, text_match: "API tokens", role_hint: "link" as const, provenance: prov },
-      { kind: "click" as const, text_match: "Create Token", role_hint: "button" as const, provenance: prov },
+      {
+        kind: "click" as const,
+        text_match: "Account settings",
+        role_hint: "button" as const,
+        provenance: prov,
+      },
+      {
+        kind: "click" as const,
+        text_match: "API tokens",
+        role_hint: "link" as const,
+        provenance: prov,
+      },
+      {
+        kind: "click" as const,
+        text_match: "Create Token",
+        role_hint: "button" as const,
+        provenance: prov,
+      },
     ];
     const out = collapseConsecutiveDuplicateSteps(steps);
     expect(out.length).toBe(3);
@@ -3229,8 +3329,18 @@ describe("collapseConsecutiveDuplicateSteps (porter ×N noise)", () => {
   it("does NOT collapse consecutive extract steps (multi-cred preserved)", async () => {
     const { collapseConsecutiveDuplicateSteps } = await import("../promote-to-skill.js");
     const steps = [
-      { kind: "extract_labeled" as const, label_hint: "app key", produces: "app_key", provenance: prov },
-      { kind: "extract_labeled" as const, label_hint: "app key", produces: "app_key", provenance: prov },
+      {
+        kind: "extract_labeled" as const,
+        label_hint: "app key",
+        produces: "app_key",
+        provenance: prov,
+      },
+      {
+        kind: "extract_labeled" as const,
+        label_hint: "app key",
+        produces: "app_key",
+        provenance: prov,
+      },
     ];
     const out = collapseConsecutiveDuplicateSteps(steps);
     expect(out.length).toBe(2);
@@ -3347,8 +3457,7 @@ describe("promoteToSkill — email verification (await_email_code)", () => {
         ],
         observed: {
           kind: "extract",
-          reason:
-            "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is visible on the page.",
+          reason: "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is visible on the page.",
         },
       },
     ];
@@ -3379,7 +3488,9 @@ describe("promoteToSkill — email verification (await_email_code)", () => {
     // no ${EMAIL_ALIAS} fill before await_email_code → nothing dispatches a
     // code. The replay-graph gate must catch it at synthesis.
     const service = uniqueService();
-    const rounds = otpRounds(service).slice(2).map((r, i) => ({ ...r, round: i }));
+    const rounds = otpRounds(service)
+      .slice(2)
+      .map((r, i) => ({ ...r, round: i }));
     const { dir, runId } = setupCaptures(rounds);
     const result = promoteToSkill({ dir, service, run_id: runId });
     expect(result.kind).toBe("rejected");
@@ -3521,8 +3632,7 @@ describe("promoteToSkill — duplicate placeholder disambiguated by name", () =>
         ],
         observed: {
           kind: "extract",
-          reason:
-            "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is visible.",
+          reason: "The API key db3a32ea-dd1b-4e28-9680-db2991c81e3e is visible.",
         },
       },
     ];
@@ -3553,13 +3663,18 @@ describe("entry-url: per-account id in the path (Deepgram / Neon)", () => {
   });
   it("stableSignupEntryUrl falls back to the origin when the path is account-scoped", () => {
     expect(
-      stableSignupEntryUrl("https://console.deepgram.com/project/68b812fb-f90f-4a08-a235-a64a01123aa9/keys", []),
+      stableSignupEntryUrl(
+        "https://console.deepgram.com/project/68b812fb-f90f-4a08-a235-a64a01123aa9/keys",
+        [],
+      ),
     ).toBe("https://console.deepgram.com/");
     expect(
       stableSignupEntryUrl("https://console.neon.tech/app/org-nameless-base-41435035/projects", []),
     ).toBe("https://console.neon.tech/");
     // a clean url is preserved
-    expect(stableSignupEntryUrl("https://app.resend.com/signup", [])).toBe("https://app.resend.com/signup");
+    expect(stableSignupEntryUrl("https://app.resend.com/signup", [])).toBe(
+      "https://app.resend.com/signup",
+    );
   });
   it("strips OAuth query cruft from the entry url (Deepgram /signup?iss=…&prompt=none)", () => {
     expect(

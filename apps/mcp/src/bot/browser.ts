@@ -66,6 +66,7 @@ export interface FrameTarget {
   framePath: string;
   frameOrigin: string;
   frameUrl: string;
+  frameOpaque?: boolean;
 }
 
 export type ResolvedPageTarget =
@@ -2783,18 +2784,20 @@ export class BrowserController {
     ctx: Page | Frame,
     mode: "text" | "css",
     value: string,
+    intent: "click" | "type",
   ): Promise<
     | {
         ok: true;
         handle: ElementHandle<Element>;
         text: string;
         safetySignals: PageTargetSafetySignals;
+        documentOrigin: string;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
   > {
     if (!this.page) throw new Error("Browser not started");
     const resultHandle = await ctx.evaluateHandle(
-      ({ mode, value }) => {
+      ({ mode, value, intent }) => {
         const norm = (s: string | null): string =>
           (s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
         // Rendered text, NOT textContent: innerText reflects what the user
@@ -2895,6 +2898,26 @@ export class BrowserController {
         };
         const hasClickAffordance = (el: Element): boolean =>
           isStrong(el) || window.getComputedStyle(el).cursor === "pointer";
+        const hasTypeAffordance = (el: Element): boolean =>
+          (el instanceof HTMLInputElement && el.type !== "hidden" && !el.disabled) ||
+          (el instanceof HTMLTextAreaElement && !el.disabled) ||
+          (el instanceof HTMLElement && el.isContentEditable);
+        const typeLabel = (el: Element): string => {
+          const labels =
+            el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+              ? Array.from(el.labels ?? []).map((label) => renderedRaw(label))
+              : [];
+          return [
+            ...labels,
+            el.getAttribute("aria-label") ?? "",
+            el.getAttribute("placeholder") ?? "",
+            el.getAttribute("name") ?? "",
+            el.getAttribute("id") ?? "",
+            renderedRaw(el),
+          ]
+            .filter((part) => part.length > 0)
+            .join(" ");
+        };
 
         // Gather candidates across the light DOM and every OPEN shadow root.
         const all: Element[] = [];
@@ -2920,7 +2943,7 @@ export class BrowserController {
 
         let pool: Element[];
         if (mode === "css") {
-          pool = all.filter(isVisible);
+          pool = all.filter((el) => isVisible(el) && (intent === "click" || hasTypeAffordance(el)));
         } else {
           const want = norm(value);
           if (want.length === 0) {
@@ -2930,10 +2953,17 @@ export class BrowserController {
               candidates: [] as string[],
               text: "",
               safetySignals: { billingObject: false, accountSetup: false },
+              documentOrigin: location.origin,
             };
           }
-          const affordable = all.filter((el) => isVisible(el) && hasClickAffordance(el));
-          const exact = affordable.filter((el) => rendered(el) === want);
+          const affordable = all.filter(
+            (el) =>
+              isVisible(el) &&
+              (intent === "click" ? hasClickAffordance(el) : hasTypeAffordance(el)),
+          );
+          const matchText = (el: Element): string =>
+            intent === "click" ? rendered(el) : norm(typeLabel(el));
+          const exact = affordable.filter((el) => matchText(el) === want);
           // Prefer exact-text matches; only fall back to "contains" (with a
           // length guard so a big wrapper doesn't swallow the query) when no
           // element's rendered text equals the query.
@@ -2941,7 +2971,7 @@ export class BrowserController {
             exact.length > 0
               ? exact
               : affordable.filter((el) => {
-                  const t = rendered(el);
+                  const t = matchText(el);
                   return t.includes(want) && t.length <= Math.max(80, want.length + 20);
                 });
         }
@@ -2958,6 +2988,7 @@ export class BrowserController {
             candidates: pool.slice(0, 8).map((el) => renderedRaw(el).slice(0, 60)),
             text: "",
             safetySignals: { billingObject: false, accountSetup: false },
+            documentOrigin: location.origin,
           };
         }
         // Collapse nesting WITHOUT silently merging two genuine controls. A
@@ -2989,15 +3020,17 @@ export class BrowserController {
           text: win !== null ? renderedRaw(win).slice(0, 120) : "",
           safetySignals:
             win !== null ? safetySignalsFor(win) : { billingObject: false, accountSetup: false },
+          documentOrigin: location.origin,
         };
       },
-      { mode, value },
+      { mode, value, intent },
     );
     const meta = await resultHandle.evaluate((r) => ({
       count: r.count,
       candidates: r.candidates,
       text: r.text,
       safetySignals: r.safetySignals,
+      documentOrigin: r.documentOrigin,
     }));
     if (meta.count !== 1) {
       await resultHandle.dispose();
@@ -3020,10 +3053,15 @@ export class BrowserController {
       handle: asElement,
       text: meta.text ?? "",
       safetySignals: meta.safetySignals ?? { billingObject: false, accountSetup: false },
+      documentOrigin: meta.documentOrigin,
     };
   }
 
-  async resolvePageTarget(mode: "text" | "css", value: string): Promise<ResolvedPageTarget> {
+  async resolvePageTarget(
+    mode: "text" | "css",
+    value: string,
+    intent: "click" | "type" = "click",
+  ): Promise<ResolvedPageTarget> {
     if (!this.page) throw new Error("Browser not started");
     const page = this.page;
     const matches: Array<{
@@ -3036,8 +3074,10 @@ export class BrowserController {
     for (const frame of page.frames()) {
       if (frame.isDetached()) continue;
       const rawUrl = frame.url();
-      if (frame !== page.mainFrame() && CAPTCHA_FRAME_HOST_RE.test(rawUrl)) continue;
-      const resolved = await this.resolveTargetInContext(frame, mode, value).catch(() => null);
+      if (frame !== page.mainFrame() && this.frameWithinCaptcha(frame)) continue;
+      const resolved = await this.resolveTargetInContext(frame, mode, value, intent).catch(
+        () => null,
+      );
       if (resolved === null) continue;
       if (!resolved.ok) {
         if (resolved.reason === "ambiguous") candidates.push(...resolved.candidates);
@@ -3046,10 +3086,12 @@ export class BrowserController {
       let frameTarget: FrameTarget | null = null;
       if (frame !== page.mainFrame()) {
         try {
+          const security = await this.frameSecurity(frame);
           frameTarget = {
             framePath: this.framePath(frame),
-            frameOrigin: this.effectiveFrameOrigin(frame),
+            frameOrigin: security.origin,
             frameUrl: rawUrl,
+            ...(security.opaque ? { frameOpaque: true } : {}),
           };
         } catch {
           await resolved.handle.dispose().catch(() => undefined);
@@ -3133,6 +3175,19 @@ export class BrowserController {
     if (dispatchState === "disabled") {
       throw new Error("locator target is disabled");
     }
+  }
+
+  async typeHandle(handle: ElementHandle<Element>, text: string, sealed = false): Promise<void> {
+    if (sealed) {
+      await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
+    }
+    if (!this.humanize) {
+      await handle.fill(text);
+      return;
+    }
+    await handle.click({ timeout: 8000 }).catch(() => undefined);
+    await handle.fill("").catch(() => undefined);
+    await handle.type(text, { delay: rand(40, 110) });
   }
 
   // Dispatch a DOM .click() in the page context. Some React copy buttons fire
@@ -8570,7 +8625,7 @@ export class BrowserController {
           occludedBy: status.occludedBy,
         });
       }
-      return { out, clusterMeta };
+      return { out, clusterMeta, documentOrigin: location.origin };
     });
   }
 
@@ -8588,18 +8643,42 @@ export class BrowserController {
     return indexes.join("/");
   }
 
-  private effectiveFrameOrigin(frame: Frame): string {
+  private frameWithinCaptcha(frame: Frame): boolean {
     let current: Frame | null = frame;
     while (current !== null) {
+      if (CAPTCHA_FRAME_HOST_RE.test(current.url())) return true;
+      current = current.parentFrame();
+    }
+    return false;
+  }
+
+  private async frameSecurity(frame: Frame): Promise<{ origin: string; opaque: boolean }> {
+    let current: Frame | null = frame;
+    while (current !== null) {
+      const parent = current.parentFrame();
+      if (parent !== null) {
+        const owner = await current.frameElement();
+        try {
+          const opaqueSandbox = await owner.evaluate((element) => {
+            const sandbox = (element as Element).getAttribute("sandbox");
+            if (sandbox === null) return false;
+            return !sandbox
+              .split(/\s+/)
+              .some((token) => token.toLowerCase() === "allow-same-origin");
+          });
+          if (opaqueSandbox) return { origin: "null", opaque: true };
+        } finally {
+          await owner.dispose().catch(() => undefined);
+        }
+      }
       const url = current.url();
       if (url !== "" && url !== "about:blank" && url !== "about:srcdoc") {
         const origin = new URL(url).origin;
-        if (origin !== "null") return origin;
-        throw new Error("opaque frame origin");
+        return origin === "null" ? { origin: "null", opaque: true } : { origin, opaque: false };
       }
-      current = current.parentFrame();
+      current = parent;
     }
-    throw new Error("frame origin unavailable");
+    return { origin: "null", opaque: true };
   }
 
   // Resolve a previously-tagged frame path back to its live Playwright Frame —
@@ -8619,9 +8698,36 @@ export class BrowserController {
       frame = child;
     }
     if (frame.isDetached()) return null;
+    return frame;
+  }
+
+  private async resolveFrameElement(
+    target: FrameTarget,
+    selector: string,
+    index = 0,
+  ): Promise<ElementHandle<Element> | null> {
+    const frame = this.resolveFrame(target);
+    if (frame === null || this.frameWithinCaptcha(frame)) return null;
+    const handle = await frame
+      .locator(selector)
+      .nth(Math.max(0, Math.floor(index)))
+      .elementHandle({ timeout: 8000 })
+      .catch(() => null);
+    if (handle === null) return null;
     try {
-      return this.effectiveFrameOrigin(frame) === target.frameOrigin ? frame : null;
+      const security = await this.frameSecurity(frame);
+      await handle.evaluate((element) => element.isConnected);
+      const expectedOpaque = target.frameOpaque === true || target.frameOrigin === "null";
+      const matches = expectedOpaque
+        ? security.opaque
+        : !security.opaque && security.origin === target.frameOrigin;
+      if (!matches) {
+        await handle.dispose().catch(() => undefined);
+        return null;
+      }
+      return handle;
     } catch {
+      await handle.dispose().catch(() => undefined);
       return null;
     }
   }
@@ -8639,33 +8745,31 @@ export class BrowserController {
   // iframe), the same primitives fillAndSubmitCheckout already relies on for
   // cross-origin PSP fields.
   async clickInFrame(target: FrameTarget, selector: string): Promise<void> {
-    const frame = this.resolveFrame(target);
-    if (frame === null) {
+    const handle = await this.resolveFrameElement(target, selector);
+    if (handle === null) {
       throw new Error(
         `click: the target's frame is no longer present (${this.frameLabel(target)})`,
       );
     }
-    await frame.locator(selector).first().click({ timeout: 8000 });
+    try {
+      await handle.click({ timeout: 8000 });
+    } finally {
+      await handle.dispose().catch(() => undefined);
+    }
   }
 
   async clickViaJsInFrame(target: FrameTarget, selector: string, index = 0): Promise<void> {
-    const frame = this.resolveFrame(target);
-    if (frame === null) {
+    const handle = await this.resolveFrameElement(target, selector, index);
+    if (handle === null) {
       throw new Error(
         `js_click: the target's frame is no longer present (${this.frameLabel(target)})`,
       );
     }
-    const safeIndex = Math.max(0, Math.floor(index));
-    await frame
-      .evaluate(
-        ({ sel, i }) => {
-          const els = Array.from(document.querySelectorAll<HTMLElement>(sel));
-          const el = els[i] ?? els[0];
-          if (el !== undefined) el.click();
-        },
-        { sel: selector, i: safeIndex },
-      )
-      .catch(() => undefined);
+    try {
+      await handle.evaluate((el) => (el as HTMLElement).click());
+    } finally {
+      await handle.dispose().catch(() => undefined);
+    }
   }
 
   // Frame-scoped type/fill, for type and (guarded, see provision-session.ts)
@@ -8673,19 +8777,22 @@ export class BrowserController {
   // split as type() above, without the multi-input-OTP auto-advance nuance —
   // out of scope for the checkout-option case this exists for.
   async typeInFrame(target: FrameTarget, selector: string, text: string): Promise<void> {
-    const frame = this.resolveFrame(target);
-    if (frame === null) {
+    const handle = await this.resolveFrameElement(target, selector);
+    if (handle === null) {
       throw new Error(`type: the target's frame is no longer present (${this.frameLabel(target)})`);
     }
-    const locator = frame.locator(selector).first();
-    await locator.waitFor({ state: "visible", timeout: 10000 });
-    if (!this.humanize) {
-      await locator.fill(text);
-      return;
+    try {
+      await handle.waitForElementState("visible", { timeout: 10000 });
+      if (!this.humanize) {
+        await handle.fill(text);
+        return;
+      }
+      await handle.click({ timeout: 8000 }).catch(() => undefined);
+      await handle.fill("").catch(() => undefined);
+      await handle.type(text, { delay: rand(40, 110) });
+    } finally {
+      await handle.dispose().catch(() => undefined);
     }
-    await locator.click({ timeout: 8000 }).catch(() => undefined);
-    await locator.fill("").catch(() => undefined);
-    await locator.pressSequentially(text, { delay: rand(40, 110) });
   }
 
   async extractInteractiveElements(): Promise<InteractiveElement[]> {
@@ -8711,13 +8818,7 @@ export class BrowserController {
     // direct children) — the same primitive isPayPalHostedCheckout/
     // fillAndSubmitCheckout/detectThreeDsChallenge use to reach cross-origin
     // frame content.
-    const framedElements: Array<
-      Omit<(typeof mainElements)[number], "frameOrigin" | "frameUrl" | "framePath"> & {
-        frameOrigin: string;
-        frameUrl: string;
-        framePath: string;
-      }
-    > = [];
+    const framedElements: Array<Omit<InteractiveElement, "index">> = [];
     for (const frame of page.frames()) {
       if (frame === page.mainFrame() || frame.isDetached()) continue;
       const frameUrl = frame.url();
@@ -8726,15 +8827,11 @@ export class BrowserController {
       // DOM as el_table rows would invite the planner to poke at the
       // challenge instead of going through that flow. Skip them; nothing
       // else about captcha handling changes.
-      if (CAPTCHA_FRAME_HOST_RE.test(frameUrl)) continue;
-      let frameOrigin: string;
-      try {
-        frameOrigin = this.effectiveFrameOrigin(frame);
-      } catch {
-        continue; // opaque/non-http frame (data:, about:) — nothing safe to tag it with
-      }
+      if (this.frameWithinCaptcha(frame)) continue;
       try {
         const raw = await this.extractElementsFromContext(frame);
+        const security = await this.frameSecurity(frame);
+        const frameOrigin = security.origin;
         const groups = assignCardRadioGroups(raw.clusterMeta);
         for (const [i, e] of raw.out.entries()) {
           framedElements.push({
@@ -8743,6 +8840,7 @@ export class BrowserController {
             frameOrigin,
             frameUrl,
             framePath: this.framePath(frame),
+            ...(security.opaque ? { frameOpaque: true } : {}),
           });
         }
       } catch {
@@ -10311,6 +10409,7 @@ export interface InteractiveElement {
   frameOrigin?: string | null;
   frameUrl?: string | null;
   framePath?: string | null;
+  frameOpaque?: boolean;
 }
 
 // T38 — pure clustering logic. Identifies card-radio groups from a

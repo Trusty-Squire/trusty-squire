@@ -1081,7 +1081,10 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
 // anything else goes through the SAME domain-scope check goto/allow_host
 // already use (hostAllowed) — reusing the existing guard, not inventing a
 // new trust classifier.
-type FrameScopedTarget = Pick<InteractiveElement, "frameOrigin" | "frameUrl" | "framePath">;
+type FrameScopedTarget = Pick<
+  InteractiveElement,
+  "frameOrigin" | "frameUrl" | "framePath" | "frameOpaque"
+>;
 
 function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
   if (el.framePath === undefined || el.framePath === null) return null;
@@ -1092,6 +1095,7 @@ function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
     framePath: el.framePath,
     frameOrigin: el.frameOrigin,
     frameUrl: el.frameUrl ?? "",
+    ...(el.frameOpaque === true ? { frameOpaque: true } : {}),
   };
 }
 
@@ -1099,13 +1103,15 @@ function sameInteractiveTarget(left: InteractiveElement, right: InteractiveEleme
   return (
     left.selector === right.selector &&
     (left.frameOrigin ?? null) === (right.frameOrigin ?? null) &&
-    (left.framePath ?? null) === (right.framePath ?? null)
+    (left.framePath ?? null) === (right.framePath ?? null) &&
+    (left.frameOpaque ?? false) === (right.frameOpaque ?? false)
   );
 }
 
 function frameTargetAllowed(session: Session, el: FrameScopedTarget): boolean {
   const target = frameTargetFor(el);
   if (target === null) return true;
+  if (target.frameOpaque === true) return false;
   const pageUrl = session.browser.currentUrl();
   if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return true;
   return hostAllowed(target.frameOrigin, hostStrings(session));
@@ -1130,6 +1136,12 @@ function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind:
 function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget): void {
   const target = frameTargetFor(el);
   if (target === null) return;
+  if (target.frameOpaque === true) {
+    throw new Error(
+      "type_secret refused: the target lives in an opaque frame. Secrets may only be " +
+        "typed into the main frame or a frame on the page's own domain.",
+    );
+  }
   const pageUrl = session.browser.currentUrl();
   if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return;
   throw new Error(
@@ -2902,6 +2914,31 @@ export async function act(
         hole: `credential.${action.slot}`,
         literal: value,
       };
+      const locator = parseLocatorTarget(action.target);
+      if (locator !== null) {
+        const resolved = await browser.resolvePageTarget(locator.mode, locator.value, "type");
+        if (!resolved.ok) {
+          if (resolved.reason === "none") {
+            throw new Error(`type_secret: no element matched locator "${action.target}".`);
+          }
+          throw new AmbiguousProvisionTargetError(action.target, resolved.candidates);
+        }
+        try {
+          if (resolved.frameTarget !== null) {
+            assertSecretFrameTargetAllowed(session, resolved.frameTarget);
+          }
+          session.usedLocatorFallback = true;
+          await browser.typeHandle(resolved.handle, value, true);
+        } finally {
+          await resolved.handle.dispose().catch(() => undefined);
+        }
+        audit(sessionId, "type_secret", {
+          slot: action.slot,
+          locator_mode: locator.mode,
+          host: registrableHost(browser.currentUrl()),
+        });
+        break;
+      }
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
       // resolveTarget recomputes identities (incl. volatile positional-group
@@ -2979,16 +3016,17 @@ export async function act(
       // page instead of the extracted-element list.
       const locator = parseLocatorTarget(action.target);
       if (locator !== null) {
-        // text=/css= is a CLICK escape hatch only. `type` gates on click
-        // affordance / non-editable text so it can't target a form input, and
-        // upload/oauth_click have bespoke flows — reject them explicitly.
-        if (action.kind !== "click" && action.kind !== "js_click") {
+        if (action.kind !== "click" && action.kind !== "js_click" && action.kind !== "type") {
           throw new Error(
             `operate_act kind="${action.kind}" does not accept a text=/css= locator target; ` +
-              `text=/css= is for clicking (click / js_click). Use an @e: ref from operate_observe.`,
+              `use an @e: ref from operate_observe.`,
           );
         }
-        const resolved = await browser.resolvePageTarget(locator.mode, locator.value);
+        const resolved = await browser.resolvePageTarget(
+          locator.mode,
+          locator.value,
+          action.kind === "type" ? "type" : "click",
+        );
         if (!resolved.ok) {
           if (resolved.reason === "none") {
             throw new Error(
@@ -3017,7 +3055,8 @@ export async function act(
           }
           session.usedLocatorFallback = true;
           if (action.kind === "click") await browser.clickHandle(resolved.handle);
-          else await browser.jsClickHandle(resolved.handle);
+          else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
+          else await browser.typeHandle(resolved.handle, action.text);
         } finally {
           await resolved.handle.dispose().catch(() => undefined);
         }
@@ -3025,7 +3064,7 @@ export async function act(
           locator_mode: locator.mode,
           host: registrableHost(browser.currentUrl()),
         });
-        await settleAfterStateChange(browser);
+        if (action.kind !== "type") await settleAfterStateChange(browser);
         break;
       }
       // Re-resolve against FRESH elements every act — never trust a stale index.
