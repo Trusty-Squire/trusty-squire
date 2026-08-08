@@ -27,6 +27,12 @@ The local key is `(verb, eTLD+1)`:
   recipes are additionally submitted to the shared registry's candidate pool
   and, once promoted, served to other installs on a local miss — CLAUDE.md
   §"Operator Recipe registry (replay-registry-share)" owns that flow.
+- A money-path recording additionally saves its checkout leg as a second,
+  narrower recipe in the same store, keyed by the live checkout page's
+  field-name-set signature (`checkoutShapeKey` → `shape:<sha256>` in the
+  ordinary domain slot) so it can replay on an unrelated domain running the
+  same checkout implementation. CLAUDE.md §"Per-leg recipe resolution +
+  checkout shape signature (replay-per-leg-signature)" owns that flow.
 
 This key does not alter registry Skill lookup or `serviceSlugFromUrl`.
 
@@ -86,6 +92,11 @@ New calls select a recipe with `operate_use { verb, service_url, params }`.
 `params` binds hole names and any legacy `${VAR}` templates. A keyed cache miss
 opens a normal cold session and returns `replay.status = "cache_miss"`. Legacy
 name-only recipes remain hint-only and do not enter deterministic replay.
+`operate_use { verb, session_id, leg: "checkout" }` (no `service_url`,
+no `resume_from`) instead resolves and replays only the checkout leg against
+the already-open session's current page, keyed by that page's shape
+signature; a miss returns `replay.status = "cache_miss"` and the host drives
+the leg cold.
 
 Replay walks the trace in order. A binding, target, live-ref, or action miss
 returns exactly one `fallback_required` result containing the missed step and a
@@ -113,9 +124,13 @@ book, and reserve recipes. Its additional invariants are:
 4. A host-repaired money field must identify the issued step and hole, supply
    the same value, match the recorded or uniquely equivalent target, and pass a
    fresh live-value check.
-5. Missing or mismatched fields return `human_required`; `operate_pay` refuses
-   to run until all replay field guards are satisfied and rechecks mounted
-   fields immediately before payment.
+5. A missing or mismatched field on a recipe with a genuine catalog/storefront
+   prefix ahead of its checkout leg returns `leg_fallback_required` — the host
+   cold-drives the checkout leg from `from_step_index` — while a recipe with
+   no such prefix returns `human_required` exactly as before. Both fail the
+   payment guard identically; `operate_pay` refuses to run until all replay
+   field guards are satisfied and rechecks mounted fields immediately before
+   payment.
 
 The existing `operate_pay` phone approval, passkey mandate, card injection,
 3-D Secure handling, and expected-total behavior are unchanged.
