@@ -3837,7 +3837,7 @@ async function rememberCheckoutLeg(
     goal: "Fill the checkout leg's fields",
     verb,
     domain: checkoutShapeKey(signature),
-    allowed_hosts: [...new Set(egressSeedHosts(session))],
+    allowed_hosts: [],
     trace: legTrace,
     secrets: [...legSlots].map((slot) => ({ slot, stored: false as const })),
     postcondition: checkoutLegPostcondition(legTrace),
@@ -4170,10 +4170,11 @@ function markReplayFailure(
 }
 
 // replay-serve-live-domainlock — checks a replay-bound goto/allow_host
-// target against the recipe's own eTLD+1, allowing the recipe's site (and
-// subdomains) plus the same identity-provider/auth-handler hosts the
-// ordinary session goto gate exempts (hostAllowed). Checkout-shape recipes
-// cannot execute goto/allow_host actions because they have no site domain.
+// target against the recipe's own eTLD+1. The fixed DEFAULT_AUTH_HOSTS and
+// firebaseapp.com/web.app exceptions are an intentional trusted boundary,
+// shared with the ordinary session goto gate through hostAllowed; arbitrary
+// off-domain hosts remain blocked. Checkout-shape recipes cannot execute
+// goto/allow_host actions because they have no site domain.
 function replayTargetWithinRecipeDomain(url: string, recipeDomain: string): boolean {
   return hostAllowed(url, [recipeDomain]);
 }

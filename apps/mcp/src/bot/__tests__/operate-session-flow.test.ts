@@ -363,7 +363,13 @@ import {
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
 } from "../provision-session.js";
-import { readRecipeForTask, type OperatorRecipe } from "../operator-recipe.js";
+import {
+  isRecipeDomainLocked,
+  isRecipeShareEligible,
+  OperatorRecipeSchema,
+  readRecipeForTask,
+  type OperatorRecipe,
+} from "../operator-recipe.js";
 import {
   provisionRememberTool,
   provisionFinishTaskTool,
@@ -1490,7 +1496,10 @@ describe("verified recipe recording", () => {
         selector: "#add",
       }),
     ];
-    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/cart",
+      extraAllowedHosts: ["checkout.example.com", "accounts.example.com"],
+    });
     // Catalog/storefront leg — a non-money click.
     await act(started.session_id, { kind: "click", target: "Add to cart" });
     // Checkout leg — a money field.
@@ -1540,6 +1549,10 @@ describe("verified recipe recording", () => {
     >;
     expect(raw.verb).toBe("purchase");
     expect(raw.domain).toMatch(/^shape:[0-9a-f]{64}$/);
+    const checkoutRecipe = OperatorRecipeSchema.parse(raw);
+    expect(checkoutRecipe.allowed_hosts).toEqual([]);
+    expect(isRecipeDomainLocked(checkoutRecipe)).toBe(true);
+    expect(isRecipeShareEligible(checkoutRecipe).eligible).toBe(true);
     // Only the money-field step made it into the leg — not the earlier
     // catalog "Add to cart" click.
     expect((raw.trace as unknown[]).length).toBe(1);

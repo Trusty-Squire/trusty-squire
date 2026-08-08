@@ -573,14 +573,13 @@ the same site.
     (`domain_lock_violation`) — never resumable, shuts the fail-closed
     payment gate exactly like `human_required` does
     (`markReplayDomainLockViolation`).
-  - **Exempt for a checkout-shape-keyed recipe**
-    (`isCheckoutShapeKey(recipe.domain)` — replay-per-leg-signature, next
-    section): its pseudo-domain is a field-set hash, not a site, and the
-    whole point of that flow is cross-store reuse. Its `allowed_hosts` is
-    never consumed to widen a replay session's scope
-    (`operate_use{leg:"checkout"}` replays against an already-open
-    session's own page), so the ordinary session host-scope gate already
-    protects it without a domain to lock to.
+  - **Checkout-shape-keyed recipes are field-interaction-only.** Their
+    `shape:<sha256>` pseudo-domain is a field-set hash, not a real site, so
+    there is no domain to compare navigation against. Instead, write and
+    replay hard-refuse every nonempty `allowed_hosts` entry and every
+    `goto`/`allow_host` trace action. A checkout leg may use field actions
+    such as `type`, `select`, and `click` against the already-open page; it
+    may never navigate or widen host scope.
 - **Cross-user safety gate 2: `isRecipeShareEligible`** (in recipe-schema).
   A shared recipe must never carry a baked-in user-specific literal or an
   earned credential. The schema already makes some of this unrepresentable
