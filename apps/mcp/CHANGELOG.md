@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.3 (2026-08-08)
+
+- feat(mcp): support guarded actions inside frames — operate_observe/operate_act now handle iframe/frame controls (#459)
+- fix(vault): identify deleted credentials in notifications (#458)
+
 ## 1.1.9-rc.2 (2026-08-08)
 
 - _summarize the changes_
