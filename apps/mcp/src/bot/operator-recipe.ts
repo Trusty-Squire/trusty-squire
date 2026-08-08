@@ -30,6 +30,10 @@ import {
   operatorRecipeDomain,
   operatorRecipeKey,
   operatorRecipeKeyForDomain,
+  checkoutFieldSetSignature,
+  isCheckoutShapeKey,
+  checkoutShapeKey,
+  operatorRecipeKeyForCheckoutShape,
   isRecipeShareEligible,
   EmailAliasTemplatePattern,
   type OperatorVerb,
@@ -58,6 +62,10 @@ export {
   operatorRecipeDomain,
   operatorRecipeKey,
   operatorRecipeKeyForDomain,
+  checkoutFieldSetSignature,
+  isCheckoutShapeKey,
+  checkoutShapeKey,
+  operatorRecipeKeyForCheckoutShape,
   isRecipeShareEligible,
   EmailAliasTemplatePattern,
 };
@@ -128,6 +136,14 @@ export async function readRecipeForTask(
   serviceUrl: string,
 ): Promise<OperatorRecipe> {
   return await readRecipe(operatorRecipeKey(verb, serviceUrl));
+}
+
+/** replay-per-leg-signature — local read of a checkout-leg recipe, keyed by field-set signature. */
+export async function readRecipeForCheckoutShape(
+  verb: OperatorVerb,
+  signature: string,
+): Promise<OperatorRecipe> {
+  return await readRecipe(operatorRecipeKeyForCheckoutShape(verb, signature));
 }
 
 export async function listRecipes(): Promise<string[]> {

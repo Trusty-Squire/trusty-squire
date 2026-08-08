@@ -29,6 +29,7 @@ import {
   captureAndPromoteSession,
   replayOperatorRecipe,
   emitProvisionMeasurement,
+  checkoutShapeSignatureForSession,
   type ProvisionAction,
   type ExtractResult,
 } from "../bot/provision-session.js";
@@ -36,11 +37,13 @@ import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
   readRecipe,
   readRecipeForTask,
+  readRecipeForCheckoutShape,
   readRecipeFromFile,
   renderOperatorRecipeHint,
   recipeEntryUrl,
   fillTemplate,
   operatorRecipeDomain,
+  checkoutShapeKey,
   OperatorVerbSchema,
   RecipeHoleSchema,
   PostconditionSchema,
@@ -197,6 +200,32 @@ export async function resolveRecipeForTask(
     const outcome = await client.fetchRecipe(verb, domain, generateProvisionId());
     if (outcome.kind !== "found") throw localErr;
     return outcome.result.recipe;
+  }
+}
+
+// replay-per-leg-signature — the checkout leg's own independent resolution
+// path: local first (same zero-latency-on-hit shape as resolveRecipeForTask
+// above), then the shared registry, keyed by the LIVE page's field-name-set
+// signature instead of domain. Returns null (not a throw) on a total miss —
+// the caller degrades to cold driving for this leg only, same as any other
+// cache_miss, never a task-ending error.
+export async function resolveCheckoutLegRecipe(
+  verb: OperatorVerb,
+  signature: string,
+): Promise<OperatorRecipe | null> {
+  try {
+    return await readRecipeForCheckoutShape(verb, signature);
+  } catch {
+    const accountId = await resolveAccountId();
+    if (accountId === undefined || accountId.length === 0) return null;
+    const client = clientFromEnv(accountId);
+    if (client === null) return null;
+    const outcome = await client.fetchRecipe(
+      verb,
+      checkoutShapeKey(signature),
+      generateProvisionId(),
+    );
+    return outcome.kind === "found" ? outcome.result.recipe : null;
   }
 }
 
@@ -1053,9 +1082,60 @@ export const provisionRememberTool: Tool<z.infer<typeof rememberSchema>> = {
     });
     // replay-registry-share — best-effort; never blocks or fails the local save.
     const registryPublish = await publishRecipeToRegistry(result.file);
-    return { ...result, registry_publish: registryPublish };
+    // replay-per-leg-signature — the checkout-leg recipe (when this session's
+    // trace had one) publishes through the exact same candidate-pool path,
+    // under its own shape-keyed domain slot. Also best-effort.
+    const checkoutLegRegistryPublish =
+      result.checkout_leg_file !== undefined
+        ? await publishRecipeToRegistry(result.checkout_leg_file)
+        : undefined;
+    return {
+      ...result,
+      registry_publish: registryPublish,
+      ...(checkoutLegRegistryPublish !== undefined
+        ? { checkout_leg_registry_publish: checkoutLegRegistryPublish }
+        : {}),
+    };
   },
 };
+
+// replay-per-leg-signature — resolve (local, then registry, by the live
+// checkout page's own field-name-set signature) and replay just the
+// checkout leg on an already-open session. Degrades to a `cache_miss`-
+// shaped result (never throws) whenever there's nothing to key by yet or
+// nothing matches — the host keeps driving the leg cold either way.
+// replayOperatorRecipe's own "replay already started" guard covers the one
+// real misuse case (calling this while a whole-task replay is still
+// active on the same session) with a clear error.
+async function useCheckoutLegRecipe(
+  sessionId: string,
+  verb: OperatorVerb,
+  params: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  const signature = await checkoutShapeSignatureForSession(sessionId);
+  if (signature === null) {
+    return {
+      ...(await observe(sessionId)),
+      replay: {
+        status: "cache_miss" as const,
+        reason: "current page has no checkout field-name-set yet; continue cold",
+      },
+    };
+  }
+  const recipe = await resolveCheckoutLegRecipe(verb, signature);
+  if (recipe === null) {
+    return {
+      ...(await observe(sessionId)),
+      replay: {
+        status: "cache_miss" as const,
+        reason: "no recipe for this checkout shape; continue cold",
+      },
+    };
+  }
+  const replay = await replayOperatorRecipe(sessionId, recipe, params, 0);
+  const { observation, ...replayState } = replay;
+  return { ...observation, replay: replayState };
+}
 
 const useSchema = z
   .object({
@@ -1069,15 +1149,32 @@ const useSchema = z
     // replay.next_index instead of starting over.
     session_id: z.string().min(1).optional(),
     resume_from: z.number().int().min(0).max(200).optional(),
+    // replay-per-leg-signature — resolve+replay the CHECKOUT LEG only,
+    // independently of any whole-task (verb, domain) recipe, against an
+    // already-open session's CURRENT page. Requires verb + session_id, no
+    // service_url (the session already has its own live page) and no
+    // resume_from (this always starts a fresh leg-scoped replay attempt).
+    leg: z.enum(["checkout"]).optional(),
   })
   .refine(
     (value) =>
-      value.name !== undefined || (value.verb !== undefined && value.service_url !== undefined),
-    { message: "provide legacy name, or both verb and service_url" },
+      value.name !== undefined ||
+      (value.verb !== undefined && value.service_url !== undefined) ||
+      (value.verb !== undefined && value.leg === "checkout" && value.session_id !== undefined),
+    {
+      message:
+        "provide legacy name, or both verb and service_url, or verb + session_id with leg:'checkout'",
+    },
   )
-  .refine((value) => (value.session_id === undefined) === (value.resume_from === undefined), {
-    message: "session_id and resume_from must be provided together",
-  });
+  .refine((value) => value.leg === undefined || value.resume_from === undefined, {
+    message: "leg:'checkout' always starts a fresh leg replay; it does not take resume_from",
+  })
+  .refine(
+    (value) =>
+      value.leg !== undefined ||
+      (value.session_id === undefined) === (value.resume_from === undefined),
+    { message: "session_id and resume_from must be provided together" },
+  );
 
 export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
   name: "operate_use",
@@ -1089,7 +1186,15 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
     "returns replay.status='fallback_required' with that step and next_index; repair only " +
     "that step, then call operate_use again with the same params plus session_id + " +
     "resume_from=next_index. " +
-    "Money-path completion deterministically verifies every injected address/contact/qty field.",
+    "Money-path completion deterministically verifies every injected address/contact/qty field. " +
+    "Pass verb + session_id + leg:'checkout' (no service_url) to resolve+replay just the " +
+    "CHECKOUT leg against an already-open session's current page — keyed by the checkout page's " +
+    "own field-name-set signature, so a checkout plan recorded on one store can replay on a " +
+    "different, unrelated store of the same checkout platform (cross-domain reuse). " +
+    "replay.status='cache_miss' means no recipe matches this page's shape; drive the checkout " +
+    "leg cold. A money-path guard failure on a recipe with a real catalog/storefront prefix " +
+    "returns replay.status='leg_fallback_required' (not human_required) — drive the checkout leg " +
+    "cold from from_step_index; the run is not aborted.",
   inputSchema: useSchema,
   jsonInputSchema: {
     type: "object",
@@ -1101,9 +1206,13 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
       require_live_identity: { type: "boolean" },
       session_id: { type: "string" },
       resume_from: { type: "integer" },
+      leg: { type: "string", enum: ["checkout"] },
     },
   },
   async handler(args) {
+    if (args.leg === "checkout") {
+      return await useCheckoutLegRecipe(args.session_id!, args.verb!, args.params ?? {});
+    }
     let recipe: Awaited<ReturnType<typeof readRecipe>>;
     try {
       recipe =

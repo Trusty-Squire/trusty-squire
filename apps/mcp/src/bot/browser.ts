@@ -8336,6 +8336,28 @@ export class BrowserController {
     }));
   }
 
+  // replay-per-leg-signature — the checkout-leg shape signature (see
+  // checkoutFieldSetSignature in @trusty-squire/recipe-schema) is computed
+  // from a page's FULL field-name set, deliberately including `type=hidden`
+  // fields — unlike extractInteractiveElements above (which deliberately
+  // skips hidden/password inputs, since those aren't things a planner can
+  // act on), a checkout platform's own hidden session/GraphQL-serialized
+  // fields are exactly the stable, platform-authored signal the signature
+  // depends on. Reads every input/select/textarea's `name` (falling back to
+  // `id`) with a single flat query — no visibility/shadow-DOM handling,
+  // matching the method proven in the field-name-set discriminator report.
+  async extractCheckoutFieldNames(): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    return await this.page.evaluate(() => {
+      const names: string[] = [];
+      document.querySelectorAll("input,select,textarea").forEach((el) => {
+        const name = el.getAttribute("name") ?? el.getAttribute("id") ?? "";
+        if (name.length > 0) names.push(name);
+      });
+      return names;
+    });
+  }
+
   // Resolve a selector against the live page for the verify step
   // (F3 T5). Returns the match count plus the first match's
   // tag/id/name so the caller can confirm a still-resolving selector

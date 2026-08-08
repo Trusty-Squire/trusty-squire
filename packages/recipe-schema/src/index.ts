@@ -16,6 +16,10 @@ export {
   operatorRecipeDomain,
   operatorRecipeKey,
   operatorRecipeKeyForDomain,
+  checkoutFieldSetSignature,
+  isCheckoutShapeKey,
+  checkoutShapeKey,
+  operatorRecipeKeyForCheckoutShape,
   isRecipeShareEligible,
   EmailAliasTemplatePattern,
 } from "./operator-recipe.js";

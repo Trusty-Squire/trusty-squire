@@ -21,7 +21,12 @@ export interface EngineReplayMeasurement {
   wall_clock_ms: number;
   total_steps: number;
   fallbacks: number;
-  status: "complete" | "fallback_required" | "human_required" | "unavailable";
+  status:
+    | "complete"
+    | "fallback_required"
+    | "human_required"
+    | "leg_fallback_required"
+    | "unavailable";
   reason?: string;
   /** Exact production money-field guard failure, retained for eval diagnosis. */
   field?: string;
