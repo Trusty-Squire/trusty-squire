@@ -28,7 +28,7 @@ const h = vi.hoisted(() => ({
   autocompleteConfirmOverride: null as boolean | null,
   autocompleteConfirmCalls: [] as Array<{ selector: string; pickedText: string }>,
   autocompleteDiscardCalls: 0,
-  autocompleteDiscardPopupDetectedCalls: [] as boolean[],
+  autocompleteDiscardEscapeCalls: [] as boolean[],
   clickCalls: 0,
   gotos: [] as string[],
   started: 0,
@@ -211,9 +211,9 @@ vi.mock("../browser.js", () => ({
         }
       }
     }
-    async discardTypeSuggestionPopup(popupDetected: boolean): Promise<void> {
+    async discardTypeSuggestionPopup(dismissWithEscape: boolean): Promise<void> {
       h.autocompleteDiscardCalls += 1;
-      h.autocompleteDiscardPopupDetectedCalls.push(popupDetected);
+      h.autocompleteDiscardEscapeCalls.push(dismissWithEscape);
     }
     async confirmAutocompleteCommitted(selector: string, pickedText: string): Promise<boolean> {
       h.autocompleteConfirmCalls.push({ selector, pickedText });
@@ -435,7 +435,7 @@ beforeEach(() => {
   h.autocompleteConfirmOverride = null;
   h.autocompleteConfirmCalls = [];
   h.autocompleteDiscardCalls = 0;
-  h.autocompleteDiscardPopupDetectedCalls = [];
+  h.autocompleteDiscardEscapeCalls = [];
   h.clickCalls = 0;
   h.gotos = [];
   h.consentDismissCalls = 0;
@@ -1186,6 +1186,46 @@ describe("verified recipe recording", () => {
         null as unknown as ApiClient,
       ),
     ).rejects.toThrow(/postcondition not confirmed/i);
+    expect(readdirSync(dir)).toEqual([]);
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("never writes a cold trace after a checkout transition loses attestation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-transition-fail-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "City",
+      text: "Queens",
+      provenance: { hole: "address.city" },
+    });
+    h.clearElementsOnClick = true;
+    h.clickValueMutation = { selector: "#city", value: "Brooklyn" };
+    await act(started.session_id, { kind: "click", target: "Continue" });
+    h.visibleText = "Review order";
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "failed-transition",
+          goal: "Buy coffee",
+          verb: "purchase",
+          inputs: { address: { city: "Queens" } },
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Ready to approve",
+            success_signal: { text_present: "Review order" },
+          },
+        },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/checkout transition could not be attested/i);
     expect(readdirSync(dir)).toEqual([]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
@@ -2009,21 +2049,24 @@ describe("3.1 — autocomplete-aware type fill", () => {
     expect(h.autocompleteDiscardCalls).toBe(1);
   });
 
-  // Captain decision (unconditional-escape-closes-modals): Escape must only
-  // fire when a popup was actually detected — it commonly bubbles to close
-  // an enclosing modal/dialog too, so firing it when there was nothing to
-  // dismiss risks closing a dialog the field happens to live in (a
-  // cart-drawer quantity field, a login modal's email field, an
-  // address-edit modal).
+  // Captain decision (unconditional-escape-closes-modals, narrowed by the
+  // escape-after-successful-commit finding): Escape must only fire when a
+  // detected popup is plausibly still open — the ambiguous/zero-match stop
+  // (no option was ever clicked) and the failed-commit path (the click may
+  // not have registered). It must NEVER fire when no popup was detected,
+  // nor after a confirmed successful commit (the widget already closed its
+  // popup on selection) — Escape commonly bubbles to close an enclosing
+  // modal/dialog too (a cmdk-in-Radix-dialog combobox, a cart-drawer
+  // quantity field, an address-edit modal).
   it("tells the browser NOT to press Escape when no popup was ever detected", async () => {
     h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
     h.autocompleteSuggestions = [];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
-    expect(h.autocompleteDiscardPopupDetectedCalls).toEqual([false]);
+    expect(h.autocompleteDiscardEscapeCalls).toEqual([false]);
   });
 
-  it("tells the browser to press Escape when a popup WAS detected", async () => {
+  it("tells the browser NOT to press Escape after a confirmed successful commit", async () => {
     h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
     h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
     h.autocompleteCommitMutation = {
@@ -2032,7 +2075,30 @@ describe("3.1 — autocomplete-aware type fill", () => {
     };
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
-    expect(h.autocompleteDiscardPopupDetectedCalls).toEqual([true]);
+    expect(h.autocompleteDiscardEscapeCalls).toEqual([false]);
+  });
+
+  it("tells the browser to press Escape on an ambiguous-match stop", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = [
+      "350 5th Ave, New York, NY 10118, USA",
+      "350 5th Avenue, Brooklyn, NY 11215, USA",
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/autocomplete_commit_required/i);
+    expect(h.autocompleteDiscardEscapeCalls).toEqual([true]);
+  });
+
+  it("tells the browser to press Escape after a failed 'did not take' commit", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/did not take/i);
+    expect(h.autocompleteDiscardEscapeCalls).toEqual([true]);
   });
 
   // The committed value (not the raw typed draft) must be what recordTrace
@@ -2055,6 +2121,50 @@ describe("3.1 — autocomplete-aware type fill", () => {
     expect((h.elements[0] as Record<string, unknown>).value).toBe(
       "350 5th Ave, New York, NY 10118, USA",
     );
+  });
+
+  // Nearby-signal commits (react-select/cmdk clear their search input and
+  // render the choice in a separate element) must record the field's LIVE
+  // post-commit value, not pickedText — the cold-path transition
+  // attestation re-reads the live value, so a pickedText literal would flag
+  // every such commit as a mismatch and silently disqualify recipe
+  // recording for exactly the widgets 3.1 targets.
+  it("records the field's live value on a nearby-signal commit so cold attestation still passes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-nearby-commit-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    h.autocompleteSuggestions = ["Queens, NY, USA"];
+    h.autocompleteConfirmOverride = true;
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "City",
+      text: "Queens",
+      provenance: { hole: "address.city" },
+    });
+    await act(started.session_id, { kind: "click", target: "Continue" });
+    h.visibleText = "Review order";
+    await provisionRememberTool.handler(
+      {
+        session_id: started.session_id,
+        name: "nearby-commit",
+        goal: "Buy coffee",
+        verb: "purchase",
+        inputs: { address: { city: "Queens" } },
+        postcondition: {
+          kind: "execute_capability",
+          describe: "Ready to approve",
+          success_signal: { text_present: "Review order" },
+        },
+      },
+      null as unknown as ApiClient,
+    );
+    expect(readdirSync(dir).length).toBeGreaterThan(0);
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

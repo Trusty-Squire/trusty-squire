@@ -2946,20 +2946,25 @@ export async function act(
           await browser.markPreexistingTypeSuggestionPopups();
           await browser.type(el.selector, action.text);
           // Cleanup (clear our tracking markers, and dismiss with Escape
-          // ONLY when a popup actually opened) must run no matter how this
-          // resolves — no popup, an ambiguous stop, a failed commit, or
-          // success — mirroring selectFromCombobox's own try/finally.
-          // Scoping the try to only the suggestionTexts.length > 0 branch
-          // left the "preexisting" markers set by
-          // markPreexistingTypeSuggestionPopups uncleared on the no-popup
-          // path; markComboboxPreexistingElements only ADDS markers, so a
-          // stale one could exclude a genuine popup from detection on a
-          // LATER type/select into the same element.
-          let popupDetected = false;
+          // ONLY when a detected popup is plausibly still open) must run no
+          // matter how this resolves — no popup, an ambiguous stop, a
+          // failed commit, or success — mirroring selectFromCombobox's own
+          // try/finally. Scoping the try to only the
+          // suggestionTexts.length > 0 branch left the "preexisting"
+          // markers set by markPreexistingTypeSuggestionPopups uncleared on
+          // the no-popup path; markComboboxPreexistingElements only ADDS
+          // markers, so a stale one could exclude a genuine popup from
+          // detection on a LATER type/select into the same element. Escape
+          // fires on the ambiguous-stop and failed-commit paths (popup
+          // never interacted with / click may not have registered — still
+          // open either way) but NEVER after a confirmed commit: the widget
+          // already closed its popup on selection, so Escape would land on
+          // nothing and bubble to close an enclosing modal/dialog instead.
+          let dismissPopupWithEscape = false;
           try {
             const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
-            popupDetected = suggestionTexts.length > 0;
-            if (popupDetected) {
+            if (suggestionTexts.length > 0) {
+              dismissPopupWithEscape = true;
               const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
               if (candidates.length !== 1) {
                 // Pass the MATCHED subset, not the full popup — passing every
@@ -2991,16 +2996,32 @@ export async function act(
                     `confirms the field now holds "${pickedText}" after selecting it.`,
                 );
               }
-              // Rewrite the completed action to the COMMITTED value (not
-              // the raw typed draft) before it reaches
+              dismissPopupWithEscape = false;
+              // Rewrite the completed action to the field's LIVE post-commit
+              // value (not the raw typed draft) before it reaches
               // recordTrace/recordedValues, so the recorded trace reflects
-              // what actually ended up on the page rather than the raw
-              // typed prefix.
-              session.lastElements = await browser.extractInteractiveElements();
-              completedAction = { ...action, text: pickedText };
+              // what actually ended up on the page. Recording pickedText
+              // would diverge from the live value exactly when the commit
+              // was confirmed via a NEARBY element (react-select/cmdk clear
+              // their search input on selection), and the cold-path
+              // transition attestation (attestRecordedFieldsBeforeTransition
+              // → verifyFilledFieldValues) re-reads the live value — a
+              // pickedText literal would flag every such commit as a
+              // mismatch and disqualify recipe recording. Reading the same
+              // live value here is attestation-consistent by construction.
+              // Known limitation: after a nearby-signal-only commit the
+              // field itself can be empty, so the recorded literal is "" —
+              // that field won't cleanly template into a saved recipe, but
+              // the live run is unaffected.
+              const refreshed = await browser.extractInteractiveElements();
+              session.lastElements = refreshed;
+              const liveField = refreshed.find((field) => field.selector === el.selector);
+              const liveValue =
+                typeof liveField?.value === "string" ? liveField.value : pickedText;
+              completedAction = { ...action, text: liveValue };
             }
           } finally {
-            await browser.discardTypeSuggestionPopup(popupDetected);
+            await browser.discardTypeSuggestionPopup(dismissPopupWithEscape);
           }
         }
       } else if (action.kind === "upload") {

@@ -107,3 +107,72 @@ describe("confirmAutocompleteCommitted — real Chromium fixtures", () => {
     }
   }, 30000);
 });
+
+describe("detectTypeSuggestionPopup — bounded settle/poll, real Chromium", () => {
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+  });
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  // Google-Places-style pickers debounce (~200ms) plus a network round-trip
+  // before rendering suggestions — a popup that renders AFTER type()
+  // resolves must still be detected, not just one already present on the
+  // first synchronous check.
+  it("detects a suggestion popup that renders after a debounce+network delay", async () => {
+    const { ctrl, page } = await pageFor(`
+      <div class="control">
+        <input id="search" value="Wireless">
+      </div>
+      <script>
+        setTimeout(() => {
+          const popup = document.createElement("div");
+          popup.setAttribute("role", "listbox");
+          popup.innerHTML = '<div role="option">Wireless Mouse</div>';
+          document.querySelector(".control").appendChild(popup);
+        }, 600);
+      </script>
+    `);
+    try {
+      expect(await ctrl.detectTypeSuggestionPopup("#search")).toEqual(["Wireless Mouse"]);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("returns an already-open popup's options on the first check without polling", async () => {
+    const { ctrl, page } = await pageFor(`
+      <div class="control">
+        <input id="search" value="Wireless">
+        <div role="listbox">
+          <div role="option">Wireless Mouse</div>
+          <div role="option">Wireless Keyboard</div>
+        </div>
+      </div>
+    `);
+    try {
+      const startedAt = Date.now();
+      expect(await ctrl.detectTypeSuggestionPopup("#search")).toEqual([
+        "Wireless Mouse",
+        "Wireless Keyboard",
+      ]);
+      expect(Date.now() - startedAt).toBeLessThan(1000);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("concludes no popup exists after the bounded budget elapses", async () => {
+    const { ctrl, page } = await pageFor(`
+      <div class="control">
+        <input id="search" value="Wireless">
+      </div>
+    `);
+    try {
+      expect(await ctrl.detectTypeSuggestionPopup("#search")).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+});

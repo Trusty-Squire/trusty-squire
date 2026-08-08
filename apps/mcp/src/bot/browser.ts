@@ -4355,18 +4355,28 @@ export class BrowserController {
    * After typing into `selector`, detect whether a suggestion popup opened
    * as a side effect and return its option texts in DOM order. Empty when
    * no popup opened — `type` behaved as an ordinary text field and the
-   * caller should no-op.
+   * caller should no-op. Google-Places-style pickers debounce (~200ms)
+   * plus a network round-trip before rendering suggestions, so a single
+   * synchronous check right after the last keystroke commonly sees
+   * nothing — poll on a bounded budget (mirroring settleAfterStateChange's
+   * shape), returning as soon as options appear so an already-open popup
+   * pays no extra latency.
    */
   async detectTypeSuggestionPopup(selector: string): Promise<string[]> {
     if (!this.page) throw new Error("Browser not started");
-    await this.refreshComboboxMarkers(selector);
-    const options = this.page.locator("[data-ts-select-option-tier]");
-    const count = await options.count();
-    const texts: string[] = [];
-    for (let i = 0; i < count; i += 1) {
-      texts.push((await options.nth(i).innerText()).replace(/\s+/g, " ").trim());
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (attempt > 0) await this.sleep(300);
+      await this.refreshComboboxMarkers(selector);
+      const options = this.page.locator("[data-ts-select-option-tier]");
+      const count = await options.count();
+      if (count === 0) continue;
+      const texts: string[] = [];
+      for (let i = 0; i < count; i += 1) {
+        texts.push((await options.nth(i).innerText()).replace(/\s+/g, " ").trim());
+      }
+      return texts;
     }
-    return texts;
+    return [];
   }
 
   /** Click the option at `index` (as indexed by detectTypeSuggestionPopup). */
@@ -4379,23 +4389,27 @@ export class BrowserController {
   /**
    * Clean up after a type-triggered autocomplete interaction, regardless of
    * outcome (committed, ambiguous/zero-match stop, or a failed commit).
-   * When `popupDetected` is true, presses Escape to dismiss any still-open
-   * popup BEFORE clearing our own tracking markers — some widgets (Google
-   * Places classic's `.pac-container` in particular) never fully unmount,
-   * just toggle visibility, so a popup left open would otherwise be
-   * captured as "preexisting" the next time
+   * When `dismissWithEscape` is true — the caller determined a detected
+   * popup is plausibly still open (an ambiguous/zero-match stop where no
+   * option was ever clicked, or a commit whose confirmation failed) —
+   * presses Escape to dismiss it BEFORE clearing our own tracking markers:
+   * some widgets (Google Places classic's `.pac-container` in particular)
+   * never fully unmount, just toggle visibility, so a popup left open would
+   * otherwise be captured as "preexisting" the next time
    * markPreexistingTypeSuggestionPopups snapshots the page (it snapshots by
    * current visibility, not by who opened it), silently disabling detection
-   * on a host's very next retry. When no popup was ever detected, Escape is
-   * skipped entirely: it commonly bubbles to close an enclosing modal/dialog
-   * too, so firing it when there was nothing to dismiss risks closing a
-   * dialog the typed-into field happens to live in (a cart-drawer quantity
-   * field, a login modal's email field, an address-edit modal) even though
-   * nothing needed dismissing. Marker clearing stays unconditional — it only
-   * removes our own tracking attributes, never touches page behavior.
+   * on a host's very next retry. Escape must NOT fire when no popup was
+   * ever detected, nor after a confirmed successful commit (the widget
+   * already closed its popup on selection): it commonly bubbles to close an
+   * enclosing modal/dialog too, so firing it with nothing left to dismiss
+   * risks closing a dialog the typed-into field happens to live in (a
+   * cmdk-in-Radix-dialog combobox, a cart-drawer quantity field, a login
+   * modal's email field, an address-edit modal). Marker clearing stays
+   * unconditional — it only removes our own tracking attributes, never
+   * touches page behavior.
    */
-  async discardTypeSuggestionPopup(popupDetected: boolean): Promise<void> {
-    if (popupDetected) await this.pressKey("Escape");
+  async discardTypeSuggestionPopup(dismissWithEscape: boolean): Promise<void> {
+    if (dismissWithEscape) await this.pressKey("Escape");
     await this.clearComboboxMarkers();
   }
 
