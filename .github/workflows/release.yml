@@ -99,18 +99,18 @@ jobs:
         if: steps.fast_path.outputs.already_released != 'true'
         run: pnpm install --frozen-lockfile --filter '@trusty-squire/mcp...'
 
-      # Workspace deps (e.g. @trusty-squire/skill-schema) ship as TypeScript
-      # sources with `main: ./dist/index.js`. Vitest's vite resolver follows
-      # that pointer, so without a prior workspace build the MCP tests fail
-      # with "Failed to resolve entry for package @trusty-squire/skill-schema".
+      # Workspace deps (e.g. @trusty-squire/skill-schema, @trusty-squire/recipe-schema)
+      # ship as TypeScript sources with `main: ./dist/index.js`. Vitest's vite
+      # resolver follows that pointer, so without a prior workspace build the
+      # MCP tests fail with "Failed to resolve entry for package @trusty-squire/<pkg>".
       # We exclude the MCP package itself — its own dist gets built fresh
       # in the publish job right before npm publish.
       - name: Build mcp's workspace deps (for test resolution)
         if: steps.fast_path.outputs.already_released != 'true'
-        # Vitest follows the `main` of @trusty-squire/skill-schema to its dist/ —
-        # that must exist before mcp tests can import it.
+        # Vitest follows the `main` of these packages to their dist/ — that
+        # must exist before mcp tests can import them.
         # Explicitly list mcp's workspace deps (keep in sync with apps/mcp/package.json).
-        run: pnpm --filter '@trusty-squire/skill-schema' build
+        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
 
       # The mcp suite includes real-Chromium tests (locator-fallback,
       # phone-country-widget, widget-corpus-eval) that chromium.launch() at
@@ -286,7 +286,7 @@ jobs:
         # Build ONLY what mcp depends on. A full `pnpm -r build` pulls in
         # apps/web (Next.js) which rebuilds @prisma/client in parallel.
         # Keep in sync with apps/mcp/package.json workspace deps.
-        run: pnpm --filter '@trusty-squire/skill-schema' build
+        run: pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build
 
       # Force a clean rebuild of the MCP package right before publish.
       # Without this, TypeScript's incremental build can reuse stale dist

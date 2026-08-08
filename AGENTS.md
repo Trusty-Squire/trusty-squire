@@ -383,6 +383,18 @@ In `.github/workflows/release.yml`, the job order is:
 
 **The rule:** When checking CI logs, look for the job named `publish` (or `release`, or `upload`). If that job failed, the release failed, even if `verify` passed.
 
+### 7. `release.yml`'s workspace-dep build step is an explicit list, not a glob — keep it in sync
+
+Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r --filter "./packages/**" --if-present build`), `.github/workflows/release.yml`'s "Build mcp's workspace deps" steps (both the `verify` and `publish` jobs) name mcp's workspace deps **explicitly**: `pnpm --filter '@trusty-squire/skill-schema' --filter '@trusty-squire/recipe-schema' build`. This is deliberate — `release.yml` installs only mcp's filtered dep tree (`--filter '@trusty-squire/mcp...'`), so a blind `./packages/**` glob would also try to build packages mcp doesn't depend on (e.g. `packages/vault`, never installed in this job) and fail.
+
+**The rule:** When `apps/mcp/package.json` gains a new `@trusty-squire/*` workspace dependency (a new `packages/*` package), add it to the `--filter` list in **both** `release.yml` build steps. Missing this makes every "Release mcp" CI run fail at the `Test (MCP package only)` step with `Failed to resolve entry for package "@trusty-squire/<new-pkg>"` — a fresh clone never builds that package's `dist/`, so vitest's vite resolver can't follow its `main`. This exact bug shipped when `@trusty-squire/recipe-schema` was added (fixed in `fm/fix-release-recipe-schema-build`) — nothing published to npm `next` from `1.1.8-rc.1` until it did.
+
+---
+
+## Maintaining this file
+
+This file is a living contract, not a historical record. When you learn something during a task that would have changed how you approached it — a gotcha, a footgun, a rule that saved you from a mistake — add it here in the same pass, in the appropriate section. Keep entries proportionate: durable, repo-specific knowledge that the code/CI itself doesn't already make obvious, not step-by-step task narration. Prefer pointing at the authoritative file/command/doc over duplicating its content. Remove or correct entries you find to be stale or wrong rather than leaving them to mislead the next agent.
+
 ---
 
 ## Final note
