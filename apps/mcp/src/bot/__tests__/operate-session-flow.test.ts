@@ -30,6 +30,9 @@ const h = vi.hoisted(() => ({
   autocompleteDiscardCalls: 0,
   autocompleteDiscardEscapeCalls: [] as boolean[],
   clickCalls: 0,
+  frameClicks: [] as string[],
+  frameJsClicks: [] as string[],
+  frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string }>,
   gotos: [] as string[],
   started: 0,
   startCalls: 0,
@@ -71,9 +74,17 @@ const h = vi.hoisted(() => ({
         ok: true;
         text: string;
         safetySignals: { billingObject: boolean; accountSetup: boolean };
+        frameTarget?: {
+          framePath: string;
+          frameOrigin: string;
+          frameUrl: string;
+          frameOpaque?: boolean;
+        } | null;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] },
   locatorClickCalls: 0,
+  locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
+  locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
 }));
 
@@ -266,18 +277,39 @@ vi.mock("../browser.js", () => ({
       if (h.clearElementsOnClick) h.elements = [];
     }
     async clickViaJs(): Promise<void> {}
+    async clickInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
+      h.frameClicks.push(`${target.frameUrl}|${selector}`);
+    }
+    async clickViaJsInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
+      h.frameJsClicks.push(`${target.frameUrl}|${selector}`);
+    }
+    async typeInFrame(target: { frameUrl: string }, selector: string, text: string): Promise<void> {
+      h.frameTypes.push({ frameUrl: target.frameUrl, selector, text });
+      for (const element of h.elements as Array<Record<string, unknown>>) {
+        if (element.selector === selector && element.frameUrl === target.frameUrl)
+          element.value = text;
+      }
+    }
     async resolvePageTarget(
       _mode: string,
       _value: string,
+      intent = "click",
     ): Promise<
       | {
           ok: true;
           handle: { dispose: () => Promise<void> };
           text: string;
           safetySignals: { billingObject: boolean; accountSetup: boolean };
+          frameTarget: {
+            framePath: string;
+            frameOrigin: string;
+            frameUrl: string;
+            frameOpaque?: boolean;
+          } | null;
         }
       | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
     > {
+      h.locatorResolveIntents.push(intent);
       if (h.locatorResolve.ok) {
         return {
           ok: true,
@@ -288,6 +320,7 @@ vi.mock("../browser.js", () => ({
           },
           text: h.locatorResolve.text,
           safetySignals: h.locatorResolve.safetySignals,
+          frameTarget: h.locatorResolve.frameTarget ?? null,
         };
       }
       return h.locatorResolve;
@@ -297,6 +330,9 @@ vi.mock("../browser.js", () => ({
     }
     async jsClickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
+    }
+    async typeHandle(_handle: unknown, text: string, sealed = false): Promise<void> {
+      h.locatorTypeCalls.push({ text, sealed });
     }
     async uploadFile(selector: string, filePath: string): Promise<void> {
       h.uploads.push({ selector, filePath });
@@ -362,6 +398,8 @@ import {
   activeProvisionBrowser,
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
+  recipeTargetFor,
+  captureObserved,
 } from "../provision-session.js";
 import {
   isRecipeDomainLocked,
@@ -425,6 +463,9 @@ function elem(partial: Record<string, unknown>): unknown {
     ...partial,
     // Keep derived autocomplete unless the caller overrode it.
     ...(partial.autocomplete !== undefined ? {} : { autocomplete }),
+    ...(typeof partial.frameUrl === "string" && partial.framePath === undefined
+      ? { framePath: "0" }
+      : {}),
   };
 }
 
@@ -447,6 +488,9 @@ beforeEach(() => {
   h.autocompleteDiscardCalls = 0;
   h.autocompleteDiscardEscapeCalls = [];
   h.clickCalls = 0;
+  h.frameClicks = [];
+  h.frameJsClicks = [];
+  h.frameTypes = [];
   h.gotos = [];
   h.consentDismissCalls = 0;
   h.consentCta = null;
@@ -480,6 +524,8 @@ beforeEach(() => {
     safetySignals: { billingObject: false, accountSetup: false },
   };
   h.locatorClickCalls = 0;
+  h.locatorTypeCalls = [];
+  h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
 });
 
@@ -2461,6 +2507,102 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
     expect(h.locatorClickCalls).toBe(1);
   });
 
+  it("applies the domain lock to a locator resolved inside a frame", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Pay",
+      safetySignals: { billingObject: false, accountSetup: false },
+      frameTarget: {
+        framePath: "0",
+        frameOrigin: "https://evil-payments.test",
+        frameUrl: "https://evil-payments.test/widget?secret=hidden",
+      },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    await expect(act(obs.session_id, { kind: "click", target: "text=Pay" })).rejects.toThrow(
+      /blocked by domain-scope/i,
+    );
+    expect(h.locatorClickCalls).toBe(0);
+    expect(h.locatorDisposeCalls).toBe(1);
+  });
+
+  it("types through a frame locator only after the frame domain lock passes", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Promo code",
+      safetySignals: { billingObject: false, accountSetup: false },
+      frameTarget: {
+        framePath: "0",
+        frameOrigin: "https://checkout.example.com",
+        frameUrl: "https://checkout.example.com/widget",
+      },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    await act(obs.session_id, { kind: "type", target: "css=#promo", text: "SAVE10" });
+    expect(h.locatorResolveIntents).toContain("type");
+    expect(h.locatorTypeCalls).toEqual([{ text: "SAVE10", sealed: false }]);
+  });
+
+  it("blocks type and type_secret locators in untrusted frames", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Card number",
+      safetySignals: { billingObject: false, accountSetup: false },
+      frameTarget: {
+        framePath: "0",
+        frameOrigin: "https://evil-payments.test",
+        frameUrl: "https://evil-payments.test/widget",
+      },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    await expect(
+      act(obs.session_id, { kind: "type", target: "css=#card", text: "4111" }),
+    ).rejects.toThrow(/blocked by domain-scope/i);
+    stashSecretSlot(obs.session_id, "card", "4111111111111111");
+    await expect(
+      act(obs.session_id, { kind: "type_secret", target: "css=#card", slot: "card" }),
+    ).rejects.toThrow(/type_secret refused/i);
+    expect(h.locatorTypeCalls).toEqual([]);
+  });
+
+  it("refuses secret locator typing into an opaque sandboxed frame", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Password",
+      safetySignals: { billingObject: false, accountSetup: false },
+      frameTarget: {
+        framePath: "0",
+        frameOrigin: "null",
+        frameUrl: "about:srcdoc",
+        frameOpaque: true,
+      },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    stashSecretSlot(obs.session_id, "login", "s3cr3t");
+    await expect(
+      act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" }),
+    ).rejects.toThrow(/opaque frame/i);
+    expect(h.locatorTypeCalls).toEqual([]);
+  });
+
+  it("seals a same-domain type_secret locator before typing", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Password",
+      safetySignals: { billingObject: false, accountSetup: false },
+      frameTarget: {
+        framePath: "0",
+        frameOrigin: "https://auth.example.com",
+        frameUrl: "https://auth.example.com/login",
+      },
+    };
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/" });
+    stashSecretSlot(obs.session_id, "login", "s3cr3t");
+    await act(obs.session_id, { kind: "type_secret", target: "text=Password", slot: "login" });
+    expect(h.locatorResolveIntents).toContain("type");
+    expect(h.locatorTypeCalls).toEqual([{ text: "s3cr3t", sealed: true }]);
+  });
+
   it("refuses to remember a session that used a locator fallback", async () => {
     h.visibleText = "Product configurator";
     h.locatorResolve = {
@@ -3221,5 +3363,217 @@ describe("withSigninHost (operate_store_login — cover the sign-in page's host)
     expect(withSigninHost(["x.com"], "https://www.x.com/login")).toEqual(["x.com"]);
     expect(withSigninHost(["x.com"], undefined)).toEqual(["x.com"]);
     expect(withSigninHost(["x.com"], "not a url")).toEqual(["x.com"]);
+  });
+});
+
+// operator-frame-support — the frame boundary must stay load-bearing for
+// security: a weak model can reach content inside iframes without reasoning
+// about frames, but an action on a frame element must never skip the SAME
+// domain-scope check a main-frame goto already gets. The page's own eTLD+1
+// (here "example.com", from serviceUrl "https://shop.example.com/cart") is
+// freely reachable via any subdomain (a merchant's own checkout iframe,
+// possibly on a different subdomain than the page); a genuinely unrelated
+// domain is refused exactly like an off-domain goto.
+describe("frame targets — domain-lock (operator-frame-support)", () => {
+  const SAME_DOMAIN_FRAME_URL = "https://payments.example.com/widget";
+  const CROSS_DOMAIN_FRAME_URL = "https://evil-payments.test/widget";
+
+  it("el_table tags a frame element with its own frame_origin (observe surfaces iframe content)", async () => {
+    h.elements = [
+      elem({
+        testId: "ship-standard",
+        labelText: "Standard Shipping",
+        selector: "#ship-standard",
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const rows = parseElementsTable(started.el_table ?? "");
+    const row = rows.find((r) => r.label === "Standard Shipping");
+    expect(row?.frame_origin).toBe("https://payments.example.com");
+  });
+
+  it("main-frame elements are unaffected — no frame_origin column noise (regression)", async () => {
+    h.elements = [elem({ testId: "go", labelText: "Continue", selector: "#go" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const rows = parseElementsTable(started.el_table ?? "");
+    const row = rows.find((r) => r.label === "Continue");
+    expect(row?.frame_origin).toBeUndefined();
+  });
+
+  it("click on a same-registrable-domain iframe element succeeds (the merchant's own checkout widget)", async () => {
+    h.elements = [
+      elem({
+        testId: "ship-standard",
+        labelText: "Standard Shipping",
+        selector: "#ship-standard",
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "click", target: "Standard Shipping" });
+    expect(h.frameClicks).toEqual([`${SAME_DOMAIN_FRAME_URL}|#ship-standard`]);
+    expect(h.clickCalls).toBe(0); // never fell through to the main-frame click
+  });
+
+  it("click on a cross-domain iframe element is refused, exactly like an off-domain goto", async () => {
+    h.elements = [
+      elem({
+        testId: "card-input",
+        labelText: "Enter Card Number",
+        selector: "#card-input",
+        frameUrl: CROSS_DOMAIN_FRAME_URL,
+        frameOrigin: "https://evil-payments.test",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "click", target: "Enter Card Number" }),
+    ).rejects.toThrow(/blocked by domain-scope/i);
+    expect(h.frameClicks).toEqual([]);
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("type into a same-registrable-domain iframe element succeeds", async () => {
+    h.elements = [
+      elem({
+        testId: "promo",
+        labelText: "Promo Code",
+        selector: "#promo",
+        value: "",
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Promo Code", text: "SAVE10" });
+    expect(h.frameTypes).toEqual([
+      { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#promo", text: "SAVE10" },
+    ]);
+    expect(h.typed).toEqual([]); // never fell through to the main-frame type
+  });
+
+  it("type_secret into a cross-origin frame is refused (the one non-negotiable)", async () => {
+    h.elements = [
+      elem({
+        testId: "card-cvv",
+        labelText: "CVV",
+        selector: "#cvv",
+        frameUrl: CROSS_DOMAIN_FRAME_URL,
+        frameOrigin: "https://evil-payments.test",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    stashSecretSlot(started.session_id, "login", "s3cr3t-value");
+    await expect(
+      act(started.session_id, { kind: "type_secret", slot: "login", target: "CVV" }),
+    ).rejects.toThrow(/type_secret refused/i);
+    expect(h.frameTypes).toEqual([]);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("refuses actions and secrets in an opaque frame", async () => {
+    h.elements = [
+      elem({
+        testId: "sandbox-password",
+        labelText: "Sandbox Password",
+        selector: "#password",
+        frameUrl: "about:srcdoc",
+        frameOrigin: "null",
+        frameOpaque: true,
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "click", target: "Sandbox Password" }),
+    ).rejects.toThrow(/blocked by domain-scope/i);
+    stashSecretSlot(started.session_id, "login", "s3cr3t-value");
+    await expect(
+      act(started.session_id, {
+        kind: "type_secret",
+        slot: "login",
+        target: "Sandbox Password",
+      }),
+    ).rejects.toThrow(/opaque frame/i);
+    expect(h.frameClicks).toEqual([]);
+    expect(h.frameTypes).toEqual([]);
+  });
+
+  it("type_secret into a same-registrable-domain frame is allowed", async () => {
+    h.elements = [
+      elem({
+        testId: "login-password",
+        labelText: "Password",
+        selector: "#password",
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    stashSecretSlot(started.session_id, "login", "s3cr3t-value");
+    await act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" });
+    expect(h.frameTypes).toEqual([
+      { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#password", text: "s3cr3t-value" },
+    ]);
+  });
+
+  it("select/upload/oauth_click on a frame target are refused explicitly, not silently mis-targeted", async () => {
+    h.elements = [
+      elem({
+        tag: "select",
+        testId: "ship-method",
+        labelText: "Shipping Method",
+        selector: "#ship-method",
+        selectOptions: [{ value: "std", text: "Standard" }],
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "select", target: "Shipping Method", text: "Standard" }),
+    ).rejects.toThrow(/does not yet support a target inside an <iframe>/i);
+    expect(h.selected).toEqual([]);
+  });
+
+  it("preserves frame scope through recording and re-gates it during replay", async () => {
+    const main = elem({
+      testId: "continue",
+      labelText: "Continue",
+      selector: "#continue",
+    }) as Record<string, unknown>;
+    const framed = elem({
+      testId: "continue",
+      labelText: "Continue",
+      selector: "#continue",
+      frameUrl: CROSS_DOMAIN_FRAME_URL,
+      frameOrigin: "https://evil-payments.test",
+      framePath: "0",
+    }) as Record<string, unknown>;
+    h.elements = [main, framed];
+    const target = recipeTargetFor(framed as never, h.elements as never);
+    expect(target).toMatchObject({
+      css: "#continue",
+      frame_origin: "https://evil-payments.test",
+      frame_path: "0",
+    });
+    expect(captureObserved({ kind: "click", target: "Continue" }, framed as never)).toMatchObject({
+      selector: "#continue",
+      frame_origin: "https://evil-payments.test",
+      frame_path: "0",
+    });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({ trace: [{ action: { kind: "click", target } }] }),
+      {},
+    );
+    expect(result.status).not.toBe("complete");
+    expect(h.frameClicks).toEqual([]);
+    expect(h.clickCalls).toBe(0);
   });
 });

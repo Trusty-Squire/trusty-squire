@@ -23,7 +23,15 @@
 // gate).
 
 import { chromium as baseChromium } from "playwright";
-import type { Browser, BrowserContext, CDPSession, ElementHandle, Locator, Page } from "playwright";
+import type {
+  Browser,
+  BrowserContext,
+  CDPSession,
+  ElementHandle,
+  Frame,
+  Locator,
+  Page,
+} from "playwright";
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
@@ -53,6 +61,23 @@ export interface PageTargetSafetySignals {
   billingObject: boolean;
   accountSetup: boolean;
 }
+
+export interface FrameTarget {
+  framePath: string;
+  frameOrigin: string;
+  frameUrl: string;
+  frameOpaque?: boolean;
+}
+
+export type ResolvedPageTarget =
+  | {
+      ok: true;
+      handle: ElementHandle<Element>;
+      text: string;
+      safetySignals: PageTargetSafetySignals;
+      frameTarget: FrameTarget | null;
+    }
+  | { ok: false; reason: "none" | "ambiguous"; candidates: string[] };
 
 // Whether to use the CDP-hardened launcher (patchright, which runs
 // evaluations in an isolated world and removes the automation tells —
@@ -504,6 +529,14 @@ export interface BrowserControllerOptions {
   // the env proxy. Unset → fall back to the env behavior.
   proxyUrl?: string;
 }
+
+// Hosts of known captcha-challenge iframes (Turnstile, reCAPTCHA, hCaptcha,
+// Arkose/FunCaptcha). Shared between the per-navigation WebGL-spoof reapply
+// (start(), below) and extractInteractiveElements' frame walk, which skips
+// these frames — their content is handled by the dedicated captcha-gate flow,
+// not surfaced as ordinary el_table rows.
+const CAPTCHA_FRAME_HOST_RE =
+  /(hcaptcha\.com|challenges\.cloudflare\.com|google\.com\/recaptcha|recaptcha\.net|arkoselabs\.com|funcaptcha\.com)/i;
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
@@ -1917,8 +1950,6 @@ export class BrowserController {
     // frame.evaluate reaches a cross-origin frame's main world at the driver
     // level (same path that wins the main-frame race), re-applied at
     // navigation-commit before the captcha's scoring JS queries WebGL.
-    const CAPTCHA_FRAME_RE =
-      /(hcaptcha\.com|challenges\.cloudflare\.com|google\.com\/recaptcha|recaptcha\.net|arkoselabs\.com|funcaptcha\.com)/i;
     // String probe (no compiled-fn __name shim needed): the UNMASKED renderer
     // a captcha would read. Logged only under CAPTCHA_TRACE to prove the fix.
     const RENDERER_PROBE = String.raw`(() => { try { const c = document.createElement("canvas"); const gl = c.getContext("webgl") || c.getContext("webgl2"); if (!gl) return "no-gl"; const e = gl.getExtension("WEBGL_debug_renderer_info"); return e ? String(gl.getParameter(e.UNMASKED_RENDERER_WEBGL)) : "no-ext"; } catch (err) { return "err:" + (err && err.message); } })()`;
@@ -1930,7 +1961,7 @@ export class BrowserController {
         reapplyWebglSpoof();
         return;
       }
-      if (!CAPTCHA_FRAME_RE.test(frame.url())) return;
+      if (!CAPTCHA_FRAME_HOST_RE.test(frame.url())) return;
       const cfHost = (() => {
         try {
           return new URL(frame.url()).host;
@@ -2724,15 +2755,15 @@ export class BrowserController {
   }
 
   // Resolve a locator-form operate_act target (`text=…` / `css=…`) DIRECTLY
-  // against the live page, bypassing the extracted-inventory list. This is the
-  // escape hatch for a control the inventory never emitted: a bare click-handler
-  // <div> with no role/label/testid that the SELECTOR walk skips and that the
-  // card scan drops once its MAX_CARDS budget is spent on earlier cursor:pointer
+  // against a live page/frame document, bypassing the extracted-inventory list.
+  // This is the escape hatch for a control the inventory never emitted: a bare
+  // click-handler <div> with no role/label/testid that the SELECTOR walk skips,
+  // or a typeable control missing from the inventory. The card scan can also
+  // drop a control once its MAX_CARDS budget is spent on earlier cursor:pointer
   // divs (Casetify's Add-To-Cart is element #45 of the eligible cards; the cap is
-  // 16). Because there is no ref for such an element, `text=`/`css=` is the only
-  // way the host can click it.
+  // 16). With no ref, `text=`/`css=` is the only host-addressable target.
   //
-  // Resolution rules (kept deliberately strict so the click can't land on the
+  // Resolution rules (kept deliberately strict so the action can't land on the
   // wrong element):
   //   • text mode — matches an element whose rendered text (innerText, so hidden
   //     descendants don't leak) equals (or, if nothing equals, contains) the
@@ -2748,22 +2779,26 @@ export class BrowserController {
   //     with the candidate texts so the host can disambiguate. Exactly 1 returns
   //     a live ElementHandle to the winner. The caller acts through the handle
   //     (never a DOM-visible marker), so a page MutationObserver cannot re-aim
-  //     the click at a decoy between resolution and click, and disposes it after.
-  async resolvePageTarget(
+  //     the action at a decoy between resolution and dispatch, and disposes it
+  //     after.
+  private async resolveTargetInContext(
+    ctx: Page | Frame,
     mode: "text" | "css",
     value: string,
+    intent: "click" | "type",
   ): Promise<
     | {
         ok: true;
         handle: ElementHandle<Element>;
         text: string;
         safetySignals: PageTargetSafetySignals;
+        documentOrigin: string;
       }
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
   > {
     if (!this.page) throw new Error("Browser not started");
-    const resultHandle = await this.page.evaluateHandle(
-      ({ mode, value }) => {
+    const resultHandle = await ctx.evaluateHandle(
+      ({ mode, value, intent }) => {
         const norm = (s: string | null): string =>
           (s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
         // Rendered text, NOT textContent: innerText reflects what the user
@@ -2864,6 +2899,26 @@ export class BrowserController {
         };
         const hasClickAffordance = (el: Element): boolean =>
           isStrong(el) || window.getComputedStyle(el).cursor === "pointer";
+        const hasTypeAffordance = (el: Element): boolean =>
+          (el instanceof HTMLInputElement && el.type !== "hidden" && !el.disabled) ||
+          (el instanceof HTMLTextAreaElement && !el.disabled) ||
+          (el instanceof HTMLElement && el.isContentEditable);
+        const typeLabel = (el: Element): string => {
+          const labels =
+            el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
+              ? Array.from(el.labels ?? []).map((label) => renderedRaw(label))
+              : [];
+          return [
+            ...labels,
+            el.getAttribute("aria-label") ?? "",
+            el.getAttribute("placeholder") ?? "",
+            el.getAttribute("name") ?? "",
+            el.getAttribute("id") ?? "",
+            renderedRaw(el),
+          ]
+            .filter((part) => part.length > 0)
+            .join(" ");
+        };
 
         // Gather candidates across the light DOM and every OPEN shadow root.
         const all: Element[] = [];
@@ -2889,7 +2944,7 @@ export class BrowserController {
 
         let pool: Element[];
         if (mode === "css") {
-          pool = all.filter(isVisible);
+          pool = all.filter((el) => isVisible(el) && (intent === "click" || hasTypeAffordance(el)));
         } else {
           const want = norm(value);
           if (want.length === 0) {
@@ -2899,10 +2954,17 @@ export class BrowserController {
               candidates: [] as string[],
               text: "",
               safetySignals: { billingObject: false, accountSetup: false },
+              documentOrigin: location.origin,
             };
           }
-          const affordable = all.filter((el) => isVisible(el) && hasClickAffordance(el));
-          const exact = affordable.filter((el) => rendered(el) === want);
+          const affordable = all.filter(
+            (el) =>
+              isVisible(el) &&
+              (intent === "click" ? hasClickAffordance(el) : hasTypeAffordance(el)),
+          );
+          const matchText = (el: Element): string =>
+            intent === "click" ? rendered(el) : norm(typeLabel(el));
+          const exact = affordable.filter((el) => matchText(el) === want);
           // Prefer exact-text matches; only fall back to "contains" (with a
           // length guard so a big wrapper doesn't swallow the query) when no
           // element's rendered text equals the query.
@@ -2910,7 +2972,7 @@ export class BrowserController {
             exact.length > 0
               ? exact
               : affordable.filter((el) => {
-                  const t = rendered(el);
+                  const t = matchText(el);
                   return t.includes(want) && t.length <= Math.max(80, want.length + 20);
                 });
         }
@@ -2927,6 +2989,7 @@ export class BrowserController {
             candidates: pool.slice(0, 8).map((el) => renderedRaw(el).slice(0, 60)),
             text: "",
             safetySignals: { billingObject: false, accountSetup: false },
+            documentOrigin: location.origin,
           };
         }
         // Collapse nesting WITHOUT silently merging two genuine controls. A
@@ -2958,15 +3021,17 @@ export class BrowserController {
           text: win !== null ? renderedRaw(win).slice(0, 120) : "",
           safetySignals:
             win !== null ? safetySignalsFor(win) : { billingObject: false, accountSetup: false },
+          documentOrigin: location.origin,
         };
       },
-      { mode, value },
+      { mode, value, intent },
     );
     const meta = await resultHandle.evaluate((r) => ({
       count: r.count,
       candidates: r.candidates,
       text: r.text,
       safetySignals: r.safetySignals,
+      documentOrigin: r.documentOrigin,
     }));
     if (meta.count !== 1) {
       await resultHandle.dispose();
@@ -2989,7 +3054,63 @@ export class BrowserController {
       handle: asElement,
       text: meta.text ?? "",
       safetySignals: meta.safetySignals ?? { billingObject: false, accountSetup: false },
+      documentOrigin: meta.documentOrigin,
     };
+  }
+
+  async resolvePageTarget(
+    mode: "text" | "css",
+    value: string,
+    intent: "click" | "type" = "click",
+  ): Promise<ResolvedPageTarget> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const matches: Array<{
+      handle: ElementHandle<Element>;
+      text: string;
+      safetySignals: PageTargetSafetySignals;
+      frameTarget: FrameTarget | null;
+    }> = [];
+    const candidates: string[] = [];
+    for (const frame of page.frames()) {
+      if (frame.isDetached()) continue;
+      const rawUrl = frame.url();
+      if (frame !== page.mainFrame() && this.frameWithinCaptcha(frame)) continue;
+      const resolved = await this.resolveTargetInContext(frame, mode, value, intent).catch(
+        () => null,
+      );
+      if (resolved === null) continue;
+      if (!resolved.ok) {
+        if (resolved.reason === "ambiguous") candidates.push(...resolved.candidates);
+        continue;
+      }
+      let frameTarget: FrameTarget | null = null;
+      if (frame !== page.mainFrame()) {
+        try {
+          const security = await this.frameSecurity(frame);
+          frameTarget = {
+            framePath: this.framePath(frame),
+            frameOrigin: security.origin,
+            frameUrl: rawUrl,
+            ...(security.opaque ? { frameOpaque: true } : {}),
+          };
+        } catch {
+          await resolved.handle.dispose().catch(() => undefined);
+          continue;
+        }
+      }
+      matches.push({ ...resolved, frameTarget });
+      candidates.push(resolved.text);
+    }
+    if (matches.length !== 1 || candidates.length > 1) {
+      await Promise.all(matches.map((match) => match.handle.dispose().catch(() => undefined)));
+      return {
+        ok: false,
+        reason: candidates.length === 0 ? "none" : "ambiguous",
+        candidates: candidates.slice(0, 8),
+      };
+    }
+    return { ok: true, ...matches[0]! };
   }
 
   private async locatorClickState(
@@ -3055,6 +3176,19 @@ export class BrowserController {
     if (dispatchState === "disabled") {
       throw new Error("locator target is disabled");
     }
+  }
+
+  async typeHandle(handle: ElementHandle<Element>, text: string, sealed = false): Promise<void> {
+    if (sealed) {
+      await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
+    }
+    if (!this.humanize) {
+      await handle.fill(text);
+      return;
+    }
+    await handle.click({ timeout: 8000 }).catch(() => undefined);
+    await handle.fill("").catch(() => undefined);
+    await handle.type(text, { delay: rand(40, 110) });
   }
 
   // Dispatch a DOM .click() in the page context. Some React copy buttons fire
@@ -7852,9 +7986,16 @@ export class BrowserController {
   // selector strings. Selectors prefer #id then [name] — Playwright's
   // CSS engine pierces open shadow roots, so those resolve for
   // shadow-DOM fields too.
-  async extractInteractiveElements(): Promise<InteractiveElement[]> {
-    if (!this.page) throw new Error("Browser not started");
-    const raw = await this.page.evaluate(() => {
+  // The DOM-walk + extraction logic, generalized to run against ANY frame
+  // context (the main page or a child <iframe>'s own Frame) — Playwright's
+  // Frame.evaluate reaches a cross-origin frame's main world at the CDP level,
+  // the same primitive isPayPalHostedCheckout/fillAndSubmitCheckout/
+  // detectThreeDsChallenge already use to read/fill cross-origin PSP fields.
+  // Pulled out of extractInteractiveElements (below) so that method can call
+  // it once for the main frame and once per child frame, tagging each result
+  // with where it came from.
+  private async extractElementsFromContext(ctx: Page | Frame) {
+    return await ctx.evaluate(() => {
       const SELECTOR =
         // rc.26 — added Radix/Headless-UI menu + option items so
         // dropdown contents (Fireworks "Create API Key" → API Key /
@@ -8485,15 +8626,213 @@ export class BrowserController {
           occludedBy: status.occludedBy,
         });
       }
-      return { out, clusterMeta };
+      return { out, clusterMeta, documentOrigin: location.origin };
     });
-    // T38 — assign card-radio groups in Node (pure logic, unit-tested).
-    const groups = assignCardRadioGroups(raw.clusterMeta);
-    return raw.out.map((e, i) => ({
+  }
+
+  private framePath(frame: Frame): string {
+    const indexes: number[] = [];
+    let current: Frame | null = frame;
+    while (current !== null) {
+      const parent = current.parentFrame();
+      if (parent === null) break;
+      const index = parent.childFrames().indexOf(current);
+      if (index < 0) return "";
+      indexes.unshift(index);
+      current = parent;
+    }
+    return indexes.join("/");
+  }
+
+  private frameWithinCaptcha(frame: Frame): boolean {
+    let current: Frame | null = frame;
+    while (current !== null) {
+      if (CAPTCHA_FRAME_HOST_RE.test(current.url())) return true;
+      current = current.parentFrame();
+    }
+    return false;
+  }
+
+  private frameSecurity(frame: Frame): { origin: string; opaque: boolean } {
+    const url = frame.url();
+    if (url === "" || url === "about:blank" || url === "about:srcdoc") {
+      return { origin: "null", opaque: true };
+    }
+    const origin = new URL(url).origin;
+    return origin === "null" ? { origin: "null", opaque: true } : { origin, opaque: false };
+  }
+
+  // Resolve a previously-tagged frame path back to its live Playwright Frame —
+  // used by the frame-aware act helpers below (clickInFrame/typeInFrame/
+  // clickViaJsInFrame) to act on an element extractInteractiveElements found
+  // inside a child <iframe>. Returns null when the frame has since navigated
+  // or detached (a fresh observe/extract picks up whatever replaced it); the
+  // caller surfaces that as a normal "target not found" error, never a
+  // silent wrong-frame action.
+  private resolveFrame(target: FrameTarget): Frame | null {
+    if (!this.page) return null;
+    let frame = this.page.mainFrame();
+    for (const part of target.framePath.split("/")) {
+      if (!/^\d+$/.test(part)) return null;
+      const child = frame.childFrames()[Number.parseInt(part, 10)];
+      if (child === undefined) return null;
+      frame = child;
+    }
+    if (frame.isDetached()) return null;
+    return frame;
+  }
+
+  private async resolveFrameElement(
+    target: FrameTarget,
+    selector: string,
+    index = 0,
+  ): Promise<ElementHandle<Element> | null> {
+    const frame = this.resolveFrame(target);
+    if (frame === null || this.frameWithinCaptcha(frame)) return null;
+    const handle = await frame
+      .locator(selector)
+      .nth(Math.max(0, Math.floor(index)))
+      .elementHandle({ timeout: 8000 })
+      .catch(() => null);
+    if (handle === null) return null;
+    try {
+      const security = await this.frameSecurity(frame);
+      await handle.evaluate((element) => element.isConnected);
+      const expectedOpaque = target.frameOpaque === true || target.frameOrigin === "null";
+      const matches = expectedOpaque
+        ? security.opaque
+        : !security.opaque && security.origin === target.frameOrigin;
+      if (!matches) {
+        await handle.dispose().catch(() => undefined);
+        return null;
+      }
+      return handle;
+    } catch {
+      await handle.dispose().catch(() => undefined);
+      return null;
+    }
+  }
+
+  private frameLabel(target: FrameTarget): string {
+    return target.frameOrigin;
+  }
+
+  // Frame-scoped click. Deliberately simpler than click() above (no radio/
+  // checkbox/aria-toggle special-casing) — it's the escape hatch for a
+  // control that lives inside an <iframe>, mirroring how resolvePageTarget is
+  // the escape hatch for a control missing from the main-frame inventory.
+  // Plain Playwright locator actions cover the money-path case this exists
+  // for (a merchant's own same-domain checkout options rendered in an
+  // iframe), the same primitives fillAndSubmitCheckout already relies on for
+  // cross-origin PSP fields.
+  async clickInFrame(target: FrameTarget, selector: string): Promise<void> {
+    const handle = await this.resolveFrameElement(target, selector);
+    if (handle === null) {
+      throw new Error(
+        `click: the target's frame is no longer present (${this.frameLabel(target)})`,
+      );
+    }
+    try {
+      await handle.click({ timeout: 8000 });
+    } finally {
+      await handle.dispose().catch(() => undefined);
+    }
+  }
+
+  async clickViaJsInFrame(target: FrameTarget, selector: string, index = 0): Promise<void> {
+    const handle = await this.resolveFrameElement(target, selector, index);
+    if (handle === null) {
+      throw new Error(
+        `js_click: the target's frame is no longer present (${this.frameLabel(target)})`,
+      );
+    }
+    try {
+      await handle.evaluate((el) => (el as HTMLElement).click());
+    } finally {
+      await handle.dispose().catch(() => undefined);
+    }
+  }
+
+  // Frame-scoped type/fill, for type and (guarded, see provision-session.ts)
+  // type_secret targets that resolve into a frame. Same humanized-vs-fast
+  // split as type() above, without the multi-input-OTP auto-advance nuance —
+  // out of scope for the checkout-option case this exists for.
+  async typeInFrame(target: FrameTarget, selector: string, text: string): Promise<void> {
+    const handle = await this.resolveFrameElement(target, selector);
+    if (handle === null) {
+      throw new Error(`type: the target's frame is no longer present (${this.frameLabel(target)})`);
+    }
+    try {
+      await handle.waitForElementState("visible", { timeout: 10000 });
+      if (!this.humanize) {
+        await handle.fill(text);
+        return;
+      }
+      await handle.click({ timeout: 8000 }).catch(() => undefined);
+      await handle.fill("").catch(() => undefined);
+      await handle.type(text, { delay: rand(40, 110) });
+    } finally {
+      await handle.dispose().catch(() => undefined);
+    }
+  }
+
+  async extractInteractiveElements(): Promise<InteractiveElement[]> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const mainRaw = await this.extractElementsFromContext(page);
+    const mainGroups = assignCardRadioGroups(mainRaw.clusterMeta);
+    const mainElements = mainRaw.out.map((e, i) => ({
       ...e,
-      index: i,
-      cardRadioGroup: groups[i] ?? null,
+      cardRadioGroup: mainGroups[i] ?? null,
+      frameOrigin: null,
+      frameUrl: null,
+      framePath: null,
     }));
+
+    // Cross-frame support — surface elements inside child <iframe>s (same- AND
+    // cross-origin), each tagged with the frame's own origin/url so a caller
+    // can apply domain-lock/secret-fill guards against the ELEMENT's real
+    // origin, never the top page's (see frameTargetAllowed in
+    // provision-session.ts — the load-bearing reason this tag exists at
+    // all). Nothing is flattened away: every frame element keeps its origin.
+    // page.frames() is already flat (it includes nested frames, not just
+    // direct children) — the same primitive isPayPalHostedCheckout/
+    // fillAndSubmitCheckout/detectThreeDsChallenge use to reach cross-origin
+    // frame content.
+    const framedElements: Array<Omit<InteractiveElement, "index">> = [];
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame() || frame.isDetached()) continue;
+      const frameUrl = frame.url();
+      // Captcha challenge iframes are handled by the dedicated captcha-gate
+      // flow, not by ordinary ref-based clicking — surfacing their internal
+      // DOM as el_table rows would invite the planner to poke at the
+      // challenge instead of going through that flow. Skip them; nothing
+      // else about captcha handling changes.
+      if (this.frameWithinCaptcha(frame)) continue;
+      try {
+        const raw = await this.extractElementsFromContext(frame);
+        const security = await this.frameSecurity(frame);
+        const frameOrigin = security.origin;
+        const groups = assignCardRadioGroups(raw.clusterMeta);
+        for (const [i, e] of raw.out.entries()) {
+          framedElements.push({
+            ...e,
+            cardRadioGroup: groups[i] ?? null,
+            frameOrigin,
+            frameUrl,
+            framePath: this.framePath(frame),
+            ...(security.opaque ? { frameOpaque: true } : {}),
+          });
+        }
+      } catch {
+        // Cross-origin frame mid-navigation, torn down, or otherwise
+        // unreachable this instant — best-effort; the next observe retries.
+      }
+    }
+
+    // T38 index is assigned ONCE, after merging, so it stays a stable,
+    // collision-free ordinal across the whole combined set.
+    return [...mainElements, ...framedElements].map((e, i) => ({ ...e, index: i }));
   }
 
   // replay-per-leg-signature — the checkout-leg shape signature (see
@@ -10038,6 +10377,20 @@ export interface InteractiveElement {
   // know exactly one card needs to be picked and "Continue" is the
   // expected next step. Null/absent when not part of a group.
   cardRadioGroup?: { id: number; position: number; total: number } | null;
+  // Frame support — the ORIGIN (scheme://host[:port]) and full URL of the
+  // <iframe> this element was extracted from, when it lives inside a child
+  // frame (same- or cross-origin). null/undefined for an ordinary main-frame
+  // element — every pre-existing element keeps this shape unchanged. This is
+  // the load-bearing security signal for frame targets: a guard checks THIS
+  // origin, never the top page's, so a rogue or third-party iframe embedded
+  // on an otherwise in-scope page can't be acted on (or typed into) just
+  // because the outer page passed its own domain check. See
+  // frameTargetAllowed / assertSecretFrameTargetAllowed in
+  // provision-session.ts.
+  frameOrigin?: string | null;
+  frameUrl?: string | null;
+  framePath?: string | null;
+  frameOpaque?: boolean;
 }
 
 // T38 — pure clustering logic. Identifies card-radio groups from a

@@ -435,6 +435,8 @@ export function bindRecipeTarget(
       : {}),
     // field_role is a locale-stable token (not email-templated); pass through.
     ...(target.field_role !== undefined ? { field_role: target.field_role } : {}),
+    ...(target.frame_origin !== undefined ? { frame_origin: target.frame_origin } : {}),
+    ...(target.frame_path !== undefined ? { frame_path: target.frame_path } : {}),
   };
 }
 
@@ -533,6 +535,8 @@ export interface RecipeTargetElement {
   type?: string | null;
   /** Optional site-authored stable role attribute (data-role / data-field-role). */
   dataRole?: string | null;
+  frameOrigin?: string | null;
+  framePath?: string | null;
 }
 
 export type RecipeTargetResolution<T extends RecipeTargetElement> = {
@@ -631,31 +635,40 @@ export function resolveRecipeTarget<T extends RecipeTargetElement>(
   elements: readonly T[],
   target: RecipeTarget,
 ): RecipeTargetResolution<T> | null {
+  const scopedElements = elements.filter(
+    (candidate) =>
+      (target.frame_origin === undefined || candidate.frameOrigin === target.frame_origin) &&
+      (target.frame_path === undefined || candidate.framePath === target.frame_path),
+  );
   const first = (matches: T[]): T | undefined => {
     if (matches.length === 1) return matches[0];
     if (target.near_text_hint === undefined || matches.length === 0) return undefined;
-    const narrowed = filterByNearTextHint(matches, target.near_text_hint, elements);
+    const narrowed = filterByNearTextHint(matches, target.near_text_hint, scopedElements);
     return narrowed.length === 1 ? narrowed[0] : undefined;
   };
   if (target.dom_hint?.testid !== undefined) {
     const element = first(
-      elements.filter((candidate) => candidate.testId === target.dom_hint?.testid),
+      scopedElements.filter((candidate) => candidate.testId === target.dom_hint?.testid),
     );
     if (element !== undefined) return { element, via: "testid" };
   }
   if (target.dom_hint?.id !== undefined) {
-    const element = first(elements.filter((candidate) => candidate.id === target.dom_hint?.id));
+    const element = first(
+      scopedElements.filter((candidate) => candidate.id === target.dom_hint?.id),
+    );
     if (element !== undefined) return { element, via: "id" };
   }
   if (target.dom_hint?.name !== undefined) {
-    const element = first(elements.filter((candidate) => candidate.name === target.dom_hint?.name));
+    const element = first(
+      scopedElements.filter((candidate) => candidate.name === target.dom_hint?.name),
+    );
     if (element !== undefined) return { element, via: "name" };
   }
   if (target.role_hint !== undefined && target.accessible_name !== undefined) {
     const wantedRole = targetNorm(target.role_hint);
     const wantedName = targetNorm(target.accessible_name);
     const element = first(
-      elements.filter(
+      scopedElements.filter(
         (candidate) =>
           semanticRole(candidate) === wantedRole && accessibleName(candidate) === wantedName,
       ),
@@ -672,7 +685,7 @@ export function resolveRecipeTarget<T extends RecipeTargetElement>(
     };
     const wantedHref = hrefPath(target.href_hint);
     const element = first(
-      elements.filter(
+      scopedElements.filter(
         (candidate) =>
           candidate.href !== null &&
           candidate.href !== undefined &&
@@ -682,12 +695,14 @@ export function resolveRecipeTarget<T extends RecipeTargetElement>(
     if (element !== undefined) return { element, via: "href" };
   }
   if (target.css !== undefined) {
-    const element = first(elements.filter((candidate) => candidate.selector === target.css));
+    const element = first(scopedElements.filter((candidate) => candidate.selector === target.css));
     if (element !== undefined) return { element, via: "css" };
   }
   if (target.visible_text !== undefined) {
     const wanted = targetNorm(target.visible_text);
-    const matches = elements.filter((candidate) => targetNorm(candidate.visibleText) === wanted);
+    const matches = scopedElements.filter(
+      (candidate) => targetNorm(candidate.visibleText) === wanted,
+    );
     if (matches.length === 1) return { element: matches[0] as T, via: "visible-text" };
   }
   return null;
@@ -715,6 +730,9 @@ export function hasRecipeTargetCandidate<T extends RecipeTargetElement>(
   const wantedAccessibleName = targetNorm(target.accessible_name);
   const wantedVisibleText = targetNorm(target.visible_text);
   return elements.some((candidate) => {
+    if (target.frame_origin !== undefined && candidate.frameOrigin !== target.frame_origin)
+      return false;
+    if (target.frame_path !== undefined && candidate.framePath !== target.frame_path) return false;
     if (target.dom_hint?.testid !== undefined && candidate.testId === target.dom_hint.testid) {
       return true;
     }
@@ -741,6 +759,12 @@ export function resolveRecipeRepairTarget<T extends RecipeTargetElement>(
   target: RecipeTarget,
 ): T | null {
   let candidates = [...elements];
+  if (target.frame_origin !== undefined) {
+    candidates = candidates.filter((candidate) => candidate.frameOrigin === target.frame_origin);
+  }
+  if (target.frame_path !== undefined) {
+    candidates = candidates.filter((candidate) => candidate.framePath === target.frame_path);
+  }
   let constrained = false;
   if (target.dom_hint?.name !== undefined) {
     candidates = candidates.filter((candidate) => candidate.name === target.dom_hint?.name);

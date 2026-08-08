@@ -19,7 +19,7 @@ user's machine; an API on Fly.io handles persistence and orchestration.
 and `operate_finish_task`/`operate_finish`; Trusty Squire supplies the scoped
 browser, DOM/screenshot observations, vault extraction, and registry hints.
 Account-bound, vault-backed. Provisioning is free during beta (no signup quota).
-Closed-loop with the skill registry: successful runs publish a Skill that
+Closed-loop with the skill registry: eligible successful runs publish a Skill that
 subsequent provisions replay in ~30s instead of the ~6min a from-scratch
 host-driven run takes.
 
@@ -56,7 +56,7 @@ nothing else down.
 
 **How it's driven + monitored:** every host-driven provision capture
 feeds **auto-promote on real provisions** (`provision_*` captures), which
-publishes a skill on a virgin success. The daily **verify pass**
+attempts to publish an eligible skill on a virgin success. The daily **verify pass**
 (`ts-housekeeper`, now its own repo
 `Trusty-Squire/trusty-squire-housekeeper`) keeps the registry honest —
 promote skills that still work, demote ones that don't — so replay stays
@@ -120,6 +120,11 @@ silent failures.
     the host agent drives via `operate_*`.
   - DOM/screenshot observation + vault-backed credential extraction +
     operator-recipe replay (`operate_use`) the host agent composes per step.
+  - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
+    controls now retain their frame origin through observation, action, and
+    operator-recipe replay. The user-facing contract lives in README's MCP-tool
+    reference; `frameTargetAllowed`/`assertSecretFrameTargetAllowed` in
+    `provision-session.ts` own the action-time security boundary.
 - **Single-tier install flow.** `npx @trusty-squire/mcp connect` does
   three things in one command:
   1. Issues a machine token (bot-internal credential for the operator

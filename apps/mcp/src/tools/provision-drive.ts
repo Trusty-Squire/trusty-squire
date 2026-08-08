@@ -347,7 +347,9 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
     "Re-read the current page of a provisioning session. DEFAULT is a COMPACT " +
     "payload whose elements ride in `el_table` (a tab-delimited table; each row's " +
     "stable `ref` is the operate_act.target) with compact label/role/href/value_len " +
-    "columns; path is retained only in snapshot_file, " +
+    "columns and `frame_origin` on child-frame controls; ordinary same- and " +
+    "cross-origin frames are included, while known captcha challenge frames stay " +
+    "behind the dedicated captcha flow. Path is retained only in snapshot_file, " +
     "and redundant screen/accessibility trees are omitted. " +
     OBSERVE_DELTA_CONTRACT +
     "Pass " +
@@ -532,20 +534,24 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "Take one action in a provisioning session, then return the resulting " +
     "observation. kinds: click (target=element ref, preferably an el_table row's ref), type (target + text), " +
     "" +
-    "TARGET FALLBACK (clicking only) — when a control you can SEE (in the " +
+    "TARGET FALLBACK (clicking or typing only) — when a control you can SEE (in the " +
     "observation text or screenshot) has NO ref in el_table (a bare click-handler " +
     '<div> with no role/label, e.g. a SPA "Add To Cart"), pass target as a locator ' +
-    'instead of a ref: `text="Add To Cart"` (a CLICKABLE element whose visible ' +
-    "text matches, case-insensitive, hidden descendants ignored, open shadow roots " +
-    "pierced) or `css=<selector>` (a raw CSS selector). Only for click / js_click " +
-    "(a form field to type into has a ref — use it). Resolved against the LIVE " +
-    "page, not el_table, so it reaches controls the inventory never emitted. It " +
+    'instead of a ref: `text="Add To Cart"` (a matching clickable or typeable ' +
+    "element, case-insensitive, hidden descendants ignored, open shadow roots " +
+    "pierced) or `css=<selector>` (a raw CSS selector). Only for click / js_click / " +
+    "type / type_secret. Resolved against the LIVE main document and ordinary " +
+    "child frames, not el_table, so it reaches controls the inventory never emitted. It " +
     "refuses an ambiguous match (returns the candidate texts — narrow with an " +
     "exact text= or a css= selector). `click` is actionability-checked and throws " +
     "if an overlay intercepts; dismiss the overlay or deliberately use `js_click`, " +
     "the explicit direct DOM dispatch that fires through a transparent overlay. " +
     "Prefer a real ref when one exists; reach for " +
     "text=/css= only when none does. " +
+    "Observed child-frame refs and locator matches retain their frame origin. " +
+    "Same-registrable-domain frames are reachable; other frame actions must pass " +
+    "the goto/allow_host domain scope, opaque frames are refused, and type_secret " +
+    "never targets a cross-domain frame. select/upload/oauth_click refuse frame refs. " +
     "select (target + text — pick an option in a native <select> or custom listbox " +
     "by its visible text, e.g. a country/state dropdown that `type` can't drive), " +
     "set_phone_country (country — set the dial-code country on a phone field's " +

@@ -81,6 +81,12 @@ export const RecipeTargetSchema = z
     // …) over visible labels so EN→JP cross-locale reuse still works. Format
     // is produced by localeStableFieldRole(); absence ⇒ no confident fill.
     field_role: z.string().max(100).optional(),
+    frame_origin: z.string().url().max(2000).optional(),
+    frame_path: z
+      .string()
+      .regex(/^\d+(?:\/\d+)*$/)
+      .max(200)
+      .optional(),
   })
   .strict();
 export type RecipeTarget = z.infer<typeof RecipeTargetSchema>;
