@@ -131,7 +131,8 @@ export interface PromoteRejection {
     // The captured entry URL is a post-signup/session transaction page, not a
     // stable replay entry. Publishing it would strand the verifier on a stale
     // dashboard/auth-confirmation URL and burn robot identities.
-    | "unstable_signup_url";
+    | "unstable_signup_url"
+    | "frame_scoped_capture";
   message: string;
   offending_round?: number;
   offending_step?: number;
@@ -163,6 +164,21 @@ export function promoteToSkill(input: PromoteInput): PromoteResult {
         ? { offending_round: verification.offending_round }
         : {}),
       ...(verification.detail !== undefined ? { detail: verification.detail } : {}),
+      synthesizer_version: SYNTHESIZER_VERSION,
+    };
+  }
+
+  const frameScopedRound = verification.rounds.findIndex(
+    (round) => "frame_origin" in round.observed || "frame_path" in round.observed,
+  );
+  if (frameScopedRound >= 0) {
+    return {
+      kind: "rejected",
+      stage: "synthesis",
+      error_kind: "frame_scoped_capture",
+      message:
+        "Frame-scoped captures cannot be promoted because skill replay has no guarded frame consumer.",
+      offending_round: frameScopedRound,
       synthesizer_version: SYNTHESIZER_VERSION,
     };
   }
@@ -598,7 +614,23 @@ function synthesizeSteps(rounds: OnboardingCaseFile[], runId: string): StepsOk |
   // (password confirmation), the two inputs have DIFFERENT
   // label_hints ("Password" vs "Confirm password"), so this pass
   // doesn't fire.
-  const trimmed = stripRetrySequences(steps);
+  const retryFrameScopes = new Map<number, CapturedFrameScope>(
+    rounds.map((round, index) => {
+      const observed = round.observed;
+      return [
+        index,
+        {
+          ...("frame_origin" in observed && observed.frame_origin !== undefined
+            ? { frame_origin: observed.frame_origin }
+            : {}),
+          ...("frame_path" in observed && observed.frame_path !== undefined
+            ? { frame_path: observed.frame_path }
+            : {}),
+        },
+      ] as const;
+    }),
+  );
+  const trimmed = stripRetrySequences(steps, retryFrameScopes);
   // The inline dedup in the build loop only compares each new step to the
   // last-pushed one, so it can't see duplicates that stripRetrySequences
   // makes newly-adjacent by splicing out a failed branch between them — nor
@@ -685,7 +717,14 @@ function collapseRedundantExtracts(steps: SkillStep[]): SkillStep[] {
   return out;
 }
 
-function stripRetrySequences(steps: SkillStep[]): SkillStep[] {
+export function stripRetrySequences(
+  steps: SkillStep[],
+  frameScopes: ReadonlyMap<number, CapturedFrameScope> = new Map(),
+): SkillStep[] {
+  const frameScopeKey = (step: SkillStep): string => {
+    const scope = frameScopes.get(step.provenance.round_index);
+    return `${scope?.frame_origin ?? ""}|${scope?.frame_path ?? ""}`;
+  };
   // Identity key for retry detection: kind + load-bearing target
   // fields. Two steps with the same identity refer to the same input
   // — the later one supersedes the earlier.
@@ -696,7 +735,7 @@ function stripRetrySequences(steps: SkillStep[]): SkillStep[] {
   // multi-page wizard would each have text_match="Next").
   const identityKey = (s: SkillStep): string | null => {
     if (s.kind === "fill" || s.kind === "select") {
-      return `${s.kind}|${s.label_hint}|${s.near_text_hint ?? ""}`;
+      return `${s.kind}|${s.label_hint}|${s.near_text_hint ?? ""}|${frameScopeKey(s)}`;
     }
     return null;
   };
@@ -717,7 +756,7 @@ function stripRetrySequences(steps: SkillStep[]): SkillStep[] {
   }
   const clickKey = (s: SkillStep): string | null => {
     if (s.kind !== "click") return null;
-    return `${s.text_match}|${s.role_hint ?? ""}|${s.href_hint ?? ""}`;
+    return `${s.text_match}|${s.role_hint ?? ""}|${s.href_hint ?? ""}|${frameScopeKey(s)}`;
   };
   for (let i = 0; i < out.length; i += 1) {
     const curKey = clickKey(out[i]!);
@@ -796,14 +835,6 @@ function capturedElement(
   return captureInventory(inventory, scope).find((element) => element.selector === selector);
 }
 
-function promotedFrameScope(observed: PostVerifyStep): {
-  frame_scope?: { origin: string; path: string };
-} {
-  if (!("frame_origin" in observed) || !("frame_path" in observed)) return {};
-  if (observed.frame_origin === undefined || observed.frame_path === undefined) return {};
-  return { frame_scope: { origin: observed.frame_origin, path: observed.frame_path } };
-}
-
 // True when a captured `fill` is an email-verification CODE entry: the
 // value is a short numeric code AND the planner's reason describes a
 // verification/OTP step. Both signals are required — a 4-8 digit value
@@ -847,7 +878,6 @@ function translateStep(
   roundIndex: number,
   roundHtml: string,
 ): { kind: "ok"; step: SkillStep | null; steps?: SkillStep[] } | PromoteRejection {
-  const frameScope = promotedFrameScope(observed);
   switch (observed.kind) {
     case "done":
     case "wait":
@@ -887,7 +917,6 @@ function translateStep(
             provider: oauthProvider,
             text_match: hintResult.hint,
             ...(available.length > 1 ? { available } : {}),
-            ...frameScope,
             provenance,
           },
         };
@@ -904,7 +933,6 @@ function translateStep(
             : {}),
           ...(hintResult.href_hint !== undefined ? { href_hint: hintResult.href_hint } : {}),
           ...(hintResult.dom_hint !== undefined ? { dom_hint: hintResult.dom_hint } : {}),
-          ...frameScope,
           provenance,
         },
       };
@@ -926,7 +954,6 @@ function translateStep(
           step: {
             kind: "await_email_code",
             ...(otpHint.kind === "ok" ? { label_hint: otpHint.hint } : {}),
-            ...frameScope,
             provenance,
           },
         };
@@ -985,7 +1012,6 @@ function translateStep(
             ? { near_text_hint: hintResult.near_text_hint }
             : {}),
           value_template: valueTemplate,
-          ...frameScope,
           provenance,
         },
       };
@@ -1021,7 +1047,6 @@ function translateStep(
             ? { near_text_hint: hintResult.near_text_hint }
             : {}),
           option_text: observed.option_text,
-          ...frameScope,
           provenance,
         },
       };
@@ -1045,7 +1070,6 @@ function translateStep(
             : {}),
           ...(hintResult.href_hint !== undefined ? { href_hint: hintResult.href_hint } : {}),
           ...(hintResult.dom_hint !== undefined ? { dom_hint: hintResult.dom_hint } : {}),
-          ...frameScope,
           provenance,
         },
       };

@@ -75,16 +75,6 @@ const ProvenanceSchema = z
 
 export type SkillStepProvenance = z.infer<typeof ProvenanceSchema>;
 
-const FrameScopeSchema = z
-  .object({
-    origin: z.string().url().max(2000),
-    path: z
-      .string()
-      .regex(/^\d+(?:\/\d+)*$/)
-      .max(200),
-  })
-  .strict();
-
 const NavigateStepSchema = z
   .object({
     kind: z.literal("navigate"),
@@ -130,7 +120,6 @@ const ClickOAuthButtonStepSchema = z
           "here that has a live session, rather than dead-ending on needs_login. " +
           "Optional; absent means only `provider` is known (older skills).",
       ),
-    frame_scope: FrameScopeSchema.optional(),
     provenance: ProvenanceSchema,
   })
   .strict();
@@ -221,7 +210,6 @@ const ClickStepSchema = z
           "(authored to survive refactors + copy changes). Preferred over " +
           "text_match when it uniquely matches.",
       ),
-    frame_scope: FrameScopeSchema.optional(),
     provenance: ProvenanceSchema,
   })
   .strict();
@@ -267,7 +255,6 @@ const FillStepSchema = z
           "templates: ${TOKEN_NAME}, ${USER_DISPLAY_NAME}, " +
           "${EMAIL_ALIAS}, ${PROJECT_NAME}.",
       ),
-    frame_scope: FrameScopeSchema.optional(),
     provenance: ProvenanceSchema,
   })
   .strict();
@@ -275,7 +262,10 @@ const FillStepSchema = z
 const SelectStepSchema = z
   .object({
     kind: z.literal("select"),
-    label_hint: z.string().min(1).describe("Same resolution rules as `fill`."),
+    label_hint: z
+      .string()
+      .min(1)
+      .describe("Same resolution rules as `fill`."),
     // Same rationale as FillStepSchema.near_text_hint — see above.
     // Sentry's per-row scope dropdowns are the canonical case: seven
     // rows, every row's select labeled "Permission", every row needs
@@ -301,7 +291,6 @@ const SelectStepSchema = z
           "already handles native <select>, Radix, Headless UI, and " +
           "custom React comboboxes.",
       ),
-    frame_scope: FrameScopeSchema.optional(),
     provenance: ProvenanceSchema,
   })
   .strict();
@@ -413,7 +402,9 @@ const ExtractViaRegexNamedStepSchema = z
     produces: z
       .string()
       .regex(/^[a-z][a-z0-9_]*$/, "must be lowercase_snake_case")
-      .describe("References an entry in the parent Skill's credentials[].name."),
+      .describe(
+        "References an entry in the parent Skill's credentials[].name.",
+      ),
     provenance: ProvenanceSchema,
   })
   .strict();
@@ -443,7 +434,9 @@ const ExtractLabeledStepSchema = z
     produces: z
       .string()
       .regex(/^[a-z][a-z0-9_]*$/, "must be lowercase_snake_case")
-      .describe("References an entry in the parent Skill's credentials[].name."),
+      .describe(
+        "References an entry in the parent Skill's credentials[].name.",
+      ),
     provenance: ProvenanceSchema,
   })
   .strict();
@@ -471,7 +464,6 @@ const AwaitEmailCodeStepSchema = z
           "code-shaped input near verification copy). Present only when the " +
           "captured field carried a stable label.",
       ),
-    frame_scope: FrameScopeSchema.optional(),
     provenance: ProvenanceSchema,
   })
   .strict();
@@ -605,7 +597,11 @@ export const SkillCredentialSpecSchema = z
       ),
     post_extract_validator: z
       .object({
-        min_length: z.number().int().min(1).describe("Minimum acceptable credential length."),
+        min_length: z
+          .number()
+          .int()
+          .min(1)
+          .describe("Minimum acceptable credential length."),
         max_length: z
           .number()
           .int()
@@ -871,7 +867,8 @@ export const SkillSchema = z
           .max(10_000)
           .default(3000)
           .describe(
-            "Network timeout — bounded so a slow service can't gate " + "replay indefinitely.",
+            "Network timeout — bounded so a slow service can't gate " +
+              "replay indefinitely.",
           ),
       })
       .optional()
@@ -989,7 +986,11 @@ export const SkillSchema = z
       .int()
       .min(0)
       .describe("Lifetime count of successful end-to-end replays."),
-    replays_failed: z.number().int().min(0).describe("Lifetime count of failed replays."),
+    replays_failed: z
+      .number()
+      .int()
+      .min(0)
+      .describe("Lifetime count of failed replays."),
     consecutive_failures: z
       .number()
       .int()
@@ -1001,7 +1002,10 @@ export const SkillSchema = z
       ),
 
     // Timestamps
-    created_at: z.string().datetime().describe("ISO-8601 UTC timestamp of first publish."),
+    created_at: z
+      .string()
+      .datetime()
+      .describe("ISO-8601 UTC timestamp of first publish."),
     last_replayed_at: z
       .string()
       .datetime()

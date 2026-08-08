@@ -148,7 +148,7 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
     }
   }, 30000);
 
-  it("surfaces a JavaScript-populated about:blank frame with its parent origin", async () => {
+  it("surfaces an unconfirmed JavaScript-populated about:blank frame as opaque", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
       await page.evaluate(() => {
@@ -160,14 +160,15 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       const els = await ctrl.extractInteractiveElements();
       const blank = els.find((element) => element.testId === "blank-button");
       expect(blank?.frameUrl).toBe("about:blank");
-      expect(blank?.frameOrigin).toBe(`http://127.0.0.1:${port}`);
+      expect(blank?.frameOrigin).toBe("null");
+      expect(blank?.frameOpaque).toBe(true);
       expect(blank?.framePath).toBe("0");
     } finally {
       await page.close();
     }
   }, 30000);
 
-  it("surfaces a sandboxed srcdoc frame as opaque instead of inheriting the parent origin", async () => {
+  it("keeps a sandboxed srcdoc document opaque after its sandbox attribute is removed", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
       await page.setContent(
@@ -176,6 +177,7 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
         ),
       );
       await page.waitForTimeout(100);
+      await page.locator("iframe").evaluate((frame) => frame.removeAttribute("sandbox"));
       const els = await ctrl.extractInteractiveElements();
       const opaque = els.find((element) => element.testId === "opaque-button");
       expect(opaque?.frameOrigin).toBe("null");

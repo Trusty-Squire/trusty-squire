@@ -24,6 +24,7 @@ import {
   stableSignupEntryUrl,
   isIdentityProviderUrl,
   isUnstableSignupEntryUrl,
+  stripRetrySequences,
 } from "../promote-to-skill.js";
 import type { InteractiveElement } from "../browser.js";
 
@@ -532,7 +533,7 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     expect(result.skill.steps[2]!.kind).toBe("extract_via_copy_button");
   });
 
-  it("preserves a captured frame boundary on the promoted target step", () => {
+  it("refuses promotion when any captured step is frame-scoped", () => {
     const service = uniqueService();
     const rounds = railwayRounds(service);
     const frameScope = {
@@ -547,13 +548,11 @@ describe("promoteToSkill — Railway-style 3-round capture", () => {
     });
     const { dir, runId } = setupCaptures(rounds);
     const result = promoteToSkill({ dir, service, run_id: runId });
-    if (result.kind !== "ok") throw new Error(`expected ok: ${JSON.stringify(result)}`);
-    const fill = result.skill.steps.find((step) => step.kind === "fill");
-    expect(fill).toMatchObject({
-      frame_scope: { origin: frameScope.frameOrigin, path: frameScope.framePath },
-    });
-    expect(parseSkill(result.skill).steps.find((step) => step.kind === "fill")).toMatchObject({
-      frame_scope: { origin: frameScope.frameOrigin, path: frameScope.framePath },
+    expect(result).toMatchObject({
+      kind: "rejected",
+      stage: "synthesis",
+      error_kind: "frame_scoped_capture",
+      offending_round: 1,
     });
   });
 
@@ -2641,6 +2640,34 @@ describe("promoteToSkill — stable-attribute fallback (0.8.3-rc.1, bug #4)", ()
 });
 
 describe("promoteToSkill — retry-sequence stripping (0.8.3-rc.1)", () => {
+  it("keeps same-label actions in distinct frame scopes", () => {
+    const provenance = (round_index: number) => ({ run_id: "frame-run", round_index });
+    const steps: Skill["steps"] = [
+      {
+        kind: "fill",
+        label_hint: "Name",
+        value_template: "first",
+        provenance: provenance(0),
+      },
+      { kind: "click", text_match: "Continue", provenance: provenance(1) },
+      {
+        kind: "fill",
+        label_hint: "Name",
+        value_template: "second",
+        provenance: provenance(2),
+      },
+      { kind: "click", text_match: "Continue", provenance: provenance(3) },
+    ];
+    const frameScopes = new Map([
+      [0, { frame_origin: "https://one.example", frame_path: "0" }],
+      [1, { frame_origin: "https://one.example", frame_path: "0" }],
+      [2, { frame_origin: "https://two.example", frame_path: "1" }],
+      [3, { frame_origin: "https://two.example", frame_path: "1" }],
+    ]);
+
+    expect(stripRetrySequences(steps, frameScopes)).toEqual(steps);
+  });
+
   it("drops a capture-time fill+submit retry, keeping the successful trailing path", () => {
     // Baseten-class case from the 2026-05-28 verifier drain marathon.
     // The bot's planner emitted fill("ts-random") → click submit →

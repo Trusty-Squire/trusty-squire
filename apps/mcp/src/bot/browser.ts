@@ -8652,33 +8652,13 @@ export class BrowserController {
     return false;
   }
 
-  private async frameSecurity(frame: Frame): Promise<{ origin: string; opaque: boolean }> {
-    let current: Frame | null = frame;
-    while (current !== null) {
-      const parent = current.parentFrame();
-      if (parent !== null) {
-        const owner = await current.frameElement();
-        try {
-          const opaqueSandbox = await owner.evaluate((element) => {
-            const sandbox = (element as Element).getAttribute("sandbox");
-            if (sandbox === null) return false;
-            return !sandbox
-              .split(/\s+/)
-              .some((token) => token.toLowerCase() === "allow-same-origin");
-          });
-          if (opaqueSandbox) return { origin: "null", opaque: true };
-        } finally {
-          await owner.dispose().catch(() => undefined);
-        }
-      }
-      const url = current.url();
-      if (url !== "" && url !== "about:blank" && url !== "about:srcdoc") {
-        const origin = new URL(url).origin;
-        return origin === "null" ? { origin: "null", opaque: true } : { origin, opaque: false };
-      }
-      current = parent;
+  private frameSecurity(frame: Frame): { origin: string; opaque: boolean } {
+    const url = frame.url();
+    if (url === "" || url === "about:blank" || url === "about:srcdoc") {
+      return { origin: "null", opaque: true };
     }
-    return { origin: "null", opaque: true };
+    const origin = new URL(url).origin;
+    return origin === "null" ? { origin: "null", opaque: true } : { origin, opaque: false };
   }
 
   // Resolve a previously-tagged frame path back to its live Playwright Frame —
