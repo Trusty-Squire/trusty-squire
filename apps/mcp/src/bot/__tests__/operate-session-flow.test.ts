@@ -1188,13 +1188,15 @@ describe("verified recipe recording", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
-  // 3.3 — this is the cold (no replayState) path: no recipe is being
-  // replayed, so before the fix this transition would silently proceed
-  // (only disqualifying a future recipe save) and could submit with a lost
-  // money field. It must now block immediately, same halt shape as the
-  // replay path's human_required.
-  it("blocks a checkout transition immediately when it loses attestation, and still refuses to save if remembered anyway", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-transition-fail-"));
+  // Gate-decision-2 fix (field-missing-hard-block): a money field that
+  // unmounts as a RESULT of a successful navigating transition (cart ->
+  // "Checkout", multi-step "Continue") must be treated as passed, not a
+  // brick — the click already fired, blocking after the fact can't prevent
+  // anything and would only false-block the NEXT transition too. This is
+  // distinct from the recipe-save path, which independently still refuses
+  // to bake in a money field whose value was never re-verified/templated.
+  it("treats a money field that unmounted from a successful navigating transition as passed, but recipe save still refuses to bake in its unverified value", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-nav-unmount-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     h.elements = [
       elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
@@ -1207,17 +1209,20 @@ describe("verified recipe recording", () => {
       text: "Queens",
       provenance: { hole: "address.city" },
     });
+    // The click navigates to the next page — the city field disappears as
+    // a SIDE EFFECT of that successful transition, not because anything
+    // went wrong.
     h.clearElementsOnClick = true;
-    h.clickValueMutation = { selector: "#city", value: "Brooklyn" };
-    await expect(act(started.session_id, { kind: "click", target: "Continue" })).rejects.toThrow(
-      /money_field_unverified/i,
-    );
+    await expect(
+      act(started.session_id, { kind: "click", target: "Continue" }),
+    ).resolves.toBeDefined();
+    expect(h.clickCalls).toBe(1);
     h.visibleText = "Review order";
     await expect(
       provisionRememberTool.handler(
         {
           session_id: started.session_id,
-          name: "failed-transition",
+          name: "nav-unmount",
           goal: "Buy coffee",
           verb: "purchase",
           inputs: { address: { city: "Queens" } },
@@ -1229,7 +1234,7 @@ describe("verified recipe recording", () => {
         },
         null as unknown as ApiClient,
       ),
-    ).rejects.toThrow(/checkout transition could not be attested/i);
+    ).rejects.toThrow(/money field lacks provenance/i);
     expect(readdirSync(dir)).toEqual([]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
@@ -1852,6 +1857,30 @@ describe("3.3 — cold-path money-field guard actually blocks", () => {
     expect(h.clickCalls).toBe(0);
   });
 
+  // Gate-decision-2 scoping guard: only a field that unmounts AS A RESULT
+  // of a successful navigating transition is forgiven (see the
+  // "verified recipe recording" describe block below). A field that
+  // vanishes for an unexplained reason BEFORE any click even fires is not
+  // that case — the pre-transition attest must still block it.
+  it("still blocks when a money field vanished for an unexplained reason before the click (not a transition side effect)", async () => {
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "City",
+      text: "Queens",
+      provenance: { hole: "address.city" },
+    });
+    h.elements = h.elements.filter((e) => (e as Record<string, unknown>).selector !== "#city");
+    await expect(act(started.session_id, { kind: "click", target: "Continue" })).rejects.toThrow(
+      /money_field_unverified/i,
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
   it("lets the transition through when the recorded money field still matches", async () => {
     h.elements = [
       elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
@@ -1975,6 +2004,62 @@ describe("3.1 — autocomplete-aware type fill", () => {
       act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
     ).rejects.toThrow(/autocomplete_commit_required/i);
     expect(h.autocompleteCommitCalls).toEqual([]);
+  });
+
+  // Gate-decision-2 fix (wrong-error-branch): the error must report the
+  // MATCHED subset, not the raw popup — otherwise a genuine zero-match
+  // never takes the "no option started with the typed text" branch (the
+  // popup itself is always non-empty here) and the multi-match branch
+  // reports the wrong count.
+  it("reports a genuine zero-match with the zero-match message, not a miscounted multi-match message", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["1 Infinite Loop, Cupertino, CA 95014, USA"];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/no visible option started with the typed text/i);
+  });
+
+  it("reports the matched-candidate count, not the popup size, on an ambiguous match", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = [
+      "350 5th Ave, New York, NY 10118, USA",
+      "350 5th Avenue, Brooklyn, NY 11215, USA",
+      "1 Infinite Loop, Cupertino, CA 95014, USA",
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/matched 2 suggestions, not one/i);
+  });
+
+  // Gate-decision-2 fix (incidental-popup-collateral): 3.1 must only
+  // engage for a form/recipe field where a committed value is actually
+  // required — a site-search/catalog-search box that happens to open its
+  // own suggestion listbox must keep ordinary free-text behavior.
+  it("keeps free-text behavior for a search box that opens its own suggestion popup", async () => {
+    h.elements = [elem({ testId: "site-search-box", labelText: "Search", selector: "#search" })];
+    h.autocompleteSuggestions = ["Wireless Mouse", "Wireless Keyboard"];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/catalog" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Search", text: "Wireless" }),
+    ).resolves.toBeDefined();
+    expect(h.autocompleteCommitCalls).toEqual([]);
+    expect((h.elements[0] as Record<string, unknown>).value).toBe("Wireless");
+  });
+
+  it("still applies the autocomplete-commit rule when the host explicitly tags a non-money-shaped field with a recipe hole", async () => {
+    h.elements = [elem({ testId: "site-search-box", labelText: "Search", selector: "#search" })];
+    h.autocompleteSuggestions = ["Wireless Mouse", "Wireless Keyboard"];
+    h.autocompleteCommitMutation = { selector: "#search", value: "Wireless Mouse" };
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/catalog" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "Search",
+      text: "Wireless Mouse",
+      provenance: { hole: "product_query" },
+    });
+    expect(h.autocompleteCommitCalls).toEqual([0]);
   });
 
   it("throws when a commit click lands but the underlying value never actually changed", async () => {

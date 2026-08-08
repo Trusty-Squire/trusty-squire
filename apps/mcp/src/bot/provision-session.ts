@@ -926,7 +926,9 @@ export class MoneyFieldVerificationError extends Error {
         reason === "field_missing"
           ? "is no longer present on the page"
           : "no longer matches the value that was typed/selected"
-      }. Re-fill it (operate_act{type/select, target, text, provenance:{hole:"${field}"}}) before retrying this transition.`,
+      }. Re-fill it (operate_act{type/select, target, text, provenance:{hole:"${field}"}}) and ` +
+        `re-observe the page before taking any further action — do not assume it is safe to ` +
+        `repeat a transition that may have already run.`,
     );
   }
 }
@@ -2955,61 +2957,78 @@ export async function act(
       else if (action.kind === "js_click") await browser.clickViaJs(el.selector);
       else if (action.kind === "type") {
         session.committedSelectValues.delete(el.selector);
-        // 3.1 — a Google-Places-style address field or a react-select/cmdk/
-        // Radix combobox can open a suggestion popup as a side effect of
-        // typing, not just of an explicit `select`. Snapshot pre-existing
-        // popups BEFORE typing (it can open mid-keystroke), then detect what
-        // opened afterward.
-        await browser.markPreexistingTypeSuggestionPopups();
-        await browser.type(el.selector, action.text);
-        const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
-        if (suggestionTexts.length > 0) {
-          // Cleanup (dismiss + clear our tracking markers) must run no
-          // matter how this resolves — ambiguous stop, a failed commit, or
-          // success — mirroring selectFromCombobox's own try/finally. A
-          // leftover marker or a popup left open desyncs the NEXT type
-          // action's pre-existing-popup snapshot.
-          try {
-            const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
-            if (candidates.length !== 1) {
-              throw new AutocompleteCommitRequiredError(action.text, suggestionTexts.slice(0, 8));
+        if (!isAutocompleteScopedTypeField(action.provenance, el)) {
+          // Free text only — e.g. a site-search/catalog-search box, which
+          // can legitimately open its own suggestion listbox too. 3.1 only
+          // applies to a form/recipe field where a committed value is
+          // actually required; forcing every incidental popup into
+          // commit-or-stop would break ordinary search typing.
+          await browser.type(el.selector, action.text);
+        } else {
+          // 3.1 — a Google-Places-style address field or a react-select/cmdk/
+          // Radix combobox can open a suggestion popup as a side effect of
+          // typing, not just of an explicit `select`. Snapshot pre-existing
+          // popups BEFORE typing (it can open mid-keystroke), then detect what
+          // opened afterward.
+          await browser.markPreexistingTypeSuggestionPopups();
+          await browser.type(el.selector, action.text);
+          const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
+          if (suggestionTexts.length > 0) {
+            // Cleanup (dismiss + clear our tracking markers) must run no
+            // matter how this resolves — ambiguous stop, a failed commit, or
+            // success — mirroring selectFromCombobox's own try/finally. A
+            // leftover marker or a popup left open desyncs the NEXT type
+            // action's pre-existing-popup snapshot.
+            try {
+              const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
+              if (candidates.length !== 1) {
+                // Pass the MATCHED subset, not the full popup — passing every
+                // suggestion made candidates.length effectively the popup
+                // size (always > 0 here), so the constructor's zero-match
+                // branch was dead code and the multi-match message reported
+                // the wrong count.
+                throw new AutocompleteCommitRequiredError(
+                  action.text,
+                  candidates.map((i) => suggestionTexts[i]!).slice(0, 8),
+                );
+              }
+              const pickedText = suggestionTexts[candidates[0]!]!;
+              await browser.commitTypeSuggestion(candidates[0]!);
+              // Never trust that a click "looked right" — POSITIVELY confirm
+              // the commit took (same hard constraint as the field-role
+              // guard, PR #447: a miss is a stop, never a silent
+              // pass-through). Checking only the typed-into selector's own
+              // `.value` false-fails on react-select/cmdk-style widgets,
+              // which clear their search input on selection and render the
+              // committed choice in a nearby element instead —
+              // confirmAutocompleteCommitted checks that too, bounded to the
+              // field's own neighborhood, and returns false (never a guess)
+              // when nothing confirms it.
+              const committed = await browser.confirmAutocompleteCommitted(el.selector, pickedText);
+              if (!committed) {
+                throw new Error(
+                  `autocomplete commit for "${action.text}" did not take — nothing on the page ` +
+                    `confirms the field now holds "${pickedText}" after selecting it.`,
+                );
+              }
+              // Rewrite the completed action to the COMMITTED value (not the
+              // raw typed draft) before it reaches recordTrace/recordedValues
+              // — otherwise 3.3's money-field guard compares the field's live
+              // (committed) value against the raw typed text on the very
+              // next transition and false-blocks the field this step just
+              // correctly filled and verified. Known residual gap: when
+              // confirmAutocompleteCommitted's positive signal came from a
+              // NEARBY element rather than el.selector's own value (a
+              // react-select/cmdk widget whose search input stays empty
+              // after commit), 3.3's re-verification on the next transition
+              // still re-reads only el.selector's live value and can
+              // false-block — not fixed here; flagging rather than building
+              // new machinery beyond what was decided for this task.
+              session.lastElements = await browser.extractInteractiveElements();
+              completedAction = { ...action, text: pickedText };
+            } finally {
+              await browser.discardTypeSuggestionPopup();
             }
-            const pickedText = suggestionTexts[candidates[0]!]!;
-            await browser.commitTypeSuggestion(candidates[0]!);
-            // Never trust that a click "looked right" — POSITIVELY confirm
-            // the commit took (same hard constraint as the field-role
-            // guard, PR #447: a miss is a stop, never a silent
-            // pass-through). Checking only the typed-into selector's own
-            // `.value` false-fails on react-select/cmdk-style widgets,
-            // which clear their search input on selection and render the
-            // committed choice in a nearby element instead —
-            // confirmAutocompleteCommitted checks that too, bounded to the
-            // field's own neighborhood, and returns false (never a guess)
-            // when nothing confirms it.
-            const committed = await browser.confirmAutocompleteCommitted(el.selector, pickedText);
-            if (!committed) {
-              throw new Error(
-                `autocomplete commit for "${action.text}" did not take — nothing on the page ` +
-                  `confirms the field now holds "${pickedText}" after selecting it.`,
-              );
-            }
-            // Rewrite the completed action to the COMMITTED value (not the
-            // raw typed draft) before it reaches recordTrace/recordedValues
-            // — otherwise 3.3's money-field guard compares the field's live
-            // (committed) value against the raw typed text on the very
-            // next transition and false-blocks the field this step just
-            // correctly filled and verified. Known residual gap: when
-            // confirmAutocompleteCommitted's positive signal came from a
-            // NEARBY element rather than el.selector's own value (a
-            // react-select/cmdk widget whose search input stays empty
-            // after commit), 3.3's re-verification on the next transition
-            // still re-reads only el.selector's live value and can
-            // false-block — not fixed here; flagging rather than building
-            // new machinery beyond what was decided for this task.
-            session.lastElements = await browser.extractInteractiveElements();
-            completedAction = { ...action, text: pickedText };
-          } finally {
-            await browser.discardTypeSuggestionPopup();
           }
         }
       } else if (action.kind === "upload") {
@@ -3999,6 +4018,28 @@ function boundReplayTarget(
 const MONEY_FIELD_TARGET =
   /(?:^|[\s._-])(?:address|street|line\s*[12]|city|state|province|postal|zip|country|e-?mail|phone|first\s*name|last\s*name|full\s*name|quantity|qty)(?:$|[\s._-])/i;
 
+// 3.1 must only engage for a form/recipe field where a committed value is
+// actually required (a checkout form field, or one the host tagged with a
+// recipe hole) — not arbitrary typing. The popup-shape detection
+// (role=listbox/menu/dialog, etc.) also matches an incidental suggestion
+// popup on an ordinary site-search/catalog-search box; without this scope,
+// typing a search query either auto-clicks a suggestion (navigating as a
+// side effect of "type") or throws, with no way to keep free text. Reuses
+// the existing MONEY_FIELD_TARGET shape check (moneyFieldName's sibling,
+// just read off the live element instead of a recorded TraceAction) rather
+// than inventing a new heuristic.
+function isAutocompleteScopedTypeField(
+  provenance: { hole: string } | undefined,
+  el: InteractiveElement,
+): boolean {
+  if (provenance !== undefined) return true;
+  const label = [el.testId, el.id, el.name, el.ariaLabel, el.labelText, el.placeholder]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join(" ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2");
+  return MONEY_FIELD_TARGET.test(label);
+}
+
 function moneyFieldName(action: TraceAction): string | null {
   if (action.kind === "set_phone_country") return "phone_country";
   if (action.kind !== "type" && action.kind !== "select") return null;
@@ -4325,6 +4366,20 @@ function rejectRecipeRecording(session: Session, reason: string): void {
   session.recipeRejectionReason ??= reason;
 }
 
+// Drop every recordedValues entry for `hole` — used when a money field
+// unmounted as a RESULT of a successful navigating transition (see
+// verifyRecordedFieldsAfterTransition): the click already fired, so
+// blocking now can't prevent anything, and leaving the stale entry would
+// brick every LATER transition too (recordedMoneyFields would keep
+// expecting a field that no longer exists on the new page/step). This does
+// NOT weaken recipe-save-time integrity: findUnprovenancedMoneyField /
+// traceWithVerifiedProvenance read the trace directly and independently
+// still refuse to save a money field whose value was never templated, so a
+// genuinely-unverified field still can't be baked into a shareable recipe.
+function pruneRecordedValue(session: Session, hole: string): void {
+  session.recordedValues = session.recordedValues.filter((source) => source.hole !== hole);
+}
+
 function recordedMoneyFields(session: Session): ReplayExpectedField[] {
   // Last-write-wins per hole. session.recordedValues is a push-only,
   // per-trace-step audit log — traceWithVerifiedProvenance needs it intact
@@ -4454,11 +4509,17 @@ async function verifyRecordedFieldsAfterTransition(
   session.lastElements = fresh;
   for (const expected of fields) {
     if (!(await isReplayFieldMounted(session, expected, fresh))) {
-      rejectRecipeRecording(
-        session,
-        `checkout transition could not be attested (${expected.hole}: field_missing)`,
-      );
-      throw new MoneyFieldVerificationError("field_missing", expected.hole);
+      // The transition already fired and succeeded — we're reading
+      // POST-click state. A money field legitimately unmounts when a
+      // navigating transition (cart -> "Checkout", multi-step "Continue")
+      // moves to the next page/step; that is not a failure, and blocking
+      // here can't undo the click. Treat it as passed and drop it so it
+      // can't false-block a LATER transition too (the pre-transition
+      // attest, which runs BEFORE a click fires and can still prevent a
+      // bad submission, is unaffected — a field present-but-wrong there
+      // still blocks).
+      pruneRecordedValue(session, expected.hole);
+      continue;
     }
     const guard = verifyColdFieldInElements(fresh, expected);
     if (!guard.ok) {
