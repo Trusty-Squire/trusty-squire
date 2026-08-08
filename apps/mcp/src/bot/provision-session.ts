@@ -3653,7 +3653,7 @@ export async function rememberRecipe(
     secrets: secrets.length,
     file,
   });
-  const checkoutLegFile = await rememberCheckoutLeg(session, opts.verb, trace);
+  const checkoutLegFile = await rememberCheckoutLeg(session, opts.verb, trace).catch(() => null);
   return {
     file,
     name: opts.name,
@@ -3830,10 +3830,14 @@ export type OperatorReplayResult =
       // catalog/storefront leg already replayed fine, only the checkout leg
       // needs cold driving. Distinct from human_required, which stays the
       // terminal "stop, nothing narrower to fall back to" response for a
-      // single-leg (or leg-less) recipe. Not resumable via resume_from
-      // (same fail-closed payment gate as human_required stays shut) —
-      // drive the checkout leg cold from from_step_index, then
-      // (optionally) operate_remember/operate_use{leg:"checkout"} as usual.
+      // single-leg (or leg-less) recipe. Not resumable via resume_from,
+      // and the same fail-closed payment gate as human_required stays shut
+      // for this session's remainder: operate_pay is refused, and
+      // operate_remember / operate_use{leg:"checkout"} both throw on this
+      // session (recipeRejectionReason is set, replayState is retained by
+      // design). The host may drive the checkout leg's NON-payment steps
+      // cold from from_step_index; completing payment requires a fresh
+      // operate_start.
       status: "leg_fallback_required";
       observation: Observation;
       leg: "checkout";

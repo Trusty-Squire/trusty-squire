@@ -1171,6 +1171,17 @@ const useSchema = z
   })
   .refine(
     (value) =>
+      value.leg === undefined ||
+      (value.verb !== undefined &&
+        value.session_id !== undefined &&
+        value.service_url === undefined),
+    {
+      message:
+        "leg:'checkout' requires verb + session_id and takes no service_url (the session already has its own live page)",
+    },
+  )
+  .refine(
+    (value) =>
       value.leg !== undefined ||
       (value.session_id === undefined) === (value.resume_from === undefined),
     { message: "session_id and resume_from must be provided together" },
@@ -1193,8 +1204,11 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
     "different, unrelated store of the same checkout platform (cross-domain reuse). " +
     "replay.status='cache_miss' means no recipe matches this page's shape; drive the checkout " +
     "leg cold. A money-path guard failure on a recipe with a real catalog/storefront prefix " +
-    "returns replay.status='leg_fallback_required' (not human_required) — drive the checkout leg " +
-    "cold from from_step_index; the run is not aborted.",
+    "returns replay.status='leg_fallback_required' (not human_required) — the session's " +
+    "fail-closed payment gate stays shut for its remainder (operate_pay, operate_remember, and " +
+    "further operate_use calls on that session are refused); non-payment checkout steps can " +
+    "still be driven cold from from_step_index, but completing payment requires a fresh " +
+    "operate_start.",
   inputSchema: useSchema,
   jsonInputSchema: {
     type: "object",
