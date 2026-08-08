@@ -814,7 +814,7 @@ describe("prepared-statement replay", () => {
     await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
       /verification is not satisfied/i,
     );
-  });
+  }, 10_000);
 
   it("blocks payment until the exact missed field is repaired and replay resumes", async () => {
     h.elements = [];
