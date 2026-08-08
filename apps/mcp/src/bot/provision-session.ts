@@ -143,6 +143,12 @@ export interface ObservedElement {
   container?: string | null;
   topmost?: boolean | null;
   occluded_by?: string | null;
+  // The origin of the <iframe> this element lives in (same- or cross-origin),
+  // e.g. "https://checkout.merchant.com". Absent for an ordinary main-frame
+  // element — every pre-existing observation shape is unchanged. Load-bearing
+  // signal, not decoration: operate_act re-derives which frame to act in (and
+  // which domain-lock guard applies) from this, never from the top page's URL.
+  frame_origin?: string | null;
 }
 
 export interface ScreenRegion {
@@ -695,6 +701,13 @@ function baseIdentityFields(el: InteractiveElement): string[] {
     elementRef(el),
     el.href ?? "",
     el.type ?? "",
+    // Frame origin — WITHOUT this, an element's `selector` (folded into
+    // stableElementId below) is only unique within its own document, so a
+    // same-shaped selector in two different frames (or a frame vs. the main
+    // page) could hash to the SAME ref and let an act resolve to the wrong
+    // frame's element. Load-bearing for the frame domain-lock: the ref
+    // itself must be frame-scoped, not just the guard that later reads it.
+    el.frameUrl ?? "",
   ];
 }
 
@@ -1052,6 +1065,69 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
   if (DEFAULT_AUTH_HOSTS.some(ok)) return true;
   if (host.endsWith(".firebaseapp.com") || host.endsWith(".web.app")) return true;
   return false;
+}
+
+// Frame domain-lock (operator-frame-support) — the ONE non-negotiable of frame
+// support: an action on an element inside a child <iframe> must be checked
+// against THAT frame's own origin, never the top page's, or a rogue/payment
+// iframe embedded on an otherwise in-scope page could be acted on (or typed
+// into) unchecked just because the outer page already passed hostAllowed.
+// `el.frameUrl` is undefined/null for an ordinary main-frame element, so this
+// is a no-op for every pre-existing target. A frame on the page's own
+// registrable domain (the merchant's own checkout iframe — the case this
+// feature exists for) is freely reachable, exactly like main-frame content;
+// anything else goes through the SAME domain-scope check goto/allow_host
+// already use (hostAllowed) — reusing the existing guard, not inventing a
+// new trust classifier.
+function frameTargetAllowed(session: Session, el: InteractiveElement): boolean {
+  const frameUrl = el.frameUrl;
+  if (frameUrl === undefined || frameUrl === null) return true; // main frame
+  const pageUrl = session.browser.currentUrl();
+  if (isSameRecipeDomain(frameUrl, pageUrl)) return true; // merchant's own iframe
+  return hostAllowed(frameUrl, hostStrings(session));
+}
+
+function assertFrameTargetAllowed(session: Session, el: InteractiveElement, kind: string): void {
+  if (frameTargetAllowed(session, el)) return;
+  throw new Error(
+    `${kind} blocked by domain-scope: the target lives in a cross-domain frame ` +
+      `(${el.frameOrigin ?? el.frameUrl}) outside the allowed hosts ` +
+      `[${hostStrings(session).join(", ")}] + auth providers. ` +
+      `Declare it first with an allow_host action if this task spans it.`,
+  );
+}
+
+// type_secret is stricter still: a secret may be typed only into the main
+// frame or a frame on the page's OWN registrable domain — never into a
+// cross-domain (e.g. third-party payment) iframe, even one otherwise allowed
+// for navigation/click via hostAllowed's auth-provider carve-outs. A weak
+// model must never be able to type a credential into a rogue or payment
+// iframe just because that host happens to be allow-listed for OAuth.
+function assertSecretFrameTargetAllowed(session: Session, el: InteractiveElement): void {
+  const frameUrl = el.frameUrl;
+  if (frameUrl === undefined || frameUrl === null) return; // main frame
+  const pageUrl = session.browser.currentUrl();
+  if (isSameRecipeDomain(frameUrl, pageUrl)) return; // merchant's own iframe
+  throw new Error(
+    `type_secret refused: the target lives in a cross-domain frame ` +
+      `(${el.frameOrigin ?? frameUrl}), not the page's own domain. Secrets may only be ` +
+      `typed into the main frame or a frame on the page's own domain.`,
+  );
+}
+
+// select/upload/oauth_click have no frame-scoped browser primitive yet (see
+// BrowserController.clickInFrame/typeInFrame — click/type/type_secret only).
+// Resolving one of these against a frame element's `selector` on the MAIN
+// page could silently act on an unrelated element that happens to share the
+// same structural selector (a real risk for positional/nth-of-type
+// selectors) rather than the intended frame element — a correctness and
+// domain-lock hazard, not just a missing feature. Refuse explicitly instead.
+function assertNoFrameTarget(el: InteractiveElement, kind: string): void {
+  if (el.frameUrl === undefined || el.frameUrl === null) return;
+  throw new Error(
+    `operate_act kind="${kind}" does not yet support a target inside an <iframe> ` +
+      `(frame ${el.frameOrigin ?? el.frameUrl}). Use click/js_click/type/type_secret for frame targets.`,
+  );
 }
 
 // A two-label public suffix we must never let a single allow_host widen to —
@@ -2159,6 +2235,7 @@ export function toCompactElement(
   if (includePath && el.screenPath) out.path = el.screenPath;
   if (el.topmost === false) out.topmost = false;
   if (el.occludedBy) out.occluded_by = el.occludedBy;
+  if (el.frameOrigin) out.frame_origin = el.frameOrigin;
   return out;
 }
 
@@ -2180,6 +2257,7 @@ const ELEMENT_TABLE_COLUMNS = [
   "testId",
   "topmost",
   "occluded_by",
+  "frame_origin",
 ] as const;
 type ElementColumn = (typeof ELEMENT_TABLE_COLUMNS)[number];
 
@@ -2209,6 +2287,8 @@ function elementCell(e: ObservedElement, col: ElementColumn): string | undefined
       return e.topmost === false ? "false" : undefined;
     case "occluded_by":
       return e.occluded_by ?? undefined;
+    case "frame_origin":
+      return e.frame_origin ?? undefined;
   }
 }
 
@@ -2267,6 +2347,7 @@ export function parseElementsTable(table: string): ObservedElement[] {
       else if (col === "testId") e.testId = raw;
       else if (col === "topmost") e.topmost = false;
       else if (col === "occluded_by") e.occluded_by = raw;
+      else if (col === "frame_origin") e.frame_origin = raw;
     });
     out.push(e);
   }
@@ -2680,6 +2761,7 @@ async function observeSession(
       container: el.container ?? null,
       topmost: el.topmost ?? null,
       occluded_by: el.occludedBy ?? null,
+      frame_origin: el.frameOrigin ?? null,
     })),
   };
 }
@@ -2806,12 +2888,18 @@ export async function act(
         throw new Error(`type_secret: no element matched target "${action.target}".`);
       }
       resolvedEl = el;
+      // Frame domain-lock (operator-frame-support) — never let a secret cross
+      // into a rogue/third-party (e.g. payment) iframe. See
+      // assertSecretFrameTargetAllowed; a main-frame or same-domain-frame
+      // target is unaffected.
+      assertSecretFrameTargetAllowed(session, el);
       // Remember this field so the next observation masks its DOM value — the
       // host sealed this secret into a slot and must never read it back.
       for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
-      await browser.type(el.selector, value);
+      if (el.frameUrl) await browser.typeInFrame(el.frameUrl, el.selector, value);
+      else await browser.type(el.selector, value);
       audit(sessionId, "type_secret", {
         slot: action.slot,
         target: action.target,
@@ -2836,6 +2924,7 @@ export async function act(
         );
       }
       resolvedEl = el;
+      assertNoFrameTarget(el, "select");
       const committedText = await browser.selectOption(el.selector, action.text);
       session.committedSelectValues.set(el.selector, committedText);
       completedAction = { ...action, text: committedText };
@@ -2928,9 +3017,24 @@ export async function act(
         );
       }
       resolvedEl = el;
-      if (action.kind === "click") await browser.click(el.selector);
-      else if (action.kind === "js_click") await browser.clickViaJs(el.selector);
-      else if (action.kind === "type") {
+      // Frame domain-lock (operator-frame-support) — see frameTargetAllowed.
+      // A main-frame or same-domain-frame target is unaffected.
+      assertFrameTargetAllowed(session, el, action.kind);
+      if (action.kind === "click") {
+        if (el.frameUrl) await browser.clickInFrame(el.frameUrl, el.selector);
+        else await browser.click(el.selector);
+      } else if (action.kind === "js_click") {
+        if (el.frameUrl) await browser.clickViaJsInFrame(el.frameUrl, el.selector);
+        else await browser.clickViaJs(el.selector);
+      } else if (action.kind === "type" && el.frameUrl) {
+        // Frame targets skip the autocomplete-popup-commit machinery below —
+        // it operates on the main page's DOM only (markPreexistingType
+        // SuggestionPopups / detectTypeSuggestionPopup / commitTypeSuggestion
+        // are page-scoped). Out of scope for the checkout-option case frame
+        // support exists for; a plain frame-scoped fill covers it.
+        session.committedSelectValues.delete(el.selector);
+        await browser.typeInFrame(el.frameUrl, el.selector, action.text);
+      } else if (action.kind === "type") {
         session.committedSelectValues.delete(el.selector);
         if (!isAutocompleteScopedTypeField(action.provenance, el)) {
           // Free text only — e.g. a site-search/catalog-search box, which
@@ -3026,13 +3130,17 @@ export async function act(
           }
         }
       } else if (action.kind === "upload") {
+        assertNoFrameTarget(el, "upload");
         await browser.uploadFile(el.selector, action.path);
         audit(sessionId, "upload", {
           target: action.target,
           path: action.path,
           host: registrableHost(browser.currentUrl()),
         });
-      } else await browser.startOAuth(el.selector);
+      } else {
+        assertNoFrameTarget(el, "oauth_click");
+        await browser.startOAuth(el.selector);
+      }
       if (action.kind !== "type") await settleAfterStateChange(browser);
       break;
     }

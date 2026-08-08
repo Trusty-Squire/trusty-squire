@@ -23,7 +23,15 @@
 // gate).
 
 import { chromium as baseChromium } from "playwright";
-import type { Browser, BrowserContext, CDPSession, ElementHandle, Locator, Page } from "playwright";
+import type {
+  Browser,
+  BrowserContext,
+  CDPSession,
+  ElementHandle,
+  Frame,
+  Locator,
+  Page,
+} from "playwright";
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
@@ -504,6 +512,14 @@ export interface BrowserControllerOptions {
   // the env proxy. Unset → fall back to the env behavior.
   proxyUrl?: string;
 }
+
+// Hosts of known captcha-challenge iframes (Turnstile, reCAPTCHA, hCaptcha,
+// Arkose/FunCaptcha). Shared between the per-navigation WebGL-spoof reapply
+// (start(), below) and extractInteractiveElements' frame walk, which skips
+// these frames — their content is handled by the dedicated captcha-gate flow,
+// not surfaced as ordinary el_table rows.
+const CAPTCHA_FRAME_HOST_RE =
+  /(hcaptcha\.com|challenges\.cloudflare\.com|google\.com\/recaptcha|recaptcha\.net|arkoselabs\.com|funcaptcha\.com)/i;
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
@@ -1917,8 +1933,6 @@ export class BrowserController {
     // frame.evaluate reaches a cross-origin frame's main world at the driver
     // level (same path that wins the main-frame race), re-applied at
     // navigation-commit before the captcha's scoring JS queries WebGL.
-    const CAPTCHA_FRAME_RE =
-      /(hcaptcha\.com|challenges\.cloudflare\.com|google\.com\/recaptcha|recaptcha\.net|arkoselabs\.com|funcaptcha\.com)/i;
     // String probe (no compiled-fn __name shim needed): the UNMASKED renderer
     // a captcha would read. Logged only under CAPTCHA_TRACE to prove the fix.
     const RENDERER_PROBE = String.raw`(() => { try { const c = document.createElement("canvas"); const gl = c.getContext("webgl") || c.getContext("webgl2"); if (!gl) return "no-gl"; const e = gl.getExtension("WEBGL_debug_renderer_info"); return e ? String(gl.getParameter(e.UNMASKED_RENDERER_WEBGL)) : "no-ext"; } catch (err) { return "err:" + (err && err.message); } })()`;
@@ -1930,7 +1944,7 @@ export class BrowserController {
         reapplyWebglSpoof();
         return;
       }
-      if (!CAPTCHA_FRAME_RE.test(frame.url())) return;
+      if (!CAPTCHA_FRAME_HOST_RE.test(frame.url())) return;
       const cfHost = (() => {
         try {
           return new URL(frame.url()).host;
@@ -7852,9 +7866,16 @@ export class BrowserController {
   // selector strings. Selectors prefer #id then [name] — Playwright's
   // CSS engine pierces open shadow roots, so those resolve for
   // shadow-DOM fields too.
-  async extractInteractiveElements(): Promise<InteractiveElement[]> {
-    if (!this.page) throw new Error("Browser not started");
-    const raw = await this.page.evaluate(() => {
+  // The DOM-walk + extraction logic, generalized to run against ANY frame
+  // context (the main page or a child <iframe>'s own Frame) — Playwright's
+  // Frame.evaluate reaches a cross-origin frame's main world at the CDP level,
+  // the same primitive isPayPalHostedCheckout/fillAndSubmitCheckout/
+  // detectThreeDsChallenge already use to read/fill cross-origin PSP fields.
+  // Pulled out of extractInteractiveElements (below) so that method can call
+  // it once for the main frame and once per child frame, tagging each result
+  // with where it came from.
+  private async extractElementsFromContext(ctx: Page | Frame) {
+    return await ctx.evaluate(() => {
       const SELECTOR =
         // rc.26 — added Radix/Headless-UI menu + option items so
         // dropdown contents (Fireworks "Create API Key" → API Key /
@@ -8487,13 +8508,135 @@ export class BrowserController {
       }
       return { out, clusterMeta };
     });
-    // T38 — assign card-radio groups in Node (pure logic, unit-tested).
-    const groups = assignCardRadioGroups(raw.clusterMeta);
-    return raw.out.map((e, i) => ({
+  }
+
+  // Resolve a previously-tagged frame URL back to its live Playwright Frame —
+  // used by the frame-aware act helpers below (clickInFrame/typeInFrame/
+  // clickViaJsInFrame) to act on an element extractInteractiveElements found
+  // inside a child <iframe>. Returns null when the frame has since navigated
+  // or detached (a fresh observe/extract picks up whatever replaced it); the
+  // caller surfaces that as a normal "target not found" error, never a
+  // silent wrong-frame action.
+  private resolveFrame(frameUrl: string): Frame | null {
+    if (!this.page) return null;
+    return (
+      this.page.frames().find((f) => !f.isDetached() && f.url() === frameUrl) ?? null
+    );
+  }
+
+  // Frame-scoped click. Deliberately simpler than click() above (no radio/
+  // checkbox/aria-toggle special-casing) — it's the escape hatch for a
+  // control that lives inside an <iframe>, mirroring how resolvePageTarget is
+  // the escape hatch for a control missing from the main-frame inventory.
+  // Plain Playwright locator actions cover the money-path case this exists
+  // for (a merchant's own same-domain checkout options rendered in an
+  // iframe), the same primitives fillAndSubmitCheckout already relies on for
+  // cross-origin PSP fields.
+  async clickInFrame(frameUrl: string, selector: string): Promise<void> {
+    const frame = this.resolveFrame(frameUrl);
+    if (frame === null) {
+      throw new Error(`click: the target's frame is no longer present (${frameUrl})`);
+    }
+    await frame.locator(selector).first().click({ timeout: 8000 });
+  }
+
+  async clickViaJsInFrame(frameUrl: string, selector: string, index = 0): Promise<void> {
+    const frame = this.resolveFrame(frameUrl);
+    if (frame === null) {
+      throw new Error(`js_click: the target's frame is no longer present (${frameUrl})`);
+    }
+    const safeIndex = Math.max(0, Math.floor(index));
+    await frame
+      .evaluate(
+        ({ sel, i }) => {
+          const els = Array.from(document.querySelectorAll<HTMLElement>(sel));
+          const el = els[i] ?? els[0];
+          if (el !== undefined) el.click();
+        },
+        { sel: selector, i: safeIndex },
+      )
+      .catch(() => undefined);
+  }
+
+  // Frame-scoped type/fill, for type and (guarded, see provision-session.ts)
+  // type_secret targets that resolve into a frame. Same humanized-vs-fast
+  // split as type() above, without the multi-input-OTP auto-advance nuance —
+  // out of scope for the checkout-option case this exists for.
+  async typeInFrame(frameUrl: string, selector: string, text: string): Promise<void> {
+    const frame = this.resolveFrame(frameUrl);
+    if (frame === null) {
+      throw new Error(`type: the target's frame is no longer present (${frameUrl})`);
+    }
+    const locator = frame.locator(selector).first();
+    await locator.waitFor({ state: "visible", timeout: 10000 });
+    if (!this.humanize) {
+      await locator.fill(text);
+      return;
+    }
+    await locator.click({ timeout: 8000 }).catch(() => undefined);
+    await locator.fill("").catch(() => undefined);
+    await locator.pressSequentially(text, { delay: rand(40, 110) });
+  }
+
+  async extractInteractiveElements(): Promise<InteractiveElement[]> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const mainRaw = await this.extractElementsFromContext(page);
+    const mainGroups = assignCardRadioGroups(mainRaw.clusterMeta);
+    const mainElements = mainRaw.out.map((e, i) => ({
       ...e,
-      index: i,
-      cardRadioGroup: groups[i] ?? null,
+      cardRadioGroup: mainGroups[i] ?? null,
+      frameOrigin: null,
+      frameUrl: null,
     }));
+
+    // Cross-frame support — surface elements inside child <iframe>s (same- AND
+    // cross-origin), each tagged with the frame's own origin/url so a caller
+    // can apply domain-lock/secret-fill guards against the ELEMENT's real
+    // origin, never the top page's (see frameTargetAllowed in
+    // provision-session.ts — the load-bearing reason this tag exists at
+    // all). Nothing is flattened away: every frame element keeps its origin.
+    // page.frames() is already flat (it includes nested frames, not just
+    // direct children) — the same primitive isPayPalHostedCheckout/
+    // fillAndSubmitCheckout/detectThreeDsChallenge use to reach cross-origin
+    // frame content.
+    const framedElements: Array<
+      Omit<(typeof mainElements)[number], "frameOrigin" | "frameUrl"> & {
+        frameOrigin: string;
+        frameUrl: string;
+      }
+    > = [];
+    for (const frame of page.frames()) {
+      if (frame === page.mainFrame() || frame.isDetached()) continue;
+      const frameUrl = frame.url();
+      if (frameUrl === "" || frameUrl === "about:blank") continue;
+      // Captcha challenge iframes are handled by the dedicated captcha-gate
+      // flow, not by ordinary ref-based clicking — surfacing their internal
+      // DOM as el_table rows would invite the planner to poke at the
+      // challenge instead of going through that flow. Skip them; nothing
+      // else about captcha handling changes.
+      if (CAPTCHA_FRAME_HOST_RE.test(frameUrl)) continue;
+      let frameOrigin: string;
+      try {
+        frameOrigin = new URL(frameUrl).origin;
+      } catch {
+        continue; // opaque/non-http frame (data:, about:) — nothing safe to tag it with
+      }
+      try {
+        const raw = await this.extractElementsFromContext(frame);
+        const groups = assignCardRadioGroups(raw.clusterMeta);
+        for (const [i, e] of raw.out.entries()) {
+          framedElements.push({ ...e, cardRadioGroup: groups[i] ?? null, frameOrigin, frameUrl });
+        }
+      } catch {
+        // Cross-origin frame mid-navigation, torn down, or otherwise
+        // unreachable this instant — best-effort; the next observe retries.
+      }
+    }
+
+    // T38 index is assigned ONCE, after merging, so it stays a stable,
+    // collision-free ordinal across the whole combined set.
+    return [...mainElements, ...framedElements].map((e, i) => ({ ...e, index: i }));
   }
 
   // replay-per-leg-signature — the checkout-leg shape signature (see
@@ -10038,6 +10181,18 @@ export interface InteractiveElement {
   // know exactly one card needs to be picked and "Continue" is the
   // expected next step. Null/absent when not part of a group.
   cardRadioGroup?: { id: number; position: number; total: number } | null;
+  // Frame support — the ORIGIN (scheme://host[:port]) and full URL of the
+  // <iframe> this element was extracted from, when it lives inside a child
+  // frame (same- or cross-origin). null/undefined for an ordinary main-frame
+  // element — every pre-existing element keeps this shape unchanged. This is
+  // the load-bearing security signal for frame targets: a guard checks THIS
+  // origin, never the top page's, so a rogue or third-party iframe embedded
+  // on an otherwise in-scope page can't be acted on (or typed into) just
+  // because the outer page passed its own domain check. See
+  // frameTargetAllowed / assertSecretFrameTargetAllowed in
+  // provision-session.ts.
+  frameOrigin?: string | null;
+  frameUrl?: string | null;
 }
 
 // T38 — pure clustering logic. Identifies card-radio groups from a

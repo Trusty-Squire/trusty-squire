@@ -30,6 +30,9 @@ const h = vi.hoisted(() => ({
   autocompleteDiscardCalls: 0,
   autocompleteDiscardEscapeCalls: [] as boolean[],
   clickCalls: 0,
+  frameClicks: [] as string[],
+  frameJsClicks: [] as string[],
+  frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string }>,
   gotos: [] as string[],
   started: 0,
   startCalls: 0,
@@ -266,6 +269,18 @@ vi.mock("../browser.js", () => ({
       if (h.clearElementsOnClick) h.elements = [];
     }
     async clickViaJs(): Promise<void> {}
+    async clickInFrame(frameUrl: string, selector: string): Promise<void> {
+      h.frameClicks.push(`${frameUrl}|${selector}`);
+    }
+    async clickViaJsInFrame(frameUrl: string, selector: string): Promise<void> {
+      h.frameJsClicks.push(`${frameUrl}|${selector}`);
+    }
+    async typeInFrame(frameUrl: string, selector: string, text: string): Promise<void> {
+      h.frameTypes.push({ frameUrl, selector, text });
+      for (const element of h.elements as Array<Record<string, unknown>>) {
+        if (element.selector === selector && element.frameUrl === frameUrl) element.value = text;
+      }
+    }
     async resolvePageTarget(
       _mode: string,
       _value: string,
@@ -447,6 +462,9 @@ beforeEach(() => {
   h.autocompleteDiscardCalls = 0;
   h.autocompleteDiscardEscapeCalls = [];
   h.clickCalls = 0;
+  h.frameClicks = [];
+  h.frameJsClicks = [];
+  h.frameTypes = [];
   h.gotos = [];
   h.consentDismissCalls = 0;
   h.consentCta = null;
@@ -3221,5 +3239,151 @@ describe("withSigninHost (operate_store_login — cover the sign-in page's host)
     expect(withSigninHost(["x.com"], "https://www.x.com/login")).toEqual(["x.com"]);
     expect(withSigninHost(["x.com"], undefined)).toEqual(["x.com"]);
     expect(withSigninHost(["x.com"], "not a url")).toEqual(["x.com"]);
+  });
+});
+
+// operator-frame-support — the frame boundary must stay load-bearing for
+// security: a weak model can reach content inside iframes without reasoning
+// about frames, but an action on a frame element must never skip the SAME
+// domain-scope check a main-frame goto already gets. The page's own eTLD+1
+// (here "example.com", from serviceUrl "https://shop.example.com/cart") is
+// freely reachable via any subdomain (a merchant's own checkout iframe,
+// possibly on a different subdomain than the page); a genuinely unrelated
+// domain is refused exactly like an off-domain goto.
+describe("frame targets — domain-lock (operator-frame-support)", () => {
+  const SAME_DOMAIN_FRAME_URL = "https://payments.example.com/widget";
+  const CROSS_DOMAIN_FRAME_URL = "https://evil-payments.test/widget";
+
+  it("el_table tags a frame element with its own frame_origin (observe surfaces iframe content)", async () => {
+    h.elements = [
+      elem({
+        testId: "ship-standard",
+        labelText: "Standard Shipping",
+        selector: "#ship-standard",
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const rows = parseElementsTable(started.el_table ?? "");
+    const row = rows.find((r) => r.label === "Standard Shipping");
+    expect(row?.frame_origin).toBe("https://payments.example.com");
+  });
+
+  it("main-frame elements are unaffected — no frame_origin column noise (regression)", async () => {
+    h.elements = [elem({ testId: "go", labelText: "Continue", selector: "#go" })];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    const rows = parseElementsTable(started.el_table ?? "");
+    const row = rows.find((r) => r.label === "Continue");
+    expect(row?.frame_origin).toBeUndefined();
+  });
+
+  it("click on a same-registrable-domain iframe element succeeds (the merchant's own checkout widget)", async () => {
+    h.elements = [
+      elem({
+        testId: "ship-standard",
+        labelText: "Standard Shipping",
+        selector: "#ship-standard",
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "click", target: "Standard Shipping" });
+    expect(h.frameClicks).toEqual([`${SAME_DOMAIN_FRAME_URL}|#ship-standard`]);
+    expect(h.clickCalls).toBe(0); // never fell through to the main-frame click
+  });
+
+  it("click on a cross-domain iframe element is refused, exactly like an off-domain goto", async () => {
+    h.elements = [
+      elem({
+        testId: "card-input",
+        labelText: "Enter Card Number",
+        selector: "#card-input",
+        frameUrl: CROSS_DOMAIN_FRAME_URL,
+        frameOrigin: "https://evil-payments.test",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "click", target: "Enter Card Number" }),
+    ).rejects.toThrow(/blocked by domain-scope/i);
+    expect(h.frameClicks).toEqual([]);
+    expect(h.clickCalls).toBe(0);
+  });
+
+  it("type into a same-registrable-domain iframe element succeeds", async () => {
+    h.elements = [
+      elem({
+        testId: "promo",
+        labelText: "Promo Code",
+        selector: "#promo",
+        value: "",
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Promo Code", text: "SAVE10" });
+    expect(h.frameTypes).toEqual([
+      { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#promo", text: "SAVE10" },
+    ]);
+    expect(h.typed).toEqual([]); // never fell through to the main-frame type
+  });
+
+  it("type_secret into a cross-origin frame is refused (the one non-negotiable)", async () => {
+    h.elements = [
+      elem({
+        testId: "card-cvv",
+        labelText: "CVV",
+        selector: "#cvv",
+        frameUrl: CROSS_DOMAIN_FRAME_URL,
+        frameOrigin: "https://evil-payments.test",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    stashSecretSlot(started.session_id, "login", "s3cr3t-value");
+    await expect(
+      act(started.session_id, { kind: "type_secret", slot: "login", target: "CVV" }),
+    ).rejects.toThrow(/type_secret refused/i);
+    expect(h.frameTypes).toEqual([]);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("type_secret into a same-registrable-domain frame is allowed", async () => {
+    h.elements = [
+      elem({
+        testId: "login-password",
+        labelText: "Password",
+        selector: "#password",
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    stashSecretSlot(started.session_id, "login", "s3cr3t-value");
+    await act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" });
+    expect(h.frameTypes).toEqual([
+      { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#password", text: "s3cr3t-value" },
+    ]);
+  });
+
+  it("select/upload/oauth_click on a frame target are refused explicitly, not silently mis-targeted", async () => {
+    h.elements = [
+      elem({
+        tag: "select",
+        testId: "ship-method",
+        labelText: "Shipping Method",
+        selector: "#ship-method",
+        selectOptions: [{ value: "std", text: "Standard" }],
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "select", target: "Shipping Method", text: "Standard" }),
+    ).rejects.toThrow(/does not yet support a target inside an <iframe>/i);
+    expect(h.selected).toEqual([]);
   });
 });
