@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.1 (2026-08-08)
+
+- fix(mcp): commit-or-stop autocomplete handling for typed checkout fields (#451)
+- feat(mcp): per-leg recipe resolution with checkout shape signatures for cross-store replay (#450)
+
 ## 1.1.8 (2026-08-07)
 
 - release(mcp): 1.1.8-rc.1
