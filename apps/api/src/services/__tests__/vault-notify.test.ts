@@ -77,6 +77,40 @@ describe("NotifyingVaultAuditStore", () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it("formats credential and card deletions with display metadata and a traceable reference", () => {
+    const credentialMsg = formatVaultEventMessage(
+      {
+        account_id: "a",
+        type: VAULT_AUDIT_TYPES.deleted,
+        payload: {
+          reference: "vault://account/subscription/credential",
+          requester: "user",
+          service: "openrouter",
+          label: "production",
+        },
+      },
+      NOW,
+    );
+    expect(credentialMsg).toContain("Credential deleted: openrouter (production)");
+    expect(credentialMsg).toContain("vault://account/subscription/credential");
+
+    const cardMsg = formatVaultEventMessage(
+      {
+        account_id: "a",
+        type: VAULT_AUDIT_TYPES.cardDeleted,
+        payload: {
+          reference: "card://card-id",
+          requester: "user",
+          label: "Personal",
+          last4: "4242",
+        },
+      },
+      NOW,
+    );
+    expect(cardMsg).toContain("Card removed: Personal ··4242");
+    expect(cardMsg).toContain("card://card-id");
+  });
+
   it("swallows a send failure — the audit write still succeeds", async () => {
     const { store, inner, accountId } = await setup({
       send: async () => {
