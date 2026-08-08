@@ -775,6 +775,27 @@ function stepsEquivalent(a: SkillStep, b: SkillStep): boolean {
   return JSON.stringify(stripped(a)) === JSON.stringify(stripped(b));
 }
 
+type CapturedFrameScope = { frame_origin?: string; frame_path?: string };
+
+function captureInventory(
+  inventory: readonly InteractiveElement[],
+  scope: CapturedFrameScope,
+): readonly InteractiveElement[] {
+  return inventory.filter(
+    (element) =>
+      (scope.frame_origin === undefined || element.frameOrigin === scope.frame_origin) &&
+      (scope.frame_path === undefined || element.framePath === scope.frame_path),
+  );
+}
+
+function capturedElement(
+  inventory: readonly InteractiveElement[],
+  selector: string,
+  scope: CapturedFrameScope,
+): InteractiveElement | undefined {
+  return captureInventory(inventory, scope).find((element) => element.selector === selector);
+}
+
 // True when a captured `fill` is an email-verification CODE entry: the
 // value is a short numeric code AND the planner's reason describes a
 // verification/OTP step. Both signals are required — a 4-8 digit value
@@ -787,7 +808,7 @@ function isOtpCodeFill(
   if (observed.kind !== "fill") return false;
   const value = observed.value.trim();
   if (!/^\d{4,8}$/.test(value)) return false;
-  const target = inventory.find((e) => e.selector === observed.selector);
+  const target = capturedElement(inventory, observed.selector, observed);
   const targetText = [
     target?.id,
     target?.name,
@@ -835,7 +856,7 @@ function translateStep(
       };
 
     case "click": {
-      const hintResult = resolveClickHint(observed.selector, inventory, roundIndex);
+      const hintResult = resolveClickHint(observed.selector, inventory, roundIndex, observed);
       if (hintResult.kind !== "ok") return hintResult;
 
       // OAuth button detection: if the matched element's text mentions
@@ -888,7 +909,7 @@ function translateStep(
       // replay time and finds the input heuristically. label_hint is
       // best-effort — included only when the field happens to be labeled.
       if (isOtpCodeFill(observed, inventory)) {
-        const otpHint = resolveLabelHint(observed.selector, inventory, roundIndex);
+        const otpHint = resolveLabelHint(observed.selector, inventory, roundIndex, observed);
         return {
           kind: "ok",
           step: {
@@ -898,7 +919,7 @@ function translateStep(
           },
         };
       }
-      const hintResult = resolveLabelHint(observed.selector, inventory, roundIndex);
+      const hintResult = resolveLabelHint(observed.selector, inventory, roundIndex, observed);
       if (hintResult.kind !== "ok") return hintResult;
       // rc.17 — if the captured value looks like the unique-name
       // shape the rc.15 planner prompt told the bot to use
@@ -929,7 +950,7 @@ function translateStep(
       // post-scope-#1 it denotes "the email to fill" (operator-resolved), not a
       // Squire alias, and there is no autonomous await_email_code poll anymore.
       const looksLikeEmail = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(literal.trim());
-      const matchedInput = inventory.find((e) => e.selector === observed.selector);
+      const matchedInput = capturedElement(inventory, observed.selector, observed);
       const inputLooksLikeTokenName =
         matchedInput !== undefined && looksLikeTokenNameInput(matchedInput);
       // Identity fields checked AFTER token-name so a "token name" field still
@@ -958,7 +979,7 @@ function translateStep(
     }
 
     case "select": {
-      const hintResult = resolveLabelHint(observed.selector, inventory, roundIndex);
+      const hintResult = resolveLabelHint(observed.selector, inventory, roundIndex, observed);
       if (hintResult.kind !== "ok") return hintResult;
       // `option_text` is optional in PostVerifyStep — the planner may
       // emit a `select` step without specifying which option to pick.
@@ -997,7 +1018,7 @@ function translateStep(
       // handles the styled-checkbox case via browser.check internally.
       // We don't model a separate kind because skills target visible
       // intent ("agree to ToS"), not browser primitives.
-      const hintResult = resolveClickHint(observed.selector, inventory, roundIndex);
+      const hintResult = resolveClickHint(observed.selector, inventory, roundIndex, observed);
       if (hintResult.kind !== "ok") return hintResult;
       return {
         kind: "ok",
@@ -1219,7 +1240,7 @@ function captureLooksLikeSignupForm(rounds: readonly OnboardingCaseFile[]): bool
     if (/\bsign[\s-]?up\b|\bregister\b|\bcreate\s+account\b/i.test(observed.reason)) {
       return true;
     }
-    const target = round.inventory.find((el) => el.selector === observed.selector);
+    const target = capturedElement(round.inventory, observed.selector, observed);
     const targetText = [
       target?.labelText,
       target?.placeholder,
@@ -1316,8 +1337,10 @@ function resolveClickHint(
   selector: string,
   inventory: readonly InteractiveElement[],
   roundIndex: number,
+  scope: CapturedFrameScope = {},
 ): ClickHintOk | PromoteRejection {
-  const match = inventory.find((e) => e.selector === selector);
+  const scopedInventory = captureInventory(inventory, scope);
+  const match = scopedInventory.find((e) => e.selector === selector);
   if (match === undefined) {
     return {
       kind: "rejected",
@@ -1355,9 +1378,9 @@ function resolveClickHint(
   // (form labels, "Cancel") provides a unique nearby text that pins
   // the modal context — exactly the same shape pickRowDisambiguator
   // already handles for fill/select.
-  const hrefHint = pickSameTextAnchorHrefHint(match, hint, inventory);
+  const hrefHint = pickSameTextAnchorHrefHint(match, hint, scopedInventory);
   const role = inferRoleHint(match) ?? (hrefHint !== null ? "link" : undefined);
-  const duplicates = inventory.filter(
+  const duplicates = scopedInventory.filter(
     (e) =>
       pickClickText(e) === hint &&
       e.selector !== selector &&
@@ -1365,7 +1388,7 @@ function resolveClickHint(
       !(hrefHint !== null && pickHrefHint(e) === hrefHint),
   );
   if (duplicates.length > 0) {
-    const nearTextHint = pickRowDisambiguator(match, duplicates, inventory);
+    const nearTextHint = pickRowDisambiguator(match, duplicates, scopedInventory);
     if (nearTextHint === null) {
       return {
         kind: "rejected",
@@ -1563,8 +1586,10 @@ function resolveLabelHint(
   selector: string,
   inventory: readonly InteractiveElement[],
   roundIndex: number,
+  scope: CapturedFrameScope = {},
 ): LabelHintOk | PromoteRejection {
-  const match = inventory.find((e) => e.selector === selector);
+  const scopedInventory = captureInventory(inventory, scope);
+  const match = scopedInventory.find((e) => e.selector === selector);
   if (match === undefined) {
     return {
       kind: "rejected",
@@ -1621,7 +1646,7 @@ function resolveLabelHint(
   // sibling help-button as an ambiguity (OpenRouter ships a "Name"
   // tooltip button next to its #name input — both report labelText
   // "Name", but the button is not a fill target).
-  const duplicates = inventory.filter(
+  const duplicates = scopedInventory.filter(
     (e) =>
       e.selector !== selector &&
       (e.tag === "input" || e.tag === "textarea" || e.tag === "select") &&
@@ -1648,7 +1673,7 @@ function resolveLabelHint(
   // generated correctly falls through to the disambiguator below.
   const stable = pickStableAttribute(match);
   if (stable !== null && stable !== hint) {
-    const stableDupes = inventory.filter(
+    const stableDupes = scopedInventory.filter(
       (e) =>
         e.selector !== selector &&
         (e.tag === "input" || e.tag === "textarea" || e.tag === "select") &&
@@ -1670,7 +1695,7 @@ function resolveLabelHint(
   //      typically a description paragraph, useless as a disambiguator).
   // Failure to find one means we still can't disambiguate — fall back
   // to the pre-rc.3 hard rejection.
-  const nearTextHint = pickRowDisambiguator(match, duplicates, inventory);
+  const nearTextHint = pickRowDisambiguator(match, duplicates, scopedInventory);
   if (nearTextHint !== null) {
     return { kind: "ok", hint, near_text_hint: nearTextHint };
   }

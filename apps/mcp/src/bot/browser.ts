@@ -62,6 +62,22 @@ export interface PageTargetSafetySignals {
   accountSetup: boolean;
 }
 
+export interface FrameTarget {
+  framePath: string;
+  frameOrigin: string;
+  frameUrl: string;
+}
+
+export type ResolvedPageTarget =
+  | {
+      ok: true;
+      handle: ElementHandle<Element>;
+      text: string;
+      safetySignals: PageTargetSafetySignals;
+      frameTarget: FrameTarget | null;
+    }
+  | { ok: false; reason: "none" | "ambiguous"; candidates: string[] };
+
 // Whether to use the CDP-hardened launcher (patchright, which runs
 // evaluations in an isolated world and removes the automation tells —
 // mainWorldExecution, navigator.webdriver, viewport — that Turnstile /
@@ -2763,7 +2779,8 @@ export class BrowserController {
   //     a live ElementHandle to the winner. The caller acts through the handle
   //     (never a DOM-visible marker), so a page MutationObserver cannot re-aim
   //     the click at a decoy between resolution and click, and disposes it after.
-  async resolvePageTarget(
+  private async resolveTargetInContext(
+    ctx: Page | Frame,
     mode: "text" | "css",
     value: string,
   ): Promise<
@@ -2776,7 +2793,7 @@ export class BrowserController {
     | { ok: false; reason: "none" | "ambiguous"; candidates: string[] }
   > {
     if (!this.page) throw new Error("Browser not started");
-    const resultHandle = await this.page.evaluateHandle(
+    const resultHandle = await ctx.evaluateHandle(
       ({ mode, value }) => {
         const norm = (s: string | null): string =>
           (s ?? "").replace(/\s+/g, " ").trim().toLowerCase();
@@ -3004,6 +3021,53 @@ export class BrowserController {
       text: meta.text ?? "",
       safetySignals: meta.safetySignals ?? { billingObject: false, accountSetup: false },
     };
+  }
+
+  async resolvePageTarget(mode: "text" | "css", value: string): Promise<ResolvedPageTarget> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const matches: Array<{
+      handle: ElementHandle<Element>;
+      text: string;
+      safetySignals: PageTargetSafetySignals;
+      frameTarget: FrameTarget | null;
+    }> = [];
+    const candidates: string[] = [];
+    for (const frame of page.frames()) {
+      if (frame.isDetached()) continue;
+      const rawUrl = frame.url();
+      if (frame !== page.mainFrame() && CAPTCHA_FRAME_HOST_RE.test(rawUrl)) continue;
+      const resolved = await this.resolveTargetInContext(frame, mode, value).catch(() => null);
+      if (resolved === null) continue;
+      if (!resolved.ok) {
+        if (resolved.reason === "ambiguous") candidates.push(...resolved.candidates);
+        continue;
+      }
+      let frameTarget: FrameTarget | null = null;
+      if (frame !== page.mainFrame()) {
+        try {
+          frameTarget = {
+            framePath: this.framePath(frame),
+            frameOrigin: this.effectiveFrameOrigin(frame),
+            frameUrl: rawUrl,
+          };
+        } catch {
+          await resolved.handle.dispose().catch(() => undefined);
+          continue;
+        }
+      }
+      matches.push({ ...resolved, frameTarget });
+      candidates.push(resolved.text);
+    }
+    if (matches.length !== 1 || candidates.length > 1) {
+      await Promise.all(matches.map((match) => match.handle.dispose().catch(() => undefined)));
+      return {
+        ok: false,
+        reason: candidates.length === 0 ? "none" : "ambiguous",
+        candidates: candidates.slice(0, 8),
+      };
+    }
+    return { ok: true, ...matches[0]! };
   }
 
   private async locatorClickState(
@@ -8510,18 +8574,60 @@ export class BrowserController {
     });
   }
 
-  // Resolve a previously-tagged frame URL back to its live Playwright Frame —
+  private framePath(frame: Frame): string {
+    const indexes: number[] = [];
+    let current: Frame | null = frame;
+    while (current !== null) {
+      const parent = current.parentFrame();
+      if (parent === null) break;
+      const index = parent.childFrames().indexOf(current);
+      if (index < 0) return "";
+      indexes.unshift(index);
+      current = parent;
+    }
+    return indexes.join("/");
+  }
+
+  private effectiveFrameOrigin(frame: Frame): string {
+    let current: Frame | null = frame;
+    while (current !== null) {
+      const url = current.url();
+      if (url !== "" && url !== "about:blank" && url !== "about:srcdoc") {
+        const origin = new URL(url).origin;
+        if (origin !== "null") return origin;
+        throw new Error("opaque frame origin");
+      }
+      current = current.parentFrame();
+    }
+    throw new Error("frame origin unavailable");
+  }
+
+  // Resolve a previously-tagged frame path back to its live Playwright Frame —
   // used by the frame-aware act helpers below (clickInFrame/typeInFrame/
   // clickViaJsInFrame) to act on an element extractInteractiveElements found
   // inside a child <iframe>. Returns null when the frame has since navigated
   // or detached (a fresh observe/extract picks up whatever replaced it); the
   // caller surfaces that as a normal "target not found" error, never a
   // silent wrong-frame action.
-  private resolveFrame(frameUrl: string): Frame | null {
+  private resolveFrame(target: FrameTarget): Frame | null {
     if (!this.page) return null;
-    return (
-      this.page.frames().find((f) => !f.isDetached() && f.url() === frameUrl) ?? null
-    );
+    let frame = this.page.mainFrame();
+    for (const part of target.framePath.split("/")) {
+      if (!/^\d+$/.test(part)) return null;
+      const child = frame.childFrames()[Number.parseInt(part, 10)];
+      if (child === undefined) return null;
+      frame = child;
+    }
+    if (frame.isDetached()) return null;
+    try {
+      return this.effectiveFrameOrigin(frame) === target.frameOrigin ? frame : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private frameLabel(target: FrameTarget): string {
+    return target.frameOrigin;
   }
 
   // Frame-scoped click. Deliberately simpler than click() above (no radio/
@@ -8532,18 +8638,22 @@ export class BrowserController {
   // for (a merchant's own same-domain checkout options rendered in an
   // iframe), the same primitives fillAndSubmitCheckout already relies on for
   // cross-origin PSP fields.
-  async clickInFrame(frameUrl: string, selector: string): Promise<void> {
-    const frame = this.resolveFrame(frameUrl);
+  async clickInFrame(target: FrameTarget, selector: string): Promise<void> {
+    const frame = this.resolveFrame(target);
     if (frame === null) {
-      throw new Error(`click: the target's frame is no longer present (${frameUrl})`);
+      throw new Error(
+        `click: the target's frame is no longer present (${this.frameLabel(target)})`,
+      );
     }
     await frame.locator(selector).first().click({ timeout: 8000 });
   }
 
-  async clickViaJsInFrame(frameUrl: string, selector: string, index = 0): Promise<void> {
-    const frame = this.resolveFrame(frameUrl);
+  async clickViaJsInFrame(target: FrameTarget, selector: string, index = 0): Promise<void> {
+    const frame = this.resolveFrame(target);
     if (frame === null) {
-      throw new Error(`js_click: the target's frame is no longer present (${frameUrl})`);
+      throw new Error(
+        `js_click: the target's frame is no longer present (${this.frameLabel(target)})`,
+      );
     }
     const safeIndex = Math.max(0, Math.floor(index));
     await frame
@@ -8562,10 +8672,10 @@ export class BrowserController {
   // type_secret targets that resolve into a frame. Same humanized-vs-fast
   // split as type() above, without the multi-input-OTP auto-advance nuance —
   // out of scope for the checkout-option case this exists for.
-  async typeInFrame(frameUrl: string, selector: string, text: string): Promise<void> {
-    const frame = this.resolveFrame(frameUrl);
+  async typeInFrame(target: FrameTarget, selector: string, text: string): Promise<void> {
+    const frame = this.resolveFrame(target);
     if (frame === null) {
-      throw new Error(`type: the target's frame is no longer present (${frameUrl})`);
+      throw new Error(`type: the target's frame is no longer present (${this.frameLabel(target)})`);
     }
     const locator = frame.locator(selector).first();
     await locator.waitFor({ state: "visible", timeout: 10000 });
@@ -8588,6 +8698,7 @@ export class BrowserController {
       cardRadioGroup: mainGroups[i] ?? null,
       frameOrigin: null,
       frameUrl: null,
+      framePath: null,
     }));
 
     // Cross-frame support — surface elements inside child <iframe>s (same- AND
@@ -8601,15 +8712,15 @@ export class BrowserController {
     // fillAndSubmitCheckout/detectThreeDsChallenge use to reach cross-origin
     // frame content.
     const framedElements: Array<
-      Omit<(typeof mainElements)[number], "frameOrigin" | "frameUrl"> & {
+      Omit<(typeof mainElements)[number], "frameOrigin" | "frameUrl" | "framePath"> & {
         frameOrigin: string;
         frameUrl: string;
+        framePath: string;
       }
     > = [];
     for (const frame of page.frames()) {
       if (frame === page.mainFrame() || frame.isDetached()) continue;
       const frameUrl = frame.url();
-      if (frameUrl === "" || frameUrl === "about:blank") continue;
       // Captcha challenge iframes are handled by the dedicated captcha-gate
       // flow, not by ordinary ref-based clicking — surfacing their internal
       // DOM as el_table rows would invite the planner to poke at the
@@ -8618,7 +8729,7 @@ export class BrowserController {
       if (CAPTCHA_FRAME_HOST_RE.test(frameUrl)) continue;
       let frameOrigin: string;
       try {
-        frameOrigin = new URL(frameUrl).origin;
+        frameOrigin = this.effectiveFrameOrigin(frame);
       } catch {
         continue; // opaque/non-http frame (data:, about:) — nothing safe to tag it with
       }
@@ -8626,7 +8737,13 @@ export class BrowserController {
         const raw = await this.extractElementsFromContext(frame);
         const groups = assignCardRadioGroups(raw.clusterMeta);
         for (const [i, e] of raw.out.entries()) {
-          framedElements.push({ ...e, cardRadioGroup: groups[i] ?? null, frameOrigin, frameUrl });
+          framedElements.push({
+            ...e,
+            cardRadioGroup: groups[i] ?? null,
+            frameOrigin,
+            frameUrl,
+            framePath: this.framePath(frame),
+          });
         }
       } catch {
         // Cross-origin frame mid-navigation, torn down, or otherwise
@@ -10193,6 +10310,7 @@ export interface InteractiveElement {
   // provision-session.ts.
   frameOrigin?: string | null;
   frameUrl?: string | null;
+  framePath?: string | null;
 }
 
 // T38 — pure clustering logic. Identifies card-radio groups from a

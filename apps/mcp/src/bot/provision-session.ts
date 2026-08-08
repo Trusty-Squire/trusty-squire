@@ -23,6 +23,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrowserController,
+  type FrameTarget,
   type InteractiveElement,
   type PageTargetSafetySignals,
 } from "./browser.js";
@@ -707,7 +708,8 @@ function baseIdentityFields(el: InteractiveElement): string[] {
     // page) could hash to the SAME ref and let an act resolve to the wrong
     // frame's element. Load-bearing for the frame domain-lock: the ref
     // itself must be frame-scoped, not just the guard that later reads it.
-    el.frameUrl ?? "",
+    el.frameOrigin ?? "",
+    el.framePath ?? "",
   ];
 }
 
@@ -1079,15 +1081,37 @@ export function hostAllowed(url: string, allowedHosts: readonly string[]): boole
 // anything else goes through the SAME domain-scope check goto/allow_host
 // already use (hostAllowed) — reusing the existing guard, not inventing a
 // new trust classifier.
-function frameTargetAllowed(session: Session, el: InteractiveElement): boolean {
-  const frameUrl = el.frameUrl;
-  if (frameUrl === undefined || frameUrl === null) return true; // main frame
-  const pageUrl = session.browser.currentUrl();
-  if (isSameRecipeDomain(frameUrl, pageUrl)) return true; // merchant's own iframe
-  return hostAllowed(frameUrl, hostStrings(session));
+type FrameScopedTarget = Pick<InteractiveElement, "frameOrigin" | "frameUrl" | "framePath">;
+
+function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
+  if (el.framePath === undefined || el.framePath === null) return null;
+  if (el.frameOrigin === undefined || el.frameOrigin === null) {
+    throw new Error("frame target lacks an origin");
+  }
+  return {
+    framePath: el.framePath,
+    frameOrigin: el.frameOrigin,
+    frameUrl: el.frameUrl ?? "",
+  };
 }
 
-function assertFrameTargetAllowed(session: Session, el: InteractiveElement, kind: string): void {
+function sameInteractiveTarget(left: InteractiveElement, right: InteractiveElement): boolean {
+  return (
+    left.selector === right.selector &&
+    (left.frameOrigin ?? null) === (right.frameOrigin ?? null) &&
+    (left.framePath ?? null) === (right.framePath ?? null)
+  );
+}
+
+function frameTargetAllowed(session: Session, el: FrameScopedTarget): boolean {
+  const target = frameTargetFor(el);
+  if (target === null) return true;
+  const pageUrl = session.browser.currentUrl();
+  if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return true;
+  return hostAllowed(target.frameOrigin, hostStrings(session));
+}
+
+function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind: string): void {
   if (frameTargetAllowed(session, el)) return;
   throw new Error(
     `${kind} blocked by domain-scope: the target lives in a cross-domain frame ` +
@@ -1103,14 +1127,14 @@ function assertFrameTargetAllowed(session: Session, el: InteractiveElement, kind
 // for navigation/click via hostAllowed's auth-provider carve-outs. A weak
 // model must never be able to type a credential into a rogue or payment
 // iframe just because that host happens to be allow-listed for OAuth.
-function assertSecretFrameTargetAllowed(session: Session, el: InteractiveElement): void {
-  const frameUrl = el.frameUrl;
-  if (frameUrl === undefined || frameUrl === null) return; // main frame
+function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget): void {
+  const target = frameTargetFor(el);
+  if (target === null) return;
   const pageUrl = session.browser.currentUrl();
-  if (isSameRecipeDomain(frameUrl, pageUrl)) return; // merchant's own iframe
+  if (isSameRecipeDomain(target.frameOrigin, pageUrl)) return;
   throw new Error(
     `type_secret refused: the target lives in a cross-domain frame ` +
-      `(${el.frameOrigin ?? frameUrl}), not the page's own domain. Secrets may only be ` +
+      `(${target.frameOrigin}), not the page's own domain. Secrets may only be ` +
       `typed into the main frame or a frame on the page's own domain.`,
   );
 }
@@ -1123,10 +1147,10 @@ function assertSecretFrameTargetAllowed(session: Session, el: InteractiveElement
 // selectors) rather than the intended frame element — a correctness and
 // domain-lock hazard, not just a missing feature. Refuse explicitly instead.
 function assertNoFrameTarget(el: InteractiveElement, kind: string): void {
-  if (el.frameUrl === undefined || el.frameUrl === null) return;
+  if (el.framePath === undefined || el.framePath === null) return;
   throw new Error(
     `operate_act kind="${kind}" does not yet support a target inside an <iframe> ` +
-      `(frame ${el.frameOrigin ?? el.frameUrl}). Use click/js_click/type/type_secret for frame targets.`,
+      `(frame ${el.frameOrigin ?? "unknown"}). Use click/js_click/type/type_secret for frame targets.`,
   );
 }
 
@@ -2898,7 +2922,8 @@ export async function act(
       for (const key of elementTargetKeys(el)) session.sealedFieldKeys.add(key);
       // Type the REAL value into the page. It crosses only browser↔page; the
       // value is never returned to the host and never logged.
-      if (el.frameUrl) await browser.typeInFrame(el.frameUrl, el.selector, value);
+      const target = frameTargetFor(el);
+      if (target !== null) await browser.typeInFrame(target, el.selector, value);
       else await browser.type(el.selector, value);
       audit(sessionId, "type_secret", {
         slot: action.slot,
@@ -2987,6 +3012,9 @@ export async function act(
         try {
           const resolvedBlock = shouldBlockUnsafeProvisionSignals(pageText, resolved.safetySignals);
           if (resolvedBlock !== null) throw new Error(resolvedBlock);
+          if (resolved.frameTarget !== null) {
+            assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
+          }
           session.usedLocatorFallback = true;
           if (action.kind === "click") await browser.clickHandle(resolved.handle);
           else await browser.jsClickHandle(resolved.handle);
@@ -3021,19 +3049,21 @@ export async function act(
       // A main-frame or same-domain-frame target is unaffected.
       assertFrameTargetAllowed(session, el, action.kind);
       if (action.kind === "click") {
-        if (el.frameUrl) await browser.clickInFrame(el.frameUrl, el.selector);
+        const target = frameTargetFor(el);
+        if (target !== null) await browser.clickInFrame(target, el.selector);
         else await browser.click(el.selector);
       } else if (action.kind === "js_click") {
-        if (el.frameUrl) await browser.clickViaJsInFrame(el.frameUrl, el.selector);
+        const target = frameTargetFor(el);
+        if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
         else await browser.clickViaJs(el.selector);
-      } else if (action.kind === "type" && el.frameUrl) {
+      } else if (action.kind === "type" && frameTargetFor(el) !== null) {
         // Frame targets skip the autocomplete-popup-commit machinery below —
         // it operates on the main page's DOM only (markPreexistingType
         // SuggestionPopups / detectTypeSuggestionPopup / commitTypeSuggestion
         // are page-scoped). Out of scope for the checkout-option case frame
         // support exists for; a plain frame-scoped fill covers it.
         session.committedSelectValues.delete(el.selector);
-        await browser.typeInFrame(el.frameUrl, el.selector, action.text);
+        await browser.typeInFrame(frameTargetFor(el)!, el.selector, action.text);
       } else if (action.kind === "type") {
         session.committedSelectValues.delete(el.selector);
         if (!isAutocompleteScopedTypeField(action.provenance, el)) {
@@ -3312,6 +3342,11 @@ export function recipeTargetFor(
   userEmail: string | null = null,
 ): RecipeTarget | undefined {
   if (el === null) return undefined;
+  const scopedInventory = inventory.filter(
+    (candidate) =>
+      (candidate.frameOrigin ?? null) === (el.frameOrigin ?? null) &&
+      (candidate.framePath ?? null) === (el.framePath ?? null),
+  );
   const role =
     el.role ??
     (el.tag === "button"
@@ -3330,7 +3365,7 @@ export function recipeTargetFor(
     el.title ??
     el.name ??
     undefined;
-  const siblings = inventory.filter((candidate) => {
+  const siblings = scopedInventory.filter((candidate) => {
     if (candidate === el || candidate.selector === el.selector) return false;
     const candidateName =
       candidate.ariaLabel ??
@@ -3349,7 +3384,7 @@ export function recipeTargetFor(
       (el.href !== null && el.href !== undefined && candidate.href === el.href)
     );
   });
-  const nearText = siblings.length > 0 ? pickRowDisambiguator(el, siblings, inventory) : null;
+  const nearText = siblings.length > 0 ? pickRowDisambiguator(el, siblings, scopedInventory) : null;
   const domHint = pickStableDomHint(el);
   const hrefHint = pickHrefHint(el);
   const scrub = (value: string): string => scrubKnownEmail(value, userEmail);
@@ -3377,6 +3412,10 @@ export function recipeTargetFor(
       ? { visible_text: scrub(el.visibleText) }
       : {}),
     ...(fieldRole !== null ? { field_role: fieldRole } : {}),
+    ...(el.frameOrigin !== undefined && el.frameOrigin !== null
+      ? { frame_origin: el.frameOrigin }
+      : {}),
+    ...(el.framePath !== undefined && el.framePath !== null ? { frame_path: el.framePath } : {}),
   };
 }
 
@@ -3526,13 +3565,25 @@ export function captureObserved(
   action: ProvisionAction,
   el: InteractiveElement | null,
 ): PostVerifyStep | null {
+  const frameScope =
+    el?.frameOrigin !== undefined &&
+    el.frameOrigin !== null &&
+    el.framePath !== undefined &&
+    el.framePath !== null
+      ? { frame_origin: el.frameOrigin, frame_path: el.framePath }
+      : {};
   switch (action.kind) {
     case "click":
     case "js_click":
     case "oauth_click":
       return el === null
         ? null
-        : { kind: "click", selector: el.selector, reason: traceTextFor(el) ?? action.kind };
+        : {
+            kind: "click",
+            selector: el.selector,
+            reason: traceTextFor(el) ?? action.kind,
+            ...frameScope,
+          };
     case "type":
       // Non-secret value; the synthesizer applies the email/token/identity PII
       // scrub. type_secret is a different kind and is skipped above.
@@ -3543,6 +3594,7 @@ export function captureObserved(
             selector: el.selector,
             value: action.text,
             reason: traceTextFor(el) ?? "fill",
+            ...frameScope,
           };
     case "goto":
       return { kind: "navigate", url: action.url, reason: "navigate" };
@@ -4424,12 +4476,14 @@ async function captureReplayRepairVerification(
   if (resolvedEl === null) {
     throw new Error(`replay repair target mismatch for ${expected.hole}`);
   }
-  const recordedTargetMatches = recordedResolution?.element.selector === resolvedEl.selector;
+  const recordedTargetMatches =
+    recordedResolution !== null && sameInteractiveTarget(recordedResolution.element, resolvedEl);
   const semanticResolution =
     expected.target === null
       ? null
       : resolveRecipeRepairTarget(session.lastElements, expected.target);
-  const replacementSemanticsMatch = semanticResolution?.selector === resolvedEl.selector;
+  const replacementSemanticsMatch =
+    semanticResolution !== null && sameInteractiveTarget(semanticResolution, resolvedEl);
   if (!recordedTargetMatches && !replacementSemanticsMatch) {
     throw new Error(`replay repair target mismatch for ${expected.hole}`);
   }
@@ -4464,10 +4518,8 @@ async function refreshReplayVerificationAfterAction(
   const affected = [...state.expectedFields.values()].filter((expected) => {
     if (action.kind === "set_phone_country") return expected.kind === "set_phone_country";
     if (expected.target === null || resolvedEl === null) return false;
-    return (
-      resolveRecipeFieldTarget(session.lastElements, expected.target)?.element.selector ===
-      resolvedEl.selector
-    );
+    const resolution = resolveRecipeFieldTarget(session.lastElements, expected.target);
+    return resolution !== null && sameInteractiveTarget(resolution.element, resolvedEl);
   });
   for (const expected of affected) {
     state.verifiedFields.delete(expected.stepIndex);

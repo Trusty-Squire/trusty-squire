@@ -35,6 +35,12 @@ beforeAll(async () => {
             `<iframe src="http://localhost:${port}/frame-cross" title="cross" width="200" height="100"></iframe>`,
         ),
       );
+    } else if (req.url === "/frame-duplicate") {
+      res.end(
+        page_(
+          `<button>Frame Button</button><script>document.querySelector('button').textContent = window.name;</script>`,
+        ),
+      );
     } else if (req.url === "/frame-same") {
       res.end(page_(`<button data-testid="same-frame-btn">Same Frame Button</button>`));
     } else if (req.url === "/frame-cross") {
@@ -120,11 +126,123 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
         const btn = document.querySelector('[data-testid="same-frame-btn"]');
         btn?.addEventListener("click", () => btn.setAttribute("data-clicked", "1"));
       });
-      await ctrl.clickInFrame(frameUrl, same?.selector ?? "");
-      const clicked = await frame?.evaluate(
-        () => document.querySelector('[data-testid="same-frame-btn"]')?.getAttribute("data-clicked"),
+      await ctrl.clickInFrame(
+        {
+          frameUrl,
+          frameOrigin: same?.frameOrigin ?? "",
+          framePath: same?.framePath ?? "",
+        },
+        same?.selector ?? "",
+      );
+      const clicked = await frame?.evaluate(() =>
+        document.querySelector('[data-testid="same-frame-btn"]')?.getAttribute("data-clicked"),
       );
       expect(clicked).toBe("1");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("surfaces a JavaScript-populated about:blank frame with its parent origin", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.evaluate(() => {
+        document.body.innerHTML = '<iframe id="blank"></iframe>';
+        const frame = document.querySelector<HTMLIFrameElement>("#blank")!;
+        frame.contentDocument!.body.innerHTML =
+          '<button data-testid="blank-button">Blank Button</button>';
+      });
+      const els = await ctrl.extractInteractiveElements();
+      const blank = els.find((element) => element.testId === "blank-button");
+      expect(blank?.frameUrl).toBe("about:blank");
+      expect(blank?.frameOrigin).toBe(`http://127.0.0.1:${port}`);
+      expect(blank?.framePath).toBe("0");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("resolves locator targets in frames and reports cross-context ambiguity", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      const resolved = await ctrl.resolvePageTarget("text", "Same Frame Button");
+      expect(resolved.ok).toBe(true);
+      if (resolved.ok) {
+        expect(resolved.frameTarget?.frameOrigin).toBe(`http://127.0.0.1:${port}`);
+        expect(resolved.frameTarget?.framePath).toBe("0");
+        await resolved.handle.dispose();
+      }
+      const cssResolved = await ctrl.resolvePageTarget("css", '[data-testid="cross-frame-btn"]');
+      expect(cssResolved.ok).toBe(true);
+      if (cssResolved.ok) {
+        expect(cssResolved.frameTarget?.frameOrigin).toBe(`http://localhost:${port}`);
+        await cssResolved.handle.dispose();
+      }
+      await page.evaluate(() => {
+        const button = document.createElement("button");
+        button.textContent = "Same Frame Button";
+        document.body.append(button);
+      });
+      const ambiguous = await ctrl.resolvePageTarget("text", "Same Frame Button");
+      expect(ambiguous).toMatchObject({ ok: false, reason: "ambiguous" });
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("uses frame paths when duplicate frame URLs share the same selector", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.setContent(
+        page_(
+          `<iframe name="First" src="http://127.0.0.1:${port}/frame-duplicate"></iframe>` +
+            `<iframe name="Second" src="http://127.0.0.1:${port}/frame-duplicate"></iframe>`,
+        ),
+      );
+      await page.waitForLoadState("networkidle");
+      const els = await ctrl.extractInteractiveElements();
+      const second = els.find((element) => element.visibleText === "Second");
+      expect(second?.framePath).toBe("1");
+      const secondFrame = page.frames().find((frame) => frame.name() === "Second")!;
+      await secondFrame.evaluate(() => {
+        document.querySelector("button")?.addEventListener("click", () => {
+          document.body.dataset.clicked = "yes";
+        });
+      });
+      await ctrl.clickInFrame(
+        {
+          frameUrl: second?.frameUrl ?? "",
+          frameOrigin: second?.frameOrigin ?? "",
+          framePath: second?.framePath ?? "",
+        },
+        second?.selector ?? "",
+      );
+      expect(await secondFrame.evaluate(() => document.body.dataset.clicked)).toBe("yes");
+      const firstFrame = page.frames().find((frame) => frame.name() === "First")!;
+      expect(await firstFrame.evaluate(() => document.body.dataset.clicked)).toBeUndefined();
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("redacts a detached frame URL from action errors", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      const target = {
+        framePath: "99",
+        frameOrigin: `http://127.0.0.1:${port}`,
+        frameUrl: `http://127.0.0.1:${port}/frame?secret=never-disclose#token`,
+      };
+      const errors = await Promise.all([
+        ctrl.clickInFrame(target, "button").catch((error: unknown) => error),
+        ctrl.typeInFrame(target, "input", "x").catch((error: unknown) => error),
+        ctrl.clickViaJsInFrame(target, "button").catch((error: unknown) => error),
+      ]);
+      for (const error of errors) {
+        expect(error).toBeInstanceOf(Error);
+        expect((error as Error).message).toContain(target.frameOrigin);
+        expect((error as Error).message).not.toMatch(/never-disclose|token/);
+      }
     } finally {
       await page.close();
     }
