@@ -523,6 +523,11 @@ describe("isSameRecipeDomain (replay-serve-live-domainlock)", () => {
     expect(isSameRecipeDomain("https://attacker.net/signup", "example.com")).toBe(false);
   });
 
+  it("isolates tenants on private suffixes", () => {
+    expect(isSameRecipeDomain("https://foo.github.io/settings", "foo.github.io")).toBe(true);
+    expect(isSameRecipeDomain("https://attacker.github.io/phish", "foo.github.io")).toBe(false);
+  });
+
   it("rejects a look-alike domain that merely contains the real one as a substring", () => {
     expect(isSameRecipeDomain("example.com.attacker.net", "example.com")).toBe(false);
     expect(isSameRecipeDomain("notexample.com", "example.com")).toBe(false);
@@ -612,13 +617,35 @@ describe("recipeDomainLockViolations / isRecipeDomainLocked (replay-serve-live-d
     expect(violations[0]!.field).toBe("trace[1].action.host");
   });
 
-  it("is exempt for a checkout-shape-keyed recipe — no single site to lock to", () => {
+  it("rejects navigation and host widening for a checkout-shape-keyed recipe", () => {
     const sig = checkoutFieldSetSignature(SHOPIFY_CHECKOUT_FIELDS)!;
     const recipe = baseRecipe({
       domain: checkoutShapeKey(sig),
       entry_url: undefined,
-      allowed_hosts: ["storeA.example", "totally-unrelated.example"],
-      trace: [{ action: { kind: "allow_host", host: "unrelated-either.example" } }],
+      allowed_hosts: ["store.example"],
+      trace: [
+        { action: { kind: "goto", url_template: "https://store.example/checkout" } },
+        { action: { kind: "allow_host", host: "store.example" } },
+      ],
+    });
+    expect(recipeDomainLockViolations(recipe).map((violation) => violation.field)).toEqual([
+      "allowed_hosts[0]",
+      "trace[0].action.url_template",
+      "trace[1].action.host",
+    ]);
+  });
+
+  it("allows field-only actions for a checkout-shape-keyed recipe", () => {
+    const sig = checkoutFieldSetSignature(SHOPIFY_CHECKOUT_FIELDS)!;
+    const recipe = baseRecipe({
+      domain: checkoutShapeKey(sig),
+      entry_url: undefined,
+      allowed_hosts: [],
+      trace: [
+        { action: { kind: "type", text_match: "Email", value: { hole: "contact.email" } } },
+        { action: { kind: "select", text_match: "Country", value: "US" } },
+        { action: { kind: "click", text_match: "Continue" } },
+      ],
     });
     expect(recipeDomainLockViolations(recipe)).toEqual([]);
   });

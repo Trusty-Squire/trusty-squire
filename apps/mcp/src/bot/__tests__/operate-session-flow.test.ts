@@ -1164,6 +1164,8 @@ describe("prepared-statement replay", () => {
 });
 
 describe("replay-serve-live-domainlock — hard domain-lock at replay time", () => {
+  const shapeDomain = `shape:${"a".repeat(64)}`;
+
   it("SAFETY: refuses a goto step targeting a different eTLD+1, hard-stops (not resumable), and shuts the payment gate", async () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
@@ -1240,6 +1242,47 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     );
     expect(result.status).toBe("complete");
     expect(h.gotos).toContain("https://checkout.example.com/next");
+  });
+
+  it.each([
+    ["goto", { action: { kind: "goto" as const, url_template: "https://store.example/next" } }],
+    ["allow_host", { action: { kind: "allow_host" as const, host: "store.example" } }],
+  ])("SAFETY: refuses a %s step in a checkout-shape recipe", async (_kind, step) => {
+    const started = await startProvisionSession({ serviceUrl: "https://store.example/checkout" });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({ domain: shapeDomain, entry_url: undefined, allowed_hosts: [], trace: [step] }),
+      {},
+    );
+    expect(result).toMatchObject({
+      status: "domain_lock_violation",
+      step_index: 0,
+      recipe_domain: shapeDomain,
+    });
+  });
+
+  it("allows field-only actions in a checkout-shape recipe", async () => {
+    h.elements = [
+      elem({
+        tag: "button",
+        testId: "continue",
+        role: "button",
+        ariaLabel: "Continue",
+        selector: "#continue",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://store.example/checkout" });
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        domain: shapeDomain,
+        entry_url: undefined,
+        allowed_hosts: [],
+        trace: [{ action: { kind: "click", target: { dom_hint: { testid: "continue" } } } }],
+      }),
+      {},
+    );
+    expect(result.status).toBe("complete");
   });
 });
 

@@ -343,8 +343,8 @@ describe("POST /recipes — hard domain-lock", () => {
 // replay-per-leg-signature — the checkout-leg key slot holds a
 // `shape:<sha256 hex>` pseudo-domain (checkoutShapeKey in
 // @trusty-squire/recipe-schema) instead of a real eTLD+1. Same routes, same
-// store, serves live the same way — only the key's shape differs, and the
-// domain-lock is exempt (no single site to lock a cross-store recipe to).
+// store, serves live the same way — only the key's shape differs. Because
+// it has no site domain, it may fill the current page but cannot navigate.
 describe("POST /recipes + GET /recipes/:verb/:domain with a checkout-leg shape key", () => {
   let store: InMemoryOperatorRecipeStore;
   let server: Awaited<ReturnType<typeof buildServer>>;
@@ -439,12 +439,22 @@ describe("POST /recipes + GET /recipes/:verb/:domain with a checkout-leg shape k
     expect(fetched.statusCode).toBe(404);
   });
 
-  it("the domain-lock is exempt for a shape-keyed recipe: allowed_hosts from the recording store is not rejected", async () => {
+  it.each([
+    ["goto", { action: { kind: "goto" as const, url_template: "https://store.example/next" } }],
+    ["allow_host", { action: { kind: "allow_host" as const, host: "store.example" } }],
+  ])("rejects a shape-keyed recipe containing a %s step", async (_kind, step) => {
+    const recipe = checkoutLegRecipe({ trace: [step] });
     const res = await server.inject({
       method: "POST",
       url: "/recipes",
-      payload: { recipe: checkoutLegRecipe({ allowed_hosts: ["storeA.example"] }) },
+      payload: { recipe },
     });
-    expect(res.statusCode).toBe(201);
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("domain_lock_violation");
+    const fetched = await server.inject({
+      method: "GET",
+      url: `/recipes/purchase/${encodeURIComponent(shapeKey)}`,
+    });
+    expect(fetched.statusCode).toBe(404);
   });
 });

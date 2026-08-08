@@ -4172,9 +4172,8 @@ function markReplayFailure(
 // replay-serve-live-domainlock — checks a replay-bound goto/allow_host
 // target against the recipe's own eTLD+1, allowing the recipe's site (and
 // subdomains) plus the same identity-provider/auth-handler hosts the
-// ordinary session goto gate exempts (hostAllowed). A checkout-shape-keyed
-// recipe (replay-per-leg-signature) has no single site to lock to — see
-// the module note on OperatorReplayResult — so it's exempt.
+// ordinary session goto gate exempts (hostAllowed). Checkout-shape recipes
+// cannot execute goto/allow_host actions because they have no site domain.
 function replayTargetWithinRecipeDomain(url: string, recipeDomain: string): boolean {
   return hostAllowed(url, [recipeDomain]);
 }
@@ -4694,6 +4693,11 @@ export async function replayOperatorRecipe(
     }
 
     if (recorded.kind === "goto") {
+      // This lock covers explicit goto/allow_host steps only. Organic redirects
+      // and OAuth popups remain governed by the existing session navigation model.
+      if (isCheckoutShapeKey(recipeDomain)) {
+        return await domainLockViolation(i, recorded.url_template ?? "<goto>");
+      }
       if (recorded.url_template === undefined) {
         return await fallback(step, i, "goto step has no URL");
       }
@@ -4707,10 +4711,7 @@ export async function replayOperatorRecipe(
       if (filled.missing.length > 0) {
         return await fallback(step, i, `missing bindings: ${filled.missing.join(", ")}`);
       }
-      if (
-        !isCheckoutShapeKey(recipeDomain) &&
-        !replayTargetWithinRecipeDomain(filled.url, recipeDomain)
-      ) {
+      if (!replayTargetWithinRecipeDomain(filled.url, recipeDomain)) {
         let host: string;
         try {
           host = new URL(filled.url).hostname;
@@ -4721,13 +4722,13 @@ export async function replayOperatorRecipe(
       }
       action = { kind: "goto", url: filled.url };
     } else if (recorded.kind === "allow_host") {
+      if (isCheckoutShapeKey(recipeDomain)) {
+        return await domainLockViolation(i, recorded.host ?? "<allow_host>");
+      }
       if (recorded.host === undefined) {
         return await fallback(step, i, "allow_host step has no host");
       }
-      if (
-        !isCheckoutShapeKey(recipeDomain) &&
-        !replayTargetWithinRecipeDomain(`https://${recorded.host}`, recipeDomain)
-      ) {
+      if (!replayTargetWithinRecipeDomain(`https://${recorded.host}`, recipeDomain)) {
         return await domainLockViolation(i, recorded.host);
       }
       action = { kind: "allow_host", host: recorded.host };

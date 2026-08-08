@@ -24,9 +24,11 @@ The local key is `(verb, eTLD+1)`:
 - Tenant subdomains under `myshopify.com` and `notion.site` retain the full host.
 - Recipes are local files under `~/.trusty-squire/operator-recipes/`, or the
   directory selected by `TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR`. Share-eligible
-  recipes are additionally submitted to the shared registry's candidate pool
-  and, once promoted, served to other installs on a local miss — CLAUDE.md
-  §"Operator Recipe registry (replay-registry-share)" owns that flow.
+  recipes are additionally written live to the shared registry and are served
+  immediately to other installs on a local miss. The registry and replay client
+  both enforce the recipe domain-lock; no candidate or promotion tier exists.
+  CLAUDE.md §"Operator Recipe registry (replay-serve-live-domainlock)" owns that
+  flow.
 - A money-path recording additionally saves its checkout leg as a second,
   narrower recipe in the same store, keyed by the live checkout page's
   field-name-set signature (`checkoutShapeKey` → `shape:<sha256>` in the
@@ -105,6 +107,12 @@ credential discovery and the existing `operate_pay` approval flow remain
 host-driven. After repairing that step, the host calls `operate_use` with the
 same recipe bindings, `session_id`, and `resume_from = next_index`; replay checks
 the continuation against the same recipe and bindings, then continues.
+
+Domain-keyed recipes may explicitly `goto` or `allow_host` only within their
+private-suffix-aware registrable domain. Checkout-shape recipes have no site
+domain and therefore cannot execute either action; they only interact with the
+already-open checkout page. Organic redirects and OAuth popups remain outside
+this explicit-action lock and follow the existing session navigation model.
 
 The saved postcondition is bound from the active replay's parameters before
 `operate_finish_task` verifies it.
