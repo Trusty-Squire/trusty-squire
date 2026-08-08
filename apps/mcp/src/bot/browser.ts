@@ -4376,10 +4376,80 @@ export class BrowserController {
     await this.clickComboboxOption(options.nth(index));
   }
 
-  /** Clear popup-detection markers without committing anything (no popup, or
-   * the match-or-stop rule found zero/multiple candidates). */
+  /**
+   * Clean up after a type-triggered autocomplete interaction, regardless of
+   * outcome (committed, ambiguous/zero-match stop, or a failed commit).
+   * Presses Escape to dismiss any still-open popup BEFORE clearing our own
+   * tracking markers — some widgets (Google Places classic's
+   * `.pac-container` in particular) never fully unmount, just toggle
+   * visibility, so a popup left open would otherwise be captured as
+   * "preexisting" the next time markPreexistingTypeSuggestionPopups
+   * snapshots the page (it snapshots by current visibility, not by who
+   * opened it), silently disabling detection on a host's very next retry.
+   */
   async discardTypeSuggestionPopup(): Promise<void> {
+    await this.pressKey("Escape");
     await this.clearComboboxMarkers();
+  }
+
+  /**
+   * After commitTypeSuggestion, POSITIVELY confirm the picked option's value
+   * actually committed. A same-selector `.value` change is one signal, but
+   * react-select/cmdk-style widgets clear their search input on selection
+   * and render the committed choice in a separate nearby element instead —
+   * checking only the original selector's `.value` would false-fail on
+   * exactly the widgets this feature targets. Checks, in order: the field's
+   * own live value; a native `<select>`'s selected-option label; a nearby
+   * (within two DOM ancestor hops of the field, never page-wide) element
+   * whose own text or aria-label exactly equals the picked option's text.
+   * Returns false — never true — when nothing positively confirms it; the
+   * caller must treat false as a miss (stop), never as a silent success.
+   */
+  async confirmAutocompleteCommitted(
+    fieldSelector: string,
+    pickedOptionText: string,
+  ): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page
+        .locator(fieldSelector)
+        .first()
+        .evaluate((field, wantedRaw) => {
+          const normalize = (s: string | null) =>
+            (s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+          const wanted = normalize(wantedRaw);
+          if (wanted.length === 0) return false;
+          const ownValue =
+            field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement
+              ? field.value
+              : "";
+          if (normalize(ownValue) === wanted) return true;
+          if (field instanceof HTMLSelectElement) {
+            const opt = field.options[field.selectedIndex];
+            if (opt !== undefined && normalize(opt.textContent) === wanted) return true;
+          }
+          // Bounded to the field's immediate wrapper (walk up at most two
+          // ancestors) so a coincidental text match elsewhere on the page —
+          // or elsewhere in a large `<form>` — can't produce a false
+          // positive. React-select/cmdk render the committed choice as a
+          // sibling of the (now-cleared) search input under a shared
+          // control wrapper, well within this range.
+          let scope: Element | null = field.parentElement;
+          for (let hop = 0; hop < 2 && scope !== null; hop += 1) {
+            const found = Array.from(scope.querySelectorAll("*")).some((el) => {
+              if (el === field) return false;
+              if (normalize(el.textContent) === wanted) return true;
+              const ariaLabel = el.getAttribute("aria-label");
+              return ariaLabel !== null && normalize(ariaLabel) === wanted;
+            });
+            if (found) return true;
+            scope = scope.parentElement;
+          }
+          return false;
+        }, pickedOptionText);
+    } catch {
+      return false;
+    }
   }
 
   // ───────────── humanization internals ─────────────

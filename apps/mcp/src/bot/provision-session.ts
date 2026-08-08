@@ -50,6 +50,7 @@ import {
   bindRecipeTarget,
   bindRecipeValue,
   cssEscapeRecipeValue,
+  fieldRoleMatches,
   fillTemplate,
   hasRecipeTargetCandidate,
   isSingleUseUrl,
@@ -2963,28 +2964,52 @@ export async function act(
         await browser.type(el.selector, action.text);
         const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
         if (suggestionTexts.length > 0) {
-          const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
-          if (candidates.length !== 1) {
+          // Cleanup (dismiss + clear our tracking markers) must run no
+          // matter how this resolves — ambiguous stop, a failed commit, or
+          // success — mirroring selectFromCombobox's own try/finally. A
+          // leftover marker or a popup left open desyncs the NEXT type
+          // action's pre-existing-popup snapshot.
+          try {
+            const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
+            if (candidates.length !== 1) {
+              throw new AutocompleteCommitRequiredError(action.text, suggestionTexts.slice(0, 8));
+            }
+            const pickedText = suggestionTexts[candidates[0]!]!;
+            await browser.commitTypeSuggestion(candidates[0]!);
+            // Never trust that a click "looked right" — POSITIVELY confirm
+            // the commit took (same hard constraint as the field-role
+            // guard, PR #447: a miss is a stop, never a silent
+            // pass-through). Checking only the typed-into selector's own
+            // `.value` false-fails on react-select/cmdk-style widgets,
+            // which clear their search input on selection and render the
+            // committed choice in a nearby element instead —
+            // confirmAutocompleteCommitted checks that too, bounded to the
+            // field's own neighborhood, and returns false (never a guess)
+            // when nothing confirms it.
+            const committed = await browser.confirmAutocompleteCommitted(el.selector, pickedText);
+            if (!committed) {
+              throw new Error(
+                `autocomplete commit for "${action.text}" did not take — nothing on the page ` +
+                  `confirms the field now holds "${pickedText}" after selecting it.`,
+              );
+            }
+            // Rewrite the completed action to the COMMITTED value (not the
+            // raw typed draft) before it reaches recordTrace/recordedValues
+            // — otherwise 3.3's money-field guard compares the field's live
+            // (committed) value against the raw typed text on the very
+            // next transition and false-blocks the field this step just
+            // correctly filled and verified. Known residual gap: when
+            // confirmAutocompleteCommitted's positive signal came from a
+            // NEARBY element rather than el.selector's own value (a
+            // react-select/cmdk widget whose search input stays empty
+            // after commit), 3.3's re-verification on the next transition
+            // still re-reads only el.selector's live value and can
+            // false-block — not fixed here; flagging rather than building
+            // new machinery beyond what was decided for this task.
+            session.lastElements = await browser.extractInteractiveElements();
+            completedAction = { ...action, text: pickedText };
+          } finally {
             await browser.discardTypeSuggestionPopup();
-            throw new AutocompleteCommitRequiredError(action.text, suggestionTexts.slice(0, 8));
-          }
-          const preCommit = await browser.extractInteractiveElements();
-          const preCommitValue = preCommit.find((e) => e.selector === el.selector)?.value ?? "";
-          await browser.commitTypeSuggestion(candidates[0]!);
-          // Never trust that a click "looked right" — re-read the field's
-          // live DOM value (not just that suggestion text was visible) and
-          // require it to have actually changed from what typing alone left
-          // behind. Same hard constraint as the field-role guard (PR #447):
-          // a miss is a stop, never a silent pass-through on a value that
-          // never really committed.
-          const afterCommit = await browser.extractInteractiveElements();
-          session.lastElements = afterCommit;
-          const committedValue = afterCommit.find((e) => e.selector === el.selector)?.value ?? "";
-          if (committedValue.length === 0 || committedValue === preCommitValue) {
-            throw new Error(
-              `autocomplete commit for "${action.text}" did not take — the field's underlying ` +
-                `value is still "${committedValue}" after selecting "${suggestionTexts[candidates[0]!]}".`,
-            );
           }
         }
       } else if (action.kind === "upload") {
@@ -4301,7 +4326,16 @@ function rejectRecipeRecording(session: Session, reason: string): void {
 }
 
 function recordedMoneyFields(session: Session): ReplayExpectedField[] {
-  const fields: ReplayExpectedField[] = [];
+  // Last-write-wins per hole. session.recordedValues is a push-only,
+  // per-trace-step audit log — traceWithVerifiedProvenance needs it intact
+  // (one entry per value-carrying step) to verify recipe writes — so the
+  // dedup happens HERE, at read time, not on the underlying array. Without
+  // it, a host correcting a typo (type "10001", notice the mistake, re-type
+  // "10118") leaves BOTH entries; the money-field guard would keep
+  // comparing the live value against the stale "10001" entry forever — an
+  // unrecoverable livelock, since re-filling only appends a third entry and
+  // nothing ever supersedes the first.
+  const byHole = new Map<string, ReplayExpectedField>();
   for (const source of session.recordedValues) {
     if (source.hole === undefined || !REPLAY_VERIFIED_HOLE.test(source.hole)) continue;
     const action = session.actionTrace[source.traceIndex]?.action;
@@ -4322,7 +4356,7 @@ function recordedMoneyFields(session: Session): ReplayExpectedField[] {
         target = null;
       }
     }
-    fields.push({
+    byHole.set(source.hole, {
       stepIndex: source.traceIndex,
       hole: source.hole,
       expected: source.literal,
@@ -4330,7 +4364,60 @@ function recordedMoneyFields(session: Session): ReplayExpectedField[] {
       kind: action.kind,
     });
   }
-  return fields;
+  return [...byHole.values()];
+}
+
+// Presence resolution for the COLD path only — same identity restriction as
+// resolveRecipeFieldTarget (id/testid only, no fuzzy name/label match, so an
+// id drift can't smuggle a value via a looser match) but deliberately
+// WITHOUT the field_role requirement. resolveRecipeFieldTarget's field_role
+// gate exists for REPLAY, where "no role signal" must mean "no confident
+// fill" because the recorded target may be stale/from a different session.
+// On a cold run there is no prior session to drift from — record time and
+// verify time are the same page load — so requiring a role signal here only
+// punishes ordinary markup that never had an autocomplete/data-role
+// attribute, hard-blocking every cold checkout on such a site (see PR review
+// finding on commit 4773e14). The replay path is untouched.
+function resolveColdFieldPresence(
+  elements: readonly InteractiveElement[],
+  target: RecipeTarget,
+): { element: InteractiveElement } | null {
+  const resolution = resolveRecipeTarget(elements, target);
+  if (resolution === null) return null;
+  if (resolution.via !== "testid" && resolution.via !== "id") return null;
+  return { element: resolution.element };
+}
+
+// Cold-path field check: presence never requires a field_role match (see
+// resolveColdFieldPresence); VALUE correctness still requires the role to
+// match whenever one WAS recorded — preserving #447's wrong-fill protection
+// for the case that matters (a same-id field whose role visibly moved),
+// without a missing role forcing a false field_missing.
+function verifyColdFieldInElements(
+  elements: readonly InteractiveElement[],
+  expected: ReplayExpectedField,
+): { ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch" } {
+  if (expected.kind === "set_phone_country" || expected.target === null) {
+    return { ok: false, reason: "field_missing" };
+  }
+  const resolution = resolveColdFieldPresence(elements, expected.target);
+  if (resolution === null) return { ok: false, reason: "field_missing" };
+  if (
+    expected.target.field_role !== undefined &&
+    !fieldRoleMatches(expected.target.field_role, resolution.element)
+  ) {
+    return { ok: false, reason: "field_value_mismatch" };
+  }
+  const actual =
+    expected.kind === "select"
+      ? (resolution.element.selectedOptionText ??
+        resolution.element.value ??
+        resolution.element.visibleText ??
+        "")
+      : (resolution.element.value ?? "");
+  return actual === expected.expected
+    ? { ok: true }
+    : { ok: false, reason: "field_value_mismatch" };
 }
 
 async function attestRecordedFieldsBeforeTransition(
@@ -4343,7 +4430,7 @@ async function attestRecordedFieldsBeforeTransition(
   const fresh = await session.browser.extractInteractiveElements();
   session.lastElements = fresh;
   for (const expected of fields) {
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    const guard = verifyColdFieldInElements(fresh, expected);
     if (!guard.ok) {
       rejectRecipeRecording(
         session,
@@ -4373,7 +4460,7 @@ async function verifyRecordedFieldsAfterTransition(
       );
       throw new MoneyFieldVerificationError("field_missing", expected.hole);
     }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
+    const guard = verifyColdFieldInElements(fresh, expected);
     if (!guard.ok) {
       rejectRecipeRecording(
         session,

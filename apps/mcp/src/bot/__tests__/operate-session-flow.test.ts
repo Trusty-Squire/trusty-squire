@@ -25,6 +25,9 @@ const h = vi.hoisted(() => ({
   autocompleteSuggestions: [] as string[],
   autocompleteCommitMutation: null as { selector: string; value: string } | null,
   autocompleteCommitCalls: [] as number[],
+  autocompleteConfirmOverride: null as boolean | null,
+  autocompleteConfirmCalls: [] as Array<{ selector: string; pickedText: string }>,
+  autocompleteDiscardCalls: 0,
   clickCalls: 0,
   gotos: [] as string[],
   started: 0,
@@ -207,7 +210,18 @@ vi.mock("../browser.js", () => ({
         }
       }
     }
-    async discardTypeSuggestionPopup(): Promise<void> {}
+    async discardTypeSuggestionPopup(): Promise<void> {
+      h.autocompleteDiscardCalls += 1;
+    }
+    async confirmAutocompleteCommitted(selector: string, pickedText: string): Promise<boolean> {
+      h.autocompleteConfirmCalls.push({ selector, pickedText });
+      if (h.autocompleteConfirmOverride !== null) return h.autocompleteConfirmOverride;
+      const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+      const el = (h.elements as Array<Record<string, unknown>>).find(
+        (e) => e.selector === selector,
+      );
+      return normalize(String(el?.value ?? "")) === normalize(pickedText);
+    }
     async selectOption(selector: string, matcher?: string): Promise<string> {
       h.selected.push({ selector, matcher });
       let committed = matcher ?? "";
@@ -416,6 +430,9 @@ beforeEach(() => {
   h.autocompleteSuggestions = [];
   h.autocompleteCommitMutation = null;
   h.autocompleteCommitCalls = [];
+  h.autocompleteConfirmOverride = null;
+  h.autocompleteConfirmCalls = [];
+  h.autocompleteDiscardCalls = 0;
   h.clickCalls = 0;
   h.gotos = [];
   h.consentDismissCalls = 0;
@@ -1850,6 +1867,62 @@ describe("3.3 — cold-path money-field guard actually blocks", () => {
     await act(started.session_id, { kind: "click", target: "Continue" });
     expect(h.clickCalls).toBe(1);
   });
+
+  // Gate-decision fix (1): presence must not require a field_role match on
+  // the cold path — most real checkout forms don't set autocomplete/data-role
+  // on their address fields, and requiring one turned every correctly-filled
+  // role-less money field into a false field_missing block.
+  it("does not block a correctly-filled money field that has no autocomplete/data-role signal", async () => {
+    h.elements = [
+      // testId deliberately avoids every string the elem() helper uses to
+      // auto-derive an autocomplete token (city/country/email/phone/first/
+      // last) — this element records with NO field_role, on purpose.
+      elem({ testId: "shipping-town-field", labelText: "Town", selector: "#town", value: "" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "Town",
+      text: "Queens",
+      provenance: { hole: "address.city" },
+    });
+    await expect(
+      act(started.session_id, { kind: "click", target: "Continue" }),
+    ).resolves.toBeDefined();
+    expect(h.clickCalls).toBe(1);
+  });
+
+  // Gate-decision fix (2, part of "auto-fix"): recordedValues is a push-only
+  // audit log; without deduping at read time, a host correcting a typo left
+  // TWO entries for the same hole and the stale one blocked every future
+  // transition forever (the error's own "re-fill it" advice only appended a
+  // third, equally stuck, entry).
+  it("recovers after a host corrects a typo in a money field instead of livelocking", async () => {
+    h.elements = [
+      elem({ testId: "shipping-postal", labelText: "Postal Code", selector: "#postal", value: "" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "Postal Code",
+      text: "10001",
+      provenance: { hole: "address.postal_code" },
+    });
+    // Host notices the mistake and re-types the correct value into the same
+    // field — session.recordedValues now holds TWO entries for this hole.
+    await act(started.session_id, {
+      kind: "type",
+      target: "Postal Code",
+      text: "10118",
+      provenance: { hole: "address.postal_code" },
+    });
+    await expect(
+      act(started.session_id, { kind: "click", target: "Continue" }),
+    ).resolves.toBeDefined();
+    expect(h.clickCalls).toBe(1);
+  });
 });
 
 describe("3.1 — autocomplete-aware type fill", () => {
@@ -1915,6 +1988,105 @@ describe("3.1 — autocomplete-aware type fill", () => {
       act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
     ).rejects.toThrow(/did not take/i);
     expect(h.autocompleteCommitCalls).toEqual([0]);
+  });
+
+  // Gate-decision fix (2): the commit-took check must accept a broader
+  // positive signal than the typed-into selector's own live value — a
+  // react-select/cmdk-style widget clears its search input on selection and
+  // renders the committed choice in a nearby element instead. The mock's
+  // confirmAutocompleteCommitted override stands in for that nearby-signal
+  // path (el.value never changes here, only the override says "confirmed").
+  it("accepts a broader commit-confirmation signal than the same-selector value", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    h.autocompleteConfirmOverride = true;
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).resolves.toBeDefined();
+    expect(h.autocompleteConfirmCalls).toEqual([
+      { selector: "#address", pickedText: "350 5th Ave, New York, NY 10118, USA" },
+    ]);
+  });
+
+  // Gate-decision hard constraint on fix (2): a can't-tell must never be
+  // assumed a success — the override defaults to null (mock falls back to
+  // the realistic same-selector-value check), so with no mutation and no
+  // override this must still stop, exactly like the existing
+  // same-selector-only test above (regression guard for the broadened
+  // signal not accidentally loosening the "never assume success" rule).
+  it("still stops on a can't-tell commit even with the broadened confirmation signal", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/did not take/i);
+  });
+
+  // Gate-decision auto-fix: the popup lifecycle (Escape + clear markers)
+  // must run on EVERY outcome — ambiguous stop, a failed "did not take"
+  // commit, and success — not just the ambiguous path, or leftover markers
+  // (and a still-open popup) desync the next type action's detection.
+  it("cleans up the popup on an ambiguous stop", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = [
+      "350 5th Ave, New York, NY 10118, USA",
+      "350 5th Avenue, Brooklyn, NY 11215, USA",
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/autocomplete_commit_required/i);
+    expect(h.autocompleteDiscardCalls).toBe(1);
+  });
+
+  it("cleans up the popup after a failed 'did not take' commit", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/did not take/i);
+    expect(h.autocompleteDiscardCalls).toBe(1);
+  });
+
+  it("cleans up the popup after a successful commit", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    h.autocompleteCommitMutation = {
+      selector: "#address",
+      value: "350 5th Ave, New York, NY 10118, USA",
+    };
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
+    expect(h.autocompleteDiscardCalls).toBe(1);
+  });
+
+  // Gate-decision auto-fix: the committed value (not the raw typed draft)
+  // must be what recordTrace records, or 3.3's own new money-field guard
+  // blocks the very field this step just correctly filled and verified.
+  it("does not trip 3.3's money-field guard on the transition right after an autocomplete commit", async () => {
+    h.elements = [
+      elem({ testId: "shipping-address", labelText: "Address", selector: "#address" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    h.autocompleteSuggestions = ["350 5th Ave, New York, NY 10118, USA"];
+    h.autocompleteCommitMutation = {
+      selector: "#address",
+      value: "350 5th Ave, New York, NY 10118, USA",
+    };
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "Address",
+      text: "350 5th Ave",
+      provenance: { hole: "address.line1" },
+    });
+    await expect(
+      act(started.session_id, { kind: "click", target: "Continue" }),
+    ).resolves.toBeDefined();
+    expect(h.clickCalls).toBe(1);
   });
 });
 
