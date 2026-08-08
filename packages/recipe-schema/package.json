@@ -1,6 +1,6 @@
 {
   "name": "@trusty-squire/recipe-schema",
-  "version": "0.1.0-rc.1",
+  "version": "0.1.0-rc.2",
   "type": "module",
   "description": "Type-checked operator-recipe wire schema for Trusty Squire. Defines the (verb, eTLD+1)-keyed replay-plan contract shared by the mcp client (record + publish) and the registry server (validate + store).",
   "license": "MIT",

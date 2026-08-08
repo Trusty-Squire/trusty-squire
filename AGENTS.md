@@ -389,6 +389,14 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** When `apps/mcp/package.json` gains a new `@trusty-squire/*` workspace dependency (a new `packages/*` package), add it to the `--filter` list in **both** `release.yml` build steps. Missing this makes every "Release mcp" CI run fail at the `Test (MCP package only)` step with `Failed to resolve entry for package "@trusty-squire/<new-pkg>"` — a fresh clone never builds that package's `dist/`, so vitest's vite resolver can't follow its `main`. This exact bug shipped when `@trusty-squire/recipe-schema` was added (fixed in `fm/fix-release-recipe-schema-build`) — nothing published to npm `next` from `1.1.8-rc.1` until it did.
 
+### 8. `recipe-schema`/`skill-schema` publish is version-driven — a source change alone does NOT republish
+
+`release-recipe-schema.yml` and `release-skill-schema.yml` both trigger only on a push whose diff touches that package's `package.json` (path-filtered — see the `on.push.paths` list in each workflow). A commit that changes `packages/recipe-schema/src/**` without bumping `packages/recipe-schema/package.json`'s `version` does not fire the workflow at all, so npm keeps serving the pre-change tarball indefinitely — mcp's `workspace:*` dep resolves fine locally (same checkout) but a real `npx @trusty-squire/mcp` install gets the stale published package and can crash on a missing export.
+
+**This exact bug shipped**: PR #450 added `checkoutFieldSetSignature` to `packages/recipe-schema/src/operator-recipe.ts` without bumping the version past the `0.1.0-rc.1` PR #449 had already published, so `@trusty-squire/mcp@1.1.9-rc.1` crashed at import (`SyntaxError: @trusty-squire/recipe-schema missing checkoutFieldSetSignature`) — fixed by bumping to `0.1.0-rc.2` on `fm/fix-recipe-schema-republish`.
+
+**The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
+
 ---
 
 ## Maintaining this file
