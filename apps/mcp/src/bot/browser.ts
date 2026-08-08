@@ -8653,13 +8653,47 @@ export class BrowserController {
     return false;
   }
 
-  private frameSecurity(frame: Frame): { origin: string; opaque: boolean } {
+  private async frameSecurity(frame: Frame): Promise<{ origin: string; opaque: boolean }> {
     const url = frame.url();
     if (url === "" || url === "about:blank" || url === "about:srcdoc") {
       return { origin: "null", opaque: true };
     }
     const origin = new URL(url).origin;
-    return origin === "null" ? { origin: "null", opaque: true } : { origin, opaque: false };
+    if (origin === "null") return { origin: "null", opaque: true };
+    if (await this.frameSandboxedWithoutSameOrigin(frame)) return { origin: "null", opaque: true };
+    return { origin, opaque: false };
+  }
+
+  // A frame whose owning <iframe> carries a `sandbox` attribute WITHOUT the
+  // allow-same-origin token has an OPAQUE active origin per spec, no matter
+  // what its URL says — tagging it by URL would let the same-domain secret
+  // check trust a frame the browser itself treats as null-origin
+  // (nonblank-sandbox-origin-bypass). Sandbox flags propagate to nested
+  // browsing contexts, so every ancestor's owning iframe is checked too.
+  // This only ever ADDS a restriction: a failure to read the attribute fails
+  // closed (opaque), never grants trust.
+  private async frameSandboxedWithoutSameOrigin(frame: Frame): Promise<boolean> {
+    let current: Frame | null = frame;
+    while (current !== null && current.parentFrame() !== null) {
+      try {
+        const owner = await current.frameElement();
+        try {
+          const sandbox = await owner.getAttribute("sandbox");
+          if (
+            sandbox !== null &&
+            !sandbox.toLowerCase().split(/\s+/).includes("allow-same-origin")
+          ) {
+            return true;
+          }
+        } finally {
+          await owner.dispose().catch(() => undefined);
+        }
+      } catch {
+        return true;
+      }
+      current = current.parentFrame();
+    }
+    return false;
   }
 
   // Resolve a previously-tagged frame path back to its live Playwright Frame —
@@ -8771,6 +8805,83 @@ export class BrowserController {
       await handle.click({ timeout: 8000 }).catch(() => undefined);
       await handle.fill("").catch(() => undefined);
       await handle.type(text, { delay: rand(40, 110) });
+    } finally {
+      await handle.dispose().catch(() => undefined);
+    }
+  }
+
+  // Frame-scoped native-<select> pick. Deliberately narrower than
+  // selectOption() above (no custom-combobox path, no row-scan label
+  // heuristics — only the direct label→control association): the escape
+  // hatch exists for a merchant's own checkout dropdowns rendered inside an
+  // <iframe>, which are native selects. Resolution + option match + commit +
+  // input/change dispatch all happen in ONE in-frame evaluate, so a frame
+  // DOM that re-renders between round-trips can't strand the action halfway.
+  async selectInFrame(
+    target: FrameTarget,
+    selector: string,
+    optionMatcher?: string,
+  ): Promise<string> {
+    const handle = await this.resolveFrameElement(target, selector);
+    if (handle === null) {
+      throw new Error(
+        `select: the target's frame is no longer present (${this.frameLabel(target)})`,
+      );
+    }
+    try {
+      const result = await handle.evaluate(
+        (element, needle) => {
+          let control: Element | null = element;
+          if (control instanceof HTMLLabelElement) control = control.control;
+          if (!(control instanceof HTMLSelectElement)) {
+            return {
+              ok: false as const,
+              reason:
+                `target resolves to <${(control ?? element).tagName.toLowerCase()}>, not a ` +
+                `native <select> — only native selects are supported inside a frame ` +
+                `(drive a custom widget with click)`,
+            };
+          }
+          const options = Array.from(control.options);
+          if (options.length === 0) {
+            return { ok: false as const, reason: "the <select> has no selectable option" };
+          }
+          // Same default as the main-frame path: first NON-empty value when
+          // no matcher is given ("Select…" placeholders are the wrong pick).
+          let chosen = options.find((option) => option.value.length > 0) ?? options[0]!;
+          if (needle !== null) {
+            const hit = options.find((option) =>
+              (option.textContent ?? "").toLowerCase().includes(needle),
+            );
+            if (hit === undefined) return { ok: false as const, reason: "no option matched" };
+            chosen = hit;
+          }
+          control.value = chosen.value;
+          if (control.value !== chosen.value) {
+            return { ok: false as const, reason: "selected value did not stick" };
+          }
+          // Playwright's own selectOption fires input+change natively — the
+          // merchant form listens on these; mirror it.
+          control.dispatchEvent(new Event("input", { bubbles: true }));
+          control.dispatchEvent(new Event("change", { bubbles: true }));
+          // Same touched-marker as the main-frame path (DEFAULTED-dropdown
+          // warning suppression).
+          control.setAttribute("data-ts-touched", "1");
+          return {
+            ok: true as const,
+            text: (chosen.textContent ?? "").replace(/\s+/g, " ").trim(),
+          };
+        },
+        optionMatcher !== undefined ? optionMatcher.toLowerCase() : null,
+      );
+      if (!result.ok) {
+        const detail =
+          result.reason === "no option matched" && optionMatcher !== undefined
+            ? `no option matched ${JSON.stringify(optionMatcher)}`
+            : result.reason;
+        throw new Error(`select (frame ${this.frameLabel(target)}) ${selector}: ${detail}`);
+      }
+      return result.text;
     } finally {
       await handle.dispose().catch(() => undefined);
     }
