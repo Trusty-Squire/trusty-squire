@@ -4332,6 +4332,166 @@ export class BrowserController {
     await this.wait(0.5);
   }
 
+  // ───────────── type-triggered autocomplete (3.1) ─────────────
+  // A free-text `type` into a Google-Places-style address field or a
+  // react-select/cmdk/Radix combobox can open the same kind of suggestion
+  // popup `select`'s selectFromCombobox() already knows how to drive — the
+  // difference is the host issued `type`, not an explicit `select`, so
+  // nothing today detects or commits the popup. These three methods reuse
+  // the exact open-detect/click machinery selectFromCombobox() uses; the
+  // match-or-stop decision of WHICH option (if any) to click lives in
+  // provision-session.ts (matchAutocompleteSuggestions), kept a pure
+  // function there so it's unit-testable without a browser.
+
+  /**
+   * Snapshot popups that already exist BEFORE typing — the suggestion popup
+   * can open mid-keystroke, so this must run before type(), not after.
+   */
+  async markPreexistingTypeSuggestionPopups(): Promise<void> {
+    await this.markComboboxPreexistingElements();
+  }
+
+  /**
+   * After typing into `selector`, detect whether a suggestion popup opened
+   * as a side effect and return its option texts in DOM order. Empty when
+   * no popup opened — `type` behaved as an ordinary text field and the
+   * caller should no-op. Google-Places-style pickers debounce (~200ms)
+   * plus a network round-trip before rendering suggestions, so a single
+   * synchronous check right after the last keystroke commonly sees
+   * nothing — poll on a bounded budget (mirroring settleAfterStateChange's
+   * shape), returning as soon as options appear so an already-open popup
+   * pays no extra latency.
+   */
+  async detectTypeSuggestionPopup(selector: string): Promise<string[]> {
+    if (!this.page) throw new Error("Browser not started");
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      if (attempt > 0) await this.sleep(300);
+      await this.refreshComboboxMarkers(selector);
+      const options = this.page.locator("[data-ts-select-option-tier]");
+      const count = await options.count();
+      if (count === 0) continue;
+      const texts: string[] = [];
+      for (let i = 0; i < count; i += 1) {
+        texts.push((await options.nth(i).innerText()).replace(/\s+/g, " ").trim());
+      }
+      return texts;
+    }
+    return [];
+  }
+
+  /** Click the option at `index` (as indexed by detectTypeSuggestionPopup). */
+  async commitTypeSuggestion(index: number): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const options = this.page.locator("[data-ts-select-option-tier]");
+    await this.clickComboboxOption(options.nth(index));
+  }
+
+  /**
+   * Clean up after a type-triggered autocomplete interaction, regardless of
+   * outcome (committed, ambiguous/zero-match stop, or a failed commit).
+   * When `dismissWithEscape` is true — the caller determined a detected
+   * popup is plausibly still open (an ambiguous/zero-match stop where no
+   * option was ever clicked, or a commit whose confirmation failed) —
+   * presses Escape to dismiss it BEFORE clearing our own tracking markers:
+   * some widgets (Google Places classic's `.pac-container` in particular)
+   * never fully unmount, just toggle visibility, so a popup left open would
+   * otherwise be captured as "preexisting" the next time
+   * markPreexistingTypeSuggestionPopups snapshots the page (it snapshots by
+   * current visibility, not by who opened it), silently disabling detection
+   * on a host's very next retry. Escape must NOT fire when no popup was
+   * ever detected, nor after a confirmed successful commit (the widget
+   * already closed its popup on selection): it commonly bubbles to close an
+   * enclosing modal/dialog too, so firing it with nothing left to dismiss
+   * risks closing a dialog the typed-into field happens to live in (a
+   * cmdk-in-Radix-dialog combobox, a cart-drawer quantity field, a login
+   * modal's email field, an address-edit modal). Marker clearing stays
+   * unconditional — it only removes our own tracking attributes, never
+   * touches page behavior.
+   */
+  async discardTypeSuggestionPopup(dismissWithEscape: boolean): Promise<void> {
+    if (dismissWithEscape) await this.pressKey("Escape");
+    await this.clearComboboxMarkers();
+  }
+
+  /**
+   * After commitTypeSuggestion, POSITIVELY confirm the picked option's value
+   * actually committed. A same-selector `.value` change is one signal, but
+   * react-select/cmdk-style widgets clear their search input on selection
+   * and render the committed choice in a separate nearby element instead —
+   * checking only the original selector's `.value` would false-fail on
+   * exactly the widgets this feature targets. Checks, in order: the field's
+   * own live value; a native `<select>`'s selected-option label; a nearby
+   * (within two DOM ancestor hops of the field, never page-wide) element
+   * whose own text or aria-label exactly equals the picked option's text.
+   * Returns false — never true — when nothing positively confirms it; the
+   * caller must treat false as a miss (stop), never as a silent success.
+   */
+  async confirmAutocompleteCommitted(
+    fieldSelector: string,
+    pickedOptionText: string,
+  ): Promise<boolean> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      return await this.page
+        .locator(fieldSelector)
+        .first()
+        .evaluate((field, wantedRaw) => {
+          const normalize = (s: string | null) =>
+            (s ?? "").toLowerCase().replace(/\s+/g, " ").trim();
+          const wanted = normalize(wantedRaw);
+          if (wanted.length === 0) return false;
+          const ownValue =
+            field instanceof HTMLInputElement || field instanceof HTMLTextAreaElement
+              ? field.value
+              : "";
+          if (normalize(ownValue) === wanted) return true;
+          if (field instanceof HTMLSelectElement) {
+            const opt = field.options[field.selectedIndex];
+            if (opt !== undefined && normalize(opt.textContent) === wanted) return true;
+          }
+          // Bounded to the field's immediate wrapper (walk up at most two
+          // ancestors) so a coincidental text match elsewhere on the page —
+          // or elsewhere in a large `<form>` — can't produce a false
+          // positive. React-select/cmdk render the committed choice as a
+          // sibling of the (now-cleared) search input under a shared
+          // control wrapper, well within this range.
+          //
+          // This runs BEFORE discardTypeSuggestionPopup (Escape is in the
+          // caller's finally), so a suggestion menu that never really
+          // committed can still be open here — and menus commonly render
+          // within two ancestor hops of the input too. Without excluding
+          // it, the picked OPTION's own (still-visible, un-really-clicked)
+          // element trivially satisfies the text-equality check every
+          // time, defeating the "positively confirm or stop" guarantee for
+          // exactly the failure this exists to catch. Exclude anything
+          // that IS, is INSIDE, or CONTAINS our own tracked popup/option
+          // markers — the last case matters because `.textContent`
+          // aggregates every descendant's text, so a plain wrapper div that
+          // merely contains the still-open popup reads as if it displayed
+          // the picked text itself.
+          const TRACKED_POPUP_SELECTOR = "[data-ts-select-popup],[data-ts-select-option-tier]";
+          const inTrackedPopup = (el: Element): boolean =>
+            el.matches(TRACKED_POPUP_SELECTOR) ||
+            el.closest("[data-ts-select-popup]") !== null ||
+            el.querySelector(TRACKED_POPUP_SELECTOR) !== null;
+          let scope: Element | null = field.parentElement;
+          for (let hop = 0; hop < 2 && scope !== null; hop += 1) {
+            const found = Array.from(scope.querySelectorAll("*")).some((el) => {
+              if (el === field || inTrackedPopup(el)) return false;
+              if (normalize(el.textContent) === wanted) return true;
+              const ariaLabel = el.getAttribute("aria-label");
+              return ariaLabel !== null && normalize(ariaLabel) === wanted;
+            });
+            if (found) return true;
+            scope = scope.parentElement;
+          }
+          return false;
+        }, pickedOptionText);
+    } catch {
+      return false;
+    }
+  }
+
   // ───────────── humanization internals ─────────────
 
   // Click that mimics a real user: locate element, bezier-path the

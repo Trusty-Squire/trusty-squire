@@ -881,6 +881,55 @@ export class AmbiguousProvisionTargetError extends Error {
   }
 }
 
+// A `type` into an autocomplete field (Google-Places-style address picker,
+// react-select/cmdk/Radix combobox) opened a suggestion popup, but the typed
+// text didn't resolve to exactly one option — same "N candidates matched,
+// stop and ask, never guess" shape as AmbiguousProvisionTargetError. Zero
+// candidates and >1 candidates are both a stop, never a confident wrong
+// commit (see matchAutocompleteSuggestions).
+export class AutocompleteCommitRequiredError extends Error {
+  readonly code = "autocomplete_commit_required";
+
+  constructor(
+    readonly typedText: string,
+    readonly candidates: readonly string[],
+  ) {
+    super(
+      candidates.length === 0
+        ? `autocomplete_commit_required: typing "${typedText}" opened a suggestion list but no ` +
+            `visible option started with the typed text. Retry with text that matches a suggestion, ` +
+            `or issue an explicit select/click on the option you want.`
+        : `autocomplete_commit_required: typing "${typedText}" matched ${candidates.length} ` +
+            `suggestions, not one. Narrow the typed text or issue an explicit select/click: ` +
+            `${candidates.slice(0, 8).join(", ")}`,
+    );
+  }
+}
+
+function normalizeAutocompleteText(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+// Match-or-stop rule for 3.1 — pure and unit-testable without a browser. A
+// suggestion is a candidate iff the typed text (normalized) is a prefix of
+// the option's normalized text (e.g. "350 5th Ave" → "350 5th Ave, New York,
+// NY 10118, USA"). Deliberately NOT a bare substring match anywhere in the
+// string — too loose, invites the label-swap-class wrong-fill the field-role
+// guard (PR #447) exists to prevent. Returns the indices of matching options;
+// the caller commits only when there is exactly one.
+export function matchAutocompleteSuggestions(
+  typedText: string,
+  optionTexts: readonly string[],
+): number[] {
+  const typed = normalizeAutocompleteText(typedText);
+  if (typed.length === 0) return [];
+  const indices: number[] = [];
+  optionTexts.forEach((text, index) => {
+    if (normalizeAutocompleteText(text).startsWith(typed)) indices.push(index);
+  });
+  return indices;
+}
+
 function elementTargetKeys(el: InteractiveElement): string[] {
   return [el.screenPath ?? null, el.testId ?? null, elementRef(el)].flatMap((s) => {
     const v = (s ?? "").replace(/\s+/g, " ").trim();
@@ -2881,7 +2930,99 @@ export async function act(
       else if (action.kind === "js_click") await browser.clickViaJs(el.selector);
       else if (action.kind === "type") {
         session.committedSelectValues.delete(el.selector);
-        await browser.type(el.selector, action.text);
+        if (!isAutocompleteScopedTypeField(action.provenance, el)) {
+          // Free text only — e.g. a site-search/catalog-search box, which
+          // can legitimately open its own suggestion listbox too. 3.1 only
+          // applies to a form/recipe field where a committed value is
+          // actually required; forcing every incidental popup into
+          // commit-or-stop would break ordinary search typing.
+          await browser.type(el.selector, action.text);
+        } else {
+          // 3.1 — a Google-Places-style address field or a react-select/cmdk/
+          // Radix combobox can open a suggestion popup as a side effect of
+          // typing, not just of an explicit `select`. Snapshot pre-existing
+          // popups BEFORE typing (it can open mid-keystroke), then detect what
+          // opened afterward.
+          await browser.markPreexistingTypeSuggestionPopups();
+          await browser.type(el.selector, action.text);
+          // Cleanup (clear our tracking markers, and dismiss with Escape
+          // ONLY when a detected popup is plausibly still open) must run no
+          // matter how this resolves — no popup, an ambiguous stop, a
+          // failed commit, or success — mirroring selectFromCombobox's own
+          // try/finally. Scoping the try to only the
+          // suggestionTexts.length > 0 branch left the "preexisting"
+          // markers set by markPreexistingTypeSuggestionPopups uncleared on
+          // the no-popup path; markComboboxPreexistingElements only ADDS
+          // markers, so a stale one could exclude a genuine popup from
+          // detection on a LATER type/select into the same element. Escape
+          // fires on the ambiguous-stop and failed-commit paths (popup
+          // never interacted with / click may not have registered — still
+          // open either way) but NEVER after a confirmed commit: the widget
+          // already closed its popup on selection, so Escape would land on
+          // nothing and bubble to close an enclosing modal/dialog instead.
+          let dismissPopupWithEscape = false;
+          try {
+            const suggestionTexts = await browser.detectTypeSuggestionPopup(el.selector);
+            if (suggestionTexts.length > 0) {
+              dismissPopupWithEscape = true;
+              const candidates = matchAutocompleteSuggestions(action.text, suggestionTexts);
+              if (candidates.length !== 1) {
+                // Pass the MATCHED subset, not the full popup — passing every
+                // suggestion made candidates.length effectively the popup
+                // size (always > 0 here), so the constructor's zero-match
+                // branch was dead code and the multi-match message reported
+                // the wrong count.
+                throw new AutocompleteCommitRequiredError(
+                  action.text,
+                  candidates.map((i) => suggestionTexts[i]!),
+                );
+              }
+              const pickedText = suggestionTexts[candidates[0]!]!;
+              await browser.commitTypeSuggestion(candidates[0]!);
+              // Never trust that a click "looked right" — POSITIVELY confirm
+              // the commit took (same hard constraint as the field-role
+              // guard, PR #447: a miss is a stop, never a silent
+              // pass-through). Checking only the typed-into selector's own
+              // `.value` false-fails on react-select/cmdk-style widgets,
+              // which clear their search input on selection and render the
+              // committed choice in a nearby element instead —
+              // confirmAutocompleteCommitted checks that too, bounded to the
+              // field's own neighborhood, and returns false (never a guess)
+              // when nothing confirms it.
+              const committed = await browser.confirmAutocompleteCommitted(el.selector, pickedText);
+              if (!committed) {
+                throw new Error(
+                  `autocomplete commit for "${action.text}" did not take — nothing on the page ` +
+                    `confirms the field now holds "${pickedText}" after selecting it.`,
+                );
+              }
+              dismissPopupWithEscape = false;
+              // Rewrite the completed action to the field's LIVE post-commit
+              // value (not the raw typed draft) before it reaches
+              // recordTrace/recordedValues, so the recorded trace reflects
+              // what actually ended up on the page. Recording pickedText
+              // would diverge from the live value exactly when the commit
+              // was confirmed via a NEARBY element (react-select/cmdk clear
+              // their search input on selection), and the cold-path
+              // transition attestation (attestRecordedFieldsBeforeTransition
+              // → verifyFilledFieldValues) re-reads the live value — a
+              // pickedText literal would flag every such commit as a
+              // mismatch and disqualify recipe recording. Reading the same
+              // live value here is attestation-consistent by construction.
+              // Known limitation: after a nearby-signal-only commit the
+              // field itself can be empty, so the recorded literal is "" —
+              // that field won't cleanly template into a saved recipe, but
+              // the live run is unaffected.
+              const refreshed = await browser.extractInteractiveElements();
+              session.lastElements = refreshed;
+              const liveField = refreshed.find((field) => field.selector === el.selector);
+              const liveValue = typeof liveField?.value === "string" ? liveField.value : pickedText;
+              completedAction = { ...action, text: liveValue };
+            }
+          } finally {
+            await browser.discardTypeSuggestionPopup(dismissPopupWithEscape);
+          }
+        }
       } else if (action.kind === "upload") {
         await browser.uploadFile(el.selector, action.path);
         audit(sessionId, "upload", {
@@ -3868,6 +4009,28 @@ function boundReplayTarget(
 
 const MONEY_FIELD_TARGET =
   /(?:^|[\s._-])(?:address|street|line\s*[12]|city|state|province|postal|zip|country|e-?mail|phone|first\s*name|last\s*name|full\s*name|quantity|qty)(?:$|[\s._-])/i;
+
+// 3.1 must only engage for a form/recipe field where a committed value is
+// actually required (a checkout form field, or one the host tagged with a
+// recipe hole) — not arbitrary typing. The popup-shape detection
+// (role=listbox/menu/dialog, etc.) also matches an incidental suggestion
+// popup on an ordinary site-search/catalog-search box; without this scope,
+// typing a search query either auto-clicks a suggestion (navigating as a
+// side effect of "type") or throws, with no way to keep free text. Reuses
+// the existing MONEY_FIELD_TARGET shape check (moneyFieldName's sibling,
+// just read off the live element instead of a recorded TraceAction) rather
+// than inventing a new heuristic.
+function isAutocompleteScopedTypeField(
+  provenance: { hole: string } | undefined,
+  el: InteractiveElement,
+): boolean {
+  if (provenance !== undefined) return true;
+  const label = [el.testId, el.id, el.name, el.ariaLabel, el.labelText, el.placeholder]
+    .filter((value): value is string => typeof value === "string" && value.length > 0)
+    .join(" ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2");
+  return MONEY_FIELD_TARGET.test(label);
+}
 
 function moneyFieldName(action: TraceAction): string | null {
   if (action.kind === "set_phone_country") return "phone_country";
