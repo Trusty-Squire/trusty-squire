@@ -18,6 +18,7 @@ import {
 } from "../credential-vault.js";
 import { InMemoryCredentialStore, InMemoryVaultAuditStore } from "../in-memory-stores.js";
 import { LocalKMS } from "../kms-client.js";
+import { VAULT_AUDIT_TYPES } from "../types.js";
 
 const NOW = new Date("2026-05-30T12:00:00.000Z");
 const ACCOUNT = "01HACCOUNTAAAAAAAAAAAAAAAA";
@@ -252,10 +253,14 @@ describe("upsert (store overwrites by service+label)", () => {
 });
 
 describe("delete + reveal", () => {
-  it("delete soft-deletes; retrieve then 404s", async () => {
-    const { vault } = makeVault();
-    const entry = await vault.store(storeInput());
+  it("delete soft-deletes, audits pre-deletion display metadata, then retrieve 404s", async () => {
+    const { vault, audit } = makeVault();
+    const entry = await vault.store(storeInput({ service: "OpenRouter", label: "production" }));
     await vault.delete(entry.reference, ACCOUNT);
+    expect((await audit.list(ACCOUNT, { type: VAULT_AUDIT_TYPES.deleted }))[0]).toMatchObject({
+      type: "vault.credential_deleted",
+      payload: { reference: entry.reference, service: "OpenRouter", label: "production" },
+    });
     await expect(vault.retrieve(entry.reference, "user:read", assertion())).rejects.toThrow(
       CredentialNotFoundError,
     );
