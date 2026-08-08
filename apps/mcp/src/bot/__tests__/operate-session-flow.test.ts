@@ -1192,10 +1192,8 @@ describe("verified recipe recording", () => {
   // unmounts as a RESULT of a successful navigating transition (cart ->
   // "Checkout", multi-step "Continue") must be treated as passed, not a
   // brick — the click already fired, blocking after the fact can't prevent
-  // anything and would only false-block the NEXT transition too. This is
-  // distinct from the recipe-save path, which independently still refuses
-  // to bake in a money field whose value was never re-verified/templated.
-  it("treats a money field that unmounted from a successful navigating transition as passed, but recipe save still refuses to bake in its unverified value", async () => {
+  // anything and would only false-block the NEXT transition too.
+  it("treats a money field that unmounted from a successful navigating transition as passed, and recipe save still succeeds since the value stays verifiable", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-nav-unmount-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     h.elements = [
@@ -1218,6 +1216,10 @@ describe("verified recipe recording", () => {
     ).resolves.toBeDefined();
     expect(h.clickCalls).toBe(1);
     h.visibleText = "Review order";
+    // Forgiving the field for the LIVE guard's purposes never touched
+    // session.recordedValues — the recipe-save path still independently
+    // verifies/templates it against the declared authoritative input, so a
+    // value that matches still saves correctly.
     await expect(
       provisionRememberTool.handler(
         {
@@ -1234,7 +1236,55 @@ describe("verified recipe recording", () => {
         },
         null as unknown as ApiClient,
       ),
-    ).rejects.toThrow(/money field lacks provenance/i);
+    ).resolves.toBeDefined();
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Gate-decision-2 review finding (prune-bakes-literals-into-nonmoney-
+  // recipes): forgiving an unmounted field for the live guard must NEVER
+  // let its value skip recipe-save-time verification — only
+  // MONEY_REPLAY_VERBS tasks get findUnprovenancedMoneyField's backstop, so
+  // pruning session.recordedValues (the earlier, wrong approach) would have
+  // let an unverified literal bake into a saved recipe untemplated on any
+  // OTHER verb with no check catching it. Proven here with a non-money verb
+  // and no matching declared input: the save must still fail.
+  it("still refuses to save an unmounted field's value with no matching declared input, even for a non-money verb", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-nav-unmount-nonmoney-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [
+      elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "City",
+      text: "Queens",
+      provenance: { hole: "address.city" },
+    });
+    h.clearElementsOnClick = true;
+    await act(started.session_id, { kind: "click", target: "Continue" });
+    h.visibleText = "Review order";
+    await expect(
+      provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "nav-unmount-nonmoney",
+          goal: "Set up a workspace",
+          // A verb OUTSIDE MONEY_REPLAY_VERBS — findUnprovenancedMoneyField
+          // would not even look at this recipe's trace.
+          verb: "signup",
+          inputs: {},
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Ready to approve",
+            success_signal: { text_present: "Review order" },
+          },
+        },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/no authoritative operate_remember input/i);
     expect(readdirSync(dir)).toEqual([]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
@@ -1922,6 +1972,66 @@ describe("3.3 — cold-path money-field guard actually blocks", () => {
     expect(h.clickCalls).toBe(1);
   });
 
+  // Gate-decision-2 review finding (cold-set-phone-country-brick):
+  // verifyColdFieldInElements had no branch for set_phone_country (its
+  // recordedMoneyFields target is always null, phone country is resolved
+  // via a dedicated browser lookup, not a regular field target), so it fell
+  // through to an unconditional field_missing — a cold-path
+  // set_phone_country tagged with a money/contact provenance hole (the
+  // operate_act docs tell hosts to tag it) hard-blocked every transition
+  // regardless of whether the country was actually still set correctly.
+  it("verifies a cold-path set_phone_country field via verifyPhoneCountry instead of always treating it as missing", async () => {
+    h.elements = [
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "set_phone_country",
+      country: "Japan",
+      provenance: { hole: "contact.country" },
+    });
+    expect(h.phoneCountry).toBe("Japan");
+    await expect(
+      act(started.session_id, { kind: "click", target: "Continue" }),
+    ).resolves.toBeDefined();
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("still blocks a cold-path set_phone_country field whose country actually changed", async () => {
+    h.elements = [
+      elem({ tag: "button", testId: "continue", labelText: "Continue", selector: "#continue" }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "set_phone_country",
+      country: "Japan",
+      provenance: { hole: "contact.country" },
+    });
+    // Simulate the widget's country silently reverting between fill and
+    // submit.
+    h.phoneCountry = "US";
+    await expect(act(started.session_id, { kind: "click", target: "Continue" })).rejects.toThrow(
+      /money_field_unverified/i,
+    );
+    expect(h.clickCalls).toBe(0);
+  });
+
+  // Gate-decision-2 fix (double-slice-undercounts-matches): the call site
+  // used to slice the matched subset to 8 before constructing the error,
+  // whose message ALSO slices for display — so with more than 8 matches the
+  // reported count was capped at 8 instead of the true count.
+  it("reports the true match count, not a display-capped count, when more than 8 suggestions match", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = Array.from(
+      { length: 12 },
+      (_, i) => `350 5th Ave Suite ${i}, New York, NY 10118, USA`,
+    );
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" }),
+    ).rejects.toThrow(/matched 12 suggestions, not one/i);
+  });
+
   // Gate-decision fix (2, part of "auto-fix"): recordedValues is a push-only
   // audit log; without deduping at read time, a host correcting a typo left
   // TWO entries for the same hole and the stale one blocked every future
@@ -2143,6 +2253,21 @@ describe("3.1 — autocomplete-aware type fill", () => {
       selector: "#address",
       value: "350 5th Ave, New York, NY 10118, USA",
     };
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
+    expect(h.autocompleteDiscardCalls).toBe(1);
+  });
+
+  // Gate-decision-2 fix (zero-suggestion-path-leaks-popup-markers): cleanup
+  // used to be scoped INSIDE the `suggestionTexts.length > 0` branch, so a
+  // type into a scoped field that opened NO popup left the "preexisting"
+  // markers set by markPreexistingTypeSuggestionPopups uncleared —
+  // markComboboxPreexistingElements only ADDS markers, so a stale one could
+  // exclude a genuine popup from detection on a later type/select into the
+  // same element.
+  it("cleans up markers even when the field opens no suggestion popup at all", async () => {
+    h.elements = [elem({ testId: "shipping-address", labelText: "Address", selector: "#address" })];
+    h.autocompleteSuggestions = [];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     await act(started.session_id, { kind: "type", target: "Address", text: "350 5th Ave" });
     expect(h.autocompleteDiscardCalls).toBe(1);

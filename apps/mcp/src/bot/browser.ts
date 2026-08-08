@@ -4434,10 +4434,29 @@ export class BrowserController {
           // positive. React-select/cmdk render the committed choice as a
           // sibling of the (now-cleared) search input under a shared
           // control wrapper, well within this range.
+          //
+          // This runs BEFORE discardTypeSuggestionPopup (Escape is in the
+          // caller's finally), so a suggestion menu that never really
+          // committed can still be open here — and menus commonly render
+          // within two ancestor hops of the input too. Without excluding
+          // it, the picked OPTION's own (still-visible, un-really-clicked)
+          // element trivially satisfies the text-equality check every
+          // time, defeating the "positively confirm or stop" guarantee for
+          // exactly the failure this exists to catch. Exclude anything
+          // that IS, is INSIDE, or CONTAINS our own tracked popup/option
+          // markers — the last case matters because `.textContent`
+          // aggregates every descendant's text, so a plain wrapper div that
+          // merely contains the still-open popup reads as if it displayed
+          // the picked text itself.
+          const TRACKED_POPUP_SELECTOR = "[data-ts-select-popup],[data-ts-select-option-tier]";
+          const inTrackedPopup = (el: Element): boolean =>
+            el.matches(TRACKED_POPUP_SELECTOR) ||
+            el.closest("[data-ts-select-popup]") !== null ||
+            el.querySelector(TRACKED_POPUP_SELECTOR) !== null;
           let scope: Element | null = field.parentElement;
           for (let hop = 0; hop < 2 && scope !== null; hop += 1) {
             const found = Array.from(scope.querySelectorAll("*")).some((el) => {
-              if (el === field) return false;
+              if (el === field || inTrackedPopup(el)) return false;
               if (normalize(el.textContent) === wanted) return true;
               const ariaLabel = el.getAttribute("aria-label");
               return ariaLabel !== null && normalize(ariaLabel) === wanted;
