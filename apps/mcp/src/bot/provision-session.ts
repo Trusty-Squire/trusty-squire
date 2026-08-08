@@ -3016,8 +3016,7 @@ export async function act(
               const refreshed = await browser.extractInteractiveElements();
               session.lastElements = refreshed;
               const liveField = refreshed.find((field) => field.selector === el.selector);
-              const liveValue =
-                typeof liveField?.value === "string" ? liveField.value : pickedText;
+              const liveValue = typeof liveField?.value === "string" ? liveField.value : pickedText;
               completedAction = { ...action, text: liveValue };
             }
           } finally {
