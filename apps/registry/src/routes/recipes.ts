@@ -25,6 +25,7 @@ import {
   OperatorVerbSchema,
   parseOperatorRecipe,
   isRecipeShareEligible,
+  isCheckoutShapeKey,
   type OperatorRecipe,
 } from "@trusty-squire/recipe-schema";
 import type { OperatorRecipeStore } from "../recipe-store.js";
@@ -57,8 +58,16 @@ function clientIp(req: FastifyRequest): string {
 // hostname": dot-separated labels of [a-z0-9-] without edge hyphens, and an
 // alphabetic TLD. A legit client derives the domain from a real URL, so
 // anything this rejects is junk that would only pollute the candidate pool.
+//
+// replay-per-leg-signature: the key slot also accepts a CHECKOUT-LEG shape
+// key (`shape:<sha256 hex>`, see checkoutFieldSetSignature in
+// @trusty-squire/recipe-schema) — a checkout page's field-name-set
+// signature, not a hostname at all. It's checked explicitly here rather
+// than disguised as a fake hostname so this function's contract stays
+// honest: "a plausible recipe key domain-slot", either form.
 const DOMAIN_LABEL = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 export function isPlausibleRecipeDomain(domain: string): boolean {
+  if (isCheckoutShapeKey(domain)) return true;
   if (domain.length === 0 || domain.length > 253) return false;
   const labels = domain.split(".");
   if (labels.length < 2) return false;

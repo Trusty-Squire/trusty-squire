@@ -17,8 +17,17 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeRecipe, readRecipeForTask, type OperatorRecipe } from "../bot/operator-recipe.js";
-import { resolveRecipeForTask, publishRecipeToRegistry } from "../tools/provision-drive.js";
+import {
+  writeRecipe,
+  readRecipeForTask,
+  checkoutFieldSetSignature,
+  type OperatorRecipe,
+} from "../bot/operator-recipe.js";
+import {
+  resolveRecipeForTask,
+  resolveCheckoutLegRecipe,
+  publishRecipeToRegistry,
+} from "../tools/provision-drive.js";
 
 function makeRecipe(overrides: Partial<OperatorRecipe> = {}): OperatorRecipe {
   return {
@@ -261,5 +270,140 @@ describe("cross-user recipe reuse via the shared registry (replay-registry-share
     const resolved = await resolveRecipeForTask("get_api_key", "https://example.com/signup");
     expect(resolved.goal).toBe(recipe.goal);
     expect(registryWasCalled).toBe(false);
+  });
+});
+
+// replay-per-leg-signature — the checkout leg's own independent resolution
+// path (resolveCheckoutLegRecipe), keyed by field-name-set signature
+// instead of domain. Same mock registry backend/two-tier candidate+promote
+// contract as above; only the key shape differs (shape:<hash> instead of a
+// real eTLD+1), which the backend's generic verb/domain URL matching
+// already handles unchanged.
+describe("cross-domain checkout-leg reuse via the shared registry (replay-per-leg-signature)", () => {
+  let backend: MockRegistryBackend;
+  let dirA: string;
+  let dirB: string;
+  let originalFetch: typeof globalThis.fetch;
+  const trackedEnvKeys = [
+    "TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR",
+    "TRUSTY_SQUIRE_ACCOUNT_ID",
+    "TRUSTY_SQUIRE_REGISTRY_URL",
+  ] as const;
+  let originalEnv: Record<string, string | undefined>;
+
+  // Field-name sets standing in for two UNRELATED stores that share a
+  // checkout implementation (Shopify's proven byte-identical field set) —
+  // same set, different store. And a third, structurally different set
+  // (WooCommerce-shaped) that must never cross-fire against it.
+  const SHARED_CHECKOUT_FIELDS = [
+    "firstName",
+    "lastName",
+    "email",
+    "address1",
+    "city",
+    "postalCode",
+    "serialized-shop",
+    "serialized-graphql",
+  ];
+  const UNRELATED_CHECKOUT_FIELDS = ["billing_first_name", "billing_address_1", "billing_phone"];
+
+  function makeCheckoutLegRecipe(signature: string): OperatorRecipe {
+    return {
+      name: "checkout-leg--test",
+      schema_version: 1,
+      goal: "Fill the checkout leg's fields",
+      verb: "purchase",
+      domain: `shape:${signature}`,
+      allowed_hosts: [],
+      trace: [
+        {
+          action: {
+            kind: "type",
+            target: { accessible_name: "Email" },
+            value: { hole: "contact.email" },
+          },
+        },
+      ],
+      secrets: [],
+      postcondition: {
+        kind: "execute_capability",
+        describe: "checkout leg fields filled and re-verified",
+        success_signal: { field_text: "Email", min_value_len: 1 },
+      },
+    };
+  }
+
+  beforeEach(() => {
+    backend = makeMockRegistryBackend();
+    dirA = mkdtempSync(join(tmpdir(), "ts-checkout-leg-a-"));
+    dirB = mkdtempSync(join(tmpdir(), "ts-checkout-leg-b-"));
+    originalFetch = globalThis.fetch;
+    originalEnv = Object.fromEntries(trackedEnvKeys.map((k) => [k, process.env[k]]));
+    globalThis.fetch = backend.fetchFn;
+    process.env.TRUSTY_SQUIRE_ACCOUNT_ID = "test-account";
+    process.env.TRUSTY_SQUIRE_REGISTRY_URL = "https://registry.test";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    for (const key of trackedEnvKeys) {
+      const value = originalEnv[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dirA, { recursive: true, force: true });
+    rmSync(dirB, { recursive: true, force: true });
+  });
+
+  it("a checkout-leg recipe recorded on store A resolves on a wholly different store B that computes the SAME field-name-set signature", async () => {
+    const signature = checkoutFieldSetSignature(SHARED_CHECKOUT_FIELDS)!;
+
+    // Store A records + submits its checkout-leg recipe.
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
+    const recipe = makeCheckoutLegRecipe(signature);
+    const file = await writeRecipe(recipe);
+    const publishStatus = await publishRecipeToRegistry(file);
+    expect(publishStatus.startsWith("submitted:")).toBe(true);
+    backend.promote("purchase", `shape:${signature}`);
+
+    // Store B: a wholly independent local store, never wrote this recipe —
+    // it computes the SAME signature (its checkout happens to share the
+    // identical field-name set) and resolves the SAME recipe.
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
+    const signatureOnB = checkoutFieldSetSignature([...SHARED_CHECKOUT_FIELDS].reverse())!;
+    expect(signatureOnB).toBe(signature); // same set, different order — same signature
+    const resolved = await resolveCheckoutLegRecipe("purchase", signatureOnB);
+    expect(resolved).not.toBeNull();
+    expect(resolved?.domain).toBe(`shape:${signature}`);
+  });
+
+  it("SAFETY: mutual discrimination — a structurally different store's signature never resolves the other store's checkout-leg recipe", async () => {
+    const signature = checkoutFieldSetSignature(SHARED_CHECKOUT_FIELDS)!;
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
+    const file = await writeRecipe(makeCheckoutLegRecipe(signature));
+    await publishRecipeToRegistry(file);
+    backend.promote("purchase", `shape:${signature}`);
+
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
+    const unrelatedSignature = checkoutFieldSetSignature(UNRELATED_CHECKOUT_FIELDS)!;
+    const resolved = await resolveCheckoutLegRecipe("purchase", unrelatedSignature);
+    expect(resolved).toBeNull();
+  });
+
+  it("SAFETY: a checkout-leg candidate is not resolvable until promoted", async () => {
+    const signature = checkoutFieldSetSignature(SHARED_CHECKOUT_FIELDS)!;
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirA;
+    const file = await writeRecipe(makeCheckoutLegRecipe(signature));
+    await publishRecipeToRegistry(file);
+    // No promotion.
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
+    const resolved = await resolveCheckoutLegRecipe("purchase", signature);
+    expect(resolved).toBeNull();
+  });
+
+  it("returns null (never throws) on a total miss, so the caller degrades to cold driving", async () => {
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dirB;
+    const resolved = await resolveCheckoutLegRecipe("purchase", "0".repeat(64));
+    expect(resolved).toBeNull();
   });
 });

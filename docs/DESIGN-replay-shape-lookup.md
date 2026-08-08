@@ -1,11 +1,15 @@
 # DESIGN — per-site shape lookup for replay
 
-Status: proposed. Extends the replay engine in
+Status: evidence record; §4's scoped engine change has since landed as
+`replay-per-leg-signature`. Extends the replay engine in
 [`DESIGN-replay-engine.md`](DESIGN-replay-engine.md); measured against the
 predicate in [`DESIGN-replay-eval-harness.md`](DESIGN-replay-eval-harness.md).
-This document does not change either — it identifies a keying limitation in
-the shipped engine, proposes a fix, and records independent test evidence for
-it.
+This document identifies the keying limitation the shipped change closed and
+records the independent test evidence for it. The as-built keying differs
+from §2's sketch: exact full-set hash equality (`shape:<sha256>` in the
+ordinary domain slot), not a ≥90% threshold or `platform:*` naming — CLAUDE.md
+§"Per-leg recipe resolution + checkout shape signature
+(replay-per-leg-signature)" owns the as-built description.
 
 ## 1. The problem
 
@@ -153,7 +157,7 @@ one successful run. A mid-run stale DOM-ref was repaired using the existing
 step-level `fallback_required` path — live confirmation that the step-level
 half of graceful degradation already works today.
 
-**3(b) — per-leg fallback on today's engine: does not exist yet.** Static
+**3(b) — per-leg fallback on the pre-change engine: did not exist.** Static
 analysis of `apps/mcp/src/bot/provision-session.ts`, the only implementation
 of replay, found two distinct escape hatches that are not equivalent:
 
@@ -197,8 +201,10 @@ Test 3(b) points to one concrete change, not a rearchitecture:
    from "retry the step" to "retry the leg."
 
 This is a registry/schema change plus a change to `humanRequired`'s call
-sites in `provision-session.ts` — not a new subsystem. Neither change is
-implemented as of this writing.
+sites in `provision-session.ts` — not a new subsystem. Both have since
+landed as `replay-per-leg-signature` (separate checkout-leg recipes under a
+`shape:<sha256>` key; guard failures on a recipe with a catalog prefix
+return `leg_fallback_required`) — see Status above for the as-built owner.
 
 ## 5. A corpus defect to fix before CI depends on it
 
@@ -249,6 +255,6 @@ The following are under test, not yet answered:
 Per `DESIGN-replay-engine.md`'s existing scope line, this document does not
 change registry Skill keying (`packages/skill-schema/src/service-slugs.ts`),
 does not introduce fingerprint scoring or embeddings, and does not touch the
-`operate_pay` guard ceremony. It also does not implement §4's engine change
-or §5's corpus recapture — both are scoped follow-ups, not part of this
-design.
+`operate_pay` guard ceremony. §4's engine change landed separately as
+`replay-per-leg-signature` (see Status); §5's corpus recapture remains an
+open scoped follow-up.

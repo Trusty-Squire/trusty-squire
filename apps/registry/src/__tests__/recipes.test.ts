@@ -19,7 +19,11 @@
 //     (no local state shared between the two "installs")
 
 import { beforeEach, describe, expect, it } from "vitest";
-import type { OperatorRecipe } from "@trusty-squire/recipe-schema";
+import {
+  checkoutFieldSetSignature,
+  checkoutShapeKey,
+  type OperatorRecipe,
+} from "@trusty-squire/recipe-schema";
 import { buildServer } from "../server.js";
 import { RECIPE_SUBMIT_IP_HOURLY_LIMIT } from "../routes/recipes.js";
 import { InMemoryOperatorRecipeStore } from "../recipe-store-memory.js";
@@ -305,5 +309,131 @@ describe("POST /recipes (candidate) + GET /recipes/:verb/:domain (live only)", (
     });
     expect(fetched.statusCode).toBe(200);
     expect(fetched.json().recipe.name).toBe("get_api_key--example.com");
+  });
+});
+
+// replay-per-leg-signature — the checkout-leg key slot holds a
+// `shape:<sha256 hex>` pseudo-domain (checkoutShapeKey in
+// @trusty-squire/recipe-schema) instead of a real eTLD+1. Same routes, same
+// candidate/promote flow, same stores — only the key's shape differs.
+describe("POST /recipes + GET /recipes/:verb/:domain with a checkout-leg shape key", () => {
+  let store: InMemoryOperatorRecipeStore;
+  let candidateStore: InMemoryOperatorRecipeCandidateStore;
+  let server: Awaited<ReturnType<typeof buildServer>>;
+  const shapeKey = checkoutShapeKey(checkoutFieldSetSignature(["email", "firstName", "lastName"])!);
+
+  function checkoutLegRecipe(overrides: Partial<OperatorRecipe> = {}): OperatorRecipe {
+    return {
+      name: "checkout-leg--test-shape",
+      schema_version: 1,
+      goal: "Fill the checkout leg's fields",
+      verb: "purchase",
+      domain: shapeKey,
+      allowed_hosts: [],
+      trace: [
+        {
+          action: {
+            kind: "type",
+            target: { accessible_name: "Email" },
+            value: { hole: "contact.email" },
+          },
+        },
+      ],
+      secrets: [],
+      postcondition: {
+        kind: "execute_capability",
+        describe: "checkout leg fields filled and re-verified",
+        success_signal: { field_text: "Email", min_value_len: 1 },
+      },
+      ...overrides,
+    };
+  }
+
+  beforeEach(async () => {
+    store = new InMemoryOperatorRecipeStore();
+    candidateStore = new InMemoryOperatorRecipeCandidateStore();
+    server = await buildServer({
+      recipeStore: store,
+      recipeCandidateStore: candidateStore,
+      adminBearer: ADMIN_BEARER,
+    });
+  });
+
+  async function promote(verb: string, domain: string): Promise<void> {
+    const queue = await server.inject({
+      method: "GET",
+      url: "/admin/recipe-candidates",
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+    });
+    const item = queue
+      .json()
+      .items.find((i: { verb: string; domain: string }) => i.verb === verb && i.domain === domain);
+    expect(item).toBeDefined();
+    const res = await server.inject({
+      method: "POST",
+      url: `/admin/recipes/${verb}/${domain}/promote`,
+      headers: { authorization: `Bearer ${ADMIN_BEARER}` },
+      payload: { content_digest: item.content_digest },
+    });
+    expect(res.statusCode).toBe(200);
+  }
+
+  it("accepts a shape: key as a plausible domain (not rejected as invalid_domain)", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: checkoutLegRecipe() },
+    });
+    expect(res.statusCode).toBe(201);
+    expect(res.json()).toMatchObject({ ok: true, domain: shapeKey, status: "pending-review" });
+  });
+
+  it("still rejects a malformed shape: key (not real hex) as an implausible domain", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: checkoutLegRecipe({ domain: "shape:not-actually-hex" }) },
+    });
+    expect(res.statusCode).toBe(400);
+    expect(res.json().error).toBe("invalid_domain");
+  });
+
+  it("cross-domain reuse: a checkout-leg recipe published+promoted under a shape key resolves via GET with the URL-encoded key, independent of any real store domain", async () => {
+    const publish = await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: checkoutLegRecipe() },
+    });
+    expect(publish.statusCode).toBe(201);
+    await promote("purchase", shapeKey);
+
+    // A "different store" resolving the SAME signature — the key alone
+    // decides the hit, with no reference to which domain recorded it.
+    const fetched = await server.inject({
+      method: "GET",
+      url: `/recipes/purchase/${encodeURIComponent(shapeKey)}`,
+    });
+    expect(fetched.statusCode).toBe(200);
+    const body = fetched.json();
+    expect(body.recipe.domain).toBe(shapeKey);
+    expect(body.recipe.verb).toBe("purchase");
+  });
+
+  it("SAFETY: mutual discrimination — a DIFFERENT field-name set's shape key never resolves this recipe", async () => {
+    await server.inject({
+      method: "POST",
+      url: "/recipes",
+      payload: { recipe: checkoutLegRecipe() },
+    });
+    await promote("purchase", shapeKey);
+
+    const otherShapeKey = checkoutShapeKey(
+      checkoutFieldSetSignature(["billing_first_name", "billing_address_1", "billing_phone"])!,
+    );
+    const fetched = await server.inject({
+      method: "GET",
+      url: `/recipes/purchase/${encodeURIComponent(otherShapeKey)}`,
+    });
+    expect(fetched.statusCode).toBe(404);
   });
 });

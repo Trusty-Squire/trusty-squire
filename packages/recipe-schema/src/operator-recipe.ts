@@ -22,6 +22,7 @@
 
 import { z } from "zod";
 import { getDomain } from "tldts";
+import { createHash } from "node:crypto";
 
 // ── Schema ──────────────────────────────────────────────────────────
 
@@ -213,6 +214,11 @@ export const OperatorRecipeSchema = z
     goal: z.string().min(1).max(300),
     // Prepared-statement key. Optional only so existing local v1 recipes
     // remain readable; new keyed recordings always set both fields.
+    // Usually an eTLD+1 (operatorRecipeDomain). A recipe scoped to just the
+    // CHECKOUT leg (replay-per-leg-signature) instead carries a
+    // checkoutShapeKey() pseudo-domain (`shape:<sha256 hex>`) so the same
+    // key slot/registry route serves both keying schemes without a schema
+    // split — see checkoutFieldSetSignature below.
     verb: OperatorVerbSchema.optional(),
     domain: z.string().min(1).max(253).optional(),
     // The canonical replay entry — the session's START url (the service_url
@@ -297,6 +303,57 @@ export function operatorRecipeKey(verb: OperatorVerb, url: string): string {
 /** Key straight from an already-resolved (verb, domain) pair — the shape the registry stores by. */
 export function operatorRecipeKeyForDomain(verb: OperatorVerb, domain: string): string {
   return `${verb}--${domain.toLowerCase()}`;
+}
+
+// ── Checkout-leg shape signature (replay-per-leg-signature) ────────────
+//
+// The catalog/storefront legs of a purchase are keyed by domain (above) —
+// domain IS known on arrival there, so domain keying is correct, not a
+// compromise. The checkout leg is different: what makes a checkout plan
+// reusable across UNRELATED stores is the checkout page's own field-NAME
+// set, which is only observable once the page is actually reached. This
+// computes that signature and formats it as a pseudo-domain so it can
+// travel through the exact same (verb, domain) key slot, registry route,
+// and local file store as an ordinary domain-keyed recipe — no schema,
+// route, or store change needed. Whatever signature a store's checkout
+// happens to produce IS the key: platforms that share a checkout
+// implementation (byte-identical field sets) collide into the same key
+// and get wide reuse; platforms whose field sets vary per install collide
+// with nothing and each store keeps its own row. No platform is ever
+// named — the scope falls out of the data.
+const CHECKOUT_SHAPE_KEY_PREFIX = "shape:";
+const CHECKOUT_SHAPE_KEY_PATTERN = /^shape:[0-9a-f]{64}$/;
+
+/**
+ * Hash of a checkout page's own full field-name set (name, falling back to
+ * id, of every input/select/textarea — hidden fields included, since
+ * platform-authored hidden fields are often the most stable signal).
+ * Deliberately the FULL recorded set, never a thinned common-core subset —
+ * a store whose set differs at all is a miss, not a partial/fuzzy match.
+ * Returns null for an empty set (nothing to key by).
+ */
+export function checkoutFieldSetSignature(fieldNames: readonly string[]): string | null {
+  const names = [
+    ...new Set(
+      fieldNames.map((name) => name.trim().toLowerCase()).filter((name) => name.length > 0),
+    ),
+  ].sort();
+  if (names.length === 0) return null;
+  return createHash("sha256").update(names.join("\n")).digest("hex");
+}
+
+export function isCheckoutShapeKey(domain: string): boolean {
+  return CHECKOUT_SHAPE_KEY_PATTERN.test(domain);
+}
+
+/** The pseudo-domain a checkout-shape signature is stored/looked-up under. */
+export function checkoutShapeKey(signature: string): string {
+  return `${CHECKOUT_SHAPE_KEY_PREFIX}${signature}`;
+}
+
+/** Registry/local-file key for a checkout-leg recipe, keyed by field-set signature instead of domain. */
+export function operatorRecipeKeyForCheckoutShape(verb: OperatorVerb, signature: string): string {
+  return operatorRecipeKeyForDomain(verb, checkoutShapeKey(signature));
 }
 
 // ── Cross-user share eligibility ───────────────────────────────────────

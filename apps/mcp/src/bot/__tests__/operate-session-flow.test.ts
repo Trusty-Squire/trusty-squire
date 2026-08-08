@@ -33,6 +33,7 @@ const h = vi.hoisted(() => ({
   connections: [] as boolean[],
   currentUrl: "",
   elements: [] as unknown[],
+  checkoutFieldNames: [] as string[],
   visibleText: "",
   scrolls: [] as string[],
   captchaVariant: "unknown" as string,
@@ -113,6 +114,9 @@ vi.mock("../browser.js", () => ({
     recoverActivePage(): void {}
     async extractInteractiveElements(): Promise<unknown[]> {
       return h.elements;
+    }
+    async extractCheckoutFieldNames(): Promise<string[]> {
+      return h.checkoutFieldNames;
     }
     async extractVisibleText(): Promise<string> {
       return h.visibleText;
@@ -402,6 +406,7 @@ beforeEach(() => {
   h.connections = [];
   h.currentUrl = "";
   h.elements = [];
+  h.checkoutFieldNames = [];
   h.visibleText = "";
   h.scrolls = [];
   h.captchaVariant = "unknown";
@@ -687,6 +692,71 @@ describe("prepared-statement replay", () => {
       reason: "field_value_mismatch",
       field: "contact.country",
     });
+    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
+      /verification is not satisfied/i,
+    );
+  });
+
+  it("replay-per-leg-signature: degrades to leg_fallback_required (not human_required) when a genuine catalog prefix precedes the failing checkout field", async () => {
+    h.elements = [
+      elem({
+        tag: "button",
+        testId: "add-to-cart",
+        role: "button",
+        ariaLabel: "Add to cart",
+        selector: "#add",
+      }),
+      elem({
+        tag: "button",
+        testId: "continue",
+        role: "button",
+        ariaLabel: "Continue",
+        selector: "#continue",
+      }),
+    ];
+    h.clickPhoneCountryMutation = "Japan";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const recipe = replayRecipe({
+      trace: [
+        // A genuine catalog/storefront-leg step BEFORE any money field —
+        // this is what makes the money-path guard failure below degrade to
+        // a leg-scoped fallback instead of the whole-run human_required.
+        {
+          action: {
+            kind: "click",
+            target: { dom_hint: { testid: "add-to-cart" }, accessible_name: "Add to cart" },
+          },
+        },
+        {
+          action: {
+            kind: "set_phone_country",
+            value: { hole: "contact.country" },
+          },
+        },
+        {
+          action: {
+            kind: "click",
+            target: { dom_hint: { testid: "continue" }, accessible_name: "Continue" },
+          },
+        },
+      ],
+    });
+    const result = await replayOperatorRecipe(started.session_id, recipe, {
+      "contact.country": "United States",
+    });
+    expect(result).toMatchObject({
+      status: "leg_fallback_required",
+      leg: "checkout",
+      from_step_index: 1,
+    });
+    expect((result as { reason: string }).reason).toContain("field_value_mismatch");
+    // Not resumable — the run degrades to cold driving for the leg, it
+    // doesn't hand back a continuation the way fallback_required does.
+    await expect(
+      replayOperatorRecipe(started.session_id, recipe, { "contact.country": "United States" }, 1),
+    ).rejects.toThrow(/invalid replay continuation/i);
     await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
       /verification is not satisfied/i,
     );
@@ -1237,6 +1307,125 @@ describe("verified recipe recording", () => {
         },
       ],
     });
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("replay-per-leg-signature: also writes a checkout-leg recipe, keyed by the live checkout field-name-set signature, when the trace has a catalog prefix before a money field", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-checkout-leg-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [
+      elem({
+        tag: "button",
+        testId: "add-to-cart",
+        role: "button",
+        ariaLabel: "Add to cart",
+        selector: "#add",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    // Catalog/storefront leg — a non-money click.
+    await act(started.session_id, { kind: "click", target: "Add to cart" });
+    // Checkout leg — a money field.
+    h.elements = [
+      elem({
+        testId: "shipping-city",
+        name: "city",
+        labelText: "City",
+        selector: "#city",
+        value: "",
+      }),
+    ];
+    await act(started.session_id, {
+      kind: "type",
+      target: "City",
+      text: "Brooklyn",
+      provenance: { hole: "address.city" },
+    });
+    h.visibleText = "Review order";
+    // What extractCheckoutFieldNames() would read off the live checkout
+    // page at operate_remember time — independent of the recorded trace's
+    // own targets, exactly as production computes it.
+    h.checkoutFieldNames = ["city", "email", "firstName", "lastName"];
+    const saved = await provisionRememberTool.handler(
+      {
+        session_id: started.session_id,
+        name: "buy-coffee",
+        goal: "Buy coffee",
+        verb: "purchase",
+        inputs: { address: { city: "Brooklyn" } },
+        postcondition: {
+          kind: "execute_capability",
+          describe: "Ready to approve",
+          success_signal: { text_present: "Review order" },
+        },
+      },
+      null as unknown as ApiClient,
+    );
+    expect((saved as { checkout_leg_file?: string }).checkout_leg_file).toBeDefined();
+    const files = readdirSync(dir).sort();
+    expect(files).toContain("purchase--example.com.json");
+    expect(files.length).toBe(2);
+    const checkoutLegFile = files.find((f) => f !== "purchase--example.com.json")!;
+    const raw = JSON.parse(readFileSync(join(dir, checkoutLegFile), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(raw.verb).toBe("purchase");
+    expect(raw.domain).toMatch(/^shape:[0-9a-f]{64}$/);
+    // Only the money-field step made it into the leg — not the earlier
+    // catalog "Add to cart" click.
+    expect((raw.trace as unknown[]).length).toBe(1);
+    expect(raw).toMatchObject({
+      trace: [{ action: { kind: "type", value: { hole: "address.city" } } }],
+    });
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("replay-per-leg-signature: writes only the whole-task recipe (no checkout leg) when the trace has no money field", async () => {
+    // Existing single-user behavior is unchanged: a non-money-path save
+    // (e.g. an API-key signup) never gains a second file.
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-no-checkout-leg-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [
+      elem({
+        testId: "product-search",
+        id: "query",
+        name: "query",
+        role: "textbox",
+        ariaLabel: "Search products",
+        visibleText: "Search",
+        selector: "#query",
+        value: "",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, {
+      kind: "type",
+      target: "Search",
+      text: "dark roast",
+      provenance: { hole: "product_query" },
+    });
+    h.visibleText = "Review order";
+    h.checkoutFieldNames = ["query"]; // present, but never consulted — no money field exists
+    const saved = await provisionRememberTool.handler(
+      {
+        session_id: started.session_id,
+        name: "buy-coffee",
+        goal: "Buy coffee",
+        verb: "purchase",
+        inputs: { product_query: "dark roast" },
+        postcondition: {
+          kind: "execute_capability",
+          describe: "Ready to approve",
+          success_signal: { text_present: "Review order" },
+        },
+      },
+      null as unknown as ApiClient,
+    );
+    expect((saved as { checkout_leg_file?: string }).checkout_leg_file).toBeUndefined();
+    expect(readdirSync(dir)).toEqual(["purchase--example.com.json"]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
   });

@@ -98,16 +98,12 @@ interface OpenIssueDelegate {
     where: Record<string, unknown>;
     data: Record<string, unknown>;
   }): Promise<{ count: number }>;
-  findUnique(args: {
-    where: Record<string, unknown>;
-  }): Promise<OpenIssueRow | null>;
+  findUnique(args: { where: Record<string, unknown> }): Promise<OpenIssueRow | null>;
   findMany(args: {
     where?: Record<string, unknown>;
     orderBy?: Record<string, unknown>;
   }): Promise<OpenIssueRow[]>;
-  deleteMany(args: {
-    where: Record<string, unknown>;
-  }): Promise<{ count: number }>;
+  deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
 }
 
 interface ServiceStateRow {
@@ -131,12 +127,8 @@ interface ServiceStateDelegate {
     create: Record<string, unknown>;
     update: Record<string, unknown>;
   }): Promise<ServiceStateRow>;
-  findUnique(args: {
-    where: Record<string, unknown>;
-  }): Promise<ServiceStateRow | null>;
-  findMany(args: {
-    orderBy?: Record<string, unknown>;
-  }): Promise<ServiceStateRow[]>;
+  findUnique(args: { where: Record<string, unknown> }): Promise<ServiceStateRow | null>;
+  findMany(args: { orderBy?: Record<string, unknown> }): Promise<ServiceStateRow[]>;
 }
 
 interface HealRunRow {
@@ -158,10 +150,7 @@ interface HealRunRow {
 interface HealRunDelegate {
   create(args: { data: Record<string, unknown> }): Promise<HealRunRow>;
   findFirst(args: { orderBy?: Record<string, unknown> }): Promise<HealRunRow | null>;
-  findMany(args: {
-    orderBy?: Record<string, unknown>;
-    take?: number;
-  }): Promise<HealRunRow[]>;
+  findMany(args: { orderBy?: Record<string, unknown>; take?: number }): Promise<HealRunRow[]>;
 }
 
 export type RegistryPrismaTransaction = Omit<
@@ -207,9 +196,7 @@ interface SkillCaptureDelegate {
     where: Record<string, unknown>;
     orderBy?: Array<Record<string, unknown>>;
   }): Promise<unknown[]>;
-  deleteMany(args: {
-    where: Record<string, unknown>;
-  }): Promise<{ count: number }>;
+  deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
 }
 
 interface UniversalBotFailureRecordDelegate {

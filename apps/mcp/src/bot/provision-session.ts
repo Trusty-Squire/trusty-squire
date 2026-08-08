@@ -56,6 +56,8 @@ import {
   knownRecipeInputValue,
   localeStableFieldRole,
   operatorRecipeDomain,
+  checkoutFieldSetSignature,
+  checkoutShapeKey,
   resolveRecipeFieldTarget,
   resolveRecipeRepairTarget,
   resolveRecipeTarget,
@@ -353,6 +355,12 @@ interface ReplayState {
   verifiedFields: Set<number>;
   paymentGuard: "pending" | "verified" | "failed";
   failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
+  // replay-per-leg-signature — index of this recipe's OWN first money field,
+  // or null when none exists. > 0 means there's a genuine non-money prefix
+  // (a catalog/storefront leg) ahead of it, which is what lets a guard
+  // failure degrade to leg_fallback_required instead of the terminal
+  // human_required — see humanRequired in replayOperatorRecipe.
+  legStartIndex: number | null;
 }
 
 interface RecordedValueSource {
@@ -3578,6 +3586,12 @@ export async function rememberRecipe(
   steps: number;
   secrets: string[];
   verified: PostconditionResult;
+  // replay-per-leg-signature — present only when this session's trace has a
+  // money field (a checkout-shaped leg exists to extract). A SECOND recipe,
+  // scoped to just that leg and keyed by the live checkout page's own
+  // field-name-set signature instead of domain — so it can be published and
+  // replayed on a completely different, unrelated store's checkout leg.
+  checkout_leg_file?: string;
 }> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -3639,13 +3653,54 @@ export async function rememberRecipe(
     secrets: secrets.length,
     file,
   });
+  const checkoutLegFile = await rememberCheckoutLeg(session, opts.verb, trace).catch(() => null);
   return {
     file,
     name: opts.name,
     steps: recipe.trace.length,
     secrets: secrets.map((s) => s.slot),
     verified,
+    ...(checkoutLegFile !== null ? { checkout_leg_file: checkoutLegFile } : {}),
   };
+}
+
+// replay-per-leg-signature — split off and save the checkout portion of a
+// just-recorded money-path trace as its OWN recipe, keyed by the checkout
+// page's live field-name-set signature instead of domain. Best-effort and
+// silent on any reason it can't produce one (non-money verb, no money field
+// captured, empty live field set) — the whole-task recipe above is already
+// saved and stands on its own either way; this only ever ADDS a second,
+// narrower, cross-domain-reusable recipe alongside it.
+async function rememberCheckoutLeg(
+  session: Session,
+  verb: OperatorVerb | undefined,
+  trace: readonly TraceEntry[],
+): Promise<string | null> {
+  if (verb === undefined || !MONEY_REPLAY_VERBS.has(verb)) return null;
+  const legStart = checkoutLegStartIndex(trace);
+  if (legStart === null) return null;
+  const legTrace = trace.slice(legStart);
+  const fieldNames = await session.browser.extractCheckoutFieldNames();
+  const signature = checkoutFieldSetSignature(fieldNames);
+  if (signature === null) return null;
+  const legSlots = new Set(
+    legTrace
+      .filter((entry) => entry.action.kind === "type_secret")
+      .map((entry) => entry.action.slot)
+      .filter((slot): slot is string => slot !== undefined),
+  );
+  const checkoutRecipe: OperatorRecipe = {
+    name: `checkout-leg--${signature.slice(0, 12)}`,
+    schema_version: 1,
+    goal: "Fill the checkout leg's fields",
+    verb,
+    domain: checkoutShapeKey(signature),
+    allowed_hosts: [...new Set(egressSeedHosts(session))],
+    trace: legTrace,
+    secrets: [...legSlots].map((slot) => ({ slot, stored: false as const })),
+    postcondition: checkoutLegPostcondition(legTrace),
+  };
+  return await writeRecipe(checkoutRecipe);
 }
 
 // Read a single page snapshot for postcondition checking. Field VALUES are
@@ -3723,6 +3778,21 @@ export async function verifyActiveRecipePostcondition(
   return await verifyPostcondition(sessionId, state.boundPostcondition);
 }
 
+// replay-per-leg-signature — the checkout leg's registry/local-store key,
+// computed from the CURRENT live page. Callers use this to resolve (and,
+// on a hit, replay via replayOperatorRecipe) a checkout-leg recipe
+// independently of whatever (or whether any) whole-task recipe applies to
+// this session's domain — the mechanism that lets a checkout plan recorded
+// on one store resolve on a different, unrelated store of the same
+// checkout platform. Returns null when the live page has no field-name-set
+// to key by (nothing to resolve yet).
+export async function checkoutShapeSignatureForSession(sessionId: string): Promise<string | null> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const fieldNames = await session.browser.extractCheckoutFieldNames();
+  return checkoutFieldSetSignature(fieldNames);
+}
+
 const MONEY_REPLAY_VERBS = new Set<OperatorVerb>([
   "purchase",
   "subscribe",
@@ -3753,6 +3823,26 @@ export type OperatorReplayResult =
       observation: Observation;
       reason: "field_missing" | "field_value_mismatch";
       field: string;
+    }
+  | {
+      // replay-per-leg-signature — a money-path guard failure that occurred
+      // AFTER a genuine catalog/storefront prefix (legStartIndex > 0): the
+      // catalog/storefront leg already replayed fine, only the checkout leg
+      // needs cold driving. Distinct from human_required, which stays the
+      // terminal "stop, nothing narrower to fall back to" response for a
+      // single-leg (or leg-less) recipe. Not resumable via resume_from,
+      // and the same fail-closed payment gate as human_required stays shut
+      // for this session's remainder: operate_pay is refused, and
+      // operate_remember / operate_use{leg:"checkout"} both throw on this
+      // session (recipeRejectionReason is set, replayState is retained by
+      // design). The host may drive the checkout leg's NON-payment steps
+      // cold from from_step_index; completing payment requires a fresh
+      // operate_start.
+      status: "leg_fallback_required";
+      observation: Observation;
+      leg: "checkout";
+      from_step_index: number;
+      reason: string;
     };
 
 function replayTarget(action: TraceAction): RecipeTarget | null {
@@ -3795,6 +3885,39 @@ function moneyFieldName(action: TraceAction): string | null {
     .join(" ")
     .replace(/([a-z])([A-Z])/g, "$1 $2");
   return MONEY_FIELD_TARGET.test(label) ? label || "field" : null;
+}
+
+// replay-per-leg-signature — the checkout leg is whatever portion of a
+// money-path trace touches money fields (address/contact/card-adjacent —
+// the exact same classifier moneyFieldName already uses for the fill
+// guard). Reusing it here means the leg boundary needs no new heuristic
+// (no URL/path pattern-matching, no platform name): the first step the
+// existing guard already treats as a money field IS where checkout starts.
+// Returns null when the trace has no money field at all (verb classified
+// money-path but nothing was actually captured, or a non-money recipe).
+function checkoutLegStartIndex(trace: readonly TraceEntry[]): number | null {
+  const index = trace.findIndex((entry) => moneyFieldName(entry.action) !== null);
+  return index === -1 ? null : index;
+}
+
+// A checkout-leg-only recipe still needs a postcondition (the schema
+// requires one), but it isn't the whole task's "order placed" signal — it
+// only covers the leg it replays. Anchor it to the LAST money field in the
+// leg holding a non-empty value, mirroring the field_text/min_value_len
+// pattern already used elsewhere (e.g. the OAuth Playground token check):
+// checks a length, never a value, so it can't leak what it proves.
+// legTrace is guaranteed non-empty and to start on a money field by
+// construction (checkoutLegStartIndex found it), so a label always exists.
+function checkoutLegPostcondition(legTrace: readonly TraceEntry[]): Postcondition {
+  const lastLabel = [...legTrace]
+    .reverse()
+    .map((entry) => moneyFieldName(entry.action))
+    .find((label): label is string => label !== null)!;
+  return {
+    kind: "execute_capability",
+    describe: "checkout leg fields filled and re-verified",
+    success_signal: { field_text: lastLabel, min_value_len: 1 },
+  };
 }
 
 function findUnprovenancedMoneyField(recipe: OperatorRecipe): string | null {
@@ -4243,6 +4366,33 @@ export async function replayOperatorRecipe(
     reason: "field_missing" | "field_value_mismatch",
     field: string,
   ): Promise<OperatorReplayResult> => {
+    // replay-per-leg-signature — a genuine catalog/storefront prefix exists
+    // ahead of the checkout leg (legStartIndex > 0): degrade to a leg-scoped
+    // fallback instead of aborting the whole replay. A recipe with no such
+    // prefix (legStartIndex is 0 or null — a simple/single-leg money-path
+    // recipe) has nothing narrower to fall back to, so it keeps today's
+    // behavior exactly: hard-stop at human_required.
+    if (state.moneyPath && state.legStartIndex !== null && state.legStartIndex > 0) {
+      const fromStepIndex = state.legStartIndex;
+      // Same fail-closed payment gate as human_required (markReplayFailure
+      // sets paymentGuard:"failed" and rejects recipe re-recording) — only
+      // the RETURNED status differs. Deliberately does NOT null out
+      // session.replayState: activeProvisionSession's operate_pay gate
+      // reads session.replayState.paymentGuard, so clearing it would
+      // silently reopen the payment gate instead of keeping it shut.
+      // nextIndex is left unset (not stepIndex+1), so a resume_from
+      // attempt still hits "invalid replay continuation" below — this is
+      // not a resumable fallback the way fallback_required is.
+      markReplayFailure(session, reason, field);
+      audit(sessionId, "replay_leg_fallback", { reason, field, from_step_index: fromStepIndex });
+      return {
+        status: "leg_fallback_required",
+        observation: await observe(sessionId),
+        leg: "checkout",
+        from_step_index: fromStepIndex,
+        reason: `${reason}: ${field}`,
+      };
+    }
     markReplayFailure(session, reason, field);
     return { status: "human_required", observation: await observe(sessionId), reason, field };
   };
@@ -4262,6 +4412,7 @@ export async function replayOperatorRecipe(
       expectedFields: expected.fields,
       verifiedFields: new Set(),
       paymentGuard: isMoneyPath ? "pending" : "verified",
+      legStartIndex: isMoneyPath ? checkoutLegStartIndex(recipe.trace) : null,
     };
     session.replayState = state;
     if (expected.missing !== null) return await humanRequired("field_missing", expected.missing);
