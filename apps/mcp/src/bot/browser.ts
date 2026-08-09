@@ -57,6 +57,20 @@ const require = createRequire(import.meta.url);
 
 export type StealthProfile = "baseline" | "cdp_hardened";
 
+export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
+
+export function contextInitScriptsFor(options: {
+  hardened: boolean;
+  remoteMode: boolean;
+}): ContextInitScriptId[] {
+  if (options.hardened) return [];
+  return [
+    "evaluate-name-shim",
+    "navigator-webdriver",
+    ...(options.remoteMode ? [] : (["webgl-spoof"] as const)),
+  ];
+}
+
 export interface PageTargetSafetySignals {
   billingObject: boolean;
   accountSetup: boolean;
@@ -1812,6 +1826,7 @@ export class BrowserController {
     // should not emit these calls, but the helper is harmless there too.
     const evaluateNameShimScript =
       'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });';
+    const contextInitScripts = contextInitScriptsFor({ hardened, remoteMode });
     // Non-ASCII page mojibake (operator-observe-jp-mojibake). ANY
     // context.addInitScript under patchright (hardened) makes patchright
     // intercept and REWRITE every text/html Document response to inject the
@@ -1829,14 +1844,16 @@ export class BrowserController {
     // so skipping them here loses NO stealth and removes the corruption
     // trigger. Baseline (playwright-extra) does not rewrite bodies and its
     // init scripts DO reach the main world, so it keeps them.
-    if (!hardened) await context.addInitScript({ content: evaluateNameShimScript });
+    if (contextInitScripts.includes("evaluate-name-shim")) {
+      await context.addInitScript({ content: evaluateNameShimScript });
+    }
     // Patch navigator.webdriver — BASELINE ONLY. Measured against the
     // rebrowser bot-detector, this manual `defineProperty` is
     // COUNTERPRODUCTIVE under patchright: it re-adds `webdriver` as an own
     // property the detector then flags, whereas patchright removes it
     // correctly at the source. So in hardened mode we leave it to
     // patchright; only the stealth baseline gets the manual patch.
-    if (!hardened) {
+    if (contextInitScripts.includes("navigator-webdriver")) {
       await context.addInitScript(() => {
         Object.defineProperty(navigator, "webdriver", { get: () => undefined });
       });
@@ -1938,7 +1955,9 @@ export class BrowserController {
     // reapplyWebglSpoof (framenavigated/load), which the comment above notes is
     // the ONLY path that reaches the main world under patchright anyway, so the
     // context init copy is dead weight there.
-    if (!remoteMode && !hardened) await context.addInitScript({ content: installWebglSpoofScript });
+    if (contextInitScripts.includes("webgl-spoof")) {
+      await context.addInitScript({ content: installWebglSpoofScript });
+    }
     this.page = context.pages()[0] ?? (await context.newPage());
     this.primaryPage = this.page;
     // addInitScript covers document-start page JS, but Playwright's

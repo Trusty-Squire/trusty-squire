@@ -24,7 +24,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { chromium, type Browser, type Page } from "patchright";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
-import { BrowserController } from "../browser.js";
+import { BrowserController, contextInitScriptsFor } from "../browser.js";
 
 // Encode a UTF-16 JS string to EUC-JP bytes. Node ships a decode-only
 // TextDecoder("euc-jp"); we invert it once over the 2-byte EUC-JP plane to
@@ -123,6 +123,25 @@ afterAll(async () => {
 });
 
 let browser: Browser;
+
+describe("browser startup context init scripts", () => {
+  it("installs no context init scripts in hardened mode", () => {
+    expect(contextInitScriptsFor({ hardened: true, remoteMode: false })).toEqual([]);
+    expect(contextInitScriptsFor({ hardened: true, remoteMode: true })).toEqual([]);
+  });
+
+  it("keeps baseline init scripts and omits the WebGL spoof in remote mode", () => {
+    expect(contextInitScriptsFor({ hardened: false, remoteMode: false })).toEqual([
+      "evaluate-name-shim",
+      "navigator-webdriver",
+      "webgl-spoof",
+    ]);
+    expect(contextInitScriptsFor({ hardened: false, remoteMode: true })).toEqual([
+      "evaluate-name-shim",
+      "navigator-webdriver",
+    ]);
+  });
+});
 
 describe("operate observe/extract — non-UTF-8 (EUC-JP) label fidelity", () => {
   beforeAll(async () => {
