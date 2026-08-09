@@ -165,6 +165,10 @@ describe("checkout payment parsing", () => {
     ["合計 8,950円（税抜）"],
     ["合計 8,950円(税抜き)"],
     ["合計 8,950円（本体価格）"],
+    ["合計 税抜 8,950円"],
+    ["合計 税抜き 8,950円"],
+    ["合計 8,950 税抜"],
+    ["合計 8,950 税別"],
     ["合計数量: 3"],
     ["ここに合計はない"],
   ])("refuses non-total or tax-exclusive Japanese lines: %s", (text) => {
@@ -181,7 +185,13 @@ describe("checkout payment parsing", () => {
   it("applies tax-exclusive and count guards to every checkout amount", () => {
     expect(
       parseCheckoutAmounts(
-        ["合計 8,950円（税抜）", "合計 3点", "お支払い金額 9,845円（税込）"],
+        [
+          "合計 8,950円（税抜）",
+          "合計 税抜 8,950円",
+          "合計 8,950 税別",
+          "合計 3点",
+          "お支払い金額 9,845円（税込）",
+        ],
         "JPY",
       ),
     ).toEqual([{ amount_cents: 9_845, currency: "JPY" }]);
