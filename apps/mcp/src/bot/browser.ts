@@ -306,14 +306,15 @@ function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
 // are guarded against adjacent kana/kanji that would turn them into a
 // different line item: 商品合計 is a merchandise SUBTOTAL, 合計数量 an item
 // count, 合計ポイント points — none is the payable total. Honorific/compound
-// forms (ご注文合計, お支払い金額, …) are unambiguous and match as-is. A
-// 税込 (tax-included) label annotation is skipped; 税抜 (tax-EXCLUDED)
-// deliberately is not — a pre-tax figure is not what the card is charged.
+// forms (ご注文合計, お支払い金額, …) use the same guard so they only match as
+// whole labels. A 税込 (tax-included) label annotation is skipped; 税抜
+// (tax-EXCLUDED) deliberately is not — a pre-tax figure is not what the card
+// is charged.
 const cjkLetter = String.raw`\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}`;
 const checkoutTotalLabel =
   String.raw`(?:\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b` +
-  String.raw`|(?:ご注文合計|ご注文金額|お支払い合計|お支払合計|お支払い金額|お支払金額|ご請求金額|ご請求額` +
-  String.raw`|(?<![${cjkLetter}])(?:税込合計|総合計|総計|合計金額|合計|注文合計|注文金額|支払い金額|支払金額|請求金額|請求額))(?![${cjkLetter}]))`;
+  String.raw`|(?<![${cjkLetter}])(?:ご注文合計|ご注文金額|お支払い合計|お支払合計|お支払い金額|お支払金額|ご請求金額|ご請求額` +
+  String.raw`|税込合計|総合計|総計|合計金額|合計|注文合計|注文金額|支払い金額|支払金額|請求金額|請求額)(?![${cjkLetter}]))`;
 // The amount must end on a digit and (?![0-9.,]) makes it atomic: a rejected
 // trailing guard fails the whole match instead of shortening the number
 // (合計500円分のクーポン must never parse as ¥50), and a sentence period after

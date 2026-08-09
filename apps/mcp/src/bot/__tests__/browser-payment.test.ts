@@ -175,6 +175,10 @@ describe("checkout payment parsing", () => {
     ["合計 8,950円（価格は税抜）"],
     ["合計 8,950円 ※税抜"],
     ["合計数量: 3"],
+    ["合計ポイント: 500"],
+    ["商品ご注文合計 8,950円"],
+    ["会員お支払い金額 8,950円"],
+    ["ご注文金額合計 8,950円"],
     ["ここに合計はない"],
   ])("refuses non-total or tax-exclusive Japanese lines: %s", (text) => {
     expect(parseCheckoutAmount([text], "JPY")).toBeNull();
@@ -186,12 +190,9 @@ describe("checkout payment parsing", () => {
     ["合計 3個口"],
     ["合計 500ポイント"],
     ["合計500円分のクーポンをプレゼント"],
-  ])(
-    "never treats a Japanese count/points line as a payable amount: %s",
-    (text) => {
-      expect(parseCheckoutAmount([text], "JPY")).toBeNull();
-    },
-  );
+  ])("never treats a Japanese count/points line as a payable amount: %s", (text) => {
+    expect(parseCheckoutAmount([text], "JPY")).toBeNull();
+  });
 
   it("applies tax-exclusive and count guards to every checkout amount", () => {
     expect(
