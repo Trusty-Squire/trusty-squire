@@ -23,10 +23,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrowserController,
+  CHECKOUT_SUBMIT_LABEL_RE,
   type FrameTarget,
   type InteractiveElement,
   type PageTargetSafetySignals,
 } from "./browser.js";
+import type { PendingCardFill } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
@@ -444,6 +446,12 @@ interface Session {
   usedLocatorFallback: boolean;
   recipeRejectionReason: string | null;
   replayState: ReplayState | null;
+  // Split-checkout state (operate_pay phase="fill_card"): the vaulted card is
+  // currently filled into this session's checkout, awaiting the confirm step.
+  // While set, operate_act refuses charge-verb clicks (and Enter) so the ONLY
+  // path to the charge is operate_pay {phase:"confirm"}, which verifies the
+  // live total against the approved amount first.
+  pendingCardFill: PendingCardFill | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -1621,6 +1629,29 @@ export function manualCardEntryBlockReason(text: string): string | null {
   return null;
 }
 
+// While a vaulted card sits filled in the checkout (operate_pay
+// phase="fill_card"), the model must not be able to reach the charge itself:
+// the pay/place-order click is reserved for operate_pay {phase:"confirm"},
+// which verifies the live total against the user-approved amount first.
+// Ordinary between-step navigation ("Next", "Continue to review") stays free —
+// only charge-verb labels are refused.
+function pendingCardFillChargeBlockReason(
+  session: Session,
+  labels: ReadonlyArray<string | null | undefined>,
+): string | null {
+  if (session.pendingCardFill === null) return null;
+  const isCharge = labels.some(
+    (label) => typeof label === "string" && CHECKOUT_SUBMIT_LABEL_RE.test(label.trim()),
+  );
+  if (!isCharge) return null;
+  return (
+    "click refused: a vaulted payment card is filled into this checkout and this " +
+    "control looks like the charge/place-order action. The charge must go through " +
+    'operate_pay {phase:"confirm"}, which verifies the live total against the ' +
+    "user-approved amount before submitting."
+  );
+}
+
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
   pageText: string,
@@ -1995,6 +2026,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     usedLocatorFallback: false,
     recipeRejectionReason: null,
     replayState: null,
+    pendingCardFill: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2087,6 +2119,7 @@ export async function startHarnessProvisionSession(
     usedLocatorFallback: false,
     recipeRejectionReason: null,
     replayState: null,
+    pendingCardFill: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2226,6 +2259,21 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
     }
   }
   return session.browser;
+}
+
+// Split-checkout pending-fill state (operate_pay phase="fill_card"/"confirm").
+// Lives on the one active session so it dies with the browser; the raw card is
+// never here — only what the confirm step needs to verify and audit.
+export function setActivePendingCardFill(pending: PendingCardFill): void {
+  activeProvisionSession().pendingCardFill = pending;
+}
+
+export function getActivePendingCardFill(): PendingCardFill | null {
+  return activeProvisionSession().pendingCardFill;
+}
+
+export function clearActivePendingCardFill(): void {
+  activeProvisionSession().pendingCardFill = null;
 }
 
 export function recordActivePaymentProvenance(cardRef: string): void {
@@ -2954,6 +3002,15 @@ export async function act(
       break;
     }
     case "press": {
+      // Enter fires the form's default submit — on an order-confirmation page
+      // that IS the charge. Same rule as the charge-click guard below.
+      if (session.pendingCardFill !== null && /^enter$/i.test(action.key.trim())) {
+        throw new Error(
+          "press refused: a vaulted payment card is filled into this checkout, and " +
+            "Enter can trigger the page's default submit (the charge). Use operate_pay " +
+            '{phase:"confirm"} to place the order.',
+        );
+      }
       await browser.pressKey(action.key);
       break;
     }
@@ -3126,6 +3183,10 @@ export async function act(
           if (resolved.frameTarget !== null) {
             assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
           }
+          if (action.kind === "click" || action.kind === "js_click") {
+            const chargeBlock = pendingCardFillChargeBlockReason(session, [resolved.text]);
+            if (chargeBlock !== null) throw new Error(chargeBlock);
+          }
           session.usedLocatorFallback = true;
           if (action.kind === "click") await browser.clickHandle(resolved.handle);
           else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
@@ -3160,6 +3221,17 @@ export async function act(
       // Frame domain-lock (operator-frame-support) — see frameTargetAllowed.
       // A main-frame or same-domain-frame target is unaffected.
       assertFrameTargetAllowed(session, el, action.kind);
+      // oauth_click included: it clicks the element too (expecting a popup),
+      // so it must not be a side door to the charge control.
+      if (action.kind === "click" || action.kind === "js_click" || action.kind === "oauth_click") {
+        const chargeBlock = pendingCardFillChargeBlockReason(session, [
+          el.ariaLabel,
+          el.visibleText,
+          el.labelText,
+          el.value,
+        ]);
+        if (chargeBlock !== null) throw new Error(chargeBlock);
+      }
       if (action.kind === "click") {
         const target = frameTargetFor(el);
         if (target !== null) await browser.clickInFrame(target, el.selector);

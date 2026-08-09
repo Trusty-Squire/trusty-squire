@@ -366,6 +366,9 @@ vi.mock("../browser.js", () => ({
       h.connections[this.index] = false;
     }
   },
+  // Mirrors the real export — the pending-card-fill charge guard reads it.
+  CHECKOUT_SUBMIT_LABEL_RE:
+    /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i,
 }));
 
 vi.mock("../captcha-solver-2captcha.js", () => ({
@@ -418,6 +421,8 @@ import {
   activeProvisionBrowser,
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
+  setActivePendingCardFill,
+  clearActivePendingCardFill,
   recipeTargetFor,
   captureObserved,
 } from "../provision-session.js";
@@ -3786,5 +3791,82 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     expect(result.status).not.toBe("complete");
     expect(h.frameClicks).toEqual([]);
     expect(h.clickCalls).toBe(0);
+  });
+});
+
+// ── Pending card-fill charge guard (split checkout) ─────────────────────────
+//
+// After operate_pay {phase:"fill_card"} the vaulted card sits filled in the
+// page, so the ONLY sanctioned path to the charge is operate_pay
+// {phase:"confirm"} (which verifies the live total first). A weak model must
+// not be able to fire the charge itself through operate_act.
+describe("pending card-fill charge guard", () => {
+  const pending = {
+    approval_id: "appr_guard",
+    approval_url: "https://web.test/vault/pay/appr_guard",
+    checkout: {
+      merchant: "Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 100,
+      currency: "USD",
+    },
+    card_ref: "card_guard",
+    last4: "4242",
+  };
+
+  it("refuses charge-verb clicks and Enter while filled, frees them after confirm clears", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+      elem({ tag: "button", type: null, visibleText: "Continue to review", selector: "#next" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+
+    await expect(
+      act(started.session_id, { kind: "click", target: "Place order" }),
+    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
+    await expect(
+      act(started.session_id, { kind: "js_click", target: "Place order" }),
+    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
+    // oauth_click clicks too — it must not be a side door to the charge.
+    await expect(
+      act(started.session_id, { kind: "oauth_click", target: "Place order" }),
+    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
+    expect(h.clickCalls).toBe(0);
+
+    // Between-step navigation stays free — that's how the host reaches the
+    // confirmation page at all.
+    await act(started.session_id, { kind: "click", target: "Continue to review" });
+    expect(h.clickCalls).toBe(1);
+
+    // Enter fires the form's default submit → refused; other keys pass.
+    await expect(act(started.session_id, { kind: "press", key: "Enter" })).rejects.toThrow(
+      /operate_pay/,
+    );
+    await act(started.session_id, { kind: "press", key: "Tab" });
+
+    // Once confirm consumes the fill, the ordinary rules return.
+    clearActivePendingCardFill();
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(2);
+  });
+
+  it("refuses a locator-fallback click on a charge control while filled", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "Pay now",
+      safetySignals: { billingObject: false, accountSetup: false },
+    };
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+
+    await expect(
+      act(started.session_id, { kind: "click", target: "text=Pay now" }),
+    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
+    expect(h.locatorClickCalls).toBe(0);
   });
 });

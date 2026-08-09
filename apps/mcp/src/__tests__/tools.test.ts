@@ -8,7 +8,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
-import type { PaymentBrowser } from "../bot/pay-operator.js";
+import type { PaymentBrowser, PendingCardFill } from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
 // operate_pay's handler reaches into the single active browser session via
@@ -16,9 +16,20 @@ import type * as ProvisionSession from "../bot/provision-session.js";
 // just that getter (everything else in the module is preserved) and hand back
 // a stub whose checkout summary the resolution tests can control.
 let mockBrowser: PaymentBrowser;
+let mockPending: PendingCardFill | null = null;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
-  return { ...actual, activeProvisionBrowserForPayment: async () => mockBrowser };
+  return {
+    ...actual,
+    activeProvisionBrowserForPayment: async () => mockBrowser,
+    getActivePendingCardFill: () => mockPending,
+    setActivePendingCardFill: (pending: PendingCardFill) => {
+      mockPending = pending;
+    },
+    clearActivePendingCardFill: () => {
+      mockPending = null;
+    },
+  };
 });
 
 import {
@@ -41,6 +52,9 @@ function stubBrowser(): PaymentBrowser {
       currency: "USD",
     }),
     fillAndSubmitCheckout: vi.fn().mockResolvedValue({ three_ds_required: false }),
+    fillCheckoutCardFields: vi.fn().mockResolvedValue(undefined),
+    submitFilledCheckout: vi.fn().mockResolvedValue({ three_ds_required: false }),
+    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
     currentUrl: vi.fn().mockReturnValue("https://m.test/checkout"),
   };
@@ -50,6 +64,7 @@ const PAYMENT_DETAILS = { item: "Synthetic item", reason: "Synthetic purchase re
 
 beforeEach(() => {
   mockBrowser = stubBrowser();
+  mockPending = null;
 });
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -228,6 +243,78 @@ describe("operate_pay card selection", () => {
       status: "payment_card_required",
       needs_user: { wall: "card_required" },
     });
+  });
+});
+
+describe("operate_pay split checkout phases", () => {
+  const PENDING: PendingCardFill = {
+    approval_id: "appr_split",
+    approval_url: "https://web.test/vault/pay/appr_split",
+    checkout: { merchant: "M", checkout_origin: "https://m.test", amount_cents: 100, currency: "USD" },
+    card_ref: "card_split",
+    last4: "4242",
+    mandate_id: "mandate_split",
+  };
+
+  it("accepts the two phase values and rejects unknown ones", () => {
+    expect(() =>
+      operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "fill_card" }),
+    ).not.toThrow();
+    expect(() =>
+      operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" }),
+    ).not.toThrow();
+    expect(() =>
+      operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "charge" }),
+    ).toThrow();
+  });
+
+  it("refuses confirm when no card fill is pending", async () => {
+    const api = makeMockApi();
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+      /phase="confirm" requires a completed phase="fill_card"/,
+    );
+  });
+
+  it("confirm verifies the live total, charges, clears pending, and skips the PayPal gate", async () => {
+    mockPending = { ...PENDING };
+    // An incidental PayPal button iframe on the review page must not block the
+    // confirm of an already-filled card.
+    vi.mocked(mockBrowser.isPayPalHostedCheckout).mockResolvedValue(true);
+    const auditPayment = vi.fn().mockResolvedValue({ id: "audit_1" });
+    const api = makeMockApi({ auditPayment } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+    expect(result).toMatchObject({ status: "payment_submitted", amount_cents: 100 });
+    expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+    expect(mockBrowser.isPayPalHostedCheckout).not.toHaveBeenCalled();
+    expect(auditPayment).toHaveBeenCalledWith(
+      expect.objectContaining({ last4: "4242", status: "payment_submitted" }),
+    );
+    expect(mockPending).toBeNull();
+  });
+
+  it("confirm keeps the pending fill on an amount mismatch (no charge)", async () => {
+    mockPending = { ...PENDING };
+    vi.mocked(mockBrowser.readCheckoutSummary).mockResolvedValue({
+      merchant: "M",
+      checkout_origin: "https://m.test",
+      amount_cents: 999,
+      currency: "USD",
+    });
+    const api = makeMockApi();
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      status: "payment_amount_mismatch",
+      mandate_amount_cents: 100,
+      live_amount_cents: 999,
+    });
+    expect(mockBrowser.submitFilledCheckout).not.toHaveBeenCalled();
+    expect(mockPending).not.toBeNull();
   });
 });
 

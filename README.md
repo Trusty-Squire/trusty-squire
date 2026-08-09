@@ -208,7 +208,14 @@ for the system and data flows.
 - `list_payment_cards` returns saved-card labels and opaque references;
   `operate_pay` can use a selected card, the only card on file, or a just-in-time
   add-card approval, then fills the checkout and waits for the user to resolve
-  3-D Secure before handing back unresolved challenges.
+  3-D Secure before handing back unresolved challenges. For split checkouts
+  where the card is entered before any total is shown, `operate_pay
+  {phase:"fill_card"}` fills the vaulted card — into the page's own domain or a
+  recognized payment-provider iframe only, never an arbitrary cross-origin
+  frame — without charging, and `operate_pay {phase:"confirm"}` later verifies
+  the now-visible total against the user-approved amount before placing the
+  order. While a card sits filled, charge-verb clicks through `operate_act` are
+  refused, so the confirm gate cannot be bypassed.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.

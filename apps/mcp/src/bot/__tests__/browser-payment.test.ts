@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { chromium, type Page } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
 import {
   BrowserController,
@@ -7,6 +7,8 @@ import {
   parseCheckoutAmount,
   parseCheckoutAmounts,
   parseStructuredCheckoutTotal,
+  recognizedPaymentProviderFrame,
+  UnrecognizedPaymentFrameError,
 } from "../browser.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
@@ -887,4 +889,167 @@ describe("3-D Secure resolution", () => {
 
     await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
   });
+});
+
+describe("recognized payment-provider frames", () => {
+  const PAGE = "https://shop.rakuten.co.jp/checkout/payment";
+
+  it("allows the merchant's own registrable domain (payment subdomain included)", () => {
+    expect(
+      recognizedPaymentProviderFrame("https://pay.shop.example.com/fields", "https://shop.example.com/checkout"),
+    ).toBe(true);
+  });
+
+  it("allows curated processors across registrable domains (the Rakuten split case)", () => {
+    // rakuten.co.jp (co.jp is a public suffix) vs rakuten.com are DIFFERENT
+    // registrable domains — exactly why the live run's secret-fill refused it.
+    expect(
+      recognizedPaymentProviderFrame(
+        "https://static-content.payment.global.rakuten.com/card-form",
+        PAGE,
+      ),
+    ).toBe(true);
+    expect(recognizedPaymentProviderFrame("https://js.stripe.com/v3/elements", PAGE)).toBe(true);
+    expect(
+      recognizedPaymentProviderFrame("https://checkoutshopper-live.adyen.com/fields", PAGE),
+    ).toBe(true);
+    expect(
+      recognizedPaymentProviderFrame("https://assets.braintreegateway.com/hosted-fields", PAGE),
+    ).toBe(true);
+  });
+
+  it("refuses arbitrary cross-origin frames, look-alikes, and non-https", () => {
+    expect(recognizedPaymentProviderFrame("https://rogue-payments.example.net/f", PAGE)).toBe(false);
+    // A look-alike host CONTAINING a processor name is not that processor.
+    expect(recognizedPaymentProviderFrame("https://stripe.com.evil.net/f", PAGE)).toBe(false);
+    expect(recognizedPaymentProviderFrame("https://evilstripe.com/f", PAGE)).toBe(false);
+    // The whole of rakuten.com is a marketplace, not a processor — only the
+    // payment platform subdomain qualifies.
+    expect(recognizedPaymentProviderFrame("https://www.rakuten.com/deals", PAGE)).toBe(false);
+    expect(recognizedPaymentProviderFrame("http://js.stripe.com/v3/elements", PAGE)).toBe(false);
+    expect(recognizedPaymentProviderFrame("about:blank", PAGE)).toBe(false);
+    expect(recognizedPaymentProviderFrame("", PAGE)).toBe(false);
+  });
+});
+
+// Real-Chromium split-checkout fill: route interception serves fake domains so
+// the payment iframe is genuinely cross-origin, no network required.
+describe("split-checkout card fill (real browser)", () => {
+  const CARD = {
+    pan: "4242424242424242",
+    exp_month: "12",
+    exp_year: "30",
+    cvv: "123",
+    name: "Synthetic Cardholder",
+    billing: {
+      line1: "123 Synthetic Street",
+      city: "Testville",
+      postal_code: "10001",
+      country: "US",
+    },
+  };
+
+  const FRAME_FORM = `
+    <form id="card-form">
+      <input autocomplete="cc-number">
+      <input inputmode="numeric" placeholder="MM/YY">
+      <input autocomplete="cc-csc">
+      <input autocomplete="cc-name">
+      <button type="submit">Pay now</button>
+    </form>
+    <script>
+      document.querySelector("#card-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        document.body.dataset.submitted = "true";
+      });
+    </script>`;
+
+  async function servePages(pages: Record<string, string>): Promise<{
+    page: Page;
+    browser: Browser;
+  }> {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.route("**/*", async (route) => {
+      const url = route.request().url();
+      const body = pages[url];
+      if (body === undefined) return route.fulfill({ status: 404, body: "not found" });
+      return route.fulfill({ contentType: "text/html", body });
+    });
+    return { page, browser };
+  }
+
+  it.skipIf(!chromiumAvailable)(
+    "fills a recognized payment-provider iframe on a page with NO total, without submitting",
+    async () => {
+      const frameUrl = "https://static-content.payment.global.rakuten.com/card-form";
+      const { page, browser } = await servePages({
+        "https://shop.rakuten.co.jp/checkout/payment": `
+          <title>Payment method</title>
+          <p>Choose your payment method. The order total is shown on the next step.</p>
+          <iframe src="${frameUrl}"></iframe>
+          <button>Next</button>`,
+        [frameUrl]: FRAME_FORM,
+      });
+      try {
+        await page.goto("https://shop.rakuten.co.jp/checkout/payment");
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+
+        const frame = page.frames().find((f) => f.url() === frameUrl)!;
+        // The card landed inside the payment-provider frame…
+        expect(await frame.locator('[autocomplete="cc-number"]').inputValue()).toBe(CARD.pan);
+        expect(await frame.locator('[autocomplete="cc-csc"]').inputValue()).toBe(CARD.cvv);
+        // No formatter script in the frame, so the four typed digits remain raw.
+        expect(await frame.locator('[placeholder="MM/YY"]').inputValue()).toBe("1230");
+        // …every filled field is marked sealed so observations mask it…
+        expect(await frame.locator('[data-ts-sealed-payment="1"]').count()).toBeGreaterThanOrEqual(4);
+        // …and NOTHING was submitted: filling is not charging.
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses the same fill when the card fields live in an UNRECOGNIZED cross-origin iframe",
+    async () => {
+      const rogueUrl = "https://rogue-payments.example.net/card-form";
+      const { page, browser } = await servePages({
+        "https://shop.example.test/checkout/payment": `
+          <title>Payment method</title>
+          <iframe src="${rogueUrl}"></iframe>
+          <button>Next</button>`,
+        [rogueUrl]: FRAME_FORM,
+      });
+      try {
+        await page.goto("https://shop.example.test/checkout/payment");
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toMatchObject({
+          message: "payment_frame_not_recognized",
+          frameOrigin: "https://rogue-payments.example.net",
+        });
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toBeInstanceOf(
+          UnrecognizedPaymentFrameError,
+        );
+
+        const frame = page.frames().find((f) => f.url() === rogueUrl)!;
+        // Not one byte of the card reached the rogue frame, and nothing sealed
+        // was left behind.
+        expect(await frame.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await frame.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+        expect(await frame.locator('[data-ts-sealed-payment="1"]').count()).toBe(0);
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 });

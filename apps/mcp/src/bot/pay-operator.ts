@@ -4,6 +4,7 @@ import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPa
 import { z } from "zod";
 import type { ApiClient } from "../api-client.js";
 import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
+import { UnrecognizedPaymentFrameError } from "./browser.js";
 import { generateOperatorKeypair, openSealed } from "./payment-hpke.js";
 
 export interface OperatePayArgs {
@@ -18,14 +19,34 @@ export interface OperatePayArgs {
   item: string;
   reason: string;
   three_ds_wait_seconds?: number;
+  // "fill_card" = split-checkout card entry: run the full approval ceremony,
+  // then fill the card into the payment fields WITHOUT submitting anything —
+  // the charge happens later via executeOperatePayConfirm once the order-
+  // confirmation step shows the total. Absent = the single-page fill+charge.
+  phase?: "fill_card";
 }
 
 export interface PaymentBrowser {
   isPayPalHostedCheckout(): Promise<boolean>;
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
+  fillCheckoutCardFields(card: CheckoutCard): Promise<void>;
+  submitFilledCheckout(): Promise<CheckoutSubmitResult>;
+  clearSealedPaymentFields(): Promise<void>;
   waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout">;
   currentUrl(): string;
+}
+
+// Everything the confirm step needs from a completed fill_card step. Held by
+// the session layer (never the model): the raw card is NOT here — it was
+// zeroed after the fill; the page holds the only copy until the charge.
+export interface PendingCardFill {
+  approval_id: string;
+  approval_url: string;
+  checkout: CheckoutSummary;
+  card_ref: string;
+  last4: string;
+  mandate_id?: string;
 }
 
 interface PayDependencies {
@@ -44,6 +65,8 @@ interface PayDependencies {
   pollIntervalMs: number;
   surfaceApprovalUrl: (url: string) => void | Promise<void>;
   onCardResolved: (cardRef: string) => void;
+  // fill_card only: hands the session layer what the later confirm step needs.
+  onCardFilled: (pending: PendingCardFill) => void;
 }
 
 const cardSchema = z.object({
@@ -231,6 +254,7 @@ function defaultDependencies(): PayDependencies {
       );
     },
     onCardResolved: () => undefined,
+    onCardFilled: () => undefined,
   };
 }
 
@@ -632,6 +656,79 @@ export async function executeOperatePay(
           : typeof claims.jti === "string"
             ? claims.jti
             : undefined;
+    // Split-checkout card entry (phase="fill_card"): fill the card, charge
+    // nothing. The human approval already happened (the mandate above binds
+    // merchant/origin/amount/currency); what CANNOT happen here is the
+    // total-verification — the card-entry step shows no total — so it moves
+    // to executeOperatePayConfirm, the step where the money actually moves.
+    // The one live check that is still possible (and needed: the ceremony can
+    // take minutes, and the fill targets the CURRENT page) is that the
+    // browser still sits on the origin the mandate was signed for.
+    if (args.phase === "fill_card") {
+      let liveOrigin: string | null;
+      try {
+        liveOrigin = new URL(browser.currentUrl()).origin;
+      } catch {
+        liveOrigin = null;
+      }
+      if (liveOrigin !== checkout.checkout_origin) {
+        return {
+          status: "payment_checkout_origin_mismatch",
+          approval_url: approvalUrl,
+          mandate_checkout_origin: checkout.checkout_origin,
+          ...(liveOrigin !== null ? { live_checkout_origin: liveOrigin } : {}),
+        };
+      }
+      try {
+        await browser.fillCheckoutCardFields(card);
+      } catch (error) {
+        if (error instanceof UnrecognizedPaymentFrameError) {
+          return {
+            status: "payment_frame_not_recognized",
+            frame_origin: error.frameOrigin,
+            approval_url: approvalUrl,
+            reason:
+              "The card fields live in a cross-origin frame that is not a recognized " +
+              "payment-provider surface; the vaulted card is never filled into an " +
+              "unrecognized frame.",
+          };
+        }
+        return {
+          status: "payment_card_fill_failed",
+          approval_url: approvalUrl,
+          reason:
+            error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
+              ? error.message
+              : "payment_card_fill_failed",
+        };
+      } finally {
+        cardBytes?.fill(0);
+        cardBytes = undefined;
+        card = undefined;
+      }
+      deps.onCardFilled({
+        approval_id: created.id,
+        approval_url: approvalUrl,
+        checkout,
+        card_ref: cardRef,
+        last4,
+        ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
+      });
+      return {
+        status: "payment_card_filled",
+        approval_url: approvalUrl,
+        merchant: checkout.merchant,
+        amount_cents: checkout.amount_cents,
+        currency: checkout.currency,
+        last4,
+        next:
+          'Drive the checkout to the order-confirmation step (the page showing the final ' +
+          'total), then call operate_pay {phase:"confirm"} — it verifies the live total ' +
+          "against the approved amount and places the order. Never click the " +
+          "pay/place-order control yourself.",
+      };
+    }
+
     // [#13][P1] JIT nearly doubles the window between reading the checkout and
     // filling it, so a mid-ceremony navigation could swap the merchant, origin,
     // or total out from under the signed mandate. Re-read the live checkout
@@ -756,4 +853,160 @@ export async function executeOperatePay(
     keypair.privateKey = "";
     keypair = { publicKey: "", privateKey: "" };
   }
+}
+
+// The charge half of a split checkout: the card was filled by phase="fill_card"
+// and the host has driven the checkout to its order-confirmation step. THIS is
+// where the money moves, so the total-verification gate lives here: the live
+// page must show a readable total that exactly matches the amount the user
+// approved (the mandate-bound checkout in `pending`) before the pay/place-order
+// control is clicked. No new approval is minted — the mandate from the fill
+// step already binds these values; a drifted page refuses instead of charging.
+export async function executeOperatePayConfirm(
+  pending: PendingCardFill,
+  args: { currency?: string; three_ds_wait_seconds?: number },
+  api: ApiClient,
+  browser: PaymentBrowser,
+): Promise<Record<string, unknown>> {
+  const threeDsWaitMs = Math.min(Math.max(args.three_ds_wait_seconds ?? 180, 0), 600) * 1000;
+  const checkout = pending.checkout;
+  const approvalUrl = pending.approval_url;
+
+  let live: CheckoutSummary;
+  try {
+    live = await browser.readCheckoutSummary(args.currency ?? checkout.currency);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "payment_checkout_total_not_found") {
+      // Unlike the fill step, a missing total here is a hard refusal — there
+      // is no declared-amount fallback at the moment of charging.
+      return {
+        status: "payment_checkout_total_not_found",
+        approval_url: approvalUrl,
+        reason:
+          "The confirm step requires the order total to be visible on the live page. " +
+          "Navigate to the order-confirmation step, then retry.",
+      };
+    }
+    if (message === "payment_checkout_currency_unresolved") {
+      return {
+        status: "payment_checkout_currency_unresolved",
+        reason: "checkout_currency_unrecognized",
+      };
+    }
+    if (message === "payment_checkout_currency_unresolved_scale_mismatch") {
+      return {
+        status: "payment_checkout_currency_unresolved",
+        reason: "fallback_currency_scale_mismatch",
+      };
+    }
+    throw error;
+  }
+  // Merchant is deliberately NOT compared: it derives from the page title,
+  // which legitimately changes between checkout steps ("Payment" → "Review
+  // order"). checkout_origin is the trust anchor; amount+currency the money
+  // gate — all three mandate-bound and all three must match exactly.
+  if (
+    live.amount_cents !== checkout.amount_cents ||
+    live.currency !== checkout.currency ||
+    live.checkout_origin !== checkout.checkout_origin
+  ) {
+    return {
+      status: "payment_amount_mismatch",
+      approval_url: approvalUrl,
+      merchant: checkout.merchant,
+      mandate_amount_cents: checkout.amount_cents,
+      mandate_currency: checkout.currency,
+      live_amount_cents: live.amount_cents,
+      live_currency: live.currency,
+      live_merchant: live.merchant,
+      live_checkout_origin: live.checkout_origin,
+    };
+  }
+
+  let paymentStatus = "payment_submitted";
+  let submitResult: CheckoutSubmitResult = { three_ds_required: false };
+  try {
+    submitResult = await browser.submitFilledCheckout();
+    if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
+  } catch (error) {
+    // The filled fields are deliberately KEPT (unlike the single-page flow):
+    // nothing was charged, and the host can settle the page and retry confirm
+    // without a second approval ceremony.
+    paymentStatus = "payment_checkout_failed";
+    let audit_recorded = true;
+    try {
+      await api.auditPayment({
+        ...checkout,
+        last4: pending.last4,
+        status: paymentStatus,
+        ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
+      });
+    } catch {
+      audit_recorded = false;
+    }
+    return {
+      status: paymentStatus,
+      audit_recorded,
+      reason:
+        error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
+          ? error.message
+          : "payment_checkout_failed",
+      approval_url: approvalUrl,
+    };
+  }
+  // Submission serialized the card values; clear them from the page now, the
+  // same point the single-page flow clears them.
+  await browser.clearSealedPaymentFields();
+
+  if (submitResult.three_ds_required && threeDsWaitMs > 0) {
+    void api.notifyThreeDs(pending.approval_id).catch(() => undefined);
+    const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
+    if (resolution === "succeeded") paymentStatus = "payment_submitted";
+    if (resolution === "failed") paymentStatus = "payment_declined";
+  }
+
+  let auditRecorded = true;
+  try {
+    await api.auditPayment({
+      ...checkout,
+      last4: pending.last4,
+      status: paymentStatus,
+      ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
+    });
+  } catch {
+    auditRecorded = false;
+  }
+  if (paymentStatus === "payment_3ds_required") {
+    return {
+      status: paymentStatus,
+      audit_recorded: auditRecorded,
+      approval_url: approvalUrl,
+      ...(submitResult.challenge_url !== undefined
+        ? { challenge_url: submitResult.challenge_url }
+        : {}),
+      needs_user: {
+        wall: "3ds",
+        message:
+          "The issuer requires 3-D Secure authentication. Complete it in the open checkout.",
+        resume: "checkout",
+        ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
+      },
+    };
+  }
+  if (paymentStatus === "payment_declined") {
+    return {
+      status: paymentStatus,
+      audit_recorded: auditRecorded,
+      approval_url: approvalUrl,
+    };
+  }
+  return {
+    status: paymentStatus,
+    audit_recorded: auditRecorded,
+    approval_url: approvalUrl,
+    merchant: checkout.merchant,
+    amount_cents: checkout.amount_cents,
+    currency: checkout.currency,
+  };
 }

@@ -37,6 +37,7 @@ import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
 import { detectAsn, type AsnClass } from "./asn.js";
 import {
   CHROME_PROFILE_DIR,
@@ -227,6 +228,68 @@ interface CheckoutFrameDescriptor {
   name: string;
   title: string;
 }
+
+// Recognized payment-provider frames — the ONLY cross-registrable-domain
+// frames the fill-without-charge step (operate_pay phase="fill_card") may put
+// the vaulted card into. This mirrors the vault's egress model: the card may
+// travel to a surface we can confidently attribute to a legitimate payment
+// processor, never to an arbitrary third-party iframe (a possible rogue/
+// phishing frame) that merely appears on an in-scope page. Entries are host
+// suffixes: a domain is listed at the registrable level only when the whole
+// domain IS the processor (everything under stripe.com is Stripe); a
+// mixed-purpose domain is pinned to its payment platform subdomain
+// (rakuten.com is a marketplace — only payment.global.rakuten.com, the
+// Rakuten Payment platform that serves the hosted card fields observed live
+// at static-content.payment.global.rakuten.com, qualifies). Deliberately
+// minimal; extend only with evidence of the processor's hosted-field host.
+const RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS: readonly string[] = [
+  "stripe.com", // Stripe Elements / Payment Element iframes (js.stripe.com)
+  "adyen.com", // Adyen web components hosted fields (checkoutshopper-*.adyen.com)
+  "braintreegateway.com", // Braintree Hosted Fields (assets.braintreegateway.com)
+  "paypal.com", // PayPal advanced card fields (PayPal-hosted wallet checkout is refused earlier)
+  "worldpay.com", // Worldpay / Access Worldpay hosted payment fields
+  "payment.global.rakuten.com", // Rakuten Payment platform hosted card fields
+];
+
+// True when a child frame is a surface the vaulted card may be filled into:
+// the merchant's own registrable domain (its payment subdomain included), or
+// a curated recognized payment processor — https only. Anything else is
+// refused: a failed fill is far better than a card sent to a rogue frame.
+export function recognizedPaymentProviderFrame(frameUrl: string, pageUrl: string): boolean {
+  let frame: URL;
+  try {
+    frame = new URL(frameUrl);
+  } catch {
+    return false;
+  }
+  if (frame.protocol !== "https:") return false;
+  if (isSameRecipeDomain(frameUrl, pageUrl)) return true;
+  const host = frame.hostname.toLowerCase();
+  return RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS.some(
+    (allowed) => host === allowed || host.endsWith(`.${allowed}`),
+  );
+}
+
+// Card fields exist on the page but only inside a frame that is NOT a
+// recognized payment-provider surface. Carries the frame origin so the
+// refusal names what was refused without ever filling it.
+export class UnrecognizedPaymentFrameError extends Error {
+  readonly frameOrigin: string;
+  constructor(frameOrigin: string) {
+    super("payment_frame_not_recognized");
+    this.frameOrigin = frameOrigin;
+  }
+}
+
+const CHECKOUT_PAN_FIELD_SELECTORS =
+  'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]';
+
+// Charge-verb button labels — the click that actually moves money. Used by
+// submitFilledCheckout to find the charge control, and by operate_act's
+// pending-card-fill guard to refuse the model clicking such a control
+// directly while a vaulted card sits filled in the checkout.
+export const CHECKOUT_SUBMIT_LABEL_RE =
+  /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i;
 
 export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescriptor[]): boolean {
   return frames.some((frame) => {
@@ -6721,11 +6784,15 @@ export class BrowserController {
     return hasPayPalHostedCheckoutFrame([...iframeDescriptors, ...frameDescriptors]);
   }
 
-  // Common autocomplete/name selectors across all CDP-reachable frames,
-  // including cross-origin hosted fields. No PSP-specific adapters.
-  async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
-    if (!this.page) throw new Error("Browser not started");
-    const frames = this.page.frames();
+  // Common autocomplete/name selectors. No PSP-specific adapters. `frames` is
+  // the caller's trust decision: fillAndSubmitCheckout passes every
+  // CDP-reachable frame (single-page checkout — fill and charge in one vetted
+  // call), fillCheckoutCardFields passes only recognized payment-provider
+  // frames (split checkout — the filled card outlives the call).
+  private async fillCheckoutCardIntoFrames(
+    frames: readonly Frame[],
+    card: CheckoutCard,
+  ): Promise<void> {
     const filled = new Set<string>();
     const fillFirst = async (
       field: string,
@@ -6779,134 +6846,197 @@ export class BrowserController {
       return false;
     };
 
-    try {
-      await fillFirst(
-        "pan",
-        card.pan,
-        'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]',
+    await fillFirst("pan", card.pan, CHECKOUT_PAN_FIELD_SELECTORS);
+    const expiryMonthSelectors =
+      '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i]';
+    const expiryYearSelectors =
+      '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i]';
+    const hasSplitExpiry =
+      (await hasFillable(expiryMonthSelectors)) && (await hasFillable(expiryYearSelectors));
+    if (hasSplitExpiry) {
+      await fillFirst("exp_month", card.exp_month.padStart(2, "0"), expiryMonthSelectors);
+      await fillFirst("exp_year", card.exp_year, expiryYearSelectors);
+    } else {
+      // A combined expiry field's formatter owns the slash. Send only the four
+      // digits as real key events so numeric-only fields accept them and the
+      // site's key/input handlers can turn e.g. "1230" into "12/30".
+      const combined = await fillFirst(
+        "expiry",
+        `${card.exp_month.padStart(2, "0")}${card.exp_year.slice(-2)}`,
+        'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i],label:has-text("MM/YY") input,label:has-text("MM / YY") input',
+        true,
       );
-      const expiryMonthSelectors =
-        '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i]';
-      const expiryYearSelectors =
-        '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i]';
-      const hasSplitExpiry =
-        (await hasFillable(expiryMonthSelectors)) && (await hasFillable(expiryYearSelectors));
-      if (hasSplitExpiry) {
+      if (!combined) {
         await fillFirst("exp_month", card.exp_month.padStart(2, "0"), expiryMonthSelectors);
         await fillFirst("exp_year", card.exp_year, expiryYearSelectors);
-      } else {
-        // A combined expiry field's formatter owns the slash. Send only the four
-        // digits as real key events so numeric-only fields accept them and the
-        // site's key/input handlers can turn e.g. "1230" into "12/30".
-        const combined = await fillFirst(
-          "expiry",
-          `${card.exp_month.padStart(2, "0")}${card.exp_year.slice(-2)}`,
-          'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i],label:has-text("MM/YY") input,label:has-text("MM / YY") input',
-          true,
-        );
-        if (!combined) {
-          await fillFirst("exp_month", card.exp_month.padStart(2, "0"), expiryMonthSelectors);
-          await fillFirst("exp_year", card.exp_year, expiryYearSelectors);
-        }
       }
-      const fields: Array<[string, string | undefined, string]> = [
-        [
-          "cvv",
-          card.cvv,
-          'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]',
-        ],
-        [
-          "name",
-          card.name,
-          'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
-        ],
-        [
-          "line1",
-          card.billing.line1,
-          '[autocomplete~="address-line1"],[name*="address_line1" i],[name*="address1" i],[name="line1" i]',
-        ],
-        [
-          "line2",
-          card.billing.line2,
-          '[autocomplete~="address-line2"],[name*="address_line2" i],[name*="address2" i],[name="line2" i]',
-        ],
-        [
-          "city",
-          card.billing.city,
-          '[autocomplete~="address-level2"],[name*="city" i],[name*="locality" i]',
-        ],
-        [
-          "state",
-          card.billing.state,
-          '[autocomplete~="address-level1"],[name*="state" i],[name*="region" i]',
-        ],
-        [
-          "postal_code",
-          card.billing.postal_code,
-          '[autocomplete~="postal-code"],[name*="postal" i],[name*="zip" i]',
-        ],
-        ["country", card.billing.country, '[autocomplete~="country"],[name*="country" i]'],
-      ];
-      for (const [field, value, selectors] of fields) {
-        await fillFirst(field, value, selectors);
-      }
-      for (const required of ["pan", "expiry", "cvv", "name"]) {
-        if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
-        if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
-      }
+    }
+    const fields: Array<[string, string | undefined, string]> = [
+      [
+        "cvv",
+        card.cvv,
+        'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]',
+      ],
+      [
+        "name",
+        card.name,
+        'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
+      ],
+      [
+        "line1",
+        card.billing.line1,
+        '[autocomplete~="address-line1"],[name*="address_line1" i],[name*="address1" i],[name="line1" i]',
+      ],
+      [
+        "line2",
+        card.billing.line2,
+        '[autocomplete~="address-line2"],[name*="address_line2" i],[name*="address2" i],[name="line2" i]',
+      ],
+      [
+        "city",
+        card.billing.city,
+        '[autocomplete~="address-level2"],[name*="city" i],[name*="locality" i]',
+      ],
+      [
+        "state",
+        card.billing.state,
+        '[autocomplete~="address-level1"],[name*="state" i],[name*="region" i]',
+      ],
+      [
+        "postal_code",
+        card.billing.postal_code,
+        '[autocomplete~="postal-code"],[name*="postal" i],[name*="zip" i]',
+      ],
+      ["country", card.billing.country, '[autocomplete~="country"],[name*="country" i]'],
+    ];
+    for (const [field, value, selectors] of fields) {
+      await fillFirst(field, value, selectors);
+    }
+    for (const required of ["pan", "expiry", "cvv", "name"]) {
+      if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
+      if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
+    }
+  }
 
-      const submitName =
-        /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i;
-      let submitted = false;
-      for (const frame of frames) {
-        const matches = frame.locator('button,input[type="submit"],[role="button"]');
-        const count = Math.min(await matches.count().catch(() => 0), 100);
-        for (let i = 0; i < count; i += 1) {
-          const candidate = matches.nth(i);
-          if (!(await candidate.isVisible().catch(() => false))) continue;
-          if (!(await candidate.isEnabled().catch(() => false))) continue;
-          const label = await candidate
-            .evaluate((el) =>
-              (
-                el.getAttribute("aria-label") ||
-                (el instanceof HTMLInputElement ? el.value : el.textContent) ||
-                ""
-              ).trim(),
-            )
-            .catch(() => "");
-          if (!submitName.test(label)) continue;
-          await candidate.click();
-          submitted = true;
-          break;
-        }
-        if (submitted) break;
-      }
-      if (!submitted) throw new Error("payment_submit_not_found");
-      const challengeDeadline = Date.now() + 15_000;
-      while (Date.now() < challengeDeadline) {
-        const challenge = await this.detectThreeDsChallenge();
-        if (challenge.three_ds_required) return challenge;
-        await this.page.waitForTimeout(250).catch(() => undefined);
-      }
-      return { three_ds_required: false };
+  async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
+    if (!this.page) throw new Error("Browser not started");
+    try {
+      await this.fillCheckoutCardIntoFrames(this.page.frames(), card);
+      return await this.submitFilledCheckout();
     } finally {
-      for (const frame of this.page.frames()) {
-        await frame
-          .locator('[data-ts-sealed-payment="1"]')
-          .evaluateAll((elements) => {
-            for (const element of elements) {
-              if (
-                element instanceof HTMLInputElement ||
-                element instanceof HTMLTextAreaElement ||
-                element instanceof HTMLSelectElement
-              ) {
-                element.value = "";
-              }
-              element.removeAttribute("data-ts-sealed-payment");
-            }
-          })
-          .catch(() => undefined);
+      await this.clearSealedPaymentFields();
+    }
+  }
+
+  // Split-checkout card entry (operate_pay phase="fill_card"): fill the
+  // vaulted card into the payment fields WITHOUT touching any submit control —
+  // filling is not charging. The card may only enter the main frame, a frame
+  // on the page's own registrable domain, or a recognized payment-provider
+  // frame (recognizedPaymentProviderFrame); when the card fields live only in
+  // an unrecognized cross-origin frame the fill is refused and nothing is
+  // left behind. On success the filled values STAY in the page (the site
+  // needs them at its confirm step) marked data-ts-sealed-payment, which
+  // extractInteractiveElements reports as sealed so observations mask them.
+  async fillCheckoutCardFields(card: CheckoutCard): Promise<void> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const pageUrl = page.url();
+    const allowed = page
+      .frames()
+      .filter(
+        (frame) =>
+          frame === page.mainFrame() || recognizedPaymentProviderFrame(frame.url(), pageUrl),
+      );
+    try {
+      await this.fillCheckoutCardIntoFrames(allowed, card);
+    } catch (error) {
+      // A partial fill must not leave card data behind on a refusal.
+      await this.clearSealedPaymentFields();
+      if (error instanceof Error && error.message === "payment_field_not_found:pan") {
+        const excluded = await this.excludedPanFrameOrigin(new Set(allowed));
+        if (excluded !== null) throw new UnrecognizedPaymentFrameError(excluded);
       }
+      throw error;
+    }
+  }
+
+  // No PAN field among the allowed frames — name the excluded frame that does
+  // carry one (if any) so the refusal is diagnosable without filling it.
+  private async excludedPanFrameOrigin(allowed: ReadonlySet<Frame>): Promise<string | null> {
+    if (!this.page) return null;
+    for (const frame of this.page.frames()) {
+      if (allowed.has(frame)) continue;
+      const count = await frame
+        .locator(CHECKOUT_PAN_FIELD_SELECTORS)
+        .count()
+        .catch(() => 0);
+      if (count > 0) {
+        try {
+          return new URL(frame.url()).origin;
+        } catch {
+          return frame.url();
+        }
+      }
+    }
+    return null;
+  }
+
+  // The charge: find and click the pay/place-order control, then poll for a
+  // 3-D Secure challenge. Callers gate this on a verified visible total.
+  async submitFilledCheckout(): Promise<CheckoutSubmitResult> {
+    if (!this.page) throw new Error("Browser not started");
+    let submitted = false;
+    for (const frame of this.page.frames()) {
+      const matches = frame.locator('button,input[type="submit"],[role="button"]');
+      const count = Math.min(await matches.count().catch(() => 0), 100);
+      for (let i = 0; i < count; i += 1) {
+        const candidate = matches.nth(i);
+        if (!(await candidate.isVisible().catch(() => false))) continue;
+        if (!(await candidate.isEnabled().catch(() => false))) continue;
+        const label = await candidate
+          .evaluate((el) =>
+            (
+              el.getAttribute("aria-label") ||
+              (el instanceof HTMLInputElement ? el.value : el.textContent) ||
+              ""
+            ).trim(),
+          )
+          .catch(() => "");
+        if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
+        await candidate.click();
+        submitted = true;
+        break;
+      }
+      if (submitted) break;
+    }
+    if (!submitted) throw new Error("payment_submit_not_found");
+    const challengeDeadline = Date.now() + 15_000;
+    while (Date.now() < challengeDeadline) {
+      const challenge = await this.detectThreeDsChallenge();
+      if (challenge.three_ds_required) return challenge;
+      await this.page.waitForTimeout(250).catch(() => undefined);
+    }
+    return { three_ds_required: false };
+  }
+
+  async clearSealedPaymentFields(): Promise<void> {
+    if (!this.page) return;
+    for (const frame of this.page.frames()) {
+      await frame
+        .locator('[data-ts-sealed-payment="1"]')
+        .evaluateAll((elements) => {
+          for (const element of elements) {
+            if (
+              element instanceof HTMLInputElement ||
+              element instanceof HTMLTextAreaElement ||
+              element instanceof HTMLSelectElement
+            ) {
+              element.value = "";
+            }
+            element.removeAttribute("data-ts-sealed-payment");
+          }
+        })
+        .catch(() => undefined);
     }
   }
 

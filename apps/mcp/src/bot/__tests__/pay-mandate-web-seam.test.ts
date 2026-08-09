@@ -332,6 +332,9 @@ async function runSeam(cfg: {
       filledCards.push(card);
       return { three_ds_required: false };
     }),
+    fillCheckoutCardFields: vi.fn(),
+    submitFilledCheckout: vi.fn(),
+    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
   };
 
