@@ -6,6 +6,7 @@ import {
   hasPayPalHostedCheckoutFrame,
   parseCheckoutAmount,
   parseCheckoutAmounts,
+  parseStructuredCheckoutTotal,
 } from "../browser.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
@@ -395,6 +396,427 @@ describe("checkout payment parsing", () => {
         ).toEqual(["", "", "", "", ""]);
       } finally {
         await browser.close();
+      }
+    },
+  );
+});
+
+function orderJsonLd(due: Record<string, unknown>): string {
+  return JSON.stringify({
+    "@context": "https://schema.org",
+    "@type": "Order",
+    totalPaymentDue: due,
+  });
+}
+
+function structuredCheckoutController(text: string, structured: unknown): BrowserController {
+  const browser = new BrowserController({ humanize: false });
+  const page = {
+    evaluate: vi.fn().mockResolvedValue({ title: "Synthetic Shop", siteName: "" }),
+    frames: () => [
+      {
+        evaluate: vi.fn(async (fn: () => unknown) =>
+          String(fn).includes("ld+json") ? structured : text,
+        ),
+      },
+    ],
+    url: () => "https://shop.example.test/checkout",
+  };
+  Object.defineProperty(browser, "page", { value: page });
+  return browser;
+}
+
+describe("structured-data checkout totals", () => {
+  it("reads a JSON-LD Order.totalPaymentDue price specification", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        {
+          jsonLd: [
+            orderJsonLd({
+              "@type": "PriceSpecification",
+              price: "149.90",
+              priceCurrency: "USD",
+            }),
+          ],
+          microdata: [],
+        },
+      ]),
+    ).toEqual({ amount_cents: 14_990, currency: "USD" });
+  });
+
+  it("reads an Invoice MonetaryAmount with numeric value in a zero-decimal currency", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        {
+          jsonLd: [
+            JSON.stringify({
+              "@context": "https://schema.org",
+              "@type": "Invoice",
+              totalPaymentDue: { "@type": "MonetaryAmount", value: 1_468, currency: "JPY" },
+            }),
+          ],
+          microdata: [],
+        },
+      ]),
+    ).toEqual({ amount_cents: 1_468, currency: "JPY" });
+  });
+
+  it("finds an Order nested inside @graph", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        {
+          jsonLd: [
+            JSON.stringify({
+              "@context": "https://schema.org",
+              "@graph": [
+                { "@type": "WebPage", name: "Checkout" },
+                {
+                  "@type": "https://schema.org/Order",
+                  totalPaymentDue: { price: "25.00", priceCurrency: "EUR" },
+                },
+              ],
+            }),
+          ],
+          microdata: [],
+        },
+      ]),
+    ).toEqual({ amount_cents: 2_500, currency: "EUR" });
+  });
+
+  it("reads a microdata order total", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        { jsonLd: [], microdata: [{ price: "89.99", currency: "GBP" }] },
+      ]),
+    ).toEqual({ amount_cents: 8_999, currency: "GBP" });
+  });
+
+  it("never treats an Offer or Product price as the checkout total", () => {
+    // Offer.price is a UNIT price; treating it as the payable total would
+    // charge-approve the wrong amount on any quantity > 1 or multi-item cart.
+    expect(
+      parseStructuredCheckoutTotal([
+        {
+          jsonLd: [
+            JSON.stringify({
+              "@context": "https://schema.org",
+              "@type": "Product",
+              name: "Synthetic Widget",
+              offers: { "@type": "Offer", price: "49.00", priceCurrency: "USD" },
+            }),
+          ],
+          microdata: [],
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it("rejects an Offer assigned to Order.totalPaymentDue", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        {
+          jsonLd: [orderJsonLd({ "@type": "Offer", price: "49.00", priceCurrency: "USD" })],
+          microdata: [],
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it.each([
+    ["malformed JSON", { jsonLd: ["{not json"], microdata: [] }],
+    ["missing currency", { jsonLd: [orderJsonLd({ price: "25.00" })], microdata: [] }],
+    [
+      "unknown currency code",
+      { jsonLd: [orderJsonLd({ price: "25.00", priceCurrency: "ZZZ" })], microdata: [] },
+    ],
+    [
+      "symbol instead of ISO code",
+      { jsonLd: [orderJsonLd({ price: "25.00", priceCurrency: "$" })], microdata: [] },
+    ],
+    [
+      "zero amount (template default risk)",
+      { jsonLd: [orderJsonLd({ price: 0, priceCurrency: "USD" })], microdata: [] },
+    ],
+    [
+      "negative amount",
+      { jsonLd: [orderJsonLd({ price: -5, priceCurrency: "USD" })], microdata: [] },
+    ],
+    [
+      "comma-decimal notation",
+      { jsonLd: [orderJsonLd({ price: "1.468,00", priceCurrency: "EUR" })], microdata: [] },
+    ],
+    [
+      "currency-prefixed price string",
+      { jsonLd: [orderJsonLd({ price: "$25.00", priceCurrency: "USD" })], microdata: [] },
+    ],
+    [
+      "fractional minor units for a zero-decimal currency",
+      { jsonLd: [orderJsonLd({ price: "96.8", priceCurrency: "JPY" })], microdata: [] },
+    ],
+    ["non-conforming extract shape", "合計 1,468円"],
+    ["null extract (frame evaluate failed)", null],
+  ])("refuses %s", (_label, extract) => {
+    expect(parseStructuredCheckoutTotal([extract])).toBeNull();
+  });
+
+  it("refuses disagreeing structured totals as ambiguous", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        {
+          jsonLd: [
+            orderJsonLd({ price: "25.00", priceCurrency: "USD" }),
+            orderJsonLd({ price: "30.00", priceCurrency: "USD" }),
+          ],
+          microdata: [],
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it("refuses a valid total alongside an invalid totalPaymentDue claim", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        {
+          jsonLd: [
+            orderJsonLd({ price: "25.00", priceCurrency: "USD" }),
+            orderJsonLd({ price: "30.00" }),
+          ],
+          microdata: [],
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it("refuses conflicting aliases within one totalPaymentDue claim", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        {
+          jsonLd: [
+            orderJsonLd({
+              price: "25.00",
+              value: "30.00",
+              priceCurrency: "USD",
+              currency: "USD",
+            }),
+          ],
+          microdata: [],
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it("refuses a valid total alongside incomplete microdata", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        {
+          jsonLd: [orderJsonLd({ price: "25.00", priceCurrency: "USD" })],
+          microdata: [{ price: "30.00", currency: "" }],
+        },
+      ]),
+    ).toBeNull();
+  });
+
+  it("accepts duplicate agreeing candidates across frames and sources", () => {
+    expect(
+      parseStructuredCheckoutTotal([
+        { jsonLd: [orderJsonLd({ price: "25.00", priceCurrency: "USD" })], microdata: [] },
+        { jsonLd: [], microdata: [{ price: "25.00", currency: "USD" }] },
+      ]),
+    ).toEqual({ amount_cents: 2_500, currency: "USD" });
+  });
+
+  it("rescues a total the text parser cannot label, in both readers", async () => {
+    // "Genel Toplam" (Turkish) is not a recognized text label; the structured
+    // order total is the only readable source.
+    const structured = {
+      jsonLd: [orderJsonLd({ price: "149.90", priceCurrency: "TRY" })],
+      microdata: [],
+    };
+    await expect(
+      structuredCheckoutController("Genel Toplam 149,90 TL", structured).readCheckoutSummary(),
+    ).resolves.toMatchObject({ amount_cents: 14_990, currency: "TRY" });
+    await expect(
+      structuredCheckoutController(
+        "Genel Toplam 149,90 TL",
+        structured,
+      ).readCheckoutReviewSummary(),
+    ).resolves.toMatchObject({ amount_cents: 14_990, currency: "TRY" });
+  });
+
+  it("keeps the visible labeled total when structured data disagrees", async () => {
+    // Stale server-rendered JSON-LD must not override the total the user sees.
+    await expect(
+      structuredCheckoutController("Order total US$ 98.45", {
+        jsonLd: [orderJsonLd({ price: "80.00", priceCurrency: "USD" })],
+        microdata: [],
+      }).readCheckoutSummary(),
+    ).resolves.toMatchObject({ amount_cents: 9_845, currency: "USD" });
+  });
+
+  it("keeps the final clean review total after earlier unresolved currency", async () => {
+    await expect(
+      structuredCheckoutController("Order total 98.45 kr\nOrder total US$ 100.00", {
+        jsonLd: [orderJsonLd({ price: "80.00", priceCurrency: "USD" })],
+        microdata: [],
+      }).readCheckoutReviewSummary("USD"),
+    ).resolves.toMatchObject({ amount_cents: 10_000, currency: "USD" });
+  });
+
+  it.each(["readCheckoutSummary", "readCheckoutReviewSummary"] as const)(
+    "keeps the currency-unresolved guard in %s when a structured total exists",
+    async (reader) => {
+      const controller = structuredCheckoutController("Order total 98.45 kr", {
+        jsonLd: [orderJsonLd({ price: "98.45", priceCurrency: "SEK" })],
+        microdata: [],
+      });
+      await expect(controller[reader]("USD")).rejects.toMatchObject({
+        message: "payment_checkout_currency_unresolved",
+      });
+    },
+  );
+
+  it.each(["readCheckoutSummary", "readCheckoutReviewSummary"] as const)(
+    "keeps the fallback-scale-mismatch guard in %s when a structured total exists",
+    async (reader) => {
+      const controller = structuredCheckoutController("Order total 98.45", {
+        jsonLd: [orderJsonLd({ price: "98", priceCurrency: "JPY" })],
+        microdata: [],
+      });
+      await expect(controller[reader]("JPY")).rejects.toMatchObject({
+        message: "payment_checkout_currency_unresolved_scale_mismatch",
+      });
+    },
+  );
+
+  it("falls through when malformed JSON-LD accompanies an otherwise valid total", async () => {
+    await expect(
+      structuredCheckoutController("Genel Toplam 25,00", {
+        jsonLd: [orderJsonLd({ price: "25.00", priceCurrency: "USD" }), "{broken"],
+        microdata: [],
+      }).readCheckoutSummary(),
+    ).rejects.toThrow("payment_checkout_total_not_found");
+  });
+
+  it("still reports total_not_found when only an Offer price is structured", async () => {
+    await expect(
+      structuredCheckoutController("Synthetic Widget — great value!", {
+        jsonLd: [
+          JSON.stringify({
+            "@context": "https://schema.org",
+            "@type": "Product",
+            offers: { "@type": "Offer", price: "49.00", priceCurrency: "USD" },
+          }),
+        ],
+        microdata: [],
+      }).readCheckoutSummary("USD"),
+    ).rejects.toThrow("payment_checkout_total_not_found");
+  });
+
+  it("resolves Japanese text totals unchanged when no structured total is present", async () => {
+    await expect(
+      structuredCheckoutController("合計 1,468円", {
+        jsonLd: ["{not json"],
+        microdata: [],
+      }).readCheckoutSummary(),
+    ).resolves.toMatchObject({ amount_cents: 1_468, currency: "JPY" });
+  });
+
+  it.skipIf(!chromiumAvailable)(
+    "extracts JSON-LD and microdata order totals from a live page",
+    async () => {
+      const playwrightBrowser = await chromium.launch({ headless: true });
+      try {
+        const page = await playwrightBrowser.newPage();
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        // JSON-LD order total, no text label the prose parser recognizes.
+        await page.setContent(`
+          <title>Synthetic Shop</title>
+          <script type="application/ld+json">
+            ${orderJsonLd({ "@type": "PriceSpecification", price: "149.90", priceCurrency: "USD" })}
+          </script>
+          <div>Genel Toplam 149,90</div>
+        `);
+        await expect(controller.readCheckoutSummary()).resolves.toMatchObject({
+          amount_cents: 14_990,
+          currency: "USD",
+        });
+
+        // Microdata order total.
+        await page.setContent(`
+          <title>Synthetic Shop</title>
+          <div itemscope itemtype="https://schema.org/Order">
+            <div itemprop="totalPaymentDue" itemscope itemtype="https://schema.org/PriceSpecification">
+              <meta itemprop="price" content="89.99">
+              <meta itemprop="priceCurrency" content="GBP">
+            </div>
+          </div>
+          <div>Genel Toplam 89,99</div>
+        `);
+        await expect(controller.readCheckoutSummary()).resolves.toMatchObject({
+          amount_cents: 8_999,
+          currency: "GBP",
+        });
+
+        await page.setContent(`
+          <title>Synthetic Shop</title>
+          <div itemscope itemtype="https://schema.org/Order">
+            <div itemprop="totalPaymentDue" itemscope itemtype="https://schema.org/PriceSpecification">
+              <div itemscope itemtype="https://schema.org/Offer">
+                <meta itemprop="price" content="49.00">
+                <meta itemprop="priceCurrency" content="USD">
+              </div>
+              <meta itemprop="price" content="89.99">
+              <meta itemprop="priceCurrency" content="GBP">
+            </div>
+          </div>
+          <div>Genel Toplam 89,99</div>
+        `);
+        await expect(controller.readCheckoutSummary()).resolves.toMatchObject({
+          amount_cents: 8_999,
+          currency: "GBP",
+        });
+
+        await page.setContent(`
+          <title>Synthetic Shop</title>
+          <div itemscope itemtype="https://schema.org/Order">
+            <div itemprop="totalPaymentDue" itemscope itemtype="https://schema.org/Offer">
+              <meta itemprop="price" content="49.00">
+              <meta itemprop="priceCurrency" content="USD">
+            </div>
+          </div>
+          <div>Genel Toplam 49,00</div>
+        `);
+        await expect(controller.readCheckoutSummary()).rejects.toThrow(
+          "payment_checkout_total_not_found",
+        );
+
+        // Product-page unit price is never a total; the text label wins.
+        await page.setContent(`
+          <title>Synthetic Shop</title>
+          <script type="application/ld+json">
+            {"@context":"https://schema.org","@type":"Product","offers":{"@type":"Offer","price":"49.00","priceCurrency":"USD"}}
+          </script>
+          <div>Order total US$ 98.45</div>
+        `);
+        await expect(controller.readCheckoutSummary()).resolves.toMatchObject({
+          amount_cents: 9_845,
+          currency: "USD",
+        });
+
+        // Malformed JSON-LD falls through to the #466 Japanese text path.
+        await page.setContent(`
+          <title>Synthetic Shop</title>
+          <script type="application/ld+json">{broken</script>
+          <div>合計 1,468円</div>
+        `);
+        await expect(controller.readCheckoutSummary()).resolves.toMatchObject({
+          amount_cents: 1_468,
+          currency: "JPY",
+        });
+      } finally {
+        await playwrightBrowser.close();
       }
     },
   );

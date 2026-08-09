@@ -54,10 +54,13 @@ and removals, payments, and app-grant changes without storing a PAN or CVV.
 
 `operate_pay` requires a non-empty item and reason (calls that omit either
 receive a validation error). It reads the checkout total, sends you a short-lived
-approval link, and submits only after you approve the exact purchase. Page currency
-notation is authoritative: Trusty Squire refuses to create an approval when it
-cannot resolve that notation, or when the displayed fractional precision conflicts
-with an agent-supplied fallback currency. Approval, 3-D Secure, Activity, and
+approval link, and submits only after you approve the exact purchase. A clean visible
+labeled total wins; when none is readable, strict schema.org
+`Order`/`Invoice.totalPaymentDue` structured data can supply the amount and currency.
+Product and offer prices never qualify as checkout totals. Page currency notation is
+authoritative: Trusty Squire refuses to create an approval when it cannot resolve that
+notation, or when the displayed fractional precision conflicts with an agent-supplied
+fallback currency. Approval, 3-D Secure, Activity, and
 notification amounts use the currency's minor-unit precision (for example, whole
 yen for JPY and two decimals for USD). The anonymous approval page shows the
 merchant, checkout origin, amount and currency, item, and reason directly from the

@@ -500,15 +500,299 @@ export function parseCheckoutAmounts(
   texts: readonly string[],
   fallbackCurrency?: string,
 ): Array<{ amount_cents: number; currency: string }> {
+  return parseCheckoutAmountsResult(texts, fallbackCurrency).amounts;
+}
+
+interface CheckoutAmountsParseResult {
+  amounts: Array<{ amount_cents: number; currency: string }>;
+  currencyUnresolved: boolean;
+  fallbackCurrencyScaleMismatch: boolean;
+}
+
+function parseCheckoutAmountsResult(
+  texts: readonly string[],
+  fallbackCurrency?: string,
+): CheckoutAmountsParseResult {
   const amounts: Array<{ amount_cents: number; currency: string }> = [];
+  let currencyUnresolved = false;
+  let fallbackCurrencyScaleMismatch = false;
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
       const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
+      currencyUnresolved ||= result.currencyUnresolved;
+      fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
       if (result.amount !== null) amounts.push(result.amount);
     }
   }
-  return amounts;
+  return { amounts, currencyUnresolved, fallbackCurrencyScaleMismatch };
+}
+
+// Machine-readable order totals (schema.org). A checkout page that embeds its
+// payable total as structured data labels it by construction —
+// Order/Invoice.totalPaymentDue — which is language-independent and therefore
+// reaches totals whose visible text label the prose parser doesn't recognize.
+// Money-path restriction: ONLY totalPaymentDue on an Order/Invoice qualifies.
+// An Offer/Product price is a UNIT price, never a checkout total, and is
+// deliberately never read here.
+export interface StructuredCheckoutDataExtract {
+  jsonLd: string[];
+  microdata: Array<{ price: string; currency: string; itemtype?: string }>;
+}
+
+// Runs in the page (frame.evaluate) — must stay self-contained.
+function extractStructuredCheckoutData(): StructuredCheckoutDataExtract {
+  const jsonLd = Array.from(
+    document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json" i]'),
+    (script) => script.textContent ?? "",
+  ).filter((text) => text.trim().length > 0);
+  const microdata: Array<{ price: string; currency: string; itemtype?: string }> = [];
+  const isOrderScope = (itemtype: string | null): boolean =>
+    (itemtype ?? "")
+      .split(/\s+/)
+      .some((token) => /^https?:\/\/schema\.org\/(?:Order|Invoice)\/?$/.test(token));
+  const readValue = (element: Element | null): string =>
+    (element?.getAttribute("content") ?? element?.textContent ?? "").trim();
+  const ownsProperty = (owner: Element, property: Element): boolean => {
+    let parent = property.parentElement;
+    while (parent !== null && parent !== owner) {
+      if (parent.hasAttribute("itemscope")) return false;
+      parent = parent.parentElement;
+    }
+    return parent === owner;
+  };
+  for (const scope of Array.from(document.querySelectorAll("[itemscope][itemtype]"))) {
+    if (!isOrderScope(scope.getAttribute("itemtype"))) continue;
+    const dues = Array.from(scope.querySelectorAll('[itemprop~="totalPaymentDue"]')).filter((due) =>
+      ownsProperty(scope, due),
+    );
+    for (const due of dues) {
+      const prices = Array.from(due.querySelectorAll('[itemprop~="price"], [itemprop~="value"]'))
+        .filter((property) => ownsProperty(due, property))
+        .map((property) => readValue(property));
+      const currencies = Array.from(
+        due.querySelectorAll('[itemprop~="priceCurrency"], [itemprop~="currency"]'),
+      )
+        .filter((property) => ownsProperty(due, property))
+        .map((property) => readValue(property));
+      const count = Math.max(prices.length, currencies.length, 1);
+      for (let index = 0; index < count; index += 1) {
+        microdata.push({
+          price: prices[index] ?? "",
+          currency: currencies[index] ?? "",
+          itemtype: due.getAttribute("itemtype") ?? "",
+        });
+      }
+    }
+  }
+  return { jsonLd, microdata };
+}
+
+// Strict by design: a structured total is trusted only when its currency is a
+// known ISO code and its amount is a plain schema.org decimal that lands on a
+// whole minor unit. Anything else means "not confidently the payable total" —
+// return null and let the caller fall through to the text parser.
+function structuredCheckoutCandidate(
+  priceRaw: unknown,
+  currencyRaw: unknown,
+): { amount_cents: number; currency: string } | null {
+  if (typeof currencyRaw !== "string") return null;
+  const currency = currencyRaw.trim().toUpperCase();
+  if (!CHECKOUT_CURRENCY_CODES.has(currency)) return null;
+  let price: number;
+  if (typeof priceRaw === "number") {
+    price = priceRaw;
+  } else if (typeof priceRaw === "string" && /^[0-9]+(?:\.[0-9]+)?$/.test(priceRaw.trim())) {
+    // schema.org mandates "." as the decimal point with no readability
+    // separators; a value using any other notation is ambiguous — reject it
+    // rather than guess at its locale.
+    price = Number(priceRaw.trim());
+  } else {
+    return null;
+  }
+  // A zero total is more plausibly a template/product default than a genuinely
+  // free checkout — fall through to the visible text for that case.
+  if (!Number.isFinite(price) || price <= 0) return null;
+  const scale = 10 ** currencyMinorDigits(currency);
+  const minor = Math.round(price * scale);
+  if (minor <= 0 || Math.abs(price * scale - minor) > 1e-6) return null;
+  return { amount_cents: minor, currency };
+}
+
+function structuredCheckoutCandidateFromFields(
+  fields: Record<string, unknown>,
+): { amount_cents: number; currency: string } | null {
+  const prices = ["price", "value"]
+    .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
+    .map((key) => fields[key]);
+  const currencies = ["priceCurrency", "currency"]
+    .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
+    .map((key) => fields[key]);
+  if (prices.length === 0 || currencies.length === 0) return null;
+  let first: { amount_cents: number; currency: string } | null = null;
+  for (const price of prices) {
+    for (const currency of currencies) {
+      const candidate = structuredCheckoutCandidate(price, currency);
+      if (candidate === null) return null;
+      if (first === null) {
+        first = candidate;
+      } else if (
+        candidate.amount_cents !== first.amount_cents ||
+        candidate.currency !== first.currency
+      ) {
+        return null;
+      }
+    }
+  }
+  return first;
+}
+
+function isSchemaOrgType(node: Record<string, unknown>, names: readonly string[]): boolean {
+  const declared = node["@type"];
+  const tokens = Array.isArray(declared) ? declared : [declared];
+  return tokens.some(
+    (token) =>
+      typeof token === "string" &&
+      names.includes(token.replace(/^https?:\/\/schema\.org\//, "").replace(/\/$/, "")),
+  );
+}
+
+function hasCompatiblePayableType(declared: unknown): boolean {
+  if (declared === undefined || declared === "") return true;
+  const tokens = Array.isArray(declared)
+    ? declared
+    : typeof declared === "string"
+      ? declared.split(/\s+/).filter((token) => token.length > 0)
+      : [declared];
+  return (
+    tokens.length > 0 &&
+    tokens.every(
+      (token) =>
+        typeof token === "string" &&
+        ["PriceSpecification", "MonetaryAmount"].includes(
+          token.replace(/^https?:\/\/schema\.org\//, "").replace(/\/$/, ""),
+        ),
+    )
+  );
+}
+
+interface StructuredCheckoutCollection {
+  candidates: Array<{ amount_cents: number; currency: string }>;
+  invalid: boolean;
+}
+
+function collectJsonLdOrderTotals(
+  node: unknown,
+  collection: StructuredCheckoutCollection,
+  depth: number,
+): void {
+  if (depth > 64) {
+    collection.invalid = true;
+    return;
+  }
+  if (typeof node !== "object" || node === null) return;
+  if (Array.isArray(node)) {
+    for (const entry of node) collectJsonLdOrderTotals(entry, collection, depth + 1);
+    return;
+  }
+  const record: Record<string, unknown> = Object.fromEntries(Object.entries(node));
+  if (
+    isSchemaOrgType(record, ["Order", "Invoice"]) &&
+    Object.prototype.hasOwnProperty.call(record, "totalPaymentDue")
+  ) {
+    const due = record["totalPaymentDue"];
+    const entries = Array.isArray(due) ? due : [due];
+    if (entries.length === 0) collection.invalid = true;
+    for (const entry of entries) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        collection.invalid = true;
+        continue;
+      }
+      const amount: Record<string, unknown> = Object.fromEntries(Object.entries(entry));
+      if (!hasCompatiblePayableType(amount["@type"])) {
+        collection.invalid = true;
+        continue;
+      }
+      const candidate = structuredCheckoutCandidateFromFields(amount);
+      if (candidate === null) {
+        collection.invalid = true;
+      } else {
+        collection.candidates.push(candidate);
+      }
+    }
+  }
+  // Order nodes can sit anywhere (@graph, nested containers) — walk everything.
+  for (const value of Object.values(record)) collectJsonLdOrderTotals(value, collection, depth + 1);
+}
+
+/**
+ * Resolve a confident machine-readable order total from per-frame structured
+ * data extracts, or null. Null on ANY doubt — absent, malformed, unknown
+ * currency, non-positive, fractional minor units, or multiple candidates that
+ * disagree — so the caller always has the text-label parser to fall back on.
+ * Inputs are typed unknown and re-validated at runtime: extracts cross the
+ * evaluate boundary, so their shape is not statically guaranteed.
+ */
+export function parseStructuredCheckoutTotal(
+  extracts: readonly unknown[],
+): { amount_cents: number; currency: string } | null {
+  const collection: StructuredCheckoutCollection = { candidates: [], invalid: false };
+  for (const extract of extracts) {
+    if (typeof extract !== "object" || extract === null) {
+      collection.invalid = true;
+      continue;
+    }
+    const record: Record<string, unknown> = Object.fromEntries(Object.entries(extract));
+    if (!Array.isArray(record["jsonLd"]) || !Array.isArray(record["microdata"])) {
+      collection.invalid = true;
+      continue;
+    }
+    const jsonLd = record["jsonLd"];
+    const microdata = record["microdata"];
+    for (const raw of jsonLd) {
+      if (typeof raw !== "string") {
+        collection.invalid = true;
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        collection.invalid = true;
+        continue;
+      }
+      if (typeof parsed !== "object" || parsed === null) {
+        collection.invalid = true;
+        continue;
+      }
+      collectJsonLdOrderTotals(parsed, collection, 0);
+    }
+    for (const entry of microdata) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        collection.invalid = true;
+        continue;
+      }
+      const fields: Record<string, unknown> = Object.fromEntries(Object.entries(entry));
+      if (!hasCompatiblePayableType(fields["itemtype"])) {
+        collection.invalid = true;
+        continue;
+      }
+      const candidate = structuredCheckoutCandidate(fields["price"], fields["currency"]);
+      if (candidate === null) {
+        collection.invalid = true;
+      } else {
+        collection.candidates.push(candidate);
+      }
+    }
+  }
+  const first = collection.candidates[0];
+  if (collection.invalid || first === undefined) return null;
+  return collection.candidates.every(
+    (candidate) =>
+      candidate.amount_cents === first.amount_cents && candidate.currency === first.currency,
+  )
+    ? first
+    : null;
 }
 
 function extractCheckoutSummaryText(): string {
@@ -6207,11 +6491,18 @@ export class BrowserController {
         document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
         "",
     }));
-    const texts = await Promise.all(
-      page
-        .frames()
-        .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
-    );
+    const [texts, structuredExtracts] = await Promise.all([
+      Promise.all(
+        page
+          .frames()
+          .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
+      ),
+      Promise.all(
+        page
+          .frames()
+          .map(async (frame) => frame.evaluate(extractStructuredCheckoutData).catch(() => null)),
+      ),
+    ]);
     const parsedAmount = parseCheckoutAmountResult(texts, fallbackCurrency);
     if (parsedAmount.currencyUnresolved) {
       throw new Error("payment_checkout_currency_unresolved");
@@ -6219,7 +6510,14 @@ export class BrowserController {
     if (parsedAmount.fallbackCurrencyScaleMismatch) {
       throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
     }
-    const amount = parsedAmount.amount;
+    // Structured-data order total (schema.org Order/Invoice.totalPaymentDue).
+    // Used only when the visible text yields no clean labeled total: a
+    // structured total that CONTRADICTS a clean visible one can't be confirmed
+    // current (stale server-rendered JSON-LD is a real pattern), so the total
+    // the user actually sees wins; when both agree the value is identical
+    // either way. Net effect: structured data only ever rescues a
+    // total_not_found, never overrides the text path or its currency guards.
+    const amount = parsedAmount.amount ?? parseStructuredCheckoutTotal(structuredExtracts);
     if (amount === null) throw new Error("payment_checkout_total_not_found");
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
@@ -6246,12 +6544,34 @@ export class BrowserController {
         document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
         "",
     }));
-    const texts = await Promise.all(
-      page
-        .frames()
-        .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
-    );
-    const amount = parseCheckoutAmounts(texts, fallbackCurrency).at(-1);
+    const [texts, structuredExtracts] = await Promise.all([
+      Promise.all(
+        page
+          .frames()
+          .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
+      ),
+      Promise.all(
+        page
+          .frames()
+          .map(async (frame) => frame.evaluate(extractStructuredCheckoutData).catch(() => null)),
+      ),
+    ]);
+    // Same structured-data precedence as readCheckoutSummary: a machine-
+    // readable order total fills in only when no clean labeled text total
+    // exists, so the settled-amount contract (readSettledCheckoutReviewSummary
+    // re-reads until two consecutive reads agree) is unchanged — a structured
+    // total is simply re-read and must be stable like any other source.
+    const parsedAmounts = parseCheckoutAmountsResult(texts, fallbackCurrency);
+    const textAmount = parsedAmounts.amounts.at(-1);
+    const structuredAmount =
+      textAmount === undefined ? parseStructuredCheckoutTotal(structuredExtracts) : null;
+    if (structuredAmount !== null && parsedAmounts.currencyUnresolved) {
+      throw new Error("payment_checkout_currency_unresolved");
+    }
+    if (structuredAmount !== null && parsedAmounts.fallbackCurrencyScaleMismatch) {
+      throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
+    }
+    const amount = textAmount ?? structuredAmount ?? undefined;
     if (amount === undefined) throw new Error("payment_checkout_total_not_found");
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
