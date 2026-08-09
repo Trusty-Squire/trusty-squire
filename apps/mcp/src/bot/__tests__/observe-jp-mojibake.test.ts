@@ -5,7 +5,8 @@
 
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { chromium, type Browser, type Page } from "patchright";
+import { chromium as patchrightChromium, type Browser, type Page } from "patchright";
+import { chromium as playwrightChromium } from "playwright";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { BrowserController, contextInitScriptsFor } from "../browser.js";
 
@@ -128,7 +129,14 @@ describe("browser startup context init scripts", () => {
 
 describe("operate observe/extract — non-UTF-8 (EUC-JP) label fidelity", () => {
   beforeAll(async () => {
-    browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+    browser = await patchrightChromium.launch({
+      headless: true,
+      args: ["--no-sandbox"],
+      // CI installs Playwright's Chromium for browser-backed MCP tests, not
+      // Patchright's separate browser revision. Patchright can drive that same
+      // executable while retaining the response-rewrite behavior under test.
+      executablePath: playwrightChromium.executablePath(),
+    });
   });
   afterAll(async () => {
     await browser?.close();
