@@ -500,15 +500,32 @@ export function parseCheckoutAmounts(
   texts: readonly string[],
   fallbackCurrency?: string,
 ): Array<{ amount_cents: number; currency: string }> {
+  return parseCheckoutAmountsResult(texts, fallbackCurrency).amounts;
+}
+
+interface CheckoutAmountsParseResult {
+  amounts: Array<{ amount_cents: number; currency: string }>;
+  currencyUnresolved: boolean;
+  fallbackCurrencyScaleMismatch: boolean;
+}
+
+function parseCheckoutAmountsResult(
+  texts: readonly string[],
+  fallbackCurrency?: string,
+): CheckoutAmountsParseResult {
   const amounts: Array<{ amount_cents: number; currency: string }> = [];
+  let currencyUnresolved = false;
+  let fallbackCurrencyScaleMismatch = false;
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
       const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
+      currencyUnresolved ||= result.currencyUnresolved;
+      fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
       if (result.amount !== null) amounts.push(result.amount);
     }
   }
-  return amounts;
+  return { amounts, currencyUnresolved, fallbackCurrencyScaleMismatch };
 }
 
 // Machine-readable order totals (schema.org). A checkout page that embeds its
@@ -520,7 +537,7 @@ export function parseCheckoutAmounts(
 // deliberately never read here.
 export interface StructuredCheckoutDataExtract {
   jsonLd: string[];
-  microdata: Array<{ price: string; currency: string }>;
+  microdata: Array<{ price: string; currency: string; itemtype?: string }>;
 }
 
 // Runs in the page (frame.evaluate) — must stay self-contained.
@@ -529,21 +546,45 @@ function extractStructuredCheckoutData(): StructuredCheckoutDataExtract {
     document.querySelectorAll<HTMLScriptElement>('script[type="application/ld+json" i]'),
     (script) => script.textContent ?? "",
   ).filter((text) => text.trim().length > 0);
-  const microdata: Array<{ price: string; currency: string }> = [];
+  const microdata: Array<{ price: string; currency: string; itemtype?: string }> = [];
   const isOrderScope = (itemtype: string | null): boolean =>
     (itemtype ?? "")
       .split(/\s+/)
       .some((token) => /^https?:\/\/schema\.org\/(?:Order|Invoice)\/?$/.test(token));
   const readValue = (element: Element | null): string =>
     (element?.getAttribute("content") ?? element?.textContent ?? "").trim();
+  const ownsProperty = (owner: Element, property: Element): boolean => {
+    let parent = property.parentElement;
+    while (parent !== null && parent !== owner) {
+      if (parent.hasAttribute("itemscope")) return false;
+      parent = parent.parentElement;
+    }
+    return parent === owner;
+  };
   for (const scope of Array.from(document.querySelectorAll("[itemscope][itemtype]"))) {
     if (!isOrderScope(scope.getAttribute("itemtype"))) continue;
-    for (const due of Array.from(scope.querySelectorAll('[itemprop~="totalPaymentDue"]'))) {
-      const price = readValue(due.querySelector('[itemprop~="price"], [itemprop~="value"]'));
-      const currency = readValue(
-        due.querySelector('[itemprop~="priceCurrency"], [itemprop~="currency"]'),
-      );
-      if (price.length > 0 && currency.length > 0) microdata.push({ price, currency });
+    const dues = Array.from(scope.querySelectorAll('[itemprop~="totalPaymentDue"]')).filter(
+      (due) => ownsProperty(scope, due),
+    );
+    for (const due of dues) {
+      const prices = Array.from(
+        due.querySelectorAll('[itemprop~="price"], [itemprop~="value"]'),
+      )
+        .filter((property) => ownsProperty(due, property))
+        .map((property) => readValue(property));
+      const currencies = Array.from(
+        due.querySelectorAll('[itemprop~="priceCurrency"], [itemprop~="currency"]'),
+      )
+        .filter((property) => ownsProperty(due, property))
+        .map((property) => readValue(property));
+      const count = Math.max(prices.length, currencies.length, 1);
+      for (let index = 0; index < count; index += 1) {
+        microdata.push({
+          price: prices[index] ?? "",
+          currency: currencies[index] ?? "",
+          itemtype: due.getAttribute("itemtype") ?? "",
+        });
+      }
     }
   }
   return { jsonLd, microdata };
@@ -580,6 +621,34 @@ function structuredCheckoutCandidate(
   return { amount_cents: minor, currency };
 }
 
+function structuredCheckoutCandidateFromFields(
+  fields: Record<string, unknown>,
+): { amount_cents: number; currency: string } | null {
+  const prices = ["price", "value"]
+    .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
+    .map((key) => fields[key]);
+  const currencies = ["priceCurrency", "currency"]
+    .filter((key) => Object.prototype.hasOwnProperty.call(fields, key))
+    .map((key) => fields[key]);
+  if (prices.length === 0 || currencies.length === 0) return null;
+  let first: { amount_cents: number; currency: string } | null = null;
+  for (const price of prices) {
+    for (const currency of currencies) {
+      const candidate = structuredCheckoutCandidate(price, currency);
+      if (candidate === null) return null;
+      if (first === null) {
+        first = candidate;
+      } else if (
+        candidate.amount_cents !== first.amount_cents ||
+        candidate.currency !== first.currency
+      ) {
+        return null;
+      }
+    }
+  }
+  return first;
+}
+
 function isSchemaOrgType(node: Record<string, unknown>, names: readonly string[]): boolean {
   const declared = node["@type"];
   const tokens = Array.isArray(declared) ? declared : [declared];
@@ -590,31 +659,73 @@ function isSchemaOrgType(node: Record<string, unknown>, names: readonly string[]
   );
 }
 
+function hasCompatiblePayableType(declared: unknown): boolean {
+  if (declared === undefined || declared === "") return true;
+  const tokens = Array.isArray(declared)
+    ? declared
+    : typeof declared === "string"
+      ? declared.split(/\s+/).filter((token) => token.length > 0)
+      : [declared];
+  return (
+    tokens.length > 0 &&
+    tokens.every(
+      (token) =>
+        typeof token === "string" &&
+        ["PriceSpecification", "MonetaryAmount"].includes(
+          token.replace(/^https?:\/\/schema\.org\//, "").replace(/\/$/, ""),
+        ),
+    )
+  );
+}
+
+interface StructuredCheckoutCollection {
+  candidates: Array<{ amount_cents: number; currency: string }>;
+  invalid: boolean;
+}
+
 function collectJsonLdOrderTotals(
   node: unknown,
-  out: Array<{ amount_cents: number; currency: string }>,
+  collection: StructuredCheckoutCollection,
   depth: number,
 ): void {
-  if (depth > 64 || typeof node !== "object" || node === null) return;
+  if (depth > 64) {
+    collection.invalid = true;
+    return;
+  }
+  if (typeof node !== "object" || node === null) return;
   if (Array.isArray(node)) {
-    for (const entry of node) collectJsonLdOrderTotals(entry, out, depth + 1);
+    for (const entry of node) collectJsonLdOrderTotals(entry, collection, depth + 1);
     return;
   }
   const record: Record<string, unknown> = Object.fromEntries(Object.entries(node));
-  if (isSchemaOrgType(record, ["Order", "Invoice"])) {
+  if (
+    isSchemaOrgType(record, ["Order", "Invoice"]) &&
+    Object.prototype.hasOwnProperty.call(record, "totalPaymentDue")
+  ) {
     const due = record["totalPaymentDue"];
-    for (const entry of Array.isArray(due) ? due : [due]) {
-      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) continue;
+    const entries = Array.isArray(due) ? due : [due];
+    if (entries.length === 0) collection.invalid = true;
+    for (const entry of entries) {
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        collection.invalid = true;
+        continue;
+      }
       const amount: Record<string, unknown> = Object.fromEntries(Object.entries(entry));
-      const candidate = structuredCheckoutCandidate(
-        amount["price"] ?? amount["value"],
-        amount["priceCurrency"] ?? amount["currency"],
-      );
-      if (candidate !== null) out.push(candidate);
+      if (!hasCompatiblePayableType(amount["@type"])) {
+        collection.invalid = true;
+        continue;
+      }
+      const candidate = structuredCheckoutCandidateFromFields(amount);
+      if (candidate === null) {
+        collection.invalid = true;
+      } else {
+        collection.candidates.push(candidate);
+      }
     }
   }
   // Order nodes can sit anywhere (@graph, nested containers) — walk everything.
-  for (const value of Object.values(record)) collectJsonLdOrderTotals(value, out, depth + 1);
+  for (const value of Object.values(record))
+    collectJsonLdOrderTotals(value, collection, depth + 1);
 }
 
 /**
@@ -628,32 +739,58 @@ function collectJsonLdOrderTotals(
 export function parseStructuredCheckoutTotal(
   extracts: readonly unknown[],
 ): { amount_cents: number; currency: string } | null {
-  const candidates: Array<{ amount_cents: number; currency: string }> = [];
+  const collection: StructuredCheckoutCollection = { candidates: [], invalid: false };
   for (const extract of extracts) {
-    if (typeof extract !== "object" || extract === null) continue;
+    if (typeof extract !== "object" || extract === null) {
+      collection.invalid = true;
+      continue;
+    }
     const record: Record<string, unknown> = Object.fromEntries(Object.entries(extract));
-    const jsonLd = Array.isArray(record["jsonLd"]) ? record["jsonLd"] : [];
-    const microdata = Array.isArray(record["microdata"]) ? record["microdata"] : [];
+    if (!Array.isArray(record["jsonLd"]) || !Array.isArray(record["microdata"])) {
+      collection.invalid = true;
+      continue;
+    }
+    const jsonLd = record["jsonLd"];
+    const microdata = record["microdata"];
     for (const raw of jsonLd) {
-      if (typeof raw !== "string") continue;
+      if (typeof raw !== "string") {
+        collection.invalid = true;
+        continue;
+      }
       let parsed: unknown;
       try {
         parsed = JSON.parse(raw);
       } catch {
+        collection.invalid = true;
         continue;
       }
-      collectJsonLdOrderTotals(parsed, candidates, 0);
+      if (typeof parsed !== "object" || parsed === null) {
+        collection.invalid = true;
+        continue;
+      }
+      collectJsonLdOrderTotals(parsed, collection, 0);
     }
     for (const entry of microdata) {
-      if (typeof entry !== "object" || entry === null) continue;
+      if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+        collection.invalid = true;
+        continue;
+      }
       const fields: Record<string, unknown> = Object.fromEntries(Object.entries(entry));
+      if (!hasCompatiblePayableType(fields["itemtype"])) {
+        collection.invalid = true;
+        continue;
+      }
       const candidate = structuredCheckoutCandidate(fields["price"], fields["currency"]);
-      if (candidate !== null) candidates.push(candidate);
+      if (candidate === null) {
+        collection.invalid = true;
+      } else {
+        collection.candidates.push(candidate);
+      }
     }
   }
-  const first = candidates[0];
-  if (first === undefined) return null;
-  return candidates.every(
+  const first = collection.candidates[0];
+  if (collection.invalid || first === undefined) return null;
+  return collection.candidates.every(
     (candidate) =>
       candidate.amount_cents === first.amount_cents && candidate.currency === first.currency,
   )
@@ -6427,8 +6564,15 @@ export class BrowserController {
     // exists, so the settled-amount contract (readSettledCheckoutReviewSummary
     // re-reads until two consecutive reads agree) is unchanged — a structured
     // total is simply re-read and must be stable like any other source.
+    const parsedAmounts = parseCheckoutAmountsResult(texts, fallbackCurrency);
+    if (parsedAmounts.currencyUnresolved) {
+      throw new Error("payment_checkout_currency_unresolved");
+    }
+    if (parsedAmounts.fallbackCurrencyScaleMismatch) {
+      throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
+    }
     const amount =
-      parseCheckoutAmounts(texts, fallbackCurrency).at(-1) ??
+      parsedAmounts.amounts.at(-1) ??
       parseStructuredCheckoutTotal(structuredExtracts) ??
       undefined;
     if (amount === undefined) throw new Error("payment_checkout_total_not_found");
