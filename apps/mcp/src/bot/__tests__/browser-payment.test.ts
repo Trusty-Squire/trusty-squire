@@ -515,9 +515,7 @@ describe("structured-data checkout totals", () => {
     expect(
       parseStructuredCheckoutTotal([
         {
-          jsonLd: [
-            orderJsonLd({ "@type": "Offer", price: "49.00", priceCurrency: "USD" }),
-          ],
+          jsonLd: [orderJsonLd({ "@type": "Offer", price: "49.00", priceCurrency: "USD" })],
           microdata: [],
         },
       ]),

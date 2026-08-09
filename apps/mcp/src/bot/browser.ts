@@ -563,13 +563,11 @@ function extractStructuredCheckoutData(): StructuredCheckoutDataExtract {
   };
   for (const scope of Array.from(document.querySelectorAll("[itemscope][itemtype]"))) {
     if (!isOrderScope(scope.getAttribute("itemtype"))) continue;
-    const dues = Array.from(scope.querySelectorAll('[itemprop~="totalPaymentDue"]')).filter(
-      (due) => ownsProperty(scope, due),
+    const dues = Array.from(scope.querySelectorAll('[itemprop~="totalPaymentDue"]')).filter((due) =>
+      ownsProperty(scope, due),
     );
     for (const due of dues) {
-      const prices = Array.from(
-        due.querySelectorAll('[itemprop~="price"], [itemprop~="value"]'),
-      )
+      const prices = Array.from(due.querySelectorAll('[itemprop~="price"], [itemprop~="value"]'))
         .filter((property) => ownsProperty(due, property))
         .map((property) => readValue(property));
       const currencies = Array.from(
@@ -724,8 +722,7 @@ function collectJsonLdOrderTotals(
     }
   }
   // Order nodes can sit anywhere (@graph, nested containers) — walk everything.
-  for (const value of Object.values(record))
-    collectJsonLdOrderTotals(value, collection, depth + 1);
+  for (const value of Object.values(record)) collectJsonLdOrderTotals(value, collection, depth + 1);
 }
 
 /**

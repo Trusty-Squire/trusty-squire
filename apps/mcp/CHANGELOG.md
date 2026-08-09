@@ -3,6 +3,7 @@
 ## 1.1.9-rc.6 (2026-08-09)
 
 - fix(bot): safely recognize Japanese checkout totals (#466)
+- fix(bot): recover checkout totals from strict Order/Invoice structured data
 
 ## 1.1.9-rc.5 (2026-08-09)
 
