@@ -1579,6 +1579,46 @@ export function shouldBlockUnsafeProvisionAction(
   );
 }
 
+// Manual card-entry guard — a model must never be the thing that types a
+// payment card number into a page. When operate_pay fails, the recovery is
+// surfacing that failure, not routing around the vault by typing the PAN via
+// an ordinary `type`. "Card-number-shaped" = a 13–19 digit run (spaces/hyphens
+// allowed as grouping) that passes the Luhn checksum — requiring Luhn keeps
+// order numbers, tracking numbers, and other long digit strings from
+// false-positiving. Scoped to MODEL-SUPPLIED `type` text only: operate_pay's
+// vaulted-card fill (BrowserController.fillAndSubmitCheckout) and type_secret's
+// sealed-slot transfer never pass through this check.
+function passesLuhn(digits: string): boolean {
+  let sum = 0;
+  let double = false;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    let d = digits.charCodeAt(i) - 48;
+    if (double) {
+      d *= 2;
+      if (d > 9) d -= 9;
+    }
+    sum += d;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+export function manualCardEntryBlockReason(text: string): string | null {
+  for (const match of text.matchAll(/\d(?:[\d\s-]*\d)?/g)) {
+    const digits = match[0].replace(/[\s-]/g, "");
+    if (digits.length >= 13 && digits.length <= 19 && passesLuhn(digits)) {
+      return (
+        "type refused: the value is card-number-shaped (a 13–19 digit Luhn-valid " +
+        "sequence). Manual payment-card entry is not permitted through operate_act — " +
+        "the model must never hold or type a card number. Card payment goes through " +
+        "operate_pay, which fills the user's vaulted card server-side. If operate_pay " +
+        "failed, report that failure to the user instead of entering a card by hand."
+      );
+    }
+  }
+  return null;
+}
+
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
   pageText: string,
@@ -2834,6 +2874,12 @@ export async function act(
     throw new Error(
       `type_secret provenance must match the authoritative slot credential.${action.slot}`,
     );
+  }
+  // Gate here — ahead of BOTH the locator and element `type` branches, and of
+  // replay's act() calls — so no model-supplied text path can reach a PAN fill.
+  if (action.kind === "type") {
+    const cardBlock = manualCardEntryBlockReason(action.text);
+    if (cardBlock !== null) throw new Error(cardBlock);
   }
   const { browser } = session;
   let completedAction: ProvisionAction = action;

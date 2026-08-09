@@ -2703,6 +2703,61 @@ describe("operate session — egress seed excludes mid_session task scope", () =
   });
 });
 
+describe("operate session — manual card-entry guard", () => {
+  it("refuses to type a Luhn-valid card number (spaced) and types nothing", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ visibleText: "Card number", selector: "#card" })];
+    await expect(
+      act(obs.session_id, { kind: "type", target: "Card number", text: "5555 5555 5555 4444" }),
+    ).rejects.toThrow(/operate_pay/);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("refuses the same card number unspaced and hyphenated", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ visibleText: "Card number", selector: "#card" })];
+    await expect(
+      act(obs.session_id, { kind: "type", target: "Card number", text: "5555555555554444" }),
+    ).rejects.toThrow(/operate_pay/);
+    await expect(
+      act(obs.session_id, { kind: "type", target: "Card number", text: "5555-5555-5555-4444" }),
+    ).rejects.toThrow(/operate_pay/);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("refuses a card number on the locator-fallback type path too", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    await expect(
+      act(obs.session_id, { kind: "type", target: "css=#card", text: "4242 4242 4242 4242" }),
+    ).rejects.toThrow(/operate_pay/);
+    expect(h.locatorTypeCalls).toEqual([]);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("allows a 16-digit NON-Luhn value (an order number) through", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/support" });
+    h.elements = [elem({ visibleText: "Order number", selector: "#order" })];
+    await act(obs.session_id, { kind: "type", target: "Order number", text: "4242424242424243" });
+    expect(h.typed).toEqual([{ selector: "#order", text: "4242424242424243" }]);
+  });
+
+  it("allows ordinary non-card text through", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ visibleText: "City", selector: "#city" })];
+    await act(obs.session_id, { kind: "type", target: "City", text: "Brooklyn" });
+    expect(h.typed).toEqual([{ selector: "#city", text: "Brooklyn" }]);
+  });
+
+  it("does not gate type_secret's sealed-slot transfer (vault flow unaffected)", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://console.example.com/" });
+    const secret = "sk-live-abcdefghijklmnop";
+    stashSecretSlot(obs.session_id, "api_key", secret);
+    h.elements = [elem({ visibleText: "API key", selector: "#key" })];
+    await act(obs.session_id, { kind: "type_secret", slot: "api_key", target: "API key" });
+    expect(h.typed).toEqual([{ selector: "#key", text: secret }]);
+  });
+});
+
 describe("operate session — sealed credential transfer", () => {
   it("type_secret types the real slot value into the page but never logs it", async () => {
     const secret = "GOCSPX-supersecret-value-1234567890";
