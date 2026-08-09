@@ -8742,9 +8742,10 @@ export class BrowserController {
 
   // Resolve a previously-tagged frame path back to its live Playwright Frame —
   // used by the frame-aware act helpers below (clickInFrame/typeInFrame/
-  // clickViaJsInFrame) to act on an element extractInteractiveElements found
-  // inside a child <iframe>. Returns null when the frame has since navigated
-  // or detached (a fresh observe/extract picks up whatever replaced it); the
+  // clickViaJsInFrame/selectInFrame) to act on an element that
+  // extractInteractiveElements found inside a child <iframe>. Returns null
+  // when the frame has since navigated or detached (a fresh observe/extract
+  // picks up whatever replaced it); the
   // caller surfaces that as a normal "target not found" error, never a
   // silent wrong-frame action.
   private resolveFrame(target: FrameTarget): Frame | null {

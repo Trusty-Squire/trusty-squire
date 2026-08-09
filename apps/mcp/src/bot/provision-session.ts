@@ -286,7 +286,8 @@ export type ProvisionAction =
   // type-ahead — so a country/state/etc. dropdown needs this. Routes to
   // browser.selectOption, which already handles both the native and the
   // <li role=option> custom shapes. target = the select/combobox (or its label);
-  // text = the option to match (e.g. "South Korea").
+  // text = the option to match (e.g. "South Korea"). Frame execution routes
+  // through BrowserController.selectInFrame, which owns its narrower contract.
   | {
       kind: "select";
       target: string;
@@ -2987,8 +2988,8 @@ export async function act(
     }
     case "select": {
       // Re-resolve against FRESH elements — the target may be the <select> or
-      // its <label>; browser.selectOption walks label→control and handles the
-      // native vs custom-listbox split. text is the fuzzy option matcher.
+      // its <label>. Main-frame execution uses selectOption; frame execution
+      // uses selectInFrame. text is the fuzzy option matcher in both paths.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
       const el = resolveTarget(fresh, action.target);
