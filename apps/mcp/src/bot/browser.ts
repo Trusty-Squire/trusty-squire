@@ -57,6 +57,20 @@ const require = createRequire(import.meta.url);
 
 export type StealthProfile = "baseline" | "cdp_hardened";
 
+export type ContextInitScriptId = "evaluate-name-shim" | "navigator-webdriver" | "webgl-spoof";
+
+export function contextInitScriptsFor(options: {
+  hardened: boolean;
+  remoteMode: boolean;
+}): ContextInitScriptId[] {
+  if (options.hardened) return [];
+  return [
+    "evaluate-name-shim",
+    "navigator-webdriver",
+    ...(options.remoteMode ? [] : (["webgl-spoof"] as const)),
+  ];
+}
+
 export interface PageTargetSafetySignals {
   billingObject: boolean;
   accountSetup: boolean;
@@ -1812,14 +1826,24 @@ export class BrowserController {
     // should not emit these calls, but the helper is harmless there too.
     const evaluateNameShimScript =
       'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });';
-    await context.addInitScript({ content: evaluateNameShimScript });
+    const contextInitScripts = contextInitScriptsFor({ hardened, remoteMode });
+    // Never register context init scripts under patchright. Its injection path
+    // rewrites text/html after decoding the response as UTF-8, corrupting
+    // server-rendered EUC-JP and Shift_JIS before Chrome parses it. The scripts
+    // also land outside the main world under patchright, so the per-navigation
+    // page.evaluate path below is the effective hardened-mode installation.
+    // Baseline playwright-extra does not rewrite responses and keeps these
+    // document-start installs. Regression guard: observe-jp-mojibake.test.ts.
+    if (contextInitScripts.includes("evaluate-name-shim")) {
+      await context.addInitScript({ content: evaluateNameShimScript });
+    }
     // Patch navigator.webdriver — BASELINE ONLY. Measured against the
     // rebrowser bot-detector, this manual `defineProperty` is
     // COUNTERPRODUCTIVE under patchright: it re-adds `webdriver` as an own
     // property the detector then flags, whereas patchright removes it
     // correctly at the source. So in hardened mode we leave it to
     // patchright; only the stealth baseline gets the manual patch.
-    if (!hardened) {
+    if (contextInitScripts.includes("navigator-webdriver")) {
       await context.addInitScript(() => {
         Object.defineProperty(navigator, "webdriver", { get: () => undefined });
       });
@@ -1915,14 +1939,22 @@ export class BrowserController {
         }
       }
     })();`;
-    if (!remoteMode) await context.addInitScript({ content: installWebglSpoofScript });
+    // Skip under patchright (hardened) — see the mojibake note above: any
+    // context.addInitScript triggers patchright's charset-lossy text/html
+    // rewrite. This spoof is already re-applied per navigation via
+    // reapplyWebglSpoof (framenavigated/load), which the comment above notes is
+    // the ONLY path that reaches the main world under patchright anyway, so the
+    // context init copy is dead weight there.
+    if (contextInitScripts.includes("webgl-spoof")) {
+      await context.addInitScript({ content: installWebglSpoofScript });
+    }
     this.page = context.pages()[0] ?? (await context.newPage());
     this.primaryPage = this.page;
-    // addInitScript covers document-start page JS, but Playwright's
-    // page.evaluate utility execution can run in a separate realm. Install the
-    // same no-op helper there with a STRING evaluate (tsx cannot wrap strings
-    // with __name). This prevents dev-runtime source runs from crashing before
-    // replay reaches the service page.
+    // In baseline mode addInitScript covers document-start page JS, but
+    // Playwright's page.evaluate utility execution can run in a separate realm.
+    // Install the same no-op helper there with a STRING evaluate (tsx cannot
+    // wrap strings with __name). This prevents dev-runtime source runs from
+    // crashing before replay reaches the service page.
     await this.page.evaluate(evaluateNameShimScript).catch(() => undefined);
     // Re-apply on every navigation — the main-world reach patchright's isolated
     // init world denies us. framenavigated fires at navigation-commit (before
