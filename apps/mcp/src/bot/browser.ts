@@ -342,8 +342,14 @@ const CHECKOUT_COUNT_SUFFIXES = new Set([
   "ポイント",
 ]);
 const CHECKOUT_TAX_EXCLUSIVE_PATTERN = /税抜|税別|本体価格/u;
-const CHECKOUT_TRAILING_TOKEN_OR_ANNOTATION_PATTERN =
-  /^\s*(?:[（(]([^）)]*)[）)]|(\p{L}+))/u;
+
+function isCheckoutCountSuffix(token: string | undefined): boolean {
+  if (token === undefined) return false;
+  for (const counter of CHECKOUT_COUNT_SUFFIXES) {
+    if (token.startsWith(counter)) return true;
+  }
+  return false;
+}
 
 interface CheckoutAmountParseResult {
   amount: { amount_cents: number; currency: string } | null;
@@ -408,19 +414,15 @@ function parseCheckoutAmountMatch(
   fallbackCurrency?: string,
 ): CheckoutAmountParseResult {
   const matchEnd = (match.index ?? 0) + match[0].length;
-  const trailingTokenOrAnnotation = text
-    .slice(matchEnd)
-    .match(CHECKOUT_TRAILING_TOKEN_OR_ANNOTATION_PATTERN);
+  const trailingLine = text.slice(matchEnd).split(/\r?\n/u, 1)[0] ?? "";
   if (
     CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(match[1] ?? "") ||
     CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(match[4] ?? "") ||
-    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(
-      trailingTokenOrAnnotation?.[1] ?? trailingTokenOrAnnotation?.[2] ?? "",
-    )
+    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(trailingLine)
   ) {
     return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
   }
-  if (match[4] !== undefined && CHECKOUT_COUNT_SUFFIXES.has(match[4])) {
+  if (isCheckoutCountSuffix(match[4])) {
     return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
   }
   const prefix = classifyCheckoutCurrencyToken(match[1]);
