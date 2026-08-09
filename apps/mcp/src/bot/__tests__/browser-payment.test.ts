@@ -655,6 +655,15 @@ describe("structured-data checkout totals", () => {
     ).resolves.toMatchObject({ amount_cents: 9_845, currency: "USD" });
   });
 
+  it("keeps the final clean review total after earlier unresolved currency", async () => {
+    await expect(
+      structuredCheckoutController("Order total 98.45 kr\nOrder total US$ 100.00", {
+        jsonLd: [orderJsonLd({ price: "80.00", priceCurrency: "USD" })],
+        microdata: [],
+      }).readCheckoutReviewSummary("USD"),
+    ).resolves.toMatchObject({ amount_cents: 10_000, currency: "USD" });
+  });
+
   it.each(["readCheckoutSummary", "readCheckoutReviewSummary"] as const)(
     "keeps the currency-unresolved guard in %s when a structured total exists",
     async (reader) => {

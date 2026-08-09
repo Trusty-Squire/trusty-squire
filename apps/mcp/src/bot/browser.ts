@@ -6565,16 +6565,16 @@ export class BrowserController {
     // re-reads until two consecutive reads agree) is unchanged — a structured
     // total is simply re-read and must be stable like any other source.
     const parsedAmounts = parseCheckoutAmountsResult(texts, fallbackCurrency);
-    if (parsedAmounts.currencyUnresolved) {
+    const textAmount = parsedAmounts.amounts.at(-1);
+    const structuredAmount =
+      textAmount === undefined ? parseStructuredCheckoutTotal(structuredExtracts) : null;
+    if (structuredAmount !== null && parsedAmounts.currencyUnresolved) {
       throw new Error("payment_checkout_currency_unresolved");
     }
-    if (parsedAmounts.fallbackCurrencyScaleMismatch) {
+    if (structuredAmount !== null && parsedAmounts.fallbackCurrencyScaleMismatch) {
       throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
     }
-    const amount =
-      parsedAmounts.amounts.at(-1) ??
-      parseStructuredCheckoutTotal(structuredExtracts) ??
-      undefined;
+    const amount = textAmount ?? structuredAmount ?? undefined;
     if (amount === undefined) throw new Error("payment_checkout_total_not_found");
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
