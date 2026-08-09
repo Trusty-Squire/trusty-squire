@@ -635,6 +635,56 @@ describe("prepared-statement replay", () => {
     expect(result.status === "fallback_required" && result.next_index).toBe(1);
   });
 
+  it("makes manual card-entry refusal terminal without exposing replay data", async () => {
+    const pan = "5555 5555 5555 4444";
+    h.elements = [
+      elem({
+        testId: "card-number",
+        labelText: "Card number",
+        selector: "#card-number",
+        value: "",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const recipe = replayRecipe({
+      trace: [
+        {
+          action: {
+            kind: "type",
+            target: {
+              dom_hint: { testid: "card-number" },
+              accessible_name: "Card number",
+              css: "#card-number",
+            },
+            value: pan,
+          },
+        },
+      ],
+    });
+
+    let refusal: unknown;
+    try {
+      await replayOperatorRecipe(started.session_id, recipe, {});
+    } catch (error) {
+      refusal = error;
+    }
+
+    expect(refusal).toBeInstanceOf(Error);
+    const surfaced = String(refusal);
+    expect(surfaced).toMatch(/operate_pay/);
+    expect(surfaced).not.toContain(pan);
+    expect(surfaced).not.toContain("fallback_required");
+    expect(surfaced).not.toContain("next_index");
+    expect(refusal).not.toHaveProperty("step");
+    expect(refusal).not.toHaveProperty("next_index");
+    expect(h.typed).toEqual([]);
+    await expect(replayOperatorRecipe(started.session_id, recipe, {}, 1)).rejects.toThrow(
+      /invalid replay continuation/i,
+    );
+  });
+
   it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
     h.elements = [];
     const recipe = replayRecipe({
@@ -2700,6 +2750,65 @@ describe("operate session — egress seed excludes mid_session task scope", () =
     const egress = observedHostsForSession(sid);
     expect(egress).toContain("console.cloud.google.com"); // start host included
     expect(egress).not.toContain("console.firebase.google.com"); // mid_session excluded
+  });
+});
+
+describe("operate session — manual card-entry guard", () => {
+  it("refuses to type a Luhn-valid card number (spaced) and types nothing", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ visibleText: "Card number", selector: "#card" })];
+    await expect(
+      act(obs.session_id, { kind: "type", target: "Card number", text: "5555 5555 5555 4444" }),
+    ).rejects.toThrow(/operate_pay/);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("refuses the same card number unspaced and hyphenated", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ visibleText: "Card number", selector: "#card" })];
+    await expect(
+      act(obs.session_id, { kind: "type", target: "Card number", text: "5555555555554444" }),
+    ).rejects.toThrow(/operate_pay/);
+    await expect(
+      act(obs.session_id, { kind: "type", target: "Card number", text: "5555-5555-5555-4444" }),
+    ).rejects.toThrow(/operate_pay/);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("refuses a card number on the locator-fallback type path too", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    await expect(
+      act(obs.session_id, { kind: "type", target: "css=#card", text: "4242 4242 4242 4242" }),
+    ).rejects.toThrow(/operate_pay/);
+    expect(h.locatorTypeCalls).toEqual([]);
+    expect(h.typed).toEqual([]);
+  });
+
+  it("allows a 16-digit NON-Luhn value (an order number) through", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/support" });
+    h.elements = [elem({ visibleText: "Order number", selector: "#order" })];
+    await act(obs.session_id, { kind: "type", target: "Order number", text: "4242424242424243" });
+    expect(h.typed).toEqual([{ selector: "#order", text: "4242424242424243" }]);
+  });
+
+  it("allows ordinary non-card text through", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    h.elements = [elem({ visibleText: "City", selector: "#city" })];
+    await act(obs.session_id, { kind: "type", target: "City", text: "Brooklyn" });
+    expect(h.typed).toEqual([{ selector: "#city", text: "Brooklyn" }]);
+  });
+
+  it("does not gate a card-shaped type_secret sealed-slot transfer (vault flow unaffected)", async () => {
+    const obs = await startProvisionSession({ serviceUrl: "https://console.example.com/" });
+    const sealedPan = "5555 5555 5555 4444";
+    stashSecretSlot(obs.session_id, "sealed_card", sealedPan);
+    h.elements = [elem({ visibleText: "Sealed field", selector: "#sealed" })];
+    await act(obs.session_id, {
+      kind: "type_secret",
+      slot: "sealed_card",
+      target: "Sealed field",
+    });
+    expect(h.typed).toEqual([{ selector: "#sealed", text: sealedPan }]);
   });
 });
 

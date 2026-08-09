@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
 import { executeOperatePay, type PaymentBrowser } from "../pay-operator.js";
 import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
+import { manualCardEntryBlockReason } from "../provision-session.js";
 import type { CheckoutCard, CheckoutSummary } from "../browser.js";
 
 const CHECKOUT = {
@@ -374,6 +375,15 @@ describe("operate_pay", () => {
     const auditJson = JSON.stringify(auditBodies);
     expect(auditJson).not.toContain(SYNTHETIC_CARD.pan);
     expect(auditJson).not.toContain(SYNTHETIC_CARD.cvv);
+  });
+
+  it("manual card-entry guard never gates the sanctioned vaulted-card fill", async () => {
+    // The exact PAN operate_act's type guard refuses as model-supplied text...
+    expect(manualCardEntryBlockReason(SYNTHETIC_CARD.pan)).toMatch(/operate_pay/);
+    // ...still flows through operate_pay's server-side injection path untouched.
+    const { result, filledCards } = await harness("happy");
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
   });
 
   it("verifies an opaque review seal before accepting the final approval", async () => {
