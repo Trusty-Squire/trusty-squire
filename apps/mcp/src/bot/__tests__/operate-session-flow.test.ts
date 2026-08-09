@@ -33,6 +33,7 @@ const h = vi.hoisted(() => ({
   frameClicks: [] as string[],
   frameJsClicks: [] as string[],
   frameTypes: [] as Array<{ frameUrl: string; selector: string; text: string }>,
+  frameSelects: [] as Array<{ frameUrl: string; selector: string; matcher: string | undefined }>,
   gotos: [] as string[],
   started: 0,
   startCalls: 0,
@@ -290,6 +291,25 @@ vi.mock("../browser.js", () => ({
           element.value = text;
       }
     }
+    async selectInFrame(
+      target: { frameUrl: string },
+      selector: string,
+      matcher?: string,
+    ): Promise<string> {
+      h.frameSelects.push({ frameUrl: target.frameUrl, selector, matcher });
+      let committed = matcher ?? "";
+      for (const element of h.elements as Array<Record<string, unknown>>) {
+        if (element.selector !== selector || element.frameUrl !== target.frameUrl) continue;
+        const options = element.selectOptions as Array<{ value: string; text: string }> | undefined;
+        const selected = options?.find((option) =>
+          option.text.toLowerCase().includes((matcher ?? "").toLowerCase()),
+        );
+        committed = selected?.text ?? matcher ?? "";
+        element.value = selected?.value ?? matcher ?? "";
+        element.selectedOptionText = committed;
+      }
+      return committed;
+    }
     async resolvePageTarget(
       _mode: string,
       _value: string,
@@ -491,6 +511,7 @@ beforeEach(() => {
   h.frameClicks = [];
   h.frameJsClicks = [];
   h.frameTypes = [];
+  h.frameSelects = [];
   h.gotos = [];
   h.consentDismissCalls = 0;
   h.consentCta = null;
@@ -3474,7 +3495,7 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     expect(h.typed).toEqual([]);
   });
 
-  it("refuses actions and secrets in an opaque frame", async () => {
+  it("refuses actions and secrets in an opaque frame with a terminal message — never the allow_host remedy, which can't satisfy a null origin", async () => {
     h.elements = [
       elem({
         testId: "sandbox-password",
@@ -3486,9 +3507,13 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
-    await expect(
-      act(started.session_id, { kind: "click", target: "Sandbox Password" }),
-    ).rejects.toThrow(/blocked by domain-scope/i);
+    const clickError = await act(started.session_id, {
+      kind: "click",
+      target: "Sandbox Password",
+    }).catch((cause: unknown) => cause);
+    expect(clickError).toBeInstanceOf(Error);
+    expect((clickError as Error).message).toMatch(/opaque/i);
+    expect((clickError as Error).message).not.toMatch(/allow_host/);
     stashSecretSlot(started.session_id, "login", "s3cr3t-value");
     await expect(
       act(started.session_id, {
@@ -3499,6 +3524,29 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     ).rejects.toThrow(/opaque frame/i);
     expect(h.frameClicks).toEqual([]);
     expect(h.frameTypes).toEqual([]);
+  });
+
+  it("type_secret is refused for a sandboxed frame tagged opaque even when its URL is the page's own domain (nonblank-sandbox-origin-bypass)", async () => {
+    h.elements = [
+      elem({
+        testId: "sandboxed-password",
+        labelText: "Password",
+        selector: "#password",
+        // A sandbox="allow-scripts" iframe keeps its real URL but has a null
+        // active origin — extraction tags it frameOpaque; the guard must key
+        // on that tag, never the URL.
+        frameUrl: "https://shop.example.com/embedded-login",
+        frameOrigin: "null",
+        frameOpaque: true,
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    stashSecretSlot(started.session_id, "login", "s3cr3t-value");
+    await expect(
+      act(started.session_id, { kind: "type_secret", slot: "login", target: "Password" }),
+    ).rejects.toThrow(/opaque frame/i);
+    expect(h.frameTypes).toEqual([]);
+    expect(h.typed).toEqual([]);
   });
 
   it("type_secret into a same-registrable-domain frame is allowed", async () => {
@@ -3519,23 +3567,77 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     ]);
   });
 
-  it("select/upload/oauth_click on a frame target are refused explicitly, not silently mis-targeted", async () => {
+  it("select on a same-registrable-domain iframe element succeeds through selectInFrame (the Rakuten-class checkout dropdown)", async () => {
     h.elements = [
       elem({
         tag: "select",
         testId: "ship-method",
         labelText: "Shipping Method",
         selector: "#ship-method",
-        selectOptions: [{ value: "std", text: "Standard" }],
+        selectOptions: [
+          { value: "", text: "Choose…" },
+          { value: "std", text: "Standard" },
+        ],
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await act(started.session_id, { kind: "select", target: "Shipping Method", text: "Standard" });
+    expect(h.frameSelects).toEqual([
+      { frameUrl: SAME_DOMAIN_FRAME_URL, selector: "#ship-method", matcher: "Standard" },
+    ]);
+    expect(h.selected).toEqual([]); // never fell through to the main-frame select
+  });
+
+  it("select on a cross-domain iframe element is refused by the domain lock, exactly like an off-domain goto", async () => {
+    h.elements = [
+      elem({
+        tag: "select",
+        testId: "card-exp",
+        labelText: "Expiry Month",
+        selector: "#card-exp",
+        selectOptions: [{ value: "01", text: "January" }],
+        frameUrl: CROSS_DOMAIN_FRAME_URL,
+        frameOrigin: "https://evil-payments.test",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    await expect(
+      act(started.session_id, { kind: "select", target: "Expiry Month", text: "January" }),
+    ).rejects.toThrow(/blocked by domain-scope/i);
+    expect(h.frameSelects).toEqual([]);
+    expect(h.selected).toEqual([]);
+  });
+
+  it("upload/oauth_click on a frame target are still refused explicitly, not silently mis-targeted", async () => {
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "file",
+        testId: "avatar",
+        labelText: "Avatar",
+        selector: "#avatar",
+        frameUrl: SAME_DOMAIN_FRAME_URL,
+        frameOrigin: "https://payments.example.com",
+      }),
+      elem({
+        tag: "button",
+        testId: "oauth-google",
+        labelText: "Continue with Google",
+        selector: "#oauth-google",
         frameUrl: SAME_DOMAIN_FRAME_URL,
         frameOrigin: "https://payments.example.com",
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
     await expect(
-      act(started.session_id, { kind: "select", target: "Shipping Method", text: "Standard" }),
+      act(started.session_id, { kind: "upload", target: "Avatar", path: "/tmp/a.png" }),
     ).rejects.toThrow(/does not yet support a target inside an <iframe>/i);
-    expect(h.selected).toEqual([]);
+    await expect(
+      act(started.session_id, { kind: "oauth_click", target: "Continue with Google" }),
+    ).rejects.toThrow(/does not yet support a target inside an <iframe>/i);
+    expect(h.uploads).toEqual([]);
   });
 
   it("preserves frame scope through recording and re-gates it during replay", async () => {

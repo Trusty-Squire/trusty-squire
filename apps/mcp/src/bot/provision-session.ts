@@ -286,7 +286,8 @@ export type ProvisionAction =
   // type-ahead — so a country/state/etc. dropdown needs this. Routes to
   // browser.selectOption, which already handles both the native and the
   // <li role=option> custom shapes. target = the select/combobox (or its label);
-  // text = the option to match (e.g. "South Korea").
+  // text = the option to match (e.g. "South Korea"). Frame execution routes
+  // through BrowserController.selectInFrame, which owns its narrower contract.
   | {
       kind: "select";
       target: string;
@@ -1122,6 +1123,17 @@ function frameTargetAllowed(session: Session, el: FrameScopedTarget): boolean {
 
 function assertFrameTargetAllowed(session: Session, el: FrameScopedTarget, kind: string): void {
   if (frameTargetAllowed(session, el)) return;
+  // An opaque (null-origin) frame gets its own TERMINAL refusal: the generic
+  // message below suggests allow_host, which can never succeed for a null
+  // origin — a remedy the model would loop on forever.
+  if (el.frameOpaque === true || el.frameOrigin === "null") {
+    throw new Error(
+      `${kind} refused: the target lives in an opaque (null-origin) frame — a sandboxed ` +
+        `iframe without allow-same-origin, or an unconfirmed about:blank/srcdoc document. ` +
+        `No host declaration can ever permit a null origin; this control is not reachable ` +
+        `through operate_act. Drive the page's own controls instead.`,
+    );
+  }
   throw new Error(
     `${kind} blocked by domain-scope: the target lives in a cross-domain frame ` +
       `(${el.frameOrigin ?? el.frameUrl}) outside the allowed hosts ` +
@@ -1154,18 +1166,20 @@ function assertSecretFrameTargetAllowed(session: Session, el: FrameScopedTarget)
   );
 }
 
-// select/upload/oauth_click have no frame-scoped browser primitive yet (see
-// BrowserController.clickInFrame/typeInFrame — click/type/type_secret only).
-// Resolving one of these against a frame element's `selector` on the MAIN
-// page could silently act on an unrelated element that happens to share the
-// same structural selector (a real risk for positional/nth-of-type
-// selectors) rather than the intended frame element — a correctness and
-// domain-lock hazard, not just a missing feature. Refuse explicitly instead.
+// upload/oauth_click have no frame-scoped browser primitive yet (see
+// BrowserController.clickInFrame/typeInFrame/selectInFrame —
+// click/type/type_secret/select only). Resolving one of these against a
+// frame element's `selector` on the MAIN page could silently act on an
+// unrelated element that happens to share the same structural selector (a
+// real risk for positional/nth-of-type selectors) rather than the intended
+// frame element — a correctness and domain-lock hazard, not just a missing
+// feature. Refuse explicitly instead.
 function assertNoFrameTarget(el: InteractiveElement, kind: string): void {
   if (el.framePath === undefined || el.framePath === null) return;
   throw new Error(
     `operate_act kind="${kind}" does not yet support a target inside an <iframe> ` +
-      `(frame ${el.frameOrigin ?? "unknown"}). Use click/js_click/type/type_secret for frame targets.`,
+      `(frame ${el.frameOrigin ?? "unknown"}). Use click/js_click/type/type_secret/select ` +
+      `for frame targets.`,
   );
 }
 
@@ -2974,8 +2988,8 @@ export async function act(
     }
     case "select": {
       // Re-resolve against FRESH elements — the target may be the <select> or
-      // its <label>; browser.selectOption walks label→control and handles the
-      // native vs custom-listbox split. text is the fuzzy option matcher.
+      // its <label>. Main-frame execution uses selectOption; frame execution
+      // uses selectInFrame. text is the fuzzy option matcher in both paths.
       const fresh = await browser.extractInteractiveElements();
       session.lastElements = fresh;
       const el = resolveTarget(fresh, action.target);
@@ -2989,8 +3003,16 @@ export async function act(
         );
       }
       resolvedEl = el;
-      assertNoFrameTarget(el, "select");
-      const committedText = await browser.selectOption(el.selector, action.text);
+      // Frame domain-lock (operator-frame-support) — the SAME gate a frame
+      // click/type passes; see frameTargetAllowed. A native <select> is not a
+      // secret field, so the stricter type_secret cross-origin rule does not
+      // apply, but the ordinary domain lock does.
+      assertFrameTargetAllowed(session, el, "select");
+      const selectFrame = frameTargetFor(el);
+      const committedText =
+        selectFrame !== null
+          ? await browser.selectInFrame(selectFrame, el.selector, action.text)
+          : await browser.selectOption(el.selector, action.text);
       session.committedSelectValues.set(el.selector, committedText);
       completedAction = { ...action, text: committedText };
       await settleAfterStateChange(browser);

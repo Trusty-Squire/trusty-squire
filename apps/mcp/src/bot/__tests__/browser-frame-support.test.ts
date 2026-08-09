@@ -1,7 +1,8 @@
 // Real-Chromium, real-HTTP tests for operator-frame-support:
 // extractInteractiveElements traversing child <iframe>s and tagging each
 // element with the ORIGIN it actually came from (frameOrigin/frameUrl on
-// InteractiveElement), plus the frame-aware act primitive (clickInFrame).
+// InteractiveElement), plus the frame-aware act primitives (clickInFrame and
+// selectInFrame).
 // Uses a tiny local HTTP server so a "same-origin" vs "cross-origin" iframe
 // is a genuine origin difference (127.0.0.1 vs localhost, both loopback, no
 // network egress) rather than something faked with a data: URL — data:
@@ -43,6 +44,26 @@ beforeAll(async () => {
       );
     } else if (req.url === "/frame-same") {
       res.end(page_(`<button data-testid="same-frame-btn">Same Frame Button</button>`));
+    } else if (req.url === "/frame-forged-origin") {
+      res.end(
+        page_(
+          `<script>window.origin = location.origin;</script>` +
+            `<button data-testid="forged-origin-frame-btn">Forged Origin Frame Button</button>`,
+        ),
+      );
+    } else if (req.url === "/frame-select") {
+      res.end(
+        page_(
+          `<label for="shipping">Shipping Method</label>` +
+            `<select id="shipping" data-testid="shipping-select">` +
+            `<option value="">Choose…</option>` +
+            `<option value="std">Standard</option>` +
+            `<option value="exp">Express</option>` +
+            `</select>`,
+        ),
+      );
+    } else if (req.url === "/frame-nested") {
+      res.end(page_(`<iframe src="http://127.0.0.1:${port}/frame-same" title="nested"></iframe>`));
     } else if (req.url === "/frame-cross") {
       res.end(
         page_(
@@ -183,6 +204,190 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
       expect(opaque?.frameOrigin).toBe("null");
       expect(opaque?.frameOpaque).toBe(true);
       expect(opaque?.frameOrigin).not.toBe(`http://127.0.0.1:${port}`);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("selects an option in a same-origin iframe <select> via selectInFrame — value committed and change fired atomically", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.setContent(
+        page_(`<iframe src="http://127.0.0.1:${port}/frame-select" title="select"></iframe>`),
+      );
+      await page.waitForLoadState("networkidle");
+      const els = await ctrl.extractInteractiveElements();
+      const sel = els.find((e) => e.testId === "shipping-select");
+      expect(sel).toBeDefined();
+      expect(sel?.frameOrigin).toBe(`http://127.0.0.1:${port}`);
+      const frame = page.frames().find((f) => f.url() === sel?.frameUrl);
+      expect(frame).toBeDefined();
+      // The merchant form listens on `change` — a selection that doesn't
+      // fire it never reaches the form's state. Observe it in the FRAME's
+      // own document.
+      await frame?.evaluate(() => {
+        const select = document.querySelector('[data-testid="shipping-select"]');
+        select?.addEventListener("input", () => select.setAttribute("data-input", "1"));
+        select?.addEventListener("change", () => select.setAttribute("data-changed", "1"));
+      });
+      const committed = await ctrl.selectInFrame(
+        {
+          frameUrl: sel?.frameUrl ?? "",
+          frameOrigin: sel?.frameOrigin ?? "",
+          framePath: sel?.framePath ?? "",
+        },
+        sel?.selector ?? "",
+        "express",
+      );
+      expect(committed).toBe("Express");
+      const state = await frame?.evaluate(() => {
+        const select = document.querySelector<HTMLSelectElement>('[data-testid="shipping-select"]');
+        return {
+          value: select?.value,
+          input: select?.getAttribute("data-input"),
+          changed: select?.getAttribute("data-changed"),
+          touched: select?.getAttribute("data-ts-touched"),
+        };
+      });
+      expect(state).toEqual({ value: "exp", input: "1", changed: "1", touched: "1" });
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("selectInFrame reaches a native <select> through its associated <label> selector", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.setContent(
+        page_(`<iframe src="http://127.0.0.1:${port}/frame-select" title="select"></iframe>`),
+      );
+      await page.waitForLoadState("networkidle");
+      const frame = page.frames().find((f) => f.url()?.endsWith("/frame-select"));
+      expect(frame).toBeDefined();
+      const committed = await ctrl.selectInFrame(
+        {
+          frameUrl: frame?.url() ?? "",
+          frameOrigin: `http://127.0.0.1:${port}`,
+          framePath: "0",
+        },
+        'label[for="shipping"]',
+      );
+      expect(committed).toBe("Standard");
+      expect(
+        await frame?.evaluate(() => document.querySelector<HTMLSelectElement>("#shipping")?.value),
+      ).toBe("std");
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("selectInFrame refuses a custom widget and directs the operator to click", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.setContent(
+        page_(`<iframe src="http://127.0.0.1:${port}/frame-same" title="custom-select"></iframe>`),
+      );
+      await page.waitForLoadState("networkidle");
+      const frame = page.frames().find((candidate) => candidate.url().endsWith("/frame-same"));
+      await expect(
+        ctrl.selectInFrame(
+          {
+            frameUrl: frame?.url() ?? "",
+            frameOrigin: `http://127.0.0.1:${port}`,
+            framePath: "0",
+          },
+          '[data-testid="same-frame-btn"]',
+          "standard",
+        ),
+      ).rejects.toThrow(/only native selects.*click/i);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("tags a sandboxed (allow-scripts, no allow-same-origin) frame opaque even when its URL is a real same-origin URL", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      // The nonblank-sandbox-origin-bypass case: the frame's URL says
+      // "same origin as the page", but sandbox without allow-same-origin
+      // gives it an OPAQUE active origin per spec — tagging by URL would
+      // let the same-domain secret gate trust it.
+      await page.setContent(
+        page_(
+          `<iframe sandbox="allow-scripts" src="http://127.0.0.1:${port}/frame-same"></iframe>`,
+        ),
+      );
+      await page.waitForLoadState("networkidle");
+      const els = await ctrl.extractInteractiveElements();
+      const sandboxed = els.find((element) => element.testId === "same-frame-btn");
+      expect(sandboxed).toBeDefined();
+      expect(sandboxed?.frameOrigin).toBe("null");
+      expect(sandboxed?.frameOpaque).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("keeps a real-URL sandboxed frame opaque after it forges window.origin and loses its sandbox attribute", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.setContent(
+        page_(
+          `<iframe sandbox="allow-scripts" src="http://127.0.0.1:${port}/frame-forged-origin"></iframe>`,
+        ),
+      );
+      await page.waitForLoadState("networkidle");
+      const frame = page
+        .frames()
+        .find((candidate) => candidate.url().endsWith("/frame-forged-origin"));
+      expect(await frame?.evaluate(() => window.origin)).toBe(`http://127.0.0.1:${port}`);
+      await page.locator("iframe").evaluate((frame) => frame.removeAttribute("sandbox"));
+      const els = await ctrl.extractInteractiveElements();
+      const sandboxed = els.find((element) => element.testId === "forged-origin-frame-btn");
+      expect(sandboxed).toBeDefined();
+      expect(sandboxed?.frameUrl).toBe(`http://127.0.0.1:${port}/frame-forged-origin`);
+      expect(sandboxed?.frameOrigin).toBe("null");
+      expect(sandboxed?.frameOpaque).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("keeps a sandbox='allow-scripts allow-same-origin' frame trusted by its URL (the sandbox rule only ever ADDS a restriction)", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.setContent(
+        page_(
+          `<iframe sandbox="allow-scripts allow-same-origin" src="http://127.0.0.1:${port}/frame-same"></iframe>`,
+        ),
+      );
+      await page.waitForLoadState("networkidle");
+      const els = await ctrl.extractInteractiveElements();
+      const framed = els.find((element) => element.testId === "same-frame-btn");
+      expect(framed).toBeDefined();
+      expect(framed?.frameOrigin).toBe(`http://127.0.0.1:${port}`);
+      expect(framed?.frameOpaque ?? false).toBe(false);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
+  it("propagates an ancestor iframe's sandbox opacity to a nested real-URL frame", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.setContent(
+        page_(
+          `<iframe sandbox="allow-scripts" src="http://127.0.0.1:${port}/frame-nested"></iframe>`,
+        ),
+      );
+      await page.waitForLoadState("networkidle");
+      const els = await ctrl.extractInteractiveElements();
+      const nested = els.find((element) => element.testId === "same-frame-btn");
+      expect(nested).toBeDefined();
+      expect(nested?.frameUrl).toBe(`http://127.0.0.1:${port}/frame-same`);
+      expect(nested?.framePath).toBe("0/0");
+      expect(nested?.frameOrigin).toBe("null");
+      expect(nested?.frameOpaque).toBe(true);
     } finally {
       await page.close();
     }
