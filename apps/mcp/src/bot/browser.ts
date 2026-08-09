@@ -476,6 +476,17 @@ function classifyCheckoutCurrencyToken(token: string | undefined): CheckoutCurre
   };
 }
 
+const AMBIGUOUS_CONFIRM_CURRENCY_NOTATIONS = new Set(["$", "¥", "￥"]);
+
+function classifyCheckoutConfirmCurrencyToken(
+  token: string | undefined,
+): CheckoutCurrencyTokenResult {
+  if (token !== undefined && AMBIGUOUS_CONFIRM_CURRENCY_NOTATIONS.has(token.toUpperCase())) {
+    return { currency: undefined, unresolved: true };
+  }
+  return classifyCheckoutCurrencyToken(token);
+}
+
 // A lone separator with three trailing digits is ambiguous: it can be either a
 // group ("1,000") or, for a three-minor-unit currency, a fraction ("1.000").
 // Preserve the existing parser's handling of that case. Shorter trailing groups
@@ -497,6 +508,9 @@ function parseCheckoutAmountMatch(
   text: string,
   match: RegExpMatchArray,
   fallbackCurrency?: string,
+  classifyCurrencyToken: (
+    token: string | undefined,
+  ) => CheckoutCurrencyTokenResult = classifyCheckoutCurrencyToken,
 ): CheckoutAmountParseResult {
   const matchEnd = (match.index ?? 0) + match[0].length;
   const trailingLine = text.slice(matchEnd).split(/\r?\n/u, 1)[0] ?? "";
@@ -510,9 +524,9 @@ function parseCheckoutAmountMatch(
   if (isCheckoutCountSuffix(match[4])) {
     return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
   }
-  const prefix = classifyCheckoutCurrencyToken(match[1]);
-  const symbol = classifyCheckoutCurrencyToken(match[2]);
-  const suffix = classifyCheckoutCurrencyToken(match[4]);
+  const prefix = classifyCurrencyToken(match[1]);
+  const symbol = classifyCurrencyToken(match[2]);
+  const suffix = classifyCurrencyToken(match[4]);
   if (prefix.unresolved || symbol.unresolved || suffix.unresolved) {
     return { amount: null, currencyUnresolved: true, fallbackCurrencyScaleMismatch: false };
   }
@@ -562,6 +576,30 @@ function parseCheckoutAmountResult(
     }
   }
   return { amount: null, currencyUnresolved, fallbackCurrencyScaleMismatch };
+}
+
+function parseCheckoutConfirmAmountResult(texts: readonly string[]): CheckoutAmountParseResult {
+  let currencyUnresolved = false;
+  for (const text of texts) {
+    checkoutTotalPattern.lastIndex = 0;
+    for (const match of text.matchAll(checkoutTotalPattern)) {
+      const result = parseCheckoutAmountMatch(
+        text,
+        match,
+        undefined,
+        classifyCheckoutConfirmCurrencyToken,
+      );
+      currencyUnresolved ||= result.currencyUnresolved;
+      if (result.amount !== null) {
+        return {
+          amount: result.amount,
+          currencyUnresolved,
+          fallbackCurrencyScaleMismatch: false,
+        };
+      }
+    }
+  }
+  return { amount: null, currencyUnresolved, fallbackCurrencyScaleMismatch: false };
 }
 
 export function parseCheckoutAmount(
@@ -6646,12 +6684,11 @@ export class BrowserController {
         document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
         "",
     }));
+    const frames = await this.visibleTrustedCheckoutFrames();
     const texts = await Promise.all(
-      page
-        .frames()
-        .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
+      frames.map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
     );
-    const parsedAmount = parseCheckoutAmountResult(texts);
+    const parsedAmount = parseCheckoutConfirmAmountResult(texts);
     if (parsedAmount.currencyUnresolved) {
       throw new Error("payment_checkout_currency_unresolved");
     }
@@ -6661,6 +6698,42 @@ export class BrowserController {
       checkout_origin: new URL(page.url()).origin,
       ...parsedAmount.amount,
     };
+  }
+
+  private async visibleTrustedCheckoutFrames(): Promise<Frame[]> {
+    if (!this.page) return [];
+    const page = this.page;
+    const pageUrl = page.url();
+    const mainFrame = page.mainFrame();
+    const visible: Frame[] = [mainFrame];
+    for (const frame of page.frames()) {
+      if (frame === mainFrame || !recognizedPaymentProviderFrame(frame.url(), pageUrl)) continue;
+      let current: Frame | null = frame;
+      let trustedAndVisible = true;
+      while (current !== null && current !== mainFrame) {
+        if (!recognizedPaymentProviderFrame(current.url(), pageUrl)) {
+          trustedAndVisible = false;
+          break;
+        }
+        try {
+          const owner = await current.frameElement();
+          try {
+            if (!(await owner.isVisible())) {
+              trustedAndVisible = false;
+              break;
+            }
+          } finally {
+            await owner.dispose().catch(() => undefined);
+          }
+        } catch {
+          trustedAndVisible = false;
+          break;
+        }
+        current = current.parentFrame();
+      }
+      if (trustedAndVisible && current === mainFrame) visible.push(frame);
+    }
+    return visible;
   }
 
   /**
@@ -7040,7 +7113,7 @@ export class BrowserController {
         if (excluded !== null) fillError = new UnrecognizedPaymentFrameError(excluded);
       }
       try {
-        await this.clearCheckoutCardFieldsInFrames(allowed);
+        await this.clearCheckoutCardFieldsInFrames(allowed, card.pan);
       } catch {
         throw new PaymentCardFillCleanupError(fillError);
       }
@@ -7137,7 +7210,10 @@ export class BrowserController {
     await this.clearCheckoutCardFieldsInFrames(this.page.frames());
   }
 
-  private async clearCheckoutCardFieldsInFrames(frames: readonly Frame[]): Promise<void> {
+  private async clearCheckoutCardFieldsInFrames(
+    frames: readonly Frame[],
+    expectedPan?: string,
+  ): Promise<void> {
     if (!this.page) return;
     for (const frame of frames) {
       const fields = frame.locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
@@ -7164,6 +7240,21 @@ export class BrowserController {
         )
         .catch(() => true);
       if (uncleared) throw new Error("payment_fields_not_cleared");
+    }
+    if (expectedPan !== undefined) {
+      const panDigits = expectedPan.replace(/\D/g, "");
+      const visibleTexts = await Promise.all(
+        frames.map(async (frame) =>
+          frame.evaluate(extractCheckoutSummaryText).catch(() => undefined),
+        ),
+      );
+      if (
+        panDigits.length >= 13 &&
+        (visibleTexts.some((text) => text === undefined) ||
+          visibleTexts.some((text) => text!.replace(/\D/g, "").includes(panDigits)))
+      ) {
+        throw new Error("payment_fields_not_cleared");
+      }
     }
   }
 

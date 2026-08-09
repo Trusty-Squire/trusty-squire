@@ -1064,22 +1064,82 @@ function redactPaymentObservationText(
     const kind = pendingCardSecretKind(element);
     const value = element.value?.trim() ?? "";
     if (kind === null || value.length === 0) continue;
+    if (kind === "pan") {
+      redacted = redactExactDigitSequence(redacted, value.replace(/\D/g, ""));
+    }
     const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     redacted = redacted.replace(
       kind === "cvv" ? new RegExp(`\\b${escaped}\\b`, "g") : new RegExp(escaped, "g"),
       "[sealed payment]",
     );
   }
-  redacted = redacted.replace(/\d(?:[\p{P}\p{Z}\s]*\d)*/gu, (candidate) => {
-    const digits = candidate.replace(/\D/g, "");
-    return digits.length >= 13 && digits.length <= 19 && passesLuhn(digits)
-      ? "[sealed payment]"
-      : candidate;
-  });
+  redacted = redactLuhnPanSpans(redacted);
   return redacted.replace(
     /\b(cvv|cvc|security\s+code)\s*[:#-]?\s*\d{3,4}\b/gi,
     "$1 [sealed payment]",
   );
+}
+
+function redactExactDigitSequence(text: string, expectedDigits: string): string {
+  if (expectedDigits.length < 13) return text;
+  const digitMatches = Array.from(text.matchAll(/\d/g));
+  const replacements: Array<{ start: number; end: number }> = [];
+  for (let start = 0; start + expectedDigits.length <= digitMatches.length; start += 1) {
+    const matches = digitMatches.slice(start, start + expectedDigits.length);
+    if (matches.map((match) => match[0]).join("") !== expectedDigits) continue;
+    replacements.push({
+      start: matches[0]!.index,
+      end: matches[matches.length - 1]!.index + 1,
+    });
+    start += expectedDigits.length - 1;
+  }
+  if (replacements.length === 0) return text;
+  let cursor = 0;
+  let result = "";
+  for (const replacement of replacements) {
+    result += `${text.slice(cursor, replacement.start)}[sealed payment]`;
+    cursor = replacement.end;
+  }
+  return result + text.slice(cursor);
+}
+
+function redactLuhnPanSpans(text: string): string {
+  return text
+    .split(/(\r?\n)/u)
+    .map((line) => {
+      if (/^\r?\n$/u.test(line)) return line;
+      const digitPositions = Array.from(line.matchAll(/\d/g), (match) => match.index);
+      const replacements: Array<{ start: number; end: number }> = [];
+      let startDigit = 0;
+      while (startDigit + 13 <= digitPositions.length) {
+        let matchedDigits = 0;
+        const maxDigits = Math.min(19, digitPositions.length - startDigit);
+        for (let length = maxDigits; length >= 13; length -= 1) {
+          const digits = digitPositions
+            .slice(startDigit, startDigit + length)
+            .map((position) => line[position])
+            .join("");
+          if (passesLuhn(digits)) {
+            matchedDigits = length;
+            replacements.push({
+              start: digitPositions[startDigit]!,
+              end: digitPositions[startDigit + length - 1]! + 1,
+            });
+            break;
+          }
+        }
+        startDigit += matchedDigits || 1;
+      }
+      if (replacements.length === 0) return line;
+      let cursor = 0;
+      let result = "";
+      for (const replacement of replacements) {
+        result += `${line.slice(cursor, replacement.start)}[sealed payment]`;
+        cursor = replacement.end;
+      }
+      return result + line.slice(cursor);
+    })
+    .join("");
 }
 
 function observationSealedFieldKeys(

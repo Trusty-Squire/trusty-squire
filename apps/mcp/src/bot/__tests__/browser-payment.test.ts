@@ -414,15 +414,15 @@ function orderJsonLd(due: Record<string, unknown>): string {
 
 function structuredCheckoutController(text: string, structured: unknown): BrowserController {
   const browser = new BrowserController({ humanize: false });
+  const mainFrame = {
+    evaluate: vi.fn(async (fn: () => unknown) =>
+      String(fn).includes("ld+json") ? structured : text,
+    ),
+  };
   const page = {
     evaluate: vi.fn().mockResolvedValue({ title: "Synthetic Shop", siteName: "" }),
-    frames: () => [
-      {
-        evaluate: vi.fn(async (fn: () => unknown) =>
-          String(fn).includes("ld+json") ? structured : text,
-        ),
-      },
-    ],
+    frames: () => [mainFrame],
+    mainFrame: () => mainFrame,
     url: () => "https://shop.example.test/checkout",
   };
   Object.defineProperty(browser, "page", { value: page });
@@ -663,6 +663,29 @@ describe("structured-data checkout totals", () => {
         structured,
       ).readCheckoutConfirmSummary(),
     ).resolves.toMatchObject({ amount_cents: 14_990, currency: "USD" });
+  });
+
+  it("requires unambiguous live currency notation only for charge confirmation", async () => {
+    const structured = { jsonLd: [], microdata: [] };
+    await expect(
+      structuredCheckoutController("Order total $39.99", structured).readCheckoutConfirmSummary(),
+    ).rejects.toThrow("payment_checkout_currency_unresolved");
+    await expect(
+      structuredCheckoutController("Order total ¥3,999", structured).readCheckoutConfirmSummary(),
+    ).rejects.toThrow("payment_checkout_currency_unresolved");
+    await expect(
+      structuredCheckoutController("Order total US$39.99", structured).readCheckoutConfirmSummary(),
+    ).resolves.toMatchObject({ amount_cents: 3_999, currency: "USD" });
+    await expect(
+      structuredCheckoutController(
+        "Order total JPY 3,999",
+        structured,
+      ).readCheckoutConfirmSummary(),
+    ).resolves.toMatchObject({ amount_cents: 3_999, currency: "JPY" });
+    expect(parseCheckoutAmount(["Order total $39.99"])).toEqual({
+      amount_cents: 3_999,
+      currency: "USD",
+    });
   });
 
   it("keeps the visible labeled total when structured data disagrees", async () => {
@@ -1070,6 +1093,39 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "accepts confirmation totals only from visible trusted frames",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/review";
+      const trustedUrl = "https://shop.example.test/checkout/summary";
+      const rogueUrl = "https://rogue-payments.example.net/summary";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Review order</title>
+          <iframe id="trusted" hidden src="${trustedUrl}"></iframe>
+          <iframe id="rogue" src="${rogueUrl}"></iframe>`,
+        [trustedUrl]: "Order total USD 39.99",
+        [rogueUrl]: "Order total USD 39.99",
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutConfirmSummary()).rejects.toThrow(
+          "payment_checkout_total_not_found",
+        );
+        await page.locator("#trusted").evaluate((element) => element.removeAttribute("hidden"));
+        await expect(controller.readCheckoutConfirmSummary()).resolves.toMatchObject({
+          amount_cents: 3_999,
+          currency: "USD",
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "fills only billing-scoped address fields during split card entry",
     async () => {
       const pageUrl = "https://shop.example.test/checkout/payment";
@@ -1201,6 +1257,40 @@ describe("split-checkout card fill (real browser)", () => {
           PaymentCardFillCleanupError,
         );
         expect(await page.locator("#pan").inputValue()).toBe(CARD.pan);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "reports unproven cleanup when a visible PAN preview survives field clearing",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <input id="pan" autocomplete="cc-number">
+          <input placeholder="MM/YY">
+          <input autocomplete="cc-name">
+          <div id="preview"></div>
+          <script>
+            document.querySelector("#pan").addEventListener("input", (event) => {
+              if (event.target.value === "") return;
+              document.querySelector("#preview").textContent =
+                event.target.value.replace(/(\\d{4})(?=\\d)/g, "$1|");
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toBeInstanceOf(
+          PaymentCardFillCleanupError,
+        );
+        expect(await page.locator("#pan").inputValue()).toBe("");
+        expect(await page.locator("#preview").innerText()).toBe("4242|4242|4242|4242");
       } finally {
         await browser.close();
       }
