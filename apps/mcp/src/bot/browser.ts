@@ -252,6 +252,7 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
   "€": "EUR",
   "£": "GBP",
   "¥": "JPY",
+  "￥": "JPY",
   "₩": "KRW",
   円: "JPY",
   ZŁ: "PLN",
@@ -301,8 +302,45 @@ function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-const checkoutTotalPattern =
-  /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9][0-9.,]*)(?:\s*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)]))?/giu;
+// Japanese has no \b word boundaries, so bare total labels (合計, 支払金額, …)
+// are guarded against adjacent kana/kanji that would turn them into a
+// different line item: 商品合計 is a merchandise SUBTOTAL, 合計数量 an item
+// count, 合計ポイント points — none is the payable total. Honorific/compound
+// forms (ご注文合計, お支払い金額, …) are unambiguous and match as-is. A
+// 税込 (tax-included) label annotation is skipped; 税抜 (tax-EXCLUDED)
+// deliberately is not — a pre-tax figure is not what the card is charged.
+const cjkLetter = String.raw`\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}`;
+const checkoutTotalLabel =
+  String.raw`(?:\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b` +
+  String.raw`|(?:ご注文合計|ご注文金額|お支払い合計|お支払合計|お支払い金額|お支払金額|ご請求金額|ご請求額` +
+  String.raw`|(?<![${cjkLetter}])(?:税込合計|総合計|総計|合計金額|合計|注文合計|注文金額|支払い金額|支払金額|請求金額|請求額))(?![${cjkLetter}]))`;
+// The amount must end on a digit and (?![0-9.,]) makes it atomic: a rejected
+// trailing guard fails the whole match instead of shortening the number
+// (合計500円分のクーポン must never parse as ¥50), and a sentence period after
+// the amount ("US$ 98.45.") can no longer be captured into the number, where
+// the two-dot rule would strip the decimal point and inflate it 100×. The
+// final CJK guard rejects an amount glued to trailing kana/kanji that the
+// suffix group could not resolve to a currency (500円分, 3個セット).
+const checkoutTotalPattern = new RegExp(
+  checkoutTotalLabel +
+    String.raw`(?:\s*[（(]税込み?[）)])?\s*[:：]?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9](?:[0-9.,]*[0-9])?)(?![0-9.,])(?:\s*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
+  "giu",
+);
+
+// Amount suffixes that mark the number as a count, not a price. A match whose
+// suffix is one of these is a quantity/points line (合計 3点, 合計 500ポイント)
+// and must be skipped even when a fallback currency could label it.
+const CHECKOUT_COUNT_SUFFIXES = new Set([
+  "点",
+  "個",
+  "件",
+  "品",
+  "枚",
+  "本",
+  "冊",
+  "台",
+  "ポイント",
+]);
 
 interface CheckoutAmountParseResult {
   amount: { amount_cents: number; currency: string } | null;
@@ -340,7 +378,7 @@ function classifyCheckoutCurrencyToken(token: string | undefined): CheckoutCurre
     currency,
     unresolved:
       currency === undefined &&
-      (/\p{Sc}/u.test(token) || UNRESOLVED_CURRENCY_NOTATIONS.has(token.toUpperCase())),
+      (/円|\p{Sc}/u.test(token) || UNRESOLVED_CURRENCY_NOTATIONS.has(token.toUpperCase())),
   };
 }
 
@@ -370,6 +408,7 @@ function parseCheckoutAmountResult(
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
+      if (match[4] !== undefined && CHECKOUT_COUNT_SUFFIXES.has(match[4])) continue;
       const prefix = classifyCheckoutCurrencyToken(match[1]);
       const symbol = classifyCheckoutCurrencyToken(match[2]);
       const suffix = classifyCheckoutCurrencyToken(match[4]);
