@@ -896,7 +896,10 @@ describe("recognized payment-provider frames", () => {
 
   it("allows the merchant's own registrable domain (payment subdomain included)", () => {
     expect(
-      recognizedPaymentProviderFrame("https://pay.shop.example.com/fields", "https://shop.example.com/checkout"),
+      recognizedPaymentProviderFrame(
+        "https://pay.shop.example.com/fields",
+        "https://shop.example.com/checkout",
+      ),
     ).toBe(true);
   });
 
@@ -919,7 +922,9 @@ describe("recognized payment-provider frames", () => {
   });
 
   it("refuses arbitrary cross-origin frames, look-alikes, and non-https", () => {
-    expect(recognizedPaymentProviderFrame("https://rogue-payments.example.net/f", PAGE)).toBe(false);
+    expect(recognizedPaymentProviderFrame("https://rogue-payments.example.net/f", PAGE)).toBe(
+      false,
+    );
     // A look-alike host CONTAINING a processor name is not that processor.
     expect(recognizedPaymentProviderFrame("https://stripe.com.evil.net/f", PAGE)).toBe(false);
     expect(recognizedPaymentProviderFrame("https://evilstripe.com/f", PAGE)).toBe(false);
@@ -1033,9 +1038,75 @@ describe("split-checkout card fill (real browser)", () => {
         // No formatter script in the frame, so the four typed digits remain raw.
         expect(await frame.locator('[placeholder="MM/YY"]').inputValue()).toBe("1230");
         // …every filled field is marked sealed so observations mask it…
-        expect(await frame.locator('[data-ts-sealed-payment="1"]').count()).toBeGreaterThanOrEqual(4);
+        expect(await frame.locator('[data-ts-sealed-payment="1"]').count()).toBeGreaterThanOrEqual(
+          4,
+        );
         // …and NOTHING was submitted: filling is not charging.
         expect(await frame.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fills only billing-scoped address fields during split card entry",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `${FRAME_FORM}
+          <input id="shipping-line1" autocomplete="shipping address-line1" value="9 Delivery Road">
+          <input id="ambiguous-city" autocomplete="address-level2" value="Delivery City">
+          <input id="billing-line1" autocomplete="billing address-line1">
+          <input id="billing-city" name="billing_city">
+          <input id="billing-postal" autocomplete="billing postal-code">
+          <input id="billing-country" name="billing_country">`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+
+        expect(await page.locator("#shipping-line1").inputValue()).toBe("9 Delivery Road");
+        expect(await page.locator("#ambiguous-city").inputValue()).toBe("Delivery City");
+        expect(await page.locator("#billing-line1").inputValue()).toBe(CARD.billing.line1);
+        expect(await page.locator("#billing-city").inputValue()).toBe(CARD.billing.city);
+        expect(await page.locator("#billing-postal").inputValue()).toBe(CARD.billing.postal_code);
+        expect(await page.locator("#billing-country").inputValue()).toBe(CARD.billing.country);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "clears semantic card fields after sealed nodes are replaced",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({ [pageUrl]: FRAME_FORM });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        await controller.fillCheckoutCardFields(CARD);
+        await page.evaluate(() => {
+          for (const original of document.querySelectorAll<HTMLInputElement>(
+            '[data-ts-sealed-payment="1"]',
+          )) {
+            const replacement = original.cloneNode(true) as HTMLInputElement;
+            replacement.removeAttribute("data-ts-sealed-payment");
+            replacement.value = original.value;
+            original.replaceWith(replacement);
+          }
+        });
+
+        await controller.clearCheckoutCardFields();
+
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-name"]').inputValue()).toBe("");
       } finally {
         await browser.close();
       }

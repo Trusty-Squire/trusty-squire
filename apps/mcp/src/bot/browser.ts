@@ -285,6 +285,13 @@ export class UnrecognizedPaymentFrameError extends Error {
 const CHECKOUT_PAN_FIELD_SELECTORS =
   'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]';
 
+const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
+  CHECKOUT_PAN_FIELD_SELECTORS,
+  'input[autocomplete~="cc-exp"],input[autocomplete~="cc-exp-month"],input[autocomplete~="cc-exp-year"],input[name*="expir" i],input[name="exp" i],input[name*="exp_month" i],input[name*="expmonth" i],input[name*="exp_year" i],input[name*="expyear" i],input[id*="expir" i],input[id="exp" i],input[id*="exp-date" i],input[id*="exp" i][id*="month" i],input[id*="exp" i][id*="year" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]',
+  'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]',
+  'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
+].join(",");
+
 // Charge-verb button labels — the click that actually moves money. Used by
 // submitFilledCheckout to find the charge control, and by operate_act's
 // pending-card-fill guard to refuse the model clicking such a control
@@ -6812,6 +6819,7 @@ export class BrowserController {
   private async fillCheckoutCardIntoFrames(
     frames: readonly Frame[],
     card: CheckoutCard,
+    billingOnly = false,
   ): Promise<void> {
     const filled = new Set<string>();
     const fillFirst = async (
@@ -6891,7 +6899,7 @@ export class BrowserController {
         await fillFirst("exp_year", card.exp_year, expiryYearSelectors);
       }
     }
-    const fields: Array<[string, string | undefined, string]> = [
+    const fields: Array<[string, string | undefined, string, string?]> = [
       [
         "cvv",
         card.cvv,
@@ -6906,31 +6914,45 @@ export class BrowserController {
         "line1",
         card.billing.line1,
         '[autocomplete~="address-line1"],[name*="address_line1" i],[name*="address1" i],[name="line1" i]',
+        '[autocomplete~="billing"][autocomplete~="address-line1"],[name*="billing" i][name*="address_line1" i],[name*="billing" i][name*="address1" i],[id*="billing" i][id*="address-line1" i],[id*="billing" i][id*="address_line1" i],[id*="billing" i][id*="address1" i]',
       ],
       [
         "line2",
         card.billing.line2,
         '[autocomplete~="address-line2"],[name*="address_line2" i],[name*="address2" i],[name="line2" i]',
+        '[autocomplete~="billing"][autocomplete~="address-line2"],[name*="billing" i][name*="address_line2" i],[name*="billing" i][name*="address2" i],[id*="billing" i][id*="address-line2" i],[id*="billing" i][id*="address_line2" i],[id*="billing" i][id*="address2" i]',
       ],
       [
         "city",
         card.billing.city,
         '[autocomplete~="address-level2"],[name*="city" i],[name*="locality" i]',
+        '[autocomplete~="billing"][autocomplete~="address-level2"],[name*="billing" i][name*="city" i],[name*="billing" i][name*="locality" i],[id*="billing" i][id*="city" i],[id*="billing" i][id*="locality" i]',
       ],
       [
         "state",
         card.billing.state,
         '[autocomplete~="address-level1"],[name*="state" i],[name*="region" i]',
+        '[autocomplete~="billing"][autocomplete~="address-level1"],[name*="billing" i][name*="state" i],[name*="billing" i][name*="region" i],[id*="billing" i][id*="state" i],[id*="billing" i][id*="region" i]',
       ],
       [
         "postal_code",
         card.billing.postal_code,
         '[autocomplete~="postal-code"],[name*="postal" i],[name*="zip" i]',
+        '[autocomplete~="billing"][autocomplete~="postal-code"],[name*="billing" i][name*="postal" i],[name*="billing" i][name*="zip" i],[id*="billing" i][id*="postal" i],[id*="billing" i][id*="zip" i]',
       ],
-      ["country", card.billing.country, '[autocomplete~="country"],[name*="country" i]'],
+      [
+        "country",
+        card.billing.country,
+        '[autocomplete~="country"],[name*="country" i]',
+        '[autocomplete~="billing"][autocomplete~="country"],[name*="billing" i][name*="country" i],[id*="billing" i][id*="country" i]',
+      ],
     ];
-    for (const [field, value, selectors] of fields) {
-      await fillFirst(field, value, selectors);
+    for (const [field, value, selectors, billingSelectors] of fields) {
+      await fillFirst(
+        field,
+        value,
+        billingOnly && billingSelectors !== undefined ? billingSelectors : selectors,
+      );
     }
     for (const required of ["pan", "expiry", "cvv", "name"]) {
       if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
@@ -6971,7 +6993,7 @@ export class BrowserController {
           frame === page.mainFrame() || recognizedPaymentProviderFrame(frame.url(), pageUrl),
       );
     try {
-      await this.fillCheckoutCardIntoFrames(allowed, card);
+      await this.fillCheckoutCardIntoFrames(allowed, card, true);
     } catch (error) {
       // A partial fill must not leave card data behind on a refusal.
       await this.clearSealedPaymentFields();
@@ -7060,6 +7082,36 @@ export class BrowserController {
           }
         })
         .catch(() => undefined);
+    }
+  }
+
+  async clearCheckoutCardFields(): Promise<void> {
+    if (!this.page) return;
+    for (const frame of this.page.frames()) {
+      const fields = frame.locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
+      const count = Math.min(await fields.count().catch(() => 0), 40);
+      for (let i = 0; i < count; i += 1) {
+        const field = fields.nth(i);
+        await field.fill("").catch(() => undefined);
+        await field
+          .evaluate((element) => element.removeAttribute("data-ts-sealed-payment"))
+          .catch(() => undefined);
+      }
+    }
+    await this.clearSealedPaymentFields();
+    await this.page.waitForTimeout(0).catch(() => undefined);
+    for (const frame of this.page.frames()) {
+      const uncleared = await frame
+        .locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS)
+        .evaluateAll((elements) =>
+          elements.some(
+            (element) =>
+              (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) &&
+              element.value.length > 0,
+          ),
+        )
+        .catch(() => true);
+      if (uncleared) throw new Error("payment_fields_not_cleared");
     }
   }
 
@@ -10082,6 +10134,35 @@ export class BrowserController {
   async pressKey(key: string): Promise<void> {
     if (!this.page) return;
     await this.page.keyboard.press(key).catch(() => {});
+  }
+
+  async focusedElementLabels(): Promise<string[]> {
+    if (!this.page) return [];
+    const labels: string[] = [];
+    for (const frame of this.page.frames()) {
+      const frameLabels = await frame
+        .evaluate(() => {
+          const element = document.activeElement;
+          if (!(element instanceof HTMLElement) || element === document.body) return [];
+          const associatedLabels =
+            element instanceof HTMLInputElement ||
+            element instanceof HTMLButtonElement ||
+            element instanceof HTMLSelectElement ||
+            element instanceof HTMLTextAreaElement
+              ? Array.from(element.labels ?? [], (label) => label.innerText)
+              : [];
+          const values = [
+            element.getAttribute("aria-label") ?? "",
+            element instanceof HTMLInputElement ? element.value : "",
+            element.innerText ?? "",
+            ...associatedLabels,
+          ];
+          return values.map((value) => value.replace(/\s+/g, " ").trim()).filter(Boolean);
+        })
+        .catch(() => []);
+      labels.push(...frameLabels);
+    }
+    return [...new Set(labels)];
   }
 
   // Open obvious collapsed menus (hamburger / avatar / account / "Settings"

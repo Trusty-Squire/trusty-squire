@@ -94,7 +94,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         enum: ["fill_card", "confirm"],
         description:
           'Split checkouts only: "fill_card" fills the vaulted card on the card-entry step ' +
-          '(no total visible yet — pass merchant+amount_cents+currency) without charging; ' +
+          "(no total visible yet — pass merchant+amount_cents+currency) without charging; " +
           '"confirm" verifies the live total on the order-confirmation step against the ' +
           "approved amount and places the order. Omit for single-page checkouts.",
       },
@@ -153,7 +153,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         status === "payment_declined" ||
         status === "payment_outcome_unknown"
       ) {
-        clearActivePendingCardFill();
+        clearActivePendingCardFill(result.payment_fields_cleared === true);
       }
       return result;
     }

@@ -1284,6 +1284,7 @@ async function runConfirm(cfg: {
   submit?: CheckoutSubmitResult | Error;
   threeDsResolution?: "succeeded" | "failed" | "timeout";
   waitSeconds?: number;
+  clear?: Error;
 }): Promise<{
   result: Record<string, unknown>;
   auditBodies: unknown[];
@@ -1310,9 +1311,7 @@ async function runConfirm(cfg: {
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary:
-      live instanceof Error
-        ? vi.fn().mockRejectedValue(live)
-        : vi.fn().mockResolvedValue(live),
+      live instanceof Error ? vi.fn().mockRejectedValue(live) : vi.fn().mockResolvedValue(live),
     currentUrl: vi.fn().mockReturnValue(`${SPLIT_CHECKOUT.checkout_origin}/checkout/confirm`),
     fillAndSubmitCheckout: vi.fn(),
     fillCheckoutCardFields: vi.fn(),
@@ -1320,7 +1319,10 @@ async function runConfirm(cfg: {
       submit instanceof Error
         ? vi.fn().mockRejectedValue(submit)
         : vi.fn().mockResolvedValue(submit),
-    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
+    clearSealedPaymentFields:
+      cfg.clear === undefined
+        ? vi.fn().mockResolvedValue(undefined)
+        : vi.fn().mockRejectedValue(cfg.clear),
     waitForThreeDsResolution: vi.fn().mockResolvedValue(cfg.threeDsResolution ?? "timeout"),
   };
   const api = new ApiClient({
@@ -1422,9 +1424,7 @@ describe("operate_pay split checkout — confirm", () => {
     });
     // Nothing was charged and the card stays in the page for a settled retry.
     expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
-    expect(auditBodies).toEqual([
-      expect.objectContaining({ status: "payment_checkout_failed" }),
-    ]);
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_checkout_failed" })]);
   });
 
   it("clears the fill and returns terminal unknown after an ambiguous submit failure", async () => {
@@ -1435,11 +1435,23 @@ describe("operate_pay split checkout — confirm", () => {
     expect(result).toMatchObject({
       status: "payment_outcome_unknown",
       reason: "payment_submit_outcome_unknown",
+      payment_fields_cleared: true,
     });
     expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
-    expect(auditBodies).toEqual([
-      expect.objectContaining({ status: "payment_outcome_unknown" }),
-    ]);
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+  });
+
+  it("reports uncleared fields after an ambiguous submit failure", async () => {
+    const { result, browser } = await runConfirm({
+      submit: new Error("click failed after dispatch"),
+      clear: new Error("controlled field restored"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      payment_fields_cleared: false,
+    });
+    expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
   });
 
   it("passes a currency-unresolved read through as a refusal", async () => {

@@ -452,6 +452,7 @@ interface Session {
   // path to the charge is operate_pay {phase:"confirm"}, which verifies the
   // live total against the approved amount first.
   pendingCardFill: PendingCardFill | null;
+  paymentFieldSealActive: boolean;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -973,12 +974,6 @@ const PENDING_CARD_AUTOCOMPLETE_FIELDS = new Set([
   "cc-exp-year",
   "cc-csc",
   "cc-name",
-  "address-line1",
-  "address-line2",
-  "address-level1",
-  "address-level2",
-  "postal-code",
-  "country",
 ]);
 
 function isPendingCardFilledField(el: InteractiveElement): boolean {
@@ -987,6 +982,21 @@ function isPendingCardFilledField(el: InteractiveElement): boolean {
     .split(/\s+/)
     .filter((token) => token.length > 0);
   if (autocomplete.some((token) => PENDING_CARD_AUTOCOMPLETE_FIELDS.has(token))) return true;
+  if (
+    autocomplete.includes("billing") &&
+    autocomplete.some((token) =>
+      [
+        "address-line1",
+        "address-line2",
+        "address-level1",
+        "address-level2",
+        "postal-code",
+        "country",
+      ].includes(token),
+    )
+  ) {
+    return true;
+  }
 
   const name = (el.name ?? "").toLowerCase();
   const id = (el.id ?? "").toLowerCase();
@@ -1017,19 +1027,58 @@ function isPendingCardFilledField(el: InteractiveElement): boolean {
         id === "exp")) ||
     placeholder.replace(/\s+/g, "") === "mm/yy" ||
     ariaLabel.replace(/\s+/g, "") === "mm/yy" ||
-    name.includes("address_line1") ||
-    name.includes("address_line2") ||
-    name.includes("address1") ||
-    name.includes("address2") ||
-    name === "line1" ||
-    name === "line2" ||
-    name.includes("city") ||
-    name.includes("locality") ||
-    name.includes("state") ||
-    name.includes("region") ||
-    name.includes("postal") ||
-    name.includes("zip") ||
-    name.includes("country")
+    ((name.includes("billing") || id.includes("billing")) &&
+      /address|line1|line2|city|locality|state|region|postal|zip|country/.test(`${name} ${id}`))
+  );
+}
+
+function pendingCardSecretKind(el: InteractiveElement): "pan" | "cvv" | null {
+  const autocomplete = (el.autocomplete ?? "").toLowerCase().split(/\s+/);
+  const signal = `${el.name ?? ""} ${el.id ?? ""}`.toLowerCase();
+  if (
+    autocomplete.includes("cc-number") ||
+    signal.includes("cardnumber") ||
+    signal.includes("card-number")
+  ) {
+    return "pan";
+  }
+  if (
+    autocomplete.includes("cc-csc") ||
+    signal.includes("cvv") ||
+    signal.includes("cvc") ||
+    signal.includes("security-code")
+  ) {
+    return "cvv";
+  }
+  return null;
+}
+
+function redactPaymentObservationText(
+  text: string,
+  elements: readonly InteractiveElement[],
+  active: boolean,
+): string {
+  if (!active) return text;
+  let redacted = text;
+  for (const element of elements) {
+    const kind = pendingCardSecretKind(element);
+    const value = element.value?.trim() ?? "";
+    if (kind === null || value.length === 0) continue;
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    redacted = redacted.replace(
+      kind === "cvv" ? new RegExp(`\\b${escaped}\\b`, "g") : new RegExp(escaped, "g"),
+      "[sealed payment]",
+    );
+  }
+  redacted = redacted.replace(/\d(?:[\d\s-]*\d)?/g, (candidate) => {
+    const digits = candidate.replace(/[\s-]/g, "");
+    return digits.length >= 13 && digits.length <= 19 && passesLuhn(digits)
+      ? "[sealed payment]"
+      : candidate;
+  });
+  return redacted.replace(
+    /\b(cvv|cvc|security\s+code)\s*[:#-]?\s*\d{3,4}\b/gi,
+    "$1 [sealed payment]",
   );
 }
 
@@ -1037,7 +1086,7 @@ function observationSealedFieldKeys(
   session: Session,
   elements: readonly InteractiveElement[],
 ): ReadonlySet<string> {
-  if (session.pendingCardFill === null) return session.sealedFieldKeys;
+  if (!session.paymentFieldSealActive) return session.sealedFieldKeys;
   const sealed = new Set(session.sealedFieldKeys);
   for (const el of elements) {
     if (!isPendingCardFilledField(el)) continue;
@@ -1719,7 +1768,7 @@ function pendingCardFillChargeBlockReason(
   session: Session,
   labels: ReadonlyArray<string | null | undefined>,
 ): string | null {
-  if (session.pendingCardFill === null) return null;
+  if (!session.paymentFieldSealActive) return null;
   const isCharge = labels.some(
     (label) => typeof label === "string" && CHECKOUT_SUBMIT_LABEL_RE.test(label.trim()),
   );
@@ -2107,6 +2156,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     recipeRejectionReason: null,
     replayState: null,
     pendingCardFill: null,
+    paymentFieldSealActive: false,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2200,6 +2250,7 @@ export async function startHarnessProvisionSession(
     recipeRejectionReason: null,
     replayState: null,
     pendingCardFill: null,
+    paymentFieldSealActive: false,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2345,15 +2396,19 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
 // Lives on the one active session so it dies with the browser; the raw card is
 // never here — only what the confirm step needs to verify and audit.
 export function setActivePendingCardFill(pending: PendingCardFill): void {
-  activeProvisionSession().pendingCardFill = pending;
+  const session = activeProvisionSession();
+  session.pendingCardFill = pending;
+  session.paymentFieldSealActive = true;
 }
 
 export function getActivePendingCardFill(): PendingCardFill | null {
   return activeProvisionSession().pendingCardFill;
 }
 
-export function clearActivePendingCardFill(): void {
-  activeProvisionSession().pendingCardFill = null;
+export function clearActivePendingCardFill(paymentFieldsCleared = true): void {
+  const session = activeProvisionSession();
+  session.pendingCardFill = null;
+  if (paymentFieldsCleared) session.paymentFieldSealActive = false;
 }
 
 export function recordActivePaymentProvenance(cardRef: string): void {
@@ -2882,7 +2937,11 @@ async function observeSession(
   const elements = await session.browser.extractInteractiveElements();
   session.lastElements = elements;
   const sealedFieldKeys = observationSealedFieldKeys(session, elements);
-  const text = await session.browser.extractVisibleText();
+  const text = redactPaymentObservationText(
+    await session.browser.extractVisibleText(),
+    elements,
+    session.paymentFieldSealActive,
+  );
   const normalizedFull = text.replace(/\s+/g, " ").trim();
   const normalizedText = normalizedFull.slice(0, 4000);
   const guidance = provisionPerceptionGuidance(normalizedText);
@@ -3085,12 +3144,23 @@ export async function act(
     case "press": {
       // Enter fires the form's default submit — on an order-confirmation page
       // that IS the charge. Same rule as the charge-click guard below.
-      if (session.pendingCardFill !== null && /^enter$/i.test(action.key.trim())) {
+      const key = action.key.trim();
+      if (session.paymentFieldSealActive && /^(?:enter|numpadenter)$/i.test(key)) {
         throw new Error(
           "press refused: a vaulted payment card is filled into this checkout, and " +
             "Enter can trigger the page's default submit (the charge). Use operate_pay " +
             '{phase:"confirm"} to place the order.',
         );
+      }
+      if (
+        session.paymentFieldSealActive &&
+        (/^(?:space|spacebar)$/i.test(key) || action.key === " ")
+      ) {
+        const chargeBlock = pendingCardFillChargeBlockReason(
+          session,
+          await browser.focusedElementLabels(),
+        );
+        if (chargeBlock !== null) throw new Error(chargeBlock);
       }
       await browser.pressKey(action.key);
       break;

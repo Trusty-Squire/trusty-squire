@@ -17,6 +17,7 @@ import type * as ProvisionSession from "../bot/provision-session.js";
 // a stub whose checkout summary the resolution tests can control.
 let mockBrowser: PaymentBrowser;
 let mockPending: PendingCardFill | null = null;
+let mockPaymentSealActive = false;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
@@ -25,9 +26,11 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
     getActivePendingCardFill: () => mockPending,
     setActivePendingCardFill: (pending: PendingCardFill) => {
       mockPending = pending;
+      mockPaymentSealActive = true;
     },
-    clearActivePendingCardFill: () => {
+    clearActivePendingCardFill: (paymentFieldsCleared = true) => {
       mockPending = null;
+      if (paymentFieldsCleared) mockPaymentSealActive = false;
     },
   };
 });
@@ -65,6 +68,7 @@ const PAYMENT_DETAILS = { item: "Synthetic item", reason: "Synthetic purchase re
 beforeEach(() => {
   mockBrowser = stubBrowser();
   mockPending = null;
+  mockPaymentSealActive = false;
 });
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -250,7 +254,12 @@ describe("operate_pay split checkout phases", () => {
   const PENDING: PendingCardFill = {
     approval_id: "appr_split",
     approval_url: "https://web.test/vault/pay/appr_split",
-    checkout: { merchant: "M", checkout_origin: "https://m.test", amount_cents: 100, currency: "USD" },
+    checkout: {
+      merchant: "M",
+      checkout_origin: "https://m.test",
+      amount_cents: 100,
+      currency: "USD",
+    },
     card_ref: "card_split",
     last4: "4242",
     mandate_id: "mandate_split",
@@ -329,6 +338,28 @@ describe("operate_pay split checkout phases", () => {
     expect(result).toMatchObject({ status: "payment_outcome_unknown" });
     expect(mockBrowser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
     expect(mockPending).toBeNull();
+    expect(mockPaymentSealActive).toBe(false);
+  });
+
+  it("confirm retains the seal lock when terminal cleanup cannot clear the fields", async () => {
+    mockPending = { ...PENDING };
+    mockPaymentSealActive = true;
+    vi.mocked(mockBrowser.submitFilledCheckout).mockRejectedValue(
+      new Error("click failed after dispatch"),
+    );
+    vi.mocked(mockBrowser.clearSealedPaymentFields).mockRejectedValue(
+      new Error("controlled field restored"),
+    );
+    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      payment_fields_cleared: false,
+    });
+    expect(mockPending).toBeNull();
+    expect(mockPaymentSealActive).toBe(true);
   });
 });
 

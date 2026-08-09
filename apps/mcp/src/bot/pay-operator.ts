@@ -33,6 +33,7 @@ export interface PaymentBrowser {
   fillCheckoutCardFields(card: CheckoutCard): Promise<void>;
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
   clearSealedPaymentFields(): Promise<void>;
+  clearCheckoutCardFields?(): Promise<void>;
   waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout">;
   currentUrl(): string;
 }
@@ -722,7 +723,7 @@ export async function executeOperatePay(
         currency: checkout.currency,
         last4,
         next:
-          'Drive the checkout to the order-confirmation step (the page showing the final ' +
+          "Drive the checkout to the order-confirmation step (the page showing the final " +
           'total), then call operate_pay {phase:"confirm"} — it verifies the live total ' +
           "against the approved amount and places the order. Never click the " +
           "pay/place-order control yourself.",
@@ -926,15 +927,25 @@ export async function executeOperatePayConfirm(
 
   let paymentStatus = "payment_submitted";
   let submitResult: CheckoutSubmitResult = { three_ds_required: false };
+  const clearPaymentFields = async (): Promise<boolean> => {
+    try {
+      if (browser.clearCheckoutCardFields !== undefined) {
+        await browser.clearCheckoutCardFields();
+      } else {
+        await browser.clearSealedPaymentFields();
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  };
   try {
     submitResult = await browser.submitFilledCheckout();
     if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
   } catch (error) {
     const submitNotFound = error instanceof Error && error.message === "payment_submit_not_found";
     paymentStatus = submitNotFound ? "payment_checkout_failed" : "payment_outcome_unknown";
-    if (!submitNotFound) {
-      await browser.clearSealedPaymentFields().catch(() => undefined);
-    }
+    const paymentFieldsCleared = submitNotFound ? false : await clearPaymentFields();
     let audit_recorded = true;
     try {
       await api.auditPayment({
@@ -951,11 +962,12 @@ export async function executeOperatePayConfirm(
       audit_recorded,
       reason: submitNotFound ? "payment_submit_not_found" : "payment_submit_outcome_unknown",
       approval_url: approvalUrl,
+      ...(!submitNotFound ? { payment_fields_cleared: paymentFieldsCleared } : {}),
     };
   }
   // Submission serialized the card values; clear them from the page now, the
   // same point the single-page flow clears them.
-  await browser.clearSealedPaymentFields();
+  const paymentFieldsCleared = await clearPaymentFields();
 
   if (submitResult.three_ds_required && threeDsWaitMs > 0) {
     void api.notifyThreeDs(pending.approval_id).catch(() => undefined);
@@ -980,13 +992,13 @@ export async function executeOperatePayConfirm(
       status: paymentStatus,
       audit_recorded: auditRecorded,
       approval_url: approvalUrl,
+      payment_fields_cleared: paymentFieldsCleared,
       ...(submitResult.challenge_url !== undefined
         ? { challenge_url: submitResult.challenge_url }
         : {}),
       needs_user: {
         wall: "3ds",
-        message:
-          "The issuer requires 3-D Secure authentication. Complete it in the open checkout.",
+        message: "The issuer requires 3-D Secure authentication. Complete it in the open checkout.",
         resume: "checkout",
         ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
       },
@@ -997,6 +1009,7 @@ export async function executeOperatePayConfirm(
       status: paymentStatus,
       audit_recorded: auditRecorded,
       approval_url: approvalUrl,
+      payment_fields_cleared: paymentFieldsCleared,
     };
   }
   return {
@@ -1006,5 +1019,6 @@ export async function executeOperatePayConfirm(
     merchant: checkout.merchant,
     amount_cents: checkout.amount_cents,
     currency: checkout.currency,
+    payment_fields_cleared: paymentFieldsCleared,
   };
 }

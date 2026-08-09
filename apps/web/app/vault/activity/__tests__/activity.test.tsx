@@ -119,4 +119,28 @@ describe("activity timeline — card / payment / grant events", () => {
     await waitFor(() => expect(screen.getByText("Grant minted")).toBeTruthy());
     expect(screen.getByText("openrouter")).toBeTruthy();
   });
+
+  it("renders an unknown payment outcome as an error", async () => {
+    api.apiGet.mockImplementation((path: string) => {
+      if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
+      if (path.startsWith("/v1/vault/audit")) {
+        return Promise.resolve({
+          events: [
+            {
+              ...EVENTS[1],
+              id: "unknown-payment",
+              payment_status: "payment_outcome_unknown",
+            },
+          ],
+          next_before: null,
+        });
+      }
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+
+    const { container } = render(<ActivityPage />);
+    await waitFor(() => expect(screen.getByText("Payment payment_outcome_unknown")).toBeTruthy());
+    expect(container.querySelector(".tl-row .tl-dot.err")).toBeTruthy();
+    expect(container.querySelector(".tl-row .tl-dot.ok")).toBeNull();
+  });
 });

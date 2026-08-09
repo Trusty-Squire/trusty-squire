@@ -92,7 +92,8 @@ function describe(e: AuditEvent): { tone: string; label: string; detail: string 
           : null;
       const tail = e.last4 !== undefined ? ` ··${e.last4}` : "";
       const declined =
-        e.payment_status !== undefined && /declin|fail|reject/i.test(e.payment_status);
+        e.payment_status !== undefined &&
+        /declin|fail|reject|outcome_unknown/i.test(e.payment_status);
       return {
         tone: declined ? "err" : "ok",
         label: declined ? `Payment ${e.payment_status}` : "Payment",
