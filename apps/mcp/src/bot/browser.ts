@@ -341,9 +341,9 @@ const CHECKOUT_COUNT_SUFFIXES = new Set([
   "台",
   "ポイント",
 ]);
-const CHECKOUT_TRAILING_TAX_EXCLUSIVE_PATTERN =
-  /^\s*(?:[（(]\s*)?(?:税抜き?|税別|本体価格)(?:\s*[）)])?/u;
-const CHECKOUT_TAX_EXCLUSIVE_TOKEN_PATTERN = /^(?:税抜き?|税別|本体価格)$/u;
+const CHECKOUT_TAX_EXCLUSIVE_PATTERN = /税抜|税別|本体価格/u;
+const CHECKOUT_TRAILING_TOKEN_OR_ANNOTATION_PATTERN =
+  /^\s*(?:[（(]([^）)]*)[）)]|(\p{L}+))/u;
 
 interface CheckoutAmountParseResult {
   amount: { amount_cents: number; currency: string } | null;
@@ -408,10 +408,15 @@ function parseCheckoutAmountMatch(
   fallbackCurrency?: string,
 ): CheckoutAmountParseResult {
   const matchEnd = (match.index ?? 0) + match[0].length;
+  const trailingTokenOrAnnotation = text
+    .slice(matchEnd)
+    .match(CHECKOUT_TRAILING_TOKEN_OR_ANNOTATION_PATTERN);
   if (
-    CHECKOUT_TAX_EXCLUSIVE_TOKEN_PATTERN.test(match[1] ?? "") ||
-    CHECKOUT_TAX_EXCLUSIVE_TOKEN_PATTERN.test(match[4] ?? "") ||
-    CHECKOUT_TRAILING_TAX_EXCLUSIVE_PATTERN.test(text.slice(matchEnd))
+    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(match[1] ?? "") ||
+    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(match[4] ?? "") ||
+    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(
+      trailingTokenOrAnnotation?.[1] ?? trailingTokenOrAnnotation?.[2] ?? "",
+    )
   ) {
     return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
   }
