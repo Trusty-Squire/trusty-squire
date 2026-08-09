@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.6 (2026-08-09)
+
+- fix(bot): safely recognize Japanese checkout totals (#466)
+
 ## 1.1.9-rc.5 (2026-08-09)
 
 - fix(mcp): preserve non-UTF-8 labels in operator extraction (#464)
