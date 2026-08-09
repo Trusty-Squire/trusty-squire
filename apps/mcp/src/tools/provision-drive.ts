@@ -551,7 +551,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "Observed child-frame refs and locator matches retain their frame origin. " +
     "Same-registrable-domain frames are reachable; other frame actions must pass " +
     "the goto/allow_host domain scope, opaque frames are refused, and type_secret " +
-    "never targets a cross-domain frame. select/upload/oauth_click refuse frame refs. " +
+    "never targets a cross-domain frame. upload/oauth_click refuse frame refs. " +
     "select (target + text — pick an option in a native <select> or custom listbox " +
     "by its visible text, e.g. a country/state dropdown that `type` can't drive), " +
     "set_phone_country (country — set the dial-code country on a phone field's " +

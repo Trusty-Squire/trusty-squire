@@ -8673,44 +8673,34 @@ export class BrowserController {
     if (path === "") return null;
     let cdp: CDPSession | null = null;
     try {
-      cdp = await page.context().newCDPSession(page);
-      const contexts = new Map<number, { frameId: string; origin: string }>();
-      cdp.on("Runtime.executionContextCreated", ({ context }) => {
-        const frameId = context.auxData?.frameId;
-        if (
-          context.auxData?.isDefault === true &&
-          typeof frameId === "string" &&
-          typeof context.origin === "string"
-        ) {
-          contexts.set(context.id, { frameId, origin: context.origin });
-        }
-      });
-      cdp.on("Runtime.executionContextDestroyed", ({ executionContextId }) => {
-        contexts.delete(executionContextId);
-      });
-      cdp.on("Runtime.executionContextsCleared", () => {
-        contexts.clear();
-      });
-      await cdp.send("Runtime.enable");
-      const { frameTree } = await cdp.send("Page.getFrameTree");
-      let currentFrame = page.mainFrame();
-      let currentTree = frameTree;
-      for (const part of path.split("/")) {
-        const index = Number.parseInt(part, 10);
-        const childFrame = currentFrame.childFrames()[index];
-        const childTree = currentTree.childFrames?.[index];
-        if (childFrame === undefined || childTree === undefined) return null;
-        const childTreeUrl = `${childTree.frame.url}${childTree.frame.urlFragment ?? ""}`;
-        if (childTreeUrl !== childFrame.url()) return null;
-        currentFrame = childFrame;
-        currentTree = childTree;
+      let frameSession = true;
+      try {
+        cdp = await page.context().newCDPSession(frame);
+      } catch {
+        frameSession = false;
+        cdp = await page.context().newCDPSession(page);
       }
-      if (currentFrame !== frame) return null;
-      const activeOrigins = [...contexts.values()].filter(
-        (context) => context.frameId === currentTree.frame.id,
-      );
-      if (activeOrigins.length !== 1) return null;
-      return activeOrigins[0]?.origin ?? null;
+      const { frameTree } = await cdp.send("Page.getFrameTree");
+      let currentTree = frameTree;
+      if (frameSession) {
+        const frameTreeUrl = `${currentTree.frame.url}${currentTree.frame.urlFragment ?? ""}`;
+        if (frameTreeUrl !== frame.url()) return null;
+      } else {
+        let currentFrame = page.mainFrame();
+        for (const part of path.split("/")) {
+          const index = Number.parseInt(part, 10);
+          const childFrame = currentFrame.childFrames()[index];
+          const childTree = currentTree.childFrames?.[index];
+          if (childFrame === undefined || childTree === undefined) return null;
+          const childTreeUrl = `${childTree.frame.url}${childTree.frame.urlFragment ?? ""}`;
+          if (childTreeUrl !== childFrame.url()) return null;
+          currentFrame = childFrame;
+          currentTree = childTree;
+        }
+        if (currentFrame !== frame) return null;
+      }
+      await cdp.send("Storage.getStorageKey", { frameId: currentTree.frame.id });
+      return currentTree.frame.securityOrigin || null;
     } catch {
       return null;
     } finally {

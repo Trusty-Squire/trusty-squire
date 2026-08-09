@@ -186,8 +186,8 @@ for the system and data flows.
   refused, and `type_secret` never targets any cross-domain frame. Frame refs
   currently support `click`, `js_click`, `type`, `type_secret`, and `select`;
   `upload` and `oauth_click` fail closed. If a visible control has no observed
-  ref, the five supported action kinds can use a live locator; that one-off
-  fallback is not replayable.
+  ref, the four locator-capable actions (`click`, `js_click`, `type`, and
+  `type_secret`) can use a live locator; that one-off fallback is not replayable.
 - `operate_extract` captures a generated credential into a sealed slot or the vault.
 - `operate_remember` saves a postcondition-verified local recipe under a closed
   task verb plus the service's registrable domain. It records stable target
