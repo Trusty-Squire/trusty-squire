@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.4 (2026-08-09)
+
+- feat(mcp): guarded frame-scoped select support — fill iframe dropdowns with a tamper-resistant frame origin sourced from browser-controlled state, hardened against sandbox-opaque frames (#462)
+
 ## 1.1.9-rc.3 (2026-08-08)
 
 - feat(mcp): support guarded actions inside frames — operate_observe/operate_act now handle iframe/frame controls (#459)
