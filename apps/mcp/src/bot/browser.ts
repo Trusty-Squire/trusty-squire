@@ -252,6 +252,7 @@ const CURRENCY_SYMBOLS: Record<string, string> = {
   "€": "EUR",
   "£": "GBP",
   "¥": "JPY",
+  "￥": "JPY",
   "₩": "KRW",
   円: "JPY",
   ZŁ: "PLN",
@@ -301,8 +302,55 @@ function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
-const checkoutTotalPattern =
-  /\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b\s*:?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9][0-9.,]*)(?:\s*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)]))?/giu;
+// Japanese has no \b word boundaries, so bare total labels (合計, 支払金額, …)
+// are guarded against adjacent kana/kanji that would turn them into a
+// different line item: 商品合計 is a merchandise SUBTOTAL, 合計数量 an item
+// count, 合計ポイント points — none is the payable total. Honorific/compound
+// forms (ご注文合計, お支払い金額, …) use the same guard so they only match as
+// whole labels. A 税込 (tax-included) label annotation is skipped; 税抜
+// (tax-EXCLUDED) deliberately is not — a pre-tax figure is not what the card
+// is charged.
+const cjkLetter = String.raw`\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}`;
+const checkoutTotalLabel =
+  String.raw`(?:\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b` +
+  String.raw`|(?<![${cjkLetter}])(?:ご注文合計|ご注文金額|お支払い合計|お支払合計|お支払い金額|お支払金額|ご請求金額|ご請求額` +
+  String.raw`|税込合計|総合計|総計|合計金額|合計|注文合計|注文金額|支払い金額|支払金額|請求金額|請求額)(?![${cjkLetter}]))`;
+// The amount must end on a digit and (?![0-9.,]) makes it atomic: a rejected
+// trailing guard fails the whole match instead of shortening the number
+// (合計500円分のクーポン must never parse as ¥50), and a sentence period after
+// the amount ("US$ 98.45.") can no longer be captured into the number, where
+// the two-dot rule would strip the decimal point and inflate it 100×. The
+// final CJK guard rejects an amount glued to trailing kana/kanji that the
+// suffix group could not resolve to a currency (500円分, 3個セット).
+const checkoutTotalPattern = new RegExp(
+  checkoutTotalLabel +
+    String.raw`(?:\s*[（(]税込み?[）)])?\s*[:：]?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9](?:[0-9.,]*[0-9])?)(?![0-9.,])(?:\s*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
+  "giu",
+);
+
+// Amount suffixes that mark the number as a count, not a price. A match whose
+// suffix is one of these is a quantity/points line (合計 3点, 合計 500ポイント)
+// and must be skipped even when a fallback currency could label it.
+const CHECKOUT_COUNT_SUFFIXES = new Set([
+  "点",
+  "個",
+  "件",
+  "品",
+  "枚",
+  "本",
+  "冊",
+  "台",
+  "ポイント",
+]);
+const CHECKOUT_TAX_EXCLUSIVE_PATTERN = /税抜|税別|本体価格/u;
+
+function isCheckoutCountSuffix(token: string | undefined): boolean {
+  if (token === undefined) return false;
+  for (const counter of CHECKOUT_COUNT_SUFFIXES) {
+    if (token.startsWith(counter)) return true;
+  }
+  return false;
+}
 
 interface CheckoutAmountParseResult {
   amount: { amount_cents: number; currency: string } | null;
@@ -340,7 +388,7 @@ function classifyCheckoutCurrencyToken(token: string | undefined): CheckoutCurre
     currency,
     unresolved:
       currency === undefined &&
-      (/\p{Sc}/u.test(token) || UNRESOLVED_CURRENCY_NOTATIONS.has(token.toUpperCase())),
+      (/円|\p{Sc}/u.test(token) || UNRESOLVED_CURRENCY_NOTATIONS.has(token.toUpperCase())),
   };
 }
 
@@ -361,6 +409,54 @@ function fallbackCurrencyScaleMismatches(raw: string, minorDigits: number): bool
   return fractionLength > minorDigits;
 }
 
+function parseCheckoutAmountMatch(
+  text: string,
+  match: RegExpMatchArray,
+  fallbackCurrency?: string,
+): CheckoutAmountParseResult {
+  const matchEnd = (match.index ?? 0) + match[0].length;
+  const trailingLine = text.slice(matchEnd).split(/\r?\n/u, 1)[0] ?? "";
+  if (
+    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(match[1] ?? "") ||
+    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(match[4] ?? "") ||
+    CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(trailingLine)
+  ) {
+    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+  }
+  if (isCheckoutCountSuffix(match[4])) {
+    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+  }
+  const prefix = classifyCheckoutCurrencyToken(match[1]);
+  const symbol = classifyCheckoutCurrencyToken(match[2]);
+  const suffix = classifyCheckoutCurrencyToken(match[4]);
+  if (prefix.unresolved || symbol.unresolved || suffix.unresolved) {
+    return { amount: null, currencyUnresolved: true, fallbackCurrencyScaleMismatch: false };
+  }
+  const pageCurrency = prefix.currency ?? suffix.currency ?? symbol.currency;
+  const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
+  if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) {
+    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+  }
+  const minorDigits = currencyMinorDigits(currency);
+  if (pageCurrency === undefined && fallbackCurrencyScaleMismatches(match[3] ?? "", minorDigits)) {
+    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: true };
+  }
+  const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
+  if (amount === null) {
+    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+  }
+  const scale = 10 ** minorDigits;
+  const minor = Math.round(amount * scale);
+  if (Math.abs(amount * scale - minor) > 1e-6) {
+    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+  }
+  return {
+    amount: { amount_cents: minor, currency },
+    currencyUnresolved: false,
+    fallbackCurrencyScaleMismatch: false,
+  };
+}
+
 function parseCheckoutAmountResult(
   texts: readonly string[],
   fallbackCurrency?: string,
@@ -370,31 +466,12 @@ function parseCheckoutAmountResult(
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
-      const prefix = classifyCheckoutCurrencyToken(match[1]);
-      const symbol = classifyCheckoutCurrencyToken(match[2]);
-      const suffix = classifyCheckoutCurrencyToken(match[4]);
-      if (prefix.unresolved || symbol.unresolved || suffix.unresolved) {
-        currencyUnresolved = true;
-        continue;
-      }
-      const pageCurrency = prefix.currency ?? suffix.currency ?? symbol.currency;
-      const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
-      if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) continue;
-      const minorDigits = currencyMinorDigits(currency);
-      if (
-        pageCurrency === undefined &&
-        fallbackCurrencyScaleMismatches(match[3] ?? "", minorDigits)
-      ) {
-        fallbackCurrencyScaleMismatch = true;
-        continue;
-      }
-      const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
-      if (amount === null) continue;
-      const scale = 10 ** minorDigits;
-      const minor = Math.round(amount * scale);
-      if (Math.abs(amount * scale - minor) > 1e-6) continue;
+      const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
+      currencyUnresolved ||= result.currencyUnresolved;
+      fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
+      if (result.amount === null) continue;
       return {
-        amount: { amount_cents: minor, currency },
+        amount: result.amount,
         currencyUnresolved,
         fallbackCurrencyScaleMismatch,
       };
@@ -427,29 +504,41 @@ export function parseCheckoutAmounts(
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
-      const prefix = classifyCheckoutCurrencyToken(match[1]);
-      const symbol = classifyCheckoutCurrencyToken(match[2]);
-      const suffix = classifyCheckoutCurrencyToken(match[4]);
-      if (prefix.unresolved || symbol.unresolved || suffix.unresolved) continue;
-      const pageCurrency = prefix.currency ?? suffix.currency ?? symbol.currency;
-      const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
-      if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) continue;
-      const minorDigits = currencyMinorDigits(currency);
-      if (
-        pageCurrency === undefined &&
-        fallbackCurrencyScaleMismatches(match[3] ?? "", minorDigits)
-      ) {
-        continue;
-      }
-      const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
-      if (amount === null) continue;
-      const scale = 10 ** minorDigits;
-      const minor = Math.round(amount * scale);
-      if (Math.abs(amount * scale - minor) > 1e-6) continue;
-      amounts.push({ amount_cents: minor, currency });
+      const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
+      if (result.amount !== null) amounts.push(result.amount);
     }
   }
   return amounts;
+}
+
+function extractCheckoutSummaryText(): string {
+  const body = document.body;
+  if (!body) return "";
+  const excluded: Array<{ el: HTMLElement | SVGElement; style: string | null }> = [];
+  try {
+    for (const el of Array.from(body.querySelectorAll("*"))) {
+      if (!(el instanceof HTMLElement || el instanceof SVGElement)) continue;
+      const tagName = el.tagName.toLowerCase();
+      const semanticStrike = tagName === "del" || tagName === "s" || tagName === "strike";
+      const computedStrike = window
+        .getComputedStyle(el)
+        .textDecorationLine.split(/\s+/)
+        .includes("line-through");
+      if (!semanticStrike && !computedStrike) continue;
+      excluded.push({ el, style: el.getAttribute("style") });
+      el.style.setProperty("display", "none", "important");
+    }
+    return body.innerText ?? "";
+  } finally {
+    for (const { el, style } of excluded.reverse()) {
+      if (style === null) {
+        el.style.removeProperty("display");
+        if (el.getAttribute("style") === "") el.removeAttribute("style");
+      } else {
+        el.setAttribute("style", style);
+      }
+    }
+  }
 }
 
 function merchantFromPage(title: string, siteName: string, url: string): string {
@@ -6121,10 +6210,7 @@ export class BrowserController {
     const texts = await Promise.all(
       page
         .frames()
-        .map(
-          async (frame) =>
-            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-        ),
+        .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
     );
     const parsedAmount = parseCheckoutAmountResult(texts, fallbackCurrency);
     if (parsedAmount.currencyUnresolved) {
@@ -6163,10 +6249,7 @@ export class BrowserController {
     const texts = await Promise.all(
       page
         .frames()
-        .map(
-          async (frame) =>
-            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-        ),
+        .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
     );
     const amount = parseCheckoutAmounts(texts, fallbackCurrency).at(-1);
     if (amount === undefined) throw new Error("payment_checkout_total_not_found");

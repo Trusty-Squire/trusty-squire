@@ -5,6 +5,7 @@ import {
   BrowserController,
   hasPayPalHostedCheckoutFrame,
   parseCheckoutAmount,
+  parseCheckoutAmounts,
 } from "../browser.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
@@ -109,6 +110,146 @@ describe("checkout payment parsing", () => {
     });
   });
 
+  it("resolves a Japanese payment-amount label", () => {
+    // The exact Rakuten failure behind payment_checkout_total_not_found.
+    expect(parseCheckoutAmount(["支払い金額 968円"])).toEqual({
+      amount_cents: 968,
+      currency: "JPY",
+    });
+  });
+
+  it.each([
+    ["合計 8,950円", 8_950],
+    ["合計 8,950円（税込）", 8_950],
+    ["合計 8,950円 ※送料無料", 8_950],
+    ["合計金額（税込）8,950円", 8_950],
+    ["ご注文合計: 8,950円", 8_950],
+    ["ご注文金額　8,950円", 8_950],
+    ["お支払い金額：8,950円", 8_950],
+    ["ご請求額 8,950円", 8_950],
+    ["注文合計: ￥8,950", 8_950],
+    ["総合計 ¥8,950", 8_950],
+  ])("resolves Japanese total label: %s", (text, cents) => {
+    expect(parseCheckoutAmount([text])).toEqual({
+      amount_cents: cents,
+      currency: "JPY",
+    });
+  });
+
+  it("resolves the order total, never the subtotal or shipping, on a Japanese summary", () => {
+    expect(parseCheckoutAmount(["小計 968円", "送料 500円", "合計 1,468円"])).toEqual({
+      amount_cents: 1_468,
+      currency: "JPY",
+    });
+    expect(parseCheckoutAmount(["小計 968円 送料 500円 消費税 134円 合計 1,468円"])).toEqual({
+      amount_cents: 1_468,
+      currency: "JPY",
+    });
+  });
+
+  it("skips a merchandise subtotal (商品合計) and resolves the payable total", () => {
+    expect(parseCheckoutAmount(["商品合計 968円", "お支払い金額 1,468円"])).toEqual({
+      amount_cents: 1_468,
+      currency: "JPY",
+    });
+  });
+
+  it.each([
+    ["小計 968円"],
+    ["商品合計 968円"],
+    ["送料 500円"],
+    ["値引き 300円"],
+    ["割引合計 300円"],
+    ["消費税 134円"],
+    ["税抜合計 8,950円"],
+    ["お支払い金額（税抜）8,950円"],
+    ["合計 8,950円（税抜）"],
+    ["合計 8,950円(税抜き)"],
+    ["合計 8,950円（本体価格）"],
+    ["合計 税抜 8,950円"],
+    ["合計 税抜き 8,950円"],
+    ["合計 税抜価格 8,950円"],
+    ["合計 8,950 税抜"],
+    ["合計 8,950 税別"],
+    ["合計 8,950 税別価格"],
+    ["合計 8,950円（価格は税抜）"],
+    ["合計 8,950円 ※税抜"],
+    ["合計数量: 3"],
+    ["合計ポイント: 500"],
+    ["商品ご注文合計 8,950円"],
+    ["会員お支払い金額 8,950円"],
+    ["ご注文金額合計 8,950円"],
+    ["ここに合計はない"],
+  ])("refuses non-total or tax-exclusive Japanese lines: %s", (text) => {
+    expect(parseCheckoutAmount([text], "JPY")).toBeNull();
+  });
+
+  it.each([
+    ["合計 3点"],
+    ["合計 3点分"],
+    ["合計 3個口"],
+    ["合計 500ポイント"],
+    ["合計500円分のクーポンをプレゼント"],
+  ])("never treats a Japanese count/points line as a payable amount: %s", (text) => {
+    expect(parseCheckoutAmount([text], "JPY")).toBeNull();
+  });
+
+  it("applies tax-exclusive and count guards to every checkout amount", () => {
+    expect(
+      parseCheckoutAmounts(
+        [
+          "合計 8,950円（税抜）",
+          "合計 8,950円 ※税抜",
+          "合計 税抜 8,950円",
+          "合計 税抜価格 8,950円",
+          "合計 8,950 税別",
+          "合計 8,950 税別価格",
+          "合計 3点",
+          "合計 3点分",
+          "合計 3個口",
+          "お支払い金額 9,845円（税込）",
+        ],
+        "JPY",
+      ),
+    ).toEqual([{ amount_cents: 9_845, currency: "JPY" }]);
+  });
+
+  it("refuses a count-only checkout review summary", async () => {
+    const browser = new BrowserController({ humanize: false });
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
+      frames: () => [{ evaluate: vi.fn().mockResolvedValue("合計 3点") }],
+      url: () => "https://flowers.example.test/checkout",
+    };
+    Object.defineProperty(browser, "page", { value: page });
+
+    await expect(browser.readCheckoutReviewSummary("JPY")).rejects.toThrow(
+      "payment_checkout_total_not_found",
+    );
+  });
+
+  it("fails closed when yen evidence is glued to unparseable trailing text", async () => {
+    // 円税込 is currency evidence the token resolver cannot read; trusting the
+    // USD fallback here would turn ¥1,468 into $1,468.00.
+    const browser = new BrowserController({ humanize: false });
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
+      frames: () => [{ evaluate: vi.fn().mockResolvedValue("合計 1,468円税込") }],
+      url: () => "https://flowers.example.test/checkout",
+    };
+    Object.defineProperty(browser, "page", { value: page });
+
+    await expect(browser.readCheckoutSummary("USD")).rejects.toMatchObject({
+      message: "payment_checkout_currency_unresolved",
+    });
+  });
+
+  it("refuses a sentence-period amount instead of stripping its decimal point", () => {
+    // "98.45." used to capture into the number, hit the two-dot rule, and
+    // inflate to $9,845.00 — a 100× overcharge. Refusing is the safe outcome.
+    expect(parseCheckoutAmount(["Order total US$ 98.45."])).toBeNull();
+  });
+
   it("refuses a decimal total when only a zero-decimal fallback currency is available", () => {
     // A Japan-based merchant is not evidence that a bare 98.45 total is JPY.
     // Treating the dot as a group would silently mint JPY 9,845 for a USD price.
@@ -148,6 +289,37 @@ describe("checkout payment parsing", () => {
       message: "payment_checkout_currency_unresolved",
     });
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores struck-through totals in initial and review reads",
+    async () => {
+      const playwrightBrowser = await chromium.launch({ headless: true });
+      try {
+        const page = await playwrightBrowser.newPage();
+        await page.setContent(`
+          <title>Japan Flower Shop</title>
+          <del>合計 968円</del>
+          <s>合計 1,100円</s>
+          <strike>合計 1,200円</strike>
+          <div style="text-decoration: line-through">合計 1,300円</div>
+          <div>合計 1,468円</div>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutSummary("JPY")).resolves.toMatchObject({
+          amount_cents: 1_468,
+          currency: "JPY",
+        });
+        await expect(controller.readCheckoutReviewSummary("JPY")).resolves.toMatchObject({
+          amount_cents: 1_468,
+          currency: "JPY",
+        });
+      } finally {
+        await playwrightBrowser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "types digits into a combined numeric expiry field and lets the site format MM/YY",
