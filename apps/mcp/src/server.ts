@@ -115,9 +115,37 @@ function errorContent(message: string) {
   };
 }
 
+// Process-level backstop for the stdio server. Every tool handler is already
+// wrapped in try/catch, but an async error can still escape that boundary —
+// e.g. a Playwright event waiter whose rejection fires while another await is
+// pending (the uploadFile filechooser race that took the server down mid-run).
+// Node's default response to an unhandledRejection/uncaughtException is to
+// kill the process, which turns one bad operate_* call into "MCP server
+// unreachable" for the host agent. Log the escape and keep serving: the
+// in-flight call fails on its own (its awaited promise threw or timed out),
+// session/browser state is self-contained and recycled by the warm-browser
+// health checks, and no security gate depends on process death — a crash
+// leaves any half-done page action in exactly the same state, minus the
+// transport. Installed only for `mcp server`; the CLI keeps fail-fast.
+export function installServerProcessGuards(): void {
+  const describe = (reason: unknown): string =>
+    reason instanceof Error ? (reason.stack ?? reason.message) : String(reason);
+  process.on("unhandledRejection", (reason) => {
+    process.stderr.write(
+      `[trusty-squire] unhandled rejection (server kept alive): ${describe(reason)}\n`,
+    );
+  });
+  process.on("uncaughtException", (err) => {
+    process.stderr.write(
+      `[trusty-squire] uncaught exception (server kept alive): ${describe(err)}\n`,
+    );
+  });
+}
+
 // Start the MCP stdio server. Throws on a fatal startup failure; bin.ts
 // owns the process-level error handling.
 export async function runServer(): Promise<void> {
+  installServerProcessGuards();
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable

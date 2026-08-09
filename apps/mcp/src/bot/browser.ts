@@ -28,6 +28,7 @@ import type {
   BrowserContext,
   CDPSession,
   ElementHandle,
+  FileChooser,
   Frame,
   Locator,
   Page,
@@ -3014,9 +3015,16 @@ export class BrowserController {
       return;
     }
     // Register the chooser waiter BEFORE the click so the event can't be missed.
-    const chooserPromise = page.waitForEvent("filechooser", { timeout: 15_000 });
+    // The catch must attach at creation, not after the click resolves: the click
+    // actionability-waits up to 30s (e.g. an occluded button), so the waiter's
+    // 15s timeout can reject while the click is still pending — a bare rejection
+    // here is an unhandledRejection that kills the whole MCP server process.
+    const chooserPromise: Promise<FileChooser | null> = page
+      .waitForEvent("filechooser", { timeout: 15_000 })
+      .then((c): FileChooser | null => c)
+      .catch((): null => null);
     await locator.click();
-    const chooser = await chooserPromise.catch(() => null);
+    const chooser = await chooserPromise;
     if (chooser === null) {
       throw new Error(
         `upload: clicking "${selector}" did not open a file picker within 15s. ` +
