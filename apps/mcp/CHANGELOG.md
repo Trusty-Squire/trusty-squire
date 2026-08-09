@@ -2,6 +2,7 @@
 
 ## 1.1.9-rc.6 (2026-08-09)
 
+- fix(mcp): keep the operator server responsive after erroring calls and upload-picker timeouts
 - fix(bot): safely recognize Japanese checkout totals (#466)
 - fix(bot): recover checkout totals from strict Order/Invoice structured data
 
