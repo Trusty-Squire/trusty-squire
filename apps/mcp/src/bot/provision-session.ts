@@ -1080,6 +1080,10 @@ function redactPaymentObservationText(
   );
 }
 
+function presentPaymentSafeString(value: string, paymentSealActive: boolean): string {
+  return paymentSealActive ? redactPaymentObservationText(value, [], true) : value;
+}
+
 const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
 
 function redactExactDigitSequence(text: string, expectedDigits: string): string {
@@ -1845,6 +1849,7 @@ export function buildScreenOutline(
   elements: readonly InteractiveElement[],
   pageText: string,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
+  paymentSealActive = false,
 ): ScreenOutline | undefined {
   if (elements.length === 0) return undefined;
   const byRegion = new Map<string, ScreenRegion>();
@@ -1853,8 +1858,8 @@ export function buildScreenOutline(
     const role = id.split(":")[0] ?? "region";
     const existing = byRegion.get(id);
     const region: ScreenRegion = existing ?? {
-      id,
-      role,
+      id: presentPaymentSafeString(id, paymentSealActive),
+      role: presentPaymentSafeString(role, paymentSealActive),
       topmost: false,
       occluded_by: null,
       children: [],
@@ -1867,16 +1872,25 @@ export function buildScreenOutline(
       el.occludedBy !== null &&
       el.occludedBy !== undefined
     ) {
-      region.occluded_by = el.occludedBy;
+      region.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive);
     }
     if (region.children.length < 10) {
       region.children.push({
-        ref: el.screenPath ?? presentLabel(el, sealedFieldKeys),
-        role: el.role,
-        text: presentLabel(el, sealedFieldKeys),
-        href: el.href ?? null,
+        ref:
+          el.screenPath !== null && el.screenPath !== undefined
+            ? presentPaymentSafeString(el.screenPath, paymentSealActive)
+            : presentLabel(el, sealedFieldKeys, paymentSealActive),
+        role: el.role === null ? null : presentPaymentSafeString(el.role, paymentSealActive),
+        text: presentLabel(el, sealedFieldKeys, paymentSealActive),
+        href:
+          el.href === null || el.href === undefined
+            ? null
+            : presentPaymentSafeString(el.href, paymentSealActive),
         topmost: el.topmost ?? null,
-        occluded_by: el.occludedBy ?? null,
+        occluded_by:
+          el.occludedBy === null || el.occludedBy === undefined
+            ? null
+            : presentPaymentSafeString(el.occludedBy, paymentSealActive),
       });
     }
     byRegion.set(id, region);
@@ -1914,25 +1928,38 @@ function isSealedFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>)
   if ((el.type ?? "").toLowerCase() === "password") return true;
   return elementTargetKeys(el).some((k) => sealed.has(k));
 }
-function presentFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): string | null {
+function presentFieldValue(
+  el: InteractiveElement,
+  sealed: ReadonlySet<string>,
+  paymentSealActive = false,
+): string | null {
   const v = el.value ?? null;
   if (v === null || v.length === 0) return v;
-  return isSealedFieldValue(el, sealed) ? SEALED_FIELD_PLACEHOLDER : v;
+  return isSealedFieldValue(el, sealed)
+    ? SEALED_FIELD_PLACEHOLDER
+    : presentPaymentSafeString(v, paymentSealActive);
 }
 // The host-facing LABEL. elementRef falls back to a field's VALUE when it has no
 // other label text — which would leak a sealed secret as the element's name. For
 // a sealed field, re-derive the label with the value stripped so it lands on the
 // next signal (placeholder/name) or `tag#index`, never the secret. Ref-keying
 // and targeting still use the raw elementRef, so resolution is unaffected.
-function presentLabel(el: InteractiveElement, sealed: ReadonlySet<string>): string {
-  if (!isSealedFieldValue(el, sealed)) return elementRef(el);
-  return elementRef({ ...el, value: null });
+function presentLabel(
+  el: InteractiveElement,
+  sealed: ReadonlySet<string>,
+  paymentSealActive = false,
+): string {
+  const label = isSealedFieldValue(el, sealed)
+    ? elementRef({ ...el, value: null })
+    : elementRef(el);
+  return presentPaymentSafeString(label, paymentSealActive);
 }
 
 export function buildAccessibilitySnapshot(
   elements: readonly InteractiveElement[],
   limit = 12000,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
+  paymentSealActive = false,
 ): AccessibilitySnapshot | undefined {
   if (elements.length === 0) return undefined;
   const refs = provisionElementRefs(elements);
@@ -1949,18 +1976,22 @@ export function buildAccessibilitySnapshot(
     entries.length > 24 || entries.some(([, group]) => group.length > 16);
   const lines: string[] = ["RootWebArea"];
   for (const [region, group] of entries.slice(0, 24)) {
-    lines.push(`  region "${region}"`);
+    lines.push(`  region "${presentPaymentSafeString(region, paymentSealActive)}"`);
     for (const el of group.slice(0, 16)) {
-      const label = presentLabel(el, sealedFieldKeys).replace(/"/g, '\\"');
-      const role = roleForAccessibility(el);
-      const shownValue = presentFieldValue(el, sealedFieldKeys);
+      const label = presentLabel(el, sealedFieldKeys, paymentSealActive).replace(/"/g, '\\"');
+      const role = presentPaymentSafeString(roleForAccessibility(el), paymentSealActive);
+      const shownValue = presentFieldValue(el, sealedFieldKeys, paymentSealActive);
       const flags = [
         el.value !== undefined && el.value !== null
           ? `value="${(shownValue ?? "").slice(0, 60)}"`
           : null,
         el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
-        el.href !== undefined && el.href !== null ? `href="${el.href.slice(0, 120)}"` : null,
-        el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
+        el.href !== undefined && el.href !== null
+          ? `href="${presentPaymentSafeString(el.href, paymentSealActive).slice(0, 120)}"`
+          : null,
+        el.topmost === false
+          ? `occluded_by="${presentPaymentSafeString(el.occludedBy ?? "unknown", paymentSealActive)}"`
+          : null,
       ].filter((v): v is string => v !== null);
       lines.push(
         `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el)}` +
@@ -2562,10 +2593,17 @@ export function toCompactElement(
   // form keeps full fidelity for re-expansion, so callers that write the file
   // pass false.
   elide = false,
+  paymentSealActive = false,
 ): ObservedElement {
-  const out: ObservedElement = { ref, label: presentLabel(el, sealed), tag: el.tag };
-  if (el.role) out.role = el.role;
-  if (el.type && !(elide && shouldElideType(el))) out.type = el.type;
+  const out: ObservedElement = {
+    ref,
+    label: presentLabel(el, sealed, paymentSealActive),
+    tag: presentPaymentSafeString(el.tag, paymentSealActive),
+  };
+  if (el.role) out.role = presentPaymentSafeString(el.role, paymentSealActive);
+  if (el.type && !(elide && shouldElideType(el))) {
+    out.type = presentPaymentSafeString(el.type, paymentSealActive);
+  }
   // value_len is a LENGTH signal, not the value — report the REAL character count.
   // presentFieldValue masks a sealed field to "[sealed]" (8 chars), so using its
   // length made a correctly-filled 19-char email read as value_len:8 and misled
@@ -2574,12 +2612,18 @@ export function toCompactElement(
   const realLen = (el.value ?? "").length;
   if (realLen > 0) out.value_len = realLen;
   if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
-  if (el.href) out.href = el.href;
-  if (el.testId) out.testId = el.testId;
-  if (includePath && el.screenPath) out.path = el.screenPath;
+  if (el.href) out.href = presentPaymentSafeString(el.href, paymentSealActive);
+  if (el.testId) out.testId = presentPaymentSafeString(el.testId, paymentSealActive);
+  if (includePath && el.screenPath) {
+    out.path = presentPaymentSafeString(el.screenPath, paymentSealActive);
+  }
   if (el.topmost === false) out.topmost = false;
-  if (el.occludedBy) out.occluded_by = el.occludedBy;
-  if (el.frameOrigin) out.frame_origin = el.frameOrigin;
+  if (el.occludedBy) {
+    out.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive);
+  }
+  if (el.frameOrigin) {
+    out.frame_origin = presentPaymentSafeString(el.frameOrigin, paymentSealActive);
+  }
   return out;
 }
 
@@ -2898,6 +2942,7 @@ export function buildCompactObservation(args: {
   guidance?: string;
   elements: readonly InteractiveElement[];
   sealed?: ReadonlySet<string>;
+  paymentSealActive?: boolean;
   prev: ObserveDeltaState | null;
   // Wire encoding of the emitted element set. Default "columnar" (the tab table).
   // The eval harness passes "json" to measure the columnar transform's marginal
@@ -2911,6 +2956,7 @@ export function buildCompactObservation(args: {
   const sealed = args.sealed ?? new Set<string>();
   const encode = args.encode ?? "columnar";
   const elide = args.elide ?? true;
+  const paymentSealActive = args.paymentSealActive ?? false;
   const refs = provisionElementRefs(elements);
   const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
 
@@ -2919,11 +2965,11 @@ export function buildCompactObservation(args: {
   const fileElements: ObservedElement[] = [];
   for (const el of elements) {
     const ref = refOf(el);
-    fullByRef.set(ref, toCompactElement(el, ref, sealed, false, elide));
+    fullByRef.set(ref, toCompactElement(el, ref, sealed, false, elide, paymentSealActive));
     serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
     // The persisted file keeps FULL fidelity (path included, no elision) so a
     // re-expansion after a host compaction loses nothing.
-    fileElements.push(toCompactElement(el, ref, sealed, true, false));
+    fileElements.push(toCompactElement(el, ref, sealed, true, false, paymentSealActive));
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
 
@@ -3026,6 +3072,7 @@ async function observeSession(
       ...(guidance !== undefined ? { guidance } : {}),
       elements,
       sealed: sealedFieldKeys,
+      paymentSealActive: session.paymentFieldSealActive,
       prev: session.prevObserve,
     });
     // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
@@ -3085,10 +3132,22 @@ async function observeSession(
     url,
     normalizedText,
     textTruncated,
-    elements.map((el) => toCompactElement(el, refOf(el), sealedFieldKeys, true)),
+    elements.map((el) =>
+      toCompactElement(el, refOf(el), sealedFieldKeys, true, false, session.paymentFieldSealActive),
+    ),
   );
-  const screen = buildScreenOutline(elements, normalizedText, sealedFieldKeys);
-  const accessibility = buildAccessibilitySnapshot(elements, undefined, sealedFieldKeys);
+  const screen = buildScreenOutline(
+    elements,
+    normalizedText,
+    sealedFieldKeys,
+    session.paymentFieldSealActive,
+  );
+  const accessibility = buildAccessibilitySnapshot(
+    elements,
+    undefined,
+    sealedFieldKeys,
+    session.paymentFieldSealActive,
+  );
   return {
     session_id: session.id,
     url,
@@ -3098,19 +3157,39 @@ async function observeSession(
     ...(accessibility !== undefined ? { accessibility } : {}),
     elements: elements.map((el) => ({
       ref: refOf(el),
-      label: presentLabel(el, sealedFieldKeys),
-      tag: el.tag,
-      role: el.role,
-      type: el.type,
-      value: presentFieldValue(el, sealedFieldKeys),
+      label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
+      tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
+      role:
+        el.role === null ? null : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
+      type:
+        el.type === null ? null : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
+      value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
       checked: el.checked ?? null,
-      href: el.href ?? null,
-      testId: el.testId ?? null,
-      path: el.screenPath ?? null,
-      container: el.container ?? null,
+      href:
+        el.href === null || el.href === undefined
+          ? null
+          : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
+      testId:
+        el.testId === null || el.testId === undefined
+          ? null
+          : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
+      path:
+        el.screenPath === null || el.screenPath === undefined
+          ? null
+          : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
+      container:
+        el.container === null || el.container === undefined
+          ? null
+          : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
       topmost: el.topmost ?? null,
-      occluded_by: el.occludedBy ?? null,
-      frame_origin: el.frameOrigin ?? null,
+      occluded_by:
+        el.occludedBy === null || el.occludedBy === undefined
+          ? null
+          : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
+      frame_origin:
+        el.frameOrigin === null || el.frameOrigin === undefined
+          ? null
+          : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
     })),
   };
 }

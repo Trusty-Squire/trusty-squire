@@ -1417,6 +1417,20 @@ describe("operate_pay split checkout — confirm", () => {
     expect(auditBodies).toEqual([]);
   });
 
+  it("refuses to charge when trusted checkout contexts show conflicting totals", async () => {
+    const { result, auditBodies, browser } = await runConfirm({
+      live: new Error("payment_checkout_total_conflict"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_amount_mismatch",
+      reason: "conflicting_checkout_totals",
+    });
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
+    expect(auditBodies).toEqual([]);
+  });
+
   it("does not fall back to the permissive summary reader at confirmation", async () => {
     const { result, browser } = await runConfirm({
       live: new Error("payment_checkout_total_not_found"),

@@ -3942,6 +3942,46 @@ describe("pending card-fill charge guard", () => {
     expect(JSON.stringify(full)).not.toContain("4242");
   });
 
+  it("masks card material in all host-facing interactive metadata", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+    const pan = "4242|4242|4242|4242";
+    h.elements = [
+      elem({ index: 0, tag: "button", ariaLabel: `Card ${pan}`, selector: "#aria" }),
+      elem({ index: 1, tag: "button", title: `Card ${pan}`, selector: "#title" }),
+      elem({ index: 2, tag: "button", labelText: `Card ${pan}`, selector: "#label" }),
+      elem({ index: 3, tag: "button", iconLabel: `Card ${pan}`, selector: "#icon" }),
+      elem({ index: 4, tag: "input", placeholder: `Card ${pan}`, selector: "#placeholder" }),
+      elem({ index: 5, tag: "button", value: pan, selector: "#value" }),
+      elem({ index: 6, tag: "button", ariaLabel: "CVV 123", selector: "#cvv" }),
+      elem({ index: 7, tag: "button", visibleText: `Card ${pan}`, selector: "#visible" }),
+      elem({ index: 8, tag: "input", name: `Card ${pan}`, selector: "#name" }),
+      elem({
+        index: 9,
+        tag: "button",
+        visibleText: "Preview",
+        href: `https://shop.example.com/card/${pan}`,
+        testId: `card-${pan}`,
+        screenPath: `main:Card ${pan} > button:preview`,
+        container: `main:Card ${pan}`,
+        topmost: false,
+        occludedBy: `Card ${pan}`,
+        selector: "#metadata",
+      }),
+    ];
+
+    const compact = await observe(started.session_id, "compact");
+    const compactJson = JSON.stringify(compact);
+    expect(compactJson).not.toContain("4242");
+    expect(compactJson).not.toContain("CVV 123");
+    expect(readFileSync(compact.snapshot_file!, "utf8")).not.toMatch(/4242|CVV 123/);
+
+    const full = await observe(started.session_id, "full");
+    expect(JSON.stringify(full)).not.toMatch(/4242|CVV 123/);
+  });
+
   it("keeps masking and charge locking after retry state is cleared without DOM cleanup", async () => {
     h.elements = [
       elem({

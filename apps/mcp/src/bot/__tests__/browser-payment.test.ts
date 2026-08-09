@@ -1168,6 +1168,65 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "keeps the main payable total authoritative and refuses trusted-frame conflicts",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/review";
+      const trustedUrl = "https://shop.example.test/checkout/summary";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Review order</title>
+          <div>Order total USD 49.99</div>
+          <iframe src="${trustedUrl}"></iframe>`,
+        [trustedUrl]: "Order total USD 39.99",
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutConfirmSummary()).rejects.toThrow(
+          "payment_checkout_total_conflict",
+        );
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores opacity-hidden confirmation totals inside a visible checkout frame",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/review";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Review order</title>
+          <section id="hidden" style="opacity: 0">
+            <div>Order total USD 39.99</div>
+          </section>
+          <button>Place order</button>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutConfirmSummary()).rejects.toThrow(
+          "payment_checkout_total_not_found",
+        );
+        await page.locator("#hidden").evaluate((element) => {
+          element.style.opacity = "1";
+        });
+        await expect(controller.readCheckoutConfirmSummary()).resolves.toMatchObject({
+          amount_cents: 3_999,
+          currency: "USD",
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "fills only billing-scoped address fields during split card entry",
     async () => {
       const pageUrl = "https://shop.example.test/checkout/payment";
@@ -1211,7 +1270,10 @@ describe("split-checkout card fill (real browser)", () => {
           ${FRAME_FORM}
           <script>
             const pan = document.querySelector('[autocomplete="cc-number"]');
-            new MutationObserver(() => location.replace("${rogueUrl}")).observe(pan, {
+            new MutationObserver(() => {
+              pan.disabled = true;
+              setTimeout(() => location.replace("${rogueUrl}"), 0);
+            }).observe(pan, {
               attributes: true,
               attributeFilter: ["data-ts-sealed-payment"],
             });
@@ -1433,6 +1495,41 @@ describe("split-checkout card fill (real browser)", () => {
         );
         expect(await page.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
         expect(await page.locator("#preview").innerText()).toBe("Security code 123");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps cleanup sealed when card data survives in interactive metadata",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `${FRAME_FORM}
+          <button id="preview" aria-label="Card preview"></button>
+          <script>
+            document.querySelector('[autocomplete="cc-number"]').addEventListener("input", event => {
+              if (event.target.value) {
+                document.querySelector("#preview").setAttribute(
+                  "aria-label",
+                  "Card " + event.target.value,
+                );
+              }
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        await controller.fillCheckoutCardFields(CARD);
+
+        await expect(controller.clearCheckoutCardFields()).rejects.toThrow(
+          "payment_fields_not_cleared",
+        );
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator("#preview").getAttribute("aria-label")).toContain(CARD.pan);
       } finally {
         await browser.close();
       }

@@ -962,6 +962,37 @@ function extractCheckoutSummaryText(): string {
   }
 }
 
+function extractCheckoutConfirmSummaryText(): string {
+  const body = document.body;
+  if (!body) return "";
+  const excluded: Array<{ el: HTMLElement | SVGElement; style: string | null }> = [];
+  try {
+    for (const el of Array.from(body.querySelectorAll("*"))) {
+      if (!(el instanceof HTMLElement || el instanceof SVGElement)) continue;
+      const style = window.getComputedStyle(el);
+      const tagName = el.tagName.toLowerCase();
+      const struck =
+        tagName === "del" ||
+        tagName === "s" ||
+        tagName === "strike" ||
+        style.textDecorationLine.split(/\s+/).includes("line-through");
+      if (!struck && Number.parseFloat(style.opacity) > 0) continue;
+      excluded.push({ el, style: el.getAttribute("style") });
+      el.style.setProperty("display", "none", "important");
+    }
+    return body.innerText ?? "";
+  } finally {
+    for (const { el, style } of excluded.reverse()) {
+      if (style === null) {
+        el.style.removeProperty("display");
+        if (el.getAttribute("style") === "") el.removeAttribute("style");
+      } else {
+        el.setAttribute("style", style);
+      }
+    }
+  }
+}
+
 function extractObservationVisibleText(): string {
   const body = document.body;
   if (!body) return "";
@@ -6723,18 +6754,34 @@ export class BrowserController {
         "",
     }));
     const frames = await this.visibleTrustedCheckoutFrames();
-    const texts = await Promise.all(
-      frames.map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
+    const parsedFrames = await Promise.all(
+      frames.map(async (frame) =>
+        parseCheckoutConfirmAmountResult([
+          await frame.evaluate(extractCheckoutConfirmSummaryText).catch(() => ""),
+        ]),
+      ),
     );
-    const parsedAmount = parseCheckoutConfirmAmountResult(texts);
-    if (parsedAmount.currencyUnresolved) {
+    if (parsedFrames.some((parsed) => parsed.currencyUnresolved)) {
       throw new Error("payment_checkout_currency_unresolved");
     }
-    if (parsedAmount.amount === null) throw new Error("payment_checkout_total_not_found");
+    const mainAmount = parsedFrames[0]?.amount ?? null;
+    const childAmounts = parsedFrames
+      .slice(1)
+      .map((parsed) => parsed.amount)
+      .filter((amount): amount is NonNullable<typeof amount> => amount !== null);
+    const amount = mainAmount ?? childAmounts[0] ?? null;
+    if (amount === null) throw new Error("payment_checkout_total_not_found");
+    if (
+      childAmounts.some(
+        (child) => child.amount_cents !== amount.amount_cents || child.currency !== amount.currency,
+      )
+    ) {
+      throw new Error("payment_checkout_total_conflict");
+    }
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
       checkout_origin: new URL(page.url()).origin,
-      ...parsedAmount.amount,
+      ...amount,
     };
   }
 
@@ -6986,7 +7033,7 @@ export class BrowserController {
     frames: readonly Frame[],
     card: CheckoutCard,
     billingOnly = false,
-    assertFrameEgress?: (frame: Frame) => void,
+    assertFrameEgress?: (frame: Frame, resolvedOrigin?: string) => void,
   ): Promise<void> {
     const filled = new Set<string>();
     const fillFirst = async (
@@ -7003,6 +7050,84 @@ export class BrowserController {
           const input = matches.nth(i);
           if (!(await input.isVisible().catch(() => false))) continue;
           if (!(await input.isEnabled().catch(() => false))) continue;
+          if (assertFrameEgress !== undefined) {
+            const resolveHandle = async (): Promise<{
+              handle: ElementHandle<Element>;
+              tag: string;
+            } | null> => {
+              const handle = await input.elementHandle().catch(() => null);
+              if (handle === null) return null;
+              if (!(await handle.isVisible().catch(() => false))) {
+                await handle.dispose().catch(() => undefined);
+                return null;
+              }
+              if (!(await handle.isEnabled().catch(() => false))) {
+                await handle.dispose().catch(() => undefined);
+                return null;
+              }
+              await handle.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
+              const context = await handle.evaluate((el) => ({
+                tag: el.tagName.toLowerCase(),
+                origin: el.ownerDocument.defaultView?.location.origin ?? "",
+              }));
+              assertFrameEgress(frame, context.origin);
+              return { handle, tag: context.tag };
+            };
+            const resolved = await resolveHandle();
+            if (resolved === null) continue;
+            let { handle } = resolved;
+            try {
+              if (resolved.tag === "select") {
+                let selected = await handle
+                  .selectOption({ value })
+                  .then((values) => values.length > 0)
+                  .catch(() => {
+                    assertFrameEgress(frame);
+                    return false;
+                  });
+                if (!selected) {
+                  await handle.dispose().catch(() => undefined);
+                  const fallback = await resolveHandle();
+                  if (fallback === null) continue;
+                  handle = fallback.handle;
+                  selected = await handle
+                    .selectOption({ label: value })
+                    .then((values) => values.length > 0)
+                    .catch(() => {
+                      assertFrameEgress(frame);
+                      return false;
+                    });
+                }
+                if (!selected) continue;
+              } else if (typePerKey) {
+                await handle.fill("").catch((error) => {
+                  assertFrameEgress(frame);
+                  throw error;
+                });
+                const resolvedOrigin = await handle.evaluate(
+                  (el) => el.ownerDocument.defaultView?.location.origin ?? "",
+                );
+                assertFrameEgress(frame, resolvedOrigin);
+                await handle
+                  .type(value, {
+                    delay: this.humanize ? rand(40, 110) : 0,
+                  })
+                  .catch((error) => {
+                    assertFrameEgress(frame);
+                    throw error;
+                  });
+              } else {
+                await handle.fill(value).catch((error) => {
+                  assertFrameEgress(frame);
+                  throw error;
+                });
+              }
+            } finally {
+              await handle.dispose().catch(() => undefined);
+            }
+            filled.add(field);
+            return true;
+          }
           const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "");
           await input.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
           if (tag === "select") {
@@ -7166,7 +7291,7 @@ export class BrowserController {
     const expectedFrameOrigins = new Map(
       allowed.map((frame) => [frame, new URL(frame.url()).origin] as const),
     );
-    const assertFrameEgress = (frame: Frame): void => {
+    const assertFrameEgress = (frame: Frame, resolvedOrigin?: string): void => {
       const livePageUrl = page.url();
       let livePageOrigin: string;
       let liveFrameOrigin: string;
@@ -7179,6 +7304,7 @@ export class BrowserController {
       if (
         livePageOrigin !== expectedPageOrigin ||
         liveFrameOrigin !== expectedFrameOrigins.get(frame) ||
+        (resolvedOrigin !== undefined && resolvedOrigin !== liveFrameOrigin) ||
         (frame !== page.mainFrame() && !recognizedPaymentProviderFrame(frame.url(), livePageUrl))
       ) {
         throw new UnrecognizedPaymentFrameError(liveFrameOrigin);
@@ -7327,6 +7453,28 @@ export class BrowserController {
       visibleTexts.some((text) => text === undefined) ||
       visibleTexts.some((text) => containsVisiblePaymentMaterial(text!))
     ) {
+      throw new Error("payment_fields_not_cleared");
+    }
+    const interactiveElements = await this.extractInteractiveElements().catch(() => undefined);
+    if (interactiveElements === undefined) throw new Error("payment_fields_not_cleared");
+    const interactiveText = interactiveElements
+      .flatMap((element) => [
+        element.ariaLabel,
+        element.title,
+        element.value,
+        element.labelText,
+        element.visibleText,
+        element.iconLabel,
+        element.placeholder,
+        element.name,
+        element.testId,
+        element.screenPath,
+        element.container,
+        element.occludedBy,
+      ])
+      .filter((value): value is string => typeof value === "string")
+      .join("\n");
+    if (containsVisiblePaymentMaterial(interactiveText)) {
       throw new Error("payment_fields_not_cleared");
     }
   }

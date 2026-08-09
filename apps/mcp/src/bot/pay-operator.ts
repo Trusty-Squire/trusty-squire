@@ -919,6 +919,13 @@ export async function executeOperatePayConfirm(
         reason: "fallback_currency_scale_mismatch",
       };
     }
+    if (message === "payment_checkout_total_conflict") {
+      return {
+        status: "payment_amount_mismatch",
+        approval_url: approvalUrl,
+        reason: "conflicting_checkout_totals",
+      };
+    }
     throw error;
   }
   // Merchant is deliberately NOT compared: it derives from the page title,
