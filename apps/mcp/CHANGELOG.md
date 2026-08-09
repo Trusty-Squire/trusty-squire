@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.5 (2026-08-09)
+
+- fix(mcp): preserve non-UTF-8 labels in operator extraction (#464)
+
 ## 1.1.9-rc.4 (2026-08-09)
 
 - feat(mcp): guarded frame-scoped select support — fill iframe dropdowns with a tamper-resistant frame origin sourced from browser-controlled state, hardened against sandbox-opaque frames (#462)
