@@ -1812,7 +1812,24 @@ export class BrowserController {
     // should not emit these calls, but the helper is harmless there too.
     const evaluateNameShimScript =
       'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });';
-    await context.addInitScript({ content: evaluateNameShimScript });
+    // Non-ASCII page mojibake (operator-observe-jp-mojibake). ANY
+    // context.addInitScript under patchright (hardened) makes patchright
+    // intercept and REWRITE every text/html Document response to inject the
+    // init scripts into <head> — and its injection path decodes the raw
+    // response bytes as UTF-8 unconditionally (Buffer.from(body,"base64")
+    // .toString("utf-8")), so a page served in EUC-JP / Shift_JIS (Rakuten et
+    // al.) is corrupted at the byte level BEFORE Chrome parses it: the DOM
+    // itself then holds `鐃緒申…` mojibake, which observe/extract faithfully
+    // reports. Only server-rendered HTML text garbles; text a page injects
+    // later from a JS bundle or XHR/JSON response survives (those aren't
+    // text/html, so patchright never rewrites them) — exactly the selective
+    // garble seen in the wild. Under patchright these context init scripts
+    // don't even reach the main world (they land in its isolated world; the
+    // per-navigation page.evaluate re-application below is the effective path),
+    // so skipping them here loses NO stealth and removes the corruption
+    // trigger. Baseline (playwright-extra) does not rewrite bodies and its
+    // init scripts DO reach the main world, so it keeps them.
+    if (!hardened) await context.addInitScript({ content: evaluateNameShimScript });
     // Patch navigator.webdriver — BASELINE ONLY. Measured against the
     // rebrowser bot-detector, this manual `defineProperty` is
     // COUNTERPRODUCTIVE under patchright: it re-adds `webdriver` as an own
@@ -1915,7 +1932,13 @@ export class BrowserController {
         }
       }
     })();`;
-    if (!remoteMode) await context.addInitScript({ content: installWebglSpoofScript });
+    // Skip under patchright (hardened) — see the mojibake note above: any
+    // context.addInitScript triggers patchright's charset-lossy text/html
+    // rewrite. This spoof is already re-applied per navigation via
+    // reapplyWebglSpoof (framenavigated/load), which the comment above notes is
+    // the ONLY path that reaches the main world under patchright anyway, so the
+    // context init copy is dead weight there.
+    if (!remoteMode && !hardened) await context.addInitScript({ content: installWebglSpoofScript });
     this.page = context.pages()[0] ?? (await context.newPage());
     this.primaryPage = this.page;
     // addInitScript covers document-start page JS, but Playwright's
