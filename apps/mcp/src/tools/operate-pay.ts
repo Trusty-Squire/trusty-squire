@@ -4,6 +4,7 @@ import {
   clearActivePendingCardFill,
   getActivePendingCardFill,
   recordActivePaymentProvenance,
+  retainActivePaymentFieldSeal,
   setActivePendingCardFill,
 } from "../bot/provision-session.js";
 import {
@@ -233,6 +234,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         onCardFilled: (pending) => {
           filledPending = pending;
         },
+        onCardFillCleanupFailed: retainActivePaymentFieldSeal,
       },
     );
     if (result.status === "payment_card_filled") {

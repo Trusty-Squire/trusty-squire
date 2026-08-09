@@ -4,7 +4,7 @@ import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPa
 import { z } from "zod";
 import type { ApiClient } from "../api-client.js";
 import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
-import { UnrecognizedPaymentFrameError } from "./browser.js";
+import { PaymentCardFillCleanupError, UnrecognizedPaymentFrameError } from "./browser.js";
 import { generateOperatorKeypair, openSealed } from "./payment-hpke.js";
 
 export interface OperatePayArgs {
@@ -29,6 +29,7 @@ export interface OperatePayArgs {
 export interface PaymentBrowser {
   isPayPalHostedCheckout(): Promise<boolean>;
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
+  readCheckoutConfirmSummary(): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
   fillCheckoutCardFields(card: CheckoutCard): Promise<void>;
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
@@ -68,6 +69,7 @@ interface PayDependencies {
   onCardResolved: (cardRef: string) => void;
   // fill_card only: hands the session layer what the later confirm step needs.
   onCardFilled: (pending: PendingCardFill) => void;
+  onCardFillCleanupFailed: () => void;
 }
 
 const cardSchema = z.object({
@@ -256,6 +258,7 @@ function defaultDependencies(): PayDependencies {
     },
     onCardResolved: () => undefined,
     onCardFilled: () => undefined,
+    onCardFillCleanupFailed: () => undefined,
   };
 }
 
@@ -683,11 +686,23 @@ export async function executeOperatePay(
       try {
         await browser.fillCheckoutCardFields(card);
       } catch (error) {
-        if (error instanceof UnrecognizedPaymentFrameError) {
+        const frameOrigin =
+          error instanceof UnrecognizedPaymentFrameError
+            ? error.frameOrigin
+            : error instanceof PaymentCardFillCleanupError
+              ? error.frameOrigin
+              : undefined;
+        if (error instanceof PaymentCardFillCleanupError) {
+          deps.onCardFillCleanupFailed();
+        }
+        if (frameOrigin !== undefined) {
           return {
             status: "payment_frame_not_recognized",
-            frame_origin: error.frameOrigin,
+            frame_origin: frameOrigin,
             approval_url: approvalUrl,
+            ...(error instanceof PaymentCardFillCleanupError
+              ? { payment_fields_cleared: false }
+              : {}),
             reason:
               "The card fields live in a cross-origin frame that is not a recognized " +
               "payment-provider surface; the vaulted card is never filled into an " +
@@ -697,6 +712,9 @@ export async function executeOperatePay(
         return {
           status: "payment_card_fill_failed",
           approval_url: approvalUrl,
+          ...(error instanceof PaymentCardFillCleanupError
+            ? { payment_fields_cleared: false }
+            : {}),
           reason:
             error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
               ? error.message
@@ -875,7 +893,7 @@ export async function executeOperatePayConfirm(
 
   let live: CheckoutSummary;
   try {
-    live = await browser.readCheckoutSummary(args.currency ?? checkout.currency);
+    live = await browser.readCheckoutConfirmSummary();
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (message === "payment_checkout_total_not_found") {

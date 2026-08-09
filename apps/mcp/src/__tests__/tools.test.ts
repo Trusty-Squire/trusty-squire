@@ -54,6 +54,12 @@ function stubBrowser(): PaymentBrowser {
       amount_cents: 100,
       currency: "USD",
     }),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue({
+      merchant: "M",
+      checkout_origin: "https://m.test",
+      amount_cents: 100,
+      currency: "USD",
+    }),
     fillAndSubmitCheckout: vi.fn().mockResolvedValue({ three_ds_required: false }),
     fillCheckoutCardFields: vi.fn().mockResolvedValue(undefined),
     submitFilledCheckout: vi.fn().mockResolvedValue({ three_ds_required: false }),
@@ -307,7 +313,7 @@ describe("operate_pay split checkout phases", () => {
 
   it("confirm keeps the pending fill on an amount mismatch (no charge)", async () => {
     mockPending = { ...PENDING };
-    vi.mocked(mockBrowser.readCheckoutSummary).mockResolvedValue({
+    vi.mocked(mockBrowser.readCheckoutConfirmSummary).mockResolvedValue({
       merchant: "M",
       checkout_origin: "https://m.test",
       amount_cents: 999,

@@ -1070,8 +1070,8 @@ function redactPaymentObservationText(
       "[sealed payment]",
     );
   }
-  redacted = redacted.replace(/\d(?:[\d\s-]*\d)?/g, (candidate) => {
-    const digits = candidate.replace(/[\s-]/g, "");
+  redacted = redacted.replace(/\d(?:[\p{P}\p{Z}\s]*\d)*/gu, (candidate) => {
+    const digits = candidate.replace(/\D/g, "");
     return digits.length >= 13 && digits.length <= 19 && passesLuhn(digits)
       ? "[sealed payment]"
       : candidate;
@@ -2398,6 +2398,12 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
 export function setActivePendingCardFill(pending: PendingCardFill): void {
   const session = activeProvisionSession();
   session.pendingCardFill = pending;
+  session.paymentFieldSealActive = true;
+}
+
+export function retainActivePaymentFieldSeal(): void {
+  const session = activeProvisionSession();
+  session.pendingCardFill = null;
   session.paymentFieldSealActive = true;
 }
 

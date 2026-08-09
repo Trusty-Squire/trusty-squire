@@ -327,6 +327,7 @@ async function runSeam(cfg: {
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);

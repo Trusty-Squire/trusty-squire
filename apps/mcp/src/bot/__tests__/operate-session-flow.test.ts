@@ -432,6 +432,7 @@ import {
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
+  retainActivePaymentFieldSeal,
   clearActivePendingCardFill,
   recipeTargetFor,
   captureObserved,
@@ -3911,13 +3912,16 @@ describe("pending card-fill charge guard", () => {
         value: "123",
       }),
     ];
-    h.visibleText = "Card preview 4242 4242 4242 4242 · CVV 123";
+    h.visibleText = "Card preview 4242·4242·4242·4242 and 4242.4242.4242.4242 · CVV 123";
 
     const full = await observe(started.session_id, "full");
     expect(JSON.stringify(full)).not.toContain("4242424242424242");
-    expect(JSON.stringify(full)).not.toContain("4242 4242 4242 4242");
+    expect(JSON.stringify(full)).not.toContain("4242·4242·4242·4242");
+    expect(JSON.stringify(full)).not.toContain("4242.4242.4242.4242");
     expect(JSON.stringify(full)).not.toContain('"123"');
-    expect(full.text).toBe("Card preview [sealed payment] · CVV [sealed payment]");
+    expect(full.text).toBe(
+      "Card preview [sealed payment] and [sealed payment] · CVV [sealed payment]",
+    );
     expect(full.elements?.map((element) => element.value)).toEqual(["[sealed]", "[sealed]"]);
   });
 
@@ -3935,7 +3939,7 @@ describe("pending card-fill charge guard", () => {
       serviceUrl: "https://shop.example.com/checkout",
     });
     setActivePendingCardFill(pending);
-    clearActivePendingCardFill(false);
+    retainActivePaymentFieldSeal();
 
     const full = await observe(started.session_id, "full");
     expect(JSON.stringify(full)).not.toContain("4242424242424242");

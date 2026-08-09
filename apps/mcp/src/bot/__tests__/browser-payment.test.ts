@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BrowserController,
   hasPayPalHostedCheckoutFrame,
+  PaymentCardFillCleanupError,
   parseCheckoutAmount,
   parseCheckoutAmounts,
   parseStructuredCheckoutTotal,
@@ -645,6 +646,25 @@ describe("structured-data checkout totals", () => {
     ).resolves.toMatchObject({ amount_cents: 14_990, currency: "TRY" });
   });
 
+  it("requires a visible labeled total with live currency for charge confirmation", async () => {
+    const structured = {
+      jsonLd: [orderJsonLd({ price: "149.90", priceCurrency: "USD" })],
+      microdata: [],
+    };
+    await expect(
+      structuredCheckoutController("Genel Toplam 149,90", structured).readCheckoutConfirmSummary(),
+    ).rejects.toThrow("payment_checkout_total_not_found");
+    await expect(
+      structuredCheckoutController("Order total 149.90", structured).readCheckoutConfirmSummary(),
+    ).rejects.toThrow("payment_checkout_total_not_found");
+    await expect(
+      structuredCheckoutController(
+        "Order total US$ 149.90",
+        structured,
+      ).readCheckoutConfirmSummary(),
+    ).resolves.toMatchObject({ amount_cents: 14_990, currency: "USD" });
+  });
+
   it("keeps the visible labeled total when structured data disagrees", async () => {
     // Stale server-rendered JSON-LD must not override the total the user sees.
     await expect(
@@ -1107,6 +1127,80 @@ describe("split-checkout card fill (real browser)", () => {
         expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
         expect(await page.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
         expect(await page.locator('[autocomplete="cc-name"]').inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "semantically clears a partial fill after the PAN node is replaced",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <input id="pan" autocomplete="cc-number">
+          <input placeholder="MM/YY">
+          <input autocomplete="cc-name">
+          <script>
+            document.addEventListener("input", (event) => {
+              const input = event.target;
+              if (!(input instanceof HTMLInputElement) || input.id !== "pan") return;
+              if (input.value === "" || document.body.dataset.replaced === "true") return;
+              document.body.dataset.replaced = "true";
+              const replacement = input.cloneNode(true);
+              replacement.removeAttribute("data-ts-sealed-payment");
+              replacement.value = input.value;
+              input.replaceWith(replacement);
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:cvv",
+        );
+        expect(await page.locator("#pan").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "reports unproven cleanup when a controlled PAN field restores its value",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <input id="pan" autocomplete="cc-number">
+          <input placeholder="MM/YY">
+          <input autocomplete="cc-name">
+          <script>
+            let stored = "";
+            document.addEventListener("input", (event) => {
+              const input = event.target;
+              if (!(input instanceof HTMLInputElement) || input.id !== "pan") return;
+              if (input.value !== "") stored = input.value;
+              const replacement = input.cloneNode(true);
+              replacement.removeAttribute("data-ts-sealed-payment");
+              replacement.value = input.value === "" ? stored : input.value;
+              input.replaceWith(replacement);
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toBeInstanceOf(
+          PaymentCardFillCleanupError,
+        );
+        expect(await page.locator("#pan").inputValue()).toBe(CARD.pan);
       } finally {
         await browser.close();
       }

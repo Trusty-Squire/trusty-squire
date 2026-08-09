@@ -282,6 +282,18 @@ export class UnrecognizedPaymentFrameError extends Error {
   }
 }
 
+export class PaymentCardFillCleanupError extends Error {
+  readonly paymentFieldsCleared = false;
+  readonly frameOrigin?: string;
+
+  constructor(error: unknown) {
+    const source = error instanceof Error ? error : new Error("payment_card_fill_failed");
+    super(source.message);
+    this.name = "PaymentCardFillCleanupError";
+    if (source instanceof UnrecognizedPaymentFrameError) this.frameOrigin = source.frameOrigin;
+  }
+}
+
 const CHECKOUT_PAN_FIELD_SELECTORS =
   'input[autocomplete~="cc-number"],input[name*="cardnumber" i],input[id*="card-number" i],input[id*="cardnumber" i]';
 
@@ -6624,6 +6636,33 @@ export class BrowserController {
     };
   }
 
+  async readCheckoutConfirmSummary(): Promise<CheckoutSummary> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const identity = await page.evaluate(() => ({
+      title: document.title,
+      siteName:
+        document.querySelector<HTMLMetaElement>('meta[property="og:site_name"]')?.content ??
+        document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
+        "",
+    }));
+    const texts = await Promise.all(
+      page
+        .frames()
+        .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
+    );
+    const parsedAmount = parseCheckoutAmountResult(texts);
+    if (parsedAmount.currencyUnresolved) {
+      throw new Error("payment_checkout_currency_unresolved");
+    }
+    if (parsedAmount.amount === null) throw new Error("payment_checkout_total_not_found");
+    return {
+      merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
+      checkout_origin: new URL(page.url()).origin,
+      ...parsedAmount.amount,
+    };
+  }
+
   /**
    * Read a settled checkout-review amount.  Checkout pages can retain an
    * earlier subtotal while asynchronously replacing the final labeled total;
@@ -6995,13 +7034,17 @@ export class BrowserController {
     try {
       await this.fillCheckoutCardIntoFrames(allowed, card, true);
     } catch (error) {
-      // A partial fill must not leave card data behind on a refusal.
-      await this.clearSealedPaymentFields();
+      let fillError = error;
       if (error instanceof Error && error.message === "payment_field_not_found:pan") {
         const excluded = await this.excludedPanFrameOrigin(new Set(allowed));
-        if (excluded !== null) throw new UnrecognizedPaymentFrameError(excluded);
+        if (excluded !== null) fillError = new UnrecognizedPaymentFrameError(excluded);
       }
-      throw error;
+      try {
+        await this.clearCheckoutCardFieldsInFrames(allowed);
+      } catch {
+        throw new PaymentCardFillCleanupError(fillError);
+      }
+      throw fillError;
     }
   }
 
@@ -7066,7 +7109,11 @@ export class BrowserController {
 
   async clearSealedPaymentFields(): Promise<void> {
     if (!this.page) return;
-    for (const frame of this.page.frames()) {
+    await this.clearSealedPaymentFieldsInFrames(this.page.frames());
+  }
+
+  private async clearSealedPaymentFieldsInFrames(frames: readonly Frame[]): Promise<void> {
+    for (const frame of frames) {
       await frame
         .locator('[data-ts-sealed-payment="1"]')
         .evaluateAll((elements) => {
@@ -7087,7 +7134,12 @@ export class BrowserController {
 
   async clearCheckoutCardFields(): Promise<void> {
     if (!this.page) return;
-    for (const frame of this.page.frames()) {
+    await this.clearCheckoutCardFieldsInFrames(this.page.frames());
+  }
+
+  private async clearCheckoutCardFieldsInFrames(frames: readonly Frame[]): Promise<void> {
+    if (!this.page) return;
+    for (const frame of frames) {
       const fields = frame.locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
       const count = Math.min(await fields.count().catch(() => 0), 40);
       for (let i = 0; i < count; i += 1) {
@@ -7098,9 +7150,9 @@ export class BrowserController {
           .catch(() => undefined);
       }
     }
-    await this.clearSealedPaymentFields();
+    await this.clearSealedPaymentFieldsInFrames(frames);
     await this.page.waitForTimeout(0).catch(() => undefined);
-    for (const frame of this.page.frames()) {
+    for (const frame of frames) {
       const uncleared = await frame
         .locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS)
         .evaluateAll((elements) =>

@@ -12,6 +12,7 @@ import {
 import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
 import { manualCardEntryBlockReason } from "../provision-session.js";
 import {
+  PaymentCardFillCleanupError,
   UnrecognizedPaymentFrameError,
   type CheckoutCard,
   type CheckoutSubmitResult,
@@ -237,6 +238,7 @@ async function harness(
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
     fillCheckoutCardFields: vi.fn(),
     submitFilledCheckout: vi.fn(),
@@ -322,6 +324,7 @@ describe("operate_pay", () => {
       const browser: PaymentBrowser = {
         isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
         readCheckoutSummary: vi.fn().mockRejectedValue(new Error(error)),
+        readCheckoutConfirmSummary: vi.fn().mockRejectedValue(new Error(error)),
         currentUrl: vi.fn().mockReturnValue("https://flowers.example.test/checkout"),
         fillAndSubmitCheckout: vi.fn(),
         fillCheckoutCardFields: vi.fn(),
@@ -772,6 +775,7 @@ async function runJit(cfg: {
       }
       return JIT_CHECKOUT;
     }),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(JIT_CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${JIT_CHECKOUT.checkout_origin}/session/test`),
     fillCheckoutCardFields: vi.fn(),
     submitFilledCheckout: vi.fn(),
@@ -1031,6 +1035,7 @@ async function runSplitFill(
   auditBodies: unknown[];
   filledCards: CheckoutCard[];
   pendings: PendingCardFill[];
+  cleanupFailureCalls: number;
   browser: PaymentBrowser;
 }> {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -1039,6 +1044,7 @@ async function runSplitFill(
   const auditBodies: unknown[] = [];
   const filledCards: CheckoutCard[] = [];
   const pendings: PendingCardFill[] = [];
+  let cleanupFailureCalls = 0;
   const nonce = "split-nonce";
   const agent = "split-agent";
 
@@ -1129,6 +1135,9 @@ async function runSplitFill(
       cfg.liveSummary !== undefined
         ? vi.fn().mockResolvedValue(cfg.liveSummary)
         : vi.fn().mockRejectedValue(new Error("payment_checkout_total_not_found")),
+    readCheckoutConfirmSummary: vi
+      .fn()
+      .mockRejectedValue(new Error("payment_checkout_total_not_found")),
     currentUrl: vi.fn(() => {
       urlCalls += 1;
       if (cfg.driftOriginAfterApproval !== undefined && urlCalls > 1) {
@@ -1172,10 +1181,21 @@ async function runSplitFill(
       webBase: "https://web.test",
       surfaceApprovalUrl: vi.fn(),
       onCardFilled: (pending) => pendings.push(pending),
+      onCardFillCleanupFailed: () => {
+        cleanupFailureCalls += 1;
+      },
     },
   )) as Record<string, unknown>;
 
-  return { result, approvalBodies, auditBodies, filledCards, pendings, browser };
+  return {
+    result,
+    approvalBodies,
+    auditBodies,
+    filledCards,
+    pendings,
+    cleanupFailureCalls,
+    browser,
+  };
 }
 
 describe("operate_pay split checkout — fill_card", () => {
@@ -1266,6 +1286,20 @@ describe("operate_pay split checkout — fill_card", () => {
       reason: "payment_field_not_found:cvv",
     });
   });
+
+  it("activates the non-retryable seal when failed-fill cleanup is unproven", async () => {
+    const { result, cleanupFailureCalls, pendings } = await runSplitFill({
+      fillRejects: new PaymentCardFillCleanupError(new Error("payment_field_not_found:cvv")),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_card_fill_failed",
+      reason: "payment_field_not_found:cvv",
+      payment_fields_cleared: false,
+    });
+    expect(cleanupFailureCalls).toBe(1);
+    expect(pendings).toEqual([]);
+  });
 });
 
 function splitPending(): PendingCardFill {
@@ -1281,6 +1315,7 @@ function splitPending(): PendingCardFill {
 
 async function runConfirm(cfg: {
   live?: CheckoutSummary | Error;
+  permissiveLive?: CheckoutSummary | Error;
   submit?: CheckoutSubmitResult | Error;
   threeDsResolution?: "succeeded" | "failed" | "timeout";
   waitSeconds?: number;
@@ -1307,10 +1342,15 @@ async function runConfirm(cfg: {
   }) as typeof fetch;
 
   const live = cfg.live ?? { ...SPLIT_CHECKOUT };
+  const permissiveLive = cfg.permissiveLive ?? live;
   const submit = cfg.submit ?? { three_ds_required: false };
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary:
+      permissiveLive instanceof Error
+        ? vi.fn().mockRejectedValue(permissiveLive)
+        : vi.fn().mockResolvedValue(permissiveLive),
+    readCheckoutConfirmSummary:
       live instanceof Error ? vi.fn().mockRejectedValue(live) : vi.fn().mockResolvedValue(live),
     currentUrl: vi.fn().mockReturnValue(`${SPLIT_CHECKOUT.checkout_origin}/checkout/confirm`),
     fillAndSubmitCheckout: vi.fn(),
@@ -1354,8 +1394,8 @@ describe("operate_pay split checkout — confirm", () => {
     });
     expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
     expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
-    // The mandate currency is the read's fallback hint.
-    expect(browser.readCheckoutSummary).toHaveBeenCalledWith("USD");
+    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledWith();
+    expect(browser.readCheckoutSummary).not.toHaveBeenCalled();
     expect(auditBodies).toEqual([
       expect.objectContaining({
         amountCents: SPLIT_CHECKOUT.amount_cents,
@@ -1375,6 +1415,18 @@ describe("operate_pay split checkout — confirm", () => {
     expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
     expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
     expect(auditBodies).toEqual([]);
+  });
+
+  it("does not fall back to the permissive summary reader at confirmation", async () => {
+    const { result, browser } = await runConfirm({
+      live: new Error("payment_checkout_total_not_found"),
+      permissiveLive: { ...SPLIT_CHECKOUT },
+    });
+
+    expect(result).toMatchObject({ status: "payment_checkout_total_not_found" });
+    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledTimes(1);
+    expect(browser.readCheckoutSummary).not.toHaveBeenCalled();
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
   });
 
   it("refuses to charge when the live total differs from the approved amount", async () => {
