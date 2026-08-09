@@ -397,14 +397,6 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
-### 9. `context.addInitScript` corrupts non-UTF-8 pages under patchright (hardened) — install stealth per-navigation, not at context init
-
-Under the hardened launcher (patchright, default-ON via `BOT_CDP_HARDENED`), registering **any** `context.addInitScript` makes patchright intercept and rewrite every `text/html` Document response to inject those scripts into `<head>`. Its injection path decodes the raw response bytes as UTF-8 unconditionally, so a page served in a non-UTF-8 charset (EUC-JP / Shift_JIS — Rakuten et al.) is corrupted at the byte level **before Chrome parses it**: the DOM itself then holds `鐃緒申…` mojibake and `operate_observe`/`operate_extract` faithfully report the garbage. Only server-rendered HTML text garbles; text a page injects later from a JS bundle or XHR/JSON response survives (not `text/html`, never rewritten) — the selective garble seen in the wild. Confirmed still present in patchright ≥ 1.61.1, so an upgrade does not fix it.
-
-Under patchright those context init scripts **don't even reach the main world** (they land in its isolated world), so `browser.ts` installs its stealth patches (WebGL/device spoof, `__name` shim) via the per-navigation `page.evaluate`/`framenavigated` re-application, and gates the context-level `addInitScript` installs behind `if (!hardened)`. Baseline (playwright-extra) does not rewrite bodies and its init scripts DO reach the main world, so it keeps them.
-
-**The rule:** never add a new `context.addInitScript` to the operator browser path expecting it to run under patchright — it won't reach the main world and it silently corrupts non-UTF-8 pages. Install stealth/main-world scripts through the existing per-navigation `page.evaluate` re-application instead. Regression guard: `apps/mcp/src/bot/__tests__/observe-jp-mojibake.test.ts`.
-
 ---
 
 ## Maintaining this file

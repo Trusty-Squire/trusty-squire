@@ -1827,23 +1827,13 @@ export class BrowserController {
     const evaluateNameShimScript =
       'Object.defineProperty(globalThis, "__name", { value: (fn) => fn, configurable: true });';
     const contextInitScripts = contextInitScriptsFor({ hardened, remoteMode });
-    // Non-ASCII page mojibake (operator-observe-jp-mojibake). ANY
-    // context.addInitScript under patchright (hardened) makes patchright
-    // intercept and REWRITE every text/html Document response to inject the
-    // init scripts into <head> — and its injection path decodes the raw
-    // response bytes as UTF-8 unconditionally (Buffer.from(body,"base64")
-    // .toString("utf-8")), so a page served in EUC-JP / Shift_JIS (Rakuten et
-    // al.) is corrupted at the byte level BEFORE Chrome parses it: the DOM
-    // itself then holds `鐃緒申…` mojibake, which observe/extract faithfully
-    // reports. Only server-rendered HTML text garbles; text a page injects
-    // later from a JS bundle or XHR/JSON response survives (those aren't
-    // text/html, so patchright never rewrites them) — exactly the selective
-    // garble seen in the wild. Under patchright these context init scripts
-    // don't even reach the main world (they land in its isolated world; the
-    // per-navigation page.evaluate re-application below is the effective path),
-    // so skipping them here loses NO stealth and removes the corruption
-    // trigger. Baseline (playwright-extra) does not rewrite bodies and its
-    // init scripts DO reach the main world, so it keeps them.
+    // Never register context init scripts under patchright. Its injection path
+    // rewrites text/html after decoding the response as UTF-8, corrupting
+    // server-rendered EUC-JP and Shift_JIS before Chrome parses it. The scripts
+    // also land outside the main world under patchright, so the per-navigation
+    // page.evaluate path below is the effective hardened-mode installation.
+    // Baseline playwright-extra does not rewrite responses and keeps these
+    // document-start installs. Regression guard: observe-jp-mojibake.test.ts.
     if (contextInitScripts.includes("evaluate-name-shim")) {
       await context.addInitScript({ content: evaluateNameShimScript });
     }
@@ -1960,11 +1950,11 @@ export class BrowserController {
     }
     this.page = context.pages()[0] ?? (await context.newPage());
     this.primaryPage = this.page;
-    // addInitScript covers document-start page JS, but Playwright's
-    // page.evaluate utility execution can run in a separate realm. Install the
-    // same no-op helper there with a STRING evaluate (tsx cannot wrap strings
-    // with __name). This prevents dev-runtime source runs from crashing before
-    // replay reaches the service page.
+    // In baseline mode addInitScript covers document-start page JS, but
+    // Playwright's page.evaluate utility execution can run in a separate realm.
+    // Install the same no-op helper there with a STRING evaluate (tsx cannot
+    // wrap strings with __name). This prevents dev-runtime source runs from
+    // crashing before replay reaches the service page.
     await this.page.evaluate(evaluateNameShimScript).catch(() => undefined);
     // Re-apply on every navigation — the main-world reach patchright's isolated
     // init world denies us. framenavigated fires at navigation-commit (before

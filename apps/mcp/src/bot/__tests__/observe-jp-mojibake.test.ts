@@ -1,24 +1,7 @@
-// Regression for operator-observe-jp-mojibake: element extraction returning
-// garbled (鐃緒申…) Japanese for <select> option labels + button text on
-// non-UTF-8 pages (Rakuten et al. serve EUC-JP / Shift_JIS).
-//
-// ROOT CAUSE (proven below): the hardened launcher (patchright, default-ON via
-// BOT_CDP_HARDENED) makes patchright intercept and REWRITE every text/html
-// Document response to inject its context init scripts into <head> — and that
-// injection decodes the raw response bytes as UTF-8 unconditionally, so an
-// EUC-JP page is corrupted at the byte level BEFORE Chrome parses it. The DOM
-// then holds mojibake, which observe/extract faithfully reports. The trigger is
-// having ANY context.addInitScript registered; with none, patchright leaves the
-// body untouched. Under patchright those init scripts don't reach the main
-// world anyway (the per-navigation page.evaluate re-application is the effective
-// path), so browser.ts now skips the context-level installs under hardened
-// mode — removing the corruption trigger at no stealth cost.
-//
-// These tests exercise the REAL extractInteractiveElements against a real
-// EUC-JP page served over local HTTP (no network egress, no Rakuten), launched
-// with the SAME hardened launcher production uses. The "fixed production shape"
-// (no context init script) must extract true Unicode; a companion test pins the
-// upstream trigger so a patchright behavior change would surface here.
+// Regression coverage for non-UTF-8 label extraction. The context-init safety
+// invariant and upstream patchright constraint are documented where the scripts
+// are installed in browser.ts. These tests use real Chromium and a local EUC-JP
+// response to cover main-frame and iframe extraction, plus the upstream trigger.
 
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
