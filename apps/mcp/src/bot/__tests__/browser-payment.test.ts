@@ -5,6 +5,7 @@ import {
   BrowserController,
   hasPayPalHostedCheckoutFrame,
   parseCheckoutAmount,
+  parseCheckoutAmounts,
 } from "../browser.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
@@ -119,6 +120,7 @@ describe("checkout payment parsing", () => {
 
   it.each([
     ["合計 8,950円", 8_950],
+    ["合計 8,950円（税込）", 8_950],
     ["合計金額（税込）8,950円", 8_950],
     ["ご注文合計: 8,950円", 8_950],
     ["ご注文金額　8,950円", 8_950],
@@ -160,6 +162,9 @@ describe("checkout payment parsing", () => {
     ["消費税 134円"],
     ["税抜合計 8,950円"],
     ["お支払い金額（税抜）8,950円"],
+    ["合計 8,950円（税抜）"],
+    ["合計 8,950円(税抜き)"],
+    ["合計 8,950円（本体価格）"],
     ["合計数量: 3"],
     ["ここに合計はない"],
   ])("refuses non-total or tax-exclusive Japanese lines: %s", (text) => {
@@ -172,6 +177,29 @@ describe("checkout payment parsing", () => {
       expect(parseCheckoutAmount([text], "JPY")).toBeNull();
     },
   );
+
+  it("applies tax-exclusive and count guards to every checkout amount", () => {
+    expect(
+      parseCheckoutAmounts(
+        ["合計 8,950円（税抜）", "合計 3点", "お支払い金額 9,845円（税込）"],
+        "JPY",
+      ),
+    ).toEqual([{ amount_cents: 9_845, currency: "JPY" }]);
+  });
+
+  it("refuses a count-only checkout review summary", async () => {
+    const browser = new BrowserController({ humanize: false });
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
+      frames: () => [{ evaluate: vi.fn().mockResolvedValue("合計 3点") }],
+      url: () => "https://flowers.example.test/checkout",
+    };
+    Object.defineProperty(browser, "page", { value: page });
+
+    await expect(browser.readCheckoutReviewSummary("JPY")).rejects.toThrow(
+      "payment_checkout_total_not_found",
+    );
+  });
 
   it("fails closed when yen evidence is glued to unparseable trailing text", async () => {
     // 円税込 is currency evidence the token resolver cannot read; trusting the
@@ -234,6 +262,37 @@ describe("checkout payment parsing", () => {
       message: "payment_checkout_currency_unresolved",
     });
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores struck-through totals in initial and review reads",
+    async () => {
+      const playwrightBrowser = await chromium.launch({ headless: true });
+      try {
+        const page = await playwrightBrowser.newPage();
+        await page.setContent(`
+          <title>Japan Flower Shop</title>
+          <del>合計 968円</del>
+          <s>合計 1,100円</s>
+          <strike>合計 1,200円</strike>
+          <div style="text-decoration: line-through">合計 1,300円</div>
+          <div>合計 1,468円</div>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutSummary("JPY")).resolves.toMatchObject({
+          amount_cents: 1_468,
+          currency: "JPY",
+        });
+        await expect(controller.readCheckoutReviewSummary("JPY")).resolves.toMatchObject({
+          amount_cents: 1_468,
+          currency: "JPY",
+        });
+      } finally {
+        await playwrightBrowser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "types digits into a combined numeric expiry field and lets the site format MM/YY",
