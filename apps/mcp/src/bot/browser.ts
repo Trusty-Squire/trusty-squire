@@ -477,11 +477,31 @@ function classifyCheckoutCurrencyToken(token: string | undefined): CheckoutCurre
 }
 
 const AMBIGUOUS_CONFIRM_CURRENCY_NOTATIONS = new Set(["$", "¥", "￥"]);
+const CONFIRM_DOLLAR_PREFIX_CURRENCIES: Readonly<Record<string, string>> = {
+  A: "AUD",
+  AU: "AUD",
+  C: "CAD",
+  CA: "CAD",
+  HK: "HKD",
+  MX: "MXN",
+  NZ: "NZD",
+  SG: "SGD",
+  US: "USD",
+};
 
 function classifyCheckoutConfirmCurrencyToken(
   token: string | undefined,
 ): CheckoutCurrencyTokenResult {
-  if (token !== undefined && AMBIGUOUS_CONFIRM_CURRENCY_NOTATIONS.has(token.toUpperCase())) {
+  if (token === undefined) return { currency: undefined, unresolved: false };
+  const upper = token.toUpperCase();
+  if (upper.endsWith("$") && upper.length > 1) {
+    const prefix = upper.slice(0, -1);
+    const currency = CHECKOUT_CURRENCY_CODES.has(prefix)
+      ? prefix
+      : CONFIRM_DOLLAR_PREFIX_CURRENCIES[prefix];
+    if (currency !== undefined) return { currency, unresolved: false };
+  }
+  if (AMBIGUOUS_CONFIRM_CURRENCY_NOTATIONS.has(upper)) {
     return { currency: undefined, unresolved: true };
   }
   return classifyCheckoutCurrencyToken(token);
@@ -580,6 +600,7 @@ function parseCheckoutAmountResult(
 
 function parseCheckoutConfirmAmountResult(texts: readonly string[]): CheckoutAmountParseResult {
   let currencyUnresolved = false;
+  let amount: { amount_cents: number; currency: string } | null = null;
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
@@ -590,16 +611,10 @@ function parseCheckoutConfirmAmountResult(texts: readonly string[]): CheckoutAmo
         classifyCheckoutConfirmCurrencyToken,
       );
       currencyUnresolved ||= result.currencyUnresolved;
-      if (result.amount !== null) {
-        return {
-          amount: result.amount,
-          currencyUnresolved,
-          fallbackCurrencyScaleMismatch: false,
-        };
-      }
+      if (result.amount !== null) amount = result.amount;
     }
   }
-  return { amount: null, currencyUnresolved, fallbackCurrencyScaleMismatch: false };
+  return { amount, currencyUnresolved, fallbackCurrencyScaleMismatch: false };
 }
 
 export function parseCheckoutAmount(
@@ -945,6 +960,72 @@ function extractCheckoutSummaryText(): string {
       }
     }
   }
+}
+
+function extractObservationVisibleText(): string {
+  const body = document.body;
+  if (!body) return "";
+  const hidden: Array<{ el: HTMLElement | SVGElement; style: string | null }> = [];
+  let text = "";
+  try {
+    for (const el of Array.from(body.querySelectorAll("*"))) {
+      if (!(el instanceof HTMLElement || el instanceof SVGElement)) continue;
+      if (window.getComputedStyle(el).opacity === "0") {
+        hidden.push({ el, style: el.getAttribute("style") });
+        el.style.setProperty("display", "none", "important");
+      }
+    }
+    text = body.innerText ?? "";
+  } finally {
+    for (const { el, style } of hidden) {
+      if (style === null) {
+        el.style.removeProperty("display");
+        if (el.getAttribute("style") === "") el.removeAttribute("style");
+      } else {
+        el.setAttribute("style", style);
+      }
+    }
+  }
+  return text;
+}
+
+const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
+
+function passesPaymentLuhn(digits: string): boolean {
+  let sum = 0;
+  let double = false;
+  for (let index = digits.length - 1; index >= 0; index -= 1) {
+    let digit = Number(digits[index]);
+    if (double) {
+      digit *= 2;
+      if (digit > 9) digit -= 9;
+    }
+    sum += digit;
+    double = !double;
+  }
+  return sum % 10 === 0;
+}
+
+function containsLuhnPanSpan(text: string): boolean {
+  const digitPositions = Array.from(text.matchAll(/\d/g), (match) => match.index);
+  for (let start = 0; start + 13 <= digitPositions.length; start += 1) {
+    const maxLength = Math.min(19, digitPositions.length - start);
+    for (let length = 13; length <= maxLength; length += 1) {
+      const positions = digitPositions.slice(start, start + length);
+      if (positions[positions.length - 1]! - positions[0]! + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
+        break;
+      }
+      const digits = positions.map((position) => text[position]).join("");
+      if (passesPaymentLuhn(digits)) return true;
+    }
+  }
+  return false;
+}
+
+function containsVisiblePaymentMaterial(text: string): boolean {
+  return (
+    containsLuhnPanSpan(text) || /\b(?:cvv|cvc|security\s+code)\s*[:#-]?\s*\d{3,4}\b/iu.test(text)
+  );
 }
 
 function merchantFromPage(title: string, siteName: string, url: string): string {
@@ -6583,50 +6664,7 @@ export class BrowserController {
   // extractText() and must stay byte-identical, so this is purely additive.
   async extractVisibleText(): Promise<string> {
     if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => {
-      const body = document.body;
-      if (!body) return "";
-      // innerText excludes display:none/visibility:hidden but NOT opacity:0 —
-      // an element with opacity:0 keeps its layout box, so innerText still
-      // walks it. Hidden-native-<select> country-code widgets (e.g.
-      // react-phone-number-input) commonly style the real <select>
-      // opacity:0 (rather than display:none) so a native mobile picker still
-      // opens on tap; with every <option> in the box, that dumps hundreds of
-      // country names into the page text, flooding/truncating what a sighted
-      // user never sees (and what really matters, like an error banner past
-      // the truncation cutoff). A detached clone won't do: innerText on an
-      // unrendered element degrades to textContent semantics, re-including
-      // the display:none/script text innerText exists to exclude. Instead,
-      // temporarily force display:none on opacity:0 elements in the LIVE
-      // body, read innerText, and restore each element's style attribute
-      // byte-identically (removing it when it was absent) — all inside
-      // this one synchronous evaluate, so the change is never painted.
-      const hidden: Array<{ el: HTMLElement | SVGElement; style: string | null }> = [];
-      let text = "";
-      try {
-        for (const el of Array.from(body.querySelectorAll("*"))) {
-          if (!(el instanceof HTMLElement || el instanceof SVGElement)) continue;
-          if (window.getComputedStyle(el).opacity === "0") {
-            hidden.push({ el, style: el.getAttribute("style") });
-            el.style.setProperty("display", "none", "important");
-          }
-        }
-        text = body.innerText ?? "";
-      } finally {
-        for (const { el, style } of hidden) {
-          if (style === null) {
-            // Plain removeAttribute here leaves an empty style="" behind:
-            // Blink lazily re-syncs the dirty CSSOM declaration back into the
-            // attribute after the innerText read. Clear the declaration first.
-            el.style.removeProperty("display");
-            if (el.getAttribute("style") === "") el.removeAttribute("style");
-          } else {
-            el.setAttribute("style", style);
-          }
-        }
-      }
-      return text;
-    });
+    return await this.page.evaluate(extractObservationVisibleText);
   }
 
   async readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
@@ -6718,7 +6756,23 @@ export class BrowserController {
         try {
           const owner = await current.frameElement();
           try {
-            if (!(await owner.isVisible())) {
+            const rendered = await owner.evaluate((element) => {
+              let currentElement: Element | null = element;
+              while (currentElement !== null) {
+                const style = window.getComputedStyle(currentElement);
+                if (
+                  style.display === "none" ||
+                  style.visibility === "hidden" ||
+                  style.visibility === "collapse" ||
+                  Number.parseFloat(style.opacity) <= 0
+                ) {
+                  return false;
+                }
+                currentElement = currentElement.parentElement;
+              }
+              return true;
+            });
+            if (!(await owner.isVisible()) || !rendered) {
               trustedAndVisible = false;
               break;
             }
@@ -6932,6 +6986,7 @@ export class BrowserController {
     frames: readonly Frame[],
     card: CheckoutCard,
     billingOnly = false,
+    assertFrameEgress?: (frame: Frame) => void,
   ): Promise<void> {
     const filled = new Set<string>();
     const fillFirst = async (
@@ -6951,6 +7006,7 @@ export class BrowserController {
           const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "");
           await input.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
           if (tag === "select") {
+            assertFrameEgress?.(frame);
             const selected =
               (await input
                 .selectOption({ value })
@@ -6963,8 +7019,10 @@ export class BrowserController {
             if (!selected) continue;
           } else if (typePerKey) {
             await input.fill("");
+            assertFrameEgress?.(frame);
             await input.pressSequentially(value, { delay: this.humanize ? rand(40, 110) : 0 });
           } else {
+            assertFrameEgress?.(frame);
             await input.fill(value);
           }
           filled.add(field);
@@ -7104,8 +7162,30 @@ export class BrowserController {
         (frame) =>
           frame === page.mainFrame() || recognizedPaymentProviderFrame(frame.url(), pageUrl),
       );
+    const expectedPageOrigin = new URL(pageUrl).origin;
+    const expectedFrameOrigins = new Map(
+      allowed.map((frame) => [frame, new URL(frame.url()).origin] as const),
+    );
+    const assertFrameEgress = (frame: Frame): void => {
+      const livePageUrl = page.url();
+      let livePageOrigin: string;
+      let liveFrameOrigin: string;
+      try {
+        livePageOrigin = new URL(livePageUrl).origin;
+        liveFrameOrigin = new URL(frame.url()).origin;
+      } catch {
+        throw new UnrecognizedPaymentFrameError(frame.url());
+      }
+      if (
+        livePageOrigin !== expectedPageOrigin ||
+        liveFrameOrigin !== expectedFrameOrigins.get(frame) ||
+        (frame !== page.mainFrame() && !recognizedPaymentProviderFrame(frame.url(), livePageUrl))
+      ) {
+        throw new UnrecognizedPaymentFrameError(liveFrameOrigin);
+      }
+    };
     try {
-      await this.fillCheckoutCardIntoFrames(allowed, card, true);
+      await this.fillCheckoutCardIntoFrames(allowed, card, true, assertFrameEgress);
     } catch (error) {
       let fillError = error;
       if (error instanceof Error && error.message === "payment_field_not_found:pan") {
@@ -7113,7 +7193,7 @@ export class BrowserController {
         if (excluded !== null) fillError = new UnrecognizedPaymentFrameError(excluded);
       }
       try {
-        await this.clearCheckoutCardFieldsInFrames(allowed, card.pan);
+        await this.clearCheckoutCardFieldsInFrames(allowed);
       } catch {
         throw new PaymentCardFillCleanupError(fillError);
       }
@@ -7210,10 +7290,7 @@ export class BrowserController {
     await this.clearCheckoutCardFieldsInFrames(this.page.frames());
   }
 
-  private async clearCheckoutCardFieldsInFrames(
-    frames: readonly Frame[],
-    expectedPan?: string,
-  ): Promise<void> {
+  private async clearCheckoutCardFieldsInFrames(frames: readonly Frame[]): Promise<void> {
     if (!this.page) return;
     for (const frame of frames) {
       const fields = frame.locator(CHECKOUT_CARD_VALUE_FIELD_SELECTORS);
@@ -7241,20 +7318,16 @@ export class BrowserController {
         .catch(() => true);
       if (uncleared) throw new Error("payment_fields_not_cleared");
     }
-    if (expectedPan !== undefined) {
-      const panDigits = expectedPan.replace(/\D/g, "");
-      const visibleTexts = await Promise.all(
-        frames.map(async (frame) =>
-          frame.evaluate(extractCheckoutSummaryText).catch(() => undefined),
-        ),
-      );
-      if (
-        panDigits.length >= 13 &&
-        (visibleTexts.some((text) => text === undefined) ||
-          visibleTexts.some((text) => text!.replace(/\D/g, "").includes(panDigits)))
-      ) {
-        throw new Error("payment_fields_not_cleared");
-      }
+    const visibleTexts = await Promise.all(
+      frames.map(async (frame) =>
+        frame.evaluate(extractObservationVisibleText).catch(() => undefined),
+      ),
+    );
+    if (
+      visibleTexts.some((text) => text === undefined) ||
+      visibleTexts.some((text) => containsVisiblePaymentMaterial(text!))
+    ) {
+      throw new Error("payment_fields_not_cleared");
     }
   }
 

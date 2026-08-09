@@ -1080,6 +1080,8 @@ function redactPaymentObservationText(
   );
 }
 
+const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
+
 function redactExactDigitSequence(text: string, expectedDigits: string): string {
   if (expectedDigits.length < 13) return text;
   const digitMatches = Array.from(text.matchAll(/\d/g));
@@ -1087,6 +1089,9 @@ function redactExactDigitSequence(text: string, expectedDigits: string): string 
   for (let start = 0; start + expectedDigits.length <= digitMatches.length; start += 1) {
     const matches = digitMatches.slice(start, start + expectedDigits.length);
     if (matches.map((match) => match[0]).join("") !== expectedDigits) continue;
+    if (matches[matches.length - 1]!.index - matches[0]!.index + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
+      continue;
+    }
     replacements.push({
       start: matches[0]!.index,
       end: matches[matches.length - 1]!.index + 1,
@@ -1104,42 +1109,37 @@ function redactExactDigitSequence(text: string, expectedDigits: string): string 
 }
 
 function redactLuhnPanSpans(text: string): string {
-  return text
-    .split(/(\r?\n)/u)
-    .map((line) => {
-      if (/^\r?\n$/u.test(line)) return line;
-      const digitPositions = Array.from(line.matchAll(/\d/g), (match) => match.index);
-      const replacements: Array<{ start: number; end: number }> = [];
-      let startDigit = 0;
-      while (startDigit + 13 <= digitPositions.length) {
-        let matchedDigits = 0;
-        const maxDigits = Math.min(19, digitPositions.length - startDigit);
-        for (let length = maxDigits; length >= 13; length -= 1) {
-          const digits = digitPositions
-            .slice(startDigit, startDigit + length)
-            .map((position) => line[position])
-            .join("");
-          if (passesLuhn(digits)) {
-            matchedDigits = length;
-            replacements.push({
-              start: digitPositions[startDigit]!,
-              end: digitPositions[startDigit + length - 1]! + 1,
-            });
-            break;
-          }
-        }
-        startDigit += matchedDigits || 1;
+  const digitPositions = Array.from(text.matchAll(/\d/g), (match) => match.index);
+  const replacements: Array<{ start: number; end: number }> = [];
+  let startDigit = 0;
+  while (startDigit + 13 <= digitPositions.length) {
+    let matchedDigits = 0;
+    const maxDigits = Math.min(19, digitPositions.length - startDigit);
+    for (let length = maxDigits; length >= 13; length -= 1) {
+      const positions = digitPositions.slice(startDigit, startDigit + length);
+      if (positions[positions.length - 1]! - positions[0]! + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
+        continue;
       }
-      if (replacements.length === 0) return line;
-      let cursor = 0;
-      let result = "";
-      for (const replacement of replacements) {
-        result += `${line.slice(cursor, replacement.start)}[sealed payment]`;
-        cursor = replacement.end;
+      const digits = positions.map((position) => text[position]).join("");
+      if (passesLuhn(digits)) {
+        matchedDigits = length;
+        replacements.push({
+          start: positions[0]!,
+          end: positions[positions.length - 1]! + 1,
+        });
+        break;
       }
-      return result + line.slice(cursor);
-    })
-    .join("");
+    }
+    startDigit += matchedDigits || 1;
+  }
+  if (replacements.length === 0) return text;
+  let cursor = 0;
+  let result = "";
+  for (const replacement of replacements) {
+    result += `${text.slice(cursor, replacement.start)}[sealed payment]`;
+    cursor = replacement.end;
+  }
+  return result + text.slice(cursor);
 }
 
 function observationSealedFieldKeys(

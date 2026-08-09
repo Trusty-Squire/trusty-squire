@@ -3929,6 +3929,19 @@ describe("pending card-fill charge guard", () => {
     expect(full.elements?.map((element) => element.value)).toEqual(["[sealed]", "[sealed]"]);
   });
 
+  it("masks multiline PAN previews without a surviving payment input", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+    h.elements = [];
+    h.visibleText = "Card preview 4242\n4242\n4242\n4242";
+
+    const full = await observe(started.session_id, "full");
+    expect(full.text).toBe("Card preview [sealed payment]");
+    expect(JSON.stringify(full)).not.toContain("4242");
+  });
+
   it("keeps masking and charge locking after retry state is cleared without DOM cleanup", async () => {
     h.elements = [
       elem({
