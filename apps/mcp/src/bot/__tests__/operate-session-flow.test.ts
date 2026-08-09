@@ -635,6 +635,56 @@ describe("prepared-statement replay", () => {
     expect(result.status === "fallback_required" && result.next_index).toBe(1);
   });
 
+  it("makes manual card-entry refusal terminal without exposing replay data", async () => {
+    const pan = "5555 5555 5555 4444";
+    h.elements = [
+      elem({
+        testId: "card-number",
+        labelText: "Card number",
+        selector: "#card-number",
+        value: "",
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const recipe = replayRecipe({
+      trace: [
+        {
+          action: {
+            kind: "type",
+            target: {
+              dom_hint: { testid: "card-number" },
+              accessible_name: "Card number",
+              css: "#card-number",
+            },
+            value: pan,
+          },
+        },
+      ],
+    });
+
+    let refusal: unknown;
+    try {
+      await replayOperatorRecipe(started.session_id, recipe, {});
+    } catch (error) {
+      refusal = error;
+    }
+
+    expect(refusal).toBeInstanceOf(Error);
+    const surfaced = String(refusal);
+    expect(surfaced).toMatch(/operate_pay/);
+    expect(surfaced).not.toContain(pan);
+    expect(surfaced).not.toContain("fallback_required");
+    expect(surfaced).not.toContain("next_index");
+    expect(refusal).not.toHaveProperty("step");
+    expect(refusal).not.toHaveProperty("next_index");
+    expect(h.typed).toEqual([]);
+    await expect(replayOperatorRecipe(started.session_id, recipe, {}, 1)).rejects.toThrow(
+      /invalid replay continuation/i,
+    );
+  });
+
   it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
     h.elements = [];
     const recipe = replayRecipe({

@@ -1603,6 +1603,8 @@ function passesLuhn(digits: string): boolean {
   return sum % 10 === 0;
 }
 
+class ManualCardEntryBlockedError extends Error {}
+
 export function manualCardEntryBlockReason(text: string): string | null {
   for (const match of text.matchAll(/\d(?:[\d\s-]*\d)?/g)) {
     const digits = match[0].replace(/[\s-]/g, "");
@@ -2879,7 +2881,7 @@ export async function act(
   // replay's act() calls — so no model-supplied text path can reach a PAN fill.
   if (action.kind === "type") {
     const cardBlock = manualCardEntryBlockReason(action.text);
-    if (cardBlock !== null) throw new Error(cardBlock);
+    if (cardBlock !== null) throw new ManualCardEntryBlockedError(cardBlock);
   }
   const { browser } = session;
   let completedAction: ProvisionAction = action;
@@ -5114,6 +5116,7 @@ export async function replayOperatorRecipe(
         return await humanRequired(transitionGuard.reason, transitionGuard.field);
       }
     } catch (error) {
+      if (error instanceof ManualCardEntryBlockedError) throw error;
       return await fallback(step, i, error instanceof Error ? error.message : String(error));
     }
   }
