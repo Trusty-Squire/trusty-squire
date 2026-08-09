@@ -184,6 +184,30 @@ describe("launched through a bin symlink", () => {
     expect(out).toContain("Setting up this machine");
   }, 30_000);
 
+  it("the server process survives an escaped async error (unhandledRejection backstop)", async () => {
+    // Operator crash hardening: an async rejection that escapes a tool
+    // handler's try/catch (the uploadFile filechooser race) used to kill the
+    // whole server — the host agent saw "MCP server unreachable" and gave up.
+    // Prove the guards in the BUILT artifact keep the process alive through
+    // both escape classes and that it can still do work afterwards.
+    const distServer = path.join(pkgRoot, "dist", "server.js");
+    const probe = `
+      import { installServerProcessGuards } from ${JSON.stringify(distServer)};
+      installServerProcessGuards();
+      Promise.reject(new Error("escaped-rejection"));
+      setTimeout(() => { throw new Error("escaped-exception"); }, 30);
+      setTimeout(() => { console.log("STILL-ALIVE"); process.exit(0); }, 120);
+    `;
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e", probe], {
+      encoding: "utf8",
+      timeout: 25_000,
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("STILL-ALIVE");
+    expect(r.stderr).toContain("unhandled rejection (server kept alive): Error: escaped-rejection");
+    expect(r.stderr).toContain("uncaught exception (server kept alive): Error: escaped-exception");
+  }, 30_000);
+
   it("`mcp install` is removed", async () => {
     const link = await linkTo("mcp-install-removed-link.js");
     const out = runSubcommand(link, [
