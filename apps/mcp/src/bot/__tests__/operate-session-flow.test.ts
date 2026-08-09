@@ -74,6 +74,7 @@ const h = vi.hoisted(() => ({
     | {
         ok: true;
         text: string;
+        labels?: string[];
         safetySignals: { billingObject: boolean; accountSetup: boolean };
         frameTarget?: {
           framePath: string;
@@ -319,6 +320,7 @@ vi.mock("../browser.js", () => ({
           ok: true;
           handle: { dispose: () => Promise<void> };
           text: string;
+          labels: string[];
           safetySignals: { billingObject: boolean; accountSetup: boolean };
           frameTarget: {
             framePath: string;
@@ -339,6 +341,7 @@ vi.mock("../browser.js", () => ({
             },
           },
           text: h.locatorResolve.text,
+          labels: h.locatorResolve.labels ?? [h.locatorResolve.text],
           safetySignals: h.locatorResolve.safetySignals,
           frameTarget: h.locatorResolve.frameTarget ?? null,
         };
@@ -3856,7 +3859,8 @@ describe("pending card-fill charge guard", () => {
   it("refuses a locator-fallback click on a charge control while filled", async () => {
     h.locatorResolve = {
       ok: true,
-      text: "Pay now",
+      text: "",
+      labels: ["Pay now"],
       safetySignals: { billingObject: false, accountSetup: false },
     };
     const started = await startProvisionSession({
@@ -3868,5 +3872,31 @@ describe("pending card-fill charge guard", () => {
       act(started.session_id, { kind: "click", target: "text=Pay now" }),
     ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
     expect(h.locatorClickCalls).toBe(0);
+  });
+
+  it("masks re-rendered payment fields while a fill remains pending", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+    h.elements = [
+      elem({
+        id: "card-number",
+        autocomplete: "cc-number",
+        selector: "#card-number",
+        value: "4242424242424242",
+      }),
+      elem({
+        id: "security-code",
+        autocomplete: "cc-csc",
+        selector: "#security-code",
+        value: "123",
+      }),
+    ];
+
+    const full = await observe(started.session_id, "full");
+    expect(JSON.stringify(full)).not.toContain("4242424242424242");
+    expect(JSON.stringify(full)).not.toContain('"123"');
+    expect(full.elements?.map((element) => element.value)).toEqual(["[sealed]", "[sealed]"]);
   });
 });

@@ -150,7 +150,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       if (
         status === "payment_submitted" ||
         status === "payment_3ds_required" ||
-        status === "payment_declined"
+        status === "payment_declined" ||
+        status === "payment_outcome_unknown"
       ) {
         clearActivePendingCardFill();
       }

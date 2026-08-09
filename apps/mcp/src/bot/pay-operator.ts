@@ -930,10 +930,11 @@ export async function executeOperatePayConfirm(
     submitResult = await browser.submitFilledCheckout();
     if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
   } catch (error) {
-    // The filled fields are deliberately KEPT (unlike the single-page flow):
-    // nothing was charged, and the host can settle the page and retry confirm
-    // without a second approval ceremony.
-    paymentStatus = "payment_checkout_failed";
+    const submitNotFound = error instanceof Error && error.message === "payment_submit_not_found";
+    paymentStatus = submitNotFound ? "payment_checkout_failed" : "payment_outcome_unknown";
+    if (!submitNotFound) {
+      await browser.clearSealedPaymentFields().catch(() => undefined);
+    }
     let audit_recorded = true;
     try {
       await api.auditPayment({
@@ -948,10 +949,7 @@ export async function executeOperatePayConfirm(
     return {
       status: paymentStatus,
       audit_recorded,
-      reason:
-        error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
-          ? error.message
-          : "payment_checkout_failed",
+      reason: submitNotFound ? "payment_submit_not_found" : "payment_submit_outcome_unknown",
       approval_url: approvalUrl,
     };
   }

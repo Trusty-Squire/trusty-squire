@@ -1427,6 +1427,21 @@ describe("operate_pay split checkout — confirm", () => {
     ]);
   });
 
+  it("clears the fill and returns terminal unknown after an ambiguous submit failure", async () => {
+    const { result, auditBodies, browser } = await runConfirm({
+      submit: new Error("click failed after dispatch"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      reason: "payment_submit_outcome_unknown",
+    });
+    expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
+    expect(auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_outcome_unknown" }),
+    ]);
+  });
+
   it("passes a currency-unresolved read through as a refusal", async () => {
     const { result, browser } = await runConfirm({
       live: new Error("payment_checkout_currency_unresolved"),

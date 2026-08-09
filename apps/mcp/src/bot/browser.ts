@@ -90,6 +90,7 @@ export type ResolvedPageTarget =
       ok: true;
       handle: ElementHandle<Element>;
       text: string;
+      labels: string[];
       safetySignals: PageTargetSafetySignals;
       frameTarget: FrameTarget | null;
     }
@@ -3267,6 +3268,7 @@ export class BrowserController {
         ok: true;
         handle: ElementHandle<Element>;
         text: string;
+        labels: string[];
         safetySignals: PageTargetSafetySignals;
         documentOrigin: string;
       }
@@ -3395,6 +3397,18 @@ export class BrowserController {
             .filter((part) => part.length > 0)
             .join(" ");
         };
+        const effectiveLabels = (el: Element): string[] =>
+          Array.from(
+            new Set(
+              [
+                el.getAttribute("aria-label") ?? "",
+                el instanceof HTMLInputElement ? el.value : "",
+                renderedRaw(el),
+              ]
+                .map((part) => part.replace(/\s+/g, " ").trim())
+                .filter((part) => part.length > 0),
+            ),
+          );
 
         // Gather candidates across the light DOM and every OPEN shadow root.
         const all: Element[] = [];
@@ -3429,6 +3443,7 @@ export class BrowserController {
               count: 0,
               candidates: [] as string[],
               text: "",
+              labels: [] as string[],
               safetySignals: { billingObject: false, accountSetup: false },
               documentOrigin: location.origin,
             };
@@ -3464,6 +3479,7 @@ export class BrowserController {
             count: pool.length,
             candidates: pool.slice(0, 8).map((el) => renderedRaw(el).slice(0, 60)),
             text: "",
+            labels: [] as string[],
             safetySignals: { billingObject: false, accountSetup: false },
             documentOrigin: location.origin,
           };
@@ -3495,6 +3511,7 @@ export class BrowserController {
           count: uniq.length,
           candidates,
           text: win !== null ? renderedRaw(win).slice(0, 120) : "",
+          labels: win !== null ? effectiveLabels(win) : [],
           safetySignals:
             win !== null ? safetySignalsFor(win) : { billingObject: false, accountSetup: false },
           documentOrigin: location.origin,
@@ -3506,6 +3523,7 @@ export class BrowserController {
       count: r.count,
       candidates: r.candidates,
       text: r.text,
+      labels: r.labels,
       safetySignals: r.safetySignals,
       documentOrigin: r.documentOrigin,
     }));
@@ -3529,6 +3547,7 @@ export class BrowserController {
       ok: true,
       handle: asElement,
       text: meta.text ?? "",
+      labels: meta.labels ?? [],
       safetySignals: meta.safetySignals ?? { billingObject: false, accountSetup: false },
       documentOrigin: meta.documentOrigin,
     };
@@ -3544,6 +3563,7 @@ export class BrowserController {
     const matches: Array<{
       handle: ElementHandle<Element>;
       text: string;
+      labels: string[];
       safetySignals: PageTargetSafetySignals;
       frameTarget: FrameTarget | null;
     }> = [];
@@ -6941,6 +6961,9 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const page = this.page;
     const pageUrl = page.url();
+    if (!recognizedPaymentProviderFrame(pageUrl, pageUrl)) {
+      throw new Error("payment_checkout_https_required");
+    }
     const allowed = page
       .frames()
       .filter(

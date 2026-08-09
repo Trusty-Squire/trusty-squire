@@ -966,6 +966,86 @@ function elementTargetKeys(el: InteractiveElement): string[] {
   });
 }
 
+const PENDING_CARD_AUTOCOMPLETE_FIELDS = new Set([
+  "cc-number",
+  "cc-exp",
+  "cc-exp-month",
+  "cc-exp-year",
+  "cc-csc",
+  "cc-name",
+  "address-line1",
+  "address-line2",
+  "address-level1",
+  "address-level2",
+  "postal-code",
+  "country",
+]);
+
+function isPendingCardFilledField(el: InteractiveElement): boolean {
+  const autocomplete = (el.autocomplete ?? "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+  if (autocomplete.some((token) => PENDING_CARD_AUTOCOMPLETE_FIELDS.has(token))) return true;
+
+  const name = (el.name ?? "").toLowerCase();
+  const id = (el.id ?? "").toLowerCase();
+  const ariaLabel = (el.ariaLabel ?? "").toLowerCase();
+  const placeholder = (el.placeholder ?? "").toLowerCase();
+  return (
+    name.includes("cardnumber") ||
+    id.includes("card-number") ||
+    id.includes("cardnumber") ||
+    name.includes("cardholder") ||
+    name.includes("card-name") ||
+    id.includes("cardholder") ||
+    name.includes("cvv") ||
+    name.includes("cvc") ||
+    name.includes("security-code") ||
+    id.includes("cvv") ||
+    id.includes("cvc") ||
+    ((name.includes("exp") || id.includes("exp")) &&
+      (name.includes("month") ||
+        name.includes("year") ||
+        name.includes("date") ||
+        name.includes("expir") ||
+        id.includes("month") ||
+        id.includes("year") ||
+        id.includes("date") ||
+        id.includes("expir") ||
+        name === "exp" ||
+        id === "exp")) ||
+    placeholder.replace(/\s+/g, "") === "mm/yy" ||
+    ariaLabel.replace(/\s+/g, "") === "mm/yy" ||
+    name.includes("address_line1") ||
+    name.includes("address_line2") ||
+    name.includes("address1") ||
+    name.includes("address2") ||
+    name === "line1" ||
+    name === "line2" ||
+    name.includes("city") ||
+    name.includes("locality") ||
+    name.includes("state") ||
+    name.includes("region") ||
+    name.includes("postal") ||
+    name.includes("zip") ||
+    name.includes("country")
+  );
+}
+
+function observationSealedFieldKeys(
+  session: Session,
+  elements: readonly InteractiveElement[],
+): ReadonlySet<string> {
+  if (session.pendingCardFill === null) return session.sealedFieldKeys;
+  const sealed = new Set(session.sealedFieldKeys);
+  for (const el of elements) {
+    if (!isPendingCardFilledField(el)) continue;
+    for (const key of elementTargetKeys(el)) sealed.add(key);
+  }
+  return sealed;
+}
+
 // Resolve a host-supplied target string to one live element. Matching is by
 // structured path, test id, or label text, scored exact > startsWith > contains.
 // Returns null when nothing matches — the caller surfaces that rather than
@@ -2801,6 +2881,7 @@ async function observeSession(
   const generation = session.generation;
   const elements = await session.browser.extractInteractiveElements();
   session.lastElements = elements;
+  const sealedFieldKeys = observationSealedFieldKeys(session, elements);
   const text = await session.browser.extractVisibleText();
   const normalizedFull = text.replace(/\s+/g, " ").trim();
   const normalizedText = normalizedFull.slice(0, 4000);
@@ -2819,7 +2900,7 @@ async function observeSession(
       textTruncated,
       ...(guidance !== undefined ? { guidance } : {}),
       elements,
-      sealed: session.sealedFieldKeys,
+      sealed: sealedFieldKeys,
       prev: session.prevObserve,
     });
     // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
@@ -2879,10 +2960,10 @@ async function observeSession(
     url,
     normalizedText,
     textTruncated,
-    elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys, true)),
+    elements.map((el) => toCompactElement(el, refOf(el), sealedFieldKeys, true)),
   );
-  const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
-  const accessibility = buildAccessibilitySnapshot(elements, undefined, session.sealedFieldKeys);
+  const screen = buildScreenOutline(elements, normalizedText, sealedFieldKeys);
+  const accessibility = buildAccessibilitySnapshot(elements, undefined, sealedFieldKeys);
   return {
     session_id: session.id,
     url,
@@ -2892,11 +2973,11 @@ async function observeSession(
     ...(accessibility !== undefined ? { accessibility } : {}),
     elements: elements.map((el) => ({
       ref: refOf(el),
-      label: presentLabel(el, session.sealedFieldKeys),
+      label: presentLabel(el, sealedFieldKeys),
       tag: el.tag,
       role: el.role,
       type: el.type,
-      value: presentFieldValue(el, session.sealedFieldKeys),
+      value: presentFieldValue(el, sealedFieldKeys),
       checked: el.checked ?? null,
       href: el.href ?? null,
       testId: el.testId ?? null,
@@ -3184,7 +3265,7 @@ export async function act(
             assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
           }
           if (action.kind === "click" || action.kind === "js_click") {
-            const chargeBlock = pendingCardFillChargeBlockReason(session, [resolved.text]);
+            const chargeBlock = pendingCardFillChargeBlockReason(session, resolved.labels);
             if (chargeBlock !== null) throw new Error(chargeBlock);
           }
           session.usedLocatorFallback = true;

@@ -316,6 +316,20 @@ describe("operate_pay split checkout phases", () => {
     expect(mockBrowser.submitFilledCheckout).not.toHaveBeenCalled();
     expect(mockPending).not.toBeNull();
   });
+
+  it("confirm clears pending after an ambiguous submit outcome", async () => {
+    mockPending = { ...PENDING };
+    vi.mocked(mockBrowser.submitFilledCheckout).mockRejectedValue(
+      new Error("click failed after dispatch"),
+    );
+    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+    expect(result).toMatchObject({ status: "payment_outcome_unknown" });
+    expect(mockBrowser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
+    expect(mockPending).toBeNull();
+  });
 });
 
 describe("revoke_app_access", () => {

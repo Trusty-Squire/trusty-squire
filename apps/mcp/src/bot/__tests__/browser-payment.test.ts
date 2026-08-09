@@ -927,6 +927,12 @@ describe("recognized payment-provider frames", () => {
     // payment platform subdomain qualifies.
     expect(recognizedPaymentProviderFrame("https://www.rakuten.com/deals", PAGE)).toBe(false);
     expect(recognizedPaymentProviderFrame("http://js.stripe.com/v3/elements", PAGE)).toBe(false);
+    expect(
+      recognizedPaymentProviderFrame(
+        "http://shop.rakuten.co.jp/checkout/payment",
+        "http://shop.rakuten.co.jp/checkout/payment",
+      ),
+    ).toBe(false);
     expect(recognizedPaymentProviderFrame("about:blank", PAGE)).toBe(false);
     expect(recognizedPaymentProviderFrame("", PAGE)).toBe(false);
   });
@@ -978,6 +984,27 @@ describe("split-checkout card fill (real browser)", () => {
     });
     return { page, browser };
   }
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses card fill on a non-HTTPS main page before writing any field",
+    async () => {
+      const pageUrl = "http://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({ [pageUrl]: FRAME_FORM });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_checkout_https_required",
+        );
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "fills a recognized payment-provider iframe on a page with NO total, without submitting",
