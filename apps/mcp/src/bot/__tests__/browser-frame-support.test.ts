@@ -43,6 +43,13 @@ beforeAll(async () => {
       );
     } else if (req.url === "/frame-same") {
       res.end(page_(`<button data-testid="same-frame-btn">Same Frame Button</button>`));
+    } else if (req.url === "/frame-forged-origin") {
+      res.end(
+        page_(
+          `<script>window.origin = location.origin;</script>` +
+            `<button data-testid="forged-origin-frame-btn">Forged Origin Frame Button</button>`,
+        ),
+      );
     } else if (req.url === "/frame-select") {
       res.end(
         page_(
@@ -293,20 +300,24 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
     }
   }, 30000);
 
-  it("keeps a real-URL sandboxed frame opaque after its sandbox attribute is removed", async () => {
+  it("keeps a real-URL sandboxed frame opaque after it forges window.origin and loses its sandbox attribute", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {
       await page.setContent(
         page_(
-          `<iframe sandbox="allow-scripts" src="http://127.0.0.1:${port}/frame-same"></iframe>`,
+          `<iframe sandbox="allow-scripts" src="http://127.0.0.1:${port}/frame-forged-origin"></iframe>`,
         ),
       );
       await page.waitForLoadState("networkidle");
+      const frame = page.frames().find((candidate) =>
+        candidate.url().endsWith("/frame-forged-origin"),
+      );
+      expect(await frame?.evaluate(() => window.origin)).toBe(`http://127.0.0.1:${port}`);
       await page.locator("iframe").evaluate((frame) => frame.removeAttribute("sandbox"));
       const els = await ctrl.extractInteractiveElements();
-      const sandboxed = els.find((element) => element.testId === "same-frame-btn");
+      const sandboxed = els.find((element) => element.testId === "forged-origin-frame-btn");
       expect(sandboxed).toBeDefined();
-      expect(sandboxed?.frameUrl).toBe(`http://127.0.0.1:${port}/frame-same`);
+      expect(sandboxed?.frameUrl).toBe(`http://127.0.0.1:${port}/frame-forged-origin`);
       expect(sandboxed?.frameOrigin).toBe("null");
       expect(sandboxed?.frameOpaque).toBe(true);
     } finally {
