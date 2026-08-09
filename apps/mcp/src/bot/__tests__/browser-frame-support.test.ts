@@ -293,6 +293,27 @@ describe("extractInteractiveElements — frame support (real Chromium, real HTTP
     }
   }, 30000);
 
+  it("keeps a real-URL sandboxed frame opaque after its sandbox attribute is removed", async () => {
+    const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
+    try {
+      await page.setContent(
+        page_(
+          `<iframe sandbox="allow-scripts" src="http://127.0.0.1:${port}/frame-same"></iframe>`,
+        ),
+      );
+      await page.waitForLoadState("networkidle");
+      await page.locator("iframe").evaluate((frame) => frame.removeAttribute("sandbox"));
+      const els = await ctrl.extractInteractiveElements();
+      const sandboxed = els.find((element) => element.testId === "same-frame-btn");
+      expect(sandboxed).toBeDefined();
+      expect(sandboxed?.frameUrl).toBe(`http://127.0.0.1:${port}/frame-same`);
+      expect(sandboxed?.frameOrigin).toBe("null");
+      expect(sandboxed?.frameOpaque).toBe(true);
+    } finally {
+      await page.close();
+    }
+  }, 30000);
+
   it("keeps a sandbox='allow-scripts allow-same-origin' frame trusted by its URL (the sandbox rule only ever ADDS a restriction)", async () => {
     const { ctrl, page } = await pageFor(`http://127.0.0.1:${port}/parent`);
     try {

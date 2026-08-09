@@ -8660,6 +8660,13 @@ export class BrowserController {
     }
     const origin = new URL(url).origin;
     if (origin === "null") return { origin: "null", opaque: true };
+    try {
+      if ((await frame.evaluate(() => window.origin)) === "null") {
+        return { origin: "null", opaque: true };
+      }
+    } catch {
+      return { origin: "null", opaque: true };
+    }
     if (await this.frameSandboxedWithoutSameOrigin(frame)) return { origin: "null", opaque: true };
     return { origin, opaque: false };
   }
