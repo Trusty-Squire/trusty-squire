@@ -532,7 +532,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   name: "operate_act",
   description:
     "Take one action in a provisioning session, then return the resulting " +
-    "observation. kinds: click (target=element ref, preferably an el_table row's ref), type (target + text), " +
+    "observation. kinds: click (target=element ref, preferably an el_table row's ref), " +
+    "type (target + text; model-supplied card-number-shaped text is refused — card payment " +
+    "must use operate_pay, which fills a vaulted card without exposing it to the model), " +
     "" +
     "TARGET FALLBACK (clicking or typing only) — when a control you can SEE (in the " +
     "observation text or screenshot) has NO ref in el_table (a bare click-handler " +

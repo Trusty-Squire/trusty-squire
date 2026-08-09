@@ -2798,13 +2798,17 @@ describe("operate session — manual card-entry guard", () => {
     expect(h.typed).toEqual([{ selector: "#city", text: "Brooklyn" }]);
   });
 
-  it("does not gate type_secret's sealed-slot transfer (vault flow unaffected)", async () => {
+  it("does not gate a card-shaped type_secret sealed-slot transfer (vault flow unaffected)", async () => {
     const obs = await startProvisionSession({ serviceUrl: "https://console.example.com/" });
-    const secret = "sk-live-abcdefghijklmnop";
-    stashSecretSlot(obs.session_id, "api_key", secret);
-    h.elements = [elem({ visibleText: "API key", selector: "#key" })];
-    await act(obs.session_id, { kind: "type_secret", slot: "api_key", target: "API key" });
-    expect(h.typed).toEqual([{ selector: "#key", text: secret }]);
+    const sealedPan = "5555 5555 5555 4444";
+    stashSecretSlot(obs.session_id, "sealed_card", sealedPan);
+    h.elements = [elem({ visibleText: "Sealed field", selector: "#sealed" })];
+    await act(obs.session_id, {
+      kind: "type_secret",
+      slot: "sealed_card",
+      target: "Sealed field",
+    });
+    expect(h.typed).toEqual([{ selector: "#sealed", text: sealedPan }]);
   });
 });
 
