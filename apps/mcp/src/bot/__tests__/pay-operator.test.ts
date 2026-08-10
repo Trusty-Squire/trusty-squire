@@ -304,11 +304,24 @@ async function harness(
 
 describe("operate_pay", () => {
   it.each([
-    ["payment_checkout_currency_unresolved_scale_mismatch", "fallback_currency_scale_mismatch"],
-    ["payment_checkout_currency_unresolved", "checkout_currency_unrecognized"],
+    [
+      "payment_checkout_currency_unresolved_scale_mismatch",
+      {
+        status: "payment_checkout_currency_unresolved",
+        reason: "fallback_currency_scale_mismatch",
+      },
+    ],
+    [
+      "payment_checkout_currency_unresolved",
+      {
+        status: "payment_checkout_currency_unresolved",
+        reason: "checkout_currency_unrecognized",
+      },
+    ],
+    ["payment_checkout_total_not_found", { status: "payment_checkout_total_not_found" }],
   ])(
-    "does not mint an approval for checkout currency grounding failure %s",
-    async (error, reason) => {
+    "does not mint an approval for checkout grounding failure %s",
+    async (error, expected) => {
       const approvalBodies: Array<Record<string, unknown>> = [];
       const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const url =
@@ -353,10 +366,7 @@ describe("operate_pay", () => {
           browser,
           { vouchflowExpectedAudience: "customer_test" },
         ),
-      ).resolves.toEqual({
-        status: "payment_checkout_currency_unresolved",
-        reason,
-      });
+      ).resolves.toEqual(expected);
       expect(approvalBodies).toEqual([]);
     },
   );
@@ -1058,12 +1068,8 @@ describe("operate_pay JIT add-card ceremony", () => {
 
 // ── Split checkout (phase="fill_card" → executeOperatePayConfirm) ───────────
 //
-// Rakuten-style flows enter the card BEFORE any total is visible and show the
-// total only on a separate confirmation step. These pin the split contract:
-// the approval ceremony + fill run against declared, human-approved values
-// with NO live total; NOTHING is submitted at fill time; and the
-// total-verification gate lives in the confirm step — exactly where the money
-// moves.
+// Split flows fill without submitting, then re-verify the total on a separate
+// confirmation step immediately before the charge.
 
 const SPLIT_CHECKOUT: CheckoutSummary = {
   merchant: "Split Merchant",
@@ -1074,7 +1080,7 @@ const SPLIT_CHECKOUT: CheckoutSummary = {
 
 async function runSplitFill(
   cfg: {
-    liveSummary?: CheckoutSummary;
+    liveSummary?: CheckoutSummary | null;
     fillRejects?: Error;
     driftOriginAfterApproval?: string;
   } = {},
@@ -1177,19 +1183,17 @@ async function runSplitFill(
     return Response.json({ error: "not_found" }, { status: 404 });
   }) as typeof fetch;
 
-  let urlCalls = 0;
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary:
-      cfg.liveSummary !== undefined
-        ? vi.fn().mockResolvedValue(cfg.liveSummary)
-        : vi.fn().mockRejectedValue(new Error("payment_checkout_total_not_found")),
+      cfg.liveSummary === null
+        ? vi.fn().mockRejectedValue(new Error("payment_checkout_total_not_found"))
+        : vi.fn().mockResolvedValue(cfg.liveSummary ?? SPLIT_CHECKOUT),
     readCheckoutConfirmSummary: vi
       .fn()
       .mockRejectedValue(new Error("payment_checkout_total_not_found")),
     currentUrl: vi.fn(() => {
-      urlCalls += 1;
-      if (cfg.driftOriginAfterApproval !== undefined && urlCalls > 1) {
+      if (cfg.driftOriginAfterApproval !== undefined && approvalBodies.length > 0) {
         return cfg.driftOriginAfterApproval;
       }
       return `${SPLIT_CHECKOUT.checkout_origin}/checkout/payment`;
@@ -1248,46 +1252,17 @@ async function runSplitFill(
 }
 
 describe("operate_pay split checkout — fill_card", () => {
-  it("fills the vaulted card with NO visible total and charges nothing", async () => {
+  it("refuses caller amounts when no page total is visible", async () => {
     const { result, approvalBodies, auditBodies, filledCards, pendings, browser } =
-      await runSplitFill();
+      await runSplitFill({ liveSummary: null });
 
-    expect(result).toMatchObject({
-      status: "payment_card_filled",
-      merchant: SPLIT_CHECKOUT.merchant,
-      amount_cents: SPLIT_CHECKOUT.amount_cents,
-      currency: SPLIT_CHECKOUT.currency,
-      last4: "4242",
-    });
-    // The human approved the DECLARED values — they are what the approval binds.
-    expect(approvalBodies[0]).toMatchObject({
-      merchant: SPLIT_CHECKOUT.merchant,
-      checkout_origin: SPLIT_CHECKOUT.checkout_origin,
-      amount_cents: SPLIT_CHECKOUT.amount_cents,
-      currency: SPLIT_CHECKOUT.currency,
-      card_ref: "card_split",
-    });
-    // The card reached the page through the fill-only primitive…
-    expect(filledCards).toEqual([SYNTHETIC_CARD]);
-    // …and NOTHING was submitted: no combined fill+charge, no charge click.
+    expect(result).toEqual({ status: "payment_checkout_total_not_found" });
+    expect(approvalBodies).toEqual([]);
+    expect(filledCards).toEqual([]);
     expect(browser.fillAndSubmitCheckout).not.toHaveBeenCalled();
     expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
-    // No money moved → no payment audit row yet.
     expect(auditBodies).toEqual([]);
-    // The confirm step gets exactly the mandate-bound state, never the card.
-    expect(pendings).toEqual([
-      {
-        approval_id: "appr_split",
-        approval_url: "https://web.test/vault/pay/appr_split",
-        checkout: SPLIT_CHECKOUT,
-        card_ref: "card_split",
-        last4: "4242",
-        mandate_id: "mandate_split",
-      },
-    ]);
-    const exposed = JSON.stringify(result) + JSON.stringify(pendings);
-    expect(exposed).not.toContain(SYNTHETIC_CARD.pan);
-    expect(exposed).not.toContain(SYNTHETIC_CARD.cvv);
+    expect(pendings).toEqual([]);
   });
 
   it("prefers the live summary when the card-entry page does show a total", async () => {

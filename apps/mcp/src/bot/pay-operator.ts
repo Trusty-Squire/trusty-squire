@@ -329,20 +329,10 @@ export async function executeOperatePay(
           reason: "fallback_currency_scale_mismatch",
         };
       }
-      if (
-        !(error instanceof Error && error.message === "payment_checkout_total_not_found") ||
-        args.merchant === undefined ||
-        args.amount_cents === undefined ||
-        args.currency === undefined
-      ) {
-        throw error;
+      if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
+        return { status: "payment_checkout_total_not_found" };
       }
-      checkout = {
-        merchant: args.merchant,
-        checkout_origin: new URL(browser.currentUrl()).origin,
-        amount_cents: args.amount_cents,
-        currency: args.currency.toUpperCase(),
-      };
+      throw error;
     }
 
     const item = args.item;

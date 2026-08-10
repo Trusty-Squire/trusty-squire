@@ -65,15 +65,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   name: "operate_pay",
   description:
     "Pay the checkout in the one active operate_start browser session. Reads the live " +
-    "merchant and total when present, creates a phone approval link, waits for approval, " +
+    "merchant and total, creates a phone approval link, waits for approval, " +
     "verifies the passkey-signed purchase mandate, opens the card only in this process, " +
     "fills common checkout fields, submits, and audits only the last four digits. Never " +
     "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved. " +
     "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
     "add-card ceremony and the card is bound server-side before the mandate is signed. " +
-    "For a SPLIT checkout (card entry before the total is shown): call with " +
-    'phase="fill_card" on the card-entry step, passing merchant + amount_cents + currency ' +
-    "(the user approves those values); the card is filled into recognized payment-provider " +
+    "For a SPLIT checkout whose card-entry step shows the payable total: call with " +
+    'phase="fill_card" on that step; the card is filled into recognized payment-provider ' +
     "fields only and NOTHING is charged. Then drive the checkout to the order-confirmation " +
     'step and call phase="confirm" — it verifies the visible total against the approved ' +
     "amount and places the order. Never click the pay/place-order control via operate_act.",
@@ -95,7 +94,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         enum: ["fill_card", "confirm"],
         description:
           'Split checkouts only: "fill_card" fills the vaulted card on the card-entry step ' +
-          "(no total visible yet — pass merchant+amount_cents+currency) without charging; " +
+          "after verifying its visible total, without charging; " +
           '"confirm" verifies the live total on the order-confirmation step against the ' +
           "approved amount and places the order. Omit for single-page checkouts.",
       },
