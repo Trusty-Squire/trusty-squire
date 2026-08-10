@@ -3,6 +3,7 @@ import { chromium, type Browser, type Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
 import {
   BrowserController,
+  CHECKOUT_SUBMIT_LABEL_RE,
   hasPayPalHostedCheckoutFrame,
   PaymentCardFillCleanupError,
   parseCheckoutAmount,
@@ -22,6 +23,68 @@ try {
 } catch {
   chromiumAvailable = false;
 }
+
+describe("charge-verb label recognition (CHECKOUT_SUBMIT_LABEL_RE)", () => {
+  it("recognizes English charge verbs (regression)", () => {
+    for (const label of [
+      "Pay now",
+      "Pay",
+      "Place order",
+      "Complete order",
+      "Complete purchase",
+      "Submit payment",
+      "Buy now",
+      "Confirm order",
+      "Confirm payment",
+    ]) {
+      expect(CHECKOUT_SUBMIT_LABEL_RE.test(label), label).toBe(true);
+    }
+  });
+
+  it("does not treat English navigation labels as charge verbs (regression)", () => {
+    for (const label of ["Continue", "Next", "Add to cart", "Back", "Continue to review"]) {
+      expect(CHECKOUT_SUBMIT_LABEL_RE.test(label), label).toBe(false);
+    }
+  });
+
+  it("recognizes Japanese charge/confirm-order verbs", () => {
+    for (const label of [
+      "ご注文を確定する",
+      "注文を確定する",
+      "注文を確定",
+      "ご注文の確定",
+      "注文する",
+      "注文内容を確定する",
+      "確定する",
+      "確定",
+      "購入する",
+      "購入を確定",
+      "購入",
+      "今すぐ購入",
+      "今すぐ支払う",
+      "支払う",
+      "お支払い",
+      "支払い",
+      "お支払いを確定する",
+    ]) {
+      expect(CHECKOUT_SUBMIT_LABEL_RE.test(label), label).toBe(true);
+    }
+  });
+
+  it("does not treat Japanese non-charge labels as charge verbs", () => {
+    for (const label of [
+      "戻る",
+      "カートに追加",
+      "お支払い方法を変更する",
+      "購入手続きへ",
+      "注文内容を確認する",
+      "レジに進む",
+      "クーポンを利用する",
+    ]) {
+      expect(CHECKOUT_SUBMIT_LABEL_RE.test(label), label).toBe(false);
+    }
+  });
+});
 
 describe("checkout payment parsing", () => {
   it("detects PayPal Smart Button and hosted card-field frames without entering them", () => {
@@ -321,6 +384,66 @@ describe("checkout payment parsing", () => {
         });
       } finally {
         await playwrightBrowser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "submits a Japanese checkout via its ご注文を確定する charge button, skipping non-charge buttons",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+        <form id="checkout">
+          <input autocomplete="cc-number">
+          <input autocomplete="cc-exp">
+          <input autocomplete="cc-csc">
+          <input autocomplete="cc-name">
+          <button type="button" id="change-payment">お支払い方法を変更する</button>
+          <button type="button" id="back">戻る</button>
+          <button type="submit" id="charge">ご注文を確定する</button>
+        </form>
+        <script>
+          document.querySelector("#change-payment").addEventListener("click", () => {
+            document.body.dataset.wrongClick = "change-payment";
+          });
+          document.querySelector("#back").addEventListener("click", () => {
+            document.body.dataset.wrongClick = "back";
+          });
+          document.querySelector("#checkout").addEventListener("submit", (event) => {
+            event.preventDefault();
+            document.body.dataset.submitted = "true";
+            setTimeout(() => {
+              const challenge = document.createElement("iframe");
+              challenge.title = "3D Secure";
+              document.body.append(challenge);
+            }, 200);
+          });
+        </script>
+      `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const result = await controller.fillAndSubmitCheckout({
+          pan: "4242424242424242",
+          exp_month: "12",
+          exp_year: "30",
+          cvv: "123",
+          name: "Synthetic Cardholder",
+          billing: {
+            line1: "123 Synthetic Street",
+            city: "Testville",
+            postal_code: "10001",
+            country: "JP",
+          },
+        });
+
+        expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+        expect(await page.locator("body").getAttribute("data-wrong-click")).toBeNull();
+        expect(result.three_ds_required).toBe(true);
+      } finally {
+        await browser.close();
       }
     },
   );

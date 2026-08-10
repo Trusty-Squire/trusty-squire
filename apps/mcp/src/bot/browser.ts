@@ -306,10 +306,18 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
 
 // Charge-verb button labels — the click that actually moves money. Used by
 // submitFilledCheckout to find the charge control, and by operate_act's
-// pending-card-fill guard to refuse the model clicking such a control
-// directly while a vaulted card sits filled in the checkout.
+// pending-card-fill guard to refuse the model clicking such a control directly
+// while a vaulted card sits filled in the checkout. NOT English-only: Japanese
+// checkouts (the
+// Rakuten-style flows the card-fill path targets) label the charge
+// ご注文を確定する / 注文する / 購入する / お支払い. Ambiguous confirm/pay
+// wording errs toward matching — a false positive is a safe refusal routed
+// through the confirm gate; a false negative is a bypassed charge gate.
+// Note: \b is ASCII-only, so the Japanese alternatives anchor on ^ (with $
+// where a bare noun like 購入 would otherwise swallow navigation labels such
+// as 購入手続きへ). 確定 (finalize) is deliberate — 確認 (review) must NOT match.
 export const CHECKOUT_SUBMIT_LABEL_RE =
-  /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i;
+  /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
 
 export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescriptor[]): boolean {
   return frames.some((frame) => {
