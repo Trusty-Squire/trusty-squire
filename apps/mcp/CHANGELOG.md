@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.9 (2026-08-10)
+
+- fix(mcp): safely resolve Japanese checkout totals (#477)
+- fix(api): accept echoed card references on payment confirmations (#475)
+
 ## 1.1.9-rc.8 (2026-08-10)
 
 - fix(mcp): recognize Japanese checkout charge controls (#473)
