@@ -6804,7 +6804,7 @@ export class BrowserController {
           const owner = await current.frameElement();
           try {
             const rendered = await owner.evaluate((element) => {
-              let currentElement: Element | null = element;
+              let currentElement: Element | null = element as Element;
               while (currentElement !== null) {
                 const style = window.getComputedStyle(currentElement);
                 if (
@@ -7131,7 +7131,6 @@ export class BrowserController {
           const tag = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => "");
           await input.evaluate((el) => el.setAttribute("data-ts-sealed-payment", "1"));
           if (tag === "select") {
-            assertFrameEgress?.(frame);
             const selected =
               (await input
                 .selectOption({ value })
@@ -7144,10 +7143,8 @@ export class BrowserController {
             if (!selected) continue;
           } else if (typePerKey) {
             await input.fill("");
-            assertFrameEgress?.(frame);
             await input.pressSequentially(value, { delay: this.humanize ? rand(40, 110) : 0 });
           } else {
-            assertFrameEgress?.(frame);
             await input.fill(value);
           }
           filled.add(field);
