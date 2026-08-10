@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.8 (2026-08-10)
+
+- fix(mcp): recognize Japanese checkout charge controls (#473)
+- feat(mcp): support secure split-checkout card payments (#472)
+
 ## 1.1.9-rc.7 (2026-08-09)
 
 - fix(bot): recognize Japanese charge controls when submitting checkouts
