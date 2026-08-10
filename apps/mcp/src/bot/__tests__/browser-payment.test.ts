@@ -203,15 +203,23 @@ describe("checkout payment parsing", () => {
     });
   });
 
-  it("resolves the order total, never the subtotal or shipping, on a Japanese summary", () => {
-    expect(parseCheckoutAmount(["小計 968円", "送料 500円", "合計 1,468円"])).toEqual({
-      amount_cents: 1_468,
+  it.each([
+    ["小計 2,904 円", 2_904],
+    ["合計 968円", 968],
+    ["ご請求金額 ¥1,065", 1_065],
+    ["税込 1,468円", 1_468],
+  ])("parses Rakuten Japanese checkout amount: %s", (text, cents) => {
+    expect(parseCheckoutAmount([text])).toEqual({
+      amount_cents: cents,
       currency: "JPY",
     });
-    expect(parseCheckoutAmount(["小計 968円 送料 500円 消費税 134円 合計 1,468円"])).toEqual({
-      amount_cents: 1_468,
-      currency: "JPY",
-    });
+  });
+
+  it("keeps all Japanese checkout matches so review selection uses the settled final total", () => {
+    expect(parseCheckoutAmounts(["小計 2,904円", "送料 500円", "合計 1,468円"])).toEqual([
+      { amount_cents: 2_904, currency: "JPY" },
+      { amount_cents: 1_468, currency: "JPY" },
+    ]);
   });
 
   it("skips a merchandise subtotal (商品合計) and resolves the payable total", () => {
@@ -222,7 +230,6 @@ describe("checkout payment parsing", () => {
   });
 
   it.each([
-    ["小計 968円"],
     ["商品合計 968円"],
     ["送料 500円"],
     ["値引き 300円"],
