@@ -42,6 +42,11 @@ const approveBody = z
   .object({
     jws: z.string().max(8192),
     sealed_card: z.string().max(16384),
+    // Accepted and ignored: shipped operators (>= #406) echo the approval's
+    // card_ref in their /confirm body. The server-stored record is the only
+    // authority; rejecting the key (as #432's bare .strict() did) 400'd every
+    // confirm from every deployed client and broke the whole money path.
+    card_ref: z.string().max(64).nullable().optional(),
   })
   .strict();
 

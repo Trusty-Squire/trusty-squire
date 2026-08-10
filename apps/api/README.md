@@ -88,13 +88,16 @@ to the operator.
 while the approval is pending. It stores the candidate, its SHA-256 fingerprint,
 phase, and an at-most-15-second expiry in the account-owned Postgres row so an
 authenticated agent polling through a different API worker can receive it.
-`POST /confirm` must use the same account and exact delivered fingerprint. A
-successful final confirmation atomically marks the approval approved and clears
-all staged JWS and ciphertext; an idempotent repeat for that fingerprint is
-accepted during the relay TTL. Review-format candidates are compatibility-only:
-their successful confirmation clears the staged bytes but leaves the approval
-pending, so a review seal is never final approval. Wrong-account, changed,
-undelivered, or expired candidates fail closed.
+`POST /confirm` must use the same account and exact delivered fingerprint. Its
+body requires `jws` and `sealed_card`; for compatibility with shipped operators,
+an optional string or `null` `card_ref` is accepted but ignored. The card
+reference stored on the server remains authoritative, and every other unknown
+body key is rejected. A successful final confirmation atomically marks the
+approval approved and clears all staged JWS and ciphertext; an idempotent repeat
+for that fingerprint is accepted during the relay TTL. Review-format candidates
+are compatibility-only: their successful confirmation clears the staged bytes
+but leaves the approval pending, so a review seal is never final approval.
+Wrong-account, changed, undelivered, or expired candidates fail closed.
 
 ## Auth model
 
