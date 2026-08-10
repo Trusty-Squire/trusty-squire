@@ -47,6 +47,8 @@ const h = vi.hoisted(() => ({
   elements: [] as unknown[],
   checkoutFieldNames: [] as string[],
   visibleText: "",
+  focusedLabels: [] as string[],
+  pressedKeys: [] as string[],
   scrolls: [] as string[],
   captchaVariant: "unknown" as string,
   captchaChallengeRendered: false,
@@ -74,6 +76,7 @@ const h = vi.hoisted(() => ({
     | {
         ok: true;
         text: string;
+        labels?: string[];
         safetySignals: { billingObject: boolean; accountSetup: boolean };
         frameTarget?: {
           framePath: string;
@@ -319,6 +322,7 @@ vi.mock("../browser.js", () => ({
           ok: true;
           handle: { dispose: () => Promise<void> };
           text: string;
+          labels: string[];
           safetySignals: { billingObject: boolean; accountSetup: boolean };
           frameTarget: {
             framePath: string;
@@ -339,6 +343,7 @@ vi.mock("../browser.js", () => ({
             },
           },
           text: h.locatorResolve.text,
+          labels: h.locatorResolve.labels ?? [h.locatorResolve.text],
           safetySignals: h.locatorResolve.safetySignals,
           frameTarget: h.locatorResolve.frameTarget ?? null,
         };
@@ -359,13 +364,21 @@ vi.mock("../browser.js", () => ({
     }
     async startOAuth(): Promise<void> {}
     async settleAfterOAuth(): Promise<void> {}
-    async pressKey(): Promise<void> {}
+    async pressKey(key: string): Promise<void> {
+      h.pressedKeys.push(key);
+    }
+    async focusedElementLabels(): Promise<string[]> {
+      return h.focusedLabels;
+    }
     async close(): Promise<void> {
       h.closeCalls += 1;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
     }
   },
+  // Mirrors the real export — the pending-card-fill charge guard reads it.
+  CHECKOUT_SUBMIT_LABEL_RE:
+    /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i,
 }));
 
 vi.mock("../captcha-solver-2captcha.js", () => ({
@@ -418,6 +431,9 @@ import {
   activeProvisionBrowser,
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
+  setActivePendingCardFill,
+  retainActivePaymentFieldSeal,
+  clearActivePendingCardFill,
   recipeTargetFor,
   captureObserved,
 } from "../provision-session.js";
@@ -527,6 +543,8 @@ beforeEach(() => {
   h.elements = [];
   h.checkoutFieldNames = [];
   h.visibleText = "";
+  h.focusedLabels = [];
+  h.pressedKeys = [];
   h.scrolls = [];
   h.captchaVariant = "unknown";
   h.captchaChallengeRendered = false;
@@ -3786,5 +3804,208 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
     expect(result.status).not.toBe("complete");
     expect(h.frameClicks).toEqual([]);
     expect(h.clickCalls).toBe(0);
+  });
+});
+
+// ── Pending card-fill charge guard (split checkout) ─────────────────────────
+//
+// After operate_pay {phase:"fill_card"} the vaulted card sits filled in the
+// page, so the ONLY sanctioned path to the charge is operate_pay
+// {phase:"confirm"} (which verifies the live total first). A weak model must
+// not be able to fire the charge itself through operate_act.
+describe("pending card-fill charge guard", () => {
+  const pending = {
+    approval_id: "appr_guard",
+    approval_url: "https://web.test/vault/pay/appr_guard",
+    checkout: {
+      merchant: "Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 100,
+      currency: "USD",
+    },
+    card_ref: "card_guard",
+    last4: "4242",
+  };
+
+  it("refuses charge-verb clicks and Enter while filled, frees them after confirm clears", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+      elem({ tag: "button", type: null, visibleText: "Continue to review", selector: "#next" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /operate_pay \{phase:"confirm"\}/,
+    );
+    await expect(
+      act(started.session_id, { kind: "js_click", target: "Place order" }),
+    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
+    // oauth_click clicks too — it must not be a side door to the charge.
+    await expect(
+      act(started.session_id, { kind: "oauth_click", target: "Place order" }),
+    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
+    expect(h.clickCalls).toBe(0);
+
+    // Between-step navigation stays free — that's how the host reaches the
+    // confirmation page at all.
+    await act(started.session_id, { kind: "click", target: "Continue to review" });
+    expect(h.clickCalls).toBe(1);
+
+    // Enter fires the form's default submit → refused; other keys pass.
+    await expect(act(started.session_id, { kind: "press", key: "Enter" })).rejects.toThrow(
+      /operate_pay/,
+    );
+    await expect(act(started.session_id, { kind: "press", key: "NumpadEnter" })).rejects.toThrow(
+      /operate_pay/,
+    );
+    h.focusedLabels = ["Pay now"];
+    await expect(act(started.session_id, { kind: "press", key: "Space" })).rejects.toThrow(
+      /operate_pay/,
+    );
+    h.focusedLabels = ["Continue to review"];
+    await act(started.session_id, { kind: "press", key: "Space" });
+    await act(started.session_id, { kind: "press", key: "Tab" });
+
+    // Once confirm consumes the fill, the ordinary rules return.
+    clearActivePendingCardFill();
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(2);
+  });
+
+  it("refuses a locator-fallback click on a charge control while filled", async () => {
+    h.locatorResolve = {
+      ok: true,
+      text: "",
+      labels: ["Pay now"],
+      safetySignals: { billingObject: false, accountSetup: false },
+    };
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+
+    await expect(
+      act(started.session_id, { kind: "click", target: "text=Pay now" }),
+    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
+    expect(h.locatorClickCalls).toBe(0);
+  });
+
+  it("masks re-rendered payment fields while a fill remains pending", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+    h.elements = [
+      elem({
+        id: "card-number",
+        autocomplete: "cc-number",
+        selector: "#card-number",
+        value: "4242424242424242",
+      }),
+      elem({
+        id: "security-code",
+        autocomplete: "cc-csc",
+        selector: "#security-code",
+        value: "123",
+      }),
+    ];
+    h.visibleText =
+      "Card preview 4242·4242·4242·4242, 4242.4242.4242.4242, 4242|4242|4242|4242, 4242×4242×4242×4242, and 4242∙4242∙4242∙4242 · CVV 123";
+
+    const full = await observe(started.session_id, "full");
+    expect(JSON.stringify(full)).not.toContain("4242424242424242");
+    expect(JSON.stringify(full)).not.toContain("4242·4242·4242·4242");
+    expect(JSON.stringify(full)).not.toContain("4242.4242.4242.4242");
+    expect(JSON.stringify(full)).not.toContain("4242|4242|4242|4242");
+    expect(JSON.stringify(full)).not.toContain("4242×4242×4242×4242");
+    expect(JSON.stringify(full)).not.toContain("4242∙4242∙4242∙4242");
+    expect(JSON.stringify(full)).not.toContain('"123"');
+    expect(full.text).toBe(
+      "Card preview [sealed payment], [sealed payment], [sealed payment], [sealed payment], and [sealed payment] · CVV [sealed payment]",
+    );
+    expect(full.elements?.map((element) => element.value)).toEqual(["[sealed]", "[sealed]"]);
+  });
+
+  it("masks multiline PAN previews without a surviving payment input", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+    h.elements = [];
+    h.visibleText = "Card preview 4242\n4242\n4242\n4242";
+
+    const full = await observe(started.session_id, "full");
+    expect(full.text).toBe("Card preview [sealed payment]");
+    expect(JSON.stringify(full)).not.toContain("4242");
+  });
+
+  it("masks card material in all host-facing interactive metadata", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+    const pan = "4242|4242|4242|4242";
+    h.elements = [
+      elem({ index: 0, tag: "button", ariaLabel: `Card ${pan}`, selector: "#aria" }),
+      elem({ index: 1, tag: "button", title: `Card ${pan}`, selector: "#title" }),
+      elem({ index: 2, tag: "button", labelText: `Card ${pan}`, selector: "#label" }),
+      elem({ index: 3, tag: "button", iconLabel: `Card ${pan}`, selector: "#icon" }),
+      elem({ index: 4, tag: "input", placeholder: `Card ${pan}`, selector: "#placeholder" }),
+      elem({ index: 5, tag: "button", value: pan, selector: "#value" }),
+      elem({ index: 6, tag: "button", ariaLabel: "CVV 123", selector: "#cvv" }),
+      elem({ index: 7, tag: "button", visibleText: `Card ${pan}`, selector: "#visible" }),
+      elem({ index: 8, tag: "input", name: `Card ${pan}`, selector: "#name" }),
+      elem({
+        index: 9,
+        tag: "button",
+        visibleText: "Preview",
+        href: `https://shop.example.com/card/${pan}`,
+        testId: `card-${pan}`,
+        screenPath: `main:Card ${pan} > button:preview`,
+        container: `main:Card ${pan}`,
+        topmost: false,
+        occludedBy: `Card ${pan}`,
+        selector: "#metadata",
+      }),
+    ];
+
+    const compact = await observe(started.session_id, "compact");
+    const compactJson = JSON.stringify(compact);
+    expect(compactJson).not.toContain("4242");
+    expect(compactJson).not.toContain("CVV 123");
+    expect(readFileSync(compact.snapshot_file!, "utf8")).not.toMatch(/4242|CVV 123/);
+
+    const full = await observe(started.session_id, "full");
+    expect(JSON.stringify(full)).not.toMatch(/4242|CVV 123/);
+  });
+
+  it("keeps masking and charge locking after retry state is cleared without DOM cleanup", async () => {
+    h.elements = [
+      elem({
+        id: "card-number",
+        autocomplete: "cc-number",
+        selector: "#card-number",
+        value: "4242424242424242",
+      }),
+      elem({ tag: "button", visibleText: "Place order", selector: "#place-order" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+    retainActivePaymentFieldSeal();
+
+    const full = await observe(started.session_id, "full");
+    expect(JSON.stringify(full)).not.toContain("4242424242424242");
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /operate_pay/,
+    );
+
+    clearActivePendingCardFill(true);
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(1);
   });
 });

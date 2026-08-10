@@ -1,9 +1,17 @@
 import { z } from "zod";
 import {
   activeProvisionBrowserForPayment,
+  clearActivePendingCardFill,
+  getActivePendingCardFill,
   recordActivePaymentProvenance,
+  retainActivePaymentFieldSeal,
+  setActivePendingCardFill,
 } from "../bot/provision-session.js";
-import { executeOperatePay } from "../bot/pay-operator.js";
+import {
+  executeOperatePay,
+  executeOperatePayConfirm,
+  type PendingCardFill,
+} from "../bot/pay-operator.js";
 import { assertApi, type Tool } from "./index.js";
 
 const inputSchema = z
@@ -16,6 +24,11 @@ const inputSchema = z
       .optional(),
     card_ref: z.string().min(1).max(64).optional(),
     card_label: z.string().min(1).max(256).optional(),
+    // Split checkouts (card entry BEFORE the total is shown): "fill_card"
+    // fills the vaulted card without charging; "confirm" verifies the live
+    // total against the approved amount and places the order. Omit for a
+    // single-page checkout (fill + charge in one call).
+    phase: z.enum(["fill_card", "confirm"]).optional(),
     item: z.string().trim().min(1).max(500),
     reason: z.string().trim().min(1).max(500),
     three_ds_wait_seconds: z
@@ -57,7 +70,13 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "fills common checkout fields, submits, and audits only the last four digits. Never " +
     "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved. " +
     "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
-    "add-card ceremony and the card is bound server-side before the mandate is signed.",
+    "add-card ceremony and the card is bound server-side before the mandate is signed. " +
+    "For a SPLIT checkout (card entry before the total is shown): call with " +
+    'phase="fill_card" on the card-entry step, passing merchant + amount_cents + currency ' +
+    "(the user approves those values); the card is filled into recognized payment-provider " +
+    "fields only and NOTHING is charged. Then drive the checkout to the order-confirmation " +
+    'step and call phase="confirm" — it verifies the visible total against the approved ' +
+    "amount and places the order. Never click the pay/place-order control via operate_act.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -71,6 +90,15 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       currency: { type: "string", pattern: "^[A-Za-z]{3}$" },
       card_ref: { type: "string" },
       card_label: { type: "string" },
+      phase: {
+        type: "string",
+        enum: ["fill_card", "confirm"],
+        description:
+          'Split checkouts only: "fill_card" fills the vaulted card on the card-entry step ' +
+          "(no total visible yet — pass merchant+amount_cents+currency) without charging; " +
+          '"confirm" verifies the live total on the order-confirmation step against the ' +
+          "approved amount and places the order. Omit for single-page checkouts.",
+      },
       item: { type: "string", minLength: 1 },
       reason: { type: "string", minLength: 1 },
       three_ds_wait_seconds: {
@@ -90,6 +118,46 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   async handler(args, api, context) {
     assertApi(api);
     const browser = await activeProvisionBrowserForPayment();
+    // Confirm step of a split checkout: the card is already filled (and the
+    // mandate already signed), so no card resolution and no PayPal gate — the
+    // job is verify-the-total-then-charge. Routed before the PayPal check so
+    // an incidental PayPal button iframe on the review page can't block it.
+    if (args.phase === "confirm") {
+      const pending = getActivePendingCardFill();
+      if (pending === null) {
+        throw new Error(
+          'operate_pay phase="confirm" requires a completed phase="fill_card" in this ' +
+            "session — no vaulted card is currently filled into the checkout.",
+        );
+      }
+      const result = await executeOperatePayConfirm(
+        pending,
+        {
+          ...(args.currency !== undefined ? { currency: args.currency } : {}),
+          ...(args.three_ds_wait_seconds !== undefined
+            ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
+            : {}),
+        },
+        api,
+        browser,
+      );
+      const status = result.status;
+      if (status === "payment_submitted" || status === "payment_3ds_required") {
+        recordActivePaymentProvenance(pending.card_ref);
+      }
+      // Terminal for the filled card (charged, in 3DS, or declined) → drop the
+      // pending state. A refusal (total missing/mismatch, submit not found)
+      // keeps it so the host can fix the page and retry confirm.
+      if (
+        status === "payment_submitted" ||
+        status === "payment_3ds_required" ||
+        status === "payment_declined" ||
+        status === "payment_outcome_unknown"
+      ) {
+        clearActivePendingCardFill(result.payment_fields_cleared === true);
+      }
+      return result;
+    }
     if (await browser.isPayPalHostedCheckout()) {
       return {
         status: "paypal_checkout",
@@ -134,6 +202,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       // the JIT add-card ceremony.
     }
     let resolvedCardRef: string | null = null;
+    let filledPending: PendingCardFill | null = null;
     const result = await executeOperatePay(
       {
         ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
@@ -145,6 +214,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         ...(args.three_ds_wait_seconds !== undefined
           ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
           : {}),
+        ...(args.phase === "fill_card" ? { phase: "fill_card" as const } : {}),
       },
       api,
       await activeProvisionBrowserForPayment(),
@@ -161,8 +231,18 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         onCardResolved: (value) => {
           resolvedCardRef = value;
         },
+        onCardFilled: (pending) => {
+          filledPending = pending;
+        },
+        onCardFillCleanupFailed: retainActivePaymentFieldSeal,
       },
     );
+    if (result.status === "payment_card_filled") {
+      if (filledPending === null) {
+        throw new Error("operate_pay fill_card succeeded without pending-fill state");
+      }
+      setActivePendingCardFill(filledPending);
+    }
     if (result.status === "payment_submitted" || result.status === "payment_3ds_required") {
       if (resolvedCardRef === null) {
         throw new Error("operate_pay succeeded without an action-time card source attestation");

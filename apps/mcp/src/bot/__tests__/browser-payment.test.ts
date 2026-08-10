@@ -1,12 +1,15 @@
 import { existsSync } from "node:fs";
-import { chromium, type Page } from "playwright";
+import { chromium, type Browser, type Page } from "playwright";
 import { describe, expect, it, vi } from "vitest";
 import {
   BrowserController,
   hasPayPalHostedCheckoutFrame,
+  PaymentCardFillCleanupError,
   parseCheckoutAmount,
   parseCheckoutAmounts,
   parseStructuredCheckoutTotal,
+  recognizedPaymentProviderFrame,
+  UnrecognizedPaymentFrameError,
 } from "../browser.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
@@ -411,15 +414,15 @@ function orderJsonLd(due: Record<string, unknown>): string {
 
 function structuredCheckoutController(text: string, structured: unknown): BrowserController {
   const browser = new BrowserController({ humanize: false });
+  const mainFrame = {
+    evaluate: vi.fn(async (fn: () => unknown) =>
+      String(fn).includes("ld+json") ? structured : text,
+    ),
+  };
   const page = {
     evaluate: vi.fn().mockResolvedValue({ title: "Synthetic Shop", siteName: "" }),
-    frames: () => [
-      {
-        evaluate: vi.fn(async (fn: () => unknown) =>
-          String(fn).includes("ld+json") ? structured : text,
-        ),
-      },
-    ],
+    frames: () => [mainFrame],
+    mainFrame: () => mainFrame,
     url: () => "https://shop.example.test/checkout",
   };
   Object.defineProperty(browser, "page", { value: page });
@@ -641,6 +644,76 @@ describe("structured-data checkout totals", () => {
         structured,
       ).readCheckoutReviewSummary(),
     ).resolves.toMatchObject({ amount_cents: 14_990, currency: "TRY" });
+  });
+
+  it("requires a visible labeled total with live currency for charge confirmation", async () => {
+    const structured = {
+      jsonLd: [orderJsonLd({ price: "149.90", priceCurrency: "USD" })],
+      microdata: [],
+    };
+    await expect(
+      structuredCheckoutController("Genel Toplam 149,90", structured).readCheckoutConfirmSummary(),
+    ).rejects.toThrow("payment_checkout_total_not_found");
+    await expect(
+      structuredCheckoutController("Order total 149.90", structured).readCheckoutConfirmSummary(),
+    ).rejects.toThrow("payment_checkout_total_not_found");
+    await expect(
+      structuredCheckoutController(
+        "Order total US$ 149.90",
+        structured,
+      ).readCheckoutConfirmSummary(),
+    ).resolves.toMatchObject({ amount_cents: 14_990, currency: "USD" });
+  });
+
+  it("requires unambiguous live currency notation only for charge confirmation", async () => {
+    const structured = { jsonLd: [], microdata: [] };
+    await expect(
+      structuredCheckoutController("Order total $39.99", structured).readCheckoutConfirmSummary(),
+    ).rejects.toThrow("payment_checkout_currency_unresolved");
+    await expect(
+      structuredCheckoutController("Order total ¥3,999", structured).readCheckoutConfirmSummary(),
+    ).rejects.toThrow("payment_checkout_currency_unresolved");
+    await expect(
+      structuredCheckoutController("Order total US$39.99", structured).readCheckoutConfirmSummary(),
+    ).resolves.toMatchObject({ amount_cents: 3_999, currency: "USD" });
+    await expect(
+      structuredCheckoutController(
+        "Order total JPY 3,999",
+        structured,
+      ).readCheckoutConfirmSummary(),
+    ).resolves.toMatchObject({ amount_cents: 3_999, currency: "JPY" });
+    expect(parseCheckoutAmount(["Order total $39.99"])).toEqual({
+      amount_cents: 3_999,
+      currency: "USD",
+    });
+  });
+
+  it.each([
+    ["CA$", "CAD"],
+    ["C$", "CAD"],
+    ["CAD$", "CAD"],
+    ["A$", "AUD"],
+    ["AU$", "AUD"],
+    ["NZ$", "NZD"],
+    ["HK$", "HKD"],
+    ["SG$", "SGD"],
+    ["MX$", "MXN"],
+  ])("resolves unambiguous %s notation during confirmation", async (notation, currency) => {
+    await expect(
+      structuredCheckoutController(`Order total ${notation}39.99`, {
+        jsonLd: [],
+        microdata: [],
+      }).readCheckoutConfirmSummary(),
+    ).resolves.toMatchObject({ amount_cents: 3_999, currency });
+  });
+
+  it("uses the final visible payable total during confirmation", async () => {
+    await expect(
+      structuredCheckoutController("Items total USD 39.99\nOrder total USD 49.99", {
+        jsonLd: [],
+        microdata: [],
+      }).readCheckoutConfirmSummary(),
+    ).resolves.toMatchObject({ amount_cents: 4_999, currency: "USD" });
   });
 
   it("keeps the visible labeled total when structured data disagrees", async () => {
@@ -887,4 +960,617 @@ describe("3-D Secure resolution", () => {
 
     await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
   });
+});
+
+describe("recognized payment-provider frames", () => {
+  const PAGE = "https://shop.rakuten.co.jp/checkout/payment";
+
+  it("allows the merchant's own registrable domain (payment subdomain included)", () => {
+    expect(
+      recognizedPaymentProviderFrame(
+        "https://pay.shop.example.com/fields",
+        "https://shop.example.com/checkout",
+      ),
+    ).toBe(true);
+  });
+
+  it("allows curated processors across registrable domains (the Rakuten split case)", () => {
+    // rakuten.co.jp (co.jp is a public suffix) vs rakuten.com are DIFFERENT
+    // registrable domains — exactly why the live run's secret-fill refused it.
+    expect(
+      recognizedPaymentProviderFrame(
+        "https://static-content.payment.global.rakuten.com/card-form",
+        PAGE,
+      ),
+    ).toBe(true);
+    expect(recognizedPaymentProviderFrame("https://js.stripe.com/v3/elements", PAGE)).toBe(true);
+    expect(
+      recognizedPaymentProviderFrame("https://checkoutshopper-live.adyen.com/fields", PAGE),
+    ).toBe(true);
+    expect(
+      recognizedPaymentProviderFrame("https://assets.braintreegateway.com/hosted-fields", PAGE),
+    ).toBe(true);
+  });
+
+  it("refuses arbitrary cross-origin frames, look-alikes, and non-https", () => {
+    expect(recognizedPaymentProviderFrame("https://rogue-payments.example.net/f", PAGE)).toBe(
+      false,
+    );
+    // A look-alike host CONTAINING a processor name is not that processor.
+    expect(recognizedPaymentProviderFrame("https://stripe.com.evil.net/f", PAGE)).toBe(false);
+    expect(recognizedPaymentProviderFrame("https://evilstripe.com/f", PAGE)).toBe(false);
+    // The whole of rakuten.com is a marketplace, not a processor — only the
+    // payment platform subdomain qualifies.
+    expect(recognizedPaymentProviderFrame("https://www.rakuten.com/deals", PAGE)).toBe(false);
+    expect(recognizedPaymentProviderFrame("http://js.stripe.com/v3/elements", PAGE)).toBe(false);
+    expect(
+      recognizedPaymentProviderFrame(
+        "http://shop.rakuten.co.jp/checkout/payment",
+        "http://shop.rakuten.co.jp/checkout/payment",
+      ),
+    ).toBe(false);
+    expect(recognizedPaymentProviderFrame("about:blank", PAGE)).toBe(false);
+    expect(recognizedPaymentProviderFrame("", PAGE)).toBe(false);
+  });
+});
+
+// Real-Chromium split-checkout fill: route interception serves fake domains so
+// the payment iframe is genuinely cross-origin, no network required.
+describe("split-checkout card fill (real browser)", () => {
+  const CARD = {
+    pan: "4242424242424242",
+    exp_month: "12",
+    exp_year: "30",
+    cvv: "123",
+    name: "Synthetic Cardholder",
+    billing: {
+      line1: "123 Synthetic Street",
+      city: "Testville",
+      postal_code: "10001",
+      country: "US",
+    },
+  };
+
+  const FRAME_FORM = `
+    <form id="card-form">
+      <input autocomplete="cc-number">
+      <input inputmode="numeric" placeholder="MM/YY">
+      <input autocomplete="cc-csc">
+      <input autocomplete="cc-name">
+      <button type="submit">Pay now</button>
+    </form>
+    <script>
+      document.querySelector("#card-form").addEventListener("submit", (event) => {
+        event.preventDefault();
+        document.body.dataset.submitted = "true";
+      });
+    </script>`;
+
+  async function servePages(pages: Record<string, string>): Promise<{
+    page: Page;
+    browser: Browser;
+  }> {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.route("**/*", async (route) => {
+      const url = route.request().url();
+      const body = pages[url];
+      if (body === undefined) return route.fulfill({ status: 404, body: "not found" });
+      return route.fulfill({ contentType: "text/html", body });
+    });
+    return { page, browser };
+  }
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses card fill on a non-HTTPS main page before writing any field",
+    async () => {
+      const pageUrl = "http://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({ [pageUrl]: FRAME_FORM });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_checkout_https_required",
+        );
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fills a recognized payment-provider iframe on a page with NO total, without submitting",
+    async () => {
+      const frameUrl = "https://static-content.payment.global.rakuten.com/card-form";
+      const { page, browser } = await servePages({
+        "https://shop.rakuten.co.jp/checkout/payment": `
+          <title>Payment method</title>
+          <p>Choose your payment method. The order total is shown on the next step.</p>
+          <iframe src="${frameUrl}"></iframe>
+          <button>Next</button>`,
+        [frameUrl]: FRAME_FORM,
+      });
+      try {
+        await page.goto("https://shop.rakuten.co.jp/checkout/payment");
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+
+        const frame = page.frames().find((f) => f.url() === frameUrl)!;
+        // The card landed inside the payment-provider frame…
+        expect(await frame.locator('[autocomplete="cc-number"]').inputValue()).toBe(CARD.pan);
+        expect(await frame.locator('[autocomplete="cc-csc"]').inputValue()).toBe(CARD.cvv);
+        // No formatter script in the frame, so the four typed digits remain raw.
+        expect(await frame.locator('[placeholder="MM/YY"]').inputValue()).toBe("1230");
+        // …every filled field is marked sealed so observations mask it…
+        expect(await frame.locator('[data-ts-sealed-payment="1"]').count()).toBeGreaterThanOrEqual(
+          4,
+        );
+        // …and NOTHING was submitted: filling is not charging.
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "accepts confirmation totals only from visible trusted frames",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/review";
+      const trustedUrl = "https://shop.example.test/checkout/summary";
+      const rogueUrl = "https://rogue-payments.example.net/summary";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Review order</title>
+          <div id="trusted-parent" style="opacity: 0">
+            <iframe id="trusted" hidden style="opacity: 0" src="${trustedUrl}"></iframe>
+          </div>
+          <iframe id="rogue" src="${rogueUrl}"></iframe>`,
+        [trustedUrl]: "Order total USD 39.99",
+        [rogueUrl]: "Order total USD 39.99",
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutConfirmSummary()).rejects.toThrow(
+          "payment_checkout_total_not_found",
+        );
+        await page.locator("#trusted").evaluate((element) => element.removeAttribute("hidden"));
+        await expect(controller.readCheckoutConfirmSummary()).rejects.toThrow(
+          "payment_checkout_total_not_found",
+        );
+        await page.locator("#trusted").evaluate((element) => {
+          element.style.opacity = "1";
+        });
+        await expect(controller.readCheckoutConfirmSummary()).rejects.toThrow(
+          "payment_checkout_total_not_found",
+        );
+        await page.locator("#trusted-parent").evaluate((element) => {
+          element.style.opacity = "1";
+        });
+        await expect(controller.readCheckoutConfirmSummary()).resolves.toMatchObject({
+          amount_cents: 3_999,
+          currency: "USD",
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps the main payable total authoritative and refuses trusted-frame conflicts",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/review";
+      const trustedUrl = "https://shop.example.test/checkout/summary";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Review order</title>
+          <div>Order total USD 49.99</div>
+          <iframe src="${trustedUrl}"></iframe>`,
+        [trustedUrl]: "Order total USD 39.99",
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutConfirmSummary()).rejects.toThrow(
+          "payment_checkout_total_conflict",
+        );
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores opacity-hidden confirmation totals inside a visible checkout frame",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/review";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Review order</title>
+          <section id="hidden" style="opacity: 0">
+            <div>Order total USD 39.99</div>
+          </section>
+          <button>Place order</button>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutConfirmSummary()).rejects.toThrow(
+          "payment_checkout_total_not_found",
+        );
+        await page.locator("#hidden").evaluate((element) => {
+          element.style.opacity = "1";
+        });
+        await expect(controller.readCheckoutConfirmSummary()).resolves.toMatchObject({
+          amount_cents: 3_999,
+          currency: "USD",
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fills only billing-scoped address fields during split card entry",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `${FRAME_FORM}
+          <input id="shipping-line1" autocomplete="shipping address-line1" value="9 Delivery Road">
+          <input id="ambiguous-city" autocomplete="address-level2" value="Delivery City">
+          <input id="billing-line1" autocomplete="billing address-line1">
+          <input id="billing-city" name="billing_city">
+          <input id="billing-postal" autocomplete="billing postal-code">
+          <input id="billing-country" name="billing_country">`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+
+        expect(await page.locator("#shipping-line1").inputValue()).toBe("9 Delivery Road");
+        expect(await page.locator("#ambiguous-city").inputValue()).toBe("Delivery City");
+        expect(await page.locator("#billing-line1").inputValue()).toBe(CARD.billing.line1);
+        expect(await page.locator("#billing-city").inputValue()).toBe(CARD.billing.city);
+        expect(await page.locator("#billing-postal").inputValue()).toBe(CARD.billing.postal_code);
+        expect(await page.locator("#billing-country").inputValue()).toBe(CARD.billing.country);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "rechecks a payment frame origin immediately before writing card data",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const frameUrl = "https://static-content.payment.global.rakuten.com/card-form";
+      const rogueUrl = "https://rogue-payments.example.net/card-form";
+      const { page, browser } = await servePages({
+        [pageUrl]: `<iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          ${FRAME_FORM}
+          <script>
+            const pan = document.querySelector('[autocomplete="cc-number"]');
+            new MutationObserver(() => {
+              pan.disabled = true;
+              setTimeout(() => location.replace("${rogueUrl}"), 0);
+            }).observe(pan, {
+              attributes: true,
+              attributeFilter: ["data-ts-sealed-payment"],
+            });
+          </script>`,
+        [rogueUrl]: FRAME_FORM,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toMatchObject({
+          message: "payment_frame_not_recognized",
+          frameOrigin: "https://rogue-payments.example.net",
+        });
+        const rogueFrame = page.frames().find((frame) => frame.url() === rogueUrl)!;
+        expect(await rogueFrame.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await rogueFrame.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "clears semantic card fields after sealed nodes are replaced",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({ [pageUrl]: FRAME_FORM });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        await controller.fillCheckoutCardFields(CARD);
+        await page.evaluate(() => {
+          for (const original of Array.from(
+            document.querySelectorAll<HTMLInputElement>('[data-ts-sealed-payment="1"]'),
+          )) {
+            const replacement = original.cloneNode(true) as HTMLInputElement;
+            replacement.removeAttribute("data-ts-sealed-payment");
+            replacement.value = original.value;
+            original.replaceWith(replacement);
+          }
+        });
+
+        await controller.clearCheckoutCardFields();
+
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+        expect(await page.locator('[autocomplete="cc-name"]').inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "semantically clears a partial fill after the PAN node is replaced",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <input id="pan" autocomplete="cc-number">
+          <input placeholder="MM/YY">
+          <input autocomplete="cc-name">
+          <script>
+            document.addEventListener("input", (event) => {
+              const input = event.target;
+              if (!(input instanceof HTMLInputElement) || input.id !== "pan") return;
+              if (input.value === "" || document.body.dataset.replaced === "true") return;
+              document.body.dataset.replaced = "true";
+              const replacement = input.cloneNode(true);
+              replacement.removeAttribute("data-ts-sealed-payment");
+              replacement.value = input.value;
+              input.replaceWith(replacement);
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_field_not_found:cvv",
+        );
+        expect(await page.locator("#pan").inputValue()).toBe("");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "reports unproven cleanup when a controlled PAN field restores its value",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <input id="pan" autocomplete="cc-number">
+          <input placeholder="MM/YY">
+          <input autocomplete="cc-name">
+          <script>
+            let stored = "";
+            document.addEventListener("input", (event) => {
+              const input = event.target;
+              if (!(input instanceof HTMLInputElement) || input.id !== "pan") return;
+              if (input.value !== "") stored = input.value;
+              const replacement = input.cloneNode(true);
+              replacement.removeAttribute("data-ts-sealed-payment");
+              replacement.value = input.value === "" ? stored : input.value;
+              input.replaceWith(replacement);
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toBeInstanceOf(
+          PaymentCardFillCleanupError,
+        );
+        expect(await page.locator("#pan").inputValue()).toBe(CARD.pan);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "reports unproven cleanup when a visible PAN preview survives field clearing",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <input id="pan" autocomplete="cc-number">
+          <input placeholder="MM/YY">
+          <input autocomplete="cc-name">
+          <div id="preview"></div>
+          <script>
+            document.querySelector("#pan").addEventListener("input", (event) => {
+              if (event.target.value === "") return;
+              document.querySelector("#preview").textContent =
+                event.target.value.replace(/(\\d{4})(?=\\d)/g, "$1|");
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toBeInstanceOf(
+          PaymentCardFillCleanupError,
+        );
+        expect(await page.locator("#pan").inputValue()).toBe("");
+        expect(await page.locator("#preview").innerText()).toBe("4242|4242|4242|4242");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "reports unproven failed-fill cleanup when a labeled CVV preview survives",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <input autocomplete="cc-number">
+          <input placeholder="MM/YY">
+          <input autocomplete="cc-name">
+          <div id="preview"></div>
+          <script>
+            document.querySelector('[autocomplete="cc-number"]').addEventListener("input", (event) => {
+              if (event.target.value !== "") document.querySelector("#preview").textContent = "CVV 123";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toBeInstanceOf(
+          PaymentCardFillCleanupError,
+        );
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator("#preview").innerText()).toBe("CVV 123");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps terminal cleanup sealed when a labeled CVV preview survives",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `${FRAME_FORM}
+          <div id="preview"></div>
+          <script>
+            document.querySelector('[autocomplete="cc-csc"]').addEventListener("input", (event) => {
+              if (event.target.value !== "") document.querySelector("#preview").textContent = "Security code 123";
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        await controller.fillCheckoutCardFields(CARD);
+
+        await expect(controller.clearCheckoutCardFields()).rejects.toThrow(
+          "payment_fields_not_cleared",
+        );
+        expect(await page.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+        expect(await page.locator("#preview").innerText()).toBe("Security code 123");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps cleanup sealed when card data survives in interactive metadata",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/payment";
+      const { page, browser } = await servePages({
+        [pageUrl]: `${FRAME_FORM}
+          <button id="preview" aria-label="Card preview"></button>
+          <script>
+            document.querySelector('[autocomplete="cc-number"]').addEventListener("input", event => {
+              if (event.target.value) {
+                document.querySelector("#preview").setAttribute(
+                  "aria-label",
+                  "Card " + event.target.value,
+                );
+              }
+            });
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+        await controller.fillCheckoutCardFields(CARD);
+
+        await expect(controller.clearCheckoutCardFields()).rejects.toThrow(
+          "payment_fields_not_cleared",
+        );
+        expect(await page.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator("#preview").getAttribute("aria-label")).toContain(CARD.pan);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses the same fill when the card fields live in an UNRECOGNIZED cross-origin iframe",
+    async () => {
+      const rogueUrl = "https://rogue-payments.example.net/card-form";
+      const { page, browser } = await servePages({
+        "https://shop.example.test/checkout/payment": `
+          <title>Payment method</title>
+          <iframe src="${rogueUrl}"></iframe>
+          <button>Next</button>`,
+        [rogueUrl]: FRAME_FORM,
+      });
+      try {
+        await page.goto("https://shop.example.test/checkout/payment");
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toMatchObject({
+          message: "payment_frame_not_recognized",
+          frameOrigin: "https://rogue-payments.example.net",
+        });
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toBeInstanceOf(
+          UnrecognizedPaymentFrameError,
+        );
+
+        const frame = page.frames().find((f) => f.url() === rogueUrl)!;
+        // Not one byte of the card reached the rogue frame, and nothing sealed
+        // was left behind.
+        expect(await frame.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await frame.locator('[autocomplete="cc-csc"]').inputValue()).toBe("");
+        expect(await frame.locator('[data-ts-sealed-payment="1"]').count()).toBe(0);
+        expect(await frame.locator("body").getAttribute("data-submitted")).toBeNull();
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 });

@@ -3,10 +3,21 @@ import canonicalize from "canonicalize";
 import { exportJWK, SignJWT } from "jose";
 import { describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
-import { executeOperatePay, type PaymentBrowser } from "../pay-operator.js";
+import {
+  executeOperatePay,
+  executeOperatePayConfirm,
+  type PaymentBrowser,
+  type PendingCardFill,
+} from "../pay-operator.js";
 import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
 import { manualCardEntryBlockReason } from "../provision-session.js";
-import type { CheckoutCard, CheckoutSummary } from "../browser.js";
+import {
+  PaymentCardFillCleanupError,
+  UnrecognizedPaymentFrameError,
+  type CheckoutCard,
+  type CheckoutSubmitResult,
+  type CheckoutSummary,
+} from "../browser.js";
 
 const CHECKOUT = {
   merchant: "Synthetic Merchant",
@@ -227,7 +238,11 @@ async function harness(
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
+    fillCheckoutCardFields: vi.fn(),
+    submitFilledCheckout: vi.fn(),
+    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
       return threeDs === undefined
@@ -309,8 +324,12 @@ describe("operate_pay", () => {
       const browser: PaymentBrowser = {
         isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
         readCheckoutSummary: vi.fn().mockRejectedValue(new Error(error)),
+        readCheckoutConfirmSummary: vi.fn().mockRejectedValue(new Error(error)),
         currentUrl: vi.fn().mockReturnValue("https://flowers.example.test/checkout"),
         fillAndSubmitCheckout: vi.fn(),
+        fillCheckoutCardFields: vi.fn(),
+        submitFilledCheckout: vi.fn(),
+        clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
         waitForThreeDsResolution: vi.fn(),
       };
 
@@ -756,7 +775,11 @@ async function runJit(cfg: {
       }
       return JIT_CHECKOUT;
     }),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(JIT_CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${JIT_CHECKOUT.checkout_origin}/session/test`),
+    fillCheckoutCardFields: vi.fn(),
+    submitFilledCheckout: vi.fn(),
+    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
       return { three_ds_required: false };
@@ -981,5 +1004,542 @@ describe("operate_pay JIT add-card ceremony", () => {
     // Same script, but the 5-min has-card budget expires before 330s.
     expect(hasCard.result).toMatchObject({ status: "payment_approval_timeout" });
     expect(hasCard.filledCards).toHaveLength(0);
+  });
+});
+
+// ── Split checkout (phase="fill_card" → executeOperatePayConfirm) ───────────
+//
+// Rakuten-style flows enter the card BEFORE any total is visible and show the
+// total only on a separate confirmation step. These pin the split contract:
+// the approval ceremony + fill run against declared, human-approved values
+// with NO live total; NOTHING is submitted at fill time; and the
+// total-verification gate lives in the confirm step — exactly where the money
+// moves.
+
+const SPLIT_CHECKOUT: CheckoutSummary = {
+  merchant: "Split Merchant",
+  checkout_origin: "https://shop.split.test",
+  amount_cents: 3_999,
+  currency: "USD",
+};
+
+async function runSplitFill(
+  cfg: {
+    liveSummary?: CheckoutSummary;
+    fillRejects?: Error;
+    driftOriginAfterApproval?: string;
+  } = {},
+): Promise<{
+  result: Record<string, unknown>;
+  approvalBodies: Array<Record<string, unknown>>;
+  auditBodies: unknown[];
+  filledCards: CheckoutCard[];
+  pendings: PendingCardFill[];
+  cleanupFailureCalls: number;
+  browser: PaymentBrowser;
+}> {
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = await exportJWK(publicKey);
+  const approvalBodies: Array<Record<string, unknown>> = [];
+  const auditBodies: unknown[] = [];
+  const filledCards: CheckoutCard[] = [];
+  const pendings: PendingCardFill[] = [];
+  let cleanupFailureCalls = 0;
+  const nonce = "split-nonce";
+  const agent = "split-agent";
+
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url === "https://vouchflow.test/.well-known/jwks.json") {
+      return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
+    }
+    if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+      approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return Response.json(
+        {
+          id: "appr_split",
+          nonce,
+          agent,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+        { status: 201 },
+      );
+    }
+    if (
+      (url.endsWith("/v1/pay/approvals/appr_split") ||
+        url.endsWith("/v1/pay/approvals/appr_split?wait_for_submission=1")) &&
+      init?.method === "GET"
+    ) {
+      // Sign the mandate over whatever checkout the operator MINTED the
+      // approval with — declared values on a split page, live ones otherwise.
+      const approval = approvalBodies[0]!;
+      const operatorPublicKey = String(approval.operator_pubkey);
+      const recipientHash = createHash("sha256")
+        .update(Buffer.from(operatorPublicKey, "base64url"))
+        .digest("base64url");
+      const canonical = canonicalize({
+        approval_id: "appr_split",
+        merchant: approval.merchant,
+        checkout_origin: approval.checkout_origin,
+        amount_cents: approval.amount_cents,
+        currency: approval.currency,
+        nonce,
+        card_ref: "card_split",
+        recipient_pubkey_hash: recipientHash,
+        item: approval.item,
+        reason: approval.reason,
+        agent,
+      })!;
+      const aad = createHash("sha256").update(canonical, "utf8").digest();
+      const jws = await new SignJWT({
+        payload_sha256: aad.toString("base64url"),
+        context: "purchase",
+        confidence: "high",
+        mandate_id: "mandate_split",
+      })
+        .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+        .setIssuer("https://vouchflow.dev")
+        .setAudience("customer_test")
+        .sign(privateKey);
+      const sealed_card = await sealToRecipient(
+        operatorPublicKey,
+        new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
+        aad,
+      );
+      return Response.json({
+        id: "appr_split",
+        status: "approved",
+        merchant: approval.merchant,
+        checkout_origin: approval.checkout_origin,
+        amount_cents: approval.amount_cents,
+        currency: approval.currency,
+        nonce,
+        card_ref: "card_split",
+        operator_pubkey: operatorPublicKey,
+        jws,
+        sealed_card,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+    }
+    if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
+      auditBodies.push(JSON.parse(String(init.body)) as unknown);
+      return Response.json({ id: "audit_split" }, { status: 201 });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }) as typeof fetch;
+
+  let urlCalls = 0;
+  const browser: PaymentBrowser = {
+    isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
+    readCheckoutSummary:
+      cfg.liveSummary !== undefined
+        ? vi.fn().mockResolvedValue(cfg.liveSummary)
+        : vi.fn().mockRejectedValue(new Error("payment_checkout_total_not_found")),
+    readCheckoutConfirmSummary: vi
+      .fn()
+      .mockRejectedValue(new Error("payment_checkout_total_not_found")),
+    currentUrl: vi.fn(() => {
+      urlCalls += 1;
+      if (cfg.driftOriginAfterApproval !== undefined && urlCalls > 1) {
+        return cfg.driftOriginAfterApproval;
+      }
+      return `${SPLIT_CHECKOUT.checkout_origin}/checkout/payment`;
+    }),
+    fillAndSubmitCheckout: vi.fn(),
+    fillCheckoutCardFields: vi.fn(async (card: CheckoutCard) => {
+      if (cfg.fillRejects !== undefined) throw cfg.fillRejects;
+      filledCards.push(card);
+    }),
+    submitFilledCheckout: vi.fn(),
+    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
+    waitForThreeDsResolution: vi.fn(),
+  };
+  const api = new ApiClient({
+    apiBaseUrl: "https://api.test",
+    registryBaseUrl: "https://registry.test",
+    agentSessionToken: "synthetic-session-token",
+    fetch: fetchMock,
+  });
+
+  const result = (await executeOperatePay(
+    {
+      card_ref: "card_split",
+      merchant: SPLIT_CHECKOUT.merchant,
+      amount_cents: SPLIT_CHECKOUT.amount_cents,
+      currency: SPLIT_CHECKOUT.currency,
+      item: "Split item",
+      reason: "Split purchase reason",
+      phase: "fill_card",
+    },
+    api,
+    browser,
+    {
+      fetch: fetchMock,
+      sleep: async () => undefined,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onCardFilled: (pending) => pendings.push(pending),
+      onCardFillCleanupFailed: () => {
+        cleanupFailureCalls += 1;
+      },
+    },
+  )) as Record<string, unknown>;
+
+  return {
+    result,
+    approvalBodies,
+    auditBodies,
+    filledCards,
+    pendings,
+    cleanupFailureCalls,
+    browser,
+  };
+}
+
+describe("operate_pay split checkout — fill_card", () => {
+  it("fills the vaulted card with NO visible total and charges nothing", async () => {
+    const { result, approvalBodies, auditBodies, filledCards, pendings, browser } =
+      await runSplitFill();
+
+    expect(result).toMatchObject({
+      status: "payment_card_filled",
+      merchant: SPLIT_CHECKOUT.merchant,
+      amount_cents: SPLIT_CHECKOUT.amount_cents,
+      currency: SPLIT_CHECKOUT.currency,
+      last4: "4242",
+    });
+    // The human approved the DECLARED values — they are what the approval binds.
+    expect(approvalBodies[0]).toMatchObject({
+      merchant: SPLIT_CHECKOUT.merchant,
+      checkout_origin: SPLIT_CHECKOUT.checkout_origin,
+      amount_cents: SPLIT_CHECKOUT.amount_cents,
+      currency: SPLIT_CHECKOUT.currency,
+      card_ref: "card_split",
+    });
+    // The card reached the page through the fill-only primitive…
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    // …and NOTHING was submitted: no combined fill+charge, no charge click.
+    expect(browser.fillAndSubmitCheckout).not.toHaveBeenCalled();
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+    // No money moved → no payment audit row yet.
+    expect(auditBodies).toEqual([]);
+    // The confirm step gets exactly the mandate-bound state, never the card.
+    expect(pendings).toEqual([
+      {
+        approval_id: "appr_split",
+        approval_url: "https://web.test/vault/pay/appr_split",
+        checkout: SPLIT_CHECKOUT,
+        card_ref: "card_split",
+        last4: "4242",
+        mandate_id: "mandate_split",
+      },
+    ]);
+    const exposed = JSON.stringify(result) + JSON.stringify(pendings);
+    expect(exposed).not.toContain(SYNTHETIC_CARD.pan);
+    expect(exposed).not.toContain(SYNTHETIC_CARD.cvv);
+  });
+
+  it("prefers the live summary when the card-entry page does show a total", async () => {
+    const live = { ...SPLIT_CHECKOUT, amount_cents: 5_000 };
+    const { result, approvalBodies } = await runSplitFill({ liveSummary: live });
+
+    expect(result).toMatchObject({ status: "payment_card_filled", amount_cents: 5_000 });
+    expect(approvalBodies[0]).toMatchObject({ amount_cents: 5_000 });
+  });
+
+  it("refuses to fill when the page origin drifted during the ceremony", async () => {
+    const { result, filledCards, browser } = await runSplitFill({
+      driftOriginAfterApproval: "https://evil.synthetic.test/checkout",
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_checkout_origin_mismatch",
+      mandate_checkout_origin: SPLIT_CHECKOUT.checkout_origin,
+      live_checkout_origin: "https://evil.synthetic.test",
+    });
+    expect(filledCards).toHaveLength(0);
+    expect(browser.fillCheckoutCardFields).not.toHaveBeenCalled();
+  });
+
+  it("refuses the fill into an unrecognized cross-origin frame", async () => {
+    const { result, auditBodies } = await runSplitFill({
+      fillRejects: new UnrecognizedPaymentFrameError("https://rogue-payments.example"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_frame_not_recognized",
+      frame_origin: "https://rogue-payments.example",
+    });
+    expect(auditBodies).toEqual([]);
+    expect(JSON.stringify(result)).not.toContain(SYNTHETIC_CARD.pan);
+  });
+
+  it("surfaces a failed fill with its payment_ code", async () => {
+    const { result } = await runSplitFill({
+      fillRejects: new Error("payment_field_not_found:cvv"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_card_fill_failed",
+      reason: "payment_field_not_found:cvv",
+    });
+  });
+
+  it("activates the non-retryable seal when failed-fill cleanup is unproven", async () => {
+    const { result, cleanupFailureCalls, pendings } = await runSplitFill({
+      fillRejects: new PaymentCardFillCleanupError(new Error("payment_field_not_found:cvv")),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_card_fill_failed",
+      reason: "payment_field_not_found:cvv",
+      payment_fields_cleared: false,
+    });
+    expect(cleanupFailureCalls).toBe(1);
+    expect(pendings).toEqual([]);
+  });
+});
+
+function splitPending(): PendingCardFill {
+  return {
+    approval_id: "appr_split",
+    approval_url: "https://web.test/vault/pay/appr_split",
+    checkout: { ...SPLIT_CHECKOUT },
+    card_ref: "card_split",
+    last4: "4242",
+    mandate_id: "mandate_split",
+  };
+}
+
+async function runConfirm(cfg: {
+  live?: CheckoutSummary | Error;
+  permissiveLive?: CheckoutSummary | Error;
+  submit?: CheckoutSubmitResult | Error;
+  threeDsResolution?: "succeeded" | "failed" | "timeout";
+  waitSeconds?: number;
+  clear?: Error;
+}): Promise<{
+  result: Record<string, unknown>;
+  auditBodies: unknown[];
+  notifyCalls: string[];
+  browser: PaymentBrowser;
+}> {
+  const auditBodies: unknown[] = [];
+  const notifyCalls: string[] = [];
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
+      auditBodies.push(JSON.parse(String(init.body)) as unknown);
+      return Response.json({ id: "audit_split" }, { status: 201 });
+    }
+    if (url.endsWith("/v1/pay/approvals/appr_split/notify-3ds") && init?.method === "POST") {
+      notifyCalls.push(url);
+      return Response.json({ sent: true });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }) as typeof fetch;
+
+  const live = cfg.live ?? { ...SPLIT_CHECKOUT };
+  const permissiveLive = cfg.permissiveLive ?? live;
+  const submit = cfg.submit ?? { three_ds_required: false };
+  const browser: PaymentBrowser = {
+    isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
+    readCheckoutSummary:
+      permissiveLive instanceof Error
+        ? vi.fn().mockRejectedValue(permissiveLive)
+        : vi.fn().mockResolvedValue(permissiveLive),
+    readCheckoutConfirmSummary:
+      live instanceof Error ? vi.fn().mockRejectedValue(live) : vi.fn().mockResolvedValue(live),
+    currentUrl: vi.fn().mockReturnValue(`${SPLIT_CHECKOUT.checkout_origin}/checkout/confirm`),
+    fillAndSubmitCheckout: vi.fn(),
+    fillCheckoutCardFields: vi.fn(),
+    submitFilledCheckout:
+      submit instanceof Error
+        ? vi.fn().mockRejectedValue(submit)
+        : vi.fn().mockResolvedValue(submit),
+    clearSealedPaymentFields:
+      cfg.clear === undefined
+        ? vi.fn().mockResolvedValue(undefined)
+        : vi.fn().mockRejectedValue(cfg.clear),
+    waitForThreeDsResolution: vi.fn().mockResolvedValue(cfg.threeDsResolution ?? "timeout"),
+  };
+  const api = new ApiClient({
+    apiBaseUrl: "https://api.test",
+    registryBaseUrl: "https://registry.test",
+    agentSessionToken: "synthetic-session-token",
+    fetch: fetchMock,
+  });
+
+  const result = (await executeOperatePayConfirm(
+    splitPending(),
+    cfg.waitSeconds !== undefined ? { three_ds_wait_seconds: cfg.waitSeconds } : {},
+    api,
+    browser,
+  )) as Record<string, unknown>;
+
+  return { result, auditBodies, notifyCalls, browser };
+}
+
+describe("operate_pay split checkout — confirm", () => {
+  it("verifies the now-visible total against the approved amount, then charges", async () => {
+    const { result, auditBodies, browser } = await runConfirm({});
+
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      merchant: SPLIT_CHECKOUT.merchant,
+      amount_cents: SPLIT_CHECKOUT.amount_cents,
+      currency: SPLIT_CHECKOUT.currency,
+    });
+    expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+    expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
+    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledWith();
+    expect(browser.readCheckoutSummary).not.toHaveBeenCalled();
+    expect(auditBodies).toEqual([
+      expect.objectContaining({
+        amountCents: SPLIT_CHECKOUT.amount_cents,
+        last4: "4242",
+        status: "payment_submitted",
+        mandateId: "mandate_split",
+      }),
+    ]);
+  });
+
+  it("refuses to charge while the total is still not visible", async () => {
+    const { result, auditBodies, browser } = await runConfirm({
+      live: new Error("payment_checkout_total_not_found"),
+    });
+
+    expect(result).toMatchObject({ status: "payment_checkout_total_not_found" });
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
+    expect(auditBodies).toEqual([]);
+  });
+
+  it("refuses to charge when trusted checkout contexts show conflicting totals", async () => {
+    const { result, auditBodies, browser } = await runConfirm({
+      live: new Error("payment_checkout_total_conflict"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_amount_mismatch",
+      reason: "conflicting_checkout_totals",
+    });
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
+    expect(auditBodies).toEqual([]);
+  });
+
+  it("does not fall back to the permissive summary reader at confirmation", async () => {
+    const { result, browser } = await runConfirm({
+      live: new Error("payment_checkout_total_not_found"),
+      permissiveLive: { ...SPLIT_CHECKOUT },
+    });
+
+    expect(result).toMatchObject({ status: "payment_checkout_total_not_found" });
+    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledTimes(1);
+    expect(browser.readCheckoutSummary).not.toHaveBeenCalled();
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+  });
+
+  it("refuses to charge when the live total differs from the approved amount", async () => {
+    const { result, browser } = await runConfirm({
+      live: { ...SPLIT_CHECKOUT, amount_cents: SPLIT_CHECKOUT.amount_cents + 500 },
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_amount_mismatch",
+      mandate_amount_cents: SPLIT_CHECKOUT.amount_cents,
+      live_amount_cents: SPLIT_CHECKOUT.amount_cents + 500,
+    });
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+  });
+
+  it("refuses to charge when the origin drifted (same total)", async () => {
+    const { result, browser } = await runConfirm({
+      live: { ...SPLIT_CHECKOUT, checkout_origin: "https://evil.synthetic.test" },
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_amount_mismatch",
+      live_checkout_origin: "https://evil.synthetic.test",
+    });
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+  });
+
+  it("tolerates a merchant display-name change between checkout steps", async () => {
+    // The merchant string derives from the page title, which legitimately
+    // changes between the payment and review steps; origin+amount+currency are
+    // the mandate-bound gate.
+    const { result } = await runConfirm({
+      live: { ...SPLIT_CHECKOUT, merchant: "Order Review — Split Merchant" },
+    });
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+  });
+
+  it("keeps the filled fields for a retry when no charge control is found", async () => {
+    const { result, auditBodies, browser } = await runConfirm({
+      submit: new Error("payment_submit_not_found"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_checkout_failed",
+      reason: "payment_submit_not_found",
+    });
+    // Nothing was charged and the card stays in the page for a settled retry.
+    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_checkout_failed" })]);
+  });
+
+  it("clears the fill and returns terminal unknown after an ambiguous submit failure", async () => {
+    const { result, auditBodies, browser } = await runConfirm({
+      submit: new Error("click failed after dispatch"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      reason: "payment_submit_outcome_unknown",
+      payment_fields_cleared: true,
+    });
+    expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+  });
+
+  it("reports uncleared fields after an ambiguous submit failure", async () => {
+    const { result, browser } = await runConfirm({
+      submit: new Error("click failed after dispatch"),
+      clear: new Error("controlled field restored"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      payment_fields_cleared: false,
+    });
+    expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes a currency-unresolved read through as a refusal", async () => {
+    const { result, browser } = await runConfirm({
+      live: new Error("payment_checkout_currency_unresolved"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_checkout_currency_unresolved",
+      reason: "checkout_currency_unrecognized",
+    });
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+  });
+
+  it("runs the 3DS wait against the fill-step approval id", async () => {
+    const { result, notifyCalls } = await runConfirm({
+      submit: { three_ds_required: true, challenge_url: "https://issuer.synthetic.test/c" },
+      threeDsResolution: "succeeded",
+    });
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyCalls[0]).toContain("appr_split");
   });
 });

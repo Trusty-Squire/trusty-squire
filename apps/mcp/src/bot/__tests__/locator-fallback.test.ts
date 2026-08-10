@@ -150,6 +150,11 @@ const ICON_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
     style="width:40px;height:40px"></button>
 </body></html>`)}`;
 
+const INPUT_SUBMIT_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <input id="place-order" type="submit" value="Place order" style="width:200px;height:40px">
+</body></html>`)}`;
+
 const ACTION_TYPE_ONLY_SAVE_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:0">
   <button id="x" action-type="SAVE_PRODUCT" style="width:40px;height:40px"></button>
@@ -435,10 +440,25 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("");
+      expect(resolved.labels).toEqual(["saveProduct"]);
       expect(resolved.safetySignals).toEqual({
         billingObject: true,
         accountSetup: false,
       });
+      await resolved.handle.dispose();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("returns an input submit value as an effective locator label", async () => {
+    const { ctrl, page } = await pageFor(INPUT_SUBMIT_FIXTURE);
+    try {
+      const resolved = await ctrl.resolvePageTarget("css", "#place-order");
+      expect(resolved.ok).toBe(true);
+      if (!resolved.ok) throw new Error("unreachable");
+      expect(resolved.text).toBe("");
+      expect(resolved.labels).toEqual(["Place order"]);
       await resolved.handle.dispose();
     } finally {
       await page.close();

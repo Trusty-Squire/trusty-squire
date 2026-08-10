@@ -327,11 +327,15 @@ async function runSeam(cfg: {
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
       return { three_ds_required: false };
     }),
+    fillCheckoutCardFields: vi.fn(),
+    submitFilledCheckout: vi.fn(),
+    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
   };
 

@@ -106,9 +106,32 @@ until a card is bound. This enforces the seal → bind → approve order on the
 server rather than relying on client convention. On resume, the operator fails
 closed unless the approval record contains a non-blank server-bound card
 reference, and uses that reference when re-creating the signed purchase payload.
-Immediately before filling a just-in-time checkout, it re-reads the live
-merchant, origin, amount, and currency and refuses submission if any signed
-field changed.
+Immediately before filling and submitting a single-page just-in-time checkout,
+it re-reads the live merchant, origin, amount, and currency and refuses submission
+if any signed field changed.
+
+A split checkout may collect card details before it exposes the order total. Its
+`fill_card` phase still completes the same signed approval, but cannot re-read a
+total at card-entry time. It instead requires the live page origin to equal the
+mandate's checkout origin, fills no submit control, and permits card data only in
+the main frame, same-registrable-domain HTTPS frames, or curated HTTPS
+payment-provider frames. A failed or unrecognized-frame fill clears partial card
+data; if cleanup itself cannot be confirmed, the session keeps the payment-field
+seal active. On success the raw card is zeroed in the operator, while the page fields
+remain sealed and observation-masked for the checkout's review step; session state
+retains only approval and mandate metadata, the checkout binding, card reference,
+and last four digits.
+
+The later `confirm` phase is the charge boundary. It requires a visible live total
+with no declared-amount fallback and refuses unless amount, currency, and checkout
+origin exactly match the mandate. The page-title-derived merchant display name is
+not compared across steps; origin is the recipient trust anchor. While a split card
+fill is pending, ordinary browser actions cannot click charge-labeled controls or
+press Enter, so only `confirm` can cross that boundary. If no submit control is found,
+the sealed page fields and pending metadata remain available for a safe retry; they
+are cleared after a terminal outcome when cleanup can be confirmed. If field cleanup
+cannot be confirmed, pending metadata is still discarded but the observation seal
+remains active.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash
@@ -168,7 +191,9 @@ audit retention window, which defaults to 365 days.
   plus the constrained `brand` and `last4` display metadata.
 - During payment, the phone releases card data only to the ephemeral local
   operator key under the exact purchase binding. The API and coding-agent model
-  never see plaintext PAN or CVV.
+  never see plaintext PAN or CVV. Split-checkout card fields may remain sealed in
+  the live page between fill and confirmation, but observations mask their values
+  and arbitrary cross-origin frames cannot receive them.
 
 ### Using a credential without exposing the key: egress grants
 

@@ -23,10 +23,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrowserController,
+  CHECKOUT_SUBMIT_LABEL_RE,
   type FrameTarget,
   type InteractiveElement,
   type PageTargetSafetySignals,
 } from "./browser.js";
+import type { PendingCardFill } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
@@ -444,6 +446,13 @@ interface Session {
   usedLocatorFallback: boolean;
   recipeRejectionReason: string | null;
   replayState: ReplayState | null;
+  // Split-checkout state (operate_pay phase="fill_card"): the vaulted card is
+  // currently filled into this session's checkout, awaiting the confirm step.
+  // While set, operate_act refuses charge-verb clicks (and Enter) so the ONLY
+  // path to the charge is operate_pay {phase:"confirm"}, which verifies the
+  // live total against the approved amount first.
+  pendingCardFill: PendingCardFill | null;
+  paymentFieldSealActive: boolean;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -956,6 +965,198 @@ function elementTargetKeys(el: InteractiveElement): string[] {
     const v = (s ?? "").replace(/\s+/g, " ").trim();
     return v.length > 0 ? [v] : [];
   });
+}
+
+const PENDING_CARD_AUTOCOMPLETE_FIELDS = new Set([
+  "cc-number",
+  "cc-exp",
+  "cc-exp-month",
+  "cc-exp-year",
+  "cc-csc",
+  "cc-name",
+]);
+
+function isPendingCardFilledField(el: InteractiveElement): boolean {
+  const autocomplete = (el.autocomplete ?? "")
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((token) => token.length > 0);
+  if (autocomplete.some((token) => PENDING_CARD_AUTOCOMPLETE_FIELDS.has(token))) return true;
+  if (
+    autocomplete.includes("billing") &&
+    autocomplete.some((token) =>
+      [
+        "address-line1",
+        "address-line2",
+        "address-level1",
+        "address-level2",
+        "postal-code",
+        "country",
+      ].includes(token),
+    )
+  ) {
+    return true;
+  }
+
+  const name = (el.name ?? "").toLowerCase();
+  const id = (el.id ?? "").toLowerCase();
+  const ariaLabel = (el.ariaLabel ?? "").toLowerCase();
+  const placeholder = (el.placeholder ?? "").toLowerCase();
+  return (
+    name.includes("cardnumber") ||
+    id.includes("card-number") ||
+    id.includes("cardnumber") ||
+    name.includes("cardholder") ||
+    name.includes("card-name") ||
+    id.includes("cardholder") ||
+    name.includes("cvv") ||
+    name.includes("cvc") ||
+    name.includes("security-code") ||
+    id.includes("cvv") ||
+    id.includes("cvc") ||
+    ((name.includes("exp") || id.includes("exp")) &&
+      (name.includes("month") ||
+        name.includes("year") ||
+        name.includes("date") ||
+        name.includes("expir") ||
+        id.includes("month") ||
+        id.includes("year") ||
+        id.includes("date") ||
+        id.includes("expir") ||
+        name === "exp" ||
+        id === "exp")) ||
+    placeholder.replace(/\s+/g, "") === "mm/yy" ||
+    ariaLabel.replace(/\s+/g, "") === "mm/yy" ||
+    ((name.includes("billing") || id.includes("billing")) &&
+      /address|line1|line2|city|locality|state|region|postal|zip|country/.test(`${name} ${id}`))
+  );
+}
+
+function pendingCardSecretKind(el: InteractiveElement): "pan" | "cvv" | null {
+  const autocomplete = (el.autocomplete ?? "").toLowerCase().split(/\s+/);
+  const signal = `${el.name ?? ""} ${el.id ?? ""}`.toLowerCase();
+  if (
+    autocomplete.includes("cc-number") ||
+    signal.includes("cardnumber") ||
+    signal.includes("card-number")
+  ) {
+    return "pan";
+  }
+  if (
+    autocomplete.includes("cc-csc") ||
+    signal.includes("cvv") ||
+    signal.includes("cvc") ||
+    signal.includes("security-code")
+  ) {
+    return "cvv";
+  }
+  return null;
+}
+
+function redactPaymentObservationText(
+  text: string,
+  elements: readonly InteractiveElement[],
+  active: boolean,
+): string {
+  if (!active) return text;
+  let redacted = text;
+  for (const element of elements) {
+    const kind = pendingCardSecretKind(element);
+    const value = element.value?.trim() ?? "";
+    if (kind === null || value.length === 0) continue;
+    if (kind === "pan") {
+      redacted = redactExactDigitSequence(redacted, value.replace(/\D/g, ""));
+    }
+    const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    redacted = redacted.replace(
+      kind === "cvv" ? new RegExp(`\\b${escaped}\\b`, "g") : new RegExp(escaped, "g"),
+      "[sealed payment]",
+    );
+  }
+  redacted = redactLuhnPanSpans(redacted);
+  return redacted.replace(
+    /\b(cvv|cvc|security\s+code)\s*[:#-]?\s*\d{3,4}\b/gi,
+    "$1 [sealed payment]",
+  );
+}
+
+function presentPaymentSafeString(value: string, paymentSealActive: boolean): string {
+  return paymentSealActive ? redactPaymentObservationText(value, [], true) : value;
+}
+
+const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
+
+function redactExactDigitSequence(text: string, expectedDigits: string): string {
+  if (expectedDigits.length < 13) return text;
+  const digitMatches = Array.from(text.matchAll(/\d/g));
+  const replacements: Array<{ start: number; end: number }> = [];
+  for (let start = 0; start + expectedDigits.length <= digitMatches.length; start += 1) {
+    const matches = digitMatches.slice(start, start + expectedDigits.length);
+    if (matches.map((match) => match[0]).join("") !== expectedDigits) continue;
+    if (matches[matches.length - 1]!.index - matches[0]!.index + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
+      continue;
+    }
+    replacements.push({
+      start: matches[0]!.index,
+      end: matches[matches.length - 1]!.index + 1,
+    });
+    start += expectedDigits.length - 1;
+  }
+  if (replacements.length === 0) return text;
+  let cursor = 0;
+  let result = "";
+  for (const replacement of replacements) {
+    result += `${text.slice(cursor, replacement.start)}[sealed payment]`;
+    cursor = replacement.end;
+  }
+  return result + text.slice(cursor);
+}
+
+function redactLuhnPanSpans(text: string): string {
+  const digitPositions = Array.from(text.matchAll(/\d/g), (match) => match.index);
+  const replacements: Array<{ start: number; end: number }> = [];
+  let startDigit = 0;
+  while (startDigit + 13 <= digitPositions.length) {
+    let matchedDigits = 0;
+    const maxDigits = Math.min(19, digitPositions.length - startDigit);
+    for (let length = maxDigits; length >= 13; length -= 1) {
+      const positions = digitPositions.slice(startDigit, startDigit + length);
+      if (positions[positions.length - 1]! - positions[0]! + 1 > PAYMENT_PAN_MAX_SPAN_CHARS) {
+        continue;
+      }
+      const digits = positions.map((position) => text[position]).join("");
+      if (passesLuhn(digits)) {
+        matchedDigits = length;
+        replacements.push({
+          start: positions[0]!,
+          end: positions[positions.length - 1]! + 1,
+        });
+        break;
+      }
+    }
+    startDigit += matchedDigits || 1;
+  }
+  if (replacements.length === 0) return text;
+  let cursor = 0;
+  let result = "";
+  for (const replacement of replacements) {
+    result += `${text.slice(cursor, replacement.start)}[sealed payment]`;
+    cursor = replacement.end;
+  }
+  return result + text.slice(cursor);
+}
+
+function observationSealedFieldKeys(
+  session: Session,
+  elements: readonly InteractiveElement[],
+): ReadonlySet<string> {
+  if (!session.paymentFieldSealActive) return session.sealedFieldKeys;
+  const sealed = new Set(session.sealedFieldKeys);
+  for (const el of elements) {
+    if (!isPendingCardFilledField(el)) continue;
+    for (const key of elementTargetKeys(el)) sealed.add(key);
+  }
+  return sealed;
 }
 
 // Resolve a host-supplied target string to one live element. Matching is by
@@ -1586,7 +1787,7 @@ export function shouldBlockUnsafeProvisionAction(
 // allowed as grouping) that passes the Luhn checksum — requiring Luhn keeps
 // order numbers, tracking numbers, and other long digit strings from
 // false-positiving. Scoped to MODEL-SUPPLIED `type` text only: operate_pay's
-// vaulted-card fill (BrowserController.fillAndSubmitCheckout) and type_secret's
+// vaulted-card fill methods and type_secret's
 // sealed-slot transfer never pass through this check.
 function passesLuhn(digits: string): boolean {
   let sum = 0;
@@ -1621,10 +1822,34 @@ export function manualCardEntryBlockReason(text: string): string | null {
   return null;
 }
 
+// While a vaulted card sits filled in the checkout (operate_pay
+// phase="fill_card"), the model must not be able to reach the charge itself:
+// the pay/place-order click is reserved for operate_pay {phase:"confirm"},
+// which verifies the live total against the user-approved amount first.
+// Ordinary between-step navigation ("Next", "Continue to review") stays free —
+// only charge-verb labels are refused.
+function pendingCardFillChargeBlockReason(
+  session: Session,
+  labels: ReadonlyArray<string | null | undefined>,
+): string | null {
+  if (!session.paymentFieldSealActive) return null;
+  const isCharge = labels.some(
+    (label) => typeof label === "string" && CHECKOUT_SUBMIT_LABEL_RE.test(label.trim()),
+  );
+  if (!isCharge) return null;
+  return (
+    "click refused: a vaulted payment card is filled into this checkout and this " +
+    "control looks like the charge/place-order action. The charge must go through " +
+    'operate_pay {phase:"confirm"}, which verifies the live total against the ' +
+    "user-approved amount before submitting."
+  );
+}
+
 export function buildScreenOutline(
   elements: readonly InteractiveElement[],
   pageText: string,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
+  paymentSealActive = false,
 ): ScreenOutline | undefined {
   if (elements.length === 0) return undefined;
   const byRegion = new Map<string, ScreenRegion>();
@@ -1633,8 +1858,8 @@ export function buildScreenOutline(
     const role = id.split(":")[0] ?? "region";
     const existing = byRegion.get(id);
     const region: ScreenRegion = existing ?? {
-      id,
-      role,
+      id: presentPaymentSafeString(id, paymentSealActive),
+      role: presentPaymentSafeString(role, paymentSealActive),
       topmost: false,
       occluded_by: null,
       children: [],
@@ -1647,16 +1872,25 @@ export function buildScreenOutline(
       el.occludedBy !== null &&
       el.occludedBy !== undefined
     ) {
-      region.occluded_by = el.occludedBy;
+      region.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive);
     }
     if (region.children.length < 10) {
       region.children.push({
-        ref: el.screenPath ?? presentLabel(el, sealedFieldKeys),
-        role: el.role,
-        text: presentLabel(el, sealedFieldKeys),
-        href: el.href ?? null,
+        ref:
+          el.screenPath !== null && el.screenPath !== undefined
+            ? presentPaymentSafeString(el.screenPath, paymentSealActive)
+            : presentLabel(el, sealedFieldKeys, paymentSealActive),
+        role: el.role === null ? null : presentPaymentSafeString(el.role, paymentSealActive),
+        text: presentLabel(el, sealedFieldKeys, paymentSealActive),
+        href:
+          el.href === null || el.href === undefined
+            ? null
+            : presentPaymentSafeString(el.href, paymentSealActive),
         topmost: el.topmost ?? null,
-        occluded_by: el.occludedBy ?? null,
+        occluded_by:
+          el.occludedBy === null || el.occludedBy === undefined
+            ? null
+            : presentPaymentSafeString(el.occludedBy, paymentSealActive),
       });
     }
     byRegion.set(id, region);
@@ -1694,25 +1928,38 @@ function isSealedFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>)
   if ((el.type ?? "").toLowerCase() === "password") return true;
   return elementTargetKeys(el).some((k) => sealed.has(k));
 }
-function presentFieldValue(el: InteractiveElement, sealed: ReadonlySet<string>): string | null {
+function presentFieldValue(
+  el: InteractiveElement,
+  sealed: ReadonlySet<string>,
+  paymentSealActive = false,
+): string | null {
   const v = el.value ?? null;
   if (v === null || v.length === 0) return v;
-  return isSealedFieldValue(el, sealed) ? SEALED_FIELD_PLACEHOLDER : v;
+  return isSealedFieldValue(el, sealed)
+    ? SEALED_FIELD_PLACEHOLDER
+    : presentPaymentSafeString(v, paymentSealActive);
 }
 // The host-facing LABEL. elementRef falls back to a field's VALUE when it has no
 // other label text — which would leak a sealed secret as the element's name. For
 // a sealed field, re-derive the label with the value stripped so it lands on the
 // next signal (placeholder/name) or `tag#index`, never the secret. Ref-keying
 // and targeting still use the raw elementRef, so resolution is unaffected.
-function presentLabel(el: InteractiveElement, sealed: ReadonlySet<string>): string {
-  if (!isSealedFieldValue(el, sealed)) return elementRef(el);
-  return elementRef({ ...el, value: null });
+function presentLabel(
+  el: InteractiveElement,
+  sealed: ReadonlySet<string>,
+  paymentSealActive = false,
+): string {
+  const label = isSealedFieldValue(el, sealed)
+    ? elementRef({ ...el, value: null })
+    : elementRef(el);
+  return presentPaymentSafeString(label, paymentSealActive);
 }
 
 export function buildAccessibilitySnapshot(
   elements: readonly InteractiveElement[],
   limit = 12000,
   sealedFieldKeys: ReadonlySet<string> = new Set<string>(),
+  paymentSealActive = false,
 ): AccessibilitySnapshot | undefined {
   if (elements.length === 0) return undefined;
   const refs = provisionElementRefs(elements);
@@ -1729,18 +1976,22 @@ export function buildAccessibilitySnapshot(
     entries.length > 24 || entries.some(([, group]) => group.length > 16);
   const lines: string[] = ["RootWebArea"];
   for (const [region, group] of entries.slice(0, 24)) {
-    lines.push(`  region "${region}"`);
+    lines.push(`  region "${presentPaymentSafeString(region, paymentSealActive)}"`);
     for (const el of group.slice(0, 16)) {
-      const label = presentLabel(el, sealedFieldKeys).replace(/"/g, '\\"');
-      const role = roleForAccessibility(el);
-      const shownValue = presentFieldValue(el, sealedFieldKeys);
+      const label = presentLabel(el, sealedFieldKeys, paymentSealActive).replace(/"/g, '\\"');
+      const role = presentPaymentSafeString(roleForAccessibility(el), paymentSealActive);
+      const shownValue = presentFieldValue(el, sealedFieldKeys, paymentSealActive);
       const flags = [
         el.value !== undefined && el.value !== null
           ? `value="${(shownValue ?? "").slice(0, 60)}"`
           : null,
         el.checked !== undefined && el.checked !== null ? `checked=${el.checked}` : null,
-        el.href !== undefined && el.href !== null ? `href="${el.href.slice(0, 120)}"` : null,
-        el.topmost === false ? `occluded_by="${el.occludedBy ?? "unknown"}"` : null,
+        el.href !== undefined && el.href !== null
+          ? `href="${presentPaymentSafeString(el.href, paymentSealActive).slice(0, 120)}"`
+          : null,
+        el.topmost === false
+          ? `occluded_by="${presentPaymentSafeString(el.occludedBy ?? "unknown", paymentSealActive)}"`
+          : null,
       ].filter((v): v is string => v !== null);
       lines.push(
         `    ${role} "${label}" ref=${refs.get(el) ?? provisionElementRef(el)}` +
@@ -1995,6 +2246,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     usedLocatorFallback: false,
     recipeRejectionReason: null,
     replayState: null,
+    pendingCardFill: null,
+    paymentFieldSealActive: false,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2087,6 +2340,8 @@ export async function startHarnessProvisionSession(
     usedLocatorFallback: false,
     recipeRejectionReason: null,
     replayState: null,
+    pendingCardFill: null,
+    paymentFieldSealActive: false,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2228,6 +2483,31 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
   return session.browser;
 }
 
+// Split-checkout pending-fill state (operate_pay phase="fill_card"/"confirm").
+// Lives on the one active session so it dies with the browser; the raw card is
+// never here — only what the confirm step needs to verify and audit.
+export function setActivePendingCardFill(pending: PendingCardFill): void {
+  const session = activeProvisionSession();
+  session.pendingCardFill = pending;
+  session.paymentFieldSealActive = true;
+}
+
+export function retainActivePaymentFieldSeal(): void {
+  const session = activeProvisionSession();
+  session.pendingCardFill = null;
+  session.paymentFieldSealActive = true;
+}
+
+export function getActivePendingCardFill(): PendingCardFill | null {
+  return activeProvisionSession().pendingCardFill;
+}
+
+export function clearActivePendingCardFill(paymentFieldsCleared = true): void {
+  const session = activeProvisionSession();
+  session.pendingCardFill = null;
+  if (paymentFieldsCleared) session.paymentFieldSealActive = false;
+}
+
 export function recordActivePaymentProvenance(cardRef: string): void {
   if (sessions.size !== 1) return;
   const session = sessions.values().next().value!;
@@ -2313,10 +2593,17 @@ export function toCompactElement(
   // form keeps full fidelity for re-expansion, so callers that write the file
   // pass false.
   elide = false,
+  paymentSealActive = false,
 ): ObservedElement {
-  const out: ObservedElement = { ref, label: presentLabel(el, sealed), tag: el.tag };
-  if (el.role) out.role = el.role;
-  if (el.type && !(elide && shouldElideType(el))) out.type = el.type;
+  const out: ObservedElement = {
+    ref,
+    label: presentLabel(el, sealed, paymentSealActive),
+    tag: presentPaymentSafeString(el.tag, paymentSealActive),
+  };
+  if (el.role) out.role = presentPaymentSafeString(el.role, paymentSealActive);
+  if (el.type && !(elide && shouldElideType(el))) {
+    out.type = presentPaymentSafeString(el.type, paymentSealActive);
+  }
   // value_len is a LENGTH signal, not the value — report the REAL character count.
   // presentFieldValue masks a sealed field to "[sealed]" (8 chars), so using its
   // length made a correctly-filled 19-char email read as value_len:8 and misled
@@ -2325,12 +2612,18 @@ export function toCompactElement(
   const realLen = (el.value ?? "").length;
   if (realLen > 0) out.value_len = realLen;
   if (el.checked !== null && el.checked !== undefined) out.checked = el.checked;
-  if (el.href) out.href = el.href;
-  if (el.testId) out.testId = el.testId;
-  if (includePath && el.screenPath) out.path = el.screenPath;
+  if (el.href) out.href = presentPaymentSafeString(el.href, paymentSealActive);
+  if (el.testId) out.testId = presentPaymentSafeString(el.testId, paymentSealActive);
+  if (includePath && el.screenPath) {
+    out.path = presentPaymentSafeString(el.screenPath, paymentSealActive);
+  }
   if (el.topmost === false) out.topmost = false;
-  if (el.occludedBy) out.occluded_by = el.occludedBy;
-  if (el.frameOrigin) out.frame_origin = el.frameOrigin;
+  if (el.occludedBy) {
+    out.occluded_by = presentPaymentSafeString(el.occludedBy, paymentSealActive);
+  }
+  if (el.frameOrigin) {
+    out.frame_origin = presentPaymentSafeString(el.frameOrigin, paymentSealActive);
+  }
   return out;
 }
 
@@ -2649,6 +2942,7 @@ export function buildCompactObservation(args: {
   guidance?: string;
   elements: readonly InteractiveElement[];
   sealed?: ReadonlySet<string>;
+  paymentSealActive?: boolean;
   prev: ObserveDeltaState | null;
   // Wire encoding of the emitted element set. Default "columnar" (the tab table).
   // The eval harness passes "json" to measure the columnar transform's marginal
@@ -2662,6 +2956,7 @@ export function buildCompactObservation(args: {
   const sealed = args.sealed ?? new Set<string>();
   const encode = args.encode ?? "columnar";
   const elide = args.elide ?? true;
+  const paymentSealActive = args.paymentSealActive ?? false;
   const refs = provisionElementRefs(elements);
   const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
 
@@ -2670,11 +2965,11 @@ export function buildCompactObservation(args: {
   const fileElements: ObservedElement[] = [];
   for (const el of elements) {
     const ref = refOf(el);
-    fullByRef.set(ref, toCompactElement(el, ref, sealed, false, elide));
+    fullByRef.set(ref, toCompactElement(el, ref, sealed, false, elide, paymentSealActive));
     serializedByRef.set(ref, JSON.stringify(fullByRef.get(ref)));
     // The persisted file keeps FULL fidelity (path included, no elision) so a
     // re-expansion after a host compaction loses nothing.
-    fileElements.push(toCompactElement(el, ref, sealed, true, false));
+    fileElements.push(toCompactElement(el, ref, sealed, true, false, paymentSealActive));
   }
   const nextState: ObserveDeltaState = { url, byRef: serializedByRef, text };
 
@@ -2753,7 +3048,12 @@ async function observeSession(
   const generation = session.generation;
   const elements = await session.browser.extractInteractiveElements();
   session.lastElements = elements;
-  const text = await session.browser.extractVisibleText();
+  const sealedFieldKeys = observationSealedFieldKeys(session, elements);
+  const text = redactPaymentObservationText(
+    await session.browser.extractVisibleText(),
+    elements,
+    session.paymentFieldSealActive,
+  );
   const normalizedFull = text.replace(/\s+/g, " ").trim();
   const normalizedText = normalizedFull.slice(0, 4000);
   const guidance = provisionPerceptionGuidance(normalizedText);
@@ -2771,7 +3071,8 @@ async function observeSession(
       textTruncated,
       ...(guidance !== undefined ? { guidance } : {}),
       elements,
-      sealed: session.sealedFieldKeys,
+      sealed: sealedFieldKeys,
+      paymentSealActive: session.paymentFieldSealActive,
       prev: session.prevObserve,
     });
     // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
@@ -2831,10 +3132,22 @@ async function observeSession(
     url,
     normalizedText,
     textTruncated,
-    elements.map((el) => toCompactElement(el, refOf(el), session.sealedFieldKeys, true)),
+    elements.map((el) =>
+      toCompactElement(el, refOf(el), sealedFieldKeys, true, false, session.paymentFieldSealActive),
+    ),
   );
-  const screen = buildScreenOutline(elements, normalizedText, session.sealedFieldKeys);
-  const accessibility = buildAccessibilitySnapshot(elements, undefined, session.sealedFieldKeys);
+  const screen = buildScreenOutline(
+    elements,
+    normalizedText,
+    sealedFieldKeys,
+    session.paymentFieldSealActive,
+  );
+  const accessibility = buildAccessibilitySnapshot(
+    elements,
+    undefined,
+    sealedFieldKeys,
+    session.paymentFieldSealActive,
+  );
   return {
     session_id: session.id,
     url,
@@ -2844,19 +3157,39 @@ async function observeSession(
     ...(accessibility !== undefined ? { accessibility } : {}),
     elements: elements.map((el) => ({
       ref: refOf(el),
-      label: presentLabel(el, session.sealedFieldKeys),
-      tag: el.tag,
-      role: el.role,
-      type: el.type,
-      value: presentFieldValue(el, session.sealedFieldKeys),
+      label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
+      tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
+      role:
+        el.role === null ? null : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
+      type:
+        el.type === null ? null : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
+      value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
       checked: el.checked ?? null,
-      href: el.href ?? null,
-      testId: el.testId ?? null,
-      path: el.screenPath ?? null,
-      container: el.container ?? null,
+      href:
+        el.href === null || el.href === undefined
+          ? null
+          : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
+      testId:
+        el.testId === null || el.testId === undefined
+          ? null
+          : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
+      path:
+        el.screenPath === null || el.screenPath === undefined
+          ? null
+          : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
+      container:
+        el.container === null || el.container === undefined
+          ? null
+          : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
       topmost: el.topmost ?? null,
-      occluded_by: el.occludedBy ?? null,
-      frame_origin: el.frameOrigin ?? null,
+      occluded_by:
+        el.occludedBy === null || el.occludedBy === undefined
+          ? null
+          : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
+      frame_origin:
+        el.frameOrigin === null || el.frameOrigin === undefined
+          ? null
+          : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
     })),
   };
 }
@@ -2954,6 +3287,26 @@ export async function act(
       break;
     }
     case "press": {
+      // Enter fires the form's default submit — on an order-confirmation page
+      // that IS the charge. Same rule as the charge-click guard below.
+      const key = action.key.trim();
+      if (session.paymentFieldSealActive && /^(?:enter|numpadenter)$/i.test(key)) {
+        throw new Error(
+          "press refused: a vaulted payment card is filled into this checkout, and " +
+            "Enter can trigger the page's default submit (the charge). Use operate_pay " +
+            '{phase:"confirm"} to place the order.',
+        );
+      }
+      if (
+        session.paymentFieldSealActive &&
+        (/^(?:space|spacebar)$/i.test(key) || action.key === " ")
+      ) {
+        const chargeBlock = pendingCardFillChargeBlockReason(
+          session,
+          await browser.focusedElementLabels(),
+        );
+        if (chargeBlock !== null) throw new Error(chargeBlock);
+      }
       await browser.pressKey(action.key);
       break;
     }
@@ -3126,6 +3479,10 @@ export async function act(
           if (resolved.frameTarget !== null) {
             assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
           }
+          if (action.kind === "click" || action.kind === "js_click") {
+            const chargeBlock = pendingCardFillChargeBlockReason(session, resolved.labels);
+            if (chargeBlock !== null) throw new Error(chargeBlock);
+          }
           session.usedLocatorFallback = true;
           if (action.kind === "click") await browser.clickHandle(resolved.handle);
           else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
@@ -3160,6 +3517,17 @@ export async function act(
       // Frame domain-lock (operator-frame-support) — see frameTargetAllowed.
       // A main-frame or same-domain-frame target is unaffected.
       assertFrameTargetAllowed(session, el, action.kind);
+      // oauth_click included: it clicks the element too (expecting a popup),
+      // so it must not be a side door to the charge control.
+      if (action.kind === "click" || action.kind === "js_click" || action.kind === "oauth_click") {
+        const chargeBlock = pendingCardFillChargeBlockReason(session, [
+          el.ariaLabel,
+          el.visibleText,
+          el.labelText,
+          el.value,
+        ]);
+        if (chargeBlock !== null) throw new Error(chargeBlock);
+      }
       if (action.kind === "click") {
         const target = frameTargetFor(el);
         if (target !== null) await browser.clickInFrame(target, el.selector);
