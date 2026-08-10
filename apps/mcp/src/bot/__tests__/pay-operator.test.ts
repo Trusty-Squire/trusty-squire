@@ -421,11 +421,13 @@ describe("operate_pay", () => {
         currency: "JPY",
       };
       const controller = new BrowserController({ humanize: false });
+      const frame = {
+        evaluate: vi.fn().mockResolvedValue("小計 ¥2,904\n合計 ¥3,404"),
+      };
       const page = {
         evaluate: vi.fn().mockResolvedValue({ title: "Rakuten", siteName: "Rakuten" }),
-        frames: () => [
-          { evaluate: vi.fn().mockResolvedValue("小計 ¥2,904\n合計 ¥3,404") },
-        ],
+        mainFrame: () => frame,
+        frames: () => [frame],
         url: () => `${checkout.checkout_origin}/session/test`,
       };
       Object.defineProperty(controller, "page", { value: page });

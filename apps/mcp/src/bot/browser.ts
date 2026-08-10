@@ -6723,23 +6723,27 @@ export class BrowserController {
         document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
         "",
     }));
-    const [texts, structuredExtracts] = await Promise.all([
-      Promise.all(
-        page
-          .frames()
-          .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
-      ),
-      Promise.all(
-        page
-          .frames()
-          .map(async (frame) => frame.evaluate(extractStructuredCheckoutData).catch(() => null)),
-      ),
-    ]);
-    const parsedAmounts = parseCheckoutAmountsResult(texts, fallbackCurrency);
-    if (parsedAmounts.currencyUnresolved) {
+    const frames = await this.visibleTrustedCheckoutFrames();
+    const parsedFrames = await Promise.all(
+      frames.map(async (frame) => {
+        const [text, structuredExtract] = await Promise.all([
+          frame.evaluate(extractCheckoutSummaryText).catch(() => ""),
+          frame.evaluate(extractStructuredCheckoutData).catch(() => null),
+        ]);
+        const parsedAmounts = parseCheckoutAmountsResult([text], fallbackCurrency);
+        const textAmount =
+          parsedAmounts.payableAmounts.at(-1) ?? parsedAmounts.amounts.at(-1);
+        return {
+          amount: textAmount ?? parseStructuredCheckoutTotal([structuredExtract]),
+          currencyUnresolved: parsedAmounts.currencyUnresolved,
+          fallbackCurrencyScaleMismatch: parsedAmounts.fallbackCurrencyScaleMismatch,
+        };
+      }),
+    );
+    if (parsedFrames.some((parsed) => parsed.currencyUnresolved)) {
       throw new Error("payment_checkout_currency_unresolved");
     }
-    if (parsedAmounts.fallbackCurrencyScaleMismatch) {
+    if (parsedFrames.some((parsed) => parsed.fallbackCurrencyScaleMismatch)) {
       throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
     }
     // Structured-data order total (schema.org Order/Invoice.totalPaymentDue).
@@ -6749,9 +6753,20 @@ export class BrowserController {
     // the user actually sees wins; when both agree the value is identical
     // either way. Net effect: structured data only ever rescues a
     // total_not_found, never overrides the text path or its currency guards.
-    const textAmount = parsedAmounts.payableAmounts.at(-1) ?? parsedAmounts.amounts.at(-1);
-    const amount = textAmount ?? parseStructuredCheckoutTotal(structuredExtracts);
+    const mainAmount = parsedFrames[0]?.amount ?? null;
+    const childAmounts = parsedFrames
+      .slice(1)
+      .map((parsed) => parsed.amount)
+      .filter((amount): amount is NonNullable<typeof amount> => amount !== null);
+    const amount = mainAmount ?? childAmounts[0] ?? null;
     if (amount === null) throw new Error("payment_checkout_total_not_found");
+    if (
+      childAmounts.some(
+        (child) => child.amount_cents !== amount.amount_cents || child.currency !== amount.currency,
+      )
+    ) {
+      throw new Error("payment_checkout_total_not_found");
+    }
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
       checkout_origin: new URL(page.url()).origin,
