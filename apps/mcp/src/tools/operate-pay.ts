@@ -24,9 +24,9 @@ const inputSchema = z
       .optional(),
     card_ref: z.string().min(1).max(64).optional(),
     card_label: z.string().min(1).max(256).optional(),
-    // Split checkouts (card entry BEFORE the total is shown): "fill_card"
-    // fills the vaulted card without charging; "confirm" verifies the live
-    // total against the approved amount and places the order. Omit for a
+    // Split checkouts whose card-entry step exposes the payable total:
+    // "fill_card" verifies that total and fills the vaulted card without
+    // charging; "confirm" verifies it again and places the order. Omit for a
     // single-page checkout (fill + charge in one call).
     phase: z.enum(["fill_card", "confirm"]).optional(),
     item: z.string().trim().min(1).max(500),

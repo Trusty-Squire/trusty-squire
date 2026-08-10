@@ -6731,8 +6731,7 @@ export class BrowserController {
           frame.evaluate(extractStructuredCheckoutData).catch(() => null),
         ]);
         const parsedAmounts = parseCheckoutAmountsResult([text], fallbackCurrency);
-        const textAmount =
-          parsedAmounts.payableAmounts.at(-1) ?? parsedAmounts.amounts.at(-1);
+        const textAmount = parsedAmounts.payableAmounts.at(-1) ?? parsedAmounts.amounts.at(-1);
         return {
           amount: textAmount ?? parseStructuredCheckoutTotal([structuredExtract]),
           currencyUnresolved: parsedAmounts.currencyUnresolved,

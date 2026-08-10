@@ -207,7 +207,10 @@ describe("checkout payment parsing", () => {
     ["小計 2,904 円", 2_904],
     ["合計 968円", 968],
     ["ご請求金額 ¥1,065", 1_065],
+    ["請求金額 1,065円", 1_065],
+    ["総額 1,468円", 1_468],
     ["税込 1,468円", 1_468],
+    ["税込み総額 1,468円", 1_468],
   ])("parses Rakuten Japanese checkout amount: %s", (text, cents) => {
     expect(parseCheckoutAmount([text])).toEqual({
       amount_cents: cents,

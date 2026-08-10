@@ -319,57 +319,53 @@ describe("operate_pay", () => {
       },
     ],
     ["payment_checkout_total_not_found", { status: "payment_checkout_total_not_found" }],
-  ])(
-    "does not mint an approval for checkout grounding failure %s",
-    async (error, expected) => {
-      const approvalBodies: Array<Record<string, unknown>> = [];
-      const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-        const url =
-          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-        if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
-          return Response.json({ vouchflow_audience: "customer_test" });
-        }
-        if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
-          approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-        }
-        return Response.json({ error: "unexpected_request" }, { status: 500 });
-      }) as typeof fetch;
-      const api = new ApiClient({
-        apiBaseUrl: "https://api.test",
-        registryBaseUrl: "https://registry.test",
-        agentSessionToken: "synthetic-session-token",
-        fetch: fetchMock,
-      });
-      const browser: PaymentBrowser = {
-        isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
-        readCheckoutSummary: vi.fn().mockRejectedValue(new Error(error)),
-        readCheckoutConfirmSummary: vi.fn().mockRejectedValue(new Error(error)),
-        currentUrl: vi.fn().mockReturnValue("https://flowers.example.test/checkout"),
-        fillAndSubmitCheckout: vi.fn(),
-        fillCheckoutCardFields: vi.fn(),
-        submitFilledCheckout: vi.fn(),
-        clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
-        waitForThreeDsResolution: vi.fn(),
-      };
+  ])("does not mint an approval for checkout grounding failure %s", async (error, expected) => {
+    const approvalBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
+        return Response.json({ vouchflow_audience: "customer_test" });
+      }
+      if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+        approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      }
+      return Response.json({ error: "unexpected_request" }, { status: 500 });
+    }) as typeof fetch;
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session-token",
+      fetch: fetchMock,
+    });
+    const browser: PaymentBrowser = {
+      isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
+      readCheckoutSummary: vi.fn().mockRejectedValue(new Error(error)),
+      readCheckoutConfirmSummary: vi.fn().mockRejectedValue(new Error(error)),
+      currentUrl: vi.fn().mockReturnValue("https://flowers.example.test/checkout"),
+      fillAndSubmitCheckout: vi.fn(),
+      fillCheckoutCardFields: vi.fn(),
+      submitFilledCheckout: vi.fn(),
+      clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
+      waitForThreeDsResolution: vi.fn(),
+    };
 
-      await expect(
-        executeOperatePay(
-          {
-            card_ref: "card_test",
-            merchant: "Japan Flower Shop",
-            amount_cents: 9_845,
-            currency: "JPY",
-            item: "Flowers",
-            reason: "Gift",
-          },
-          api,
-          browser,
-          { vouchflowExpectedAudience: "customer_test" },
-        ),
-      ).resolves.toEqual(expected);
-      expect(approvalBodies).toEqual([]);
-    },
-  );
+    await expect(
+      executeOperatePay(
+        {
+          card_ref: "card_test",
+          merchant: "Japan Flower Shop",
+          amount_cents: 9_845,
+          currency: "JPY",
+          item: "Flowers",
+          reason: "Gift",
+        },
+        api,
+        browser,
+        { vouchflowExpectedAudience: "customer_test" },
+      ),
+    ).resolves.toEqual(expected);
+    expect(approvalBodies).toEqual([]);
+  });
 
   it("verifies the mandate, opens the card, fills the checkout, and audits last4 only", async () => {
     const {
@@ -421,48 +417,44 @@ describe("operate_pay", () => {
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
   });
 
-  it(
-    "binds approval to the final Japanese payable total, never the earlier subtotal",
-    async () => {
-      const checkout: CheckoutSummary = {
-        merchant: "Rakuten",
-        checkout_origin: "https://checkout.rakuten.test",
-        amount_cents: 3_404,
-        currency: "JPY",
-      };
-      const controller = new BrowserController({ humanize: false });
-      const frame = {
-        evaluate: vi.fn().mockResolvedValue("小計 ¥2,904\n合計 ¥3,404"),
-      };
-      const page = {
-        evaluate: vi.fn().mockResolvedValue({ title: "Rakuten", siteName: "Rakuten" }),
-        mainFrame: () => frame,
-        frames: () => [frame],
-        url: () => `${checkout.checkout_origin}/session/test`,
-      };
-      Object.defineProperty(controller, "page", { value: page });
+  it("binds approval to the final Japanese payable total, never the earlier subtotal", async () => {
+    const checkout: CheckoutSummary = {
+      merchant: "Rakuten",
+      checkout_origin: "https://checkout.rakuten.test",
+      amount_cents: 3_404,
+      currency: "JPY",
+    };
+    const controller = new BrowserController({ humanize: false });
+    const frame = {
+      evaluate: vi.fn().mockResolvedValue("小計 ¥2,904\n合計 ¥3,404"),
+    };
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ title: "Rakuten", siteName: "Rakuten" }),
+      mainFrame: () => frame,
+      frames: () => [frame],
+      url: () => `${checkout.checkout_origin}/session/test`,
+    };
+    Object.defineProperty(controller, "page", { value: page });
 
-      const { result, approvalBodies, browser } = await harness(
-        "happy",
-        "customer_test",
-        undefined,
-        undefined,
-        {
-          checkout,
-          readCheckoutSummary: controller.readCheckoutSummary.bind(controller),
-        },
-      );
+    const { result, approvalBodies, browser } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      undefined,
+      {
+        checkout,
+        readCheckoutSummary: controller.readCheckoutSummary.bind(controller),
+      },
+    );
 
-      expect(browser.readCheckoutSummary).toHaveBeenCalledTimes(1);
-      expect(approvalBodies[0]).toMatchObject({ amount_cents: 3_404, currency: "JPY" });
-      expect(result).toMatchObject({
-        status: "payment_submitted",
-        amount_cents: 3_404,
-        currency: "JPY",
-      });
-    },
-    10_000,
-  );
+    expect(browser.readCheckoutSummary).toHaveBeenCalledTimes(1);
+    expect(approvalBodies[0]).toMatchObject({ amount_cents: 3_404, currency: "JPY" });
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      amount_cents: 3_404,
+      currency: "JPY",
+    });
+  }, 10_000);
 
   it("verifies an opaque review seal before accepting the final approval", async () => {
     const { result, confirmationBodies, filledCards } = await harness("review_then_happy");
