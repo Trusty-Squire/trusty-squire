@@ -225,6 +225,13 @@ describe("checkout payment parsing", () => {
     ]);
   });
 
+  it("uses a Rakuten card-step subtotal when no final payable label exists", () => {
+    expect(parseCheckoutAmount(["小計 3,872 円"])).toEqual({
+      amount_cents: 3_872,
+      currency: "JPY",
+    });
+  });
+
   it("skips a merchandise subtotal (商品合計) and resolves the payable total", () => {
     expect(parseCheckoutAmount(["商品合計 968円", "お支払い金額 1,468円"])).toEqual({
       amount_cents: 1_468,

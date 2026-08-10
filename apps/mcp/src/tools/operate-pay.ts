@@ -24,10 +24,9 @@ const inputSchema = z
       .optional(),
     card_ref: z.string().min(1).max(64).optional(),
     card_label: z.string().min(1).max(256).optional(),
-    // Split checkouts whose card-entry step exposes the payable total:
-    // "fill_card" verifies that total and fills the vaulted card without
-    // charging; "confirm" verifies it again and places the order. Omit for a
-    // single-page checkout (fill + charge in one call).
+    // Split checkouts: "fill_card" approves the best visible amount (a
+    // subtotal when that is all the card step exposes) and fills without
+    // charging; "confirm" strictly verifies the final total before charge.
     phase: z.enum(["fill_card", "confirm"]).optional(),
     item: z.string().trim().min(1).max(500),
     reason: z.string().trim().min(1).max(500),
@@ -71,7 +70,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved. " +
     "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
     "add-card ceremony and the card is bound server-side before the mandate is signed. " +
-    "For a SPLIT checkout whose card-entry step shows the payable total: call with " +
+    "For a SPLIT checkout: call with " +
     'phase="fill_card" on that step; the card is filled into recognized payment-provider ' +
     "fields only and NOTHING is charged. Then drive the checkout to the order-confirmation " +
     'step and call phase="confirm" — it verifies the visible total against the approved ' +
@@ -94,7 +93,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         enum: ["fill_card", "confirm"],
         description:
           'Split checkouts only: "fill_card" fills the vaulted card on the card-entry step ' +
-          "after verifying its visible total, without charging; " +
+          "using its best visible amount (including a subtotal), without charging; " +
           '"confirm" verifies the live total on the order-confirmation step against the ' +
           "approved amount and places the order. Omit for single-page checkouts.",
       },
@@ -139,6 +138,18 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         },
         api,
         browser,
+        {
+          ...(context !== undefined
+            ? {
+                surfaceApprovalUrl: async (url: string) => {
+                  await context.notifyUser(`Approve this payment on your phone: ${url}`, {
+                    approval_url: url,
+                  });
+                },
+              }
+            : {}),
+          onCardFillCleanupFailed: retainActivePaymentFieldSeal,
+        },
       );
       const status = result.status;
       if (status === "payment_submitted" || status === "payment_3ds_required") {

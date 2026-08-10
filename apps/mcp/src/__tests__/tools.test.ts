@@ -269,6 +269,8 @@ describe("operate_pay split checkout phases", () => {
     card_ref: "card_split",
     last4: "4242",
     mandate_id: "mandate_split",
+    item: "Synthetic item",
+    reason: "Synthetic purchase reason",
   };
 
   it("accepts the two phase values and rejects unknown ones", () => {
@@ -317,7 +319,7 @@ describe("operate_pay split checkout phases", () => {
       merchant: "M",
       checkout_origin: "https://m.test",
       amount_cents: 999,
-      currency: "USD",
+      currency: "EUR",
     });
     const api = makeMockApi();
     const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });

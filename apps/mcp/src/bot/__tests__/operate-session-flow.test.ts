@@ -3825,6 +3825,8 @@ describe("pending card-fill charge guard", () => {
     },
     card_ref: "card_guard",
     last4: "4242",
+    item: "Synthetic item",
+    reason: "Synthetic purchase reason",
   };
 
   it("refuses charge-verb clicks and Enter while filled, frees them after confirm clears", async () => {
