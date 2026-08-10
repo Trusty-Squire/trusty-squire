@@ -12,6 +12,7 @@ import {
 import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
 import { manualCardEntryBlockReason } from "../provision-session.js";
 import {
+  BrowserController,
   PaymentCardFillCleanupError,
   UnrecognizedPaymentFrameError,
   type CheckoutCard,
@@ -66,7 +67,12 @@ async function harness(
     waitSeconds?: number;
     notifyNeverResolves?: boolean;
   },
+  checkoutOptions: {
+    checkout?: CheckoutSummary;
+    readCheckoutSummary?: () => Promise<CheckoutSummary>;
+  } = {},
 ) {
+  const checkout = checkoutOptions.checkout ?? CHECKOUT;
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
   });
@@ -115,7 +121,7 @@ async function harness(
         return Response.json({
           id: "approval_test",
           status: "approved",
-          ...CHECKOUT,
+          ...checkout,
           nonce,
           card_ref: "card_test",
           operator_pubkey: operatorPublicKey,
@@ -129,12 +135,12 @@ async function harness(
         .digest("base64url");
       const payload = {
         approval_id: "approval_test",
-        merchant: CHECKOUT.merchant,
+        merchant: checkout.merchant,
         checkout_origin:
-          mode === "tampered_origin" ? "https://evil.synthetic.test" : CHECKOUT.checkout_origin,
+          mode === "tampered_origin" ? "https://evil.synthetic.test" : checkout.checkout_origin,
         amount_cents:
-          mode === "tampered_amount" ? CHECKOUT.amount_cents + 1 : CHECKOUT.amount_cents,
-        currency: CHECKOUT.currency,
+          mode === "tampered_amount" ? checkout.amount_cents + 1 : checkout.amount_cents,
+        currency: checkout.currency,
         nonce,
         card_ref: "card_test",
         recipient_pubkey_hash: recipientHash,
@@ -187,7 +193,7 @@ async function harness(
           mode === "junk_then_happy"
             ? "pending"
             : "approved",
-        ...CHECKOUT,
+        ...checkout,
         nonce,
         card_ref: "card_test",
         operator_pubkey: operatorPublicKey,
@@ -237,9 +243,9 @@ async function harness(
 
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
-    readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
-    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(CHECKOUT),
-    currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
+    readCheckoutSummary: vi.fn(checkoutOptions.readCheckoutSummary ?? (async () => checkout)),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(checkout),
+    currentUrl: vi.fn().mockReturnValue(`${checkout.checkout_origin}/session/test`),
     fillCheckoutCardFields: vi.fn(),
     submitFilledCheckout: vi.fn(),
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
@@ -404,6 +410,47 @@ describe("operate_pay", () => {
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
   });
+
+  it(
+    "binds approval to the final Japanese payable total, never the earlier subtotal",
+    async () => {
+      const checkout: CheckoutSummary = {
+        merchant: "Rakuten",
+        checkout_origin: "https://checkout.rakuten.test",
+        amount_cents: 3_404,
+        currency: "JPY",
+      };
+      const controller = new BrowserController({ humanize: false });
+      const page = {
+        evaluate: vi.fn().mockResolvedValue({ title: "Rakuten", siteName: "Rakuten" }),
+        frames: () => [
+          { evaluate: vi.fn().mockResolvedValue("小計 ¥2,904\n合計 ¥3,404") },
+        ],
+        url: () => `${checkout.checkout_origin}/session/test`,
+      };
+      Object.defineProperty(controller, "page", { value: page });
+
+      const { result, approvalBodies, browser } = await harness(
+        "happy",
+        "customer_test",
+        undefined,
+        undefined,
+        {
+          checkout,
+          readCheckoutSummary: controller.readCheckoutSummary.bind(controller),
+        },
+      );
+
+      expect(browser.readCheckoutSummary).toHaveBeenCalledTimes(1);
+      expect(approvalBodies[0]).toMatchObject({ amount_cents: 3_404, currency: "JPY" });
+      expect(result).toMatchObject({
+        status: "payment_submitted",
+        amount_cents: 3_404,
+        currency: "JPY",
+      });
+    },
+    10_000,
+  );
 
   it("verifies an opaque review seal before accepting the final approval", async () => {
     const { result, confirmationBodies, filledCards } = await harness("review_then_happy");

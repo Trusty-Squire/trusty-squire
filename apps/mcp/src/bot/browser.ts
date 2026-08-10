@@ -402,8 +402,8 @@ function parseDisplayedNumber(raw: string, minorDigits: number): number | null {
 // whole labels. A 税込 (tax-included) label annotation is skipped; 税抜
 // (tax-EXCLUDED) deliberately is not — a pre-tax figure is not what the card
 // is charged. A bare 小計 is also accepted: Rakuten cart pages use it as the
-// only visible checkout amount. Review pages retain every match and select the
-// settled final amount later.
+// only visible checkout amount. Summary readers retain every match, prefer the
+// final payable label, and use 小計 only when no payable label resolves.
 const cjkLetter = String.raw`\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}`;
 const checkoutTotalLabel =
   String.raw`(?:\b(?:order\s+total|grand\s+total|total\s+due|amount\s+due|total)\b` +
@@ -418,7 +418,7 @@ const checkoutTotalLabel =
 // suffix group could not resolve to a currency (500円分, 3個セット).
 const checkoutTotalPattern = new RegExp(
   checkoutTotalLabel +
-    String.raw`(?:\s*[（(]税込み?[）)])?\s*[:：]?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9](?:[0-9.,]*[0-9])?)(?![0-9.,])(?:\s*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
+    String.raw`(?:\s*[（(]税込み?[）)])?\s*[:：]?\s*(?:(\p{L}{1,4}\p{Sc}?)\s*)?(\p{Sc})?\s*([0-9](?:[0-9.,]*[0-9])?)(?![0-9.,])(?:[^\S\r\n]*(\p{L}{1,4}\p{Sc}?|\p{Sc})(?=\s|$|[.,;:!?)（）(。、]))?(?![${cjkLetter}])`,
   "giu",
 );
 
@@ -652,6 +652,7 @@ export function parseCheckoutAmounts(
 
 interface CheckoutAmountsParseResult {
   amounts: Array<{ amount_cents: number; currency: string }>;
+  payableAmounts: Array<{ amount_cents: number; currency: string }>;
   currencyUnresolved: boolean;
   fallbackCurrencyScaleMismatch: boolean;
 }
@@ -661,6 +662,7 @@ function parseCheckoutAmountsResult(
   fallbackCurrency?: string,
 ): CheckoutAmountsParseResult {
   const amounts: Array<{ amount_cents: number; currency: string }> = [];
+  const payableAmounts: Array<{ amount_cents: number; currency: string }> = [];
   let currencyUnresolved = false;
   let fallbackCurrencyScaleMismatch = false;
   for (const text of texts) {
@@ -669,10 +671,13 @@ function parseCheckoutAmountsResult(
       const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
       currencyUnresolved ||= result.currencyUnresolved;
       fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
-      if (result.amount !== null) amounts.push(result.amount);
+      if (result.amount !== null) {
+        amounts.push(result.amount);
+        if (!match[0].startsWith("小計")) payableAmounts.push(result.amount);
+      }
     }
   }
-  return { amounts, currencyUnresolved, fallbackCurrencyScaleMismatch };
+  return { amounts, payableAmounts, currencyUnresolved, fallbackCurrencyScaleMismatch };
 }
 
 // Machine-readable order totals (schema.org). A checkout page that embeds its
@@ -6730,11 +6735,11 @@ export class BrowserController {
           .map(async (frame) => frame.evaluate(extractStructuredCheckoutData).catch(() => null)),
       ),
     ]);
-    const parsedAmount = parseCheckoutAmountResult(texts, fallbackCurrency);
-    if (parsedAmount.currencyUnresolved) {
+    const parsedAmounts = parseCheckoutAmountsResult(texts, fallbackCurrency);
+    if (parsedAmounts.currencyUnresolved) {
       throw new Error("payment_checkout_currency_unresolved");
     }
-    if (parsedAmount.fallbackCurrencyScaleMismatch) {
+    if (parsedAmounts.fallbackCurrencyScaleMismatch) {
       throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
     }
     // Structured-data order total (schema.org Order/Invoice.totalPaymentDue).
@@ -6744,7 +6749,8 @@ export class BrowserController {
     // the user actually sees wins; when both agree the value is identical
     // either way. Net effect: structured data only ever rescues a
     // total_not_found, never overrides the text path or its currency guards.
-    const amount = parsedAmount.amount ?? parseStructuredCheckoutTotal(structuredExtracts);
+    const textAmount = parsedAmounts.payableAmounts.at(-1) ?? parsedAmounts.amounts.at(-1);
+    const amount = textAmount ?? parseStructuredCheckoutTotal(structuredExtracts);
     if (amount === null) throw new Error("payment_checkout_total_not_found");
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
@@ -6852,8 +6858,8 @@ export class BrowserController {
    * earlier subtotal while asynchronously replacing the final labeled total;
    * the harness calls this only after it has proved a shipping method is
    * present, then requires this value to remain stable across two reads.
-   * Payment continues to use readCheckoutSummary's original first-read
-   * contract; this is a review-only, pre-payment reader.
+   * This is a review-only, pre-payment reader whose amount must settle before
+   * the payment flow continues.
    */
   async readCheckoutReviewSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
     if (!this.page) throw new Error("Browser not started");
@@ -6883,7 +6889,7 @@ export class BrowserController {
     // re-reads until two consecutive reads agree) is unchanged — a structured
     // total is simply re-read and must be stable like any other source.
     const parsedAmounts = parseCheckoutAmountsResult(texts, fallbackCurrency);
-    const textAmount = parsedAmounts.amounts.at(-1);
+    const textAmount = parsedAmounts.payableAmounts.at(-1) ?? parsedAmounts.amounts.at(-1);
     const structuredAmount =
       textAmount === undefined ? parseStructuredCheckoutTotal(structuredExtracts) : null;
     if (structuredAmount !== null && parsedAmounts.currencyUnresolved) {
