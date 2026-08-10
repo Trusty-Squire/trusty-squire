@@ -162,9 +162,9 @@ and transferred secrets are not returned to the agent.
 ```text
 agent starts operate_pay in the active checkout
   -> agent supplies a non-empty item and reason
-  -> a single-page checkout reads merchant, origin, and total; a split checkout's
-     fill_card phase may use the declared merchant, amount, and currency when its
-     card-entry page has no readable total
+  -> both a single-page checkout and split fill_card read merchant, origin, and
+     payable total from the live page; an unreadable total stops before approval
+     with payment_checkout_total_not_found
   -> PayPal Smart Button or hosted-field frames hand initial/fill checkout calls to
      the user before saved-card resolution or approval creation
   -> an explicit card is used; otherwise one saved card is selected automatically,
