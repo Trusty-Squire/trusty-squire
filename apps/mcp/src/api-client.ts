@@ -169,7 +169,13 @@ export class ApiClient {
     id: string,
     submission: { jws: string; sealed_card: string },
   ): Promise<{ status: "verified" | "approved" }> {
-    return this.post(`/v1/pay/approvals/${encodeURIComponent(id)}/confirm`, submission);
+    // Send exactly the schema fields: callers pass wider candidate objects
+    // (extra card_ref), and the server validates this body strictly — an
+    // excess key leaking into the wire body 400'd every confirm (Aug 2026).
+    return this.post(`/v1/pay/approvals/${encodeURIComponent(id)}/confirm`, {
+      jws: submission.jws,
+      sealed_card: submission.sealed_card,
+    });
   }
 
   async getPaymentConfig(): Promise<{ vouchflow_audience?: string }> {
