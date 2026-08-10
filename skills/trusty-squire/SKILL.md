@@ -95,6 +95,13 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   card remains available for the retry. Set `three_ds_wait_seconds` to `0` only
   when the user wants the immediate handoff without notification or waiting.
   Card fields never return through MCP.
+- On a split checkout whose card-entry step has no total, call `operate_pay` with
+  `phase: "fill_card"` and the declared merchant, amount, and currency. After the
+  user approves, advance only through non-charge navigation such as **Next** or
+  **Continue to review**, then call `operate_pay` with `phase: "confirm"` once the
+  total is visible. `item` and `reason` remain required on both calls. Never click
+  a pay/place-order control or press Enter while the card fill is pending; confirm
+  owns the amount check and charge. An unrecognized payment iframe is a hard stop.
 
 **Safety rules the agent must follow:**
 
@@ -105,7 +112,8 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 - **Stop for the user** at phone verification, a hard image CAPTCHA, an
   unsupported payment, 3-D Secure, or any decision that belongs to a person.
   `operate_pay` may proceed only after its explicit phone approval succeeds. Do
-  not guess, and do not claim a signup finished when it did not.
+  not bypass a pending split payment with `operate_act`, do not guess, and do not
+  claim a signup finished when it did not.
 - The user connects Google/GitHub themselves in the real browser during
   `connect`. Never ask for or type the user's password in chat.
 

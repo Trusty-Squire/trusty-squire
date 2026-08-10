@@ -161,10 +161,12 @@ and transferred secrets are not returned to the agent.
 
 ```text
 agent starts operate_pay in the active checkout
-  -> agent supplies a non-empty item and reason; operator reads merchant, origin,
-     and total
-  -> PayPal Smart Button or hosted-field frames hand checkout to the user before
-     saved-card resolution or approval creation
+  -> agent supplies a non-empty item and reason
+  -> a single-page checkout reads merchant, origin, and total; a split checkout's
+     fill_card phase may use the declared merchant, amount, and currency when its
+     card-entry page has no readable total
+  -> PayPal Smart Button or hosted-field frames hand initial/fill checkout calls to
+     the user before saved-card resolution or approval creation
   -> an explicit card is used; otherwise one saved card is selected automatically,
      no saved cards starts add-card, and multiple cards require a user choice
   -> operator creates an ephemeral key; API creates a short-lived approval relay
@@ -177,11 +179,22 @@ agent starts operate_pay in the active checkout
      purchase payload, unlocks the card, and seals it to the ephemeral operator
   -> the API stages that opaque candidate in an account-scoped Postgres relay with
      a 15-second TTL so another API worker can deliver it to the waiting operator
-  -> the operator verifies the final JWS and opens the card, then confirms the exact
+  -> the operator verifies the final JWS, opens the card, and confirms the exact
      candidate fingerprint; successful confirmation clears the JWS and ciphertext
-  -> add-card also re-reads every signed checkout field and refuses if the merchant,
-     origin, amount, or currency changed
-  -> operator opens the card and fills checkout
+  -> single-page add-card re-reads every signed checkout field, then fills and
+     submits only if merchant, origin, amount, and currency still match
+  -> split fill_card instead requires the current origin to match the mandate and
+     fills without submitting; only the main frame, same-registrable-domain HTTPS
+     frames, and curated HTTPS payment-provider frames can receive card data
+  -> the raw card is zeroed; sealed, observation-masked page fields remain, while
+     session state retains only approval/mandate and card-reference metadata
+  -> operate_act blocks charge-labeled clicks and Enter while that state is pending;
+     ordinary navigation can advance the checkout to its review step
+  -> split confirm bypasses the initial PayPal-frame gate, requires a visible total
+     with no declared fallback, and submits only when amount, currency, and origin
+     exactly match the mandate (the page-title-derived merchant name may change)
+  -> a missing submit control retains the pending fill for retry; terminal payment
+     outcomes clear it
   -> when 3-D Secure is required, the API nudges a linked Telegram chat and
      the operator waits for success or failure when waiting is enabled
   -> timeout, or a disabled wait, hands the unresolved challenge to the user

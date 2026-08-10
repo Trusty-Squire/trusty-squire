@@ -1310,8 +1310,8 @@ describe("split-checkout card fill (real browser)", () => {
         (controller as unknown as { page: Page }).page = page;
         await controller.fillCheckoutCardFields(CARD);
         await page.evaluate(() => {
-          for (const original of document.querySelectorAll<HTMLInputElement>(
-            '[data-ts-sealed-payment="1"]',
+          for (const original of Array.from(
+            document.querySelectorAll<HTMLInputElement>('[data-ts-sealed-payment="1"]'),
           )) {
             const replacement = original.cloneNode(true) as HTMLInputElement;
             replacement.removeAttribute("data-ts-sealed-payment");

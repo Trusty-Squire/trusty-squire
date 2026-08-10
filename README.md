@@ -53,9 +53,9 @@ never shown, even after reveal. The Activity page also records card additions
 and removals, payments, and app-grant changes without storing a PAN or CVV.
 
 `operate_pay` requires a non-empty item and reason (calls that omit either
-receive a validation error). It reads the checkout total, sends you a short-lived
-approval link, and submits only after you approve the exact purchase. A clean visible
-labeled total wins; when none is readable, strict schema.org
+receive a validation error). On a single-page checkout it reads the checkout total,
+sends you a short-lived approval link, and submits only after you approve the exact
+purchase. A clean visible labeled total wins; when none is readable, strict schema.org
 `Order`/`Invoice.totalPaymentDue` structured data can supply the amount and currency.
 Product and offer prices never qualify as checkout totals. Page currency notation is
 authoritative: Trusty Squire refuses to create an approval when it cannot resolve that
@@ -69,10 +69,23 @@ payment values. You also see the requesting MCP client (for example, Hermes) and
 that a saved card will be used before clicking **Approve payment** to relay the
 operator-sealed final authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
-between approval and submission. If the checkout exposes PayPal Smart Buttons
-or PayPal-hosted fields, Trusty Squire hands the checkout back before selecting a
-saved card or creating an approval; it does not sign in to PayPal or use vaulted
-PayPal credentials. If the issuer requires 3-D Secure, Trusty Squire notifies
+between approval and submission.
+
+Some checkouts collect the card before showing the order total. For those flows,
+`operate_pay { phase: "fill_card" }` uses the declared merchant, amount, and currency
+for the same phone approval, then fills the card without submitting. It fills only the
+merchant's own HTTPS frames or recognized payment-provider frames. The card stays in
+the page as sealed, observation-masked fields while the agent advances to the review
+step; charge-like `operate_act` clicks and Enter are blocked during that interval.
+`operate_pay { phase: "confirm" }` then requires a visible total and charges only when
+its amount, currency, and checkout origin exactly match the approved values. A changed
+page title does not invalidate the merchant because the checkout origin is the trust
+anchor. A missing total or declared-amount fallback is never accepted at confirmation.
+
+Before an initial single-page or `fill_card` call, a checkout that exposes PayPal
+Smart Buttons or PayPal-hosted fields is handed back before Trusty Squire selects a
+saved card or creates an approval. Trusty Squire does not sign in to PayPal or use
+vaulted PayPal credentials. If the issuer requires 3-D Secure, Trusty Squire notifies
 your linked Telegram chat and waits 180 seconds by default for you to complete
 the challenge in the open checkout instead of automating it. It reports a
 visible success or decline and hands an unresolved challenge back on timeout.
@@ -208,14 +221,8 @@ for the system and data flows.
 - `list_payment_cards` returns saved-card labels and opaque references;
   `operate_pay` can use a selected card, the only card on file, or a just-in-time
   add-card approval, then fills the checkout and waits for the user to resolve
-  3-D Secure before handing back unresolved challenges. For split checkouts
-  where the card is entered before any total is shown, `operate_pay
-  {phase:"fill_card"}` fills the vaulted card — into the page's own domain or a
-  recognized payment-provider iframe only, never an arbitrary cross-origin
-  frame — without charging, and `operate_pay {phase:"confirm"}` later verifies
-  the now-visible total against the user-approved amount before placing the
-  order. While a card sits filled, charge-verb clicks through `operate_act` are
-  refused, so the confirm gate cannot be bypassed.
+  3-D Secure before handing back unresolved challenges. It also supports the
+  two-phase `fill_card` then `confirm` flow for split checkouts described above.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.

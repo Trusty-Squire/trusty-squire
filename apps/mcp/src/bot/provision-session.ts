@@ -1787,7 +1787,7 @@ export function shouldBlockUnsafeProvisionAction(
 // allowed as grouping) that passes the Luhn checksum — requiring Luhn keeps
 // order numbers, tracking numbers, and other long digit strings from
 // false-positiving. Scoped to MODEL-SUPPLIED `type` text only: operate_pay's
-// vaulted-card fill (BrowserController.fillAndSubmitCheckout) and type_secret's
+// vaulted-card fill methods and type_secret's
 // sealed-slot transfer never pass through this check.
 function passesLuhn(digits: string): boolean {
   let sum = 0;
