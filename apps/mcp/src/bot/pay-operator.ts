@@ -74,6 +74,7 @@ interface PayDependencies {
   // fill_card only: hands the session layer what the later confirm step needs.
   onCardFilled: (pending: PendingCardFill) => void;
   onCardFillCleanupFailed: () => void;
+  skipCardFill?: boolean;
   // Internal-only: confirmation has already read the strict, final total and
   // may use it to mint a replacement approval. Never sourced from tool input.
   initialCheckout?: CheckoutSummary;
@@ -680,7 +681,9 @@ export async function executeOperatePay(
         };
       }
       try {
-        await browser.fillCheckoutCardFields(card);
+        if (!deps.skipCardFill) {
+          await browser.fillCheckoutCardFields(card);
+        }
       } catch (error) {
         const frameOrigin =
           error instanceof UnrecognizedPaymentFrameError
@@ -966,6 +969,7 @@ export async function executeOperatePayConfirm(
       {
         ...overrides,
         initialCheckout: live,
+        skipCardFill: true,
         onCardFilled: (next) => {
           refreshed = next;
         },

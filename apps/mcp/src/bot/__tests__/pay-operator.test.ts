@@ -1472,7 +1472,9 @@ async function runConfirm(cfg: {
       live instanceof Error ? vi.fn().mockRejectedValue(live) : vi.fn().mockResolvedValue(live),
     currentUrl: vi.fn().mockReturnValue(`${SPLIT_CHECKOUT.checkout_origin}/checkout/confirm`),
     fillAndSubmitCheckout: vi.fn(),
-    fillCheckoutCardFields: vi.fn(),
+    fillCheckoutCardFields: vi
+      .fn()
+      .mockRejectedValue(new Error("payment_field_not_found:pan")),
     submitFilledCheckout:
       submit instanceof Error
         ? vi.fn().mockRejectedValue(submit)
@@ -1568,8 +1570,8 @@ describe("operate_pay split checkout — confirm", () => {
     expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
   });
 
-  it("reapproves a higher final total before charging", async () => {
-    const { result, browser, approvalBodies } = await runConfirm({
+  it("reapproves and charges without card-entry fields on the confirm page", async () => {
+    const { result, browser, approvalBodies, auditBodies } = await runConfirm({
       live: { ...SPLIT_CHECKOUT, amount_cents: SPLIT_CHECKOUT.amount_cents + 500 },
     });
 
@@ -1580,8 +1582,15 @@ describe("operate_pay split checkout — confirm", () => {
     expect(approvalBodies).toEqual([
       expect.objectContaining({ amount_cents: SPLIT_CHECKOUT.amount_cents + 500 }),
     ]);
-    expect(browser.fillCheckoutCardFields).toHaveBeenCalledTimes(1);
+    expect(browser.fillCheckoutCardFields).not.toHaveBeenCalled();
+    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledTimes(2);
     expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+    expect(auditBodies).toEqual([
+      expect.objectContaining({
+        amountCents: SPLIT_CHECKOUT.amount_cents + 500,
+        mandateId: "mandate_reapproval",
+      }),
+    ]);
   });
 
   it("charges a lower final total under the existing higher approval", async () => {
