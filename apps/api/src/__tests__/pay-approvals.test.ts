@@ -626,6 +626,55 @@ describe("payment approval relay", () => {
     });
   });
 
+  // Regression (Aug 2026 money-path outage): the deployed operator echoes the
+  // approval's card_ref in its /confirm body (pay-operator.ts candidate). The
+  // #432 bare-.strict() schema rejected that key, 400ing every confirm after
+  // the user had already passkey-approved. The extra key must be accepted —
+  // and ignored: the server record stays the only card_ref authority.
+  it("confirms a candidate whose body carries the operator's extra card_ref key", async () => {
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    const relayed = await relaySubmission(created.id, submission);
+    expect(relayed.approvalStatus).toBe(202);
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { ...submission, card_ref: "card_synthetic_1" },
+    });
+    expect(confirm.statusCode).toBe(200);
+    expect(confirm.json()).toEqual({ status: "approved" });
+
+    // A null card_ref (card-less JIT candidates serialize null) is accepted too.
+    const second = await createApproval();
+    const secondSubmission = makeSubmission(second);
+    const secondRelayed = await relaySubmission(second.id, secondSubmission);
+    expect(secondRelayed.approvalStatus).toBe(202);
+    const nullConfirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${second.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { ...secondSubmission, card_ref: null },
+    });
+    expect(nullConfirm.statusCode).toBe(200);
+    expect(nullConfirm.json()).toEqual({ status: "approved" });
+
+    // Any OTHER unknown key is still rejected — the schema stays strict.
+    const third = await createApproval();
+    const thirdSubmission = makeSubmission(third);
+    const thirdRelayed = await relaySubmission(third.id, thirdSubmission);
+    expect(thirdRelayed.approvalStatus).toBe(202);
+    const unknownKey = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${third.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: { ...thirdSubmission, unexpected: "key" },
+    });
+    expect(unknownKey.statusCode).toBe(400);
+    expect(unknownKey.json()).toMatchObject({ error: "invalid_request" });
+  });
+
   it("reads a past pending approval as expired", async () => {
     const created = await createApproval();
     nowMs += 10 * 60 * 1000 + 1;
