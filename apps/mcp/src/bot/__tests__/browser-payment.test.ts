@@ -203,15 +203,26 @@ describe("checkout payment parsing", () => {
     });
   });
 
-  it("resolves the order total, never the subtotal or shipping, on a Japanese summary", () => {
-    expect(parseCheckoutAmount(["小計 968円", "送料 500円", "合計 1,468円"])).toEqual({
-      amount_cents: 1_468,
+  it.each([
+    ["小計 2,904 円", 2_904],
+    ["合計 968円", 968],
+    ["ご請求金額 ¥1,065", 1_065],
+    ["請求金額 1,065円", 1_065],
+    ["総額 1,468円", 1_468],
+    ["税込 1,468円", 1_468],
+    ["税込み総額 1,468円", 1_468],
+  ])("parses Rakuten Japanese checkout amount: %s", (text, cents) => {
+    expect(parseCheckoutAmount([text])).toEqual({
+      amount_cents: cents,
       currency: "JPY",
     });
-    expect(parseCheckoutAmount(["小計 968円 送料 500円 消費税 134円 合計 1,468円"])).toEqual({
-      amount_cents: 1_468,
-      currency: "JPY",
-    });
+  });
+
+  it("keeps all Japanese checkout matches so review selection uses the settled final total", () => {
+    expect(parseCheckoutAmounts(["小計 2,904円", "送料 500円", "合計 1,468円"])).toEqual([
+      { amount_cents: 2_904, currency: "JPY" },
+      { amount_cents: 1_468, currency: "JPY" },
+    ]);
   });
 
   it("skips a merchandise subtotal (商品合計) and resolves the payable total", () => {
@@ -222,7 +233,6 @@ describe("checkout payment parsing", () => {
   });
 
   it.each([
-    ["小計 968円"],
     ["商品合計 968円"],
     ["送料 500円"],
     ["値引き 300円"],
@@ -299,9 +309,11 @@ describe("checkout payment parsing", () => {
     // 円税込 is currency evidence the token resolver cannot read; trusting the
     // USD fallback here would turn ¥1,468 into $1,468.00.
     const browser = new BrowserController({ humanize: false });
+    const frame = { evaluate: vi.fn().mockResolvedValue("合計 1,468円税込") };
     const page = {
       evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
-      frames: () => [{ evaluate: vi.fn().mockResolvedValue("合計 1,468円税込") }],
+      mainFrame: () => frame,
+      frames: () => [frame],
       url: () => "https://flowers.example.test/checkout",
     };
     Object.defineProperty(browser, "page", { value: page });
@@ -325,9 +337,11 @@ describe("checkout payment parsing", () => {
 
   it("surfaces a clear capture error instead of falling back to a mismatched currency", async () => {
     const browser = new BrowserController({ humanize: false });
+    const frame = { evaluate: vi.fn().mockResolvedValue("Order total 98.45") };
     const page = {
       evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
-      frames: () => [{ evaluate: vi.fn().mockResolvedValue("Order total 98.45") }],
+      mainFrame: () => frame,
+      frames: () => [frame],
       url: () => "https://flowers.example.test/checkout",
     };
     Object.defineProperty(browser, "page", { value: page });
@@ -345,9 +359,11 @@ describe("checkout payment parsing", () => {
     "Order total JPY$98.45",
   ])("fails closed when a total uses unresolved currency notation: %s", async (text) => {
     const browser = new BrowserController({ humanize: false });
+    const frame = { evaluate: vi.fn().mockResolvedValue(text) };
     const page = {
       evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
-      frames: () => [{ evaluate: vi.fn().mockResolvedValue(text) }],
+      mainFrame: () => frame,
+      frames: () => [frame],
       url: () => "https://flowers.example.test/checkout",
     };
     Object.defineProperty(browser, "page", { value: page });
@@ -1284,6 +1300,50 @@ describe("split-checkout card fill (real browser)", () => {
           amount_cents: 3_999,
           currency: "USD",
         });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps the main checkout total authoritative over injected frame totals",
+    async () => {
+      const pageUrl = "https://shop.rakuten.co.jp/checkout/payment";
+      const rogueUrl = "https://rogue-payments.example.net/summary";
+      const trustedUrl = "https://static-content.payment.global.rakuten.com/summary";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <meta charset="utf-8">
+          <title>Rakuten</title>
+          <div>合計 ¥3,404</div>
+          <iframe src="${rogueUrl}"></iframe>`,
+        [rogueUrl]: '<meta charset="utf-8">合計 ¥9',
+        [trustedUrl]: '<meta charset="utf-8">合計 ¥9',
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutSummary("JPY")).resolves.toMatchObject({
+          amount_cents: 3_404,
+          currency: "JPY",
+        });
+
+        await Promise.all([
+          page.waitForEvent("framenavigated", (frame) => frame.url() === trustedUrl),
+          page.evaluate((url) => {
+            const frame = document.createElement("iframe");
+            frame.src = url;
+            document.body.append(frame);
+          }, trustedUrl),
+        ]);
+
+        await expect(controller.readCheckoutSummary("JPY")).rejects.toThrow(
+          "payment_checkout_total_not_found",
+        );
       } finally {
         await browser.close();
       }

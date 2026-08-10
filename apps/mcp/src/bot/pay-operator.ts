@@ -20,9 +20,10 @@ export interface OperatePayArgs {
   reason: string;
   three_ds_wait_seconds?: number;
   // "fill_card" = split-checkout card entry: run the full approval ceremony,
-  // then fill the card into the payment fields WITHOUT submitting anything —
-  // the charge happens later via executeOperatePayConfirm once the order-
-  // confirmation step shows the total. Absent = the single-page fill+charge.
+  // after resolving the payable total, then fill the card into the payment
+  // fields WITHOUT submitting anything. The charge happens later via
+  // executeOperatePayConfirm after re-verifying the total. Absent = the
+  // single-page fill+charge.
   phase?: "fill_card";
 }
 
@@ -329,20 +330,10 @@ export async function executeOperatePay(
           reason: "fallback_currency_scale_mismatch",
         };
       }
-      if (
-        !(error instanceof Error && error.message === "payment_checkout_total_not_found") ||
-        args.merchant === undefined ||
-        args.amount_cents === undefined ||
-        args.currency === undefined
-      ) {
-        throw error;
+      if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
+        return { status: "payment_checkout_total_not_found" };
       }
-      checkout = {
-        merchant: args.merchant,
-        checkout_origin: new URL(browser.currentUrl()).origin,
-        amount_cents: args.amount_cents,
-        currency: args.currency.toUpperCase(),
-      };
+      throw error;
     }
 
     const item = args.item;
@@ -662,12 +653,11 @@ export async function executeOperatePay(
             : undefined;
     // Split-checkout card entry (phase="fill_card"): fill the card, charge
     // nothing. The human approval already happened (the mandate above binds
-    // merchant/origin/amount/currency); what CANNOT happen here is the
-    // total-verification — the card-entry step shows no total — so it moves
-    // to executeOperatePayConfirm, the step where the money actually moves.
-    // The one live check that is still possible (and needed: the ceremony can
-    // take minutes, and the fill targets the CURRENT page) is that the
-    // browser still sits on the origin the mandate was signed for.
+    // merchant/origin/amount/currency). The amount was resolved before the
+    // approval; executeOperatePayConfirm re-verifies it immediately before
+    // money moves. The live check still needed here (the ceremony can take
+    // minutes, and the fill targets the CURRENT page) is that the browser
+    // remains on the origin the mandate was signed for.
     if (args.phase === "fill_card") {
       let liveOrigin: string | null;
       try {
@@ -897,8 +887,8 @@ export async function executeOperatePayConfirm(
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (message === "payment_checkout_total_not_found") {
-      // Unlike the fill step, a missing total here is a hard refusal — there
-      // is no declared-amount fallback at the moment of charging.
+      // Confirmation fails closed when the live total disappears; the
+      // approved amount is never used as a substitute at charge time.
       return {
         status: "payment_checkout_total_not_found",
         approval_url: approvalUrl,

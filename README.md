@@ -71,16 +71,20 @@ operator-sealed final authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission.
 
-Some checkouts collect the card before showing the order total. For those flows,
-`operate_pay { phase: "fill_card" }` uses the declared merchant, amount, and currency
-for the same phone approval, then fills the card without submitting. It fills only the
-merchant's own HTTPS frames or recognized payment-provider frames. The card stays in
-the page as sealed, observation-masked fields while the agent advances to the review
-step; charge-like `operate_act` clicks and Enter are blocked during that interval.
-`operate_pay { phase: "confirm" }` then requires a visible total and charges only when
-its amount, currency, and checkout origin exactly match the approved values. A changed
-page title does not invalidate the merchant because the checkout origin is the trust
-anchor. A missing total or declared-amount fallback is never accepted at confirmation.
+Some split checkouts collect the card before the final order-confirmation step. Their
+card-entry page must still expose a readable payable total:
+`operate_pay { phase: "fill_card" }` reads the live merchant, checkout origin, amount,
+and currency for the same phone approval, then fills the card without submitting. If
+the page total cannot be resolved, the call returns
+`payment_checkout_total_not_found` before creating an approval or filling any fields.
+It fills only the merchant's own HTTPS frames or recognized payment-provider frames.
+The card stays in the page as sealed, observation-masked fields while the agent
+advances to the review step; charge-like `operate_act` clicks and Enter are blocked
+during that interval. `operate_pay { phase: "confirm" }` then re-reads the visible
+total and charges only when its amount, currency, and checkout origin exactly match
+the approved values. A changed page title does not invalidate the merchant because
+the checkout origin is the trust anchor. A missing or conflicting total is never
+replaced with caller-supplied payment values.
 
 Before an initial single-page or `fill_card` call, a checkout that exposes PayPal
 Smart Buttons or PayPal-hosted fields is handed back before Trusty Squire selects a

@@ -12,6 +12,7 @@ import {
 import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
 import { manualCardEntryBlockReason } from "../provision-session.js";
 import {
+  BrowserController,
   PaymentCardFillCleanupError,
   UnrecognizedPaymentFrameError,
   type CheckoutCard,
@@ -66,7 +67,12 @@ async function harness(
     waitSeconds?: number;
     notifyNeverResolves?: boolean;
   },
+  checkoutOptions: {
+    checkout?: CheckoutSummary;
+    readCheckoutSummary?: () => Promise<CheckoutSummary>;
+  } = {},
 ) {
+  const checkout = checkoutOptions.checkout ?? CHECKOUT;
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
   });
@@ -115,7 +121,7 @@ async function harness(
         return Response.json({
           id: "approval_test",
           status: "approved",
-          ...CHECKOUT,
+          ...checkout,
           nonce,
           card_ref: "card_test",
           operator_pubkey: operatorPublicKey,
@@ -129,12 +135,12 @@ async function harness(
         .digest("base64url");
       const payload = {
         approval_id: "approval_test",
-        merchant: CHECKOUT.merchant,
+        merchant: checkout.merchant,
         checkout_origin:
-          mode === "tampered_origin" ? "https://evil.synthetic.test" : CHECKOUT.checkout_origin,
+          mode === "tampered_origin" ? "https://evil.synthetic.test" : checkout.checkout_origin,
         amount_cents:
-          mode === "tampered_amount" ? CHECKOUT.amount_cents + 1 : CHECKOUT.amount_cents,
-        currency: CHECKOUT.currency,
+          mode === "tampered_amount" ? checkout.amount_cents + 1 : checkout.amount_cents,
+        currency: checkout.currency,
         nonce,
         card_ref: "card_test",
         recipient_pubkey_hash: recipientHash,
@@ -187,7 +193,7 @@ async function harness(
           mode === "junk_then_happy"
             ? "pending"
             : "approved",
-        ...CHECKOUT,
+        ...checkout,
         nonce,
         card_ref: "card_test",
         operator_pubkey: operatorPublicKey,
@@ -237,9 +243,9 @@ async function harness(
 
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
-    readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
-    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(CHECKOUT),
-    currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
+    readCheckoutSummary: vi.fn(checkoutOptions.readCheckoutSummary ?? (async () => checkout)),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(checkout),
+    currentUrl: vi.fn().mockReturnValue(`${checkout.checkout_origin}/session/test`),
     fillCheckoutCardFields: vi.fn(),
     submitFilledCheckout: vi.fn(),
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
@@ -298,62 +304,68 @@ async function harness(
 
 describe("operate_pay", () => {
   it.each([
-    ["payment_checkout_currency_unresolved_scale_mismatch", "fallback_currency_scale_mismatch"],
-    ["payment_checkout_currency_unresolved", "checkout_currency_unrecognized"],
-  ])(
-    "does not mint an approval for checkout currency grounding failure %s",
-    async (error, reason) => {
-      const approvalBodies: Array<Record<string, unknown>> = [];
-      const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-        const url =
-          typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-        if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
-          return Response.json({ vouchflow_audience: "customer_test" });
-        }
-        if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
-          approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-        }
-        return Response.json({ error: "unexpected_request" }, { status: 500 });
-      }) as typeof fetch;
-      const api = new ApiClient({
-        apiBaseUrl: "https://api.test",
-        registryBaseUrl: "https://registry.test",
-        agentSessionToken: "synthetic-session-token",
-        fetch: fetchMock,
-      });
-      const browser: PaymentBrowser = {
-        isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
-        readCheckoutSummary: vi.fn().mockRejectedValue(new Error(error)),
-        readCheckoutConfirmSummary: vi.fn().mockRejectedValue(new Error(error)),
-        currentUrl: vi.fn().mockReturnValue("https://flowers.example.test/checkout"),
-        fillAndSubmitCheckout: vi.fn(),
-        fillCheckoutCardFields: vi.fn(),
-        submitFilledCheckout: vi.fn(),
-        clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
-        waitForThreeDsResolution: vi.fn(),
-      };
-
-      await expect(
-        executeOperatePay(
-          {
-            card_ref: "card_test",
-            merchant: "Japan Flower Shop",
-            amount_cents: 9_845,
-            currency: "JPY",
-            item: "Flowers",
-            reason: "Gift",
-          },
-          api,
-          browser,
-          { vouchflowExpectedAudience: "customer_test" },
-        ),
-      ).resolves.toEqual({
+    [
+      "payment_checkout_currency_unresolved_scale_mismatch",
+      {
         status: "payment_checkout_currency_unresolved",
-        reason,
-      });
-      expect(approvalBodies).toEqual([]);
-    },
-  );
+        reason: "fallback_currency_scale_mismatch",
+      },
+    ],
+    [
+      "payment_checkout_currency_unresolved",
+      {
+        status: "payment_checkout_currency_unresolved",
+        reason: "checkout_currency_unrecognized",
+      },
+    ],
+    ["payment_checkout_total_not_found", { status: "payment_checkout_total_not_found" }],
+  ])("does not mint an approval for checkout grounding failure %s", async (error, expected) => {
+    const approvalBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
+        return Response.json({ vouchflow_audience: "customer_test" });
+      }
+      if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+        approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      }
+      return Response.json({ error: "unexpected_request" }, { status: 500 });
+    }) as typeof fetch;
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session-token",
+      fetch: fetchMock,
+    });
+    const browser: PaymentBrowser = {
+      isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
+      readCheckoutSummary: vi.fn().mockRejectedValue(new Error(error)),
+      readCheckoutConfirmSummary: vi.fn().mockRejectedValue(new Error(error)),
+      currentUrl: vi.fn().mockReturnValue("https://flowers.example.test/checkout"),
+      fillAndSubmitCheckout: vi.fn(),
+      fillCheckoutCardFields: vi.fn(),
+      submitFilledCheckout: vi.fn(),
+      clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
+      waitForThreeDsResolution: vi.fn(),
+    };
+
+    await expect(
+      executeOperatePay(
+        {
+          card_ref: "card_test",
+          merchant: "Japan Flower Shop",
+          amount_cents: 9_845,
+          currency: "JPY",
+          item: "Flowers",
+          reason: "Gift",
+        },
+        api,
+        browser,
+        { vouchflowExpectedAudience: "customer_test" },
+      ),
+    ).resolves.toEqual(expected);
+    expect(approvalBodies).toEqual([]);
+  });
 
   it("verifies the mandate, opens the card, fills the checkout, and audits last4 only", async () => {
     const {
@@ -404,6 +416,45 @@ describe("operate_pay", () => {
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
   });
+
+  it("binds approval to the final Japanese payable total, never the earlier subtotal", async () => {
+    const checkout: CheckoutSummary = {
+      merchant: "Rakuten",
+      checkout_origin: "https://checkout.rakuten.test",
+      amount_cents: 3_404,
+      currency: "JPY",
+    };
+    const controller = new BrowserController({ humanize: false });
+    const frame = {
+      evaluate: vi.fn().mockResolvedValue("小計 ¥2,904\n合計 ¥3,404"),
+    };
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ title: "Rakuten", siteName: "Rakuten" }),
+      mainFrame: () => frame,
+      frames: () => [frame],
+      url: () => `${checkout.checkout_origin}/session/test`,
+    };
+    Object.defineProperty(controller, "page", { value: page });
+
+    const { result, approvalBodies, browser } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      undefined,
+      {
+        checkout,
+        readCheckoutSummary: controller.readCheckoutSummary.bind(controller),
+      },
+    );
+
+    expect(browser.readCheckoutSummary).toHaveBeenCalledTimes(1);
+    expect(approvalBodies[0]).toMatchObject({ amount_cents: 3_404, currency: "JPY" });
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      amount_cents: 3_404,
+      currency: "JPY",
+    });
+  }, 10_000);
 
   it("verifies an opaque review seal before accepting the final approval", async () => {
     const { result, confirmationBodies, filledCards } = await harness("review_then_happy");
@@ -1009,12 +1060,8 @@ describe("operate_pay JIT add-card ceremony", () => {
 
 // ── Split checkout (phase="fill_card" → executeOperatePayConfirm) ───────────
 //
-// Rakuten-style flows enter the card BEFORE any total is visible and show the
-// total only on a separate confirmation step. These pin the split contract:
-// the approval ceremony + fill run against declared, human-approved values
-// with NO live total; NOTHING is submitted at fill time; and the
-// total-verification gate lives in the confirm step — exactly where the money
-// moves.
+// Split flows fill without submitting, then re-verify the total on a separate
+// confirmation step immediately before the charge.
 
 const SPLIT_CHECKOUT: CheckoutSummary = {
   merchant: "Split Merchant",
@@ -1025,7 +1072,7 @@ const SPLIT_CHECKOUT: CheckoutSummary = {
 
 async function runSplitFill(
   cfg: {
-    liveSummary?: CheckoutSummary;
+    liveSummary?: CheckoutSummary | null;
     fillRejects?: Error;
     driftOriginAfterApproval?: string;
   } = {},
@@ -1128,19 +1175,17 @@ async function runSplitFill(
     return Response.json({ error: "not_found" }, { status: 404 });
   }) as typeof fetch;
 
-  let urlCalls = 0;
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     readCheckoutSummary:
-      cfg.liveSummary !== undefined
-        ? vi.fn().mockResolvedValue(cfg.liveSummary)
-        : vi.fn().mockRejectedValue(new Error("payment_checkout_total_not_found")),
+      cfg.liveSummary === null
+        ? vi.fn().mockRejectedValue(new Error("payment_checkout_total_not_found"))
+        : vi.fn().mockResolvedValue(cfg.liveSummary ?? SPLIT_CHECKOUT),
     readCheckoutConfirmSummary: vi
       .fn()
       .mockRejectedValue(new Error("payment_checkout_total_not_found")),
     currentUrl: vi.fn(() => {
-      urlCalls += 1;
-      if (cfg.driftOriginAfterApproval !== undefined && urlCalls > 1) {
+      if (cfg.driftOriginAfterApproval !== undefined && approvalBodies.length > 0) {
         return cfg.driftOriginAfterApproval;
       }
       return `${SPLIT_CHECKOUT.checkout_origin}/checkout/payment`;
@@ -1199,46 +1244,17 @@ async function runSplitFill(
 }
 
 describe("operate_pay split checkout — fill_card", () => {
-  it("fills the vaulted card with NO visible total and charges nothing", async () => {
+  it("refuses caller amounts when no page total is visible", async () => {
     const { result, approvalBodies, auditBodies, filledCards, pendings, browser } =
-      await runSplitFill();
+      await runSplitFill({ liveSummary: null });
 
-    expect(result).toMatchObject({
-      status: "payment_card_filled",
-      merchant: SPLIT_CHECKOUT.merchant,
-      amount_cents: SPLIT_CHECKOUT.amount_cents,
-      currency: SPLIT_CHECKOUT.currency,
-      last4: "4242",
-    });
-    // The human approved the DECLARED values — they are what the approval binds.
-    expect(approvalBodies[0]).toMatchObject({
-      merchant: SPLIT_CHECKOUT.merchant,
-      checkout_origin: SPLIT_CHECKOUT.checkout_origin,
-      amount_cents: SPLIT_CHECKOUT.amount_cents,
-      currency: SPLIT_CHECKOUT.currency,
-      card_ref: "card_split",
-    });
-    // The card reached the page through the fill-only primitive…
-    expect(filledCards).toEqual([SYNTHETIC_CARD]);
-    // …and NOTHING was submitted: no combined fill+charge, no charge click.
+    expect(result).toEqual({ status: "payment_checkout_total_not_found" });
+    expect(approvalBodies).toEqual([]);
+    expect(filledCards).toEqual([]);
     expect(browser.fillAndSubmitCheckout).not.toHaveBeenCalled();
     expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
-    // No money moved → no payment audit row yet.
     expect(auditBodies).toEqual([]);
-    // The confirm step gets exactly the mandate-bound state, never the card.
-    expect(pendings).toEqual([
-      {
-        approval_id: "appr_split",
-        approval_url: "https://web.test/vault/pay/appr_split",
-        checkout: SPLIT_CHECKOUT,
-        card_ref: "card_split",
-        last4: "4242",
-        mandate_id: "mandate_split",
-      },
-    ]);
-    const exposed = JSON.stringify(result) + JSON.stringify(pendings);
-    expect(exposed).not.toContain(SYNTHETIC_CARD.pan);
-    expect(exposed).not.toContain(SYNTHETIC_CARD.cvv);
+    expect(pendings).toEqual([]);
   });
 
   it("prefers the live summary when the card-entry page does show a total", async () => {
