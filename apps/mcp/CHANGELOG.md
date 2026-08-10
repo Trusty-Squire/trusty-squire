@@ -2,6 +2,7 @@
 
 ## 1.1.9-rc.7 (2026-08-09)
 
+- fix(bot): recognize Japanese charge controls when submitting checkouts
 - fix(mcp): keep operator server alive after erroring calls (#470)
 - fix(mcp): recover checkout totals from structured data (#469)
 - fix(mcp): block manual card entry through operate_act (#468)
