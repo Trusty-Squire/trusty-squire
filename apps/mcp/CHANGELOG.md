@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.11 (2026-08-11)
+
+- fix(mcp): decouple card fill from amount approval — `operate_pay(phase="fill_card")` fills the vaulted card with a $0 release-only approval; the human payment approval and charge happen at `phase="confirm"` against the final total (#482)
+
 ## 1.1.9-rc.10 (2026-08-10)
 
 - fix(mcp): reapprove higher split-checkout totals — fill vaulted cards against subtotal-only Rakuten card-entry pages, then require a fresh approval when the authoritative final total exceeds the approved amount; harden approval leases and bind audits to the merchant (#479)
