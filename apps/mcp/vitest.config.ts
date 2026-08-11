@@ -6,5 +6,13 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"],
+    // One test in this suite is memory-heavy enough to OOM a worker at
+    // Node's default heap size on a memory-constrained CI runner. Tracked:
+    // operator-mandate-web-seam-test-oom.
+    poolOptions: {
+      threads: {
+        execArgv: ["--max-old-space-size=4096"],
+      },
+    },
   },
 });
