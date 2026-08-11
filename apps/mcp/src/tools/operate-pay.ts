@@ -344,12 +344,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       if (
         paymentClaim.resumeApproval !== undefined &&
         !paymentLeaseCompleted &&
-        resolvedCardRef === null &&
-        result.status !== "payment_approval_timeout" &&
-        result.status !== "payment_card_required"
+        resolvedCardRef === null
       ) {
-        completeActivePaymentLeaseWithPendingApproval(paymentLease, paymentClaim.resumeApproval);
-        paymentLeaseCompleted = true;
+        if (result.status === "payment_configuration_error") {
+          completeActivePaymentLeaseWithPendingApproval(paymentLease, paymentClaim.resumeApproval);
+          paymentLeaseCompleted = true;
+        } else {
+          paymentClaim.resumeApproval.keypair.privateKey = "";
+        }
       }
       return result;
     } catch (error) {
