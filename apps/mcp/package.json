@@ -47,7 +47,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run --exclude src/bot/__tests__/observe-delta.test.ts && vitest run src/bot/__tests__/observe-delta.test.ts --pool=forks",
+    "test": "vitest run",
     "test:cov": "vitest run --coverage",
     "eval:replay:capture": "node scripts/capture-replay-baseline.mjs",
     "eval:replay": "tsx src/eval/replay-harness/cli.ts",
