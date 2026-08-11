@@ -6,11 +6,5 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["src/**/*.test.ts", "scripts/**/*.test.mjs"],
-    pool: "forks",
-    poolOptions: {
-      forks: {
-        execArgv: ["--max-old-space-size=32768"],
-      },
-    },
   },
 });

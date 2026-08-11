@@ -11,37 +11,4 @@ commands:
     set -eu
     pnpm --filter '@trusty-squire/registry' prisma:generate
     pnpm -r --filter "./packages/**" --if-present build
-    export NODE_OPTIONS="--max-old-space-size=32768"
-    pnpm -r --filter '!@trusty-squire/mcp' --if-present test
-    (
-      cd apps/mcp
-      # TEMP: quarantined - pre-existing intermittent OOM leak, unrelated to this PR, tracked in operator-mandate-web-seam-test-oom
-      quarantined_mcp_test='src/bot/__tests__/pay-mandate-web-seam.test.ts'
-      quarantined_mcp_test_count="$(find src scripts -type f \( -name '*.test.ts' -o -name '*.test.mjs' \) -path "$quarantined_mcp_test" | wc -l | tr -d ' ')"
-      if [ "$quarantined_mcp_test_count" -ne 1 ]; then
-        echo "Expected exactly one quarantined MCP test, found $quarantined_mcp_test_count" >&2
-        exit 1
-      fi
-      mcp_test_files="$(find src scripts -type f \( -name '*.test.ts' -o -name '*.test.mjs' \) ! -path "$quarantined_mcp_test" | sort)"
-      if [ -z "$mcp_test_files" ]; then
-        echo "No MCP test files discovered" >&2
-        exit 1
-      fi
-      saved_ifs="$IFS"
-      IFS="$(printf '\n_')"
-      IFS="${IFS%_}"
-      set -- $mcp_test_files
-      IFS="$saved_ifs"
-      mcp_test_count="$#"
-      mcp_test_completed=0
-      for mcp_test_file in "$@"; do
-        if [ -z "$mcp_test_file" ] || [ ! -f "$mcp_test_file" ] || [ "$mcp_test_file" = "$quarantined_mcp_test" ]; then
-          echo "Invalid MCP test file entry: '$mcp_test_file'" >&2
-          exit 1
-        fi
-        echo "MCP test file $((mcp_test_completed + 1))/$mcp_test_count: $mcp_test_file"
-        pnpm exec vitest run "$mcp_test_file" --maxWorkers=2 --minWorkers=1
-        mcp_test_completed=$((mcp_test_completed + 1))
-      done
-      test "$mcp_test_completed" -eq "$mcp_test_count"
-    )
+    pnpm -r --if-present test
