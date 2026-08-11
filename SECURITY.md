@@ -91,14 +91,13 @@ Before card entry or payment approval, the browser requires a one-time Vouchflow
 passkey enrollment and confirms that the platform authenticator supports the
 WebAuthn PRF extension. A payment approval is short-lived and account-scoped.
 The anonymous approval shell displays the canonical purchase values before an
-amount-bound payment ceremony. For a split checkout's zero-amount, no-currency
-release approval, it instead says that the named card will be released to the
-merchant with no charge yet. One explicit **Approve payment** action then signs
-a payload binding the merchant, checkout origin, amount, currency, single-use
-nonce, card reference, operator-key hash, item description, purchase reason, and
-server-derived requesting-agent label while deriving the card-decryption key.
-The API uses the install's authenticated agent identity when present and
-otherwise signs `unknown-agent`; the client cannot supply the label.
+amount-bound payment ceremony, including the amount used for a split checkout's
+card-fill approval. One explicit **Approve payment** action then signs a payload
+binding the merchant, checkout origin, amount, currency, single-use nonce, card
+reference, operator-key hash, item description, purchase reason, and server-derived
+requesting-agent label while deriving the card-decryption key. The API uses the
+install's authenticated agent identity when present and otherwise signs
+`unknown-agent`; the client cannot supply the label.
 
 Just-in-time add-card approvals may be created without a card reference, while
 still binding the operator's ephemeral public key at creation. The API permits
@@ -113,11 +112,15 @@ it re-reads the live merchant, origin, amount, and currency and refuses submissi
 if any signed field changed.
 
 A split checkout may collect card details before it exposes the final payable total.
-Its `fill_card` phase never reads or requires a page amount: it completes a signed
-release approval bound to a zero amount and card release only, so it works even
-when the card-entry page shows no total at all. After approval it requires the live
-page origin to equal the mandate's checkout origin, fills no
-submit control, and permits card data only in the main frame,
+On every observation, the session best-effort captures the most recent real checkout
+total read from the current page, replacing the prior value only after a successful
+read and scoping it to that page's origin. The `fill_card` phase prefers the live
+card-entry page's own total. Only when that page has no readable total may it use the
+same session's captured value, after re-checking that the current origin matches; a
+caller-supplied amount is never a fallback. The resulting single amount-bound
+approval both releases the card and authorizes a later charge up to that amount.
+After approval it requires the live page origin to equal the mandate's checkout
+origin, fills no submit control, and permits card data only in the main frame,
 same-registrable-domain HTTPS frames, or curated HTTPS payment-provider frames. A
 failed or unrecognized-frame fill clears partial card data; if cleanup itself cannot
 be confirmed, the session keeps the payment-field seal active. On success the raw
@@ -129,14 +132,14 @@ digits.
 The later `confirm` phase is the charge boundary. Its strict reader requires a final
 payable total from the main frame or a visible trusted payment frame, with no
 caller-supplied amount fallback; unresolved or conflicting totals fail closed.
-Checkout origin must match the mandate. Because the fill approval never covers a
-real amount, every charge requires a new signed, amount-bound approval for that
-exact final total, followed by another strict read before submission. Thus no
-charge is ever submitted without a human approval of the final amount. The page-title-derived
-merchant display name is not compared across steps; origin is the recipient trust
-anchor. While a split card fill is pending, ordinary browser actions cannot click
-charge-labeled controls or press Enter, so only `confirm` can cross that boundary. If
-no submit control is found, the sealed page fields and pending metadata remain
+Checkout origin and currency must match the mandate. A final total at or below the
+approved amount is submitted under the same signed approval, without a second human
+tap. A higher total fails closed with `payment_amount_exceeds_approval`; there is no
+reapproval path. The page-title-derived merchant display name is not compared across
+steps; origin is the recipient trust anchor. While a split card fill is pending,
+ordinary browser actions cannot click charge-labeled controls or press Enter, so only
+`confirm` can cross that boundary. If no submit control is found, the sealed page
+fields and pending metadata remain
 available for a safe retry; they are cleared after a terminal outcome when cleanup
 can be confirmed. Every payment entry is claimed before asynchronous work begins,
 and a pending confirmation is claimed atomically, so overlapping `operate_pay` calls

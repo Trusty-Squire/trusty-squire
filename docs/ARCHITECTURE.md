@@ -57,12 +57,11 @@ captcha handling, and extraction.
 
 A short-lived handoff from an active operate session to the user's phone. The
 phone can add and bind a card when needed. The anonymous approval shell displays
-the exact server-recorded purchase details for an amount-bound approval, or the
-merchant and no-charge card-release intent for a split fill. One payment-context
-passkey authorization signs that approval. The API relays the signed mandate and
-operator-sealed card through an account-scoped, short-TTL database record and
-mutates approval state only after operator verification. The security contract
-is owned by
+the exact server-recorded purchase details for an amount-bound approval. One
+payment-context passkey authorization signs that approval. The API relays the
+signed mandate and operator-sealed card through an account-scoped, short-TTL
+database record and mutates approval state only after operator verification. The
+security contract is owned by
 [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Sealed slot**
@@ -166,8 +165,13 @@ agent starts operate_pay in the active checkout
   -> agent supplies a non-empty item and reason
   -> a single-page checkout reads merchant, origin, and payable total from the
      live page; an unreadable amount stops before approval with
-     payment_checkout_total_not_found. Split fill_card never reads a page total —
-     it reads only merchant and origin and approves a zero-amount card release
+     payment_checkout_total_not_found
+  -> every session observation best-effort captures the most recent real checkout
+     total, replacing the prior value after a successful read and preserving it
+     when a later page has no total; the value remains scoped to its page origin
+  -> split fill_card first reads the live card-entry total; only when none is
+     readable may it use that same session's captured total after re-checking the
+     current origin. Caller-supplied amounts never provide this fallback
   -> PayPal Smart Button or hosted-field frames hand initial/fill checkout calls to
      the user before saved-card resolution or approval creation
   -> an explicit card is used; otherwise one saved card is selected automatically,
@@ -177,8 +181,7 @@ agent starts operate_pay in the active checkout
   -> if the approval has no card, the user adds one and the API binds that saved
      card to the still-pending approval
   -> the anonymous approval shell displays merchant, checkout origin, item, reason,
-     and requesting agent from the short-lived server record; amount-bound approvals
-     show amount and currency, while split fill shows a no-charge release message
+     requesting agent, amount, and currency from the short-lived server record
   -> the user reviews that intent and one passkey ceremony signs the canonical
      payload, unlocks the card, and seals it to the ephemeral operator
   -> the API stages that opaque candidate in an account-scoped Postgres relay with
@@ -187,8 +190,8 @@ agent starts operate_pay in the active checkout
      candidate fingerprint; successful confirmation clears the JWS and ciphertext
   -> single-page add-card re-reads every signed checkout field, then fills and
      submits only if merchant, origin, amount, and currency still match
-  -> split fill_card instead requires the current origin to match its release
-     mandate and fills without submitting; only the main frame,
+  -> split fill_card requires the current origin to match its amount-bound mandate
+     and fills without submitting; only the main frame,
      same-registrable-domain HTTPS frames, and curated HTTPS payment-provider frames
      can receive card data
   -> the raw card is zeroed; sealed, observation-masked page fields remain, while
@@ -199,9 +202,10 @@ agent starts operate_pay in the active checkout
      final payable total from the main frame and visible trusted payment frames with
      no caller fallback; origin must match the mandate (the page-title-derived
      merchant name may change)
-  -> because the fill approval never covers a real amount, confirm always obtains a
-     fresh amount-bound approval for the strict final total and re-reads it before
-     submission; unresolved or conflicting totals fail closed without charging
+  -> confirm charges under the fill-time approval, without another passkey tap, when
+     currency matches and the final total is at or below the approved amount; a
+     higher total fails closed with payment_amount_exceeds_approval and is never
+     re-approved. Unresolved or conflicting totals also fail closed without charging
   -> the active session serializes payment entry and confirmation; retry state is
      restored only before submission starts, and unverified field cleanup seals the
      session against later payment operations (the contract lives in SECURITY.md)
