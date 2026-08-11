@@ -76,9 +76,14 @@ interface PayDependencies {
   onCardFillCleanupFailed: () => void;
   onSubmitStarted: () => void;
   skipCardFill?: boolean;
-  // Internal-only: confirmation has already read the strict, final total and
-  // may use it to mint a replacement approval. Never sourced from tool input.
+  // Internal-only: a trusted browser reader has already produced the checkout
+  // (fill_card preflight or confirm's strict final-total read). Never sourced
+  // from tool input.
   initialCheckout?: CheckoutSummary;
+  // Internal-only companion to initialCheckout. Lets a fill_card preflight
+  // preserve the FIRST trusted-reader failure for executeOperatePay's normal
+  // structured error mapping instead of retrying a changing page.
+  initialCheckoutFailure?: unknown;
 }
 
 const cardSchema = z.object({
@@ -318,6 +323,7 @@ export async function executeOperatePay(
 
     let checkout: CheckoutSummary;
     try {
+      if (deps.initialCheckoutFailure !== undefined) throw deps.initialCheckoutFailure;
       checkout = deps.initialCheckout ?? (await browser.readCheckoutSummary(args.currency));
     } catch (error) {
       if (error instanceof Error && error.message === "payment_checkout_currency_unresolved") {

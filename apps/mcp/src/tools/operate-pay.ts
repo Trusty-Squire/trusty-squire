@@ -266,10 +266,11 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       // last real cart-page observation. Any other reader failure (unresolved
       // currency, scale mismatch, conflicting totals) is left alone so it
       // propagates through executeOperatePay's normal handling.
-      let cartFallbackCheckout: CheckoutSummary | undefined;
+      let initialCheckout: CheckoutSummary | undefined;
+      let initialCheckoutFailure: unknown;
       if (args.phase === "fill_card") {
         try {
-          await browser.readCheckoutSummary(args.currency);
+          initialCheckout = await browser.readCheckoutSummary(args.currency);
         } catch (error) {
           if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
             let liveOrigin: string | null;
@@ -279,7 +280,13 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
               liveOrigin = null;
             }
             const stored = liveOrigin !== null ? getActiveCartCheckoutSummary(liveOrigin) : null;
-            if (stored !== null) cartFallbackCheckout = stored;
+            if (stored !== null) initialCheckout = stored;
+            else initialCheckoutFailure = error;
+          } else {
+            // Preserve the first trusted-reader failure. Retrying here could
+            // erase a conflict/scale/currency refusal if the DOM changes
+            // between reads and incorrectly allow an approval to be minted.
+            initialCheckoutFailure = error;
           }
         }
       }
@@ -310,7 +317,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
                 },
               }
             : {}),
-          ...(cartFallbackCheckout !== undefined ? { initialCheckout: cartFallbackCheckout } : {}),
+          ...(initialCheckout !== undefined ? { initialCheckout } : {}),
+          ...(initialCheckoutFailure !== undefined ? { initialCheckoutFailure } : {}),
           onCardResolved: (value) => {
             resolvedCardRef = value;
           },

@@ -630,6 +630,55 @@ describe("operate_pay split checkout phases", () => {
       expect(result).toEqual({ status: "payment_checkout_total_not_found" });
       expect(createPaymentApproval).not.toHaveBeenCalled();
     });
+
+    it.each([
+      [
+        "payment_checkout_currency_unresolved",
+        {
+          status: "payment_checkout_currency_unresolved",
+          reason: "checkout_currency_unrecognized",
+        },
+      ],
+      [
+        "payment_checkout_currency_unresolved_scale_mismatch",
+        {
+          status: "payment_checkout_currency_unresolved",
+          reason: "fallback_currency_scale_mismatch",
+        },
+      ],
+      [
+        "payment_checkout_total_conflict",
+        {
+          status: "payment_amount_mismatch",
+          reason: "conflicting_checkout_totals",
+        },
+      ],
+    ])("preserves the first non-missing-total reader failure %s", async (error, expected) => {
+      mockBrowser = stubBrowser();
+      vi.mocked(mockBrowser.currentUrl).mockReturnValue(`${RAKUTEN_CART_ORIGIN}/payment`);
+      vi.mocked(mockBrowser.readCheckoutSummary)
+        .mockRejectedValueOnce(new Error(error))
+        // A retry would erase the required refusal and mint an approval. Keep
+        // this changing second result as a regression trap.
+        .mockResolvedValueOnce(RAKUTEN_CART_CHECKOUT);
+      mockCartCheckout = RAKUTEN_CART_CHECKOUT;
+      const createPaymentApproval = vi.fn();
+      const api = makeMockApi({
+        createPaymentApproval,
+        getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+      } as unknown as ApiClient);
+      const args = operatePayTool.inputSchema.parse({
+        ...PAYMENT_DETAILS,
+        card_ref: "card_1",
+        phase: "fill_card",
+      });
+
+      const result = await operatePayTool.handler(args, api);
+
+      expect(result).toEqual(expected);
+      expect(mockBrowser.readCheckoutSummary).toHaveBeenCalledTimes(1);
+      expect(createPaymentApproval).not.toHaveBeenCalled();
+    });
   });
 
   it("refuses confirm when no card fill is pending", async () => {
