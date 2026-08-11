@@ -451,6 +451,42 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(createPaymentApproval).toHaveBeenCalledOnce();
   });
 
+  it("restores the original approval when failure precedes operator execution", async () => {
+    const resumeApproval: PendingApprovalWait = {
+      approval_id: "appr_existing",
+      approval_url: "https://web.test/pay/appr_existing",
+      nonce: "nonce_existing",
+      agent: "agent_existing",
+      checkout: {
+        merchant: "M",
+        checkout_origin: "https://m.test",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      jit: false,
+      boundCardRef: "card_1",
+      deadline: Date.now() + 600_000,
+      rejectedCandidates: [],
+      keypair: { publicKey: "public", privateKey: "private" },
+      item: PAYMENT_DETAILS.item,
+      reason: PAYMENT_DETAILS.reason,
+      cardRef: "card_1",
+    };
+    mockAwaitingApproval = resumeApproval;
+    vi.mocked(mockBrowser.isPayPalHostedCheckout).mockRejectedValue(
+      new Error("browser unavailable"),
+    );
+
+    await expect(
+      operatePayTool.handler(
+        operatePayTool.inputSchema.parse(PAYMENT_DETAILS),
+        makeMockApi(),
+      ),
+    ).rejects.toThrow("browser unavailable");
+    expect(mockAwaitingApproval).toBe(resumeApproval);
+    expect(mockPaymentLease).toBeNull();
+  });
+
   it("returns the persisted cart URL with the safe total-observation action", async () => {
     mockCartCheckout = {
       checkout: {

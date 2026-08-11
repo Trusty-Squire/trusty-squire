@@ -203,7 +203,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     const paymentLease = paymentClaim.lease;
     let paymentLeaseCompleted = false;
     let paymentFieldsCleared = true;
-    let approvalPending: PendingApprovalWait | null = paymentClaim.resumeApproval ?? null;
+    let approvalPending: PendingApprovalWait | null = null;
+    let operatorStarted = false;
     try {
       const browser = await activeProvisionBrowserForPayment();
       if (await browser.isPayPalHostedCheckout()) {
@@ -264,6 +265,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         cartFallbackOrigin !== null
           ? (activeCartCheckoutForOrigin(cartFallbackOrigin) ?? undefined)
           : undefined;
+      operatorStarted = true;
       const result = await executeOperatePay(
         {
           ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
@@ -337,8 +339,10 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       }
       return result;
     } catch (error) {
-      if (approvalPending !== null) {
-        completeActivePaymentLeaseWithPendingApproval(paymentLease, approvalPending);
+      const approvalToRestore =
+        approvalPending ?? (!operatorStarted ? (paymentClaim.resumeApproval ?? null) : null);
+      if (approvalToRestore !== null) {
+        completeActivePaymentLeaseWithPendingApproval(paymentLease, approvalToRestore);
         paymentLeaseCompleted = true;
       }
       throw error;

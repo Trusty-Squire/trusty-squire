@@ -1878,6 +1878,130 @@ describe("operate_pay non-blocking approval [P0]", () => {
     expect(env.approvalBodies).toHaveLength(1);
   });
 
+  it("preserves the resumed keypair when configuration lookup fails", async () => {
+    const env = buildResumableEnv();
+    let captured: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        captured = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (captured === null) throw new Error("expected resumable state");
+    const resumeState: PendingApprovalWait = captured;
+    const privateKey = resumeState.keypair.privateKey;
+    vi.spyOn(env.api, "getPaymentConfig").mockRejectedValueOnce(
+      new Error("configuration unavailable"),
+    );
+    let restored: PendingApprovalWait | null = null;
+
+    await expect(
+      executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        onApprovalPending: (state) => {
+          restored = state;
+        },
+        resumeFrom: resumeState,
+        pollBudgetMs: 0,
+      }),
+    ).rejects.toThrow("configuration unavailable");
+    expect(restored).toBe(resumeState);
+    expect(resumeState.keypair.privateKey).toBe(privateKey);
+  });
+
+  it("does not hand a resumed approval back after submission starts", async () => {
+    const env = buildResumableEnv();
+    let captured: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        captured = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (captured === null) throw new Error("expected resumable state");
+    const resumeState: PendingApprovalWait = captured;
+    env.setApproved();
+    vi.mocked(env.browser.fillAndSubmitCheckout).mockResolvedValue({ three_ds_required: true });
+    vi.mocked(env.browser.waitForThreeDsResolution).mockRejectedValue(
+      new Error("3DS unavailable"),
+    );
+    const onApprovalPending = vi.fn();
+
+    await expect(
+      executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        onApprovalPending,
+        resumeFrom: resumeState,
+        pollBudgetMs: 0,
+      }),
+    ).rejects.toThrow("3DS unavailable");
+    expect(onApprovalPending).not.toHaveBeenCalled();
+  });
+
+  it("resumes a JIT split fill without requiring a total on the card page", async () => {
+    const env = buildResumableEnv(SPLIT_CHECKOUT);
+    vi.mocked(env.browser.readCheckoutSummary).mockRejectedValue(
+      new Error("payment_checkout_total_not_found"),
+    );
+    const args = {
+      item: "Split item",
+      reason: "Split purchase reason",
+      phase: "fill_card" as const,
+    };
+    const cartFallbackCheckout = {
+      checkout: SPLIT_CHECKOUT,
+      url: `${SPLIT_CHECKOUT.checkout_origin}/cart`,
+      observedAt: 1,
+    } satisfies CartCheckoutObservation;
+    let captured: PendingApprovalWait | null = null;
+    await executeOperatePay(args, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      cartFallbackCheckout,
+      onApprovalPending: (state) => {
+        captured = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (captured === null) throw new Error("expected resumable state");
+    env.setApproved();
+
+    await expect(
+      executeOperatePay(args, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        cartFallbackCheckout,
+        resumeFrom: captured,
+        pollBudgetMs: 0,
+      }),
+    ).resolves.toMatchObject({ status: "payment_card_filled" });
+    expect(env.browser.readCheckoutSummary).toHaveBeenCalledOnce();
+    expect(env.browser.fillCheckoutCardFields).toHaveBeenCalledOnce();
+  });
+
   it("refuses a resumed single-page payment when the live checkout drifted", async () => {
     const env = buildResumableEnv();
     let captured: PendingApprovalWait | null = null;

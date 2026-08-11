@@ -382,7 +382,8 @@ export async function executeOperatePay(
   let keypairHandedOff = false;
   let cardBytes: Uint8Array | undefined;
   let card: CheckoutCard | undefined;
-  let resumableState: (() => PendingApprovalWait) | undefined;
+  let resumableState: (() => PendingApprovalWait) | undefined =
+    resume !== undefined ? () => resume : undefined;
   const rejectedCandidates = new Set<string>(resume?.rejectedCandidates ?? []);
 
   try {
@@ -847,7 +848,7 @@ export async function executeOperatePay(
     // amount, currency — drifted. The card was opened above but is never
     // submitted on a mismatch; the outer finally zeroes it. Fresh has-card
     // calls retain their prior behavior; resumed has-card calls recheck too.
-    if (jit || (resume !== undefined && phaseArg !== "fill_card")) {
+    if (phaseArg !== "fill_card" && (jit || resume !== undefined)) {
       let live: CheckoutSummary | undefined;
       try {
         live = await browser.readCheckoutSummary(args.currency);
