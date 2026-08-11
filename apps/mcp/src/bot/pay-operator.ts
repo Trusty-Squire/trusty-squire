@@ -932,10 +932,7 @@ export async function executeOperatePayConfirm(
   // Merchant is deliberately NOT compared: it derives from the page title,
   // which legitimately changes between checkout steps ("Payment" → "Review
   // order"). Origin and currency remain exact trust anchors.
-  if (
-    live.currency !== checkout.currency ||
-    live.checkout_origin !== checkout.checkout_origin
-  ) {
+  if (live.currency !== checkout.currency || live.checkout_origin !== checkout.checkout_origin) {
     return {
       status: "payment_amount_mismatch",
       approval_url: approvalUrl,

@@ -1281,7 +1281,9 @@ describe("operate_pay split checkout — fill_card", () => {
       amount_cents: 3_872,
       currency: "JPY",
     });
-    expect(approvalBodies).toEqual([expect.objectContaining({ amount_cents: 3_872, currency: "JPY" })]);
+    expect(approvalBodies).toEqual([
+      expect.objectContaining({ amount_cents: 3_872, currency: "JPY" }),
+    ]);
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
     expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
     expect(browser.fillAndSubmitCheckout).not.toHaveBeenCalled();
@@ -1472,9 +1474,7 @@ async function runConfirm(cfg: {
       live instanceof Error ? vi.fn().mockRejectedValue(live) : vi.fn().mockResolvedValue(live),
     currentUrl: vi.fn().mockReturnValue(`${SPLIT_CHECKOUT.checkout_origin}/checkout/confirm`),
     fillAndSubmitCheckout: vi.fn(),
-    fillCheckoutCardFields: vi
-      .fn()
-      .mockRejectedValue(new Error("payment_field_not_found:pan")),
+    fillCheckoutCardFields: vi.fn().mockRejectedValue(new Error("payment_field_not_found:pan")),
     submitFilledCheckout:
       submit instanceof Error
         ? vi.fn().mockRejectedValue(submit)

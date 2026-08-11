@@ -95,13 +95,17 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   card remains available for the retry. Set `three_ds_wait_seconds` to `0` only
   when the user wants the immediate handoff without notification or waiting.
   Card fields never return through MCP.
-- On a split checkout whose card-entry step has no total, call `operate_pay` with
-  `phase: "fill_card"` and the declared merchant, amount, and currency. After the
-  user approves, advance only through non-charge navigation such as **Next** or
-  **Continue to review**, then call `operate_pay` with `phase: "confirm"` once the
-  total is visible. `item` and `reason` remain required on both calls. Never click
-  a pay/place-order control or press Enter while the card fill is pending; confirm
-  owns the amount check and charge. An unrecognized payment iframe is a hard stop.
+- On a split checkout whose card-entry step shows only a subtotal, call
+  `operate_pay` with `phase: "fill_card"`. The tool binds approval to the best
+  visible amount and fills without charging. After approval, advance only through
+  non-charge navigation such as **Next** or **Continue to review**, then call
+  `operate_pay` with `phase: "confirm"` once the final total is visible. Confirm
+  fails closed if that total is unresolved or conflicting; if it exceeds the
+  fill-card approval, the tool requires a new approval for the final amount before
+  charging. `item` and `reason` remain required on both calls. Never click a
+  pay/place-order control or press Enter while the card fill is pending; confirm
+  owns the strict amount check and charge. An unrecognized payment iframe is a
+  hard stop.
 
 **Safety rules the agent must follow:**
 
