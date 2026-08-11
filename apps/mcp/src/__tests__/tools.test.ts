@@ -8,11 +8,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
-import type {
-  CheckoutSummary,
-  PaymentBrowser,
-  PendingCardFill,
-} from "../bot/pay-operator.js";
+import type { CheckoutSummary, PaymentBrowser, PendingCardFill } from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
 // operate_pay's handler reaches into the single active browser session via
@@ -23,27 +19,64 @@ let mockBrowser: PaymentBrowser;
 let mockPending: PendingCardFill | null = null;
 let mockPendingConfirming = false;
 let mockSubmitStarted = false;
+let mockPaymentLease: { phase: "fill_card" | "single" } | null = null;
+let mockPaymentSealed = false;
 let mockPaymentSealActive = false;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
     activeProvisionBrowserForPayment: async () => mockBrowser,
-    claimActivePendingCardFillForPayment: (confirm: boolean) => {
+    claimActivePaymentForOperatePay: (phase: "fill_card" | "confirm" | undefined) => {
+      if (mockPaymentLease !== null) {
+        throw new Error("operate_pay refused: another payment operation is already in progress");
+      }
       if (mockPendingConfirming) {
         throw new Error("operate_pay refused: another payment confirmation is already in progress");
       }
-      if (mockPending === null) return null;
-      if (!confirm) {
+      if (mockPaymentSealed) {
+        throw new Error("operate_pay refused: payment field cleanup remains unverified");
+      }
+      if (mockPending !== null) {
+        if (phase !== "confirm") {
+          throw new Error(
+            'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
+          );
+        }
+        const pending = mockPending;
+        mockPending = null;
+        mockPendingConfirming = true;
+        mockSubmitStarted = false;
+        return { kind: "confirm", pending };
+      }
+      if (phase === "confirm") return { kind: "missing_confirm" };
+      const lease = { phase: phase === "fill_card" ? ("fill_card" as const) : ("single" as const) };
+      mockPaymentLease = lease;
+      if (lease.phase === "fill_card") mockPaymentSealActive = true;
+      return { kind: "lease", lease };
+    },
+    completeActivePaymentLeaseWithPendingFill: (
+      lease: { phase: "fill_card" | "single" },
+      pending: PendingCardFill,
+    ) => {
+      if (mockPaymentLease !== lease || lease.phase !== "fill_card") {
         throw new Error(
-          'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
+          "operate_pay fill_card completed without ownership of the active payment lease",
         );
       }
-      const pending = mockPending;
-      mockPending = null;
-      mockPendingConfirming = true;
-      mockSubmitStarted = false;
-      return pending;
+      mockPaymentLease = null;
+      mockPending = pending;
+      mockPaymentSealActive = true;
+    },
+    releaseActivePaymentLease: (
+      lease: { phase: "fill_card" | "single" },
+      paymentFieldsCleared = true,
+    ) => {
+      if (mockPaymentLease !== lease) return false;
+      mockPaymentLease = null;
+      mockPaymentSealed = !paymentFieldsCleared;
+      if (lease.phase === "fill_card") mockPaymentSealActive = !paymentFieldsCleared;
+      return true;
     },
     markActivePendingCardFillSubmitStarted: () => {
       mockSubmitStarted = true;
@@ -58,13 +91,21 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       mockPending = pending;
       mockPendingConfirming = false;
       mockSubmitStarted = false;
+      mockPaymentLease = null;
+      mockPaymentSealed = false;
+      mockPaymentSealActive = true;
+    },
+    retainActivePaymentFieldSeal: () => {
+      if (mockPaymentLease === null) mockPaymentSealed = true;
       mockPaymentSealActive = true;
     },
     clearActivePendingCardFill: (paymentFieldsCleared = true) => {
       mockPending = null;
       mockPendingConfirming = false;
       mockSubmitStarted = false;
-      if (paymentFieldsCleared) mockPaymentSealActive = false;
+      mockPaymentLease = null;
+      mockPaymentSealed = !paymentFieldsCleared;
+      mockPaymentSealActive = !paymentFieldsCleared;
     },
   };
 });
@@ -110,6 +151,8 @@ beforeEach(() => {
   mockPending = null;
   mockPendingConfirming = false;
   mockSubmitStarted = false;
+  mockPaymentLease = null;
+  mockPaymentSealed = false;
   mockPaymentSealActive = false;
 });
 
@@ -405,6 +448,34 @@ describe("operate_pay split checkout phases", () => {
     expect(mockBrowser.isPayPalHostedCheckout).not.toHaveBeenCalled();
     expect(api.listPaymentCards).not.toHaveBeenCalled();
     expect(mockPending).toEqual(PENDING);
+  });
+
+  it("leases fill_card before its first await and releases refusals", async () => {
+    let releasePayPal!: (value: boolean) => void;
+    vi.mocked(mockBrowser.isPayPalHostedCheckout).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releasePayPal = resolve;
+        }),
+    );
+    const api = makeMockApi();
+    const fillArgs = operatePayTool.inputSchema.parse({
+      ...PAYMENT_DETAILS,
+      phase: "fill_card",
+    });
+    const fill = operatePayTool.handler(fillArgs, api);
+    await vi.waitFor(() => expect(mockBrowser.isPayPalHostedCheckout).toHaveBeenCalledOnce());
+
+    expect(mockPaymentLease).toEqual({ phase: "fill_card" });
+    expect(mockPaymentSealActive).toBe(true);
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).rejects.toThrow(/another payment operation is already in progress/);
+
+    releasePayPal(true);
+    await expect(fill).resolves.toMatchObject({ status: "paypal_checkout" });
+    expect(mockPaymentLease).toBeNull();
+    expect(mockPaymentSealActive).toBe(false);
   });
 
   it("rejects every other payment while confirm is in flight", async () => {

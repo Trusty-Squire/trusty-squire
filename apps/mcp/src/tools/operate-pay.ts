@@ -1,10 +1,12 @@
 import { z } from "zod";
 import {
   activeProvisionBrowserForPayment,
-  claimActivePendingCardFillForPayment,
+  claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
+  completeActivePaymentLeaseWithPendingFill,
   markActivePendingCardFillSubmitStarted,
   recordActivePaymentProvenance,
+  releaseActivePaymentLease,
   retainActivePaymentFieldSeal,
   restoreActivePendingCardFillAfterConfirmThrow,
   setActivePendingCardFill,
@@ -136,18 +138,22 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   },
   async handler(args, api, context) {
     assertApi(api);
-    const pending = claimActivePendingCardFillForPayment(args.phase === "confirm");
+    const paymentClaim = claimActivePaymentForOperatePay(args.phase);
     // Confirm step of a split checkout: the card is already filled (and the
     // mandate already signed), so no card resolution and no PayPal gate — the
     // job is verify-the-total-then-charge. Routed before the PayPal check so
     // an incidental PayPal button iframe on the review page can't block it.
     if (args.phase === "confirm") {
-      if (pending === null) {
+      if (paymentClaim.kind === "missing_confirm") {
         throw new Error(
           'operate_pay phase="confirm" requires a completed phase="fill_card" in this ' +
             "session — no vaulted card is currently filled into the checkout.",
         );
       }
+      if (paymentClaim.kind !== "confirm") {
+        throw new Error("operate_pay confirm acquired an invalid payment lease");
+      }
+      const pending = paymentClaim.pending;
       let retryPending = pending;
       try {
         const browser = await activeProvisionBrowserForPayment();
@@ -198,98 +204,116 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         throw error;
       }
     }
-    const browser = await activeProvisionBrowserForPayment();
-    if (await browser.isPayPalHostedCheckout()) {
-      return {
-        status: "paypal_checkout",
-        reason: "paypal_hosted_fields_unfillable",
-        needs_user: {
-          wall: "paypal",
-          message:
-            "This checkout uses PayPal-hosted payment fields. Trusty Squire cannot enter a saved card into that cross-origin PayPal frame.",
-          resume: "checkout",
-        },
-      };
+    if (paymentClaim.kind !== "lease") {
+      throw new Error("operate_pay acquired an invalid payment lease");
     }
-    // Resolve which card to charge. An explicit card_ref wins. Otherwise:
-    //  - card_label given  → resolve it (0 → error, >1 same-label → error)
-    //  - neither given      → resolve against the cards on file:
-    //      0 cards  → cardRef stays undefined → JIT add-card ceremony
-    //      1 card   → use it
-    //      >1 cards → error listing the labels (never silently guess)
-    let cardRef = args.card_ref;
-    if (cardRef === undefined) {
-      const cards = await api.listPaymentCards();
-      if (args.card_label !== undefined) {
-        const matches = cards.filter((card) => card.label === args.card_label);
-        if (matches.length === 0) {
-          throw new Error(`No saved payment card has label "${args.card_label}".`);
-        }
-        if (matches.length > 1) {
+    const paymentLease = paymentClaim.lease;
+    let paymentLeaseCompleted = false;
+    let paymentFieldsCleared = true;
+    try {
+      const browser = await activeProvisionBrowserForPayment();
+      if (await browser.isPayPalHostedCheckout()) {
+        return {
+          status: "paypal_checkout",
+          reason: "paypal_hosted_fields_unfillable",
+          needs_user: {
+            wall: "paypal",
+            message:
+              "This checkout uses PayPal-hosted payment fields. Trusty Squire cannot enter a saved card into that cross-origin PayPal frame.",
+            resume: "checkout",
+          },
+        };
+      }
+      // Resolve which card to charge. An explicit card_ref wins. Otherwise:
+      //  - card_label given  → resolve it (0 → error, >1 same-label → error)
+      //  - neither given      → resolve against the cards on file:
+      //      0 cards  → cardRef stays undefined → JIT add-card ceremony
+      //      1 card   → use it
+      //      >1 cards → error listing the labels (never silently guess)
+      let cardRef = args.card_ref;
+      if (cardRef === undefined) {
+        const cards = await api.listPaymentCards();
+        if (args.card_label !== undefined) {
+          const matches = cards.filter((card) => card.label === args.card_label);
+          if (matches.length === 0) {
+            throw new Error(`No saved payment card has label "${args.card_label}".`);
+          }
+          if (matches.length > 1) {
+            throw new Error(
+              `Multiple saved payment cards have label "${args.card_label}"; use card_ref instead.`,
+            );
+          }
+          cardRef = matches[0]!.id;
+        } else if (cards.length === 1) {
+          cardRef = cards[0]!.id;
+        } else if (cards.length > 1) {
+          const labels = cards.map((card) => `"${card.label}"`).join(", ");
           throw new Error(
-            `Multiple saved payment cards have label "${args.card_label}"; use card_ref instead.`,
+            `Multiple saved payment cards on file (${labels}); specify card_ref or card_label.`,
           );
         }
-        cardRef = matches[0]!.id;
-      } else if (cards.length === 1) {
-        cardRef = cards[0]!.id;
-      } else if (cards.length > 1) {
-        const labels = cards.map((card) => `"${card.label}"`).join(", ");
-        throw new Error(
-          `Multiple saved payment cards on file (${labels}); specify card_ref or card_label.`,
-        );
+        // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
+        // the JIT add-card ceremony.
       }
-      // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
-      // the JIT add-card ceremony.
-    }
-    let resolvedCardRef: string | null = null;
-    let filledPending: PendingCardFill | null = null;
-    const result = await executeOperatePay(
-      {
-        ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
-        ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
-        ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
-        ...(args.currency !== undefined ? { currency: args.currency } : {}),
-        item: args.item,
-        reason: args.reason,
-        ...(args.three_ds_wait_seconds !== undefined
-          ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
-          : {}),
-        ...(args.phase === "fill_card" ? { phase: "fill_card" as const } : {}),
-      },
-      api,
-      await activeProvisionBrowserForPayment(),
-      {
-        ...(context !== undefined
-          ? {
-              surfaceApprovalUrl: async (url: string) => {
-                await context.notifyUser(`Approve this payment on your phone: ${url}`, {
-                  approval_url: url,
-                });
-              },
-            }
-          : {}),
-        onCardResolved: (value) => {
-          resolvedCardRef = value;
+      let resolvedCardRef: string | null = null;
+      let filledPending: PendingCardFill | null = null;
+      const result = await executeOperatePay(
+        {
+          ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
+          ...(args.merchant !== undefined ? { merchant: args.merchant } : {}),
+          ...(args.amount_cents !== undefined ? { amount_cents: args.amount_cents } : {}),
+          ...(args.currency !== undefined ? { currency: args.currency } : {}),
+          item: args.item,
+          reason: args.reason,
+          ...(args.three_ds_wait_seconds !== undefined
+            ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
+            : {}),
+          ...(args.phase === "fill_card" ? { phase: "fill_card" as const } : {}),
         },
-        onCardFilled: (pending) => {
-          filledPending = pending;
+        api,
+        browser,
+        {
+          ...(context !== undefined
+            ? {
+                surfaceApprovalUrl: async (url: string) => {
+                  await context.notifyUser(`Approve this payment on your phone: ${url}`, {
+                    approval_url: url,
+                  });
+                },
+              }
+            : {}),
+          onCardResolved: (value) => {
+            resolvedCardRef = value;
+          },
+          onCardFilled: (pending) => {
+            filledPending = pending;
+          },
+          onCardFillCleanupFailed: () => {
+            paymentFieldsCleared = false;
+            retainActivePaymentFieldSeal();
+          },
         },
-        onCardFillCleanupFailed: retainActivePaymentFieldSeal,
-      },
-    );
-    if (result.status === "payment_card_filled") {
-      if (filledPending === null) {
-        throw new Error("operate_pay fill_card succeeded without pending-fill state");
+      );
+      if (result.payment_fields_cleared === false) paymentFieldsCleared = false;
+      if (result.status === "payment_card_filled") {
+        if (filledPending === null) {
+          paymentFieldsCleared = false;
+          throw new Error("operate_pay fill_card succeeded without pending-fill state");
+        }
+        completeActivePaymentLeaseWithPendingFill(paymentLease, filledPending);
+        paymentLeaseCompleted = true;
       }
-      setActivePendingCardFill(filledPending);
-    }
-    if (result.status === "payment_submitted" || result.status === "payment_3ds_required") {
-      if (resolvedCardRef === null) {
-        throw new Error("operate_pay succeeded without an action-time card source attestation");
+      if (result.status === "payment_submitted" || result.status === "payment_3ds_required") {
+        if (resolvedCardRef === null) {
+          throw new Error("operate_pay succeeded without an action-time card source attestation");
+        }
+        recordActivePaymentProvenance(resolvedCardRef);
       }
-      recordActivePaymentProvenance(resolvedCardRef);
+      return result;
+    } finally {
+      if (!paymentLeaseCompleted) {
+        releaseActivePaymentLease(paymentLease, paymentFieldsCleared);
+      }
     }
-    return result;
   },
 };

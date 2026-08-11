@@ -446,14 +446,11 @@ interface Session {
   usedLocatorFallback: boolean;
   recipeRejectionReason: string | null;
   replayState: ReplayState | null;
-  // Split-checkout state (operate_pay phase="fill_card"): the vaulted card is
-  // currently filled into this session's checkout, awaiting the confirm step.
-  // While set, operate_act refuses charge-verb clicks (and Enter) so the ONLY
-  // path to the charge is operate_pay {phase:"confirm"}, which verifies the
-  // live total against the approved amount first.
-  pendingCardFill:
+  activePayment:
+    | { status: "operating"; lease: ActivePaymentLease }
     | { status: "pending"; pending: PendingCardFill }
     | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
+    | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
 }
@@ -2249,7 +2246,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     usedLocatorFallback: false,
     recipeRejectionReason: null,
     replayState: null,
-    pendingCardFill: null,
+    activePayment: null,
     paymentFieldSealActive: false,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
@@ -2343,7 +2340,7 @@ export async function startHarnessProvisionSession(
     usedLocatorFallback: false,
     recipeRejectionReason: null,
     replayState: null,
-    pendingCardFill: null,
+    activePayment: null,
     paymentFieldSealActive: false,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
@@ -2486,63 +2483,112 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
   return session.browser;
 }
 
-// Split-checkout pending-fill state (operate_pay phase="fill_card"/"confirm").
-// Lives on the one active session so it dies with the browser; the raw card is
-// never here — only what the confirm step needs to verify and audit.
 export function setActivePendingCardFill(pending: PendingCardFill): void {
   const session = activeProvisionSession();
-  session.pendingCardFill = { status: "pending", pending };
+  session.activePayment = { status: "pending", pending };
   session.paymentFieldSealActive = true;
 }
 
 export function retainActivePaymentFieldSeal(): void {
   const session = activeProvisionSession();
-  session.pendingCardFill = null;
+  if (session.activePayment?.status !== "operating") {
+    session.activePayment = { status: "sealed" };
+  }
   session.paymentFieldSealActive = true;
 }
 
 export function getActivePendingCardFill(): PendingCardFill | null {
-  const state = activeProvisionSession().pendingCardFill;
+  const state = activeProvisionSession().activePayment;
   return state?.status === "pending" ? state.pending : null;
 }
 
-export function claimActivePendingCardFillForPayment(confirm: boolean): PendingCardFill | null {
+export interface ActivePaymentLease {
+  phase: "fill_card" | "single";
+}
+
+export type ActivePaymentClaim =
+  | { kind: "lease"; lease: ActivePaymentLease }
+  | { kind: "confirm"; pending: PendingCardFill }
+  | { kind: "missing_confirm" };
+
+export function claimActivePaymentForOperatePay(
+  phase: "fill_card" | "confirm" | undefined,
+): ActivePaymentClaim {
   const session = activeProvisionSession();
-  const state = session.pendingCardFill;
-  if (state === null) return null;
-  if (state.status === "confirming") {
+  const state = session.activePayment;
+  if (state?.status === "operating") {
+    throw new Error("operate_pay refused: another payment operation is already in progress");
+  }
+  if (state?.status === "confirming") {
     throw new Error("operate_pay refused: another payment confirmation is already in progress");
   }
-  if (!confirm) {
+  if (state?.status === "sealed") {
+    throw new Error("operate_pay refused: payment field cleanup remains unverified");
+  }
+  if (state?.status === "pending") {
+    if (phase !== "confirm") {
+      throw new Error(
+        'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
+      );
+    }
+    session.activePayment = {
+      status: "confirming",
+      pending: state.pending,
+      submitStarted: false,
+    };
+    return { kind: "confirm", pending: state.pending };
+  }
+  if (phase === "confirm") return { kind: "missing_confirm" };
+  const lease: ActivePaymentLease = { phase: phase === "fill_card" ? "fill_card" : "single" };
+  session.activePayment = { status: "operating", lease };
+  if (lease.phase === "fill_card") session.paymentFieldSealActive = true;
+  return { kind: "lease", lease };
+}
+
+export function completeActivePaymentLeaseWithPendingFill(
+  lease: ActivePaymentLease,
+  pending: PendingCardFill,
+): void {
+  const session = activeProvisionSession();
+  const state = session.activePayment;
+  if (state?.status !== "operating" || state.lease !== lease || lease.phase !== "fill_card") {
     throw new Error(
-      'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
+      "operate_pay fill_card completed without ownership of the active payment lease",
     );
   }
-  session.pendingCardFill = {
-    status: "confirming",
-    pending: state.pending,
-    submitStarted: false,
-  };
-  return state.pending;
+  session.activePayment = { status: "pending", pending };
+  session.paymentFieldSealActive = true;
+}
+
+export function releaseActivePaymentLease(
+  lease: ActivePaymentLease,
+  paymentFieldsCleared = true,
+): boolean {
+  const session = activeProvisionSession();
+  const state = session.activePayment;
+  if (state?.status !== "operating" || state.lease !== lease) return false;
+  session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
+  if (lease.phase === "fill_card") session.paymentFieldSealActive = !paymentFieldsCleared;
+  return true;
 }
 
 export function markActivePendingCardFillSubmitStarted(): void {
-  const state = activeProvisionSession().pendingCardFill;
+  const state = activeProvisionSession().activePayment;
   if (state?.status === "confirming") state.submitStarted = true;
 }
 
 export function restoreActivePendingCardFillAfterConfirmThrow(pending: PendingCardFill): boolean {
   const session = activeProvisionSession();
-  const state = session.pendingCardFill;
+  const state = session.activePayment;
   if (state?.status !== "confirming" || state.submitStarted) return false;
-  session.pendingCardFill = { status: "pending", pending };
+  session.activePayment = { status: "pending", pending };
   return true;
 }
 
 export function clearActivePendingCardFill(paymentFieldsCleared = true): void {
   const session = activeProvisionSession();
-  session.pendingCardFill = null;
-  if (paymentFieldsCleared) session.paymentFieldSealActive = false;
+  session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
+  session.paymentFieldSealActive = !paymentFieldsCleared;
 }
 
 export function recordActivePaymentProvenance(cardRef: string): void {

@@ -432,7 +432,9 @@ import {
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
-  claimActivePendingCardFillForPayment,
+  claimActivePaymentForOperatePay,
+  completeActivePaymentLeaseWithPendingFill,
+  releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
   restoreActivePendingCardFillAfterConfirmThrow,
   retainActivePaymentFieldSeal,
@@ -3836,15 +3838,64 @@ describe("pending card-fill charge guard", () => {
     await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
     setActivePendingCardFill(pending);
 
-    expect(() => claimActivePendingCardFillForPayment(false)).toThrow(/phase="confirm"/);
-    expect(claimActivePendingCardFillForPayment(true)).toEqual(pending);
-    expect(() => claimActivePendingCardFillForPayment(true)).toThrow(/already in progress/);
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/phase="confirm"/);
+    expect(claimActivePaymentForOperatePay("confirm")).toEqual({ kind: "confirm", pending });
+    expect(() => claimActivePaymentForOperatePay("confirm")).toThrow(/already in progress/);
     expect(restoreActivePendingCardFillAfterConfirmThrow(pending)).toBe(true);
 
-    expect(claimActivePendingCardFillForPayment(true)).toEqual(pending);
+    expect(claimActivePaymentForOperatePay("confirm")).toEqual({ kind: "confirm", pending });
     markActivePendingCardFillSubmitStarted();
     expect(restoreActivePendingCardFillAfterConfirmThrow(pending)).toBe(false);
-    expect(() => claimActivePendingCardFillForPayment(false)).toThrow(/already in progress/);
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
+  });
+
+  it("locks charge actions for the full fill-card lease", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const claim = claimActivePaymentForOperatePay("fill_card");
+
+    expect(claim.kind).toBe("lease");
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /operate_pay/,
+    );
+
+    if (claim.kind !== "lease") throw new Error("expected fill-card payment lease");
+    expect(releaseActivePaymentLease(claim.lease, true)).toBe(true);
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("serializes fill-card behind every other payment lease", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay(undefined);
+    if (claim.kind !== "lease") throw new Error("expected payment lease");
+
+    expect(() => claimActivePaymentForOperatePay("fill_card")).toThrow(/already in progress/);
+    expect(releaseActivePaymentLease(claim.lease)).toBe(true);
+  });
+
+  it("transitions a successful fill-card lease to pending confirmation", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay("fill_card");
+    if (claim.kind !== "lease") throw new Error("expected fill-card payment lease");
+
+    completeActivePaymentLeaseWithPendingFill(claim.lease, pending);
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/phase="confirm"/);
+    expect(claimActivePaymentForOperatePay("confirm")).toEqual({ kind: "confirm", pending });
+  });
+
+  it("retains the payment lock when fill-card cleanup is unverified", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay("fill_card");
+    if (claim.kind !== "lease") throw new Error("expected fill-card payment lease");
+
+    expect(releaseActivePaymentLease(claim.lease, false)).toBe(true);
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/cleanup remains unverified/);
   });
 
   it("refuses charge-verb clicks and Enter while filled, frees them after confirm clears", async () => {
