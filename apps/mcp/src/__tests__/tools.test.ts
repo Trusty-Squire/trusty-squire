@@ -8,7 +8,11 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
-import type { PaymentBrowser, PendingCardFill } from "../bot/pay-operator.js";
+import type {
+  CheckoutSummary,
+  PaymentBrowser,
+  PendingCardFill,
+} from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
 // operate_pay's handler reaches into the single active browser session via
@@ -17,23 +21,49 @@ import type * as ProvisionSession from "../bot/provision-session.js";
 // a stub whose checkout summary the resolution tests can control.
 let mockBrowser: PaymentBrowser;
 let mockPending: PendingCardFill | null = null;
+let mockPendingConfirming = false;
+let mockSubmitStarted = false;
 let mockPaymentSealActive = false;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
     activeProvisionBrowserForPayment: async () => mockBrowser,
-    takeActivePendingCardFill: () => {
+    claimActivePendingCardFillForPayment: (confirm: boolean) => {
+      if (mockPendingConfirming) {
+        throw new Error("operate_pay refused: another payment confirmation is already in progress");
+      }
+      if (mockPending === null) return null;
+      if (!confirm) {
+        throw new Error(
+          'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
+        );
+      }
       const pending = mockPending;
       mockPending = null;
+      mockPendingConfirming = true;
+      mockSubmitStarted = false;
       return pending;
+    },
+    markActivePendingCardFillSubmitStarted: () => {
+      mockSubmitStarted = true;
+    },
+    restoreActivePendingCardFillAfterConfirmThrow: (pending: PendingCardFill) => {
+      if (!mockPendingConfirming || mockSubmitStarted) return false;
+      mockPending = pending;
+      mockPendingConfirming = false;
+      return true;
     },
     setActivePendingCardFill: (pending: PendingCardFill) => {
       mockPending = pending;
+      mockPendingConfirming = false;
+      mockSubmitStarted = false;
       mockPaymentSealActive = true;
     },
     clearActivePendingCardFill: (paymentFieldsCleared = true) => {
       mockPending = null;
+      mockPendingConfirming = false;
+      mockSubmitStarted = false;
       if (paymentFieldsCleared) mockPaymentSealActive = false;
     },
   };
@@ -78,6 +108,8 @@ const PAYMENT_DETAILS = { item: "Synthetic item", reason: "Synthetic purchase re
 beforeEach(() => {
   mockBrowser = stubBrowser();
   mockPending = null;
+  mockPendingConfirming = false;
+  mockSubmitStarted = false;
   mockPaymentSealActive = false;
 });
 
@@ -353,11 +385,91 @@ describe("operate_pay split checkout phases", () => {
     const first = operatePayTool.handler(args, api);
     await vi.waitFor(() => expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1));
     await expect(operatePayTool.handler(args, api)).rejects.toThrow(
-      /phase="confirm" requires a completed phase="fill_card"/,
+      /another payment confirmation is already in progress/,
     );
     releaseSubmit({ three_ds_required: false });
     await expect(first).resolves.toMatchObject({ status: "payment_submitted" });
     expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects every non-confirm payment while a card fill is pending", async () => {
+    mockPending = { ...PENDING };
+    const api = makeMockApi({ listPaymentCards: vi.fn() } as unknown as ApiClient);
+
+    for (const phase of [undefined, "fill_card" as const]) {
+      const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase });
+      await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+        /a vaulted card fill is pending; phase="confirm" is required next/,
+      );
+    }
+    expect(mockBrowser.isPayPalHostedCheckout).not.toHaveBeenCalled();
+    expect(api.listPaymentCards).not.toHaveBeenCalled();
+    expect(mockPending).toEqual(PENDING);
+  });
+
+  it("rejects every other payment while confirm is in flight", async () => {
+    mockPending = { ...PENDING };
+    let releaseRead!: (value: CheckoutSummary) => void;
+    vi.mocked(mockBrowser.readCheckoutConfirmSummary).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseRead = resolve;
+        }),
+    );
+    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
+    const confirmArgs = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+    const first = operatePayTool.handler(confirmArgs, api);
+    await vi.waitFor(() => expect(mockBrowser.readCheckoutConfirmSummary).toHaveBeenCalledOnce());
+
+    for (const phase of [undefined, "fill_card" as const, "confirm" as const]) {
+      const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase });
+      await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+        /another payment confirmation is already in progress/,
+      );
+    }
+    releaseRead({
+      merchant: "M",
+      checkout_origin: "https://m.test",
+      amount_cents: 100,
+      currency: "USD",
+    });
+    await expect(first).resolves.toMatchObject({ status: "payment_submitted" });
+    expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the pending fill when confirm throws before submission", async () => {
+    mockPending = { ...PENDING };
+    vi.mocked(mockBrowser.readCheckoutConfirmSummary).mockRejectedValue(
+      new Error("Execution context was destroyed"),
+    );
+    const api = makeMockApi();
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+      /Execution context was destroyed/,
+    );
+    expect(mockPending).toEqual(PENDING);
+    expect(mockPendingConfirming).toBe(false);
+    expect(mockBrowser.submitFilledCheckout).not.toHaveBeenCalled();
+  });
+
+  it("does not restore the pending fill when confirm throws after submission starts", async () => {
+    mockPending = { ...PENDING };
+    vi.mocked(mockBrowser.submitFilledCheckout).mockResolvedValue({ three_ds_required: true });
+    vi.mocked(mockBrowser.waitForThreeDsResolution).mockRejectedValue(
+      new Error("Execution context was destroyed"),
+    );
+    const api = makeMockApi({ notifyThreeDs: vi.fn().mockResolvedValue({ sent: true }) });
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+      /Execution context was destroyed/,
+    );
+    expect(mockPending).toBeNull();
+    expect(mockPendingConfirming).toBe(true);
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).rejects.toThrow(/another payment confirmation is already in progress/);
   });
 
   it("confirm clears pending after an ambiguous submit outcome", async () => {

@@ -432,6 +432,9 @@ import {
   activeProvisionBrowserForPayment,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
+  claimActivePendingCardFillForPayment,
+  markActivePendingCardFillSubmitStarted,
+  restoreActivePendingCardFillAfterConfirmThrow,
   retainActivePaymentFieldSeal,
   clearActivePendingCardFill,
   recipeTargetFor,
@@ -3828,6 +3831,21 @@ describe("pending card-fill charge guard", () => {
     item: "Synthetic item",
     reason: "Synthetic purchase reason",
   };
+
+  it("tracks pending, confirming, and submit-started states distinctly", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    setActivePendingCardFill(pending);
+
+    expect(() => claimActivePendingCardFillForPayment(false)).toThrow(/phase="confirm"/);
+    expect(claimActivePendingCardFillForPayment(true)).toEqual(pending);
+    expect(() => claimActivePendingCardFillForPayment(true)).toThrow(/already in progress/);
+    expect(restoreActivePendingCardFillAfterConfirmThrow(pending)).toBe(true);
+
+    expect(claimActivePendingCardFillForPayment(true)).toEqual(pending);
+    markActivePendingCardFillSubmitStarted();
+    expect(restoreActivePendingCardFillAfterConfirmThrow(pending)).toBe(false);
+    expect(() => claimActivePendingCardFillForPayment(false)).toThrow(/already in progress/);
+  });
 
   it("refuses charge-verb clicks and Enter while filled, frees them after confirm clears", async () => {
     h.elements = [

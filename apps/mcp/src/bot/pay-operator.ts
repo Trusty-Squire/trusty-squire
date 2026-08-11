@@ -74,6 +74,7 @@ interface PayDependencies {
   // fill_card only: hands the session layer what the later confirm step needs.
   onCardFilled: (pending: PendingCardFill) => void;
   onCardFillCleanupFailed: () => void;
+  onSubmitStarted: () => void;
   skipCardFill?: boolean;
   // Internal-only: confirmation has already read the strict, final total and
   // may use it to mint a replacement approval. Never sourced from tool input.
@@ -267,6 +268,7 @@ function defaultDependencies(): PayDependencies {
     onCardResolved: () => undefined,
     onCardFilled: () => undefined,
     onCardFillCleanupFailed: () => undefined,
+    onSubmitStarted: () => undefined,
   };
 }
 
@@ -1001,6 +1003,7 @@ export async function executeOperatePayConfirm(
     }
   };
   try {
+    overrides.onSubmitStarted?.();
     submitResult = await browser.submitFilledCheckout();
     if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
   } catch (error) {

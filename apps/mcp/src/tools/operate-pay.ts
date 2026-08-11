@@ -1,11 +1,13 @@
 import { z } from "zod";
 import {
   activeProvisionBrowserForPayment,
+  claimActivePendingCardFillForPayment,
   clearActivePendingCardFill,
+  markActivePendingCardFillSubmitStarted,
   recordActivePaymentProvenance,
   retainActivePaymentFieldSeal,
+  restoreActivePendingCardFillAfterConfirmThrow,
   setActivePendingCardFill,
-  takeActivePendingCardFill,
 } from "../bot/provision-session.js";
 import {
   executeOperatePay,
@@ -134,13 +136,12 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   },
   async handler(args, api, context) {
     assertApi(api);
-    const browser = await activeProvisionBrowserForPayment();
+    const pending = claimActivePendingCardFillForPayment(args.phase === "confirm");
     // Confirm step of a split checkout: the card is already filled (and the
     // mandate already signed), so no card resolution and no PayPal gate — the
     // job is verify-the-total-then-charge. Routed before the PayPal check so
     // an incidental PayPal button iframe on the review page can't block it.
     if (args.phase === "confirm") {
-      const pending = takeActivePendingCardFill();
       if (pending === null) {
         throw new Error(
           'operate_pay phase="confirm" requires a completed phase="fill_card" in this ' +
@@ -148,48 +149,56 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         );
       }
       let retryPending = pending;
-      const result = await executeOperatePayConfirm(
-        pending,
-        {
-          ...(args.currency !== undefined ? { currency: args.currency } : {}),
-          ...(args.three_ds_wait_seconds !== undefined
-            ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
-            : {}),
-        },
-        api,
-        browser,
-        {
-          ...(context !== undefined
-            ? {
-                surfaceApprovalUrl: async (url: string) => {
-                  await context.notifyUser(`Approve this payment on your phone: ${url}`, {
-                    approval_url: url,
-                  });
-                },
-              }
-            : {}),
-          onCardFillCleanupFailed: retainActivePaymentFieldSeal,
-          onCardFilled: (refreshed) => {
-            retryPending = refreshed;
+      try {
+        const browser = await activeProvisionBrowserForPayment();
+        const result = await executeOperatePayConfirm(
+          pending,
+          {
+            ...(args.currency !== undefined ? { currency: args.currency } : {}),
+            ...(args.three_ds_wait_seconds !== undefined
+              ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
+              : {}),
           },
-        },
-      );
-      const status = result.status;
-      if (status === "payment_submitted" || status === "payment_3ds_required") {
-        recordActivePaymentProvenance(pending.card_ref);
+          api,
+          browser,
+          {
+            ...(context !== undefined
+              ? {
+                  surfaceApprovalUrl: async (url: string) => {
+                    await context.notifyUser(`Approve this payment on your phone: ${url}`, {
+                      approval_url: url,
+                    });
+                  },
+                }
+              : {}),
+            onCardFillCleanupFailed: retainActivePaymentFieldSeal,
+            onCardFilled: (refreshed) => {
+              retryPending = refreshed;
+            },
+            onSubmitStarted: markActivePendingCardFillSubmitStarted,
+          },
+        );
+        const status = result.status;
+        if (status === "payment_submitted" || status === "payment_3ds_required") {
+          recordActivePaymentProvenance(pending.card_ref);
+        }
+        if (shouldRestorePendingCardFill(result)) {
+          setActivePendingCardFill(retryPending);
+        } else if (
+          status === "payment_submitted" ||
+          status === "payment_3ds_required" ||
+          status === "payment_declined" ||
+          status === "payment_outcome_unknown"
+        ) {
+          clearActivePendingCardFill(result.payment_fields_cleared === true);
+        }
+        return result;
+      } catch (error) {
+        restoreActivePendingCardFillAfterConfirmThrow(retryPending);
+        throw error;
       }
-      if (shouldRestorePendingCardFill(result)) {
-        setActivePendingCardFill(retryPending);
-      } else if (
-        status === "payment_submitted" ||
-        status === "payment_3ds_required" ||
-        status === "payment_declined" ||
-        status === "payment_outcome_unknown"
-      ) {
-        clearActivePendingCardFill(result.payment_fields_cleared === true);
-      }
-      return result;
     }
+    const browser = await activeProvisionBrowserForPayment();
     if (await browser.isPayPalHostedCheckout()) {
       return {
         status: "paypal_checkout",

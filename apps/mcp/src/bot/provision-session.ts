@@ -451,7 +451,10 @@ interface Session {
   // While set, operate_act refuses charge-verb clicks (and Enter) so the ONLY
   // path to the charge is operate_pay {phase:"confirm"}, which verifies the
   // live total against the approved amount first.
-  pendingCardFill: PendingCardFill | null;
+  pendingCardFill:
+    | { status: "pending"; pending: PendingCardFill }
+    | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
+    | null;
   paymentFieldSealActive: boolean;
 }
 
@@ -2488,7 +2491,7 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
 // never here — only what the confirm step needs to verify and audit.
 export function setActivePendingCardFill(pending: PendingCardFill): void {
   const session = activeProvisionSession();
-  session.pendingCardFill = pending;
+  session.pendingCardFill = { status: "pending", pending };
   session.paymentFieldSealActive = true;
 }
 
@@ -2499,14 +2502,41 @@ export function retainActivePaymentFieldSeal(): void {
 }
 
 export function getActivePendingCardFill(): PendingCardFill | null {
-  return activeProvisionSession().pendingCardFill;
+  const state = activeProvisionSession().pendingCardFill;
+  return state?.status === "pending" ? state.pending : null;
 }
 
-export function takeActivePendingCardFill(): PendingCardFill | null {
+export function claimActivePendingCardFillForPayment(confirm: boolean): PendingCardFill | null {
   const session = activeProvisionSession();
-  const pending = session.pendingCardFill;
-  session.pendingCardFill = null;
-  return pending;
+  const state = session.pendingCardFill;
+  if (state === null) return null;
+  if (state.status === "confirming") {
+    throw new Error("operate_pay refused: another payment confirmation is already in progress");
+  }
+  if (!confirm) {
+    throw new Error(
+      'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
+    );
+  }
+  session.pendingCardFill = {
+    status: "confirming",
+    pending: state.pending,
+    submitStarted: false,
+  };
+  return state.pending;
+}
+
+export function markActivePendingCardFillSubmitStarted(): void {
+  const state = activeProvisionSession().pendingCardFill;
+  if (state?.status === "confirming") state.submitStarted = true;
+}
+
+export function restoreActivePendingCardFillAfterConfirmThrow(pending: PendingCardFill): boolean {
+  const session = activeProvisionSession();
+  const state = session.pendingCardFill;
+  if (state?.status !== "confirming" || state.submitStarted) return false;
+  session.pendingCardFill = { status: "pending", pending };
+  return true;
 }
 
 export function clearActivePendingCardFill(paymentFieldsCleared = true): void {
