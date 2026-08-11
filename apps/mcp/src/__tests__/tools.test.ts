@@ -8,6 +8,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
+import type { CheckoutSummary } from "../bot/browser.js";
 import type { PaymentBrowser, PendingCardFill } from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
@@ -17,20 +18,95 @@ import type * as ProvisionSession from "../bot/provision-session.js";
 // a stub whose checkout summary the resolution tests can control.
 let mockBrowser: PaymentBrowser;
 let mockPending: PendingCardFill | null = null;
+let mockPendingConfirming = false;
+let mockSubmitStarted = false;
+let mockPaymentLease: { phase: "fill_card" | "single" } | null = null;
+let mockPaymentSealed = false;
 let mockPaymentSealActive = false;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
     activeProvisionBrowserForPayment: async () => mockBrowser,
-    getActivePendingCardFill: () => mockPending,
+    claimActivePaymentForOperatePay: (phase: "fill_card" | "confirm" | undefined) => {
+      if (mockPaymentLease !== null) {
+        throw new Error("operate_pay refused: another payment operation is already in progress");
+      }
+      if (mockPendingConfirming) {
+        throw new Error("operate_pay refused: another payment confirmation is already in progress");
+      }
+      if (mockPaymentSealed) {
+        throw new Error("operate_pay refused: payment field cleanup remains unverified");
+      }
+      if (mockPending !== null) {
+        if (phase !== "confirm") {
+          throw new Error(
+            'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
+          );
+        }
+        const pending = mockPending;
+        mockPending = null;
+        mockPendingConfirming = true;
+        mockSubmitStarted = false;
+        return { kind: "confirm", pending };
+      }
+      if (phase === "confirm") return { kind: "missing_confirm" };
+      const lease = { phase: phase === "fill_card" ? ("fill_card" as const) : ("single" as const) };
+      mockPaymentLease = lease;
+      if (lease.phase === "fill_card") mockPaymentSealActive = true;
+      return { kind: "lease", lease };
+    },
+    completeActivePaymentLeaseWithPendingFill: (
+      lease: { phase: "fill_card" | "single" },
+      pending: PendingCardFill,
+    ) => {
+      if (mockPaymentLease !== lease || lease.phase !== "fill_card") {
+        throw new Error(
+          "operate_pay fill_card completed without ownership of the active payment lease",
+        );
+      }
+      mockPaymentLease = null;
+      mockPending = pending;
+      mockPaymentSealActive = true;
+    },
+    releaseActivePaymentLease: (
+      lease: { phase: "fill_card" | "single" },
+      paymentFieldsCleared = true,
+    ) => {
+      if (mockPaymentLease !== lease) return false;
+      mockPaymentLease = null;
+      mockPaymentSealed = !paymentFieldsCleared;
+      if (lease.phase === "fill_card") mockPaymentSealActive = !paymentFieldsCleared;
+      return true;
+    },
+    markActivePendingCardFillSubmitStarted: () => {
+      mockSubmitStarted = true;
+    },
+    restoreActivePendingCardFillAfterConfirmThrow: (pending: PendingCardFill) => {
+      if (!mockPendingConfirming || mockSubmitStarted) return false;
+      mockPending = pending;
+      mockPendingConfirming = false;
+      return true;
+    },
     setActivePendingCardFill: (pending: PendingCardFill) => {
       mockPending = pending;
+      mockPendingConfirming = false;
+      mockSubmitStarted = false;
+      mockPaymentLease = null;
+      mockPaymentSealed = false;
+      mockPaymentSealActive = true;
+    },
+    retainActivePaymentFieldSeal: () => {
+      if (mockPaymentLease === null) mockPaymentSealed = true;
       mockPaymentSealActive = true;
     },
     clearActivePendingCardFill: (paymentFieldsCleared = true) => {
       mockPending = null;
-      if (paymentFieldsCleared) mockPaymentSealActive = false;
+      mockPendingConfirming = false;
+      mockSubmitStarted = false;
+      mockPaymentLease = null;
+      mockPaymentSealed = !paymentFieldsCleared;
+      mockPaymentSealActive = !paymentFieldsCleared;
     },
   };
 });
@@ -74,6 +150,10 @@ const PAYMENT_DETAILS = { item: "Synthetic item", reason: "Synthetic purchase re
 beforeEach(() => {
   mockBrowser = stubBrowser();
   mockPending = null;
+  mockPendingConfirming = false;
+  mockSubmitStarted = false;
+  mockPaymentLease = null;
+  mockPaymentSealed = false;
   mockPaymentSealActive = false;
 });
 
@@ -269,6 +349,8 @@ describe("operate_pay split checkout phases", () => {
     card_ref: "card_split",
     last4: "4242",
     mandate_id: "mandate_split",
+    item: "Synthetic item",
+    reason: "Synthetic purchase reason",
   };
 
   it("accepts the two phase values and rejects unknown ones", () => {
@@ -317,7 +399,7 @@ describe("operate_pay split checkout phases", () => {
       merchant: "M",
       checkout_origin: "https://m.test",
       amount_cents: 999,
-      currency: "USD",
+      currency: "EUR",
     });
     const api = makeMockApi();
     const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
@@ -330,6 +412,136 @@ describe("operate_pay split checkout phases", () => {
     });
     expect(mockBrowser.submitFilledCheckout).not.toHaveBeenCalled();
     expect(mockPending).not.toBeNull();
+  });
+
+  it("atomically reserves a pending fill across overlapping confirms", async () => {
+    mockPending = { ...PENDING };
+    let releaseSubmit!: (value: { three_ds_required: false }) => void;
+    vi.mocked(mockBrowser.submitFilledCheckout).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseSubmit = resolve;
+        }),
+    );
+    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    const first = operatePayTool.handler(args, api);
+    await vi.waitFor(() => expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1));
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+      /another payment confirmation is already in progress/,
+    );
+    releaseSubmit({ three_ds_required: false });
+    await expect(first).resolves.toMatchObject({ status: "payment_submitted" });
+    expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects every non-confirm payment while a card fill is pending", async () => {
+    mockPending = { ...PENDING };
+    const api = makeMockApi({ listPaymentCards: vi.fn() } as unknown as ApiClient);
+
+    for (const phase of [undefined, "fill_card" as const]) {
+      const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase });
+      await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+        /a vaulted card fill is pending; phase="confirm" is required next/,
+      );
+    }
+    expect(mockBrowser.isPayPalHostedCheckout).not.toHaveBeenCalled();
+    expect(api.listPaymentCards).not.toHaveBeenCalled();
+    expect(mockPending).toEqual(PENDING);
+  });
+
+  it("leases fill_card before its first await and releases refusals", async () => {
+    let releasePayPal!: (value: boolean) => void;
+    vi.mocked(mockBrowser.isPayPalHostedCheckout).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releasePayPal = resolve;
+        }),
+    );
+    const api = makeMockApi();
+    const fillArgs = operatePayTool.inputSchema.parse({
+      ...PAYMENT_DETAILS,
+      phase: "fill_card",
+    });
+    const fill = operatePayTool.handler(fillArgs, api);
+    await vi.waitFor(() => expect(mockBrowser.isPayPalHostedCheckout).toHaveBeenCalledOnce());
+
+    expect(mockPaymentLease).toEqual({ phase: "fill_card" });
+    expect(mockPaymentSealActive).toBe(true);
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).rejects.toThrow(/another payment operation is already in progress/);
+
+    releasePayPal(true);
+    await expect(fill).resolves.toMatchObject({ status: "paypal_checkout" });
+    expect(mockPaymentLease).toBeNull();
+    expect(mockPaymentSealActive).toBe(false);
+  });
+
+  it("rejects every other payment while confirm is in flight", async () => {
+    mockPending = { ...PENDING };
+    let releaseRead!: (value: CheckoutSummary) => void;
+    vi.mocked(mockBrowser.readCheckoutConfirmSummary).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseRead = resolve;
+        }),
+    );
+    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
+    const confirmArgs = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+    const first = operatePayTool.handler(confirmArgs, api);
+    await vi.waitFor(() => expect(mockBrowser.readCheckoutConfirmSummary).toHaveBeenCalledOnce());
+
+    for (const phase of [undefined, "fill_card" as const, "confirm" as const]) {
+      const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase });
+      await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+        /another payment confirmation is already in progress/,
+      );
+    }
+    releaseRead({
+      merchant: "M",
+      checkout_origin: "https://m.test",
+      amount_cents: 100,
+      currency: "USD",
+    });
+    await expect(first).resolves.toMatchObject({ status: "payment_submitted" });
+    expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores the pending fill when confirm throws before submission", async () => {
+    mockPending = { ...PENDING };
+    vi.mocked(mockBrowser.readCheckoutConfirmSummary).mockRejectedValue(
+      new Error("Execution context was destroyed"),
+    );
+    const api = makeMockApi();
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+      /Execution context was destroyed/,
+    );
+    expect(mockPending).toEqual(PENDING);
+    expect(mockPendingConfirming).toBe(false);
+    expect(mockBrowser.submitFilledCheckout).not.toHaveBeenCalled();
+  });
+
+  it("does not restore the pending fill when confirm throws after submission starts", async () => {
+    mockPending = { ...PENDING };
+    vi.mocked(mockBrowser.submitFilledCheckout).mockResolvedValue({ three_ds_required: true });
+    vi.mocked(mockBrowser.waitForThreeDsResolution).mockRejectedValue(
+      new Error("Execution context was destroyed"),
+    );
+    const api = makeMockApi({ notifyThreeDs: vi.fn().mockResolvedValue({ sent: true }) });
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+      /Execution context was destroyed/,
+    );
+    expect(mockPending).toBeNull();
+    expect(mockPendingConfirming).toBe(true);
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).rejects.toThrow(/another payment confirmation is already in progress/);
   });
 
   it("confirm clears pending after an ambiguous submit outcome", async () => {

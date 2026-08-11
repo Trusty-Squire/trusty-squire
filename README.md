@@ -71,20 +71,21 @@ operator-sealed final authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission.
 
-Some split checkouts collect the card before the final order-confirmation step. Their
-card-entry page must still expose a readable payable total:
-`operate_pay { phase: "fill_card" }` reads the live merchant, checkout origin, amount,
-and currency for the same phone approval, then fills the card without submitting. If
-the page total cannot be resolved, the call returns
-`payment_checkout_total_not_found` before creating an approval or filling any fields.
+Some split checkouts collect the card before the final order-confirmation step. On the
+card-entry page, `operate_pay { phase: "fill_card" }` reads the live merchant, checkout
+origin, currency, and best visible amount, including a subtotal when no final payable
+total is shown. The phone approval is bound to that amount before Trusty Squire releases
+and fills the card without submitting. If no checkout amount can be resolved, the call
+returns `payment_checkout_total_not_found` before creating an approval or filling any fields.
 It fills only the merchant's own HTTPS frames or recognized payment-provider frames.
 The card stays in the page as sealed, observation-masked fields while the agent
 advances to the review step; charge-like `operate_act` clicks and Enter are blocked
-during that interval. `operate_pay { phase: "confirm" }` then re-reads the visible
-total and charges only when its amount, currency, and checkout origin exactly match
-the approved values. A changed page title does not invalidate the merchant because
-the checkout origin is the trust anchor. A missing or conflicting total is never
-replaced with caller-supplied payment values.
+during that interval. `operate_pay { phase: "confirm" }` then strictly re-reads the
+final payable total. It can charge when that total is no greater than the approved
+amount; a higher total triggers a new phone approval bound to the final amount before
+any charge. Currency and checkout origin must still match exactly. A changed page title
+does not invalidate the merchant because the checkout origin is the trust anchor. A
+missing or conflicting final total is never replaced with caller-supplied payment values.
 
 Before an initial single-page or `fill_card` call, a checkout that exposes PayPal
 Smart Buttons or PayPal-hosted fields is handed back before Trusty Squire selects a

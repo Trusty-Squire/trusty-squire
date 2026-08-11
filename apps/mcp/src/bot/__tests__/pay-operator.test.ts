@@ -1265,6 +1265,31 @@ describe("operate_pay split checkout — fill_card", () => {
     expect(approvalBodies[0]).toMatchObject({ amount_cents: 5_000 });
   });
 
+  it("fills from a Rakuten-style subtotal approval without submitting a charge", async () => {
+    const subtotal: CheckoutSummary = {
+      merchant: "Rakuten Synthetic",
+      checkout_origin: SPLIT_CHECKOUT.checkout_origin,
+      amount_cents: 3_872,
+      currency: "JPY",
+    };
+    const { result, approvalBodies, filledCards, auditBodies, browser } = await runSplitFill({
+      liveSummary: subtotal,
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_card_filled",
+      amount_cents: 3_872,
+      currency: "JPY",
+    });
+    expect(approvalBodies).toEqual([
+      expect.objectContaining({ amount_cents: 3_872, currency: "JPY" }),
+    ]);
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+    expect(browser.fillAndSubmitCheckout).not.toHaveBeenCalled();
+    expect(auditBodies).toEqual([]);
+  });
+
   it("refuses to fill when the page origin drifted during the ceremony", async () => {
     const { result, filledCards, browser } = await runSplitFill({
       driftOriginAfterApproval: "https://evil.synthetic.test/checkout",
@@ -1326,6 +1351,8 @@ function splitPending(): PendingCardFill {
     card_ref: "card_split",
     last4: "4242",
     mandate_id: "mandate_split",
+    item: "Split item",
+    reason: "Split purchase reason",
   };
 }
 
@@ -1339,13 +1366,92 @@ async function runConfirm(cfg: {
 }): Promise<{
   result: Record<string, unknown>;
   auditBodies: unknown[];
+  approvalBodies: Array<Record<string, unknown>>;
   notifyCalls: string[];
   browser: PaymentBrowser;
+  refreshedPendings: PendingCardFill[];
 }> {
   const auditBodies: unknown[] = [];
+  const approvalBodies: Array<Record<string, unknown>> = [];
   const notifyCalls: string[] = [];
+  const refreshedPendings: PendingCardFill[] = [];
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const jwk = await exportJWK(publicKey);
+  const nonce = "confirm-reapproval-nonce";
+  const agent = "confirm-reapproval-agent";
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url === "https://vouchflow.test/.well-known/jwks.json") {
+      return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
+    }
+    if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
+      return Response.json({ vouchflow_audience: "customer_test" });
+    }
+    if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+      approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return Response.json(
+        {
+          id: "appr_reapproval",
+          nonce,
+          agent,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        },
+        { status: 201 },
+      );
+    }
+    if (
+      (url.endsWith("/v1/pay/approvals/appr_reapproval") ||
+        url.endsWith("/v1/pay/approvals/appr_reapproval?wait_for_submission=1")) &&
+      init?.method === "GET"
+    ) {
+      const approval = approvalBodies[0]!;
+      const recipientHash = createHash("sha256")
+        .update(Buffer.from(String(approval.operator_pubkey), "base64url"))
+        .digest("base64url");
+      const canonical = canonicalize({
+        approval_id: "appr_reapproval",
+        merchant: approval.merchant,
+        checkout_origin: approval.checkout_origin,
+        amount_cents: approval.amount_cents,
+        currency: approval.currency,
+        nonce,
+        card_ref: "card_split",
+        recipient_pubkey_hash: recipientHash,
+        item: approval.item,
+        reason: approval.reason,
+        agent,
+      })!;
+      const aad = createHash("sha256").update(canonical, "utf8").digest();
+      const jws = await new SignJWT({
+        payload_sha256: aad.toString("base64url"),
+        context: "purchase",
+        confidence: "high",
+        mandate_id: "mandate_reapproval",
+      })
+        .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+        .setIssuer("https://vouchflow.dev")
+        .setAudience("customer_test")
+        .sign(privateKey);
+      const sealed_card = await sealToRecipient(
+        String(approval.operator_pubkey),
+        new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
+        aad,
+      );
+      return Response.json({
+        id: "appr_reapproval",
+        status: "approved",
+        merchant: approval.merchant,
+        checkout_origin: approval.checkout_origin,
+        amount_cents: approval.amount_cents,
+        currency: approval.currency,
+        nonce,
+        card_ref: "card_split",
+        operator_pubkey: approval.operator_pubkey,
+        jws,
+        sealed_card,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+    }
     if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
       auditBodies.push(JSON.parse(String(init.body)) as unknown);
       return Response.json({ id: "audit_split" }, { status: 201 });
@@ -1370,7 +1476,7 @@ async function runConfirm(cfg: {
       live instanceof Error ? vi.fn().mockRejectedValue(live) : vi.fn().mockResolvedValue(live),
     currentUrl: vi.fn().mockReturnValue(`${SPLIT_CHECKOUT.checkout_origin}/checkout/confirm`),
     fillAndSubmitCheckout: vi.fn(),
-    fillCheckoutCardFields: vi.fn(),
+    fillCheckoutCardFields: vi.fn().mockRejectedValue(new Error("payment_field_not_found:pan")),
     submitFilledCheckout:
       submit instanceof Error
         ? vi.fn().mockRejectedValue(submit)
@@ -1393,9 +1499,19 @@ async function runConfirm(cfg: {
     cfg.waitSeconds !== undefined ? { three_ds_wait_seconds: cfg.waitSeconds } : {},
     api,
     browser,
+    {
+      fetch: fetchMock,
+      sleep: async () => undefined,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      onCardFilled: (pending) => {
+        refreshedPendings.push(pending);
+      },
+    },
   )) as Record<string, unknown>;
 
-  return { result, auditBodies, notifyCalls, browser };
+  return { result, auditBodies, approvalBodies, notifyCalls, browser, refreshedPendings };
 }
 
 describe("operate_pay split checkout — confirm", () => {
@@ -1459,17 +1575,40 @@ describe("operate_pay split checkout — confirm", () => {
     expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
   });
 
-  it("refuses to charge when the live total differs from the approved amount", async () => {
-    const { result, browser } = await runConfirm({
+  it("reapproves and charges without card-entry fields on the confirm page", async () => {
+    const { result, browser, approvalBodies, auditBodies } = await runConfirm({
       live: { ...SPLIT_CHECKOUT, amount_cents: SPLIT_CHECKOUT.amount_cents + 500 },
     });
 
     expect(result).toMatchObject({
-      status: "payment_amount_mismatch",
-      mandate_amount_cents: SPLIT_CHECKOUT.amount_cents,
-      live_amount_cents: SPLIT_CHECKOUT.amount_cents + 500,
+      status: "payment_submitted",
+      amount_cents: SPLIT_CHECKOUT.amount_cents + 500,
     });
-    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+    expect(approvalBodies).toEqual([
+      expect.objectContaining({ amount_cents: SPLIT_CHECKOUT.amount_cents + 500 }),
+    ]);
+    expect(browser.fillCheckoutCardFields).not.toHaveBeenCalled();
+    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledTimes(2);
+    expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+    expect(auditBodies).toEqual([
+      expect.objectContaining({
+        amountCents: SPLIT_CHECKOUT.amount_cents + 500,
+        mandateId: "mandate_reapproval",
+      }),
+    ]);
+  });
+
+  it("charges a lower final total under the existing higher approval", async () => {
+    const { result, browser, approvalBodies } = await runConfirm({
+      live: { ...SPLIT_CHECKOUT, amount_cents: SPLIT_CHECKOUT.amount_cents - 500 },
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      amount_cents: SPLIT_CHECKOUT.amount_cents - 500,
+    });
+    expect(approvalBodies).toEqual([]);
+    expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
   });
 
   it("refuses to charge when the origin drifted (same total)", async () => {
@@ -1488,15 +1627,43 @@ describe("operate_pay split checkout — confirm", () => {
     // The merchant string derives from the page title, which legitimately
     // changes between the payment and review steps; origin+amount+currency are
     // the mandate-bound gate.
-    const { result } = await runConfirm({
+    const { result, auditBodies } = await runConfirm({
       live: { ...SPLIT_CHECKOUT, merchant: "Order Review — Split Merchant" },
     });
 
-    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      merchant: SPLIT_CHECKOUT.merchant,
+    });
+    expect(auditBodies).toEqual([expect.objectContaining({ merchant: SPLIT_CHECKOUT.merchant })]);
+  });
+
+  it("returns a higher-total reapproval before a submit-not-found retry", async () => {
+    const { result, refreshedPendings } = await runConfirm({
+      live: {
+        ...SPLIT_CHECKOUT,
+        merchant: "Order Review — Split Merchant",
+        amount_cents: SPLIT_CHECKOUT.amount_cents + 500,
+      },
+      submit: new Error("payment_submit_not_found"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_checkout_failed",
+      reason: "payment_submit_not_found",
+    });
+    expect(refreshedPendings).toEqual([
+      expect.objectContaining({
+        checkout: expect.objectContaining({ amount_cents: SPLIT_CHECKOUT.amount_cents + 500 }),
+        mandate_id: "mandate_reapproval",
+      }),
+    ]);
+    expect(refreshedPendings[0]?.checkout.merchant).toBe(SPLIT_CHECKOUT.merchant);
   });
 
   it("keeps the filled fields for a retry when no charge control is found", async () => {
     const { result, auditBodies, browser } = await runConfirm({
+      live: { ...SPLIT_CHECKOUT, merchant: "Order Review — Split Merchant" },
       submit: new Error("payment_submit_not_found"),
     });
 
@@ -1506,7 +1673,12 @@ describe("operate_pay split checkout — confirm", () => {
     });
     // Nothing was charged and the card stays in the page for a settled retry.
     expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
-    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_checkout_failed" })]);
+    expect(auditBodies).toEqual([
+      expect.objectContaining({
+        merchant: SPLIT_CHECKOUT.merchant,
+        status: "payment_checkout_failed",
+      }),
+    ]);
   });
 
   it("clears the fill and returns terminal unknown after an ambiguous submit failure", async () => {

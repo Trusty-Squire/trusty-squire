@@ -19,11 +19,10 @@ export interface OperatePayArgs {
   item: string;
   reason: string;
   three_ds_wait_seconds?: number;
-  // "fill_card" = split-checkout card entry: run the full approval ceremony,
-  // after resolving the payable total, then fill the card into the payment
-  // fields WITHOUT submitting anything. The charge happens later via
-  // executeOperatePayConfirm after re-verifying the total. Absent = the
-  // single-page fill+charge.
+  // "fill_card" = split-checkout card entry: approve the best visible amount
+  // (including a subtotal), then fill payment fields WITHOUT submitting. The
+  // final payable total is strictly verified at confirm, which reapproves if
+  // it exceeds this amount. Absent = the single-page fill+charge.
   phase?: "fill_card";
 }
 
@@ -50,6 +49,10 @@ export interface PendingCardFill {
   card_ref: string;
   last4: string;
   mandate_id?: string;
+  // Retained only for a confirm-time reapproval when the final payable total
+  // exceeds the card-entry amount. They are non-secret mandate context.
+  item: string;
+  reason: string;
 }
 
 interface PayDependencies {
@@ -71,6 +74,11 @@ interface PayDependencies {
   // fill_card only: hands the session layer what the later confirm step needs.
   onCardFilled: (pending: PendingCardFill) => void;
   onCardFillCleanupFailed: () => void;
+  onSubmitStarted: () => void;
+  skipCardFill?: boolean;
+  // Internal-only: confirmation has already read the strict, final total and
+  // may use it to mint a replacement approval. Never sourced from tool input.
+  initialCheckout?: CheckoutSummary;
 }
 
 const cardSchema = z.object({
@@ -260,6 +268,7 @@ function defaultDependencies(): PayDependencies {
     onCardResolved: () => undefined,
     onCardFilled: () => undefined,
     onCardFillCleanupFailed: () => undefined,
+    onSubmitStarted: () => undefined,
   };
 }
 
@@ -309,7 +318,7 @@ export async function executeOperatePay(
 
     let checkout: CheckoutSummary;
     try {
-      checkout = await browser.readCheckoutSummary(args.currency);
+      checkout = deps.initialCheckout ?? (await browser.readCheckoutSummary(args.currency));
     } catch (error) {
       if (error instanceof Error && error.message === "payment_checkout_currency_unresolved") {
         return {
@@ -674,7 +683,9 @@ export async function executeOperatePay(
         };
       }
       try {
-        await browser.fillCheckoutCardFields(card);
+        if (!deps.skipCardFill) {
+          await browser.fillCheckoutCardFields(card);
+        }
       } catch (error) {
         const frameOrigin =
           error instanceof UnrecognizedPaymentFrameError
@@ -721,6 +732,8 @@ export async function executeOperatePay(
         checkout,
         card_ref: cardRef,
         last4,
+        item,
+        reason,
         ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
       });
       return {
@@ -867,15 +880,15 @@ export async function executeOperatePay(
 // The charge half of a split checkout: the card was filled by phase="fill_card"
 // and the host has driven the checkout to its order-confirmation step. THIS is
 // where the money moves, so the total-verification gate lives here: the live
-// page must show a readable total that exactly matches the amount the user
-// approved (the mandate-bound checkout in `pending`) before the pay/place-order
-// control is clicked. No new approval is minted — the mandate from the fill
-// step already binds these values; a drifted page refuses instead of charging.
+// page must show a readable final total before the pay/place-order control is
+// clicked. A lower final total is covered by the fill approval; a higher total
+// receives a fresh approval before charge. A drifted origin/currency refuses.
 export async function executeOperatePayConfirm(
   pending: PendingCardFill,
   args: { currency?: string; three_ds_wait_seconds?: number },
   api: ApiClient,
   browser: PaymentBrowser,
+  overrides: Partial<PayDependencies> = {},
 ): Promise<Record<string, unknown>> {
   const threeDsWaitMs = Math.min(Math.max(args.three_ds_wait_seconds ?? 180, 0), 600) * 1000;
   const checkout = pending.checkout;
@@ -920,13 +933,8 @@ export async function executeOperatePayConfirm(
   }
   // Merchant is deliberately NOT compared: it derives from the page title,
   // which legitimately changes between checkout steps ("Payment" → "Review
-  // order"). checkout_origin is the trust anchor; amount+currency the money
-  // gate — all three mandate-bound and all three must match exactly.
-  if (
-    live.amount_cents !== checkout.amount_cents ||
-    live.currency !== checkout.currency ||
-    live.checkout_origin !== checkout.checkout_origin
-  ) {
+  // order"). Origin and currency remain exact trust anchors.
+  if (live.currency !== checkout.currency || live.checkout_origin !== checkout.checkout_origin) {
     return {
       status: "payment_amount_mismatch",
       approval_url: approvalUrl,
@@ -938,6 +946,46 @@ export async function executeOperatePayConfirm(
       live_merchant: live.merchant,
       live_checkout_origin: live.checkout_origin,
     };
+  }
+
+  // A card-entry step may show only a subtotal. That approval can safely
+  // release and fill the card, but it can never authorize a higher final
+  // payable total. Re-read the final total above (strict reader only), then
+  // obtain a new amount-bound approval before the submit control is reachable.
+  // The internal initialCheckout dependency prevents this reapproval from
+  // falling back to the permissive/subtotal reader or caller-supplied amount.
+  if (live.amount_cents > checkout.amount_cents) {
+    let refreshed: PendingCardFill | undefined;
+    const reapproval = await executeOperatePay(
+      {
+        card_ref: pending.card_ref,
+        item: pending.item,
+        reason: pending.reason,
+        phase: "fill_card",
+      },
+      api,
+      browser,
+      {
+        ...overrides,
+        initialCheckout: {
+          merchant: checkout.merchant,
+          checkout_origin: live.checkout_origin,
+          amount_cents: live.amount_cents,
+          currency: live.currency,
+        },
+        skipCardFill: true,
+        onCardFilled: (next) => {
+          refreshed = next;
+          overrides.onCardFilled?.(next);
+        },
+      },
+    );
+    if (reapproval.status !== "payment_card_filled" || refreshed === undefined) {
+      return reapproval;
+    }
+    // The replacement approval is bound to the strict final total. Re-read it
+    // immediately before submission so a page mutation cannot race approval.
+    return await executeOperatePayConfirm(refreshed, args, api, browser, overrides);
   }
 
   let paymentStatus = "payment_submitted";
@@ -955,6 +1003,7 @@ export async function executeOperatePayConfirm(
     }
   };
   try {
+    overrides.onSubmitStarted?.();
     submitResult = await browser.submitFilledCheckout();
     if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
   } catch (error) {
@@ -964,7 +1013,9 @@ export async function executeOperatePayConfirm(
     let audit_recorded = true;
     try {
       await api.auditPayment({
-        ...checkout,
+        merchant: checkout.merchant,
+        amount_cents: live.amount_cents,
+        currency: live.currency,
         last4: pending.last4,
         status: paymentStatus,
         ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
@@ -994,7 +1045,9 @@ export async function executeOperatePayConfirm(
   let auditRecorded = true;
   try {
     await api.auditPayment({
-      ...checkout,
+      merchant: checkout.merchant,
+      amount_cents: live.amount_cents,
+      currency: live.currency,
       last4: pending.last4,
       status: paymentStatus,
       ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
@@ -1032,8 +1085,8 @@ export async function executeOperatePayConfirm(
     audit_recorded: auditRecorded,
     approval_url: approvalUrl,
     merchant: checkout.merchant,
-    amount_cents: checkout.amount_cents,
-    currency: checkout.currency,
+    amount_cents: live.amount_cents,
+    currency: live.currency,
     payment_fields_cleared: paymentFieldsCleared,
   };
 }
