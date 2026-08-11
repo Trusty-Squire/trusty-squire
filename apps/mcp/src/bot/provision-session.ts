@@ -24,6 +24,7 @@ import { join } from "node:path";
 import {
   BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
+  type CheckoutSummary,
   type FrameTarget,
   type InteractiveElement,
   type PageTargetSafetySignals,
@@ -457,6 +458,14 @@ interface Session {
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
+  // The most recent real checkout total this session actually observed on a
+  // page (e.g. the cart step), scoped to that page's own origin. Split
+  // checkouts (Rakuten-style) show no total on the card-entry page itself;
+  // operate_pay {phase:"fill_card"} falls back to this ONLY when the live
+  // card-entry page has no readable total of its own, and only when the
+  // origin still matches. Replaced (never accumulated) on each successful
+  // observe of a page with a parseable total; never a caller-supplied value.
+  lastCartCheckout: { checkout: CheckoutSummary; observedAt: number } | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -2252,6 +2261,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    lastCartCheckout: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2346,6 +2356,7 @@ export async function startHarnessProvisionSession(
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    lastCartCheckout: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2603,6 +2614,14 @@ export function recordActivePaymentProvenance(cardRef: string): void {
   const traceIndex = session.actionTrace.length;
   session.actionTrace.push({ action: { kind: "operate_pay", value: { hole: "card" } } });
   session.recordedValues.push({ traceIndex, hole: "card", literal: cardRef });
+}
+
+// operate_pay {phase:"fill_card"} fallback source (see Session.lastCartCheckout):
+// the most recent real total this SAME session actually read off a page,
+// returned only when it still matches the given (current, live) origin.
+export function activeCartCheckoutForOrigin(origin: string): CheckoutSummary | null {
+  const cached = activeProvisionSession().lastCartCheckout;
+  return cached !== null && cached.checkout.checkout_origin === origin ? cached.checkout : null;
 }
 
 // PR3c — the user's own email captured at login (the authoritative signup
@@ -3125,6 +3144,33 @@ export function buildCompactObservation(args: {
   };
 }
 
+// Best-effort: on every observation, try to read a real checkout total off
+// the CURRENT live page and cache it as the fill_card fallback (see
+// Session.lastCartCheckout). Most pages have no parseable total — that's the
+// overwhelmingly common, expected outcome, not an error, so a throw here
+// simply leaves the existing cache untouched rather than clearing it. Scoped
+// to the observed page's own origin so a later cross-origin fallback read
+// (checked again at use time) can never happen even if this cache were stale.
+async function captureCartCheckoutForFillCardFallback(
+  session: Session,
+  url: string,
+): Promise<void> {
+  let origin: string;
+  try {
+    origin = new URL(url).origin;
+  } catch {
+    return;
+  }
+  try {
+    const checkout = await session.browser.readCheckoutSummary();
+    if (checkout.checkout_origin === origin) {
+      session.lastCartCheckout = { checkout, observedAt: Date.now() };
+    }
+  } catch {
+    // No readable total on this page — leave any previously cached total alone.
+  }
+}
+
 async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
@@ -3145,6 +3191,7 @@ async function observeSession(
   const normalizedText = normalizedFull.slice(0, 4000);
   const guidance = provisionPerceptionGuidance(normalizedText);
   const url = session.browser.currentUrl();
+  await captureCartCheckoutForFillCardFallback(session, url);
   const refs = provisionElementRefs(elements);
   const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
   const textTruncated = normalizedFull.length > 4000;

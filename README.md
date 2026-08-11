@@ -72,19 +72,24 @@ payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission.
 
 Some split checkouts collect the card before the final order-confirmation step. On the
-card-entry page, `operate_pay { phase: "fill_card" }` never reads or requires a page
-total — it works even when the card-entry page shows no total at all. The phone
-approval it obtains only releases the card, binding no charge amount, before Trusty
-Squire fills the card without submitting. It fills only the merchant's own HTTPS
-frames or recognized payment-provider frames. The card stays in the page as sealed,
-observation-masked fields while the agent advances to the review step; charge-like
-`operate_act` clicks and Enter are blocked during that interval.
-`operate_pay { phase: "confirm" }` is where the charge happens: it strictly reads the
-final payable total and always obtains a fresh phone approval bound to that exact
-amount before any charge. Checkout origin must still match exactly. A changed page
-title does not invalidate the merchant because the checkout origin is the trust
-anchor. A missing or conflicting final total is never replaced with caller-supplied
-payment values.
+card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. If
+that page exposes no total, it uses the most recent real total observed earlier in the
+same browser session, such as the cart subtotal, only when the checkout origin still
+matches. It never uses a caller-supplied amount for this fallback. One phone approval
+binds that amount, releases the card, and authorizes the eventual charge up to the
+approved amount; Trusty Squire then fills the card without submitting. It fills only
+the merchant's own HTTPS frames or recognized payment-provider frames. The card stays
+in the page as sealed, observation-masked fields while the agent advances to the
+review step; charge-like `operate_act` clicks and Enter are blocked during that
+interval.
+
+`operate_pay { phase: "confirm" }` is where the charge happens. It strictly reads the
+final payable total and submits within the same approval, without a second phone tap,
+when the origin and currency still match and the final total is at or below the
+approved amount. A higher final total returns `payment_amount_exceeds_approval` and is
+not re-approved. A changed page title does not invalidate the merchant because the
+checkout origin is the trust anchor. A missing or conflicting final total is never
+replaced with caller-supplied payment values.
 
 Before an initial single-page or `fill_card` call, a checkout that exposes PayPal
 Smart Buttons or PayPal-hosted fields is handed back before Trusty Squire selects a
@@ -176,11 +181,11 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
   single-page payment, your phone releases the card only after approving the
-  exact purchase details shown on the approval page. On a split checkout, the
-  first approval releases the card without authorizing a charge; a second phone
-  approval authorizes the exact final total immediately before submission. The
-  API temporarily relays only operator-sealed card ciphertext and its signed
-  mandate; successful operator confirmation clears those relay bytes.
+  exact purchase details shown on the approval page. On a split checkout, one
+  amount-bound approval both releases the card and authorizes a charge up to that
+  amount; confirmation refuses a higher final total instead of requesting another
+  approval. The API temporarily relays only operator-sealed card ciphertext and
+  its signed mandate; successful operator confirmation clears those relay bytes.
   Trusty Squire's API and the coding-agent model never receive plaintext PAN or
   CVV. See the
   [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)

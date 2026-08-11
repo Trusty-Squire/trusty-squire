@@ -1,5 +1,6 @@
 import { z } from "zod";
 import {
+  activeCartCheckoutForOrigin,
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
@@ -28,9 +29,6 @@ const inputSchema = z
       .optional(),
     card_ref: z.string().min(1).max(64).optional(),
     card_label: z.string().min(1).max(256).optional(),
-    // Split checkouts: "fill_card" reads no total and approves only card
-    // release, then fills without charging; "confirm" strictly reads and
-    // obtains human approval for the exact final total before charge.
     phase: z.enum(["fill_card", "confirm"]).optional(),
     item: z.string().trim().min(1).max(500),
     reason: z.string().trim().min(1).max(500),
@@ -62,6 +60,7 @@ function shouldRestorePendingCardFill(result: Record<string, unknown>): boolean 
     case "payment_card_open_failed":
     case "payment_checkout_origin_mismatch":
     case "payment_amount_mismatch":
+    case "payment_amount_exceeds_approval":
       return true;
     case "payment_checkout_failed":
       return result.reason === "payment_submit_not_found";
@@ -93,12 +92,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved. " +
     "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
     "add-card ceremony and the card is bound server-side before the mandate is signed. " +
-    "For a SPLIT checkout: call with " +
-    'phase="fill_card" on that step; this never reads a page total (works even when the ' +
-    "card-entry step shows none) and only releases the card into recognized payment-provider " +
-    "fields — NOTHING is charged. Then drive the checkout to the order-confirmation step and " +
-    'call phase="confirm" — it reads the strict final total, requires a fresh human approval ' +
-    "of that exact amount, and only then places the order. Never click the pay/place-order " +
+    "For a SPLIT checkout (a card-entry step with no visible total, e.g. Rakuten): call with " +
+    'phase="fill_card" on that step — the approval amount is sourced from the most recent real ' +
+    "total this session observed (e.g. the cart page) when the card-entry page itself shows " +
+    "none, and releases the card into recognized payment-provider fields without charging. Then " +
+    'drive the checkout to the order-confirmation step and call phase="confirm" — it reads the ' +
+    "strict final total and places the order if it does not exceed the amount already approved " +
+    "at fill_card, with NO second approval. A final total above that amount is refused, never " +
+    "re-approved. Exactly one human approval per purchase. Never click the pay/place-order " +
     "control via operate_act.",
   inputSchema,
   jsonInputSchema: {
@@ -117,10 +118,11 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         type: "string",
         enum: ["fill_card", "confirm"],
         description:
-          'Split checkouts only: "fill_card" releases the vaulted card onto the card-entry ' +
-          "step without reading or requiring a page total, and without charging; " +
-          '"confirm" reads the final total, requires a fresh human approval of that exact ' +
-          "amount, and only then places the order. Omit for single-page checkouts.",
+          'Split checkouts only: "fill_card" approves an amount (falling back to the most ' +
+          "recent real total this session observed when the card-entry page itself has none) " +
+          'and releases the vaulted card without charging; "confirm" reads the final total and ' +
+          "charges within that SAME approval — no second tap — refusing instead if the final " +
+          "total exceeds it. Omit for single-page checkouts.",
       },
       item: { type: "string", minLength: 1 },
       reason: { type: "string", minLength: 1 },
@@ -156,13 +158,11 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         throw new Error("operate_pay confirm acquired an invalid payment lease");
       }
       const pending = paymentClaim.pending;
-      let retryPending = pending;
       try {
         const browser = await activeProvisionBrowserForPayment();
         const result = await executeOperatePayConfirm(
           pending,
           {
-            ...(args.currency !== undefined ? { currency: args.currency } : {}),
             ...(args.three_ds_wait_seconds !== undefined
               ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
               : {}),
@@ -170,19 +170,6 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           api,
           browser,
           {
-            ...(context !== undefined
-              ? {
-                  surfaceApprovalUrl: async (url: string) => {
-                    await context.notifyUser(`Approve this payment on your phone: ${url}`, {
-                      approval_url: url,
-                    });
-                  },
-                }
-              : {}),
-            onCardFillCleanupFailed: retainActivePaymentFieldSeal,
-            onCardFilled: (refreshed) => {
-              retryPending = refreshed;
-            },
             onSubmitStarted: markActivePendingCardFillSubmitStarted,
           },
         );
@@ -191,7 +178,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           recordActivePaymentProvenance(pending.card_ref);
         }
         if (shouldRestorePendingCardFill(result)) {
-          setActivePendingCardFill(retryPending);
+          setActivePendingCardFill(pending);
         } else if (
           status === "payment_submitted" ||
           status === "payment_3ds_required" ||
@@ -202,7 +189,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         }
         return result;
       } catch (error) {
-        restoreActivePendingCardFillAfterConfirmThrow(retryPending);
+        restoreActivePendingCardFillAfterConfirmThrow(pending);
         throw error;
       }
     }
@@ -259,6 +246,19 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       }
       let resolvedCardRef: string | null = null;
       let filledPending: PendingCardFill | null = null;
+      // Split checkouts (Rakuten-style) show no total on the card-entry page
+      // itself. executeOperatePay's own live read is tried first regardless;
+      // this is only its fallback when that read specifically finds no total.
+      let cartFallbackOrigin: string | null = null;
+      try {
+        cartFallbackOrigin = new URL(browser.currentUrl()).origin;
+      } catch {
+        cartFallbackOrigin = null;
+      }
+      const cartFallbackCheckout =
+        args.phase === "fill_card" && cartFallbackOrigin !== null
+          ? (activeCartCheckoutForOrigin(cartFallbackOrigin) ?? undefined)
+          : undefined;
       const result = await executeOperatePay(
         {
           ...(cardRef !== undefined ? { card_ref: cardRef } : {}),
@@ -294,6 +294,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             paymentFieldsCleared = false;
             retainActivePaymentFieldSeal();
           },
+          ...(cartFallbackCheckout !== undefined ? { cartFallbackCheckout } : {}),
         },
       );
       if (result.payment_fields_cleared === false) paymentFieldsCleared = false;

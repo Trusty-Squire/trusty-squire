@@ -96,16 +96,19 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   when the user wants the immediate handoff without notification or waiting.
   Card fields never return through MCP.
 - On a split checkout whose card-entry step shows no total (or only a subtotal),
-  call `operate_pay` with `phase: "fill_card"`. It never reads or requires a page
-  amount — it just releases and fills the card, charging nothing. After approval,
-  advance only through non-charge navigation such as **Next** or **Continue to
-  review**, then call `operate_pay` with `phase: "confirm"` once the final total is
-  visible. Confirm reads that total, requires a fresh human approval of the exact
-  amount, and only then charges — it fails closed if the total is unresolved or
-  conflicting. `item` and `reason` remain required on both calls. Never click a
-  pay/place-order control or press Enter while the card fill is pending; confirm
-  owns the strict amount check and charge. An unrecognized payment iframe is a
-  hard stop.
+  call `operate_pay` with `phase: "fill_card"`. It approves the live card-entry
+  total when readable; otherwise it may use the most recent real total observed in
+  this session on the same origin. That one approval releases and fills the card,
+  charging nothing yet, and authorizes the eventual charge up to the approved
+  amount. Advance only through non-charge navigation such as **Next** or
+  **Continue to review**, then call `operate_pay` with `phase: "confirm"` once the
+  final total is visible. Confirm reads that total and charges under the same
+  approval when it is at or below the approved amount. It never asks for another
+  approval: a higher total returns `payment_amount_exceeds_approval`, while an
+  unresolved or conflicting total also fails closed. `item` and `reason` remain
+  required on both calls. Never click a pay/place-order control or press Enter
+  while the card fill is pending; confirm owns the strict amount check and charge.
+  An unrecognized payment iframe is a hard stop.
 
 **Safety rules the agent must follow:**
 
