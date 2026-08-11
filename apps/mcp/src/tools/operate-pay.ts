@@ -29,9 +29,6 @@ const inputSchema = z
       .optional(),
     card_ref: z.string().min(1).max(64).optional(),
     card_label: z.string().min(1).max(256).optional(),
-    // Split checkouts: "fill_card" reads no total and approves only card
-    // release, then fills without charging; "confirm" strictly reads and
-    // obtains human approval for the exact final total before charge.
     phase: z.enum(["fill_card", "confirm"]).optional(),
     item: z.string().trim().min(1).max(500),
     reason: z.string().trim().min(1).max(500),
@@ -161,13 +158,11 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         throw new Error("operate_pay confirm acquired an invalid payment lease");
       }
       const pending = paymentClaim.pending;
-      let retryPending = pending;
       try {
         const browser = await activeProvisionBrowserForPayment();
         const result = await executeOperatePayConfirm(
           pending,
           {
-            ...(args.currency !== undefined ? { currency: args.currency } : {}),
             ...(args.three_ds_wait_seconds !== undefined
               ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
               : {}),
@@ -175,19 +170,6 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           api,
           browser,
           {
-            ...(context !== undefined
-              ? {
-                  surfaceApprovalUrl: async (url: string) => {
-                    await context.notifyUser(`Approve this payment on your phone: ${url}`, {
-                      approval_url: url,
-                    });
-                  },
-                }
-              : {}),
-            onCardFillCleanupFailed: retainActivePaymentFieldSeal,
-            onCardFilled: (refreshed) => {
-              retryPending = refreshed;
-            },
             onSubmitStarted: markActivePendingCardFillSubmitStarted,
           },
         );
@@ -196,7 +178,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           recordActivePaymentProvenance(pending.card_ref);
         }
         if (shouldRestorePendingCardFill(result)) {
-          setActivePendingCardFill(retryPending);
+          setActivePendingCardFill(pending);
         } else if (
           status === "payment_submitted" ||
           status === "payment_3ds_required" ||
@@ -207,7 +189,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         }
         return result;
       } catch (error) {
-        restoreActivePendingCardFillAfterConfirmThrow(retryPending);
+        restoreActivePendingCardFillAfterConfirmThrow(pending);
         throw error;
       }
     }

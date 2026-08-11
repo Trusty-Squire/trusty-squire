@@ -349,8 +349,6 @@ describe("operate_pay split checkout phases", () => {
     card_ref: "card_split",
     last4: "4242",
     mandate_id: "mandate_split",
-    item: "Synthetic item",
-    reason: "Synthetic purchase reason",
   };
 
   it("accepts the two phase values and rejects unknown ones", () => {

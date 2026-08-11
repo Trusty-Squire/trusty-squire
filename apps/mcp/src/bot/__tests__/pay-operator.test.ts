@@ -1355,8 +1355,6 @@ function splitPending(checkout: CheckoutSummary = SPLIT_CHECKOUT): PendingCardFi
     card_ref: "card_split",
     last4: "4242",
     mandate_id: "mandate_split",
-    item: "Split item",
-    reason: "Split purchase reason",
   };
 }
 
@@ -1429,7 +1427,6 @@ async function runConfirm(cfg: {
     cfg.waitSeconds !== undefined ? { three_ds_wait_seconds: cfg.waitSeconds } : {},
     api,
     browser,
-    { fetch: fetchMock, sleep: async () => undefined, webBase: "https://web.test" },
   )) as Record<string, unknown>;
 
   return { result, auditBodies, notifyCalls, browser };

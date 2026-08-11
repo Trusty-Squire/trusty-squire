@@ -3852,8 +3852,6 @@ describe("pending card-fill charge guard", () => {
     },
     card_ref: "card_guard",
     last4: "4242",
-    item: "Synthetic item",
-    reason: "Synthetic purchase reason",
   };
 
   it("tracks pending, confirming, and submit-started states distinctly", async () => {

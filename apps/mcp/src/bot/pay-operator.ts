@@ -51,10 +51,6 @@ export interface PendingCardFill {
   card_ref: string;
   last4: string;
   mandate_id?: string;
-  // Retained only for the confirm-time approval of the strict final payable
-  // total. They are non-secret mandate context.
-  item: string;
-  reason: string;
 }
 
 interface PayDependencies {
@@ -744,8 +740,6 @@ export async function executeOperatePay(
         checkout,
         card_ref: cardRef,
         last4,
-        item,
-        reason,
         ...(mandateId !== undefined ? { mandate_id: mandateId } : {}),
       });
       return {
@@ -900,10 +894,10 @@ export async function executeOperatePay(
 // refuses closed instead.
 export async function executeOperatePayConfirm(
   pending: PendingCardFill,
-  args: { currency?: string; three_ds_wait_seconds?: number },
+  args: { three_ds_wait_seconds?: number },
   api: ApiClient,
   browser: PaymentBrowser,
-  overrides: Partial<PayDependencies> = {},
+  overrides: { onSubmitStarted?: () => void } = {},
 ): Promise<Record<string, unknown>> {
   const threeDsWaitMs = Math.min(Math.max(args.three_ds_wait_seconds ?? 180, 0), 600) * 1000;
   const checkout = pending.checkout;
