@@ -9,7 +9,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
 import type { CheckoutSummary } from "../bot/browser.js";
-import type { PaymentBrowser, PendingApprovalWait, PendingCardFill } from "../bot/pay-operator.js";
+import type {
+  CartCheckoutObservation,
+  PaymentBrowser,
+  PendingApprovalWait,
+  PendingCardFill,
+} from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
 // operate_pay's handler reaches into the single active browser session via
@@ -27,11 +32,13 @@ let mockPaymentSealActive = false;
 // state machine so operate_pay's approval_pending path, and
 // operate_payment_status/await, can be exercised against this fake session.
 let mockAwaitingApproval: PendingApprovalWait | null = null;
+let mockCartCheckout: CartCheckoutObservation | null = null;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
     activeProvisionBrowserForPayment: async () => mockBrowser,
+    activeCartCheckoutForOrigin: () => mockCartCheckout,
     claimActivePaymentForOperatePay: (phase: "fill_card" | "confirm" | undefined) => {
       if (mockPaymentLease !== null) {
         throw new Error("operate_pay refused: another payment operation is already in progress");
@@ -56,6 +63,7 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       }
       if (phase === "confirm") return { kind: "missing_confirm" };
       const resumeApproval = mockAwaitingApproval ?? undefined;
+      mockAwaitingApproval = null;
       const lease = { phase: phase === "fill_card" ? ("fill_card" as const) : ("single" as const) };
       mockPaymentLease = lease;
       if (lease.phase === "fill_card") mockPaymentSealActive = true;
@@ -176,6 +184,7 @@ beforeEach(() => {
   mockPaymentSealed = false;
   mockPaymentSealActive = false;
   mockAwaitingApproval = null;
+  mockCartCheckout = null;
 });
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -401,12 +410,72 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     // The RPC completed on a single live check — the old blocking loop that
     // polled until payment_approval_timeout never ran.
     expect(getPaymentApproval).toHaveBeenCalledOnce();
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_wire", false);
     expect(mockAwaitingApproval).not.toBeNull();
     expect(mockPaymentLease).toBeNull();
 
     // A re-initiation now resumes — never a second POST /v1/pay/approvals.
     await operatePayTool.handler(args, api);
     expect(createPaymentApproval).toHaveBeenCalledOnce();
+  });
+
+  it("restores a resumable approval when notification fails after creation", async () => {
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_restore",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+    });
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      createPaymentApproval,
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+      getPaymentApproval: vi.fn().mockResolvedValue({
+        id: "appr_restore",
+        status: "pending",
+        card_ref: "card_1",
+        jws: null,
+        sealed_card: null,
+      }),
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse(PAYMENT_DETAILS);
+
+    await expect(
+      operatePayTool.handler(args, api, {
+        notifyUser: vi.fn().mockRejectedValue(new Error("notification unavailable")),
+      }),
+    ).rejects.toThrow("notification unavailable");
+    expect(mockAwaitingApproval).toMatchObject({ approval_id: "appr_restore" });
+
+    await operatePayTool.handler(args, api);
+    expect(createPaymentApproval).toHaveBeenCalledOnce();
+  });
+
+  it("returns the persisted cart URL with the safe total-observation action", async () => {
+    mockCartCheckout = {
+      checkout: {
+        merchant: "M",
+        checkout_origin: "https://m.test",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      url: "https://m.test/cart",
+      observedAt: Date.now(),
+    };
+    vi.mocked(mockBrowser.readCheckoutSummary).mockRejectedValue(
+      new Error("payment_checkout_total_not_found"),
+    );
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+    } as unknown as ApiClient);
+
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).resolves.toMatchObject({
+      status: "needs_cart_total",
+      next: { tool: "operate_observe", url: "https://m.test/cart" },
+    });
   });
 });
 
@@ -440,6 +509,13 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     await expect(
       operatePaymentAwaitTool.handler({}, api),
     ).resolves.toMatchObject({ status: "no_pending_payment" });
+  });
+
+  it("rejects waits longer than the 15-second tool contract", () => {
+    expect(() => operatePaymentAwaitTool.inputSchema.parse({ max_wait_seconds: 16 })).toThrow();
+    expect(operatePaymentAwaitTool.jsonInputSchema).toMatchObject({
+      properties: { max_wait_seconds: { maximum: 15 } },
+    });
   });
 
   it("status: read-only — never opens the card or confirms a candidate", async () => {

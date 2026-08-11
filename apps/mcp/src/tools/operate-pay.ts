@@ -203,6 +203,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     const paymentLease = paymentClaim.lease;
     let paymentLeaseCompleted = false;
     let paymentFieldsCleared = true;
+    let approvalPending: PendingApprovalWait | null = paymentClaim.resumeApproval ?? null;
     try {
       const browser = await activeProvisionBrowserForPayment();
       if (await browser.isPayPalHostedCheckout()) {
@@ -250,7 +251,6 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       }
       let resolvedCardRef: string | null = null;
       let filledPending: PendingCardFill | null = null;
-      let approvalPending: PendingApprovalWait | null = null;
       // Split checkouts (Rakuten-style) show no total on the card-entry page
       // itself. executeOperatePay's own live read is tried first regardless;
       // this is only its fallback when that read specifically finds no total.
@@ -261,7 +261,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         cartFallbackOrigin = null;
       }
       const cartFallbackCheckout =
-        args.phase === "fill_card" && cartFallbackOrigin !== null
+        cartFallbackOrigin !== null
           ? (activeCartCheckoutForOrigin(cartFallbackOrigin) ?? undefined)
           : undefined;
       const result = await executeOperatePay(
@@ -336,6 +336,12 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         recordActivePaymentProvenance(resolvedCardRef);
       }
       return result;
+    } catch (error) {
+      if (approvalPending !== null) {
+        completeActivePaymentLeaseWithPendingApproval(paymentLease, approvalPending);
+        paymentLeaseCompleted = true;
+      }
+      throw error;
     } finally {
       if (!paymentLeaseCompleted) {
         releaseActivePaymentLease(paymentLease, paymentFieldsCleared);
@@ -433,7 +439,7 @@ export const operatePaymentStatusTool: Tool = {
 };
 
 const paymentAwaitInputSchema = z.object({
-  max_wait_seconds: z.number().int().min(1).max(60).optional(),
+  max_wait_seconds: z.number().int().min(1).max(15).optional(),
 });
 
 export const operatePaymentAwaitTool: Tool<z.infer<typeof paymentAwaitInputSchema>> = {
@@ -451,8 +457,8 @@ export const operatePaymentAwaitTool: Tool<z.infer<typeof paymentAwaitInputSchem
       max_wait_seconds: {
         type: "integer",
         minimum: 1,
-        maximum: 60,
-        description: "Upper bound on this call's wait. Defaults to 15s; clamped to [1, 60].",
+        maximum: 15,
+        description: "Upper bound on this call's wait. Defaults to 15s; clamped to [1, 15].",
       },
     },
   },
@@ -461,7 +467,7 @@ export const operatePaymentAwaitTool: Tool<z.infer<typeof paymentAwaitInputSchem
     assertApi(api);
     const state = getActivePendingApproval();
     if (state === null) return noPendingPaymentResult();
-    const boundMs = Math.min(Math.max((args.max_wait_seconds ?? 15) * 1000, 1_000), 60_000);
+    const boundMs = Math.min(Math.max((args.max_wait_seconds ?? 15) * 1000, 1_000), 15_000);
     return await readApprovalStatus(api, state, true, boundMs);
   },
 };

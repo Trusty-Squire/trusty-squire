@@ -6,6 +6,7 @@ import { ApiClient } from "../../api-client.js";
 import {
   executeOperatePay,
   executeOperatePayConfirm,
+  type CartCheckoutObservation,
   type PaymentBrowser,
   type PendingApprovalWait,
   type PendingCardFill,
@@ -763,6 +764,9 @@ async function runJit(cfg: {
   const agent = "jit-agent";
   let clock = 0;
   let summaryReads = 0;
+  const serverExpiresAt = new Date(
+    (cfg.cardRefArg === undefined ? cfg.jitApprovalTimeoutMs : cfg.approvalTimeoutMs) ?? 8.64e15,
+  ).toISOString();
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -772,7 +776,7 @@ async function runJit(cfg: {
     if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
       approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return Response.json(
-        { id: "appr_jit", nonce, agent, expires_at: new Date(8.64e15).toISOString() },
+        { id: "appr_jit", nonce, agent, expires_at: serverExpiresAt },
         { status: 201 },
       );
     }
@@ -800,7 +804,7 @@ async function runJit(cfg: {
           operator_pubkey: operatorPubkey,
           jws,
           sealed_card,
-          expires_at: new Date(8.64e15).toISOString(),
+          expires_at: serverExpiresAt,
         });
       }
       return Response.json({
@@ -812,7 +816,7 @@ async function runJit(cfg: {
         operator_pubkey: operatorPubkey,
         jws: null,
         sealed_card: null,
-        expires_at: new Date(8.64e15).toISOString(),
+        expires_at: serverExpiresAt,
       });
     }
     if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
@@ -1225,7 +1229,13 @@ async function runSplitFill(
   });
 
   const cartFallbackCheckout =
-    cfg.cartFallbackCheckout === null ? undefined : (cfg.cartFallbackCheckout ?? SPLIT_CHECKOUT);
+    cfg.cartFallbackCheckout === null
+      ? undefined
+      : ({
+          checkout: cfg.cartFallbackCheckout ?? SPLIT_CHECKOUT,
+          url: `${SPLIT_CHECKOUT.checkout_origin}/cart`,
+          observedAt: 1,
+        } satisfies CartCheckoutObservation);
   const result = (await executeOperatePay(
     {
       card_ref: "card_split",
@@ -1643,6 +1653,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   fetch: typeof fetch;
   approvalBodies: Array<Record<string, unknown>>;
   filledCards: CheckoutCard[];
+  expiresAt: string;
   setApproved: () => void;
 } {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -1651,6 +1662,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   const filledCards: CheckoutCard[] = [];
   const nonce = "resume-nonce";
   const agent = "resume-agent";
+  const expiresAt = new Date(Date.now() + 600_000).toISOString();
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -1661,7 +1673,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
       approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return Response.json(
-        { id: "appr_resume", nonce, agent, expires_at: new Date(Date.now() + 600_000).toISOString() },
+        { id: "appr_resume", nonce, agent, expires_at: expiresAt },
         { status: 201 },
       );
     }
@@ -1682,7 +1694,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
           operator_pubkey: operatorPublicKey,
           jws: null,
           sealed_card: null,
-          expires_at: new Date(Date.now() + 600_000).toISOString(),
+          expires_at: expiresAt,
         });
       }
       const recipientHash = createHash("sha256")
@@ -1726,7 +1738,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
         operator_pubkey: operatorPublicKey,
         jws,
         sealed_card,
-        expires_at: new Date(Date.now() + 600_000).toISOString(),
+        expires_at: expiresAt,
       });
     }
     if (url.endsWith("/v1/pay/approvals/appr_resume/confirm") && init?.method === "POST") {
@@ -1766,6 +1778,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     fetch: fetchMock,
     approvalBodies,
     filledCards,
+    expiresAt,
     setApproved: () => {
       approved = true;
     },
@@ -1810,10 +1823,11 @@ describe("operate_pay non-blocking approval [P0]", () => {
       next: { tool: "operate_payment_await", max_wait_seconds: 15 },
     });
     expect(result.approval_url).toContain("appr_resume");
-    expect(result.expires_at).toEqual(expect.any(String));
+    expect(result.expires_at).toBe(env.expiresAt);
     // Never blocked on a real wait — one live check, then hand back.
     expect(sleepCalls).toEqual([]);
     expect(pendingStates).toHaveLength(1);
+    expect(pendingStates[0]?.deadline).toBe(Date.parse(env.expiresAt));
     expect(env.approvalBodies).toHaveLength(1);
   });
 
@@ -1864,6 +1878,45 @@ describe("operate_pay non-blocking approval [P0]", () => {
     expect(env.approvalBodies).toHaveLength(1);
   });
 
+  it("refuses a resumed single-page payment when the live checkout drifted", async () => {
+    const env = buildResumableEnv();
+    let captured: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        captured = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (captured === null) throw new Error("expected resumable state");
+    env.setApproved();
+    vi.mocked(env.browser.readCheckoutSummary).mockResolvedValue({
+      ...CHECKOUT,
+      amount_cents: CHECKOUT.amount_cents + 1,
+    });
+
+    await expect(
+      executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        resumeFrom: captured,
+        pollBudgetMs: 0,
+      }),
+    ).resolves.toMatchObject({
+      status: "payment_amount_mismatch",
+      mandate_amount_cents: CHECKOUT.amount_cents,
+      live_amount_cents: CHECKOUT.amount_cents + 1,
+    });
+    expect(env.filledCards).toHaveLength(0);
+  });
+
   it("bounds the wait to pollBudgetMs, never the full approval deadline", async () => {
     const env = buildResumableEnv();
     let clock = 0;
@@ -1886,7 +1939,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
 
     expect(result.status).toBe("approval_pending");
     // pollIntervalMs defaults to 3000ms — a 10s budget polls a handful of
-    // times then gives up, nowhere near the 5-minute has-card deadline.
+    // times then gives up, nowhere near the server approval deadline.
     expect(sleepCalls.length).toBeGreaterThan(0);
     expect(sleepCalls.every((ms) => ms === 3_000)).toBe(true);
     expect(clock).toBeLessThan(13_000);

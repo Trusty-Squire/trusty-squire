@@ -4197,9 +4197,11 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     };
     await observe(started.session_id, "compact");
 
-    expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toEqual(
-      h.checkoutSummary,
-    );
+    expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toEqual({
+      checkout: h.checkoutSummary,
+      url: "https://cart.step.rakuten.co.jp/cart",
+      observedAt: expect.any(Number),
+    });
   });
 
   it("never serves a cached total to a DIFFERENT origin", async () => {
@@ -4235,10 +4237,14 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     await observe(started.session_id, "compact");
 
     expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toEqual({
-      merchant: "Rakuten",
-      checkout_origin: "https://cart.step.rakuten.co.jp",
-      amount_cents: 2_904,
-      currency: "JPY",
+      checkout: {
+        merchant: "Rakuten",
+        checkout_origin: "https://cart.step.rakuten.co.jp",
+        amount_cents: 2_904,
+        currency: "JPY",
+      },
+      url: "https://cart.step.rakuten.co.jp/cart",
+      observedAt: expect.any(Number),
     });
   });
 
@@ -4262,7 +4268,8 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     await observe(started.session_id, "compact");
 
     expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toMatchObject({
-      amount_cents: 3_872,
+      checkout: { amount_cents: 3_872 },
+      url: "https://cart.step.rakuten.co.jp/cart",
     });
   });
 

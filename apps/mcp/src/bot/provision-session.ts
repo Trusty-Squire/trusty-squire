@@ -29,7 +29,11 @@ import {
   type InteractiveElement,
   type PageTargetSafetySignals,
 } from "./browser.js";
-import type { PendingApprovalWait, PendingCardFill } from "./pay-operator.js";
+import type {
+  CartCheckoutObservation,
+  PendingApprovalWait,
+  PendingCardFill,
+} from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
@@ -471,7 +475,7 @@ interface Session {
   // card-entry page has no readable total of its own, and only when the
   // origin still matches. Replaced (never accumulated) on each successful
   // observe of a page with a parseable total; never a caller-supplied value.
-  lastCartCheckout: { checkout: CheckoutSummary; observedAt: number } | null;
+  lastCartCheckout: CartCheckoutObservation | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -2656,9 +2660,9 @@ export function recordActivePaymentProvenance(cardRef: string): void {
 // operate_pay {phase:"fill_card"} fallback source (see Session.lastCartCheckout):
 // the most recent real total this SAME session actually read off a page,
 // returned only when it still matches the given (current, live) origin.
-export function activeCartCheckoutForOrigin(origin: string): CheckoutSummary | null {
+export function activeCartCheckoutForOrigin(origin: string): CartCheckoutObservation | null {
   const cached = activeProvisionSession().lastCartCheckout;
-  return cached !== null && cached.checkout.checkout_origin === origin ? cached.checkout : null;
+  return cached !== null && cached.checkout.checkout_origin === origin ? cached : null;
 }
 
 // PR3c — the user's own email captured at login (the authoritative signup
@@ -3201,7 +3205,7 @@ async function captureCartCheckoutForFillCardFallback(
   try {
     const checkout = await session.browser.readCheckoutSummary();
     if (checkout.checkout_origin === origin) {
-      session.lastCartCheckout = { checkout, observedAt: Date.now() };
+      session.lastCartCheckout = { checkout, url, observedAt: Date.now() };
     }
   } catch {
     // No readable total on this page — leave any previously cached total alone.
