@@ -5,7 +5,7 @@ import { z } from "zod";
 import type { ApiClient } from "../api-client.js";
 import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
 import { PaymentCardFillCleanupError, UnrecognizedPaymentFrameError } from "./browser.js";
-import { generateOperatorKeypair, openSealed } from "./payment-hpke.js";
+import { generateOperatorKeypair, openSealed, type OperatorKeypair } from "./payment-hpke.js";
 
 export interface OperatePayArgs {
   merchant?: string;
@@ -53,6 +53,32 @@ export interface PendingCardFill {
   mandate_id?: string;
 }
 
+// Non-blocking approval [P0]: everything a LATER operate_pay call needs to
+// resume waiting for the SAME approval instead of minting a duplicate one.
+// Held by the session layer only (never the model) — it carries the operator
+// keypair's PRIVATE half, which is what makes idempotent re-initiation safe:
+// the sealed card was HPKE-encrypted to this exact keypair at creation time,
+// so a resumed poll must reuse it verbatim rather than generating a fresh one.
+export interface PendingApprovalWait {
+  approval_id: string;
+  approval_url: string;
+  nonce: string;
+  agent: string;
+  checkout: CheckoutSummary;
+  jit: boolean;
+  boundCardRef: string | null;
+  // Absolute epoch ms — the OVERALL approval deadline, fixed at creation and
+  // never extended on resume.
+  deadline: number;
+  rejectedCandidates: string[];
+  keypair: OperatorKeypair;
+  item: string;
+  reason: string;
+  cardRef?: string;
+  phase?: "fill_card";
+  three_ds_wait_seconds?: number;
+}
+
 interface PayDependencies {
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
@@ -80,6 +106,23 @@ interface PayDependencies {
   // the approval still binds to a real, browser-read amount, never a
   // caller-supplied one.
   cartFallbackCheckout?: CheckoutSummary;
+  // [P0] Resume a previously-created, still-pending approval instead of
+  // minting a new one. Set by the MCP tool layer from session state when a
+  // prior call on this checkout already returned approval_pending. When
+  // present, args' merchant/amount/currency/card_ref/item/reason/phase are
+  // IGNORED in favor of the resumed values — a later call can never mutate
+  // the terms of an approval already presented to the human for signing.
+  resumeFrom?: PendingApprovalWait;
+  // [P0] How long (ms, from this call's start) THIS invocation will actively
+  // poll for approval before giving up and returning approval_pending,
+  // bounded by the overall approval deadline. Undefined = the legacy
+  // behavior of waiting for the full approval/JIT timeout (used by direct
+  // executeOperatePay callers, e.g. unit tests). The MCP tool layer passes a
+  // short bound (0) so operate_pay never blocks the RPC waiting on a human.
+  pollBudgetMs?: number;
+  // [P0] Fired when a call ends still-pending (poll budget exhausted, human
+  // hasn't responded yet) so the session layer can persist resumable state.
+  onApprovalPending: (state: PendingApprovalWait) => void;
 }
 
 const cardSchema = z.object({
@@ -250,6 +293,30 @@ function cardRequiredResult(
   };
 }
 
+// [P1] A bare payment_checkout_total_not_found left the host with no next
+// step (friction audit finding). Name the exact safe action instead — go
+// observe the page that shows the payable total — never a bare error string.
+// This never substitutes a fallback amount itself; it only fires when no
+// fallback was usable, so it changes the ERROR SHAPE, not what gets approved.
+function needsCartTotalResult(phase: "fill_card" | undefined): Record<string, unknown> {
+  return {
+    status: "needs_cart_total",
+    reason: "checkout_total_not_on_page",
+    next: {
+      tool: "operate_observe",
+      hint:
+        phase === "fill_card"
+          ? "No cart total has been observed yet this session for this checkout's origin. " +
+            "Navigate to the cart or order-summary page that shows the payable total, call " +
+            'operate_observe there, then retry operate_pay with phase="fill_card".'
+          : "This checkout page has no readable total. If this is a split checkout (a separate " +
+            "card-entry step whose total was shown earlier, e.g. on the cart page), retry with " +
+            'phase="fill_card" after observing that total. Otherwise navigate to the page that ' +
+            "shows the payable total and observe it first.",
+    },
+  };
+}
+
 function defaultDependencies(): PayDependencies {
   return {
     fetch,
@@ -270,6 +337,7 @@ function defaultDependencies(): PayDependencies {
     onCardFilled: () => undefined,
     onCardFillCleanupFailed: () => undefined,
     onSubmitStarted: () => undefined,
+    onApprovalPending: () => undefined,
   };
 }
 
@@ -298,8 +366,14 @@ export async function executeOperatePay(
   overrides: Partial<PayDependencies> = {},
 ): Promise<Record<string, unknown>> {
   const deps = { ...defaultDependencies(), ...overrides };
-  const threeDsWaitMs = Math.min(Math.max(args.three_ds_wait_seconds ?? 180, 0), 600) * 1000;
-  let keypair = await generateOperatorKeypair();
+  const resume = deps.resumeFrom;
+  const threeDsWaitSeconds = resume !== undefined ? resume.three_ds_wait_seconds : args.three_ds_wait_seconds;
+  const threeDsWaitMs = Math.min(Math.max(threeDsWaitSeconds ?? 180, 0), 600) * 1000;
+  let keypair = resume !== undefined ? resume.keypair : await generateOperatorKeypair();
+  // [P0] Set right before handing `keypair` off to onApprovalPending so the
+  // outer finally skips zeroing it — the SAME object is what a later resumed
+  // call will decrypt the sealed card with.
+  let keypairHandedOff = false;
   let cardBytes: Uint8Array | undefined;
   let card: CheckoutCard | undefined;
 
@@ -318,76 +392,123 @@ export async function executeOperatePay(
     }
 
     let checkout: CheckoutSummary;
-    try {
-      checkout = await browser.readCheckoutSummary(args.currency);
-    } catch (error) {
-      if (error instanceof Error && error.message === "payment_checkout_currency_unresolved") {
-        return {
-          status: "payment_checkout_currency_unresolved",
-          reason: "checkout_currency_unrecognized",
-        };
-      }
-      if (
-        error instanceof Error &&
-        error.message === "payment_checkout_currency_unresolved_scale_mismatch"
-      ) {
-        // A page amount with fractional precision cannot be relabelled using an
-        // agent hint for a zero- (or lower-) precision currency. Unlike a
-        // missing total, this is an observed contradiction, so never mint an
-        // approval from agent-supplied values.
-        return {
-          status: "payment_checkout_currency_unresolved",
-          reason: "fallback_currency_scale_mismatch",
-        };
-      }
-      if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
-        // Rakuten-style split checkouts show no total on the card-entry page
-        // itself. Only for fill_card, fall back to the most recent total this
-        // SAME session actually read from a real page (the cart step) — never
-        // an agent-supplied amount. Any other reader failure above still fails.
-        if (args.phase === "fill_card" && deps.cartFallbackCheckout !== undefined) {
-          checkout = deps.cartFallbackCheckout;
-        } else {
-          return { status: "payment_checkout_total_not_found" };
+    let item: string;
+    let reason: string;
+    let jit: boolean;
+    let approvalId: string;
+    let nonce: string;
+    let agent: string;
+    let approvalUrl: string;
+    let deadline: number;
+    let boundCardRef: string | null;
+    const cardRefArg = resume !== undefined ? resume.cardRef : args.card_ref;
+    const phaseArg = resume !== undefined ? resume.phase : args.phase;
+
+    if (resume !== undefined) {
+      checkout = resume.checkout;
+      item = resume.item;
+      reason = resume.reason;
+      jit = resume.jit;
+      approvalId = resume.approval_id;
+      nonce = resume.nonce;
+      agent = resume.agent;
+      approvalUrl = resume.approval_url;
+      deadline = resume.deadline;
+      boundCardRef = resume.boundCardRef;
+      await deps.surfaceApprovalUrl(approvalUrl);
+    } else {
+      try {
+        checkout = await browser.readCheckoutSummary(args.currency);
+      } catch (error) {
+        if (error instanceof Error && error.message === "payment_checkout_currency_unresolved") {
+          return {
+            status: "payment_checkout_currency_unresolved",
+            reason: "checkout_currency_unrecognized",
+          };
         }
-      } else {
-        throw error;
+        if (
+          error instanceof Error &&
+          error.message === "payment_checkout_currency_unresolved_scale_mismatch"
+        ) {
+          // A page amount with fractional precision cannot be relabelled using an
+          // agent hint for a zero- (or lower-) precision currency. Unlike a
+          // missing total, this is an observed contradiction, so never mint an
+          // approval from agent-supplied values.
+          return {
+            status: "payment_checkout_currency_unresolved",
+            reason: "fallback_currency_scale_mismatch",
+          };
+        }
+        if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
+          // Rakuten-style split checkouts show no total on the card-entry page
+          // itself. Only for fill_card, fall back to the most recent total this
+          // SAME session actually read from a real page (the cart step) — never
+          // an agent-supplied amount. Any other reader failure above still fails.
+          if (args.phase === "fill_card" && deps.cartFallbackCheckout !== undefined) {
+            checkout = deps.cartFallbackCheckout;
+          } else {
+            return needsCartTotalResult(args.phase);
+          }
+        } else {
+          throw error;
+        }
       }
+
+      item = args.item;
+      reason = args.reason;
+      // JIT add-card ceremony: no card on file, so mint the approval card-less
+      // and read the SERVER-BOUND card_ref back on resume. The has-card path
+      // (args.card_ref present) is entirely untouched by this flag.
+      jit = args.card_ref === undefined;
+
+      const created = await api.createPaymentApproval({
+        ...checkout,
+        ...(args.card_ref !== undefined ? { card_ref: args.card_ref } : {}),
+        operator_pubkey: keypair.publicKey,
+        item,
+        reason,
+      });
+      approvalId = created.id;
+      nonce = created.nonce;
+      agent = created.agent;
+      approvalUrl = `${deps.webBase.replace(/\/+$/, "")}/vault/pay/${encodeURIComponent(created.id)}`;
+      await deps.surfaceApprovalUrl(approvalUrl);
+
+      // A JIT ceremony (first-time card form + passkey) needs a longer wait than
+      // a tap-to-approve on a card already on file. Both are still bounded by the
+      // server-issued approval TTL (expires_at) below.
+      const waitBudgetMs = jit ? deps.jitApprovalTimeoutMs : deps.approvalTimeoutMs;
+      deadline = Math.min(
+        deps.now() + waitBudgetMs,
+        Number.isFinite(Date.parse(created.expires_at))
+          ? Date.parse(created.expires_at)
+          : Number.POSITIVE_INFINITY,
+      );
+      boundCardRef = args.card_ref ?? null;
     }
 
-    const item = args.item;
-    const reason = args.reason;
-    // JIT add-card ceremony: no card on file, so mint the approval card-less
-    // and read the SERVER-BOUND card_ref back on resume. The has-card path
-    // (args.card_ref present) is entirely untouched by this flag.
-    const jit = args.card_ref === undefined;
-
-    const created = await api.createPaymentApproval({
-      ...checkout,
-      ...(args.card_ref !== undefined ? { card_ref: args.card_ref } : {}),
-      operator_pubkey: keypair.publicKey,
-      item,
-      reason,
-    });
-    const approvalUrl = `${deps.webBase.replace(/\/+$/, "")}/vault/pay/${encodeURIComponent(created.id)}`;
-    await deps.surfaceApprovalUrl(approvalUrl);
-
-    // A JIT ceremony (first-time card form + passkey) needs a longer wait than
-    // a tap-to-approve on a card already on file. Both are still bounded by the
-    // server-issued approval TTL (expires_at) below.
-    const waitBudgetMs = jit ? deps.jitApprovalTimeoutMs : deps.approvalTimeoutMs;
-    const deadline = Math.min(
-      deps.now() + waitBudgetMs,
-      Number.isFinite(Date.parse(created.expires_at))
-        ? Date.parse(created.expires_at)
-        : Number.POSITIVE_INFINITY,
-    );
+    // [P0] This call's own wait budget, bounded by the overall approval
+    // deadline. Undefined pollBudgetMs (direct executeOperatePay callers) =
+    // no additional bound, i.e. the legacy full-deadline blocking behavior.
+    const callDeadline =
+      deps.pollBudgetMs === undefined ? deadline : Math.min(deadline, deps.now() + deps.pollBudgetMs);
+    // True once this call's (not the overall) budget is exhausted with no
+    // resolution — distinguishes "still pending, ask again" from "expired".
+    let budgetExhausted = false;
+    const shouldKeepPolling = (): boolean => {
+      const now = deps.now();
+      if (now >= deadline) return false;
+      if (now >= callDeadline) {
+        budgetExhausted = true;
+        return false;
+      }
+      return true;
+    };
 
     // In the JIT branch, the approval starts card-less; the card is bound
     // server-side mid-ceremony. Track the latest binding so a timeout/expiry
     // can distinguish "no card was ever added" (card_required) from "card was
     // stored but never approved" (payment_approval_timeout, card persists).
-    let boundCardRef: string | null = args.card_ref ?? null;
     const timeoutResult = (): Record<string, unknown> => {
       if (jit && !hasBoundCard(boundCardRef)) {
         return cardRequiredResult(
@@ -410,9 +531,22 @@ export async function executeOperatePay(
 
     let approved: { jws: string; sealed_card: string; card_ref: string | null } | undefined;
     let claims: JWTPayload | undefined;
-    const rejectedCandidates = new Set<string>();
-    while (deps.now() < deadline) {
-      const approval = await api.getPaymentApproval(created.id, true);
+    const rejectedCandidates = new Set<string>(resume?.rejectedCandidates ?? []);
+    // Always runs at least once — a fresh call must make one live check
+    // before ever reporting pending, and a resumed call with a zero poll
+    // budget must too. Two things gate every re-entry to the top: (1) right
+    // before each sleep, shouldKeepPolling() skips the sleep entirely when
+    // the budget is already exhausted, so a not-yet-resolved call never
+    // blocks on a real wait before returning; (2) the iteration>0 check
+    // here re-validates AFTER that sleep (real time — or a mocked clock —
+    // may have advanced past the deadline during it) so the loop never
+    // spends one more live poll call past the budget it just decided to
+    // respect.
+    let iteration = 0;
+    while (true) {
+      if (iteration > 0 && !shouldKeepPolling()) break;
+      iteration++;
+      const approval = await api.getPaymentApproval(approvalId, true);
       boundCardRef = approval.card_ref;
       if (approval.status === "expired") {
         return timeoutResult();
@@ -437,7 +571,7 @@ export async function executeOperatePay(
           .digest("base64url");
         if (!rejectedCandidates.has(candidateKey)) {
           rejectedCandidates.add(candidateKey);
-          const cardRef = args.card_ref ?? candidate.card_ref;
+          const cardRef = cardRefArg ?? candidate.card_ref;
           if (!hasBoundCard(cardRef)) {
             if (approval.status === "approved") {
               return {
@@ -450,17 +584,17 @@ export async function executeOperatePay(
             const publicKeyBytes = fromBase64Url(keypair.publicKey);
             const recipientHash = createHash("sha256").update(publicKeyBytes).digest();
             const canonical = canonicalize({
-              approval_id: created.id,
+              approval_id: approvalId,
               merchant: checkout.merchant,
               checkout_origin: checkout.checkout_origin,
               amount_cents: checkout.amount_cents,
               currency: checkout.currency,
-              nonce: created.nonce,
+              nonce,
               card_ref: cardRef,
               recipient_pubkey_hash: toBase64Url(recipientHash),
               item,
               reason,
-              agent: created.agent,
+              agent,
             });
             if (canonical === undefined) {
               if (approval.status === "approved") {
@@ -475,7 +609,7 @@ export async function executeOperatePay(
                 createHash("sha256").update(canonical, "utf8").digest(),
               );
               const reviewCanonical = canonicalize({
-                approval_id: created.id,
+                approval_id: approvalId,
                 approval_payload_sha256: toBase64Url(approvalAad),
                 card_ref: cardRef,
                 recipient_pubkey_hash: toBase64Url(recipientHash),
@@ -515,7 +649,7 @@ export async function executeOperatePay(
                 if (reviewCandidate) {
                   logPaymentReviewLifecycle({
                     event: "review_candidate_rejected",
-                    approval_id: created.id,
+                    approval_id: approvalId,
                     candidate_fingerprint: candidateKey,
                     failure_code: failureReason,
                   });
@@ -561,7 +695,7 @@ export async function executeOperatePay(
                   if (reviewCandidate) {
                     logPaymentReviewLifecycle({
                       event: "review_candidate_rejected",
-                      approval_id: created.id,
+                      approval_id: approvalId,
                       candidate_fingerprint: candidateKey,
                       failure_code: "card_open_failed",
                     });
@@ -578,7 +712,7 @@ export async function executeOperatePay(
                 if (candidateCardBytes !== undefined && candidateCard !== undefined) {
                   if (reviewCandidate) {
                     try {
-                      const confirmation = await api.confirmPaymentApproval(created.id, candidate);
+                      const confirmation = await api.confirmPaymentApproval(approvalId, candidate);
                       if (confirmation.status !== "verified") {
                         throw new Error("review_confirmation_failed");
                       }
@@ -590,7 +724,7 @@ export async function executeOperatePay(
                           : "confirm_failed";
                       logPaymentReviewLifecycle({
                         event: "review_candidate_rejected",
-                        approval_id: created.id,
+                        approval_id: approvalId,
                         candidate_fingerprint: candidateKey,
                         failure_code: reason,
                       });
@@ -602,21 +736,22 @@ export async function executeOperatePay(
                     }
                     logPaymentReviewLifecycle({
                       event: "review_candidate_verified",
-                      approval_id: created.id,
+                      approval_id: approvalId,
                       candidate_fingerprint: candidateKey,
                       failure_code: "ok",
                     });
                     candidateCardBytes.fill(0);
+                    if (!shouldKeepPolling()) break;
                     await deps.sleep(deps.pollIntervalMs);
                     continue;
                   }
                   if (approval.status === "pending") {
                     try {
-                      await api.confirmPaymentApproval(created.id, candidate);
+                      await api.confirmPaymentApproval(approvalId, candidate);
                     } catch (error) {
                       try {
                         const reconciliation = await api.confirmPaymentApproval(
-                          created.id,
+                          approvalId,
                           candidate,
                         );
                         if (reconciliation.status !== "approved") throw error;
@@ -637,12 +772,45 @@ export async function executeOperatePay(
           }
         }
       }
+      if (!shouldKeepPolling()) break;
       await deps.sleep(deps.pollIntervalMs);
     }
     if (approved === undefined) {
+      if (budgetExhausted) {
+        const state: PendingApprovalWait = {
+          approval_id: approvalId,
+          approval_url: approvalUrl,
+          nonce,
+          agent,
+          checkout,
+          jit,
+          boundCardRef,
+          deadline,
+          rejectedCandidates: [...rejectedCandidates],
+          keypair,
+          item,
+          reason,
+          ...(cardRefArg !== undefined ? { cardRef: cardRefArg } : {}),
+          ...(phaseArg === "fill_card" ? { phase: "fill_card" as const } : {}),
+          ...(threeDsWaitSeconds !== undefined ? { three_ds_wait_seconds: threeDsWaitSeconds } : {}),
+        };
+        keypairHandedOff = true;
+        deps.onApprovalPending(state);
+        return {
+          status: "approval_pending",
+          approval_id: approvalId,
+          approval_url: approvalUrl,
+          expires_at: new Date(deadline).toISOString(),
+          phase: phaseArg ?? null,
+          approved_amount_cents: checkout.amount_cents,
+          currency: checkout.currency,
+          merchant: checkout.merchant,
+          next: { tool: "operate_payment_await", max_wait_seconds: 15 },
+        };
+      }
       if (jit) {
         try {
-          const final = await api.getPaymentApproval(created.id);
+          const final = await api.getPaymentApproval(approvalId);
           boundCardRef = final.card_ref;
         } catch {}
       }
@@ -651,7 +819,7 @@ export async function executeOperatePay(
 
     if (claims === undefined || card === undefined) return timeoutResult();
 
-    const cardRef = args.card_ref ?? approved.card_ref;
+    const cardRef = cardRefArg ?? approved.card_ref;
     if (!hasBoundCard(cardRef)) {
       return {
         status: "payment_mandate_rejected",
@@ -670,6 +838,40 @@ export async function executeOperatePay(
           : typeof claims.jti === "string"
             ? claims.jti
             : undefined;
+    // [#13][P1] JIT nearly doubles the window between reading the checkout and
+    // filling it, so a mid-ceremony navigation could swap the merchant, origin,
+    // or total out from under the signed mandate. Re-read the live checkout
+    // immediately before filling (smallest possible time-of-check→time-of-use
+    // gap) and refuse if ANY signed field the mandate binds — merchant, origin,
+    // amount, currency — drifted. The card was opened above but is never
+    // submitted on a mismatch; the outer finally zeroes it. The has-card path
+    // (jit === false) skips this entirely — its behavior is unchanged.
+    if (jit) {
+      let live: CheckoutSummary | undefined;
+      try {
+        live = await browser.readCheckoutSummary(args.currency);
+      } catch {
+        live = undefined;
+      }
+      if (!checkoutSummaryMatches(checkout, live)) {
+        return {
+          status: "payment_amount_mismatch",
+          approval_url: approvalUrl,
+          merchant: checkout.merchant,
+          mandate_amount_cents: checkout.amount_cents,
+          mandate_currency: checkout.currency,
+          ...(live !== undefined
+            ? {
+                live_amount_cents: live.amount_cents,
+                live_currency: live.currency,
+                live_merchant: live.merchant,
+                live_checkout_origin: live.checkout_origin,
+              }
+            : {}),
+        };
+      }
+    }
+
     // Split-checkout card entry (phase="fill_card"): the human approval above
     // is a SINGLE amount-bound approval (one passkey tap) that both releases
     // the card here and authorizes the eventual charge up to checkout's
@@ -677,7 +879,7 @@ export async function executeOperatePay(
     // second approval. The live check still needed here (the ceremony can
     // take minutes, and the fill targets the CURRENT page) is that the
     // browser remains on the origin the approval was signed for.
-    if (args.phase === "fill_card") {
+    if (phaseArg === "fill_card") {
       let liveOrigin: string | null;
       try {
         liveOrigin = new URL(browser.currentUrl()).origin;
@@ -735,7 +937,7 @@ export async function executeOperatePay(
         card = undefined;
       }
       deps.onCardFilled({
-        approval_id: created.id,
+        approval_id: approvalId,
         approval_url: approvalUrl,
         checkout,
         card_ref: cardRef,
@@ -756,40 +958,6 @@ export async function executeOperatePay(
           "here, with no further approval needed. A final total above the approved amount is " +
           "refused, never re-approved. Never click the pay/place-order control yourself.",
       };
-    }
-
-    // [#13][P1] JIT nearly doubles the window between reading the checkout and
-    // filling it, so a mid-ceremony navigation could swap the merchant, origin,
-    // or total out from under the signed mandate. Re-read the live checkout
-    // immediately before filling (smallest possible time-of-check→time-of-use
-    // gap) and refuse if ANY signed field the mandate binds — merchant, origin,
-    // amount, currency — drifted. The card was opened above but is never
-    // submitted on a mismatch; the outer finally zeroes it. The has-card path
-    // (jit === false) skips this entirely — its behavior is unchanged.
-    if (jit) {
-      let live: CheckoutSummary | undefined;
-      try {
-        live = await browser.readCheckoutSummary(args.currency);
-      } catch {
-        live = undefined;
-      }
-      if (!checkoutSummaryMatches(checkout, live)) {
-        return {
-          status: "payment_amount_mismatch",
-          approval_url: approvalUrl,
-          merchant: checkout.merchant,
-          mandate_amount_cents: checkout.amount_cents,
-          mandate_currency: checkout.currency,
-          ...(live !== undefined
-            ? {
-                live_amount_cents: live.amount_cents,
-                live_currency: live.currency,
-                live_merchant: live.merchant,
-                live_checkout_origin: live.checkout_origin,
-              }
-            : {}),
-        };
-      }
     }
 
     let paymentStatus = "payment_submitted";
@@ -826,7 +994,7 @@ export async function executeOperatePay(
     }
 
     if (submitResult.three_ds_required && threeDsWaitMs > 0) {
-      void api.notifyThreeDs(created.id).catch(() => undefined);
+      void api.notifyThreeDs(approvalId).catch(() => undefined);
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
       if (resolution === "succeeded") paymentStatus = "payment_submitted";
       if (resolution === "failed") paymentStatus = "payment_declined";
@@ -879,8 +1047,10 @@ export async function executeOperatePay(
     cardBytes?.fill(0);
     cardBytes = undefined;
     card = undefined;
-    keypair.privateKey = "";
-    keypair = { publicKey: "", privateKey: "" };
+    if (!keypairHandedOff) {
+      keypair.privateKey = "";
+      keypair = { publicKey: "", privateKey: "" };
+    }
   }
 }
 

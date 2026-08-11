@@ -453,7 +453,9 @@ import {
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
+  completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  getActivePendingApproval,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
   restoreActivePendingCardFillAfterConfirmThrow,
@@ -4098,6 +4100,87 @@ describe("pending card-fill charge guard", () => {
     clearActivePendingCardFill(true);
     await act(started.session_id, { kind: "click", target: "Place order" });
     expect(h.clickCalls).toBe(1);
+  });
+});
+
+// [P0] The non-blocking approval rest state: operate_pay no longer holds the
+// "operating" lease across a human's phone tap, so a new state exists for
+// "the human hasn't responded yet." A later call resumes it (idempotent —
+// never a duplicate approval) instead of throwing "already in progress".
+describe("awaiting-approval payment lease [P0]", () => {
+  const approvalState = {
+    approval_id: "appr_wait",
+    approval_url: "https://web.test/vault/pay/appr_wait",
+    nonce: "n",
+    agent: "a",
+    checkout: {
+      merchant: "Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 100,
+      currency: "USD",
+    },
+    jit: false,
+    boundCardRef: "card_wait",
+    deadline: Date.now() + 60_000,
+    rejectedCandidates: [],
+    keypair: { publicKey: "pub", privateKey: "priv" },
+    item: "Widget",
+    reason: "test",
+    cardRef: "card_wait",
+  };
+
+  it("transitions operating -> awaiting_approval, then resumes it on the next call", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay(undefined);
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+    expect(claim.resumeApproval).toBeUndefined();
+    expect(getActivePendingApproval()).toBeNull();
+
+    completeActivePaymentLeaseWithPendingApproval(claim.lease, approvalState);
+    expect(getActivePendingApproval()).toEqual(approvalState);
+
+    // A later call (re-initiation after the host's own timeout, or a retry)
+    // resumes the SAME approval instead of throwing "already in progress" —
+    // this is what makes idempotent re-initiation possible.
+    const resumed = claimActivePaymentForOperatePay(undefined);
+    expect(resumed).toMatchObject({ kind: "lease", resumeApproval: approvalState });
+  });
+
+  it('refuses phase="confirm" while still awaiting approval — no card has been filled yet', async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay("fill_card");
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+    completeActivePaymentLeaseWithPendingApproval(claim.lease, approvalState);
+
+    expect(claimActivePaymentForOperatePay("confirm")).toEqual({ kind: "missing_confirm" });
+  });
+
+  it("clears back to null once a resumed wait is released — no stale resume data survives", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const first = claimActivePaymentForOperatePay(undefined);
+    if (first.kind !== "lease") throw new Error("expected a fresh lease");
+    completeActivePaymentLeaseWithPendingApproval(first.lease, approvalState);
+
+    const resumed = claimActivePaymentForOperatePay(undefined);
+    if (resumed.kind !== "lease") throw new Error("expected a resumed lease");
+    expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
+    expect(getActivePendingApproval()).toBeNull();
+
+    const fresh = claimActivePaymentForOperatePay(undefined);
+    expect(fresh).toMatchObject({ kind: "lease" });
+    expect((fresh as { resumeApproval?: unknown }).resumeApproval).toBeUndefined();
+  });
+
+  it("serializes a resume attempt behind another in-flight call, same as a fresh lease", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay(undefined);
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+    completeActivePaymentLeaseWithPendingApproval(claim.lease, approvalState);
+
+    const resumed = claimActivePaymentForOperatePay(undefined);
+    if (resumed.kind !== "lease") throw new Error("expected a resumed lease");
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
+    expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
   });
 });
 

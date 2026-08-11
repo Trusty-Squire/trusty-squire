@@ -4,7 +4,9 @@ import {
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
+  completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  getActivePendingApproval,
   markActivePendingCardFillSubmitStarted,
   recordActivePaymentProvenance,
   releaseActivePaymentLease,
@@ -15,8 +17,10 @@ import {
 import {
   executeOperatePay,
   executeOperatePayConfirm,
+  type PendingApprovalWait,
   type PendingCardFill,
 } from "../bot/pay-operator.js";
+import type { ApiClient } from "../api-client.js";
 import { assertApi, type Tool } from "./index.js";
 
 const inputSchema = z
@@ -246,6 +250,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       }
       let resolvedCardRef: string | null = null;
       let filledPending: PendingCardFill | null = null;
+      let approvalPending: PendingApprovalWait | null = null;
       // Split checkouts (Rakuten-style) show no total on the card-entry page
       // itself. executeOperatePay's own live read is tried first regardless;
       // this is only its fallback when that read specifically finds no total.
@@ -294,7 +299,18 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             paymentFieldsCleared = false;
             retainActivePaymentFieldSeal();
           },
+          onApprovalPending: (state) => {
+            approvalPending = state;
+          },
           ...(cartFallbackCheckout !== undefined ? { cartFallbackCheckout } : {}),
+          ...(paymentClaim.resumeApproval !== undefined
+            ? { resumeFrom: paymentClaim.resumeApproval }
+            : {}),
+          // [P0] Never block the RPC waiting on the human — one live check,
+          // then hand back approval_pending. operate_payment_await/status (or
+          // simply calling operate_pay again, which resumes this SAME
+          // approval) is how the host finds out when the phone responds.
+          pollBudgetMs: 0,
         },
       );
       if (result.payment_fields_cleared === false) paymentFieldsCleared = false;
@@ -304,6 +320,13 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           throw new Error("operate_pay fill_card succeeded without pending-fill state");
         }
         completeActivePaymentLeaseWithPendingFill(paymentLease, filledPending);
+        paymentLeaseCompleted = true;
+      }
+      if (result.status === "approval_pending") {
+        if (approvalPending === null) {
+          throw new Error("operate_pay approval_pending returned without resumable state");
+        }
+        completeActivePaymentLeaseWithPendingApproval(paymentLease, approvalPending);
         paymentLeaseCompleted = true;
       }
       if (result.status === "payment_submitted" || result.status === "payment_3ds_required") {
@@ -318,5 +341,127 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         releaseActivePaymentLease(paymentLease, paymentFieldsCleared);
       }
     }
+  },
+};
+
+// [P0] Shared by operate_payment_status/await: maps the LIVE server record
+// (never the locally-cached approval terms) to a status the host can act on.
+// Never opens the sealed card or calls confirm — read-only, no side effects.
+// `boundMs`, when given, races the server call so this can never outlast the
+// caller's own bound even though the server's wait_for_submission window is
+// a fixed ~15s.
+async function readApprovalStatus(
+  api: ApiClient,
+  state: PendingApprovalWait,
+  waitForSubmission: boolean,
+  boundMs?: number,
+): Promise<Record<string, unknown>> {
+  const fetchApproval = api.getPaymentApproval(state.approval_id, waitForSubmission);
+  const approval =
+    boundMs === undefined
+      ? await fetchApproval
+      : await Promise.race([
+          fetchApproval,
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), boundMs)),
+        ]);
+  if (approval === null) {
+    return {
+      status: "pending",
+      approval_id: state.approval_id,
+      approval_url: state.approval_url,
+      phase: state.phase ?? null,
+      merchant: state.checkout.merchant,
+      amount_cents: state.checkout.amount_cents,
+      currency: state.checkout.currency,
+      candidate_submitted: false,
+      next: { tool: "operate_payment_await", max_wait_seconds: 15 },
+    };
+  }
+  const candidateSubmitted =
+    typeof approval.jws === "string" && typeof approval.sealed_card === "string";
+  const expired = approval.status === "expired";
+  return {
+    status: expired ? "expired" : approval.status,
+    approval_id: state.approval_id,
+    approval_url: state.approval_url,
+    expires_at: approval.expires_at,
+    phase: state.phase ?? null,
+    merchant: approval.merchant,
+    amount_cents: approval.amount_cents,
+    currency: approval.currency,
+    candidate_submitted: candidateSubmitted,
+    ...(expired
+      ? {}
+      : candidateSubmitted
+        ? {
+            next: {
+              tool: "operate_pay",
+              hint:
+                "The phone has responded. Call operate_pay again with the same arguments " +
+                '(including phase="fill_card" if that is how this payment was started) to ' +
+                "complete verification and release/charge — it resumes this SAME approval, " +
+                "never mints a new one.",
+            },
+          }
+        : { next: { tool: "operate_payment_await", max_wait_seconds: 15 } }),
+  };
+}
+
+function noPendingPaymentResult(): Record<string, unknown> {
+  return {
+    status: "no_pending_payment",
+    reason: "No operate_pay call in this session is currently awaiting approval.",
+  };
+}
+
+export const operatePaymentStatusTool: Tool = {
+  name: "operate_payment_status",
+  description:
+    "Read-only: report the status of the payment approval currently awaiting the human's phone " +
+    "tap, if any — started by the most recent operate_pay call that returned approval_pending. " +
+    "Never blocks, never verifies a mandate or opens a card. When the phone has responded " +
+    "(candidate_submitted:true), call operate_pay again to complete the payment.",
+  inputSchema: z.object({}),
+  jsonInputSchema: { type: "object", properties: {} },
+  annotations: { readOnlyHint: true },
+  async handler(_args, api) {
+    assertApi(api);
+    const state = getActivePendingApproval();
+    if (state === null) return noPendingPaymentResult();
+    return await readApprovalStatus(api, state, false);
+  },
+};
+
+const paymentAwaitInputSchema = z.object({
+  max_wait_seconds: z.number().int().min(1).max(60).optional(),
+});
+
+export const operatePaymentAwaitTool: Tool<z.infer<typeof paymentAwaitInputSchema>> = {
+  name: "operate_payment_await",
+  description:
+    "Bounded wait (never more than ~15s) for the payment approval currently awaiting the human's " +
+    "phone tap — started by the most recent operate_pay call that returned approval_pending. " +
+    "Returns pending, approved (candidate_submitted:true — call operate_pay again to complete), " +
+    "or expired. Never hangs for minutes; call it again (or operate_payment_status) if it comes " +
+    "back pending.",
+  inputSchema: paymentAwaitInputSchema,
+  jsonInputSchema: {
+    type: "object",
+    properties: {
+      max_wait_seconds: {
+        type: "integer",
+        minimum: 1,
+        maximum: 60,
+        description: "Upper bound on this call's wait. Defaults to 15s; clamped to [1, 60].",
+      },
+    },
+  },
+  annotations: { readOnlyHint: true },
+  async handler(args, api) {
+    assertApi(api);
+    const state = getActivePendingApproval();
+    if (state === null) return noPendingPaymentResult();
+    const boundMs = Math.min(Math.max((args.max_wait_seconds ?? 15) * 1000, 1_000), 60_000);
+    return await readApprovalStatus(api, state, true, boundMs);
   },
 };

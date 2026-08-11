@@ -29,7 +29,7 @@ import {
   type InteractiveElement,
   type PageTargetSafetySignals,
 } from "./browser.js";
-import type { PendingCardFill } from "./pay-operator.js";
+import type { PendingApprovalWait, PendingCardFill } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
@@ -451,8 +451,14 @@ interface Session {
   // pending -> confirming transition prevents duplicate confirmation, while
   // submitStarted forbids restoring retry state after a charge may have begun.
   // "sealed" survives unverified field cleanup and blocks later payments.
+  // [P0] "awaiting_approval" is a NEW rest state (not held during a call —
+  // operate_pay no longer blocks): the human hasn't tapped approve yet. A
+  // later operate_pay call for the same checkout resumes it (idempotent —
+  // never mints a second approval); operate_payment_status/await read it
+  // read-only.
   activePayment:
     | { status: "operating"; lease: ActivePaymentLease }
+    | { status: "awaiting_approval"; state: PendingApprovalWait }
     | { status: "pending"; pending: PendingCardFill }
     | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
     | { status: "sealed" }
@@ -2517,12 +2523,20 @@ export function getActivePendingCardFill(): PendingCardFill | null {
   return state?.status === "pending" ? state.pending : null;
 }
 
+// [P0] Read-only: the outstanding approval a prior operate_pay call left
+// waiting on the human, if any. Backs operate_payment_status/await — neither
+// tool touches session state, they just report on it.
+export function getActivePendingApproval(): PendingApprovalWait | null {
+  const state = activeProvisionSession().activePayment;
+  return state?.status === "awaiting_approval" ? state.state : null;
+}
+
 export interface ActivePaymentLease {
   phase: "fill_card" | "single";
 }
 
 export type ActivePaymentClaim =
-  | { kind: "lease"; lease: ActivePaymentLease }
+  | { kind: "lease"; lease: ActivePaymentLease; resumeApproval?: PendingApprovalWait }
   | { kind: "confirm"; pending: PendingCardFill }
   | { kind: "missing_confirm" };
 
@@ -2554,10 +2568,15 @@ export function claimActivePaymentForOperatePay(
     return { kind: "confirm", pending: state.pending };
   }
   if (phase === "confirm") return { kind: "missing_confirm" };
+  // [P0] Resuming an outstanding approval (status "awaiting_approval" — the
+  // human hasn't tapped approve yet) takes the SAME "operating" lease as a
+  // fresh call, just carrying the prior approval/keypair through so
+  // re-initiation polls the SAME approval instead of minting a duplicate one.
+  const resumeApproval = state?.status === "awaiting_approval" ? state.state : undefined;
   const lease: ActivePaymentLease = { phase: phase === "fill_card" ? "fill_card" : "single" };
   session.activePayment = { status: "operating", lease };
   if (lease.phase === "fill_card") session.paymentFieldSealActive = true;
-  return { kind: "lease", lease };
+  return resumeApproval !== undefined ? { kind: "lease", lease, resumeApproval } : { kind: "lease", lease };
 }
 
 export function completeActivePaymentLeaseWithPendingFill(
@@ -2573,6 +2592,24 @@ export function completeActivePaymentLeaseWithPendingFill(
   }
   session.activePayment = { status: "pending", pending };
   session.paymentFieldSealActive = true;
+}
+
+// [P0] Mirrors completeActivePaymentLeaseWithPendingFill for the
+// still-pending-approval outcome: the human hasn't responded yet, so this
+// call ends with no card filled — just a resumable wait, picked up by the
+// NEXT operate_pay call (idempotent) or read by operate_payment_status/await.
+export function completeActivePaymentLeaseWithPendingApproval(
+  lease: ActivePaymentLease,
+  state: PendingApprovalWait,
+): void {
+  const session = activeProvisionSession();
+  const current = session.activePayment;
+  if (current?.status !== "operating" || current.lease !== lease) {
+    throw new Error(
+      "operate_pay approval_pending completed without ownership of the active payment lease",
+    );
+  }
+  session.activePayment = { status: "awaiting_approval", state };
 }
 
 export function releaseActivePaymentLease(
