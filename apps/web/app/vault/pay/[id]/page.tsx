@@ -310,7 +310,8 @@ export default function PaymentApprovalPage() {
   // reads a page total, so amount_cents is always 0. Showing "$0.00" here
   // would misleadingly read as a free order; the real total is approved
   // separately, right before the charge.
-  const isReleaseOnly = approval !== null && approval.amount_cents === 0;
+  const isReleaseOnly =
+    approval !== null && approval.amount_cents === 0 && approval.currency === "XXX";
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
   const cardLine =

@@ -1349,6 +1349,7 @@ function splitPending(): PendingCardFill {
 async function runConfirm(cfg: {
   live?: CheckoutSummary | Error;
   permissiveLive?: CheckoutSummary | Error;
+  reapprovalStatus?: "approved" | "expired";
   submit?: CheckoutSubmitResult | Error;
   threeDsResolution?: "succeeded" | "failed" | "timeout";
   waitSeconds?: number;
@@ -1360,6 +1361,7 @@ async function runConfirm(cfg: {
   notifyCalls: string[];
   browser: PaymentBrowser;
   refreshedPendings: PendingCardFill[];
+  retryPending: PendingCardFill;
 }> {
   const auditBodies: unknown[] = [];
   const approvalBodies: Array<Record<string, unknown>> = [];
@@ -1395,6 +1397,22 @@ async function runConfirm(cfg: {
       init?.method === "GET"
     ) {
       const approval = approvalBodies[0]!;
+      if (cfg.reapprovalStatus === "expired") {
+        return Response.json({
+          id: "appr_reapproval",
+          status: "expired",
+          merchant: approval.merchant,
+          checkout_origin: approval.checkout_origin,
+          amount_cents: approval.amount_cents,
+          currency: approval.currency,
+          nonce,
+          card_ref: "card_split",
+          operator_pubkey: approval.operator_pubkey,
+          jws: null,
+          sealed_card: null,
+          expires_at: new Date(Date.now() - 1).toISOString(),
+        });
+      }
       const recipientHash = createHash("sha256")
         .update(Buffer.from(String(approval.operator_pubkey), "base64url"))
         .digest("base64url");
@@ -1489,8 +1507,9 @@ async function runConfirm(cfg: {
     fetch: fetchMock,
   });
 
+  let retryPending = splitPending();
   const result = (await executeOperatePayConfirm(
-    splitPending(),
+    retryPending,
     cfg.waitSeconds !== undefined ? { three_ds_wait_seconds: cfg.waitSeconds } : {},
     api,
     browser,
@@ -1502,11 +1521,20 @@ async function runConfirm(cfg: {
       webBase: "https://web.test",
       onCardFilled: (pending) => {
         refreshedPendings.push(pending);
+        retryPending = pending;
       },
     },
   )) as Record<string, unknown>;
 
-  return { result, auditBodies, approvalBodies, notifyCalls, browser, refreshedPendings };
+  return {
+    result,
+    auditBodies,
+    approvalBodies,
+    notifyCalls,
+    browser,
+    refreshedPendings,
+    retryPending,
+  };
 }
 
 describe("operate_pay split checkout — confirm", () => {
@@ -1593,6 +1621,28 @@ describe("operate_pay split checkout — confirm", () => {
         mandateId: "mandate_reapproval",
       }),
     ]);
+  });
+
+  it("fails closed and retains the pending fill when final-total approval expires", async () => {
+    const { result, browser, approvalBodies, refreshedPendings, retryPending } = await runConfirm({
+      reapprovalStatus: "expired",
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_approval_timeout",
+      amount_cents: SPLIT_CHECKOUT.amount_cents,
+      currency: SPLIT_CHECKOUT.currency,
+    });
+    expect(approvalBodies).toEqual([
+      expect.objectContaining({
+        amount_cents: SPLIT_CHECKOUT.amount_cents,
+        currency: SPLIT_CHECKOUT.currency,
+      }),
+    ]);
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
+    expect(refreshedPendings).toEqual([]);
+    expect(retryPending).toEqual(splitPending());
   });
 
   it("reapproves a low final total too, since the fill approval never covers any amount", async () => {
