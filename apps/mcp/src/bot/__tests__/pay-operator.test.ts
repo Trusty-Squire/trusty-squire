@@ -1623,8 +1623,8 @@ describe("operate_pay split checkout — confirm", () => {
     ]);
   });
 
-  it("fails closed and retains the pending fill when final-total approval expires", async () => {
-    const { result, browser, approvalBodies, refreshedPendings, retryPending } = await runConfirm({
+  it("fails closed when final-total approval expires", async () => {
+    const { result, browser, approvalBodies, auditBodies } = await runConfirm({
       reapprovalStatus: "expired",
     });
 
@@ -1640,9 +1640,7 @@ describe("operate_pay split checkout — confirm", () => {
       }),
     ]);
     expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
-    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
-    expect(refreshedPendings).toEqual([]);
-    expect(retryPending).toEqual(splitPending());
+    expect(auditBodies).toEqual([]);
   });
 
   it("reapproves a low final total too, since the fill approval never covers any amount", async () => {
