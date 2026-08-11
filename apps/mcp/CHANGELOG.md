@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.10 (2026-08-10)
+
+- fix(mcp): reapprove higher split-checkout totals — fill vaulted cards against subtotal-only Rakuten card-entry pages, then require a fresh approval when the authoritative final total exceeds the approved amount; harden approval leases and bind audits to the merchant (#479)
+
 ## 1.1.9-rc.9 (2026-08-10)
 
 - fix(mcp): safely resolve Japanese checkout totals (#477)
