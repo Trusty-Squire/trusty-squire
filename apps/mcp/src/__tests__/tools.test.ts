@@ -9,7 +9,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
 import type { CheckoutSummary } from "../bot/browser.js";
-import type { PaymentBrowser, PendingCardFill } from "../bot/pay-operator.js";
+import type {
+  CartCheckoutObservation,
+  PaymentBrowser,
+  PendingApprovalWait,
+  PendingCardFill,
+} from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
 // operate_pay's handler reaches into the single active browser session via
@@ -23,11 +28,17 @@ let mockSubmitStarted = false;
 let mockPaymentLease: { phase: "fill_card" | "single" } | null = null;
 let mockPaymentSealed = false;
 let mockPaymentSealActive = false;
+// [P0] The awaiting-approval rest state — mirrors provision-session.ts's real
+// state machine so operate_pay's approval_pending path, and
+// operate_payment_status/await, can be exercised against this fake session.
+let mockAwaitingApproval: PendingApprovalWait | null = null;
+let mockCartCheckout: CartCheckoutObservation | null = null;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
     activeProvisionBrowserForPayment: async () => mockBrowser,
+    activeCartCheckoutForOrigin: () => mockCartCheckout,
     claimActivePaymentForOperatePay: (phase: "fill_card" | "confirm" | undefined) => {
       if (mockPaymentLease !== null) {
         throw new Error("operate_pay refused: another payment operation is already in progress");
@@ -51,10 +62,12 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
         return { kind: "confirm", pending };
       }
       if (phase === "confirm") return { kind: "missing_confirm" };
+      const resumeApproval = mockAwaitingApproval ?? undefined;
+      mockAwaitingApproval = null;
       const lease = { phase: phase === "fill_card" ? ("fill_card" as const) : ("single" as const) };
       mockPaymentLease = lease;
       if (lease.phase === "fill_card") mockPaymentSealActive = true;
-      return { kind: "lease", lease };
+      return resumeApproval !== undefined ? { kind: "lease", lease, resumeApproval } : { kind: "lease", lease };
     },
     completeActivePaymentLeaseWithPendingFill: (
       lease: { phase: "fill_card" | "single" },
@@ -69,6 +82,19 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       mockPending = pending;
       mockPaymentSealActive = true;
     },
+    completeActivePaymentLeaseWithPendingApproval: (
+      lease: { phase: "fill_card" | "single" },
+      state: PendingApprovalWait,
+    ) => {
+      if (mockPaymentLease !== lease) {
+        throw new Error(
+          "operate_pay approval_pending completed without ownership of the active payment lease",
+        );
+      }
+      mockPaymentLease = null;
+      mockAwaitingApproval = state;
+    },
+    getActivePendingApproval: () => mockAwaitingApproval,
     releaseActivePaymentLease: (
       lease: { phase: "fill_card" | "single" },
       paymentFieldsCleared = true,
@@ -117,6 +143,8 @@ import {
   listCredentialsTool,
   listPaymentCardsTool,
   operatePayTool,
+  operatePaymentAwaitTool,
+  operatePaymentStatusTool,
   revokeAppAccessTool,
   TOOLS,
 } from "../tools/index.js";
@@ -155,6 +183,8 @@ beforeEach(() => {
   mockPaymentLease = null;
   mockPaymentSealed = false;
   mockPaymentSealActive = false;
+  mockAwaitingApproval = null;
+  mockCartCheckout = null;
 });
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -333,6 +363,359 @@ describe("operate_pay card selection", () => {
       status: "payment_card_required",
       needs_user: { wall: "card_required" },
     });
+  });
+});
+
+// [P0] Non-blocking approval: operate_pay never blocks the RPC on the human's
+// phone tap. It makes one live check and, when nobody has responded yet,
+// hands back approval_pending and leaves the session in the awaiting_approval
+// rest state instead — verified here at the tool-wiring layer (operate-pay.ts),
+// distinct from pay-operator.test.ts's executeOperatePay-level coverage.
+describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
+  it("returns approval_pending (never payment_approval_timeout) when the human hasn't responded, and marks the lease awaiting_approval", async () => {
+    mockBrowser = stubBrowser();
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_wire",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(Date.now() + 300_000).toISOString(),
+    });
+    const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
+    const getPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_wire",
+      status: "pending",
+      card_ref: "card_1",
+      jws: null,
+      sealed_card: null,
+    });
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      createPaymentApproval,
+      getPaymentConfig,
+      getPaymentApproval,
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse({
+      ...PAYMENT_DETAILS,
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+    });
+
+    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+    expect(result).toMatchObject({
+      status: "approval_pending",
+      approval_id: "appr_wire",
+      next: { tool: "operate_payment_await", max_wait_seconds: 15 },
+    });
+    // The RPC completed on a single live check — the old blocking loop that
+    // polled until payment_approval_timeout never ran.
+    expect(getPaymentApproval).toHaveBeenCalledOnce();
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_wire", false);
+    expect(mockAwaitingApproval).not.toBeNull();
+    expect(mockPaymentLease).toBeNull();
+
+    // A re-initiation now resumes — never a second POST /v1/pay/approvals.
+    await operatePayTool.handler(args, api);
+    expect(createPaymentApproval).toHaveBeenCalledOnce();
+  });
+
+  it("restores a resumable approval when notification fails after creation", async () => {
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_restore",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+    });
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      createPaymentApproval,
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+      getPaymentApproval: vi.fn().mockResolvedValue({
+        id: "appr_restore",
+        status: "pending",
+        card_ref: "card_1",
+        jws: null,
+        sealed_card: null,
+      }),
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse(PAYMENT_DETAILS);
+
+    await expect(
+      operatePayTool.handler(args, api, {
+        notifyUser: vi.fn().mockRejectedValue(new Error("notification unavailable")),
+      }),
+    ).rejects.toThrow("notification unavailable");
+    expect(mockAwaitingApproval).toMatchObject({ approval_id: "appr_restore" });
+
+    await operatePayTool.handler(args, api);
+    expect(createPaymentApproval).toHaveBeenCalledOnce();
+  });
+
+  it("restores the original approval when failure precedes operator execution", async () => {
+    const resumeApproval: PendingApprovalWait = {
+      approval_id: "appr_existing",
+      approval_url: "https://web.test/pay/appr_existing",
+      nonce: "nonce_existing",
+      agent: "agent_existing",
+      checkout: {
+        merchant: "M",
+        checkout_origin: "https://m.test",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      jit: false,
+      boundCardRef: "card_1",
+      deadline: Date.now() + 600_000,
+      rejectedCandidates: [],
+      keypair: { publicKey: "public", privateKey: "private" },
+      item: PAYMENT_DETAILS.item,
+      reason: PAYMENT_DETAILS.reason,
+      cardRef: "card_1",
+    };
+    mockAwaitingApproval = resumeApproval;
+    vi.mocked(mockBrowser.isPayPalHostedCheckout).mockRejectedValue(
+      new Error("browser unavailable"),
+    );
+
+    await expect(
+      operatePayTool.handler(
+        operatePayTool.inputSchema.parse(PAYMENT_DETAILS),
+        makeMockApi(),
+      ),
+    ).rejects.toThrow("browser unavailable");
+    expect(mockAwaitingApproval).toBe(resumeApproval);
+    expect(mockPaymentLease).toBeNull();
+  });
+
+  it("preserves a resumed approval across a normal configuration error", async () => {
+    const resumeApproval: PendingApprovalWait = {
+      approval_id: "appr_configuration",
+      approval_url: "https://web.test/pay/appr_configuration",
+      nonce: "nonce_configuration",
+      agent: "agent_configuration",
+      checkout: {
+        merchant: "M",
+        checkout_origin: "https://m.test",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      jit: false,
+      boundCardRef: "card_1",
+      deadline: Date.now() + 600_000,
+      rejectedCandidates: [],
+      keypair: { publicKey: "public", privateKey: "private" },
+      item: PAYMENT_DETAILS.item,
+      reason: PAYMENT_DETAILS.reason,
+      cardRef: "card_1",
+    };
+    mockAwaitingApproval = resumeApproval;
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "" }),
+    } as unknown as ApiClient);
+
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).resolves.toMatchObject({
+      status: "payment_configuration_error",
+      reason: "vouchflow_expected_audience_unset",
+    });
+    expect(mockAwaitingApproval).toBe(resumeApproval);
+    expect(resumeApproval.keypair.privateKey).toBe("private");
+    expect(mockPaymentLease).toBeNull();
+  });
+
+  it("releases a terminal resumed approval instead of requeueing it", async () => {
+    const resumeApproval: PendingApprovalWait = {
+      approval_id: "appr_terminal",
+      approval_url: "https://web.test/pay/appr_terminal",
+      nonce: "nonce_terminal",
+      agent: "agent_terminal",
+      checkout: {
+        merchant: "M",
+        checkout_origin: "https://m.test",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      jit: false,
+      boundCardRef: "card_1",
+      deadline: Date.now() + 600_000,
+      rejectedCandidates: [],
+      keypair: { publicKey: "public", privateKey: "private" },
+      item: PAYMENT_DETAILS.item,
+      reason: PAYMENT_DETAILS.reason,
+      cardRef: "card_1",
+    };
+    mockAwaitingApproval = resumeApproval;
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+      getPaymentApproval: vi.fn().mockResolvedValue({
+        id: "appr_terminal",
+        status: "approved",
+        card_ref: "card_1",
+        jws: null,
+        sealed_card: null,
+      }),
+    } as unknown as ApiClient);
+
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).resolves.toMatchObject({
+      status: "payment_mandate_rejected",
+      reason: "invalid_approval_payload",
+    });
+    expect(mockAwaitingApproval).toBeNull();
+    expect(resumeApproval.keypair.privateKey).toBe("");
+    expect(mockPaymentLease).toBeNull();
+  });
+
+  it("returns the persisted cart URL with the safe total-observation action", async () => {
+    mockCartCheckout = {
+      checkout: {
+        merchant: "M",
+        checkout_origin: "https://m.test",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      url: "https://m.test/cart",
+      observedAt: Date.now(),
+    };
+    vi.mocked(mockBrowser.readCheckoutSummary).mockRejectedValue(
+      new Error("payment_checkout_total_not_found"),
+    );
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+    } as unknown as ApiClient);
+
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).resolves.toMatchObject({
+      status: "needs_cart_total",
+      next: { tool: "operate_observe", url: "https://m.test/cart" },
+    });
+  });
+});
+
+describe("operate_payment_status / operate_payment_await [P0]", () => {
+  const baseState = {
+    approval_id: "appr_status",
+    approval_url: "https://web.test/vault/pay/appr_status",
+    nonce: "n",
+    agent: "a",
+    checkout: {
+      merchant: "M",
+      checkout_origin: "https://m.test",
+      amount_cents: 100,
+      currency: "USD",
+    },
+    jit: false,
+    boundCardRef: "card_1",
+    deadline: Date.now() + 60_000,
+    rejectedCandidates: [],
+    keypair: { publicKey: "pub", privateKey: "priv" },
+    item: "Synthetic item",
+    reason: "Synthetic purchase reason",
+    cardRef: "card_1",
+  };
+
+  it("reports no_pending_payment when nothing is awaiting approval", async () => {
+    const api = makeMockApi();
+    await expect(operatePaymentStatusTool.handler({}, api)).resolves.toMatchObject({
+      status: "no_pending_payment",
+    });
+    await expect(
+      operatePaymentAwaitTool.handler({}, api),
+    ).resolves.toMatchObject({ status: "no_pending_payment" });
+  });
+
+  it("rejects waits longer than the 15-second tool contract", () => {
+    expect(() => operatePaymentAwaitTool.inputSchema.parse({ max_wait_seconds: 16 })).toThrow();
+    expect(operatePaymentAwaitTool.jsonInputSchema).toMatchObject({
+      properties: { max_wait_seconds: { maximum: 15 } },
+    });
+  });
+
+  it("status: read-only — never opens the card or confirms a candidate", async () => {
+    mockAwaitingApproval = baseState;
+    const getPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_status",
+      status: "pending",
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      jws: null,
+      sealed_card: null,
+    });
+    const confirmPaymentApproval = vi.fn();
+    const api = makeMockApi({ getPaymentApproval, confirmPaymentApproval } as unknown as ApiClient);
+
+    const result = await operatePaymentStatusTool.handler({}, api);
+    expect(result).toMatchObject({
+      status: "pending",
+      approval_id: "appr_status",
+      candidate_submitted: false,
+      next: { tool: "operate_payment_await" },
+    });
+    // waitForSubmission=false — status never asks the server to hold the
+    // response open.
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", false);
+    expect(confirmPaymentApproval).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a submitted candidate as an actionable signal to call operate_pay again", async () => {
+    mockAwaitingApproval = baseState;
+    const getPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_status",
+      status: "pending",
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      jws: "signed",
+      sealed_card: "sealed",
+    });
+    const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+    const result = await operatePaymentAwaitTool.handler({}, api);
+    expect(result).toMatchObject({
+      status: "pending",
+      candidate_submitted: true,
+      next: { tool: "operate_pay" },
+    });
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", true);
+  });
+
+  it("reports expired without a next action", async () => {
+    mockAwaitingApproval = baseState;
+    const getPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_status",
+      status: "expired",
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+      expires_at: new Date(Date.now() - 1_000).toISOString(),
+      jws: null,
+      sealed_card: null,
+    });
+    const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+    const result = await operatePaymentAwaitTool.handler({ max_wait_seconds: 5 }, api);
+    expect(result).toMatchObject({ status: "expired" });
+    expect(result).not.toHaveProperty("next");
+  });
+
+  it("await never outlasts its own bound even if the server call hangs", async () => {
+    mockAwaitingApproval = baseState;
+    const getPaymentApproval = vi.fn(() => new Promise<never>(() => undefined));
+    const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+    const start = Date.now();
+    const result = await operatePaymentAwaitTool.handler({ max_wait_seconds: 1 }, api);
+    expect(Date.now() - start).toBeLessThan(2_000);
+    expect(result).toMatchObject({ status: "pending", candidate_submitted: false });
   });
 });
 
@@ -654,7 +1037,7 @@ describe("TOOLS registry", () => {
     // captcha_gate/await_verification/extract/remember/use/finish_task/finish —
     // remember+use are the operator-recipe capture/replay pair — plus the PR3c
     // login-credential tools: prepare/store plus seal_vault_credential for signin fill.
-    expect(TOOLS).toHaveLength(24);
+    expect(TOOLS).toHaveLength(26);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
       "get_extract_failure",
@@ -671,6 +1054,8 @@ describe("TOOLS registry", () => {
       "operate_finish_task",
       "operate_observe",
       "operate_pay",
+      "operate_payment_await",
+      "operate_payment_status",
       "operate_prepare_login",
       "operate_remember",
       "operate_seal_vault_credential",

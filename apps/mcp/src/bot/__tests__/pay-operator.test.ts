@@ -6,7 +6,9 @@ import { ApiClient } from "../../api-client.js";
 import {
   executeOperatePay,
   executeOperatePayConfirm,
+  type CartCheckoutObservation,
   type PaymentBrowser,
+  type PendingApprovalWait,
   type PendingCardFill,
 } from "../pay-operator.js";
 import { generateOperatorKeypair, sealToRecipient } from "../payment-hpke.js";
@@ -318,7 +320,14 @@ describe("operate_pay", () => {
         reason: "checkout_currency_unrecognized",
       },
     ],
-    ["payment_checkout_total_not_found", { status: "payment_checkout_total_not_found" }],
+    [
+      "payment_checkout_total_not_found",
+      {
+        status: "needs_cart_total",
+        reason: "checkout_total_not_on_page",
+        next: { tool: "operate_observe", hint: expect.any(String) },
+      },
+    ],
   ])("does not mint an approval for checkout grounding failure %s", async (error, expected) => {
     const approvalBodies: Array<Record<string, unknown>> = [];
     const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
@@ -755,6 +764,9 @@ async function runJit(cfg: {
   const agent = "jit-agent";
   let clock = 0;
   let summaryReads = 0;
+  const serverExpiresAt = new Date(
+    (cfg.cardRefArg === undefined ? cfg.jitApprovalTimeoutMs : cfg.approvalTimeoutMs) ?? 8.64e15,
+  ).toISOString();
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -764,7 +776,7 @@ async function runJit(cfg: {
     if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
       approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return Response.json(
-        { id: "appr_jit", nonce, agent, expires_at: new Date(8.64e15).toISOString() },
+        { id: "appr_jit", nonce, agent, expires_at: serverExpiresAt },
         { status: 201 },
       );
     }
@@ -792,7 +804,7 @@ async function runJit(cfg: {
           operator_pubkey: operatorPubkey,
           jws,
           sealed_card,
-          expires_at: new Date(8.64e15).toISOString(),
+          expires_at: serverExpiresAt,
         });
       }
       return Response.json({
@@ -804,7 +816,7 @@ async function runJit(cfg: {
         operator_pubkey: operatorPubkey,
         jws: null,
         sealed_card: null,
-        expires_at: new Date(8.64e15).toISOString(),
+        expires_at: serverExpiresAt,
       });
     }
     if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
@@ -1217,7 +1229,13 @@ async function runSplitFill(
   });
 
   const cartFallbackCheckout =
-    cfg.cartFallbackCheckout === null ? undefined : (cfg.cartFallbackCheckout ?? SPLIT_CHECKOUT);
+    cfg.cartFallbackCheckout === null
+      ? undefined
+      : ({
+          checkout: cfg.cartFallbackCheckout ?? SPLIT_CHECKOUT,
+          url: `${SPLIT_CHECKOUT.checkout_origin}/cart`,
+          observedAt: 1,
+        } satisfies CartCheckoutObservation);
   const result = (await executeOperatePay(
     {
       card_ref: "card_split",
@@ -1287,7 +1305,10 @@ describe("operate_pay split checkout — fill_card", () => {
   it("fails closed when the card-entry page has no total and this session never captured a cart total", async () => {
     const { result, browser } = await runSplitFill({ cartFallbackCheckout: null });
 
-    expect(result).toMatchObject({ status: "payment_checkout_total_not_found" });
+    expect(result).toMatchObject({
+      status: "needs_cart_total",
+      reason: "checkout_total_not_on_page",
+    });
     expect(browser.fillCheckoutCardFields).not.toHaveBeenCalled();
   });
 
@@ -1614,5 +1635,437 @@ describe("operate_pay split checkout — confirm", () => {
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0]).toContain("appr_split");
+  });
+});
+
+// ── Non-blocking approval [P0] ───────────────────────────────────────────
+//
+// Friction-audit finding #1: operate_pay used to block the MCP call for up
+// to five (or eighteen, JIT) minutes polling for a human's phone tap. These
+// exercise the fix: a bounded per-call poll budget that returns
+// approval_pending instead of blocking, and idempotent resume — a later
+// call reuses the SAME approval/operator keypair rather than minting a
+// duplicate approval.
+
+function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
+  api: ApiClient;
+  browser: PaymentBrowser;
+  fetch: typeof fetch;
+  approvalBodies: Array<Record<string, unknown>>;
+  filledCards: CheckoutCard[];
+  expiresAt: string;
+  setApproved: () => void;
+} {
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  let approved = false; // flips once "the phone responds"
+  const approvalBodies: Array<Record<string, unknown>> = [];
+  const filledCards: CheckoutCard[] = [];
+  const nonce = "resume-nonce";
+  const agent = "resume-agent";
+  const expiresAt = new Date(Date.now() + 600_000).toISOString();
+
+  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url === "https://vouchflow.test/.well-known/jwks.json") {
+      const jwk = await exportJWK(publicKey);
+      return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
+    }
+    if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+      approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return Response.json(
+        { id: "appr_resume", nonce, agent, expires_at: expiresAt },
+        { status: 201 },
+      );
+    }
+    if (
+      (url.endsWith("/v1/pay/approvals/appr_resume") ||
+        url.endsWith("/v1/pay/approvals/appr_resume?wait_for_submission=1")) &&
+      init?.method === "GET"
+    ) {
+      const approval = approvalBodies[0]!;
+      const operatorPublicKey = String(approval.operator_pubkey);
+      if (!approved) {
+        return Response.json({
+          id: "appr_resume",
+          status: "pending",
+          ...checkout,
+          nonce,
+          card_ref: "card_resume",
+          operator_pubkey: operatorPublicKey,
+          jws: null,
+          sealed_card: null,
+          expires_at: expiresAt,
+        });
+      }
+      const recipientHash = createHash("sha256")
+        .update(Buffer.from(operatorPublicKey, "base64url"))
+        .digest("base64url");
+      const canonical = canonicalize({
+        approval_id: "appr_resume",
+        merchant: checkout.merchant,
+        checkout_origin: checkout.checkout_origin,
+        amount_cents: checkout.amount_cents,
+        currency: checkout.currency,
+        nonce,
+        card_ref: "card_resume",
+        recipient_pubkey_hash: recipientHash,
+        item: approval.item,
+        reason: approval.reason,
+        agent,
+      })!;
+      const aad = createHash("sha256").update(canonical, "utf8").digest();
+      const jws = await new SignJWT({
+        payload_sha256: aad.toString("base64url"),
+        context: "purchase",
+        confidence: "high",
+        mandate_id: "mandate_resume",
+      })
+        .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+        .setIssuer("https://vouchflow.dev")
+        .setAudience("customer_test")
+        .sign(privateKey);
+      const sealed_card = await sealToRecipient(
+        operatorPublicKey,
+        new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
+        aad,
+      );
+      return Response.json({
+        id: "appr_resume",
+        status: "approved",
+        ...checkout,
+        nonce,
+        card_ref: "card_resume",
+        operator_pubkey: operatorPublicKey,
+        jws,
+        sealed_card,
+        expires_at: expiresAt,
+      });
+    }
+    if (url.endsWith("/v1/pay/approvals/appr_resume/confirm") && init?.method === "POST") {
+      return Response.json({ status: "approved" });
+    }
+    if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
+      return Response.json({ id: "audit_resume" }, { status: 201 });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }) as typeof fetch;
+
+  const browser: PaymentBrowser = {
+    isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
+    readCheckoutSummary: vi.fn(async () => checkout),
+    readCheckoutConfirmSummary: vi.fn().mockResolvedValue(checkout),
+    currentUrl: vi.fn().mockReturnValue(`${checkout.checkout_origin}/session/test`),
+    fillCheckoutCardFields: vi.fn(),
+    submitFilledCheckout: vi.fn(),
+    clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
+    fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
+      filledCards.push(card);
+      return { three_ds_required: false };
+    }),
+    waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
+  };
+
+  const api = new ApiClient({
+    apiBaseUrl: "https://api.test",
+    registryBaseUrl: "https://registry.test",
+    agentSessionToken: "synthetic-session-token",
+    fetch: fetchMock,
+  });
+
+  return {
+    api,
+    browser,
+    fetch: fetchMock,
+    approvalBodies,
+    filledCards,
+    expiresAt,
+    setApproved: () => {
+      approved = true;
+    },
+  };
+}
+
+describe("operate_pay non-blocking approval [P0]", () => {
+  const baseArgs = {
+    card_ref: "card_resume",
+    merchant: CHECKOUT.merchant,
+    amount_cents: CHECKOUT.amount_cents,
+    currency: CHECKOUT.currency,
+    item: "Wireless Mouse",
+    reason: "office restock",
+  };
+
+  it("returns approval_pending immediately instead of blocking when nobody has approved yet", async () => {
+    const env = buildResumableEnv();
+    const sleepCalls: number[] = [];
+    const pendingStates: PendingApprovalWait[] = [];
+
+    const result = (await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+      },
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => pendingStates.push(state),
+      pollBudgetMs: 0,
+    })) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      status: "approval_pending",
+      approval_id: "appr_resume",
+      merchant: CHECKOUT.merchant,
+      approved_amount_cents: CHECKOUT.amount_cents,
+      currency: CHECKOUT.currency,
+      phase: null,
+      next: { tool: "operate_payment_await", max_wait_seconds: 15 },
+    });
+    expect(result.approval_url).toContain("appr_resume");
+    expect(result.expires_at).toBe(env.expiresAt);
+    // Never blocked on a real wait — one live check, then hand back.
+    expect(sleepCalls).toEqual([]);
+    expect(pendingStates).toHaveLength(1);
+    expect(pendingStates[0]?.deadline).toBe(Date.parse(env.expiresAt));
+    expect(env.approvalBodies).toHaveLength(1);
+  });
+
+  it("resumes the SAME approval on re-initiation — never mints a duplicate", async () => {
+    const env = buildResumableEnv();
+    let captured: PendingApprovalWait | null = null;
+
+    const first = (await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      sleep: async () => undefined,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        captured = state;
+      },
+      pollBudgetMs: 0,
+    })) as Record<string, unknown>;
+    expect(first.status).toBe("approval_pending");
+    expect(env.approvalBodies).toHaveLength(1);
+    if (captured === null) throw new Error("expected resumable state from the first call");
+    const resumeState: PendingApprovalWait = captured;
+
+    // Re-initiation: the host calls operate_pay again with the SAME
+    // arguments (unaware or not of the prior pending call) — the MCP tool
+    // layer supplies resumeFrom from session state. The phone has now
+    // responded.
+    env.setApproved();
+    const resolvedCardRefs: string[] = [];
+    const second = (await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      sleep: async () => undefined,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onCardResolved: (ref) => resolvedCardRefs.push(ref),
+      resumeFrom: resumeState,
+      pollBudgetMs: 0,
+    })) as Record<string, unknown>;
+
+    expect(second).toMatchObject({ status: "payment_submitted", merchant: CHECKOUT.merchant });
+    expect(env.filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(resolvedCardRefs).toEqual(["card_resume"]);
+    // Exactly ONE approval was ever minted across both calls — the exact
+    // duplicate-approval pile-up the friction audit flagged.
+    expect(env.approvalBodies).toHaveLength(1);
+  });
+
+  it("preserves the resumed keypair when configuration lookup fails", async () => {
+    const env = buildResumableEnv();
+    let captured: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        captured = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (captured === null) throw new Error("expected resumable state");
+    const resumeState: PendingApprovalWait = captured;
+    const privateKey = resumeState.keypair.privateKey;
+    vi.spyOn(env.api, "getPaymentConfig").mockRejectedValueOnce(
+      new Error("configuration unavailable"),
+    );
+    let restored: PendingApprovalWait | null = null;
+
+    await expect(
+      executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        onApprovalPending: (state) => {
+          restored = state;
+        },
+        resumeFrom: resumeState,
+        pollBudgetMs: 0,
+      }),
+    ).rejects.toThrow("configuration unavailable");
+    expect(restored).toBe(resumeState);
+    expect(resumeState.keypair.privateKey).toBe(privateKey);
+  });
+
+  it("does not hand a resumed approval back after submission starts", async () => {
+    const env = buildResumableEnv();
+    let captured: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        captured = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (captured === null) throw new Error("expected resumable state");
+    const resumeState: PendingApprovalWait = captured;
+    env.setApproved();
+    vi.mocked(env.browser.fillAndSubmitCheckout).mockResolvedValue({ three_ds_required: true });
+    vi.mocked(env.browser.waitForThreeDsResolution).mockRejectedValue(
+      new Error("3DS unavailable"),
+    );
+    const onApprovalPending = vi.fn();
+
+    await expect(
+      executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        onApprovalPending,
+        resumeFrom: resumeState,
+        pollBudgetMs: 0,
+      }),
+    ).rejects.toThrow("3DS unavailable");
+    expect(onApprovalPending).not.toHaveBeenCalled();
+  });
+
+  it("resumes a JIT split fill without requiring a total on the card page", async () => {
+    const env = buildResumableEnv(SPLIT_CHECKOUT);
+    vi.mocked(env.browser.readCheckoutSummary).mockRejectedValue(
+      new Error("payment_checkout_total_not_found"),
+    );
+    const args = {
+      item: "Split item",
+      reason: "Split purchase reason",
+      phase: "fill_card" as const,
+    };
+    const cartFallbackCheckout = {
+      checkout: SPLIT_CHECKOUT,
+      url: `${SPLIT_CHECKOUT.checkout_origin}/cart`,
+      observedAt: 1,
+    } satisfies CartCheckoutObservation;
+    let captured: PendingApprovalWait | null = null;
+    await executeOperatePay(args, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      cartFallbackCheckout,
+      onApprovalPending: (state) => {
+        captured = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (captured === null) throw new Error("expected resumable state");
+    env.setApproved();
+
+    await expect(
+      executeOperatePay(args, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        cartFallbackCheckout,
+        resumeFrom: captured,
+        pollBudgetMs: 0,
+      }),
+    ).resolves.toMatchObject({ status: "payment_card_filled" });
+    expect(env.browser.readCheckoutSummary).toHaveBeenCalledOnce();
+    expect(env.browser.fillCheckoutCardFields).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a resumed single-page payment when the live checkout drifted", async () => {
+    const env = buildResumableEnv();
+    let captured: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        captured = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (captured === null) throw new Error("expected resumable state");
+    env.setApproved();
+    vi.mocked(env.browser.readCheckoutSummary).mockResolvedValue({
+      ...CHECKOUT,
+      amount_cents: CHECKOUT.amount_cents + 1,
+    });
+
+    await expect(
+      executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        resumeFrom: captured,
+        pollBudgetMs: 0,
+      }),
+    ).resolves.toMatchObject({
+      status: "payment_amount_mismatch",
+      mandate_amount_cents: CHECKOUT.amount_cents,
+      live_amount_cents: CHECKOUT.amount_cents + 1,
+    });
+    expect(env.filledCards).toHaveLength(0);
+  });
+
+  it("bounds the wait to pollBudgetMs, never the full approval deadline", async () => {
+    const env = buildResumableEnv();
+    let clock = 0;
+    const sleepCalls: number[] = [];
+
+    const result = (await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      now: () => clock,
+      sleep: async (ms) => {
+        sleepCalls.push(ms);
+        clock += ms;
+      },
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: () => undefined,
+      pollBudgetMs: 10_000,
+    })) as Record<string, unknown>;
+
+    expect(result.status).toBe("approval_pending");
+    // pollIntervalMs defaults to 3000ms — a 10s budget polls a handful of
+    // times then gives up, nowhere near the server approval deadline.
+    expect(sleepCalls.length).toBeGreaterThan(0);
+    expect(sleepCalls.every((ms) => ms === 3_000)).toBe(true);
+    expect(clock).toBeLessThan(13_000);
   });
 });

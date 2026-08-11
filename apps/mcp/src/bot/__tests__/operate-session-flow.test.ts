@@ -453,7 +453,9 @@ import {
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
+  completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  getActivePendingApproval,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
   restoreActivePendingCardFillAfterConfirmThrow,
@@ -4101,6 +4103,87 @@ describe("pending card-fill charge guard", () => {
   });
 });
 
+// [P0] The non-blocking approval rest state: operate_pay no longer holds the
+// "operating" lease across a human's phone tap, so a new state exists for
+// "the human hasn't responded yet." A later call resumes it (idempotent —
+// never a duplicate approval) instead of throwing "already in progress".
+describe("awaiting-approval payment lease [P0]", () => {
+  const approvalState = {
+    approval_id: "appr_wait",
+    approval_url: "https://web.test/vault/pay/appr_wait",
+    nonce: "n",
+    agent: "a",
+    checkout: {
+      merchant: "Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 100,
+      currency: "USD",
+    },
+    jit: false,
+    boundCardRef: "card_wait",
+    deadline: Date.now() + 60_000,
+    rejectedCandidates: [],
+    keypair: { publicKey: "pub", privateKey: "priv" },
+    item: "Widget",
+    reason: "test",
+    cardRef: "card_wait",
+  };
+
+  it("transitions operating -> awaiting_approval, then resumes it on the next call", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay(undefined);
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+    expect(claim.resumeApproval).toBeUndefined();
+    expect(getActivePendingApproval()).toBeNull();
+
+    completeActivePaymentLeaseWithPendingApproval(claim.lease, approvalState);
+    expect(getActivePendingApproval()).toEqual(approvalState);
+
+    // A later call (re-initiation after the host's own timeout, or a retry)
+    // resumes the SAME approval instead of throwing "already in progress" —
+    // this is what makes idempotent re-initiation possible.
+    const resumed = claimActivePaymentForOperatePay(undefined);
+    expect(resumed).toMatchObject({ kind: "lease", resumeApproval: approvalState });
+  });
+
+  it('refuses phase="confirm" while still awaiting approval — no card has been filled yet', async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay("fill_card");
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+    completeActivePaymentLeaseWithPendingApproval(claim.lease, approvalState);
+
+    expect(claimActivePaymentForOperatePay("confirm")).toEqual({ kind: "missing_confirm" });
+  });
+
+  it("clears back to null once a resumed wait is released — no stale resume data survives", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const first = claimActivePaymentForOperatePay(undefined);
+    if (first.kind !== "lease") throw new Error("expected a fresh lease");
+    completeActivePaymentLeaseWithPendingApproval(first.lease, approvalState);
+
+    const resumed = claimActivePaymentForOperatePay(undefined);
+    if (resumed.kind !== "lease") throw new Error("expected a resumed lease");
+    expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
+    expect(getActivePendingApproval()).toBeNull();
+
+    const fresh = claimActivePaymentForOperatePay(undefined);
+    expect(fresh).toMatchObject({ kind: "lease" });
+    expect((fresh as { resumeApproval?: unknown }).resumeApproval).toBeUndefined();
+  });
+
+  it("serializes a resume attempt behind another in-flight call, same as a fresh lease", async () => {
+    await startProvisionSession({ serviceUrl: "https://shop.example.com/checkout" });
+    const claim = claimActivePaymentForOperatePay(undefined);
+    if (claim.kind !== "lease") throw new Error("expected a fresh lease");
+    completeActivePaymentLeaseWithPendingApproval(claim.lease, approvalState);
+
+    const resumed = claimActivePaymentForOperatePay(undefined);
+    if (resumed.kind !== "lease") throw new Error("expected a resumed lease");
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
+    expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
+  });
+});
+
 describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => {
   it("captures a real total observed on an earlier page and serves it for the SAME origin", async () => {
     const started = await startProvisionSession({
@@ -4114,9 +4197,11 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     };
     await observe(started.session_id, "compact");
 
-    expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toEqual(
-      h.checkoutSummary,
-    );
+    expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toEqual({
+      checkout: h.checkoutSummary,
+      url: "https://cart.step.rakuten.co.jp/cart",
+      observedAt: expect.any(Number),
+    });
   });
 
   it("never serves a cached total to a DIFFERENT origin", async () => {
@@ -4152,10 +4237,14 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     await observe(started.session_id, "compact");
 
     expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toEqual({
-      merchant: "Rakuten",
-      checkout_origin: "https://cart.step.rakuten.co.jp",
-      amount_cents: 2_904,
-      currency: "JPY",
+      checkout: {
+        merchant: "Rakuten",
+        checkout_origin: "https://cart.step.rakuten.co.jp",
+        amount_cents: 2_904,
+        currency: "JPY",
+      },
+      url: "https://cart.step.rakuten.co.jp/cart",
+      observedAt: expect.any(Number),
     });
   });
 
@@ -4179,7 +4268,8 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     await observe(started.session_id, "compact");
 
     expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toMatchObject({
-      amount_cents: 3_872,
+      checkout: { amount_cents: 3_872 },
+      url: "https://cart.step.rakuten.co.jp/cart",
     });
   });
 

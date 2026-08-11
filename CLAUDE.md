@@ -596,6 +596,41 @@ own signature; Shopify↔WooCommerce mutual discrimination holds, 0 overlap).
   reports' actual field-name lists (Shopify's 45-name intersection across
   6 merchants; 5 real WooCommerce stores' captured sets) verbatim.
 
+### Non-blocking payment approval (operate_payment_status/await)
+
+`operate_pay` (fill_card and single-page initiation — NOT `phase:"confirm"`,
+which was never a wait) no longer blocks the MCP call for up to 5 (18 for
+JIT) minutes polling for the human's phone tap. It makes ONE live
+`getPaymentApproval` check and, if not yet approved, returns
+`{status:"approval_pending", approval_id, approval_url, expires_at, phase,
+approved_amount_cents, next:{tool:"operate_payment_await"}}` — the
+friction-audit P0 fix (small models can't tell "pending" from "broken" on a
+silent multi-minute hang, so they panic-retry or kill the server).
+- **New read-only tools:** `operate_payment_status` (single check, no
+  side effects) and `operate_payment_await` (bounded ~15s wait, client-side
+  race in `readApprovalStatus`, `apps/mcp/src/tools/operate-pay.ts`) —
+  both report `pending`/`approved`/`expired` plus `candidate_submitted`
+  (the phone responded; call `operate_pay` again to actually verify the
+  mandate, open the card, and fill/charge — these two tools never do that).
+- **Idempotent resume, never a duplicate approval.** A still-pending call
+  hands its resumable state (approval id/nonce/keypair/checkout/rejected-
+  candidates — `PendingApprovalWait` in `pay-operator.ts`) to session state
+  via a NEW `activePayment` status, `"awaiting_approval"`
+  (`provision-session.ts`). A later `operate_pay` call for the same
+  checkout resumes it (`claimActivePaymentForOperatePay`'s `resumeApproval`)
+  instead of POSTing `/v1/pay/approvals` again — this is what stops the
+  unattended-approval pile-up the audit observed. Mechanism: `executeOperatePay`
+  takes `pollBudgetMs` (bounds THIS call's poll loop; omitted = legacy
+  full-deadline blocking, so direct callers/unit tests are unaffected) and
+  `resumeFrom` (skips re-minting, reuses the operator keypair — required
+  because the sealed card was HPKE-encrypted to that exact keypair).
+- **P1, same audit:** a card-entry page with no total (Rakuten-style split
+  checkout) now returns structured `{status:"needs_cart_total", next:{tool:
+  "operate_observe", hint}}` instead of a bare `payment_checkout_total_not_found`
+  string, when no persisted cart total (`Session.lastCartCheckout`) is
+  usable as a fallback. Never changes what gets approved — browser-observed
+  totals only, still never a model-supplied amount.
+
 ### Goose / local-dev MCP install
 
 `npx @trusty-squire/mcp connect --target=goose` writes the extension to

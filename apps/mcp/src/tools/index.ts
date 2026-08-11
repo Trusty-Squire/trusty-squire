@@ -18,7 +18,12 @@ import { grantAppAccessTool } from "./grant-app-access.js";
 import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
-import { listPaymentCardsTool, operatePayTool } from "./operate-pay.js";
+import {
+  listPaymentCardsTool,
+  operatePayTool,
+  operatePaymentAwaitTool,
+  operatePaymentStatusTool,
+} from "./operate-pay.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -75,6 +80,10 @@ export const TOOLS: Tool[] = [
   getExtractFailureTool,
   listPaymentCardsTool,
   operatePayTool,
+  // [P0] Non-blocking payment approval: read-only status + a bounded wait,
+  // so a host never has to block an RPC on the human's phone tap.
+  operatePaymentStatusTool,
+  operatePaymentAwaitTool,
   // Interactive host-driven provisioning (provision_start/observe/act/
   // captcha_gate/await_verification/extract/finish).
   ...OPERATE_TOOLS,
@@ -101,4 +110,6 @@ export {
   getExtractFailureTool,
   listPaymentCardsTool,
   operatePayTool,
+  operatePaymentStatusTool,
+  operatePaymentAwaitTool,
 };
