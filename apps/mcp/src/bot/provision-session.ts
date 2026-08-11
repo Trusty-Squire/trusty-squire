@@ -24,6 +24,7 @@ import { join } from "node:path";
 import {
   BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
+  type CheckoutSummary,
   type FrameTarget,
   type InteractiveElement,
   type PageTargetSafetySignals,
@@ -457,6 +458,13 @@ interface Session {
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
+  // Split-checkout cart-total handoff (fill_card fallback): the most recent
+  // REAL, parser-accepted CheckoutSummary observed on this session's own
+  // Rakuten cart page, plus the cart URL it came from. Populated only by
+  // observeSession on an exact cart-page match, never from model input or
+  // page text synthesis. Replaced (not accumulated) on each successful cart
+  // observation; never crosses sessions.
+  lastCartCheckout: { summary: CheckoutSummary; url: string } | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -2252,6 +2260,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    lastCartCheckout: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2346,6 +2355,7 @@ export async function startHarnessProvisionSession(
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    lastCartCheckout: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -3125,6 +3135,43 @@ export function buildCompactObservation(args: {
   };
 }
 
+// Split-checkout cart-total handoff: Rakuten's real card-entry page shows no
+// order total (see data/operator-rakuten-flow-diagnostic/report.md), so
+// fill_card needs the amount from the cart step it already passed through.
+// Recognized by exact origin+pathname (query ignored) — never by page text —
+// and stored only when readCheckoutSummary succeeds AND its own
+// checkout_origin matches the URL that triggered the read. A failure here
+// must never overwrite a previously good value, and never throws into the
+// caller: this is best-effort session bookkeeping, not part of the
+// observation contract.
+const RAKUTEN_CART_ORIGIN = "https://cart.step.rakuten.co.jp";
+const RAKUTEN_CART_PATHNAME = "/cart";
+
+async function captureCartCheckoutForHandoff(session: Session, url: string): Promise<void> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return;
+  }
+  if (parsed.origin !== RAKUTEN_CART_ORIGIN || parsed.pathname !== RAKUTEN_CART_PATHNAME) return;
+  try {
+    const summary = await session.browser.readCheckoutSummary("JPY");
+    if (summary.checkout_origin === parsed.origin) {
+      session.lastCartCheckout = { summary, url };
+    }
+  } catch {
+    // Parse failure on the cart page — leave any previously stored value alone.
+  }
+}
+
+/** fill_card fallback only: the session's own last-observed Rakuten cart total, scoped to the current page's origin. Never crosses sessions or falls back across origins. */
+export function getActiveCartCheckoutSummary(currentOrigin: string): CheckoutSummary | null {
+  const cart = activeProvisionSession().lastCartCheckout;
+  if (cart === null || cart.summary.checkout_origin !== currentOrigin) return null;
+  return cart.summary;
+}
+
 async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
@@ -3145,6 +3192,7 @@ async function observeSession(
   const normalizedText = normalizedFull.slice(0, 4000);
   const guidance = provisionPerceptionGuidance(normalizedText);
   const url = session.browser.currentUrl();
+  await captureCartCheckoutForHandoff(session, url);
   const refs = provisionElementRefs(elements);
   const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
   const textTruncated = normalizedFull.length > 4000;

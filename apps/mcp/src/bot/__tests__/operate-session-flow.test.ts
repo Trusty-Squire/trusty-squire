@@ -90,6 +90,10 @@ const h = vi.hoisted(() => ({
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
+  // Split-checkout cart-total handoff (Rakuten): readCheckoutSummary's
+  // outcome for whatever h.currentUrl is at call time.
+  checkoutSummaries: {} as Record<string, { amount_cents: number; currency: string }>,
+  checkoutSummaryCalls: [] as string[],
 }));
 
 vi.mock("../browser.js", () => ({
@@ -370,6 +374,26 @@ vi.mock("../browser.js", () => ({
     async focusedElementLabels(): Promise<string[]> {
       return h.focusedLabels;
     }
+    async readCheckoutSummary(): Promise<{
+      merchant: string;
+      checkout_origin: string;
+      amount_cents: number;
+      currency: string;
+    }> {
+      h.checkoutSummaryCalls.push(h.currentUrl);
+      let origin: string;
+      let pathname: string;
+      try {
+        const parsed = new URL(h.currentUrl);
+        origin = parsed.origin;
+        pathname = parsed.pathname;
+      } catch {
+        throw new Error("payment_checkout_total_not_found");
+      }
+      const summary = h.checkoutSummaries[`${origin}${pathname}`];
+      if (summary === undefined) throw new Error("payment_checkout_total_not_found");
+      return { merchant: "Rakuten", checkout_origin: origin, ...summary };
+    }
     async close(): Promise<void> {
       h.closeCalls += 1;
       if (h.connections[this.index] === true) h.started -= 1;
@@ -441,6 +465,7 @@ import {
   clearActivePendingCardFill,
   recipeTargetFor,
   captureObserved,
+  getActiveCartCheckoutSummary,
 } from "../provision-session.js";
 import {
   isRecipeDomainLocked,
@@ -571,6 +596,8 @@ beforeEach(() => {
   h.locatorTypeCalls = [];
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
+  h.checkoutSummaries = {};
+  h.checkoutSummaryCalls = [];
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -4078,5 +4105,76 @@ describe("pending card-fill charge guard", () => {
     clearActivePendingCardFill(true);
     await act(started.session_id, { kind: "click", target: "Place order" });
     expect(h.clickCalls).toBe(1);
+  });
+});
+
+// Split-checkout cart-total handoff (data/operator-rakuten-flow-diagnostic):
+// Rakuten's real /payment card-entry page carries no order total at all — only
+// the /cart page (小計) does. observeSession must capture the cart's REAL,
+// parser-accepted total into session state on an exact cart-page match, and
+// getActiveCartCheckoutSummary must expose it to the fill_card fallback only
+// while the current page's origin still matches.
+describe("split-checkout cart-total handoff (Rakuten)", () => {
+  const RAKUTEN_CART_ORIGIN = "https://cart.step.rakuten.co.jp";
+  const RAKUTEN_CART_URL = `${RAKUTEN_CART_ORIGIN}/cart?shop_bid=228240&l2-id=shop_header_cart`;
+  const RAKUTEN_PAYMENT_URL = `${RAKUTEN_CART_ORIGIN}/payment?l2-id=step1_pc_next_bot`;
+
+  it("captures the cart total on an exact cart-page match and exposes it on a later no-total page of the same origin", async () => {
+    // The real captured cart subtotal (小計 (2商品) 2,904 円).
+    h.checkoutSummaries[`${RAKUTEN_CART_ORIGIN}/cart`] = { amount_cents: 2_904, currency: "JPY" };
+    const started = await startProvisionSession({ serviceUrl: RAKUTEN_CART_URL });
+
+    expect(getActiveCartCheckoutSummary(RAKUTEN_CART_ORIGIN)).toMatchObject({
+      merchant: "Rakuten",
+      checkout_origin: RAKUTEN_CART_ORIGIN,
+      amount_cents: 2_904,
+      currency: "JPY",
+    });
+
+    // Navigate to the real /payment page, which has no total at all — the
+    // stored cart summary must survive this observation untouched.
+    h.currentUrl = RAKUTEN_PAYMENT_URL;
+    await observe(started.session_id);
+
+    expect(getActiveCartCheckoutSummary(RAKUTEN_CART_ORIGIN)).toMatchObject({
+      amount_cents: 2_904,
+      currency: "JPY",
+    });
+    // readCheckoutSummary is only ever invoked on an exact cart-page match —
+    // the payment page never triggers a (redundant, and here total-less) read.
+    expect(h.checkoutSummaryCalls).toEqual([RAKUTEN_CART_URL]);
+  });
+
+  it("never overwrites a stored cart total when a later cart-page observation fails to parse", async () => {
+    h.checkoutSummaries[`${RAKUTEN_CART_ORIGIN}/cart`] = { amount_cents: 2_904, currency: "JPY" };
+    const started = await startProvisionSession({ serviceUrl: RAKUTEN_CART_URL });
+    expect(getActiveCartCheckoutSummary(RAKUTEN_CART_ORIGIN)).toMatchObject({
+      amount_cents: 2_904,
+    });
+
+    // The cart re-renders (e.g. an item removed) and no longer has a
+    // parseable total; the session must keep the last GOOD value.
+    delete h.checkoutSummaries[`${RAKUTEN_CART_ORIGIN}/cart`];
+    await observe(started.session_id);
+
+    expect(getActiveCartCheckoutSummary(RAKUTEN_CART_ORIGIN)).toMatchObject({
+      amount_cents: 2_904,
+    });
+  });
+
+  it("is not populated by a non-cart page, and is never exposed for a different origin", async () => {
+    // Not the Rakuten cart URL — must never call readCheckoutSummary for the
+    // handoff, and must never store anything.
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    expect(h.checkoutSummaryCalls).toEqual([]);
+    expect(getActiveCartCheckoutSummary("https://shop.example.com")).toBeNull();
+
+    // Even if the (unrelated) session origin happened to have a stored
+    // Rakuten cart summary from history, a caller asking about the WRONG
+    // origin must never get it back.
+    await observe(started.session_id);
+    expect(getActiveCartCheckoutSummary(RAKUTEN_CART_ORIGIN)).toBeNull();
   });
 });

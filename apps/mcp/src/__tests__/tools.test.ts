@@ -23,11 +23,22 @@ let mockSubmitStarted = false;
 let mockPaymentLease: { phase: "fill_card" | "single" } | null = null;
 let mockPaymentSealed = false;
 let mockPaymentSealActive = false;
+// The split-checkout cart-total handoff (Rakuten's real card-entry page shows
+// no total): observeSession would have populated this from a real cart-page
+// observation earlier in the session. Tests below control it directly rather
+// than driving a full observe(), since the fallback wiring under test lives
+// in operate-pay.ts's handler, not in provision-session.ts's capture logic
+// (covered separately in provision-session tests).
+let mockCartCheckout: CheckoutSummary | null = null;
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
     activeProvisionBrowserForPayment: async () => mockBrowser,
+    getActiveCartCheckoutSummary: (currentOrigin: string) =>
+      mockCartCheckout !== null && mockCartCheckout.checkout_origin === currentOrigin
+        ? mockCartCheckout
+        : null,
     claimActivePaymentForOperatePay: (phase: "fill_card" | "confirm" | undefined) => {
       if (mockPaymentLease !== null) {
         throw new Error("operate_pay refused: another payment operation is already in progress");
@@ -155,6 +166,7 @@ beforeEach(() => {
   mockPaymentLease = null;
   mockPaymentSealed = false;
   mockPaymentSealActive = false;
+  mockCartCheckout = null;
 });
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -363,6 +375,121 @@ describe("operate_pay split checkout phases", () => {
     expect(() =>
       operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "charge" }),
     ).toThrow();
+  });
+
+  // Rakuten's real /payment card-entry page shows no order total at all — only
+  // its /cart page (小計) and /order-confirmation page (支払い金額) do
+  // (data/operator-rakuten-flow-diagnostic/report.md, verbatim captured page
+  // text). The session's own prior cart-page observation is the only allowed
+  // fallback source; it must never come from an injected liveSummary on the
+  // card page itself.
+  describe("fill_card cart-total handoff (Rakuten split checkout)", () => {
+    const RAKUTEN_CART_ORIGIN = "https://cart.step.rakuten.co.jp";
+    // The real captured cart subtotal: "購入手続き 小計 (2商品) 2,904 円 送料 送料無料".
+    const RAKUTEN_CART_CHECKOUT: CheckoutSummary = {
+      merchant: "Rakuten",
+      checkout_origin: RAKUTEN_CART_ORIGIN,
+      amount_cents: 2_904,
+      currency: "JPY",
+    };
+
+    function stubRakutenPaymentPageWithNoTotal(): void {
+      mockBrowser = stubBrowser();
+      // The real captured /payment text has no 小計/合計/送料/ご請求金額 label
+      // or yen amount at all — the current-page reader must fail closed.
+      vi.mocked(mockBrowser.readCheckoutSummary).mockRejectedValue(
+        new Error("payment_checkout_total_not_found"),
+      );
+      vi.mocked(mockBrowser.currentUrl).mockReturnValue(
+        `${RAKUTEN_CART_ORIGIN}/payment?l2-id=step1_pc_next_bot`,
+      );
+    }
+
+    it("uses the session's stored cart total to mint the fill_card approval", async () => {
+      stubRakutenPaymentPageWithNoTotal();
+      mockCartCheckout = RAKUTEN_CART_CHECKOUT;
+      const createPaymentApproval = vi.fn().mockResolvedValue({
+        id: "appr_rakuten",
+        nonce: "n",
+        agent: "a",
+        expires_at: new Date(0).toISOString(),
+      });
+      const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
+      const getPaymentApproval = vi
+        .fn()
+        .mockResolvedValue({ id: "appr_rakuten", status: "expired", card_ref: "card_1" });
+      const api = makeMockApi({
+        createPaymentApproval,
+        getPaymentConfig,
+        getPaymentApproval,
+      } as unknown as ApiClient);
+      const args = operatePayTool.inputSchema.parse({
+        ...PAYMENT_DETAILS,
+        card_ref: "card_1",
+        phase: "fill_card",
+      });
+
+      const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+
+      // fill_card never charges — a timed-out approval is still the correct
+      // outcome here; what this asserts is that the approval was minted
+      // against the STORED cart total, not a caller-supplied or fabricated one.
+      expect(createPaymentApproval).toHaveBeenCalledOnce();
+      expect(createPaymentApproval.mock.calls[0]![0]).toMatchObject({
+        merchant: "Rakuten",
+        checkout_origin: RAKUTEN_CART_ORIGIN,
+        amount_cents: 2_904,
+        currency: "JPY",
+      });
+      expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    });
+
+    it("fails closed when the card page has no total and no cart summary was ever observed", async () => {
+      stubRakutenPaymentPageWithNoTotal();
+      mockCartCheckout = null;
+      const createPaymentApproval = vi.fn();
+      const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
+      const api = makeMockApi({
+        createPaymentApproval,
+        getPaymentConfig,
+      } as unknown as ApiClient);
+      const args = operatePayTool.inputSchema.parse({
+        ...PAYMENT_DETAILS,
+        card_ref: "card_1",
+        phase: "fill_card",
+      });
+
+      const result = await operatePayTool.handler(args, api);
+
+      expect(result).toEqual({ status: "payment_checkout_total_not_found" });
+      expect(createPaymentApproval).not.toHaveBeenCalled();
+    });
+
+    it("never uses a stored cart summary observed on a different origin", async () => {
+      stubRakutenPaymentPageWithNoTotal();
+      mockCartCheckout = {
+        merchant: "Some Other Shop",
+        checkout_origin: "https://evil.example.test",
+        amount_cents: 999,
+        currency: "USD",
+      };
+      const createPaymentApproval = vi.fn();
+      const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
+      const api = makeMockApi({
+        createPaymentApproval,
+        getPaymentConfig,
+      } as unknown as ApiClient);
+      const args = operatePayTool.inputSchema.parse({
+        ...PAYMENT_DETAILS,
+        card_ref: "card_1",
+        phase: "fill_card",
+      });
+
+      const result = await operatePayTool.handler(args, api);
+
+      expect(result).toEqual({ status: "payment_checkout_total_not_found" });
+      expect(createPaymentApproval).not.toHaveBeenCalled();
+    });
   });
 
   it("refuses confirm when no card fill is pending", async () => {

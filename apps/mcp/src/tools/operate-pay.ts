@@ -1,9 +1,11 @@
 import { z } from "zod";
+import type { CheckoutSummary } from "../bot/browser.js";
 import {
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
   completeActivePaymentLeaseWithPendingFill,
+  getActiveCartCheckoutSummary,
   markActivePendingCardFillSubmitStarted,
   recordActivePaymentProvenance,
   releaseActivePaymentLease,
@@ -257,6 +259,30 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         // cards.length === 0 → leave cardRef undefined; executeOperatePay runs
         // the JIT add-card ceremony.
       }
+      // Split-checkout cart-total handoff (data/operator-rakuten-flow-diagnostic):
+      // some card-entry pages (Rakuten's real /payment step) show no total at
+      // all — the current-page reader correctly fails closed. Try it first, as
+      // today; ONLY on that specific failure, fall back to the session's own
+      // last real cart-page observation. Any other reader failure (unresolved
+      // currency, scale mismatch, conflicting totals) is left alone so it
+      // propagates through executeOperatePay's normal handling.
+      let cartFallbackCheckout: CheckoutSummary | undefined;
+      if (args.phase === "fill_card") {
+        try {
+          await browser.readCheckoutSummary(args.currency);
+        } catch (error) {
+          if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
+            let liveOrigin: string | null;
+            try {
+              liveOrigin = new URL(browser.currentUrl()).origin;
+            } catch {
+              liveOrigin = null;
+            }
+            const stored = liveOrigin !== null ? getActiveCartCheckoutSummary(liveOrigin) : null;
+            if (stored !== null) cartFallbackCheckout = stored;
+          }
+        }
+      }
       let resolvedCardRef: string | null = null;
       let filledPending: PendingCardFill | null = null;
       const result = await executeOperatePay(
@@ -284,6 +310,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
                 },
               }
             : {}),
+          ...(cartFallbackCheckout !== undefined ? { initialCheckout: cartFallbackCheckout } : {}),
           onCardResolved: (value) => {
             resolvedCardRef = value;
           },
