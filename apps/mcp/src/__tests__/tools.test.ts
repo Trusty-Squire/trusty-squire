@@ -8,7 +8,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
-import type { CheckoutSummary, PaymentBrowser, PendingCardFill } from "../bot/pay-operator.js";
+import type { CheckoutSummary } from "../bot/browser.js";
+import type { PaymentBrowser, PendingCardFill } from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
 // operate_pay's handler reaches into the single active browser session via

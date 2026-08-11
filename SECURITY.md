@@ -137,8 +137,12 @@ anchor. While a split card fill is pending, ordinary browser actions cannot clic
 charge-labeled controls or press Enter, so only `confirm` can cross that boundary. If
 no submit control is found, the sealed page fields and pending metadata remain
 available for a safe retry; they are cleared after a terminal outcome when cleanup
-can be confirmed. If field cleanup cannot be confirmed, pending metadata is still
-discarded but the observation seal remains active.
+can be confirmed. Every payment entry is claimed before asynchronous work begins,
+and a pending confirmation is claimed atomically, so overlapping `operate_pay` calls
+cannot race toward the same submission. A failed confirmation becomes retryable only
+if submission has not started. If field cleanup cannot be confirmed, pending metadata
+is discarded, the observation seal remains active, and the session refuses further
+payment operations.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash

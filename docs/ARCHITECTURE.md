@@ -200,6 +200,9 @@ agent starts operate_pay in the active checkout
   -> when that final total is higher, confirm obtains a fresh amount-bound approval
      for it and re-reads the strict total before submission; unresolved or conflicting
      totals fail closed without charging
+  -> the active session serializes payment entry and confirmation; retry state is
+     restored only before submission starts, and unverified field cleanup seals the
+     session against later payment operations (the contract lives in SECURITY.md)
   -> a missing submit control retains the pending fill for retry; terminal payment
      outcomes clear it
   -> when 3-D Secure is required, the API nudges a linked Telegram chat and

@@ -96,8 +96,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "For a SPLIT checkout: call with " +
     'phase="fill_card" on that step; the card is filled into recognized payment-provider ' +
     "fields only and NOTHING is charged. Then drive the checkout to the order-confirmation " +
-    'step and call phase="confirm" — it verifies the visible total against the approved ' +
-    "amount and places the order. Never click the pay/place-order control via operate_act.",
+    'step and call phase="confirm" — it strictly verifies the final total, places the order ' +
+    "when the approval covers it, and requests a new approval first if the total is higher. " +
+    "Never click the pay/place-order control via operate_act.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -117,8 +118,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         description:
           'Split checkouts only: "fill_card" fills the vaulted card on the card-entry step ' +
           "using its best visible amount (including a subtotal), without charging; " +
-          '"confirm" verifies the live total on the order-confirmation step against the ' +
-          "approved amount and places the order. Omit for single-page checkouts.",
+          '"confirm" strictly verifies the final total, places the order when the approval ' +
+          "covers it, and requests a new approval first if the total is higher. Omit for " +
+          "single-page checkouts.",
       },
       item: { type: "string", minLength: 1 },
       reason: { type: "string", minLength: 1 },

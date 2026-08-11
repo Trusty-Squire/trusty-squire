@@ -1631,10 +1631,11 @@ describe("operate_pay split checkout — confirm", () => {
       live: { ...SPLIT_CHECKOUT, merchant: "Order Review — Split Merchant" },
     });
 
-    expect(result).toMatchObject({ status: "payment_submitted", merchant: SPLIT_CHECKOUT.merchant });
-    expect(auditBodies).toEqual([
-      expect.objectContaining({ merchant: SPLIT_CHECKOUT.merchant }),
-    ]);
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      merchant: SPLIT_CHECKOUT.merchant,
+    });
+    expect(auditBodies).toEqual([expect.objectContaining({ merchant: SPLIT_CHECKOUT.merchant })]);
   });
 
   it("returns a higher-total reapproval before a submit-not-found retry", async () => {

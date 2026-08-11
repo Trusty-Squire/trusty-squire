@@ -446,6 +446,10 @@ interface Session {
   usedLocatorFallback: boolean;
   recipeRejectionReason: string | null;
   replayState: ReplayState | null;
+  // One session-wide payment lease is claimed before any await. The
+  // pending -> confirming transition prevents duplicate confirmation, while
+  // submitStarted forbids restoring retry state after a charge may have begun.
+  // "sealed" survives unverified field cleanup and blocks later payments.
   activePayment:
     | { status: "operating"; lease: ActivePaymentLease }
     | { status: "pending"; pending: PendingCardFill }
