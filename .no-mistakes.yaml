@@ -11,6 +11,6 @@ commands:
     set -eu
     pnpm --filter '@trusty-squire/registry' prisma:generate
     pnpm -r --filter "./packages/**" --if-present build
-    export NODE_OPTIONS="--max-old-space-size=8192"
+    export NODE_OPTIONS="--max-old-space-size=16384"
     pnpm -r --filter '!@trusty-squire/mcp' --if-present test
-    pnpm --filter '@trusty-squire/mcp' exec vitest run --maxWorkers=2 --minWorkers=1
+    pnpm --filter '@trusty-squire/mcp' test
