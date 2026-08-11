@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.12 (2026-08-11)
+
+- fix(mcp): use one approval for split checkouts — a single amount-bound passkey approval sourced from the cart total releases/decrypts the card and authorizes the charge, with no separate release or charge approval (#484)
+
 ## 1.1.9-rc.11 (2026-08-11)
 
 - fix(mcp): decouple card fill from amount approval — `operate_pay(phase="fill_card")` fills the vaulted card with a $0 release-only approval; the human payment approval and charge happen at `phase="confirm"` against the final total (#482)
