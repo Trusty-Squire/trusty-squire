@@ -401,8 +401,8 @@ export default function PaymentApprovalPage() {
           <p className="pay-anchor">
             {isReleaseOnly ? (
               <>
-                Release <span className="mono">{cardLine}</span> to {approval.merchant} — no
-                charge yet
+                Release <span className="mono">{cardLine}</span> to {approval.merchant} — no charge
+                yet
               </>
             ) : (
               <>

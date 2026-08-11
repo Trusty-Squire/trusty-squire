@@ -56,8 +56,8 @@ export interface PendingCardFill {
   card_ref: string;
   last4: string;
   mandate_id?: string;
-  // Retained only for a confirm-time reapproval when the final payable total
-  // exceeds the card-entry amount. They are non-secret mandate context.
+  // Retained only for the confirm-time approval of the strict final payable
+  // total. They are non-secret mandate context.
   item: string;
   reason: string;
 }
@@ -899,8 +899,8 @@ export async function executeOperatePay(
 // and the host has driven the checkout to its order-confirmation step. THIS is
 // where the money moves, so the total-verification gate lives here: the live
 // page must show a readable final total before the pay/place-order control is
-// clicked. A lower final total is covered by the fill approval; a higher total
-// receives a fresh approval before charge. A drifted origin/currency refuses.
+// clicked. The release approval covers no amount; any later amount drift gets
+// a fresh exact-total approval before charge. A drifted origin/currency refuses.
 export async function executeOperatePayConfirm(
   pending: PendingCardFill,
   args: { currency?: string; three_ds_wait_seconds?: number },
@@ -978,7 +978,10 @@ export async function executeOperatePayConfirm(
   // human to approve that exact amount, then submit. The internal
   // initialCheckout dependency prevents this reapproval from falling back to
   // the permissive reader or a caller-supplied amount.
-  if (live.amount_cents > checkout.amount_cents) {
+  if (
+    checkout.currency === ZERO_AMOUNT_CHECKOUT_CURRENCY ||
+    live.amount_cents !== checkout.amount_cents
+  ) {
     let refreshed: PendingCardFill | undefined;
     const reapproval = await executeOperatePay(
       {

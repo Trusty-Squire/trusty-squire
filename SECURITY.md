@@ -90,9 +90,11 @@ fields.
 Before card entry or payment approval, the browser requires a one-time Vouchflow
 passkey enrollment and confirms that the platform authenticator supports the
 WebAuthn PRF extension. A payment approval is short-lived and account-scoped.
-The anonymous approval shell displays the canonical server values before any
-payment-context ceremony. One explicit **Approve payment** action then signs a
-payload binding the merchant, checkout origin, amount, currency, single-use
+The anonymous approval shell displays the canonical purchase values before an
+amount-bound payment ceremony. For a split checkout's zero-amount, no-currency
+release approval, it instead says that the named card will be released to the
+merchant with no charge yet. One explicit **Approve payment** action then signs
+a payload binding the merchant, checkout origin, amount, currency, single-use
 nonce, card reference, operator-key hash, item description, purchase reason, and
 server-derived requesting-agent label while deriving the card-decryption key.
 The API uses the install's authenticated agent identity when present and

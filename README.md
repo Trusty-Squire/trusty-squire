@@ -175,11 +175,12 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - App grants are host-scoped, auditable, rate-limitable, and independently revocable. A leaked grant can be revoked without rotating the provider key.
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
-  payment, your phone releases the card only to that checkout's ephemeral local
-  operator after one passkey authorization over the exact details already shown
-  on the approval page. The API temporarily relays only operator-sealed card
-  ciphertext and its signed mandate; successful operator confirmation clears
-  those relay bytes.
+  single-page payment, your phone releases the card only after approving the
+  exact purchase details shown on the approval page. On a split checkout, the
+  first approval releases the card without authorizing a charge; a second phone
+  approval authorizes the exact final total immediately before submission. The
+  API temporarily relays only operator-sealed card ciphertext and its signed
+  mandate; successful operator confirmation clears those relay bytes.
   Trusty Squire's API and the coding-agent model never receive plaintext PAN or
   CVV. See the
   [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)

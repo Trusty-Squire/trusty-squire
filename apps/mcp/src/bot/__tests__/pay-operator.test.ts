@@ -1263,9 +1263,7 @@ describe("operate_pay split checkout — fill_card", () => {
       status: "payment_card_filled",
       amount_cents: 0,
     });
-    expect(approvalBodies).toEqual([
-      expect.objectContaining({ amount_cents: 0, currency: "XXX" }),
-    ]);
+    expect(approvalBodies).toEqual([expect.objectContaining({ amount_cents: 0, currency: "XXX" })]);
     expect(filledCards).toEqual([SYNTHETIC_CARD]);
     expect(browser.readCheckoutSummary).not.toHaveBeenCalled();
     expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
@@ -1348,6 +1346,7 @@ function splitPending(): PendingCardFill {
 
 async function runConfirm(cfg: {
   live?: CheckoutSummary | Error;
+  liveAfterApproval?: CheckoutSummary;
   permissiveLive?: CheckoutSummary | Error;
   reapprovalStatus?: "approved" | "expired";
   submit?: CheckoutSubmitResult | Error;
@@ -1396,7 +1395,7 @@ async function runConfirm(cfg: {
         url.endsWith("/v1/pay/approvals/appr_reapproval?wait_for_submission=1")) &&
       init?.method === "GET"
     ) {
-      const approval = approvalBodies[0]!;
+      const approval = approvalBodies.at(-1)!;
       if (cfg.reapprovalStatus === "expired") {
         return Response.json({
           id: "appr_reapproval",
@@ -1474,6 +1473,12 @@ async function runConfirm(cfg: {
   const live = cfg.live ?? { ...SPLIT_CHECKOUT };
   const permissiveLive = cfg.permissiveLive ?? live;
   const submit = cfg.submit ?? { three_ds_required: false };
+  const readCheckoutConfirmSummary =
+    live instanceof Error
+      ? vi.fn().mockRejectedValue(live)
+      : cfg.liveAfterApproval === undefined
+        ? vi.fn().mockResolvedValue(live)
+        : vi.fn().mockResolvedValueOnce(live).mockResolvedValue(cfg.liveAfterApproval);
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
     // The reapproval path always supplies initialCheckout, so it never calls
@@ -1485,8 +1490,7 @@ async function runConfirm(cfg: {
       permissiveLive instanceof Error
         ? vi.fn().mockRejectedValue(permissiveLive)
         : vi.fn().mockResolvedValue(permissiveLive),
-    readCheckoutConfirmSummary:
-      live instanceof Error ? vi.fn().mockRejectedValue(live) : vi.fn().mockResolvedValue(live),
+    readCheckoutConfirmSummary,
     currentUrl: vi.fn().mockReturnValue(`${SPLIT_CHECKOUT.checkout_origin}/checkout/confirm`),
     fillAndSubmitCheckout: vi.fn(),
     fillCheckoutCardFields: vi.fn().mockRejectedValue(new Error("payment_field_not_found:pan")),
@@ -1655,6 +1659,40 @@ describe("operate_pay split checkout — confirm", () => {
     expect(approvalBodies).toEqual([
       expect.objectContaining({ amount_cents: SPLIT_CHECKOUT.amount_cents - 500 }),
     ]);
+    expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+  });
+
+  it("requires a genuine zero-dollar approval instead of treating release approval as payment approval", async () => {
+    const { result, browser, approvalBodies } = await runConfirm({
+      live: { ...SPLIT_CHECKOUT, amount_cents: 0 },
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      amount_cents: 0,
+      currency: SPLIT_CHECKOUT.currency,
+    });
+    expect(approvalBodies).toEqual([
+      expect.objectContaining({ amount_cents: 0, currency: SPLIT_CHECKOUT.currency }),
+    ]);
+    expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+  });
+
+  it("reapproves the exact amount again when the final total drops during approval", async () => {
+    const lowered = SPLIT_CHECKOUT.amount_cents - 500;
+    const { result, browser, approvalBodies } = await runConfirm({
+      liveAfterApproval: { ...SPLIT_CHECKOUT, amount_cents: lowered },
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      amount_cents: lowered,
+    });
+    expect(approvalBodies.map((body) => body.amount_cents)).toEqual([
+      SPLIT_CHECKOUT.amount_cents,
+      lowered,
+    ]);
+    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledTimes(3);
     expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
   });
 

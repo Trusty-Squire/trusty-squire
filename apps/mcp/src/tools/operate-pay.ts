@@ -28,9 +28,9 @@ const inputSchema = z
       .optional(),
     card_ref: z.string().min(1).max(64).optional(),
     card_label: z.string().min(1).max(256).optional(),
-    // Split checkouts: "fill_card" approves the best visible amount (a
-    // subtotal when that is all the card step exposes) and fills without
-    // charging; "confirm" strictly verifies the final total before charge.
+    // Split checkouts: "fill_card" reads no total and approves only card
+    // release, then fills without charging; "confirm" strictly reads and
+    // obtains human approval for the exact final total before charge.
     phase: z.enum(["fill_card", "confirm"]).optional(),
     item: z.string().trim().min(1).max(500),
     reason: z.string().trim().min(1).max(500),

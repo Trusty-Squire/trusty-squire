@@ -57,10 +57,12 @@ captcha handling, and extraction.
 
 A short-lived handoff from an active operate session to the user's phone. The
 phone can add and bind a card when needed. The anonymous approval shell displays
-the exact server-recorded purchase details before one payment-context passkey
-authorization. The API relays the signed mandate and operator-sealed card through
-an account-scoped, short-TTL database record and mutates approval state only after
-operator verification. The security contract is owned by
+the exact server-recorded purchase details for an amount-bound approval, or the
+merchant and no-charge card-release intent for a split fill. One payment-context
+passkey authorization signs that approval. The API relays the signed mandate and
+operator-sealed card through an account-scoped, short-TTL database record and
+mutates approval state only after operator verification. The security contract
+is owned by
 [`SECURITY.md`](../SECURITY.md#client-encrypted-card-data).
 
 **Sealed slot**
@@ -174,10 +176,11 @@ agent starts operate_pay in the active checkout
      and attaches the requesting MCP host's initialize clientInfo.name
   -> if the approval has no card, the user adds one and the API binds that saved
      card to the still-pending approval
-  -> the anonymous approval shell displays merchant, checkout origin, amount and
-     currency, item, reason, and requesting agent from the short-lived server record
-  -> the user reviews those values and one passkey ceremony signs their canonical
-     purchase payload, unlocks the card, and seals it to the ephemeral operator
+  -> the anonymous approval shell displays merchant, checkout origin, item, reason,
+     and requesting agent from the short-lived server record; amount-bound approvals
+     show amount and currency, while split fill shows a no-charge release message
+  -> the user reviews that intent and one passkey ceremony signs the canonical
+     payload, unlocks the card, and seals it to the ephemeral operator
   -> the API stages that opaque candidate in an account-scoped Postgres relay with
      a 15-second TTL so another API worker can deliver it to the waiting operator
   -> the operator verifies the final JWS, opens the card, and confirms the exact
