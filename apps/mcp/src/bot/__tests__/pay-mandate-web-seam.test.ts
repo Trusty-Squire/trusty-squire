@@ -326,6 +326,10 @@ async function runSeam(cfg: {
 
   const browser: PaymentBrowser = {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
+    readCheckoutIdentity: vi.fn().mockResolvedValue({
+      merchant: CHECKOUT.merchant,
+      checkout_origin: CHECKOUT.checkout_origin,
+    }),
     readCheckoutSummary: vi.fn().mockResolvedValue(CHECKOUT),
     readCheckoutConfirmSummary: vi.fn().mockResolvedValue(CHECKOUT),
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),

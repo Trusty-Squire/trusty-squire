@@ -306,6 +306,12 @@ export default function PaymentApprovalPage() {
   const jitReviewBlocked =
     isJitOrigin && (jitBindingMismatch || ceremony?.card === null || cardMetadataError !== null);
   const needsCard = ceremony?.status === "pending" && ceremony.card_ref === null;
+  // A split-checkout card-entry fill approves card release only — it never
+  // reads a page total, so amount_cents is always 0. Showing "$0.00" here
+  // would misleadingly read as a free order; the real total is approved
+  // separately, right before the charge.
+  const isReleaseOnly =
+    approval !== null && approval.amount_cents === 0 && approval.currency === "XXX";
   const amountLabel =
     approval !== null ? formatAmount(approval.amount_cents, approval.currency) : "";
   const cardLine =
@@ -393,7 +399,17 @@ export default function PaymentApprovalPage() {
             ))}
           </dl>
           <p className="pay-anchor">
-            Pay with <span className="mono">{cardLine}</span> · {amountLabel} to {approval.merchant}
+            {isReleaseOnly ? (
+              <>
+                Release <span className="mono">{cardLine}</span> to {approval.merchant} — no charge
+                yet
+              </>
+            ) : (
+              <>
+                Pay with <span className="mono">{cardLine}</span> · {amountLabel} to{" "}
+                {approval.merchant}
+              </>
+            )}
           </p>
           {jitReviewBlocked ? (
             <div className="app-banner err">

@@ -72,20 +72,19 @@ payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission.
 
 Some split checkouts collect the card before the final order-confirmation step. On the
-card-entry page, `operate_pay { phase: "fill_card" }` reads the live merchant, checkout
-origin, currency, and best visible amount, including a subtotal when no final payable
-total is shown. The phone approval is bound to that amount before Trusty Squire releases
-and fills the card without submitting. If no checkout amount can be resolved, the call
-returns `payment_checkout_total_not_found` before creating an approval or filling any fields.
-It fills only the merchant's own HTTPS frames or recognized payment-provider frames.
-The card stays in the page as sealed, observation-masked fields while the agent
-advances to the review step; charge-like `operate_act` clicks and Enter are blocked
-during that interval. `operate_pay { phase: "confirm" }` then strictly re-reads the
-final payable total. It can charge when that total is no greater than the approved
-amount; a higher total triggers a new phone approval bound to the final amount before
-any charge. Currency and checkout origin must still match exactly. A changed page title
-does not invalidate the merchant because the checkout origin is the trust anchor. A
-missing or conflicting final total is never replaced with caller-supplied payment values.
+card-entry page, `operate_pay { phase: "fill_card" }` never reads or requires a page
+total — it works even when the card-entry page shows no total at all. The phone
+approval it obtains only releases the card, binding no charge amount, before Trusty
+Squire fills the card without submitting. It fills only the merchant's own HTTPS
+frames or recognized payment-provider frames. The card stays in the page as sealed,
+observation-masked fields while the agent advances to the review step; charge-like
+`operate_act` clicks and Enter are blocked during that interval.
+`operate_pay { phase: "confirm" }` is where the charge happens: it strictly reads the
+final payable total and always obtains a fresh phone approval bound to that exact
+amount before any charge. Checkout origin must still match exactly. A changed page
+title does not invalidate the merchant because the checkout origin is the trust
+anchor. A missing or conflicting final total is never replaced with caller-supplied
+payment values.
 
 Before an initial single-page or `fill_card` call, a checkout that exposes PayPal
 Smart Buttons or PayPal-hosted fields is handed back before Trusty Squire selects a
@@ -176,11 +175,12 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - App grants are host-scoped, auditable, rate-limitable, and independently revocable. A leaked grant can be revoked without rotating the provider key.
 - You connect Google or GitHub in a real browser. Trusty Squire does not ask the coding agent to type those passwords.
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
-  payment, your phone releases the card only to that checkout's ephemeral local
-  operator after one passkey authorization over the exact details already shown
-  on the approval page. The API temporarily relays only operator-sealed card
-  ciphertext and its signed mandate; successful operator confirmation clears
-  those relay bytes.
+  single-page payment, your phone releases the card only after approving the
+  exact purchase details shown on the approval page. On a split checkout, the
+  first approval releases the card without authorizing a charge; a second phone
+  approval authorizes the exact final total immediately before submission. The
+  API temporarily relays only operator-sealed card ciphertext and its signed
+  mandate; successful operator confirmation clears those relay bytes.
   Trusty Squire's API and the coding-agent model never receive plaintext PAN or
   CVV. See the
   [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)
