@@ -208,6 +208,10 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     try {
       const browser = await activeProvisionBrowserForPayment();
       if (await browser.isPayPalHostedCheckout()) {
+        if (paymentClaim.resumeApproval !== undefined) {
+          completeActivePaymentLeaseWithPendingApproval(paymentLease, paymentClaim.resumeApproval);
+          paymentLeaseCompleted = true;
+        }
         return {
           status: "paypal_checkout",
           reason: "paypal_hosted_fields_unfillable",
@@ -336,6 +340,16 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           throw new Error("operate_pay succeeded without an action-time card source attestation");
         }
         recordActivePaymentProvenance(resolvedCardRef);
+      }
+      if (
+        paymentClaim.resumeApproval !== undefined &&
+        !paymentLeaseCompleted &&
+        resolvedCardRef === null &&
+        result.status !== "payment_approval_timeout" &&
+        result.status !== "payment_card_required"
+      ) {
+        completeActivePaymentLeaseWithPendingApproval(paymentLease, paymentClaim.resumeApproval);
+        paymentLeaseCompleted = true;
       }
       return result;
     } catch (error) {

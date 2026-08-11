@@ -487,6 +487,44 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(mockPaymentLease).toBeNull();
   });
 
+  it("preserves a resumed approval across a normal configuration error", async () => {
+    const resumeApproval: PendingApprovalWait = {
+      approval_id: "appr_configuration",
+      approval_url: "https://web.test/pay/appr_configuration",
+      nonce: "nonce_configuration",
+      agent: "agent_configuration",
+      checkout: {
+        merchant: "M",
+        checkout_origin: "https://m.test",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      jit: false,
+      boundCardRef: "card_1",
+      deadline: Date.now() + 600_000,
+      rejectedCandidates: [],
+      keypair: { publicKey: "public", privateKey: "private" },
+      item: PAYMENT_DETAILS.item,
+      reason: PAYMENT_DETAILS.reason,
+      cardRef: "card_1",
+    };
+    mockAwaitingApproval = resumeApproval;
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "" }),
+    } as unknown as ApiClient);
+
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).resolves.toMatchObject({
+      status: "payment_configuration_error",
+      reason: "vouchflow_expected_audience_unset",
+    });
+    expect(mockAwaitingApproval).toBe(resumeApproval);
+    expect(resumeApproval.keypair.privateKey).toBe("private");
+    expect(mockPaymentLease).toBeNull();
+  });
+
   it("returns the persisted cart URL with the safe total-observation action", async () => {
     mockCartCheckout = {
       checkout: {

@@ -376,10 +376,7 @@ export async function executeOperatePay(
   const threeDsWaitSeconds = resume !== undefined ? resume.three_ds_wait_seconds : args.three_ds_wait_seconds;
   const threeDsWaitMs = Math.min(Math.max(threeDsWaitSeconds ?? 180, 0), 600) * 1000;
   let keypair = resume !== undefined ? resume.keypair : await generateOperatorKeypair();
-  // [P0] Set right before handing `keypair` off to onApprovalPending so the
-  // outer finally skips zeroing it — the SAME object is what a later resumed
-  // call will decrypt the sealed card with.
-  let keypairHandedOff = false;
+  let keypairHandedOff = resume !== undefined;
   let cardBytes: Uint8Array | undefined;
   let card: CheckoutCard | undefined;
   let resumableState: (() => PendingApprovalWait) | undefined =
@@ -566,6 +563,8 @@ export async function executeOperatePay(
       const approval = await api.getPaymentApproval(approvalId, deps.now() < callDeadline);
       boundCardRef = approval.card_ref;
       if (approval.status === "expired") {
+        resumableState = undefined;
+        keypairHandedOff = false;
         return timeoutResult();
       }
       const hasCandidate =
@@ -815,11 +814,18 @@ export async function executeOperatePay(
           boundCardRef = final.card_ref;
         } catch {}
       }
+      resumableState = undefined;
+      keypairHandedOff = false;
       return timeoutResult();
     }
 
-    if (claims === undefined || card === undefined) return timeoutResult();
+    if (claims === undefined || card === undefined) {
+      resumableState = undefined;
+      keypairHandedOff = false;
+      return timeoutResult();
+    }
     resumableState = undefined;
+    keypairHandedOff = false;
 
     const cardRef = cardRefArg ?? approved.card_ref;
     if (!hasBoundCard(cardRef)) {
