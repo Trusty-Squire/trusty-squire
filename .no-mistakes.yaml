@@ -11,4 +11,5 @@ commands:
     set -eu
     pnpm --filter '@trusty-squire/registry' prisma:generate
     pnpm -r --filter "./packages/**" --if-present build
+    export NODE_OPTIONS="--max-old-space-size=8192"
     pnpm -r --if-present test
