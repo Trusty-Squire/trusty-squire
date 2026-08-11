@@ -9,8 +9,9 @@ export default defineConfig({
     // One test in this suite is memory-heavy enough to OOM a worker at
     // Node's default heap size on a memory-constrained CI runner. Tracked:
     // operator-mandate-web-seam-test-oom.
+    pool: "forks",
     poolOptions: {
-      threads: {
+      forks: {
         execArgv: ["--max-old-space-size=4096"],
       },
     },
