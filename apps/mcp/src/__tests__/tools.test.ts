@@ -6,9 +6,13 @@
 // the interactive provisioning driver, vault tools, and extract-failure
 // diagnostic pair.
 
+import { createHash, generateKeyPairSync } from "node:crypto";
+import canonicalize from "canonicalize";
+import { exportJWK, SignJWT } from "jose";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiCallError, type ApiClient } from "../api-client.js";
-import type { CheckoutSummary } from "../bot/browser.js";
+import type { CheckoutCard, CheckoutSummary } from "../bot/browser.js";
+import { sealToRecipient } from "../bot/payment-hpke.js";
 import type { PaymentBrowser, PendingCardFill } from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
@@ -392,6 +396,21 @@ describe("operate_pay split checkout phases", () => {
       amount_cents: 2_904,
       currency: "JPY",
     };
+    const SYNTHETIC_CARD: CheckoutCard = {
+      pan: "4242424242424242",
+      exp_month: "12",
+      exp_year: "30",
+      name: "Synthetic Cardholder",
+      cvv: "123",
+      billing: {
+        line1: "123 Test Street",
+        line2: "Suite 4",
+        city: "Testville",
+        state: "NY",
+        postal_code: "10001",
+        country: "US",
+      },
+    };
 
     function stubRakutenPaymentPageWithNoTotal(): void {
       mockBrowser = stubBrowser();
@@ -442,6 +461,127 @@ describe("operate_pay split checkout phases", () => {
         currency: "JPY",
       });
       expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    });
+
+    it("fills the card after approval grounded in the stored cart total", async () => {
+      stubRakutenPaymentPageWithNoTotal();
+      mockCartCheckout = RAKUTEN_CART_CHECKOUT;
+      const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+      const jwk = await exportJWK(publicKey);
+      const approvalId = "appr_rakuten_approved";
+      const nonce = "rakuten-nonce";
+      const agent = "rakuten-agent";
+      let approvalBody: Record<string, unknown> | undefined;
+      const createPaymentApproval = vi.fn(async (body: Record<string, unknown>) => {
+        approvalBody = body;
+        return {
+          id: approvalId,
+          nonce,
+          agent,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        };
+      });
+      const getPaymentConfig = vi.fn().mockResolvedValue({
+        vouchflow_audience: "customer_test",
+      });
+      const getPaymentApproval = vi.fn(async () => {
+        const approval = approvalBody;
+        if (approval === undefined) throw new Error("approval_not_created");
+        const operatorPublicKey = String(approval.operator_pubkey);
+        const recipientHash = createHash("sha256")
+          .update(Buffer.from(operatorPublicKey, "base64url"))
+          .digest("base64url");
+        const canonical = canonicalize({
+          approval_id: approvalId,
+          merchant: approval.merchant,
+          checkout_origin: approval.checkout_origin,
+          amount_cents: approval.amount_cents,
+          currency: approval.currency,
+          nonce,
+          card_ref: "card_1",
+          recipient_pubkey_hash: recipientHash,
+          item: approval.item,
+          reason: approval.reason,
+          agent,
+        });
+        if (canonical === undefined) throw new Error("canonicalization_failed");
+        const aad = createHash("sha256").update(canonical, "utf8").digest();
+        const jws = await new SignJWT({
+          payload_sha256: aad.toString("base64url"),
+          context: "purchase",
+          confidence: "high",
+          mandate_id: "mandate_rakuten",
+        })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+          .setIssuer("https://vouchflow.dev")
+          .setAudience("customer_test")
+          .sign(privateKey);
+        const sealedCard = await sealToRecipient(
+          operatorPublicKey,
+          new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
+          aad,
+        );
+        return {
+          id: approvalId,
+          status: "approved",
+          merchant: approval.merchant,
+          checkout_origin: approval.checkout_origin,
+          amount_cents: approval.amount_cents,
+          currency: approval.currency,
+          nonce,
+          card_ref: "card_1",
+          operator_pubkey: operatorPublicKey,
+          jws,
+          sealed_card: sealedCard,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        };
+      });
+      const api = makeMockApi({
+        createPaymentApproval,
+        getPaymentConfig,
+        getPaymentApproval,
+      } as unknown as ApiClient);
+      const originalFetch = globalThis.fetch;
+      const fetchMock = vi.fn(
+        async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+          const url =
+            typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+          if (url === "https://api.vouchflow.dev/.well-known/jwks.json") {
+            return Response.json({
+              keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }],
+            });
+          }
+          return originalFetch(input, init);
+        },
+      ) as typeof fetch;
+      globalThis.fetch = fetchMock;
+      try {
+        const args = operatePayTool.inputSchema.parse({
+          ...PAYMENT_DETAILS,
+          card_ref: "card_1",
+          phase: "fill_card",
+        });
+
+        const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+
+        expect(createPaymentApproval).toHaveBeenCalledOnce();
+        expect(approvalBody).toMatchObject({
+          merchant: "Rakuten",
+          checkout_origin: RAKUTEN_CART_ORIGIN,
+          amount_cents: 2_904,
+          currency: "JPY",
+        });
+        expect(result).toMatchObject({
+          status: "payment_card_filled",
+          merchant: "Rakuten",
+          amount_cents: 2_904,
+          currency: "JPY",
+        });
+        expect(mockBrowser.fillCheckoutCardFields).toHaveBeenCalledWith(SYNTHETIC_CARD);
+        expect(mockBrowser.fillAndSubmitCheckout).not.toHaveBeenCalled();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     });
 
     it("fails closed when the card page has no total and no cart summary was ever observed", async () => {

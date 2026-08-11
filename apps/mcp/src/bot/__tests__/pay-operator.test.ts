@@ -318,6 +318,10 @@ describe("operate_pay", () => {
         reason: "checkout_currency_unrecognized",
       },
     ],
+    [
+      "payment_checkout_total_conflict",
+      { status: "payment_amount_mismatch", reason: "conflicting_checkout_totals" },
+    ],
     ["payment_checkout_total_not_found", { status: "payment_checkout_total_not_found" }],
   ])("does not mint an approval for checkout grounding failure %s", async (error, expected) => {
     const approvalBodies: Array<Record<string, unknown>> = [];

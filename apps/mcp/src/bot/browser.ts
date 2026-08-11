@@ -6764,7 +6764,7 @@ export class BrowserController {
         (child) => child.amount_cents !== amount.amount_cents || child.currency !== amount.currency,
       )
     ) {
-      throw new Error("payment_checkout_total_not_found");
+      throw new Error("payment_checkout_total_conflict");
     }
     return {
       merchant: merchantFromPage(identity.title, identity.siteName, page.url()),

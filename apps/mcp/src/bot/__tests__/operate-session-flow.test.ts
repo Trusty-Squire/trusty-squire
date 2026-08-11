@@ -4162,7 +4162,7 @@ describe("split-checkout cart-total handoff (Rakuten)", () => {
     });
   });
 
-  it("is not populated by a non-cart page, and is never exposed for a different origin", async () => {
+  it("is not populated by a non-cart page", async () => {
     // Not the Rakuten cart URL — must never call readCheckoutSummary for the
     // handoff, and must never store anything.
     const started = await startProvisionSession({
@@ -4171,10 +4171,21 @@ describe("split-checkout cart-total handoff (Rakuten)", () => {
     expect(h.checkoutSummaryCalls).toEqual([]);
     expect(getActiveCartCheckoutSummary("https://shop.example.com")).toBeNull();
 
-    // Even if the (unrelated) session origin happened to have a stored
-    // Rakuten cart summary from history, a caller asking about the WRONG
-    // origin must never get it back.
     await observe(started.session_id);
     expect(getActiveCartCheckoutSummary(RAKUTEN_CART_ORIGIN)).toBeNull();
+  });
+
+  it("never exposes a stored cart total for a different origin", async () => {
+    h.checkoutSummaries[`${RAKUTEN_CART_ORIGIN}/cart`] = { amount_cents: 2_904, currency: "JPY" };
+    await startProvisionSession({ serviceUrl: RAKUTEN_CART_URL });
+
+    expect(getActiveCartCheckoutSummary(RAKUTEN_CART_ORIGIN)).toMatchObject({
+      amount_cents: 2_904,
+      currency: "JPY",
+    });
+    expect(
+      getActiveCartCheckoutSummary("https://evil.cart.step.rakuten.co.jp"),
+    ).toBeNull();
+    expect(getActiveCartCheckoutSummary("https://shop.example.com")).toBeNull();
   });
 });

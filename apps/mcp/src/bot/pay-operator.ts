@@ -342,6 +342,12 @@ export async function executeOperatePay(
       if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
         return { status: "payment_checkout_total_not_found" };
       }
+      if (error instanceof Error && error.message === "payment_checkout_total_conflict") {
+        return {
+          status: "payment_amount_mismatch",
+          reason: "conflicting_checkout_totals",
+        };
+      }
       throw error;
     }
 
@@ -751,6 +757,8 @@ export async function executeOperatePay(
       };
     }
 
+    // fill_card always returns above: split card-entry pages may omit the total, and confirm
+    // performs the strict final-total recheck before any submission.
     // [#13][P1] JIT nearly doubles the window between reading the checkout and
     // filling it, so a mid-ceremony navigation could swap the merchant, origin,
     // or total out from under the signed mandate. Re-read the live checkout

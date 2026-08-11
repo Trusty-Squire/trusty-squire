@@ -1349,7 +1349,7 @@ describe("split-checkout card fill (real browser)", () => {
         ]);
 
         await expect(controller.readCheckoutSummary("JPY")).rejects.toThrow(
-          "payment_checkout_total_not_found",
+          "payment_checkout_total_conflict",
         );
       } finally {
         await browser.close();
