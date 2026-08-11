@@ -97,8 +97,13 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   Card fields never return through MCP.
 - On a split checkout whose card-entry step shows only a subtotal, call
   `operate_pay` with `phase: "fill_card"`. The tool binds approval to the best
-  visible amount and fills without charging. After approval, advance only through
-  non-charge navigation such as **Next** or **Continue to review**, then call
+  visible amount and fills without charging. Rakuten's card-entry page has no
+  amount at all: observe its cart page before advancing, then call `fill_card` on
+  the card page. It can use that same session's parser-validated cart total only
+  while the origin still matches. It must still fail closed without that
+  observation, and never accepts the caller's amount as a substitute. After
+  approval, advance only through non-charge navigation such as **Next** or
+  **Continue to review**, then call
   `operate_pay` with `phase: "confirm"` once the final total is visible. Confirm
   fails closed if that total is unresolved or conflicting; if it exceeds the
   fill-card approval, the tool requires a new approval for the final amount before

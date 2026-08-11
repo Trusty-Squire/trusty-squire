@@ -4183,9 +4183,7 @@ describe("split-checkout cart-total handoff (Rakuten)", () => {
       amount_cents: 2_904,
       currency: "JPY",
     });
-    expect(
-      getActiveCartCheckoutSummary("https://evil.cart.step.rakuten.co.jp"),
-    ).toBeNull();
+    expect(getActiveCartCheckoutSummary("https://evil.cart.step.rakuten.co.jp")).toBeNull();
     expect(getActiveCartCheckoutSummary("https://shop.example.com")).toBeNull();
   });
 });

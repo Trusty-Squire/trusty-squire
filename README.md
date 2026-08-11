@@ -72,11 +72,16 @@ payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission.
 
 Some split checkouts collect the card before the final order-confirmation step. On the
-card-entry page, `operate_pay { phase: "fill_card" }` reads the live merchant, checkout
-origin, currency, and best visible amount, including a subtotal when no final payable
-total is shown. The phone approval is bound to that amount before Trusty Squire releases
-and fills the card without submitting. If no checkout amount can be resolved, the call
-returns `payment_checkout_total_not_found` before creating an approval or filling any fields.
+card-entry page, `operate_pay { phase: "fill_card" }` first reads the live merchant,
+checkout origin, currency, and best visible amount, including a subtotal when no final
+payable total is shown. Rakuten's card-entry page shows no amount, so Trusty Squire can
+instead use the latest parser-validated checkout summary that the same operate session
+observed at `https://cart.step.rakuten.co.jp/cart`, but only while the checkout remains
+on that origin. The phone approval is bound to that observed amount before Trusty Squire
+releases and fills the card without submitting. Caller input never supplies this fallback.
+If the current page has no amount and no qualifying cart observation exists, the call returns
+`payment_checkout_total_not_found` before creating an approval or filling any fields;
+currency, precision, and conflicting-total failures never use the cart fallback.
 It fills only the merchant's own HTTPS frames or recognized payment-provider frames.
 The card stays in the page as sealed, observation-masked fields while the agent
 advances to the review step; charge-like `operate_act` clicks and Enter are blocked

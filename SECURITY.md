@@ -111,10 +111,17 @@ it re-reads the live merchant, origin, amount, and currency and refuses submissi
 if any signed field changed.
 
 A split checkout may collect card details before it exposes the final payable total.
-Its `fill_card` phase resolves the best amount visible on the card-entry page,
-including a subtotal when that is all the page shows, and completes the same signed,
-amount-bound approval before releasing the card. If no page amount resolves, it
-fails before approval rather than accepting a caller-supplied amount. After approval
+Its `fill_card` phase first resolves the best amount visible on the card-entry page,
+including a subtotal when that is all the page shows. For Rakuten's amount-less card
+page only, a missing-total result may fall back to the latest real `CheckoutSummary`
+that the same operate session captured with the normal trusted reader at
+`https://cart.step.rakuten.co.jp/cart` (query ignored). Capture and use both require
+the checkout origin to match; the value is replaced only by another successful cart
+read and never crosses sessions. Currency, precision, conflicting-total, and other
+reader failures cannot use the fallback. If
+neither the current page nor that scoped cart observation supplies an amount,
+`fill_card` fails before approval rather than accepting a caller-supplied amount. It
+completes the signed, amount-bound approval before releasing the card. After approval
 it requires the live page origin to equal the mandate's checkout origin, fills no
 submit control, and permits card data only in the main frame,
 same-registrable-domain HTTPS frames, or curated HTTPS payment-provider frames. A

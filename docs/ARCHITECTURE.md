@@ -163,9 +163,13 @@ and transferred secrets are not returned to the agent.
 agent starts operate_pay in the active checkout
   -> agent supplies a non-empty item and reason
   -> a single-page checkout reads merchant, origin, and payable total from the
-     live page; split fill_card reads those fields using the best visible amount,
-     including a subtotal when no final payable total is present; an unreadable
-     amount stops before approval with payment_checkout_total_not_found
+     live page; split fill_card first reads those fields using the best visible
+     amount, including a subtotal when no final payable total is present
+  -> an observation of https://cart.step.rakuten.co.jp/cart (query ignored) keeps
+     the latest parser-validated JPY checkout summary in that operate session;
+     only a missing-total result on a later same-origin fill_card page may reuse
+     it, while other reader failures, missing session state, and origin changes
+     still stop before approval
   -> PayPal Smart Button or hosted-field frames hand initial/fill checkout calls to
      the user before saved-card resolution or approval creation
   -> an explicit card is used; otherwise one saved card is selected automatically,
