@@ -1369,10 +1369,12 @@ async function runConfirm(cfg: {
   approvalBodies: Array<Record<string, unknown>>;
   notifyCalls: string[];
   browser: PaymentBrowser;
+  refreshedPendings: PendingCardFill[];
 }> {
   const auditBodies: unknown[] = [];
   const approvalBodies: Array<Record<string, unknown>> = [];
   const notifyCalls: string[] = [];
+  const refreshedPendings: PendingCardFill[] = [];
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const jwk = await exportJWK(publicKey);
   const nonce = "confirm-reapproval-nonce";
@@ -1503,10 +1505,13 @@ async function runConfirm(cfg: {
       vouchflowApiBase: "https://vouchflow.test",
       vouchflowExpectedAudience: "customer_test",
       webBase: "https://web.test",
+      onCardFilled: (pending) => {
+        refreshedPendings.push(pending);
+      },
     },
   )) as Record<string, unknown>;
 
-  return { result, auditBodies, approvalBodies, notifyCalls, browser };
+  return { result, auditBodies, approvalBodies, notifyCalls, browser, refreshedPendings };
 }
 
 describe("operate_pay split checkout — confirm", () => {
@@ -1622,15 +1627,42 @@ describe("operate_pay split checkout — confirm", () => {
     // The merchant string derives from the page title, which legitimately
     // changes between the payment and review steps; origin+amount+currency are
     // the mandate-bound gate.
-    const { result } = await runConfirm({
+    const { result, auditBodies } = await runConfirm({
       live: { ...SPLIT_CHECKOUT, merchant: "Order Review — Split Merchant" },
     });
 
-    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(result).toMatchObject({ status: "payment_submitted", merchant: SPLIT_CHECKOUT.merchant });
+    expect(auditBodies).toEqual([
+      expect.objectContaining({ merchant: SPLIT_CHECKOUT.merchant }),
+    ]);
+  });
+
+  it("returns a higher-total reapproval before a submit-not-found retry", async () => {
+    const { result, refreshedPendings } = await runConfirm({
+      live: {
+        ...SPLIT_CHECKOUT,
+        merchant: "Order Review — Split Merchant",
+        amount_cents: SPLIT_CHECKOUT.amount_cents + 500,
+      },
+      submit: new Error("payment_submit_not_found"),
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_checkout_failed",
+      reason: "payment_submit_not_found",
+    });
+    expect(refreshedPendings).toEqual([
+      expect.objectContaining({
+        checkout: expect.objectContaining({ amount_cents: SPLIT_CHECKOUT.amount_cents + 500 }),
+        mandate_id: "mandate_reapproval",
+      }),
+    ]);
+    expect(refreshedPendings[0]?.checkout.merchant).toBe(SPLIT_CHECKOUT.merchant);
   });
 
   it("keeps the filled fields for a retry when no charge control is found", async () => {
     const { result, auditBodies, browser } = await runConfirm({
+      live: { ...SPLIT_CHECKOUT, merchant: "Order Review — Split Merchant" },
       submit: new Error("payment_submit_not_found"),
     });
 
@@ -1640,7 +1672,12 @@ describe("operate_pay split checkout — confirm", () => {
     });
     // Nothing was charged and the card stays in the page for a settled retry.
     expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
-    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_checkout_failed" })]);
+    expect(auditBodies).toEqual([
+      expect.objectContaining({
+        merchant: SPLIT_CHECKOUT.merchant,
+        status: "payment_checkout_failed",
+      }),
+    ]);
   });
 
   it("clears the fill and returns terminal unknown after an ambiguous submit failure", async () => {

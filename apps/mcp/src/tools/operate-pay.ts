@@ -2,10 +2,10 @@ import { z } from "zod";
 import {
   activeProvisionBrowserForPayment,
   clearActivePendingCardFill,
-  getActivePendingCardFill,
   recordActivePaymentProvenance,
   retainActivePaymentFieldSeal,
   setActivePendingCardFill,
+  takeActivePendingCardFill,
 } from "../bot/provision-session.js";
 import {
   executeOperatePay,
@@ -46,6 +46,25 @@ const inputSchema = z
   .refine((value) => value.card_ref === undefined || value.card_label === undefined, {
     message: "Provide at most one of card_ref or card_label",
   });
+
+function shouldRestorePendingCardFill(result: Record<string, unknown>): boolean {
+  switch (result.status) {
+    case "payment_configuration_error":
+    case "payment_checkout_currency_unresolved":
+    case "payment_checkout_total_not_found":
+    case "payment_approval_timeout":
+    case "payment_mandate_rejected":
+    case "payment_review_verification_failed":
+    case "payment_card_open_failed":
+    case "payment_checkout_origin_mismatch":
+    case "payment_amount_mismatch":
+      return true;
+    case "payment_checkout_failed":
+      return result.reason === "payment_submit_not_found";
+    default:
+      return false;
+  }
+}
 
 export const listPaymentCardsTool: Tool = {
   name: "list_payment_cards",
@@ -121,13 +140,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     // job is verify-the-total-then-charge. Routed before the PayPal check so
     // an incidental PayPal button iframe on the review page can't block it.
     if (args.phase === "confirm") {
-      const pending = getActivePendingCardFill();
+      const pending = takeActivePendingCardFill();
       if (pending === null) {
         throw new Error(
           'operate_pay phase="confirm" requires a completed phase="fill_card" in this ' +
             "session — no vaulted card is currently filled into the checkout.",
         );
       }
+      let retryPending = pending;
       const result = await executeOperatePayConfirm(
         pending,
         {
@@ -149,16 +169,18 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
               }
             : {}),
           onCardFillCleanupFailed: retainActivePaymentFieldSeal,
+          onCardFilled: (refreshed) => {
+            retryPending = refreshed;
+          },
         },
       );
       const status = result.status;
       if (status === "payment_submitted" || status === "payment_3ds_required") {
         recordActivePaymentProvenance(pending.card_ref);
       }
-      // Terminal for the filled card (charged, in 3DS, or declined) → drop the
-      // pending state. A refusal (total missing/mismatch, submit not found)
-      // keeps it so the host can fix the page and retry confirm.
-      if (
+      if (shouldRestorePendingCardFill(result)) {
+        setActivePendingCardFill(retryPending);
+      } else if (
         status === "payment_submitted" ||
         status === "payment_3ds_required" ||
         status === "payment_declined" ||

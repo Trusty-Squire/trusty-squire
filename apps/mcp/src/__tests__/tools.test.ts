@@ -23,7 +23,11 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
   return {
     ...actual,
     activeProvisionBrowserForPayment: async () => mockBrowser,
-    getActivePendingCardFill: () => mockPending,
+    takeActivePendingCardFill: () => {
+      const pending = mockPending;
+      mockPending = null;
+      return pending;
+    },
     setActivePendingCardFill: (pending: PendingCardFill) => {
       mockPending = pending;
       mockPaymentSealActive = true;
@@ -332,6 +336,28 @@ describe("operate_pay split checkout phases", () => {
     });
     expect(mockBrowser.submitFilledCheckout).not.toHaveBeenCalled();
     expect(mockPending).not.toBeNull();
+  });
+
+  it("atomically reserves a pending fill across overlapping confirms", async () => {
+    mockPending = { ...PENDING };
+    let releaseSubmit!: (value: { three_ds_required: false }) => void;
+    vi.mocked(mockBrowser.submitFilledCheckout).mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseSubmit = resolve;
+        }),
+    );
+    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
+    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+
+    const first = operatePayTool.handler(args, api);
+    await vi.waitFor(() => expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1));
+    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
+      /phase="confirm" requires a completed phase="fill_card"/,
+    );
+    releaseSubmit({ three_ds_required: false });
+    await expect(first).resolves.toMatchObject({ status: "payment_submitted" });
+    expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
   });
 
   it("confirm clears pending after an ambiguous submit outcome", async () => {

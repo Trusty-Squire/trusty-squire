@@ -2502,6 +2502,13 @@ export function getActivePendingCardFill(): PendingCardFill | null {
   return activeProvisionSession().pendingCardFill;
 }
 
+export function takeActivePendingCardFill(): PendingCardFill | null {
+  const session = activeProvisionSession();
+  const pending = session.pendingCardFill;
+  session.pendingCardFill = null;
+  return pending;
+}
+
 export function clearActivePendingCardFill(paymentFieldsCleared = true): void {
   const session = activeProvisionSession();
   session.pendingCardFill = null;

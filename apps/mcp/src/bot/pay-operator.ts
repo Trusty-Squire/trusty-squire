@@ -965,10 +965,16 @@ export async function executeOperatePayConfirm(
       browser,
       {
         ...overrides,
-        initialCheckout: live,
+        initialCheckout: {
+          merchant: checkout.merchant,
+          checkout_origin: live.checkout_origin,
+          amount_cents: live.amount_cents,
+          currency: live.currency,
+        },
         skipCardFill: true,
         onCardFilled: (next) => {
           refreshed = next;
+          overrides.onCardFilled?.(next);
         },
       },
     );
@@ -1004,7 +1010,9 @@ export async function executeOperatePayConfirm(
     let audit_recorded = true;
     try {
       await api.auditPayment({
-        ...live,
+        merchant: checkout.merchant,
+        amount_cents: live.amount_cents,
+        currency: live.currency,
         last4: pending.last4,
         status: paymentStatus,
         ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
@@ -1034,7 +1042,9 @@ export async function executeOperatePayConfirm(
   let auditRecorded = true;
   try {
     await api.auditPayment({
-      ...live,
+      merchant: checkout.merchant,
+      amount_cents: live.amount_cents,
+      currency: live.currency,
       last4: pending.last4,
       status: paymentStatus,
       ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
@@ -1071,7 +1081,7 @@ export async function executeOperatePayConfirm(
     status: paymentStatus,
     audit_recorded: auditRecorded,
     approval_url: approvalUrl,
-    merchant: live.merchant,
+    merchant: checkout.merchant,
     amount_cents: live.amount_cents,
     currency: live.currency,
     payment_fields_cleared: paymentFieldsCleared,
