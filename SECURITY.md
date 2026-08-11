@@ -111,11 +111,10 @@ it re-reads the live merchant, origin, amount, and currency and refuses submissi
 if any signed field changed.
 
 A split checkout may collect card details before it exposes the final payable total.
-Its `fill_card` phase resolves the best amount visible on the card-entry page,
-including a subtotal when that is all the page shows, and completes the same signed,
-amount-bound approval before releasing the card. If no page amount resolves, it
-fails before approval rather than accepting a caller-supplied amount. After approval
-it requires the live page origin to equal the mandate's checkout origin, fills no
+Its `fill_card` phase never reads or requires a page amount: it completes a signed
+release approval bound to a zero amount and card release only, so it works even
+when the card-entry page shows no total at all. After approval it requires the live
+page origin to equal the mandate's checkout origin, fills no
 submit control, and permits card data only in the main frame,
 same-registrable-domain HTTPS frames, or curated HTTPS payment-provider frames. A
 failed or unrecognized-frame fill clears partial card data; if cleanup itself cannot
@@ -128,10 +127,10 @@ digits.
 The later `confirm` phase is the charge boundary. Its strict reader requires a final
 payable total from the main frame or a visible trusted payment frame, with no
 caller-supplied amount fallback; unresolved or conflicting totals fail closed.
-Currency and checkout origin must match the mandate. A final total no greater than
-the approved amount may be charged. A higher total requires a new signed,
-amount-bound approval for that final value, followed by another strict read before
-submission. Thus no charge can exceed an approved amount. The page-title-derived
+Checkout origin must match the mandate. Because the fill approval never covers a
+real amount, every charge requires a new signed, amount-bound approval for that
+exact final total, followed by another strict read before submission. Thus no
+charge is ever submitted without a human approval of the final amount. The page-title-derived
 merchant display name is not compared across steps; origin is the recipient trust
 anchor. While a split card fill is pending, ordinary browser actions cannot click
 charge-labeled controls or press Enter, so only `confirm` can cross that boundary. If

@@ -163,9 +163,9 @@ and transferred secrets are not returned to the agent.
 agent starts operate_pay in the active checkout
   -> agent supplies a non-empty item and reason
   -> a single-page checkout reads merchant, origin, and payable total from the
-     live page; split fill_card reads those fields using the best visible amount,
-     including a subtotal when no final payable total is present; an unreadable
-     amount stops before approval with payment_checkout_total_not_found
+     live page; an unreadable amount stops before approval with
+     payment_checkout_total_not_found. Split fill_card never reads a page total —
+     it reads only merchant and origin and approves a zero-amount card release
   -> PayPal Smart Button or hosted-field frames hand initial/fill checkout calls to
      the user before saved-card resolution or approval creation
   -> an explicit card is used; otherwise one saved card is selected automatically,
@@ -184,7 +184,7 @@ agent starts operate_pay in the active checkout
      candidate fingerprint; successful confirmation clears the JWS and ciphertext
   -> single-page add-card re-reads every signed checkout field, then fills and
      submits only if merchant, origin, amount, and currency still match
-  -> split fill_card instead requires the current origin to match its amount-bound
+  -> split fill_card instead requires the current origin to match its release
      mandate and fills without submitting; only the main frame,
      same-registrable-domain HTTPS frames, and curated HTTPS payment-provider frames
      can receive card data
@@ -194,12 +194,11 @@ agent starts operate_pay in the active checkout
      ordinary navigation can advance the checkout to its review step
   -> split confirm bypasses the initial PayPal-frame gate and strictly resolves the
      final payable total from the main frame and visible trusted payment frames with
-     no caller fallback; currency and origin must match the mandate, and a total no
-     greater than the approved amount may submit (the page-title-derived merchant
-     name may change)
-  -> when that final total is higher, confirm obtains a fresh amount-bound approval
-     for it and re-reads the strict total before submission; unresolved or conflicting
-     totals fail closed without charging
+     no caller fallback; origin must match the mandate (the page-title-derived
+     merchant name may change)
+  -> because the fill approval never covers a real amount, confirm always obtains a
+     fresh amount-bound approval for the strict final total and re-reads it before
+     submission; unresolved or conflicting totals fail closed without charging
   -> the active session serializes payment entry and confirmation; retry state is
      restored only before submission starts, and unverified field cleanup seals the
      session against later payment operations (the contract lives in SECURITY.md)

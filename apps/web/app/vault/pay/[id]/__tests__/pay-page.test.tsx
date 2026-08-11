@@ -248,6 +248,19 @@ describe("pay page — JIT add-card ceremony", () => {
     expect(vouchflow.signPayload).not.toHaveBeenCalled();
   });
 
+  it("shows a release-only message for a zero-amount fill_card approval, not $0.00", async () => {
+    bound = true;
+    approvalAmountCents = 0;
+    approvalCurrency = "XXX";
+    render(<PaymentApprovalPage />);
+    await screen.findByRole("button", { name: /Approve payment/ });
+
+    const paymentLine = screen.getByText(/Release/);
+    expect(paymentLine.textContent).toContain("no charge yet");
+    expect(paymentLine.textContent).not.toContain("$0.00");
+    expect(screen.queryByText(/Pay with/)).toBeNull();
+  });
+
   it("blocks JIT approval when the server-bound card metadata cannot be loaded", async () => {
     failCardListAfterBind = true;
     render(<PaymentApprovalPage />);

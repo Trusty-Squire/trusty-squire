@@ -6713,6 +6713,25 @@ export class BrowserController {
     return await this.page.evaluate(extractObservationVisibleText);
   }
 
+  // Merchant + origin only — never reads a total. Used by the card-entry fill
+  // step, which releases the vaulted card without needing (or trusting) any
+  // amount on the page; the strictly-read total lives entirely at confirm.
+  async readCheckoutIdentity(): Promise<{ merchant: string; checkout_origin: string }> {
+    if (!this.page) throw new Error("Browser not started");
+    const page = this.page;
+    const identity = await page.evaluate(() => ({
+      title: document.title,
+      siteName:
+        document.querySelector<HTMLMetaElement>('meta[property="og:site_name"]')?.content ??
+        document.querySelector<HTMLElement>('[itemprop="merchant"]')?.textContent ??
+        "",
+    }));
+    return {
+      merchant: merchantFromPage(identity.title, identity.siteName, page.url()),
+      checkout_origin: new URL(page.url()).origin,
+    };
+  }
+
   async readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary> {
     if (!this.page) throw new Error("Browser not started");
     const page = this.page;

@@ -19,15 +19,22 @@ export interface OperatePayArgs {
   item: string;
   reason: string;
   three_ds_wait_seconds?: number;
-  // "fill_card" = split-checkout card entry: approve the best visible amount
-  // (including a subtotal), then fill payment fields WITHOUT submitting. The
-  // final payable total is strictly verified at confirm, which reapproves if
-  // it exceeds this amount. Absent = the single-page fill+charge.
+  // "fill_card" = split-checkout card entry: release the vaulted card under a
+  // ZERO_AMOUNT_CHECKOUT release approval (no total read, nothing charged),
+  // then fill payment fields WITHOUT submitting. The final payable total is
+  // strictly verified and separately approved at confirm before any charge.
+  // Absent = the single-page fill+charge.
   phase?: "fill_card";
 }
 
+// "XXX" is the ISO 4217 code reserved for "no currency" — used for the
+// fill-time release approval, which never reads (or trusts) a page amount.
+// The real currency is established fresh from the strict confirm-time read.
+const ZERO_AMOUNT_CHECKOUT_CURRENCY = "XXX";
+
 export interface PaymentBrowser {
   isPayPalHostedCheckout(): Promise<boolean>;
+  readCheckoutIdentity(): Promise<{ merchant: string; checkout_origin: string }>;
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
   readCheckoutConfirmSummary(): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
@@ -318,7 +325,18 @@ export async function executeOperatePay(
 
     let checkout: CheckoutSummary;
     try {
-      checkout = deps.initialCheckout ?? (await browser.readCheckoutSummary(args.currency));
+      if (deps.initialCheckout !== undefined) {
+        checkout = deps.initialCheckout;
+      } else if (args.phase === "fill_card") {
+        const identity = await browser.readCheckoutIdentity();
+        checkout = {
+          ...identity,
+          amount_cents: 0,
+          currency: ZERO_AMOUNT_CHECKOUT_CURRENCY,
+        };
+      } else {
+        checkout = await browser.readCheckoutSummary(args.currency);
+      }
     } catch (error) {
       if (error instanceof Error && error.message === "payment_checkout_currency_unresolved") {
         return {
@@ -661,12 +679,12 @@ export async function executeOperatePay(
             ? claims.jti
             : undefined;
     // Split-checkout card entry (phase="fill_card"): fill the card, charge
-    // nothing. The human approval already happened (the mandate above binds
-    // merchant/origin/amount/currency). The amount was resolved before the
-    // approval; executeOperatePayConfirm re-verifies it immediately before
-    // money moves. The live check still needed here (the ceremony can take
-    // minutes, and the fill targets the CURRENT page) is that the browser
-    // remains on the origin the mandate was signed for.
+    // nothing. The human approval above only releases the card (amount_cents
+    // is always 0 — no total was read or trusted). executeOperatePayConfirm
+    // reads the strict final total and obtains a fresh, amount-bound approval
+    // before any money moves. The live check still needed here (the ceremony
+    // can take minutes, and the fill targets the CURRENT page) is that the
+    // browser remains on the origin the release approval was signed for.
     if (args.phase === "fill_card") {
       let liveOrigin: string | null;
       try {
@@ -744,10 +762,10 @@ export async function executeOperatePay(
         currency: checkout.currency,
         last4,
         next:
-          "Drive the checkout to the order-confirmation step (the page showing the final " +
-          'total), then call operate_pay {phase:"confirm"} — it verifies the live total ' +
-          "against the approved amount and places the order. Never click the " +
-          "pay/place-order control yourself.",
+          "Nothing was charged. Drive the checkout to the order-confirmation step (the page " +
+          'showing the final total), then call operate_pay {phase:"confirm"} — it reads the ' +
+          "final total, requires a fresh human approval of that exact amount, and only then " +
+          "places the order. Never click the pay/place-order control yourself.",
       };
     }
 
@@ -933,8 +951,14 @@ export async function executeOperatePayConfirm(
   }
   // Merchant is deliberately NOT compared: it derives from the page title,
   // which legitimately changes between checkout steps ("Payment" → "Review
-  // order"). Origin and currency remain exact trust anchors.
-  if (live.currency !== checkout.currency || live.checkout_origin !== checkout.checkout_origin) {
+  // order"). Origin is always an exact trust anchor. Currency is skipped when
+  // the fill approved amount_cents:0 (the normal case — fill never reads a
+  // total, so it has no real currency to compare against); the amount-bound
+  // reapproval below establishes the real currency fresh from this live read.
+  if (
+    live.checkout_origin !== checkout.checkout_origin ||
+    (checkout.amount_cents !== 0 && live.currency !== checkout.currency)
+  ) {
     return {
       status: "payment_amount_mismatch",
       approval_url: approvalUrl,
@@ -948,12 +972,12 @@ export async function executeOperatePayConfirm(
     };
   }
 
-  // A card-entry step may show only a subtotal. That approval can safely
-  // release and fill the card, but it can never authorize a higher final
-  // payable total. Re-read the final total above (strict reader only), then
-  // obtain a new amount-bound approval before the submit control is reachable.
-  // The internal initialCheckout dependency prevents this reapproval from
-  // falling back to the permissive/subtotal reader or caller-supplied amount.
+  // The fill-time approval never authorizes a charge (amount_cents is always
+  // 0), so this is the normal path for every charge, not an edge case: mint a
+  // fresh approval bound to the strict final total read above, wait for the
+  // human to approve that exact amount, then submit. The internal
+  // initialCheckout dependency prevents this reapproval from falling back to
+  // the permissive reader or a caller-supplied amount.
   if (live.amount_cents > checkout.amount_cents) {
     let refreshed: PendingCardFill | undefined;
     const reapproval = await executeOperatePay(
