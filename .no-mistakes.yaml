@@ -11,6 +11,25 @@ commands:
     set -eu
     pnpm --filter '@trusty-squire/registry' prisma:generate
     pnpm -r --filter "./packages/**" --if-present build
-    export NODE_OPTIONS="--max-old-space-size=16384"
+    export NODE_OPTIONS="--max-old-space-size=32768"
     pnpm -r --filter '!@trusty-squire/mcp' --if-present test
-    pnpm --filter '@trusty-squire/mcp' test
+    (
+      cd apps/mcp
+      mcp_test_files="$(find src scripts -type f \( -name '*.test.ts' -o -name '*.test.mjs' \) | sort)"
+      if [ -z "$mcp_test_files" ]; then
+        echo "No MCP test files discovered" >&2
+        exit 1
+      fi
+      mcp_test_count="$(printf '%s\n' "$mcp_test_files" | wc -l | tr -d ' ')"
+      mcp_test_completed=0
+      saved_ifs="$IFS"
+      IFS='
+'
+      for mcp_test_file in $mcp_test_files; do
+        echo "MCP test file $((mcp_test_completed + 1))/$mcp_test_count: $mcp_test_file"
+        pnpm exec vitest run "$mcp_test_file" --maxWorkers=2 --minWorkers=1
+        mcp_test_completed=$((mcp_test_completed + 1))
+      done
+      IFS="$saved_ifs"
+      test "$mcp_test_completed" -eq "$mcp_test_count"
+    )
