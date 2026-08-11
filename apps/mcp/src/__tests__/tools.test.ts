@@ -124,10 +124,6 @@ import {
 function stubBrowser(): PaymentBrowser {
   return {
     isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
-    readCheckoutIdentity: vi.fn().mockResolvedValue({
-      merchant: "M",
-      checkout_origin: "https://m.test",
-    }),
     readCheckoutSummary: vi.fn().mockResolvedValue({
       merchant: "M",
       checkout_origin: "https://m.test",

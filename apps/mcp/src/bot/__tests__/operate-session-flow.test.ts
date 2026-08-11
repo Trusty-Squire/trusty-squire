@@ -47,6 +47,15 @@ const h = vi.hoisted(() => ({
   elements: [] as unknown[],
   checkoutFieldNames: [] as string[],
   visibleText: "",
+  // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
+  // "no total on this page" (readCheckoutSummary rejects, the common case).
+  checkoutSummary: null as {
+    merchant: string;
+    checkout_origin: string;
+    amount_cents: number;
+    currency: string;
+  } | null,
+  readCheckoutSummaryCalls: 0,
   focusedLabels: [] as string[],
   pressedKeys: [] as string[],
   scrolls: [] as string[],
@@ -143,6 +152,16 @@ vi.mock("../browser.js", () => ({
     }
     async extractVisibleText(): Promise<string> {
       return h.visibleText;
+    }
+    async readCheckoutSummary(): Promise<{
+      merchant: string;
+      checkout_origin: string;
+      amount_cents: number;
+      currency: string;
+    }> {
+      h.readCheckoutSummaryCalls += 1;
+      if (h.checkoutSummary === null) throw new Error("payment_checkout_total_not_found");
+      return h.checkoutSummary;
     }
     async openFirstMailResult(): Promise<boolean> {
       return false;
@@ -430,6 +449,7 @@ import {
   replayOperatorRecipe,
   activeProvisionBrowser,
   activeProvisionBrowserForPayment,
+  activeCartCheckoutForOrigin,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
@@ -548,6 +568,8 @@ beforeEach(() => {
   h.elements = [];
   h.checkoutFieldNames = [];
   h.visibleText = "";
+  h.checkoutSummary = null;
+  h.readCheckoutSummaryCalls = 0;
   h.focusedLabels = [];
   h.pressedKeys = [];
   h.scrolls = [];
@@ -4078,5 +4100,97 @@ describe("pending card-fill charge guard", () => {
     clearActivePendingCardFill(true);
     await act(started.session_id, { kind: "click", target: "Place order" });
     expect(h.clickCalls).toBe(1);
+  });
+});
+
+describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => {
+  it("captures a real total observed on an earlier page and serves it for the SAME origin", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://cart.step.rakuten.co.jp/cart",
+    });
+    h.checkoutSummary = {
+      merchant: "Rakuten",
+      checkout_origin: "https://cart.step.rakuten.co.jp",
+      amount_cents: 2_904,
+      currency: "JPY",
+    };
+    await observe(started.session_id, "compact");
+
+    expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toEqual(
+      h.checkoutSummary,
+    );
+  });
+
+  it("never serves a cached total to a DIFFERENT origin", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://cart.step.rakuten.co.jp/cart",
+    });
+    h.checkoutSummary = {
+      merchant: "Rakuten",
+      checkout_origin: "https://cart.step.rakuten.co.jp",
+      amount_cents: 2_904,
+      currency: "JPY",
+    };
+    await observe(started.session_id, "compact");
+
+    expect(activeCartCheckoutForOrigin("https://evil.example.test")).toBeNull();
+  });
+
+  it("leaves the cache untouched when a later page has no readable total (e.g. the card-entry step)", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://cart.step.rakuten.co.jp/cart",
+    });
+    h.checkoutSummary = {
+      merchant: "Rakuten",
+      checkout_origin: "https://cart.step.rakuten.co.jp",
+      amount_cents: 2_904,
+      currency: "JPY",
+    };
+    await observe(started.session_id, "compact");
+
+    // Navigate to the card-entry step: same origin, but no total on the page.
+    h.currentUrl = "https://cart.step.rakuten.co.jp/payment";
+    h.checkoutSummary = null;
+    await observe(started.session_id, "compact");
+
+    expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toEqual({
+      merchant: "Rakuten",
+      checkout_origin: "https://cart.step.rakuten.co.jp",
+      amount_cents: 2_904,
+      currency: "JPY",
+    });
+  });
+
+  it("replaces (never accumulates) the cache on each subsequent successful capture", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://cart.step.rakuten.co.jp/cart",
+    });
+    h.checkoutSummary = {
+      merchant: "Rakuten",
+      checkout_origin: "https://cart.step.rakuten.co.jp",
+      amount_cents: 1_936,
+      currency: "JPY",
+    };
+    await observe(started.session_id, "compact");
+    h.checkoutSummary = {
+      merchant: "Rakuten",
+      checkout_origin: "https://cart.step.rakuten.co.jp",
+      amount_cents: 3_872,
+      currency: "JPY",
+    };
+    await observe(started.session_id, "compact");
+
+    expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toMatchObject({
+      amount_cents: 3_872,
+    });
+  });
+
+  it("returns null when this session never observed a page with a readable total", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://cart.step.rakuten.co.jp/payment",
+    });
+    await observe(started.session_id, "compact");
+
+    expect(activeCartCheckoutForOrigin("https://cart.step.rakuten.co.jp")).toBeNull();
   });
 });

@@ -19,22 +19,17 @@ export interface OperatePayArgs {
   item: string;
   reason: string;
   three_ds_wait_seconds?: number;
-  // "fill_card" = split-checkout card entry: release the vaulted card under a
-  // ZERO_AMOUNT_CHECKOUT release approval (no total read, nothing charged),
-  // then fill payment fields WITHOUT submitting. The final payable total is
-  // strictly verified and separately approved at confirm before any charge.
+  // "fill_card" = split-checkout card entry: a SINGLE amount-bound approval
+  // (one human passkey tap) both releases the vaulted card and authorizes the
+  // eventual charge up to that amount, then fills payment fields WITHOUT
+  // submitting. confirm later charges within that same approval — never a
+  // second tap — and fails closed if the final total exceeds it.
   // Absent = the single-page fill+charge.
   phase?: "fill_card";
 }
 
-// "XXX" is the ISO 4217 code reserved for "no currency" — used for the
-// fill-time release approval, which never reads (or trusts) a page amount.
-// The real currency is established fresh from the strict confirm-time read.
-const ZERO_AMOUNT_CHECKOUT_CURRENCY = "XXX";
-
 export interface PaymentBrowser {
   isPayPalHostedCheckout(): Promise<boolean>;
-  readCheckoutIdentity(): Promise<{ merchant: string; checkout_origin: string }>;
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
   readCheckoutConfirmSummary(): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
@@ -82,10 +77,13 @@ interface PayDependencies {
   onCardFilled: (pending: PendingCardFill) => void;
   onCardFillCleanupFailed: () => void;
   onSubmitStarted: () => void;
-  skipCardFill?: boolean;
-  // Internal-only: confirmation has already read the strict, final total and
-  // may use it to mint a replacement approval. Never sourced from tool input.
-  initialCheckout?: CheckoutSummary;
+  // fill_card only, and only consulted when the live card-entry page itself
+  // has no readable total (Rakuten-style split checkouts). The most recent
+  // successfully-parsed checkout total observed earlier in THIS session (the
+  // cart page), scoped to the same origin. Never sourced from tool input —
+  // the approval still binds to a real, browser-read amount, never a
+  // caller-supplied one.
+  cartFallbackCheckout?: CheckoutSummary;
 }
 
 const cardSchema = z.object({
@@ -325,18 +323,7 @@ export async function executeOperatePay(
 
     let checkout: CheckoutSummary;
     try {
-      if (deps.initialCheckout !== undefined) {
-        checkout = deps.initialCheckout;
-      } else if (args.phase === "fill_card") {
-        const identity = await browser.readCheckoutIdentity();
-        checkout = {
-          ...identity,
-          amount_cents: 0,
-          currency: ZERO_AMOUNT_CHECKOUT_CURRENCY,
-        };
-      } else {
-        checkout = await browser.readCheckoutSummary(args.currency);
-      }
+      checkout = await browser.readCheckoutSummary(args.currency);
     } catch (error) {
       if (error instanceof Error && error.message === "payment_checkout_currency_unresolved") {
         return {
@@ -358,9 +345,18 @@ export async function executeOperatePay(
         };
       }
       if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
-        return { status: "payment_checkout_total_not_found" };
+        // Rakuten-style split checkouts show no total on the card-entry page
+        // itself. Only for fill_card, fall back to the most recent total this
+        // SAME session actually read from a real page (the cart step) — never
+        // an agent-supplied amount. Any other reader failure above still fails.
+        if (args.phase === "fill_card" && deps.cartFallbackCheckout !== undefined) {
+          checkout = deps.cartFallbackCheckout;
+        } else {
+          return { status: "payment_checkout_total_not_found" };
+        }
+      } else {
+        throw error;
       }
-      throw error;
     }
 
     const item = args.item;
@@ -678,13 +674,13 @@ export async function executeOperatePay(
           : typeof claims.jti === "string"
             ? claims.jti
             : undefined;
-    // Split-checkout card entry (phase="fill_card"): fill the card, charge
-    // nothing. The human approval above only releases the card (amount_cents
-    // is always 0 — no total was read or trusted). executeOperatePayConfirm
-    // reads the strict final total and obtains a fresh, amount-bound approval
-    // before any money moves. The live check still needed here (the ceremony
-    // can take minutes, and the fill targets the CURRENT page) is that the
-    // browser remains on the origin the release approval was signed for.
+    // Split-checkout card entry (phase="fill_card"): the human approval above
+    // is a SINGLE amount-bound approval (one passkey tap) that both releases
+    // the card here and authorizes the eventual charge up to checkout's
+    // amount_cents — executeOperatePayConfirm charges within it, never a
+    // second approval. The live check still needed here (the ceremony can
+    // take minutes, and the fill targets the CURRENT page) is that the
+    // browser remains on the origin the approval was signed for.
     if (args.phase === "fill_card") {
       let liveOrigin: string | null;
       try {
@@ -701,9 +697,7 @@ export async function executeOperatePay(
         };
       }
       try {
-        if (!deps.skipCardFill) {
-          await browser.fillCheckoutCardFields(card);
-        }
+        await browser.fillCheckoutCardFields(card);
       } catch (error) {
         const frameOrigin =
           error instanceof UnrecognizedPaymentFrameError
@@ -764,8 +758,9 @@ export async function executeOperatePay(
         next:
           "Nothing was charged. Drive the checkout to the order-confirmation step (the page " +
           'showing the final total), then call operate_pay {phase:"confirm"} — it reads the ' +
-          "final total, requires a fresh human approval of that exact amount, and only then " +
-          "places the order. Never click the pay/place-order control yourself.",
+          "final total and places the order if it does not exceed the amount already approved " +
+          "here, with no further approval needed. A final total above the approved amount is " +
+          "refused, never re-approved. Never click the pay/place-order control yourself.",
       };
     }
 
@@ -899,8 +894,10 @@ export async function executeOperatePay(
 // and the host has driven the checkout to its order-confirmation step. THIS is
 // where the money moves, so the total-verification gate lives here: the live
 // page must show a readable final total before the pay/place-order control is
-// clicked. The release approval covers no amount; any later amount drift gets
-// a fresh exact-total approval before charge. A drifted origin/currency refuses.
+// clicked. There is exactly ONE human approval per purchase (minted at fill) —
+// confirm charges within that same approved amount and never mints a second
+// one. A drifted origin/currency, or a final total above the approved amount,
+// refuses closed instead.
 export async function executeOperatePayConfirm(
   pending: PendingCardFill,
   args: { currency?: string; three_ds_wait_seconds?: number },
@@ -951,14 +948,9 @@ export async function executeOperatePayConfirm(
   }
   // Merchant is deliberately NOT compared: it derives from the page title,
   // which legitimately changes between checkout steps ("Payment" → "Review
-  // order"). Origin is always an exact trust anchor. Currency is skipped when
-  // the fill approved amount_cents:0 (the normal case — fill never reads a
-  // total, so it has no real currency to compare against); the amount-bound
-  // reapproval below establishes the real currency fresh from this live read.
-  if (
-    live.checkout_origin !== checkout.checkout_origin ||
-    (checkout.amount_cents !== 0 && live.currency !== checkout.currency)
-  ) {
+  // order"). Origin and currency are exact trust anchors — both were read for
+  // real (the amount-bound approval at fill), never a caller-supplied value.
+  if (live.checkout_origin !== checkout.checkout_origin || live.currency !== checkout.currency) {
     return {
       status: "payment_amount_mismatch",
       approval_url: approvalUrl,
@@ -972,47 +964,20 @@ export async function executeOperatePayConfirm(
     };
   }
 
-  // The fill-time approval never authorizes a charge (amount_cents is always
-  // 0), so this is the normal path for every charge, not an edge case: mint a
-  // fresh approval bound to the strict final total read above, wait for the
-  // human to approve that exact amount, then submit. The internal
-  // initialCheckout dependency prevents this reapproval from falling back to
-  // the permissive reader or a caller-supplied amount.
-  if (
-    checkout.currency === ZERO_AMOUNT_CHECKOUT_CURRENCY ||
-    live.amount_cents !== checkout.amount_cents
-  ) {
-    let refreshed: PendingCardFill | undefined;
-    const reapproval = await executeOperatePay(
-      {
-        card_ref: pending.card_ref,
-        item: pending.item,
-        reason: pending.reason,
-        phase: "fill_card",
-      },
-      api,
-      browser,
-      {
-        ...overrides,
-        initialCheckout: {
-          merchant: checkout.merchant,
-          checkout_origin: live.checkout_origin,
-          amount_cents: live.amount_cents,
-          currency: live.currency,
-        },
-        skipCardFill: true,
-        onCardFilled: (next) => {
-          refreshed = next;
-          overrides.onCardFilled?.(next);
-        },
-      },
-    );
-    if (reapproval.status !== "payment_card_filled" || refreshed === undefined) {
-      return reapproval;
-    }
-    // The replacement approval is bound to the strict final total. Re-read it
-    // immediately before submission so a page mutation cannot race approval.
-    return await executeOperatePayConfirm(refreshed, args, api, browser, overrides);
+  // Exactly one human approval per purchase: the fill-time approval already
+  // authorizes a charge up to checkout.amount_cents. A live total at or below
+  // it charges under that SAME approval — no second tap. A live total above
+  // it refuses closed; there is deliberately no reapproval path here.
+  if (live.amount_cents > checkout.amount_cents) {
+    return {
+      status: "payment_amount_exceeds_approval",
+      approval_url: approvalUrl,
+      merchant: checkout.merchant,
+      approved_amount_cents: checkout.amount_cents,
+      approved_currency: checkout.currency,
+      live_amount_cents: live.amount_cents,
+      live_currency: live.currency,
+    };
   }
 
   let paymentStatus = "payment_submitted";
