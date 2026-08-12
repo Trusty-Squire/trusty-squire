@@ -67,7 +67,9 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       const lease = { phase: phase === "fill_card" ? ("fill_card" as const) : ("single" as const) };
       mockPaymentLease = lease;
       if (lease.phase === "fill_card") mockPaymentSealActive = true;
-      return resumeApproval !== undefined ? { kind: "lease", lease, resumeApproval } : { kind: "lease", lease };
+      return resumeApproval !== undefined
+        ? { kind: "lease", lease, resumeApproval }
+        : { kind: "lease", lease };
     },
     completeActivePaymentLeaseWithPendingFill: (
       lease: { phase: "fill_card" | "single" },
@@ -536,10 +538,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     );
 
     await expect(
-      operatePayTool.handler(
-        operatePayTool.inputSchema.parse(PAYMENT_DETAILS),
-        makeMockApi(),
-      ),
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), makeMockApi()),
     ).rejects.toThrow("browser unavailable");
     expect(mockAwaitingApproval).toBe(resumeApproval);
     expect(mockPaymentLease).toBeNull();
@@ -683,9 +682,9 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     await expect(operatePaymentStatusTool.handler({}, api)).resolves.toMatchObject({
       status: "no_pending_payment",
     });
-    await expect(
-      operatePaymentAwaitTool.handler({}, api),
-    ).resolves.toMatchObject({ status: "no_pending_payment" });
+    await expect(operatePaymentAwaitTool.handler({}, api)).resolves.toMatchObject({
+      status: "no_pending_payment",
+    });
   });
 
   it("rejects waits longer than the 15-second tool contract", () => {

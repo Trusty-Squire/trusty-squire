@@ -6922,9 +6922,7 @@ export class BrowserController {
   }
 
   async readCheckoutReviewLineItems(): Promise<Array<{ title: string; quantity: number }>>;
-  async readCheckoutReviewLineItems(
-    includeDetails: true,
-  ): Promise<
+  async readCheckoutReviewLineItems(includeDetails: true): Promise<
     Array<{
       title: string;
       quantity: number;
@@ -6933,9 +6931,7 @@ export class BrowserController {
       option_signatures: string[];
     }>
   >;
-  async readCheckoutReviewLineItems(
-    includeDetails = false,
-  ): Promise<
+  async readCheckoutReviewLineItems(includeDetails = false): Promise<
     Array<{
       title: string;
       quantity: number;
@@ -6996,14 +6992,16 @@ export class BrowserController {
           const sku =
             element.getAttribute("data-sku") ??
             (element.getAttribute("itemprop") === "sku"
-              ? element.getAttribute("content") ?? element.textContent?.trim() ?? ""
+              ? (element.getAttribute("content") ?? element.textContent?.trim() ?? "")
               : "");
           const productId = element.getAttribute("data-product-id");
           if (explicit !== null) identities.push(explicit);
           if (sku.length > 0) identities.push(sku, `sku:${sku}`);
           if (productId !== null) identities.push(productId, `product:${productId}`);
         }
-        for (const link of Array.from(container.querySelectorAll<HTMLAnchorElement>('a[href*="/product" i]'))) {
+        for (const link of Array.from(
+          container.querySelectorAll<HTMLAnchorElement>('a[href*="/product" i]'),
+        )) {
           identities.push(link.href);
         }
         return unique(identities.map((identity) => normalize(identity)));
@@ -7022,10 +7020,15 @@ export class BrowserController {
             signatures.push(`${optionName}=${optionValue}`);
           }
         }
-        for (const select of Array.from(container.querySelectorAll<HTMLSelectElement>("select[name]"))) {
+        for (const select of Array.from(
+          container.querySelectorAll<HTMLSelectElement>("select[name]"),
+        )) {
           const option = select.selectedOptions[0];
           if (option !== undefined) {
-            signatures.push(`${select.name}=${option.value}`, `${select.name}=${normalize(option.text)}`);
+            signatures.push(
+              `${select.name}=${option.value}`,
+              `${select.name}=${normalize(option.text)}`,
+            );
           }
         }
         return unique(signatures.map((signature) => normalize(signature)));
@@ -7051,19 +7054,19 @@ export class BrowserController {
         const title = titleFrom(row);
         return quantity === undefined || title === undefined
           ? []
-          : [{
-              title,
-              quantity,
-              details: normalize(row.textContent ?? ""),
-              product_identities: productIdentitiesIn(row),
-              option_signatures: optionSignaturesIn(row),
-            }];
+          : [
+              {
+                title,
+                quantity,
+                details: normalize(row.textContent ?? ""),
+                product_identities: productIdentitiesIn(row),
+                option_signatures: optionSignaturesIn(row),
+              },
+            ];
       });
       return observed;
     });
-    return includeDetails
-      ? items
-      : items.map(({ title, quantity }) => ({ title, quantity }));
+    return includeDetails ? items : items.map(({ title, quantity }) => ({ title, quantity }));
   }
 
   async readSettledCheckoutReviewSummary(

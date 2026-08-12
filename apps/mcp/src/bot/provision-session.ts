@@ -2663,7 +2663,9 @@ export function claimActivePaymentForOperatePay(
   const lease: ActivePaymentLease = { phase: phase === "fill_card" ? "fill_card" : "single" };
   session.activePayment = { status: "operating", lease };
   if (lease.phase === "fill_card") session.paymentFieldSealActive = true;
-  return resumeApproval !== undefined ? { kind: "lease", lease, resumeApproval } : { kind: "lease", lease };
+  return resumeApproval !== undefined
+    ? { kind: "lease", lease, resumeApproval }
+    : { kind: "lease", lease };
 }
 
 export function completeActivePaymentLeaseWithPendingFill(
@@ -2809,12 +2811,13 @@ async function reconcileReservedCartAdd(
     try {
       return alreadyInCartResult(await record.promise);
     } catch (error) {
-      if (record.phase === "reserved") return await cartAdd(
-        session.id,
-        record.productIdentity,
-        record.optionsHash,
-        record.idempotencyKey,
-      );
+      if (record.phase === "reserved")
+        return await cartAdd(
+          session.id,
+          record.productIdentity,
+          record.optionsHash,
+          record.idempotencyKey,
+        );
       const quantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash);
       if (quantity === null) throw error;
       session.lastCartMutation = {
@@ -2899,19 +2902,20 @@ async function performCartAdd(session: Session, record: CartAddRecord): Promise<
     }
   }
   if (addError !== undefined || observed === null) throw addError;
-  const afterQuantity = await cartLineQuantity(
-    session,
-    record.productIdentity,
-    record.optionsHash,
-  );
+  const afterQuantity = await cartLineQuantity(session, record.productIdentity, record.optionsHash);
   if (afterQuantity === null || afterQuantity <= 0) {
     throw new Error("requested product/variant line was not observable after add");
   }
   const checkoutState = observed.checkout_state;
   if (checkoutState === undefined) throw new Error("cart state was not observable after add");
   const cartDelta =
-    beforeQuantity === null ? (afterQuantity === 1 ? "+1" : "unknown") :
-      afterQuantity === beforeQuantity + 1 ? "+1" : "unknown";
+    beforeQuantity === null
+      ? afterQuantity === 1
+        ? "+1"
+        : "unknown"
+      : afterQuantity === beforeQuantity + 1
+        ? "+1"
+        : "unknown";
   session.lastCartMutation = {
     productIdentity: record.productIdentity,
     optionsHash: record.optionsHash,
@@ -2943,7 +2947,8 @@ export async function cartAdd(
   const byIdempotencyKey = session.cartAddsByIdempotencyKey.get(idempotencyKey);
   if (
     byIdempotencyKey !== undefined &&
-    (byIdempotencyKey.productIdentity !== productIdentity || byIdempotencyKey.optionsHash !== optionsHash)
+    (byIdempotencyKey.productIdentity !== productIdentity ||
+      byIdempotencyKey.optionsHash !== optionsHash)
   ) {
     throw new Error("idempotency_key is already bound to a different product/variant");
   }
@@ -3058,7 +3063,10 @@ export function paymentFieldForObservation(el: InteractiveElement): PaymentField
   if (autocomplete.includes("cc-exp-year") || /exp(?:iry|iration)?[\s_-]*year/.test(signal)) {
     return "expiry_year";
   }
-  if (autocomplete.includes("cc-exp") || /\bmm\s*\/\s*yy\b|exp(?:iry|iration)?[\s_-]*(?:date)?\b/.test(signal)) {
+  if (
+    autocomplete.includes("cc-exp") ||
+    /\bmm\s*\/\s*yy\b|exp(?:iry|iration)?[\s_-]*(?:date)?\b/.test(signal)
+  ) {
     return "expiry";
   }
   if (autocomplete.includes("cc-name") || /cardholder|card[\s_-]*name/.test(signal)) {
@@ -3248,7 +3256,14 @@ export function parseElementsTable(table: string): ObservedElement[] {
       else if (col === "frame_origin") e.frame_origin = raw;
       else if (
         col === "payment_field" &&
-        ["card_number", "expiry", "expiry_month", "expiry_year", "security_code", "cardholder_name"].includes(raw)
+        [
+          "card_number",
+          "expiry",
+          "expiry_month",
+          "expiry_year",
+          "security_code",
+          "cardholder_name",
+        ].includes(raw)
       )
         e.payment_field = raw as PaymentField;
       else if (col === "interaction" && raw === "vaulted_card_only") e.interaction = raw;
@@ -3601,10 +3616,19 @@ function checkoutStageFromUrl(url: string): CheckoutState["stage"] | null {
   } catch {
     return null;
   }
-  if (/(?:^|\/)(?:checkout|secure[-_]?checkout|payment|order[-_]?review|order\/review)(?:\.(?:php|html?))?(?:\/|$)/i.test(pathname)) {
+  if (
+    /(?:^|\/)(?:checkout|secure[-_]?checkout|payment|order[-_]?review|order\/review)(?:\.(?:php|html?))?(?:\/|$)/i.test(
+      pathname,
+    )
+  ) {
     return "checkout";
   }
-  if (/(?:^|\/)(?:cart|shopping[-_]?cart|view[-_]?cart|basket|bag)(?:\.(?:php|html?))?(?:\/|$)/i.test(pathname)) return "cart";
+  if (
+    /(?:^|\/)(?:cart|shopping[-_]?cart|view[-_]?cart|basket|bag)(?:\.(?:php|html?))?(?:\/|$)/i.test(
+      pathname,
+    )
+  )
+    return "cart";
   return null;
 }
 
@@ -3618,16 +3642,29 @@ function checkoutStage(
   const contexts = elements
     .flatMap((element) => [element.container, element.screenPath])
     .filter((value): value is string => typeof value === "string");
-  if (contexts.some((context) => /(?:^|[ >:/_-])(?:checkout|payment|order[-_ ]?review|お支払い|注文確認)(?:$|[ >:/_-])/i.test(context))) {
+  if (
+    contexts.some((context) =>
+      /(?:^|[ >:/_-])(?:checkout|payment|order[-_ ]?review|お支払い|注文確認)(?:$|[ >:/_-])/i.test(
+        context,
+      ),
+    )
+  ) {
     return "checkout";
   }
-  if (contexts.some((context) => /(?:^|[ >:/_-])(?:cart|basket|bag|カート|かご)(?:$|[ >:/_-])/i.test(context))) {
+  if (
+    contexts.some((context) =>
+      /(?:^|[ >:/_-])(?:cart|basket|bag|カート|かご)(?:$|[ >:/_-])/i.test(context),
+    )
+  ) {
     return "cart";
   }
   return null;
 }
 
-function observedCartQuantity(elements: readonly InteractiveElement[], text: string): number | null {
+function observedCartQuantity(
+  elements: readonly InteractiveElement[],
+  text: string,
+): number | null {
   for (const el of elements) {
     const label = `${el.name ?? ""} ${el.id ?? ""} ${el.ariaLabel ?? ""} ${el.labelText ?? ""}`;
     if (!/\b(?:quantity|qty)\b|(?:数量|個数)/i.test(label)) continue;
@@ -3638,8 +3675,7 @@ function observedCartQuantity(elements: readonly InteractiveElement[], text: str
   return match?.[1] === undefined ? null : Number(match[1]);
 }
 
-const checkoutComponentBoundary =
-  String.raw`(?:subtotal|merchandise\s+subtotal|shipping|delivery|tax|grand\s+total|order\s+total|total\s+due|amount\s+due|total|商品合計|小計|送料|配送料|税|合計)`;
+const checkoutComponentBoundary = String.raw`(?:subtotal|merchandise\s+subtotal|shipping|delivery|tax|grand\s+total|order\s+total|total\s+due|amount\s+due|total|商品合計|小計|送料|配送料|税|合計)`;
 
 function labeledCheckoutMoney(
   text: string,
@@ -3647,7 +3683,10 @@ function labeledCheckoutMoney(
   fallbackCurrency?: string,
 ): CheckoutMoney | null {
   const match = text.match(
-    new RegExp(`(?:${label})\\s*[:：]?\\s*([\\s\\S]*?)(?=${checkoutComponentBoundary}\\s*[:：]?|$)`, "iu"),
+    new RegExp(
+      `(?:${label})\\s*[:：]?\\s*([\\s\\S]*?)(?=${checkoutComponentBoundary}\\s*[:：]?|$)`,
+      "iu",
+    ),
   );
   const value = match?.[1]?.trim();
   if (value === undefined || value.length === 0) return null;
@@ -3703,7 +3742,11 @@ function cartMutationForUrl(session: Session, url: string): CartMutation | null 
     : null;
 }
 
-function cartUrlForState(session: Session, url: string, elements: readonly InteractiveElement[]): string | null {
+function cartUrlForState(
+  session: Session,
+  url: string,
+  elements: readonly InteractiveElement[],
+): string | null {
   const origin = originForUrl(url);
   if (origin === null) return null;
   if (checkoutStageFromUrl(url) === "cart") {
@@ -3712,7 +3755,11 @@ function cartUrlForState(session: Session, url: string, elements: readonly Inter
   }
   const cartLink = elements.find((el) => {
     const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.labelText ?? ""}`;
-    return el.href !== null && el.href !== undefined && /\b(?:cart|basket|bag)\b|(?:かご|カート)/i.test(label);
+    return (
+      el.href !== null &&
+      el.href !== undefined &&
+      /\b(?:cart|basket|bag)\b|(?:かご|カート)/i.test(label)
+    );
   });
   if (cartLink?.href !== undefined && cartLink.href !== null) {
     try {
@@ -3744,7 +3791,9 @@ function checkoutStateForObservation(
   // Do not burden unrelated provision flows with an empty cart-shaped object.
   if (stage === null && mutation === null) return undefined;
   const payableTotal =
-    checkout === undefined ? null : { amount_cents: checkout.amount_cents, currency: checkout.currency };
+    checkout === undefined
+      ? null
+      : { amount_cents: checkout.amount_cents, currency: checkout.currency };
   const fallbackCurrency = checkout?.currency;
   const resolvedStage = stage ?? "product";
   return {
@@ -3755,7 +3804,11 @@ function checkoutStateForObservation(
     product_identity: mutation?.productIdentity ?? null,
     options_hash: mutation?.optionsHash ?? null,
     quantity: observedCartQuantity(elements, text),
-    subtotal: labeledCheckoutMoney(text, String.raw`subtotal|merchandise\s+subtotal|商品合計|小計`, fallbackCurrency),
+    subtotal: labeledCheckoutMoney(
+      text,
+      String.raw`subtotal|merchandise\s+subtotal|商品合計|小計`,
+      fallbackCurrency,
+    ),
     shipping: shippingMoney(text, fallbackCurrency),
     payable_total: payableTotal,
     cart_url: cartUrlForState(session, url, elements),
@@ -3798,10 +3851,15 @@ function isCartAffectingAction(
   ];
   const target = parts.join(" ");
   if (action.kind === "click" || action.kind === "js_click") {
-    if (/(?:add\s+to\s+(?:cart|bag|basket)|remove\s+from\s+(?:cart|bag|basket)|update\s+(?:cart|bag|basket)|increase\s+quantity|decrease\s+quantity|かごに追加|カートに追加|カートから削除|数量を増やす|数量を減らす)/i.test(target)) {
+    if (
+      /(?:add\s+to\s+(?:cart|bag|basket)|remove\s+from\s+(?:cart|bag|basket)|update\s+(?:cart|bag|basket)|increase\s+quantity|decrease\s+quantity|かごに追加|カートに追加|カートから削除|数量を増やす|数量を減らす)/i.test(
+        target,
+      )
+    ) {
       return true;
     }
-    const hasQuantityContext = /(?:\b(?:quantity|qty|cart|basket|bag)\b|数量|個数|カート|かご)/i.test(target);
+    const hasQuantityContext =
+      /(?:\b(?:quantity|qty|cart|basket|bag)\b|数量|個数|カート|かご)/i.test(target);
     if (hasQuantityContext && parts.some((part) => /^\s*(?:\+|[-−])\s*$/.test(part))) {
       return true;
     }
@@ -3895,24 +3953,32 @@ async function observeSession(
       // remove-then-restore-across-a-failed-persist sequence would silently drop
       // the restored element otherwise).
       session.prevObserve = null;
-      return withCheckoutState({
-        session_id: session.id,
-        url,
-        text: normalizedText,
-        ...(guidance !== undefined ? { guidance } : {}),
-        // Still a COMPACT response — carry the (uncollapsed) set as the columnar
-        // table so the host parses it the same way as any other compact observe.
-        ...emitElements([...built.fullByRef.values()], "columnar"),
-        delta: false,
-        elements_total: elements.length,
-        ...(textTruncated ? { text_truncated: true } : {}),
-      }, checkoutState, currentCartMutation);
+      return withCheckoutState(
+        {
+          session_id: session.id,
+          url,
+          text: normalizedText,
+          ...(guidance !== undefined ? { guidance } : {}),
+          // Still a COMPACT response — carry the (uncollapsed) set as the columnar
+          // table so the host parses it the same way as any other compact observe.
+          ...emitElements([...built.fullByRef.values()], "columnar"),
+          delta: false,
+          elements_total: elements.length,
+          ...(textTruncated ? { text_truncated: true } : {}),
+        },
+        checkoutState,
+        currentCartMutation,
+      );
     }
     session.prevObserve = built.nextState;
-    return withCheckoutState({
-      ...built.observation,
-      snapshot_file: snapshotFile,
-    }, checkoutState, currentCartMutation);
+    return withCheckoutState(
+      {
+        ...built.observation,
+        snapshot_file: snapshotFile,
+      },
+      checkoutState,
+      currentCartMutation,
+    );
   }
 
   // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
@@ -3945,54 +4011,62 @@ async function observeSession(
     sealedFieldKeys,
     session.paymentFieldSealActive,
   );
-  return withCheckoutState({
-    session_id: session.id,
-    url,
-    text: normalizedText,
-    ...(guidance !== undefined ? { guidance } : {}),
-    ...(screen !== undefined ? { screen } : {}),
-    ...(accessibility !== undefined ? { accessibility } : {}),
-    elements: elements.map((el) => {
-      const observed: ObservedElement = {
-        ref: refOf(el),
-        label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
-        tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
-        role:
-          el.role === null ? null : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
-        type:
-          el.type === null ? null : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
-        value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
-        checked: el.checked ?? null,
-        href:
-          el.href === null || el.href === undefined
-            ? null
-            : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
-        testId:
-          el.testId === null || el.testId === undefined
-            ? null
-            : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
-        path:
-          el.screenPath === null || el.screenPath === undefined
-            ? null
-            : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
-        container:
-          el.container === null || el.container === undefined
-            ? null
-            : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
-        topmost: el.topmost ?? null,
-        occluded_by:
-          el.occludedBy === null || el.occludedBy === undefined
-            ? null
-            : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
-        frame_origin:
-          el.frameOrigin === null || el.frameOrigin === undefined
-            ? null
-            : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
-      };
-      annotatePaymentControl(observed, el);
-      return observed;
-    }),
-  }, checkoutState, currentCartMutation);
+  return withCheckoutState(
+    {
+      session_id: session.id,
+      url,
+      text: normalizedText,
+      ...(guidance !== undefined ? { guidance } : {}),
+      ...(screen !== undefined ? { screen } : {}),
+      ...(accessibility !== undefined ? { accessibility } : {}),
+      elements: elements.map((el) => {
+        const observed: ObservedElement = {
+          ref: refOf(el),
+          label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
+          tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
+          role:
+            el.role === null
+              ? null
+              : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
+          type:
+            el.type === null
+              ? null
+              : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
+          value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
+          checked: el.checked ?? null,
+          href:
+            el.href === null || el.href === undefined
+              ? null
+              : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
+          testId:
+            el.testId === null || el.testId === undefined
+              ? null
+              : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
+          path:
+            el.screenPath === null || el.screenPath === undefined
+              ? null
+              : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
+          container:
+            el.container === null || el.container === undefined
+              ? null
+              : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
+          topmost: el.topmost ?? null,
+          occluded_by:
+            el.occludedBy === null || el.occludedBy === undefined
+              ? null
+              : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
+          frame_origin:
+            el.frameOrigin === null || el.frameOrigin === undefined
+              ? null
+              : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
+        };
+        annotatePaymentControl(observed, el);
+        return observed;
+      }),
+    },
+    checkoutState,
+    currentCartMutation,
+  );
 }
 
 export async function act(
