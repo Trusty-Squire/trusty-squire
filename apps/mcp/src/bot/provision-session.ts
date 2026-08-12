@@ -4023,12 +4023,10 @@ export async function act(
   let sensitiveSource: RecordedValueSource | undefined;
   let cartAffecting = false;
   const bindCartIdentity = (affecting: boolean): void => {
-    if (!affecting) return;
-    if (cartIdentity === undefined) {
-      throw new Error(
-        "cart-affecting operate_act requires product_identity and options_hash",
-      );
-    }
+    // Generic operate_act cart controls stay usable without identity. Identity
+    // is a best-effort observation hint here; exact product/variant binding and
+    // retry suppression belong to operate_cart_add's dedicated contract.
+    if (!affecting || cartIdentity === undefined) return;
     cartAffecting = true;
     cartIdentity.onActionReady?.();
   };

@@ -441,7 +441,9 @@ vi.mock("../browser.js", () => ({
     /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i,
   parseCheckoutAmount: (texts: readonly string[], fallbackCurrency?: string) => {
     for (const text of texts) {
-      const match = text.match(/(?:([A-Z]{3})\s*)?([$¥￥])?\s*([0-9]+(?:[.,][0-9]+)?)\s*(円|[A-Z]{3})?/i);
+      const match = text.match(
+        /^\s*(?:total\s+)?(?:([A-Z]{3})\s*)?([$¥￥])?\s*([0-9]+(?:[.,][0-9]+)?)\s*(円|[A-Z]{3})?\s*$/i,
+      );
       if (match?.[3] === undefined) continue;
       const currency = (match[1] ?? match[4] ?? (match[2] === "$" ? "USD" : undefined) ?? fallbackCurrency)
         ?.replace("円", "JPY")
@@ -4384,6 +4386,26 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     });
   });
 
+  it("does not fabricate component amounts from the payable total", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Total $15.00";
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 1_500,
+      currency: "USD",
+    };
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const observed = await observe(started.session_id, "compact");
+
+    expect(observed.checkout_state).toMatchObject({
+      subtotal: null,
+      shipping: null,
+      payable_total: { amount_cents: 1_500, currency: "USD" },
+    });
+  });
+
   it("keeps a labeled shipping charge over value-leading promotional copy", async () => {
     h.currentUrl = "https://shop.example.com/cart";
     h.visibleText =
@@ -4445,7 +4467,7 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     });
   });
 
-  it("requires and emits identity for generic quantity controls", async () => {
+  it("allows generic quantity controls without identity and emits supplied hints", async () => {
     h.currentUrl = "https://shop.example.com/cart";
     h.visibleText = "Cart Quantity: 1";
     h.elements = [
@@ -4459,11 +4481,14 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     ];
     const started = await startProvisionSession({ serviceUrl: h.currentUrl });
 
-    await expect(act(started.session_id, { kind: "click", target: "Increase quantity" }))
-      .rejects.toThrow("requires product_identity and options_hash");
+    const unbound = await act(started.session_id, { kind: "click", target: "+" });
+    expect(unbound.checkout_state).toMatchObject({
+      product_identity: null,
+      options_hash: null,
+    });
     const observed = await act(
       started.session_id,
-      { kind: "click", target: "Increase quantity" },
+      { kind: "click", target: "+" },
       "compact",
       { productIdentity: "sku:tiara", optionsHash: "size=M" },
     );
@@ -4474,7 +4499,7 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     });
   });
 
-  it("binds row-scoped remove controls before dispatch", async () => {
+  it("allows row-scoped remove controls without identity and binds supplied hints", async () => {
     h.currentUrl = "https://shop.example.com/cart";
     h.visibleText = "Cart Tiara size M";
     h.elements = [
@@ -4487,9 +4512,12 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     ];
     const started = await startProvisionSession({ serviceUrl: h.currentUrl });
 
-    await expect(act(started.session_id, { kind: "click", target: "Remove" }))
-      .rejects.toThrow("requires product_identity and options_hash");
-    expect(h.clickCalls).toBe(0);
+    const unbound = await act(started.session_id, { kind: "click", target: "Remove" });
+    expect(unbound.checkout_state).toMatchObject({
+      product_identity: null,
+      options_hash: null,
+    });
+    expect(h.clickCalls).toBe(1);
     const observed = await act(
       started.session_id,
       { kind: "click", target: "Remove" },
