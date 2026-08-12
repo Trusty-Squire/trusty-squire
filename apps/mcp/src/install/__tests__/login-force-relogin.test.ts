@@ -70,4 +70,15 @@ describe("login --force-relogin marker honesty", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(m.clearProviderLoggedIn).not.toHaveBeenCalled();
   });
+
+  it("exits non-zero when another Trusty Squire session owns the browser", async () => {
+    m.ensureOAuthSession.mockResolvedValue({
+      status: "error",
+      detail: "another Trusty Squire session is already using the browser — close it first",
+    });
+
+    await expect(runCli(["login"])).rejects.toThrow("process.exit");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
 });

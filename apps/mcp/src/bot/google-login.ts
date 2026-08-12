@@ -604,7 +604,7 @@ function requireBinaries(names: readonly string[]): void {
 }
 
 // --- path 2: headless — virtual display + noVNC + cloudflared ----------
-interface HeadlessRig {
+export interface HeadlessRig {
   procs: ChildProcess[];
   display: string;
   // Temp dir websockify serves (branded vnc.html + the installed
@@ -615,6 +615,9 @@ interface HeadlessRig {
   // on the process command line where `ps` could read it. Tracked here
   // as a belt-and-suspenders unlink in case x11vnc never started.
   passFile?: string;
+  // Cleanup can run from the normal finally path, Node's exit event, and an
+  // interrupt/exception handler. Mark it so every path is safe to invoke.
+  tornDown?: boolean;
 }
 
 function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess {
@@ -684,7 +687,9 @@ function printBanner(opts: { tunnelUrl: string; vncPassword: string; label: stri
   );
 }
 
-function teardown(rig: HeadlessRig): void {
+export function teardownHeadlessRig(rig: HeadlessRig): void {
+  if (rig.tornDown === true) return;
+  rig.tornDown = true;
   for (const p of rig.procs) {
     try {
       p.kill("SIGTERM");
@@ -726,6 +731,73 @@ function teardown(rig: HeadlessRig): void {
       // best-effort — x11vnc's `rm:` prefix usually removed it already.
     }
   }
+}
+
+type LoginProcessRuntime = Pick<NodeJS.Process, "once" | "removeListener" | "exit">;
+
+// Attach the per-login rig to every process termination route. The function
+// returns a disposer for the normal completion path; callers must keep the
+// browser teardown in the getter so an interrupt can also release the Chrome
+// profile lock before Node exits. The hard cap prevents a wedged browser from
+// keeping Xvfb/x11vnc/websockify (or cloudflared) alive indefinitely.
+export function registerHeadlessRigCleanup(
+  rig: HeadlessRig,
+  activeBrowserTeardown: () => (() => Promise<void>) | undefined,
+  runtime: LoginProcessRuntime = process,
+): () => void {
+  let finishing = false;
+
+  const teardownBrowserWithin = async (): Promise<void> => {
+    const closeBrowser = activeBrowserTeardown();
+    if (closeBrowser === undefined) return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 3_000);
+      void closeBrowser()
+        .catch(() => undefined)
+        .finally(() => {
+          clearTimeout(timer);
+          resolve();
+        });
+    });
+  };
+
+  const exitAfterCleanup = (code: number): void => {
+    if (finishing) return;
+    finishing = true;
+    void teardownBrowserWithin().finally(() => {
+      teardownHeadlessRig(rig);
+      runtime.exit(code);
+    });
+  };
+
+  const onExit = (): void => teardownHeadlessRig(rig);
+  const onSignal = (): void => exitAfterCleanup(130);
+  const onUncaughtException = (error: Error): void => {
+    console.error("[login] uncaught exception; tearing down the login browser", error);
+    exitAfterCleanup(1);
+  };
+  const onUnhandledRejection = (reason: unknown): void => {
+    console.error("[login] unhandled rejection; tearing down the login browser", reason);
+    exitAfterCleanup(1);
+  };
+
+  runtime.once("exit", onExit);
+  runtime.once("SIGTERM", onSignal);
+  runtime.once("SIGINT", onSignal);
+  runtime.once("uncaughtException", onUncaughtException);
+  runtime.once("unhandledRejection", onUnhandledRejection);
+
+  return (): void => {
+    runtime.removeListener("exit", onExit);
+    runtime.removeListener("SIGTERM", onSignal);
+    runtime.removeListener("SIGINT", onSignal);
+    runtime.removeListener("uncaughtException", onUncaughtException);
+    runtime.removeListener("unhandledRejection", onUnhandledRejection);
+  };
+}
+
+export function fallbackCloudflaredArgs(webPort: number): string[] {
+  return ["tunnel", "--protocol", "http2", "--url", `http://127.0.0.1:${webPort}`];
 }
 
 // Assemble the directory websockify serves: a copy of the installed
@@ -811,24 +883,25 @@ export interface RunInBotChromeOpts {
   plainOnSuccess?: (profileDir: string) => Promise<void>;
 }
 
+const LOGIN_BROWSER_CLOSED_ERROR =
+  "the login browser closed before the session completed — re-run the command after closing any other Trusty Squire session";
+const LOGIN_STATUS_CHECK_STALLED_ERROR =
+  "the login status check stopped responding before the session completed";
+
 export async function runInBotChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   // `mcp login` runs in a SEPARATE process from the MCP server, so the
   // in-process OAuth mutex can't serialize it against an in-flight signup.
-  // Wait on Chrome's SingletonLock as a cross-process semaphore: reclaim
-  // it if a prior run died (stale), or wait our turn if a signup is
-  // genuinely live — then proceed. Without this, login either died on a
-  // stale lock OR crashed against a live one, before the noVNC rig could
-  // even start (the "relogin prompted, no noVNC, still failed" bug).
+  // Chrome's SingletonLock is the cross-process semaphore: reclaim a stale
+  // holder, but fail immediately for a live one. Waiting here used to leave a
+  // second connect apparently frozen while a duplicate noVNC stack accumulated.
   const free = await waitForProfileFree(opts.profileDir, {
-    deadlineMs: 120_000,
-    onWait: () =>
-      console.error("[login] the bot browser is busy with another run — waiting for it to finish…"),
+    deadlineMs: 0,
   });
   if (!free) {
     throw new ProfileBusyError(
-      "the bot browser is busy with a signup that hasn't finished — wait a moment and re-run `mcp login`",
+      "another Trusty Squire session is already using the browser — close it first",
     );
   }
   if (hasDisplay()) {
@@ -870,6 +943,9 @@ async function runDisplayedChrome(
         opts.deadline,
         () => opts.plainPollUntilDone!(opts.profileDir),
         opts.heartbeatMessage,
+        () => {
+          if (!browser.isRunning()) throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
+        },
       );
       if (ok && opts.plainOnSuccess !== undefined) {
         try {
@@ -970,31 +1046,11 @@ async function runHeadlessChrome(
   // running), for the persistent fallback it's just context.close(). Tracked
   // so the signal handler can release the profile lock before exiting.
   let activeTeardown: (() => Promise<void>) | undefined;
+  let plainBrowserIsRunning: (() => boolean) | undefined;
 
-  // Ensure nothing is orphaned if the process dies mid-flow. `exit`
-  // covers a normal return; SIGTERM/SIGINT cover an interrupted run —
-  // once a signal listener is registered the default terminate is
-  // suppressed, so the handler must clean up AND exit itself.
-  const onExit = (): void => teardown(rig);
-  const onSignal = (): void => {
-    const finish = (): void => {
-      teardown(rig);
-      process.exit(130);
-    };
-    if (activeTeardown !== undefined) {
-      // Tear down the browser to release the persistent-profile lock (and
-      // kill the self-launched Chrome) — but cap the wait: a wedged Chrome
-      // under Xvfb can hang indefinitely, and the rig MUST still be torn
-      // down. Whichever wins (clean teardown, or the 3s cap), `finish` runs.
-      const capped = new Promise<void>((r) => setTimeout(r, 3000));
-      Promise.race([activeTeardown().catch(() => undefined), capped]).then(finish, finish);
-    } else {
-      finish();
-    }
-  };
-  process.once("exit", onExit);
-  process.once("SIGTERM", onSignal);
-  process.once("SIGINT", onSignal);
+  // Cover normal cleanup, interrupts, and fatal process errors. The returned
+  // disposer removes process-global listeners once this login finishes.
+  const removeRigCleanup = registerHeadlessRigCleanup(rig, () => activeTeardown);
 
   try {
     // 1. Virtual display — phone-shaped.
@@ -1055,6 +1111,7 @@ async function runHeadlessChrome(
         extraArgs: sharedChromeArgs,
       });
       teardownContext = browser.teardown;
+      plainBrowserIsRunning = browser.isRunning;
     } else if (useSelfLaunch && chromeBinary !== null) {
       const launched = await launchSelfManagedLoginContext({
         binary: chromeBinary,
@@ -1160,12 +1217,15 @@ async function runHeadlessChrome(
       // the URL is ~80 chars and the cold-start hurts.
       let bannerUrl: string;
       if (usingNamedTunnel) {
+        // The persistent operator-managed named tunnel lives outside this
+        // process; run that service with `--protocol http2` too, avoiding the
+        // same QUIC datagram-manager drops as the per-session fallback.
         // No `/vnc.html` — websockify serves the same content as
         // index.html (buildVncWebDir writes both). Shorter URL fits
         // one line on a phone terminal.
         bannerUrl = `https://${namedTunnelHost}/#p=${vncPassword}`;
       } else {
-        const cf = spawnBg("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${webPort}`]);
+        const cf = spawnBg("cloudflared", fallbackCloudflaredArgs(webPort));
         rig.procs.push(cf);
         const tunnelUrl = await awaitTunnelUrl(cf, 30000);
         const longVncUrl = `${tunnelUrl}/#p=${vncPassword}`;
@@ -1204,6 +1264,11 @@ async function runHeadlessChrome(
             ? opts.pollUntilDone(context)
             : opts.plainPollUntilDone!(opts.profileDir),
         opts.heartbeatMessage,
+        () => {
+          if (plainBrowserIsRunning !== undefined && !plainBrowserIsRunning()) {
+            throw new Error(LOGIN_BROWSER_CLOSED_ERROR);
+          }
+        },
       );
       if (ok) {
         if (context !== undefined) {
@@ -1233,10 +1298,8 @@ async function runHeadlessChrome(
       activeTeardown = undefined;
     }
   } finally {
-    teardown(rig);
-    process.removeListener("exit", onExit);
-    process.removeListener("SIGTERM", onSignal);
-    process.removeListener("SIGINT", onSignal);
+    teardownHeadlessRig(rig);
+    removeRigCleanup();
   }
 }
 
@@ -1254,11 +1317,46 @@ export async function pollUntil(
   heartbeatMessage:
     | string
     | (() => string) = "Still waiting for you to finish signing in — the URL/window above stays live until you do.",
+  assertStillLive?: () => void,
 ): Promise<boolean> {
   const beatEveryMs = 20_000;
+  const maxCheckMs = 15_000;
   let lastBeat = Date.now();
   while (Date.now() < deadline) {
-    if (await check()) return true;
+    assertStillLive?.();
+    const checkTimeoutMs = Math.min(maxCheckMs, Math.max(1, deadline - Date.now()));
+    if (
+      await new Promise<boolean>((resolve, reject) => {
+        let settled = false;
+        const finish = (settle: () => void): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(checkTimer);
+          if (livenessTimer !== undefined) clearInterval(livenessTimer);
+          settle();
+        };
+        const checkTimer = setTimeout(
+          () => finish(() => reject(new Error(LOGIN_STATUS_CHECK_STALLED_ERROR))),
+          checkTimeoutMs,
+        );
+        const livenessTimer =
+          assertStillLive === undefined
+            ? undefined
+            : setInterval(() => {
+                try {
+                  assertStillLive();
+                } catch (err) {
+                  finish(() => reject(err instanceof Error ? err : new Error(String(err))));
+                }
+              }, 1_000);
+        void check().then(
+          (result) => finish(() => resolve(result)),
+          (err: unknown) => finish(() => reject(err instanceof Error ? err : new Error(String(err)))),
+        );
+      })
+    ) {
+      return true;
+    }
     await new Promise((r) => setTimeout(r, 3000));
     if (Date.now() - lastBeat >= beatEveryMs) {
       lastBeat = Date.now();

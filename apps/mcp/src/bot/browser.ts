@@ -1764,6 +1764,9 @@ export async function launchSelfManagedLoginContext(params: {
 export interface PlainLoginBrowser {
   // Idempotent: kills the spawned Chrome child and reaps the profile lock.
   teardown: () => Promise<void>;
+  // Plain login intentionally has no CDP attachment, so expose child liveness
+  // for the polling loop to fail loudly if the visible browser disappears.
+  isRunning: () => boolean;
 }
 
 // Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
@@ -1854,7 +1857,10 @@ export async function launchPlainLoginBrowser(params: {
     }
     reapLeakedProfileHolder(params.profileDir);
   };
-  return { teardown };
+  return {
+    teardown,
+    isRunning: () => child !== null && child.exitCode === null,
+  };
 }
 
 export class BrowserController {
