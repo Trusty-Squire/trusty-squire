@@ -4679,6 +4679,10 @@ export async function formSelectMany(
         { kind: "select", target: label, text: option },
         "none",
       );
+      const selectedOption = actionResult.selected_option;
+      if (selectedOption === undefined) {
+        throw new Error("select: successful action omitted the selected option");
+      }
       // `detail:none` is intentionally a minimal ack. The explicit observe here
       // refreshes the DOM generation between every potentially mutating select.
       await observe(sessionId, "compact");
@@ -4686,7 +4690,7 @@ export async function formSelectMany(
         label,
         option,
         status: "selected",
-        selected_option: actionResult.selected_option,
+        selected_option: selectedOption,
       });
     } catch (err) {
       if (err instanceof TargetStaleError) {

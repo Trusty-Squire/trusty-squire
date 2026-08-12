@@ -38,13 +38,19 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
         arguments: { session_id: "s1", kind: "set_value", target: "この商品のみ注文", text: "2" },
       });
       expect(bad.isError).toBe(true);
-      const text = resultText(bad);
-      // Actionable for a weak model: every valid kind is named so it can
-      // self-correct instead of abandoning the operator.
-      for (const kind of ["click", "type", "select", "goto", "press", "scroll", "upload"]) {
-        expect(text).toContain(kind);
-      }
-      expect(text).toContain("set_value");
+      const repair = JSON.parse(resultText(bad));
+      expect(repair).toEqual(
+        expect.objectContaining({
+          error: "invalid_action_arguments",
+          supplied_kind: "set_value",
+          missing: ["kind"],
+          example: expect.any(Object),
+          safe_alternative: expect.any(String),
+        }),
+      );
+      expect(repair.allowed_kinds).toEqual(
+        expect.arrayContaining(["click", "type", "select", "goto", "press", "scroll", "upload"]),
+      );
 
       // The transport survived: the very next call gets a real answer.
       const next = await client.callTool({
@@ -73,8 +79,17 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
         arguments: { session_id: "never-started", kind: "click" },
       });
       expect(badTarget.isError).toBe(true);
-      // buildAction names the missing field before the session lookup runs.
-      expect(resultText(badTarget)).toMatch(/requires "target"|unknown provision session/);
+      // Schema repair names the missing field before the session lookup runs.
+      const repair = JSON.parse(resultText(badTarget));
+      expect(repair).toEqual(
+        expect.objectContaining({
+          error: "invalid_action_arguments",
+          allowed_kinds: expect.any(Array),
+          missing: expect.arrayContaining(["target"]),
+          example: expect.any(Object),
+          safe_alternative: expect.any(String),
+        }),
+      );
     } finally {
       await client.close();
     }

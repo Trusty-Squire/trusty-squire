@@ -554,6 +554,7 @@ function actionSchemaRepair(args: unknown, issues: readonly { path: (string | nu
       : 'Use kind "type" for text fields or "select" for options, and take target refs from operate_observe. Never enter card values with operate_act; use operate_pay.';
   return {
     error: "invalid_action_arguments",
+    ...(typeof input.kind === "string" ? { supplied_kind: input.kind } : {}),
     allowed_kinds: ACTION_KINDS,
     missing,
     example,
