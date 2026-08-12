@@ -15,8 +15,9 @@
 //   2. Headless (no DISPLAY) → run Chrome on a phone-shaped virtual
 //      display (Xvfb), bridge it out with x11vnc + noVNC + a cloudflared
 //      tunnel, and print one URL + a VNC password. The user logs in from
-//      any browser on any network. The public URL lives only until the
-//      active login or install flow reaches its completion gate.
+//      any browser on any network. The per-session stack and public URL
+//      are removed when the flow completes, times out, errors, or is
+//      interrupted; an operator-managed named tunnel remains external.
 //
 // Binaries the headless path needs: Xvfb, x11vnc, websockify
 // (with /usr/share/novnc), cloudflared, and Google Chrome. Missing ones
@@ -911,8 +912,8 @@ function buildVncWebDir(): string {
 
 // Open the bot's Chrome at `url`, on whichever platform path applies
 // (with-display or headless+noVNC+cloudflared), and run `pollUntilDone`
-// against the live context until it resolves true OR the deadline
-// passes. Returns whether the poll succeeded.
+// against the live context until it resolves true, the deadline passes,
+// or the browser/status check fails. Returns whether the poll succeeded.
 //
 // Extracted so both `mcp login` (poll for Google/GitHub cookies in the
 // bot's profile) AND `install` (poll the API for the install claim)

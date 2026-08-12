@@ -1703,54 +1703,57 @@ export async function launchSelfManagedLoginContext(params: {
   extraArgs?: readonly string[];
 }): Promise<SelfLaunchedLogin> {
   let child: ChildProcess | null = null;
-  const endpoint = await withChromeStartupLock(async () => {
-    const port = await findFreePort();
-    clearStaleSingletonLock(params.profileDir);
-    const argv = [
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${params.profileDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--password-store=basic",
-      "--window-position=0,0",
-      `--window-size=${params.window.width},${params.window.height}`,
-      "--lang=en-US",
-      ...(params.extraArgs ?? []),
-      ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-      // NB: we build argv ourselves, so Playwright's --enable-automation
-      // (and the rest of its launch instrumentation — the actual Turnstile
-      // tell) is never added. That is the whole point of self-launching.
-      params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
-    ];
-    const spawned = spawn(params.binary, argv, {
-      env: params.env,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    child = spawned;
-    registerSelfManagedChrome(spawned);
-    let chromeStderr = "";
-    spawned.stderr?.on("data", (chunk: Buffer) => {
-      chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-    });
-    try {
-      return await waitForDevtools(port, 30_000, spawned);
-    } catch (err) {
+  const endpoint = await withChromeStartupLock(
+    async () => {
+      const port = await findFreePort();
+      clearStaleSingletonLock(params.profileDir);
+      const argv = [
+        `--remote-debugging-port=${port}`,
+        "--remote-debugging-address=127.0.0.1",
+        `--user-data-dir=${params.profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        "--window-position=0,0",
+        `--window-size=${params.window.width},${params.window.height}`,
+        "--lang=en-US",
+        ...(params.extraArgs ?? []),
+        ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+        // NB: we build argv ourselves, so Playwright's --enable-automation
+        // (and the rest of its launch instrumentation — the actual Turnstile
+        // tell) is never added. That is the whole point of self-launching.
+        params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
+      ];
+      const spawned = spawn(params.binary, argv, {
+        env: params.env,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      child = spawned;
+      registerSelfManagedChrome(spawned);
+      let chromeStderr = "";
+      spawned.stderr?.on("data", (chunk: Buffer) => {
+        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+      });
       try {
-        spawned.kill("SIGKILL");
-      } catch {
-        /* already gone */
+        return await waitForDevtools(port, 30_000, spawned);
+      } catch (err) {
+        try {
+          spawned.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
+        const detail = chromeStderr.trim();
+        const collision = profileCollisionFromStderr(detail);
+        if (collision !== null) throw collision;
+        throw new Error(
+          `${err instanceof Error ? err.message : String(err)}` +
+            `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+        );
       }
-      reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
-      const detail = chromeStderr.trim();
-      const collision = profileCollisionFromStderr(detail);
-      if (collision !== null) throw collision;
-      throw new Error(
-        `${err instanceof Error ? err.message : String(err)}` +
-          `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-      );
-    }
-  }, { deadlineMs: 0 });
+    },
+    { deadlineMs: 0 },
+  );
 
   const launcher = getChromium();
   const browser = await launcher.connectOverCDP(endpoint);
@@ -1841,50 +1844,53 @@ export async function launchPlainLoginBrowser(params: {
   extraArgs?: readonly string[];
 }): Promise<PlainLoginBrowser> {
   let child: ChildProcess | null = null;
-  await withChromeStartupLock(async () => {
-    clearStaleSingletonLock(params.profileDir);
-    const argv = [
-      `--user-data-dir=${params.profileDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--password-store=basic",
-      "--window-position=0,0",
-      `--window-size=${params.window.width},${params.window.height}`,
-      "--lang=en-US",
-      ...(params.extraArgs ?? []),
-      ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-      `--app=${params.url}`,
-    ];
-    const spawned = spawn(params.binary, argv, {
-      env: params.env,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    child = spawned;
-    registerSelfManagedChrome(spawned);
-    let chromeStderr = "";
-    spawned.stderr?.on("data", (chunk: Buffer) => {
-      chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-    });
-    // Give Chrome a moment to actually come up (or die). Unlike the CDP path
-    // there is no devtools endpoint to poll — but a crash-on-launch (bad
-    // profile, missing lib) should surface here, not 15min later as a blank
-    // noVNC. If the process is already dead, throw with its stderr.
-    await new Promise((r) => setTimeout(r, 1_200));
-    if (!childProcessIsRunning(spawned)) {
-      reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
-      const detail = chromeStderr.trim();
-      const collision = profileCollisionFromStderr(detail);
-      if (collision !== null) throw collision;
-      const termination =
-        spawned.exitCode !== null
-          ? `code ${spawned.exitCode}`
-          : `signal ${spawned.signalCode ?? "unknown"}`;
-      throw new Error(
-        `plain login Chrome exited immediately (${termination})` +
-          `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-      );
-    }
-  }, { deadlineMs: 0 });
+  await withChromeStartupLock(
+    async () => {
+      clearStaleSingletonLock(params.profileDir);
+      const argv = [
+        `--user-data-dir=${params.profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        "--window-position=0,0",
+        `--window-size=${params.window.width},${params.window.height}`,
+        "--lang=en-US",
+        ...(params.extraArgs ?? []),
+        ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+        `--app=${params.url}`,
+      ];
+      const spawned = spawn(params.binary, argv, {
+        env: params.env,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      child = spawned;
+      registerSelfManagedChrome(spawned);
+      let chromeStderr = "";
+      spawned.stderr?.on("data", (chunk: Buffer) => {
+        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+      });
+      // Give Chrome a moment to actually come up (or die). Unlike the CDP path
+      // there is no devtools endpoint to poll — but a crash-on-launch (bad
+      // profile, missing lib) should surface here, not 15min later as a blank
+      // noVNC. If the process is already dead, throw with its stderr.
+      await new Promise((r) => setTimeout(r, 1_200));
+      if (!childProcessIsRunning(spawned)) {
+        reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
+        const detail = chromeStderr.trim();
+        const collision = profileCollisionFromStderr(detail);
+        if (collision !== null) throw collision;
+        const termination =
+          spawned.exitCode !== null
+            ? `code ${spawned.exitCode}`
+            : `signal ${spawned.signalCode ?? "unknown"}`;
+        throw new Error(
+          `plain login Chrome exited immediately (${termination})` +
+            `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+        );
+      }
+    },
+    { deadlineMs: 0 },
+  );
 
   let torn = false;
   const forceTeardown = (): void => {
@@ -2109,66 +2115,69 @@ export class BrowserController {
       }
       return ctx;
     }
-    const endpoint = await withChromeStartupLock(async () => {
-      const port = await findFreePort();
-      clearStaleSingletonLock(this.profileDir);
-      const argv = [
-        `--remote-debugging-port=${port}`,
-        "--remote-debugging-address=127.0.0.1",
-        `--user-data-dir=${this.profileDir}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-        "--window-position=0,0",
-        `--window-size=${params.window.width},${params.window.height}`,
-        "--lang=en-US",
-        ...params.args,
-        ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-        ...(params.headless ? ["--headless=new"] : []),
-        "about:blank",
-      ];
-      const child = spawn(params.binary, argv, {
-        env: params.env,
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      this.childChrome = child;
-      registerSelfManagedChrome(child);
-      let chromeStderr = "";
-      let chromeExit = "";
-      child.stderr?.on("data", (chunk: Buffer) => {
-        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-      });
-      child.on("exit", (code, signal) => {
-        chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
-      });
-      try {
-        return await waitForDevtools(port, 30_000);
-      } catch (err) {
-        const alive =
-          child.pid !== undefined
-            ? (() => {
-                try {
-                  process.kill(child.pid!, 0);
-                  return true;
-                } catch {
-                  return false;
-                }
-              })()
-            : false;
+    const endpoint = await withChromeStartupLock(
+      async () => {
+        const port = await findFreePort();
+        clearStaleSingletonLock(this.profileDir);
+        const argv = [
+          `--remote-debugging-port=${port}`,
+          "--remote-debugging-address=127.0.0.1",
+          `--user-data-dir=${this.profileDir}`,
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--password-store=basic",
+          "--window-position=0,0",
+          `--window-size=${params.window.width},${params.window.height}`,
+          "--lang=en-US",
+          ...params.args,
+          ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
+          ...(params.headless ? ["--headless=new"] : []),
+          "about:blank",
+        ];
+        const child = spawn(params.binary, argv, {
+          env: params.env,
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        this.childChrome = child;
+        registerSelfManagedChrome(child);
+        let chromeStderr = "";
+        let chromeExit = "";
+        child.stderr?.on("data", (chunk: Buffer) => {
+          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+        });
+        child.on("exit", (code, signal) => {
+          chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
+        });
         try {
-          child.kill("SIGKILL");
-        } catch {
-          /* already gone */
+          return await waitForDevtools(port, 30_000);
+        } catch (err) {
+          const alive =
+            child.pid !== undefined
+              ? (() => {
+                  try {
+                    process.kill(child.pid!, 0);
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                })()
+              : false;
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* already gone */
+          }
+          reapProfileHolderIfOwned(this.profileDir, child.pid ?? null);
+          this.childChrome = null;
+          const detail = chromeStderr.trim();
+          throw new Error(
+            `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
+              `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+          );
         }
-        reapProfileHolderIfOwned(this.profileDir, child.pid ?? null);
-        this.childChrome = null;
-        const detail = chromeStderr.trim();
-        throw new Error(
-          `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
-            `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-        );
-      }
-    }, { deadlineMs: 0 });
+      },
+      { deadlineMs: 0 },
+    );
     // Use the patchright launcher's connectOverCDP — it's the exact path the
     // falsification experiment validated (its connect avoids Runtime.enable,
     // which a plain attach would emit). The anti-detection that matters here

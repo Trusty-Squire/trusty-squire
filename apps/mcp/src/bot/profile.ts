@@ -19,10 +19,10 @@ export const CHROME_PROFILE_DIR =
 // is "<hostname>-<pid>"; the other two are sockets/cookies beside it.
 const SINGLETON_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] as const;
 
-// Thrown when the bot profile is held by a live run on another process and
-// doesn't free up within the wait deadline. The CLI/MCP layers surface
-// this as a clear "busy, retry" instead of a raw Playwright SingletonLock
-// stack trace.
+// Thrown when the operation guard or Chrome's SingletonLock proves that a
+// live process already owns the profile. Interactive CLI/MCP entry points
+// fail immediately with PROFILE_BUSY_MESSAGE instead of waiting or exposing
+// a raw Playwright SingletonLock stack trace.
 export class ProfileBusyError extends Error {
   constructor(message: string) {
     super(message);
@@ -215,22 +215,11 @@ export function currentProfileHolderPid(profileDir: string = CHROME_PROFILE_DIR)
   return holder.pid;
 }
 
-// Free the profile after WE are done with it (called from close(), once our
-// own context is closed). context.close() is supposed to terminate the
-// browser, but headed Chrome under Xvfb (and some patchright teardowns) can
-// leave the main process alive holding the SingletonLock with a LIVE pid —
-// which the next run's waitForProfileFree treats as a genuine concurrent run
-// and waits 120s on before failing with ProfileBusyError. One leak bricks
-// EVERY subsequent run in a batch (measured: 4/7 of a discovery batch).
-//
-// We do NOT pid-match here, and deliberately so: Chrome rewrites the
-// SingletonLock asynchronously during startup, so the pid we could read right
-// after launch is often the PREVIOUS holder's — a stale value that would make
-// a pid-matched reap skip the real leak (the bug that left 2253353 alive).
-// Instead: at close() we are definitively finished with the profile and the
-// bot serializes profile access (the cross-process gate), so any holder still
-// on THIS host is our own leaked browser — SIGKILL it and clear the lock. A
-// holder on ANOTHER host (shared profile over a network mount) is left alone.
+// Broad recovery helper for a caller that exclusively owns the whole profile
+// operation but could not capture the Chrome pid. Because this does not
+// pid-match, it may kill any local holder and must never run while another
+// profile operation could be active; launch/teardown paths that know their pid
+// use reapProfileHolderIfOwned instead. A holder on another host is untouched.
 // Returns true iff it freed a live/stale local holder. Never throws.
 export function reapLeakedProfileHolder(profileDir: string = CHROME_PROFILE_DIR): boolean {
   const holder = readLockHolder(profileDir);
@@ -283,8 +272,8 @@ export interface WaitForProfileOptions {
 //
 // Returns true once the profile is free to open, or false if a live
 // holder never released within the deadline (caller surfaces ProfileBusyError).
-// This is what turns "separate `mcp login` collides and crashes" into
-// "login waits its turn behind an in-flight signup, then proceeds".
+// Interactive entry points pass a zero deadline and fail immediately; narrow
+// internal probes may opt into a bounded wait.
 export async function waitForProfileFree(
   profileDir: string = CHROME_PROFILE_DIR,
   opts: WaitForProfileOptions = {},
@@ -323,10 +312,10 @@ function isSingletonCollision(err: unknown): boolean {
 // sub-second gap between "lock is absent" and Chrome creating it where a
 // second process can win — launchPersistentContext then throws
 // "Failed to create a ProcessSingleton". This wraps the launch: on that
-// specific collision it re-waits for the new holder (reclaiming it if it
-// died) and relaunches, up to `retries` times. Any other error, or a
-// holder that never releases, propagates. This is what makes the
-// cross-process gate race-free in practice.
+// specific collision, `failFast` maps it immediately to the standard busy
+// error. Legacy callers without `failFast` re-wait for the new holder
+// (reclaiming it if it died) and relaunch up to `retries` times. Any other
+// error, or a holder that never releases, propagates.
 export async function launchWithProfileGate<T>(
   profileDir: string,
   launch: () => Promise<T>,

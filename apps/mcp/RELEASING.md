@@ -10,19 +10,28 @@ hand. **Run this once per release**, on a headless box (or with
 `TRUSTY_SQUIRE_FORCE_HEADLESS=true`):
 
 - [ ] `npx @trusty-squire/mcp@<rc> install` (or `login`) reaches the
-      headless login stage and prints a `*.trycloudflare.com/vnc.html`
-      URL with a `?password=` query.
+      headless login stage and prints the named, shortened, or raw
+      `*.trycloudflare.com` VNC URL. The long URL carries the password in
+      a `#p=` fragment, never in a query parameter.
 - [ ] Opening that URL shows the **branded** Trusty Squire login page
       (dark header, status dot) — not the stock noVNC client.
 - [ ] The page auto-connects with **no VNC password prompt** (the
       password rode in the URL).
 - [ ] The remote Chrome is visible and usable; a Google sign-in
       completes and the CLI reports the session connected.
-- [ ] `Ctrl-C` during the login leaves **no orphaned processes**:
-      `pgrep -a 'Xvfb|x11vnc|websockify|cloudflared'` is empty
-      afterward (T7 — SIGTERM/SIGINT teardown).
+- [ ] The fallback per-session `cloudflared` command includes
+      `--protocol http2`; the operator-managed named-tunnel path still
+      starts no per-session `cloudflared` process.
+- [ ] Normal completion, timeout, an injected startup/poll error,
+      `Ctrl-C`, and `SIGTERM` each leave **no new orphaned processes**.
+      Capture `pgrep -a 'Xvfb|x11vnc|websockify|cloudflared'` before the
+      run and confirm it returns to that baseline afterward; do not stop
+      or count the persistent housekeeper Xvfb as a per-session leak.
+- [ ] Starting a concurrent `connect` or `login` exits non-zero without
+      waiting and prints `another Trusty Squire session is already using
+      the browser — close it first`.
 - [ ] The temp websockify web dir (`/tmp/ts-novnc-*`) is removed after
-      the run.
+      every termination path above.
 
 If any step fails, do not publish — the headless path is the worst-UX
 path and a regression there is invisible to CI.
