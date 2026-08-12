@@ -124,6 +124,41 @@ describe("BrowserController OAuth popup lifecycle", () => {
     }
   });
 
+  it("tracks a popup opened after a delayed provider-button dispatch", async () => {
+    const context = await browser.newContext();
+    const product = await context.newPage();
+    const delayedProductUrl = `data:text/html,${encodeURIComponent(`
+      <main id="state">Signed out</main>
+      <button id="oauth" disabled onclick="window.open('about:blank', 'provider-oauth')">
+        Login with Provider
+      </button>
+      <script>setTimeout(() => { document.querySelector('#oauth').disabled = false }, 2300)</script>
+    `)}`;
+    await product.goto(delayedProductUrl);
+    const controller = BrowserController.fromHarnessPage(product);
+    const onPage = (candidate: Page): void => {
+      void (async () => {
+        if ((await candidate.opener()) !== product) return;
+        await candidate.goto("data:text/html,provider-token-exchange");
+        await product.locator("#state").evaluate((element) => {
+          element.textContent = "Signed in";
+        });
+        await candidate.close();
+      })();
+    };
+    context.on("page", onPage);
+
+    try {
+      await controller.loginWithOAuth("#oauth", 6_000);
+      expect(product.isClosed()).toBe(false);
+      expect((controller as unknown as { page: Page }).page).toBe(product);
+      expect(await controller.extractVisibleText()).toContain("Signed in");
+    } finally {
+      context.off("page", onPage);
+      await context.close().catch(() => undefined);
+    }
+  });
+
   it("settles a legacy popup close without closing the retained product page", async () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();

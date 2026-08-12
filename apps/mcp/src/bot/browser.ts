@@ -10255,17 +10255,29 @@ export class BrowserController {
       recovery = await context.newPage();
       await recovery.goto(productUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
 
-      const popupPromise = context
-        .waitForEvent("page", { timeout: Math.min(settleTimeoutMs, 2_000) })
-        .catch(() => null);
-
+      let resolvePopup: (page: Page | null) => void = () => undefined;
+      const popupPromise = new Promise<Page | null>((resolve) => {
+        resolvePopup = resolve;
+      });
+      const onPopup = (page: Page): void => {
+        context.off("page", onPopup);
+        resolvePopup(page);
+      };
+      context.on("page", onPopup);
       try {
-        await this.click(selector);
-      } catch (error) {
-        if (!product.isClosed()) throw error;
+        try {
+          await this.click(selector);
+        } catch (error) {
+          if (!product.isClosed()) throw error;
+        }
+        providerPage = await Promise.race([
+          popupPromise,
+          this.sleep(Math.min(settleTimeoutMs, 2_000)).then(() => null),
+        ]);
+      } finally {
+        context.off("page", onPopup);
+        resolvePopup(null);
       }
-
-      providerPage = await popupPromise;
       const transient = providerPage ?? product;
       const durableProduct = providerPage === null ? recovery : product;
       this.oauthProductPage = durableProduct;
