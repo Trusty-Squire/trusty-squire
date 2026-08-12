@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import canonicalize from "canonicalize";
 import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
-import type { ApiClient } from "../api-client.js";
+import { ApiCallError, type ApiClient, type PaymentApproval } from "../api-client.js";
 import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
 import { PaymentCardFillCleanupError, UnrecognizedPaymentFrameError } from "./browser.js";
 import { generateOperatorKeypair, openSealed, type OperatorKeypair } from "./payment-hpke.js";
@@ -323,6 +323,29 @@ function needsCartTotalResult(
   };
 }
 
+function isLiveResumableApproval(
+  approval: PaymentApproval,
+  resume: PendingApprovalWait,
+  now: number,
+): boolean {
+  if (approval.id !== resume.approval_id) return false;
+  // The API always sends expires_at. Falling back to the deadline preserves
+  // compatibility with narrowly mocked clients while still using the
+  // server-issued expiry in production.
+  const expiresAt = Date.parse(approval.expires_at);
+  const deadline = Number.isFinite(expiresAt) ? expiresAt : resume.deadline;
+  if (!Number.isFinite(deadline) || deadline <= now) return false;
+  // "approved" is still resumable only while it carries the signed candidate
+  // that this operator must verify and spend. An approved record without that
+  // candidate is terminal and cannot safely authorize a retry.
+  return (
+    approval.status === "pending" ||
+    (approval.status === "approved" &&
+      typeof approval.jws === "string" &&
+      typeof approval.sealed_card === "string")
+  );
+}
+
 function defaultDependencies(): PayDependencies {
   return {
     fetch,
@@ -372,15 +395,17 @@ export async function executeOperatePay(
   overrides: Partial<PayDependencies> = {},
 ): Promise<Record<string, unknown>> {
   const deps = { ...defaultDependencies(), ...overrides };
-  const resume = deps.resumeFrom;
-  const threeDsWaitSeconds = resume !== undefined ? resume.three_ds_wait_seconds : args.three_ds_wait_seconds;
+  let resume = deps.resumeFrom;
+  const threeDsWaitSeconds =
+    resume !== undefined ? resume.three_ds_wait_seconds : args.three_ds_wait_seconds;
   const threeDsWaitMs = Math.min(Math.max(threeDsWaitSeconds ?? 180, 0), 600) * 1000;
   let keypair = resume !== undefined ? resume.keypair : await generateOperatorKeypair();
   let keypairHandedOff = resume !== undefined;
   let cardBytes: Uint8Array | undefined;
   let card: CheckoutCard | undefined;
+  const initialResume = resume;
   let resumableState: (() => PendingApprovalWait) | undefined =
-    resume !== undefined ? () => resume : undefined;
+    initialResume !== undefined ? () => initialResume : undefined;
   const rejectedCandidates = new Set<string>(resume?.rejectedCandidates ?? []);
 
   try {
@@ -395,6 +420,31 @@ export async function executeOperatePay(
         reason: "vouchflow_expected_audience_unset",
         configuration: "Set VOUCHFLOW_CUSTOMER_ID on the Trusty Squire API.",
       };
+    }
+
+    if (resume !== undefined) {
+      let reusable = false;
+      if (deps.now() < resume.deadline) {
+        try {
+          const live = await api.getPaymentApproval(resume.approval_id);
+          reusable = isLiveResumableApproval(live, resume, deps.now());
+        } catch (error) {
+          if (!(error instanceof ApiCallError && error.code === "payment_approval_not_found")) {
+            throw error;
+          }
+        }
+      }
+      if (!reusable) {
+        // Never re-surface a stale capability URL or retain the private half
+        // of a terminal approval's keypair. The fresh ceremony below mints a
+        // new approval and surfaces its URL instead.
+        resume.keypair.privateKey = "";
+        resume = undefined;
+        keypair = await generateOperatorKeypair();
+        keypairHandedOff = false;
+        resumableState = undefined;
+        rejectedCandidates.clear();
+      }
     }
 
     let checkout: CheckoutSummary;

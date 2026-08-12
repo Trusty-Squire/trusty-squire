@@ -1834,6 +1834,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
   it("resumes the SAME approval on re-initiation — never mints a duplicate", async () => {
     const env = buildResumableEnv();
     let captured: PendingApprovalWait | null = null;
+    const surfaceApprovalUrl = vi.fn();
 
     const first = (await executeOperatePay(baseArgs, env.api, env.browser, {
       fetch: env.fetch,
@@ -1841,7 +1842,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
       vouchflowApiBase: "https://vouchflow.test",
       vouchflowExpectedAudience: "customer_test",
       webBase: "https://web.test",
-      surfaceApprovalUrl: vi.fn(),
+      surfaceApprovalUrl,
       onApprovalPending: (state) => {
         captured = state;
       },
@@ -1864,7 +1865,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
       vouchflowApiBase: "https://vouchflow.test",
       vouchflowExpectedAudience: "customer_test",
       webBase: "https://web.test",
-      surfaceApprovalUrl: vi.fn(),
+      surfaceApprovalUrl,
       onCardResolved: (ref) => resolvedCardRefs.push(ref),
       resumeFrom: resumeState,
       pollBudgetMs: 0,
@@ -1876,6 +1877,11 @@ describe("operate_pay non-blocking approval [P0]", () => {
     // Exactly ONE approval was ever minted across both calls — the exact
     // duplicate-approval pile-up the friction audit flagged.
     expect(env.approvalBodies).toHaveLength(1);
+    // Re-requests deliberately re-surface the same live URL so the host can
+    // deliver another approval notice without minting another authorization.
+    expect(surfaceApprovalUrl).toHaveBeenCalledTimes(2);
+    expect(surfaceApprovalUrl).toHaveBeenNthCalledWith(1, "https://web.test/vault/pay/appr_resume");
+    expect(surfaceApprovalUrl).toHaveBeenNthCalledWith(2, "https://web.test/vault/pay/appr_resume");
   });
 
   it("preserves the resumed keypair when configuration lookup fails", async () => {
