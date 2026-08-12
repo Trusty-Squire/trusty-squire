@@ -46,6 +46,7 @@ const h = vi.hoisted(() => ({
   connections: [] as boolean[],
   currentUrl: "",
   elements: [] as unknown[],
+  extractInteractiveElementsCalls: 0,
   checkoutFieldNames: [] as string[],
   visibleText: "",
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
@@ -162,6 +163,7 @@ vi.mock("../browser.js", () => ({
     }
     recoverActivePage(): void {}
     async extractInteractiveElements(): Promise<unknown[]> {
+      h.extractInteractiveElementsCalls += 1;
       return h.elements;
     }
     async extractCheckoutFieldNames(): Promise<string[]> {
@@ -640,6 +642,7 @@ beforeEach(() => {
   h.connections = [];
   h.currentUrl = "";
   h.elements = [];
+  h.extractInteractiveElementsCalls = 0;
   h.checkoutFieldNames = [];
   h.visibleText = "";
   h.checkoutSummary = null;
@@ -3038,7 +3041,7 @@ describe("operate session — sealed credential transfer", () => {
         tag: "select",
         labelText: "Variant",
         selector: "#variant",
-        selectOptions: [{ value: "blue", text: "Blue" }],
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
       }),
     ];
     h.selectMutation = [
@@ -3064,11 +3067,17 @@ describe("operate session — sealed credential transfer", () => {
       { selector: "#size", matcher: "Large" },
     ]);
     expect(result.fields).toMatchObject([
-      { label: "Variant", option: "Blue", status: "selected" },
-      { label: "Size", option: "Large", status: "selected" },
+      {
+        label: "Variant",
+        option: "Blue",
+        status: "selected",
+        selected_option: "Ocean Blue",
+      },
+      { label: "Size", option: "Large", status: "selected", selected_option: "Large" },
       { label: "Color", option: "Red", status: "failed" },
     ]);
     expect(result.observation.session_id).toBe(started.session_id);
+    expect(h.extractInteractiveElementsCalls).toBe(7);
   });
 
   it("upload fails loudly when the target isn't in the inventory", async () => {

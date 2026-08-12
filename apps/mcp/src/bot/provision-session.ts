@@ -311,6 +311,7 @@ export interface Observation {
   // merchant did not expose a count we can verify; callers still receive the
   // canonical cart URL and safe retry semantics from operate_cart_add.
   cart_delta?: "+1" | "0" | "unknown";
+  selected_option?: string;
 }
 
 export interface AccessibilitySnapshot {
@@ -4637,16 +4638,19 @@ export async function act(
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
-  if (detail === "none" && !cartAffecting) {
-    return {
-      session_id: session.id,
-      url: browser.currentUrl(),
-      text: "",
-      elements: [],
-      observed: "none",
-    };
-  }
-  return await observeSession(session, detail === "none" ? "compact" : detail);
+  const observation =
+    detail === "none" && !cartAffecting
+      ? {
+          session_id: session.id,
+          url: browser.currentUrl(),
+          text: "",
+          elements: [],
+          observed: "none" as const,
+        }
+      : await observeSession(session, detail === "none" ? "compact" : detail);
+  return completedAction.kind === "select"
+    ? { ...observation, selected_option: completedAction.text }
+    : observation;
 }
 
 export interface FormSelectManyFieldResult {
@@ -4663,7 +4667,6 @@ export async function formSelectMany(
   selections: Record<string, string>,
 ): Promise<{ session_id: string; fields: FormSelectManyFieldResult[]; observation: Observation }> {
   const fields: FormSelectManyFieldResult[] = [];
-  let latestObservation: Observation | undefined;
 
   // Keep variant changes in one host call. Each successful select is followed
   // by a real observe before the next target resolves: variant widgets commonly
@@ -4671,15 +4674,19 @@ export async function formSelectMany(
   // than reporting a partial result.
   for (const [label, option] of Object.entries(selections)) {
     try {
-      await act(sessionId, { kind: "select", target: label, text: option }, "none");
+      const actionResult = await act(
+        sessionId,
+        { kind: "select", target: label, text: option },
+        "none",
+      );
       // `detail:none` is intentionally a minimal ack. The explicit observe here
       // refreshes the DOM generation between every potentially mutating select.
-      latestObservation = await observe(sessionId, "compact");
+      await observe(sessionId, "compact");
       fields.push({
         label,
         option,
         status: "selected",
-        selected_option: option,
+        selected_option: actionResult.selected_option,
       });
     } catch (err) {
       if (err instanceof TargetStaleError) {
@@ -4704,7 +4711,7 @@ export async function formSelectMany(
   return {
     session_id: sessionId,
     fields,
-    observation: latestObservation ?? (await observe(sessionId, "compact")),
+    observation: await observe(sessionId, "compact"),
   };
 }
 

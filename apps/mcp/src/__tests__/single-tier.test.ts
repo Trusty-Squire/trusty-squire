@@ -111,6 +111,10 @@ describe("MCP tool argument validation", () => {
         name: "operate_act",
         arguments: { session_id: "session_1", kind: "type_secret", target: "@e:field" },
       });
+      const missingTypeTarget = await client.callTool({
+        name: "operate_act",
+        arguments: { session_id: "session_1", kind: "type", text: "x" },
+      });
       const cardConflict = await client.callTool({
         name: "operate_pay",
         arguments: {
@@ -120,7 +124,7 @@ describe("MCP tool argument validation", () => {
           card_label: "Personal",
         },
       });
-      for (const result of [badKind, missingSlot, cardConflict]) {
+      for (const result of [badKind, missingSlot, missingTypeTarget, cardConflict]) {
         expect(result.isError).toBe(true);
         const repair = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
         expect(repair).toEqual(
@@ -138,6 +142,10 @@ describe("MCP tool argument validation", () => {
         (missingSlot.content as Array<{ text: string }>)[0]!.text,
       );
       expect(missingSlotRepair.missing).toContain("slot");
+      const missingTypeTargetRepair = JSON.parse(
+        (missingTypeTarget.content as Array<{ text: string }>)[0]!.text,
+      );
+      expect(missingTypeTargetRepair.missing).toContain("target");
       const cardRepair = JSON.parse((cardConflict.content as Array<{ text: string }>)[0]!.text);
       expect(cardRepair.safe_alternative).toMatch(/only one of card_ref or card_label/i);
     } finally {

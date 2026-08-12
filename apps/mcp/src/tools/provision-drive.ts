@@ -427,6 +427,7 @@ const actSchema = z
     const requiredByKind: Record<string, readonly string[]> = {
       click: ["target"],
       js_click: ["target"],
+      type: ["target"],
       oauth_click: ["target"],
       select: ["target", "text"],
       set_phone_country: ["country"],
