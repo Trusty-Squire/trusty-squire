@@ -60,11 +60,11 @@ export interface CartCheckoutObservation {
 }
 
 // Non-blocking approval [P0]: everything a LATER operate_pay call needs to
-// resume waiting for the SAME approval instead of minting a duplicate one.
-// Held by the session layer only (never the model) — it carries the operator
-// keypair's PRIVATE half, which is what makes idempotent re-initiation safe:
-// the sealed card was HPKE-encrypted to this exact keypair at creation time,
-// so a resumed poll must reuse it verbatim rather than generating a fresh one.
+// validate and potentially resume the SAME approval. Held by the session layer
+// only (never the model) — it carries the operator keypair's PRIVATE half. A
+// live resumed approval must reuse that keypair because its sealed card was
+// HPKE-encrypted to it; a stale approval is discarded with the key before a
+// fresh approval is minted.
 export interface PendingApprovalWait {
   approval_id: string;
   approval_url: string;
@@ -557,7 +557,9 @@ export async function executeOperatePay(
     // Undefined pollBudgetMs (direct executeOperatePay callers) = no additional
     // bound, i.e. the legacy full-deadline blocking behavior.
     const callDeadline =
-      deps.pollBudgetMs === undefined ? deadline : Math.min(deadline, deps.now() + deps.pollBudgetMs);
+      deps.pollBudgetMs === undefined
+        ? deadline
+        : Math.min(deadline, deps.now() + deps.pollBudgetMs);
     // True once this call's (not the overall) budget is exhausted with no
     // resolution — distinguishes "still pending, ask again" from "expired".
     let budgetExhausted = false;

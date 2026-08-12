@@ -527,9 +527,9 @@ interface Session {
   // "sealed" survives unverified field cleanup and blocks later payments.
   // [P0] "awaiting_approval" is a NEW rest state (not held during a call —
   // operate_pay no longer blocks): the human hasn't tapped approve yet. A
-  // later operate_pay call for the same checkout resumes it (idempotent —
-  // never mints a second approval); operate_payment_status/await read it
-  // read-only.
+  // later operate_pay call validates the stored approval before reusing it;
+  // stale or terminal resources are replaced. operate_payment_status/await
+  // read it without changing it.
   activePayment:
     | { status: "operating"; lease: ActivePaymentLease }
     | { status: "awaiting_approval"; state: PendingApprovalWait }
@@ -2744,8 +2744,8 @@ export function claimActivePaymentForOperatePay(
   if (phase === "confirm") return { kind: "missing_confirm" };
   // [P0] Resuming an outstanding approval (status "awaiting_approval" — the
   // human hasn't tapped approve yet) takes the SAME "operating" lease as a
-  // fresh call, just carrying the prior approval/keypair through so
-  // re-initiation polls the SAME approval instead of minting a duplicate one.
+  // fresh call, carrying the prior approval/keypair through so the operator can
+  // validate the resource before either reusing it or minting a replacement.
   const resumeApproval = state?.status === "awaiting_approval" ? state.state : undefined;
   const lease: ActivePaymentLease = { phase: phase === "fill_card" ? "fill_card" : "single" };
   session.activePayment = { status: "operating", lease };
@@ -2773,7 +2773,8 @@ export function completeActivePaymentLeaseWithPendingFill(
 // [P0] Mirrors completeActivePaymentLeaseWithPendingFill for the
 // still-pending-approval outcome: the human hasn't responded yet, so this
 // call ends with no card filled — just a resumable wait, picked up by the
-// NEXT operate_pay call (idempotent) or read by operate_payment_status/await.
+// NEXT operate_pay call for live-resource validation or read by
+// operate_payment_status/await.
 export function completeActivePaymentLeaseWithPendingApproval(
   lease: ActivePaymentLease,
   state: PendingApprovalWait,

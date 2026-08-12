@@ -1941,9 +1941,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
     const resumeState: PendingApprovalWait = captured;
     env.setApproved();
     vi.mocked(env.browser.fillAndSubmitCheckout).mockResolvedValue({ three_ds_required: true });
-    vi.mocked(env.browser.waitForThreeDsResolution).mockRejectedValue(
-      new Error("3DS unavailable"),
-    );
+    vi.mocked(env.browser.waitForThreeDsResolution).mockRejectedValue(new Error("3DS unavailable"));
     const onApprovalPending = vi.fn();
 
     await expect(

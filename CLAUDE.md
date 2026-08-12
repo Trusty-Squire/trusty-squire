@@ -612,18 +612,22 @@ silent multi-minute hang, so they panic-retry or kill the server).
   both report `pending`/`approved`/`expired` plus `candidate_submitted`
   (the phone responded; call `operate_pay` again to actually verify the
   mandate, open the card, and fill/charge — these two tools never do that).
-- **Idempotent resume, never a duplicate approval.** A still-pending call
+- **Validated idempotent resume.** A still-pending call
   hands its resumable state (approval id/nonce/keypair/checkout/rejected-
   candidates — `PendingApprovalWait` in `pay-operator.ts`) to session state
   via a NEW `activePayment` status, `"awaiting_approval"`
   (`provision-session.ts`). A later `operate_pay` call for the same
-  checkout resumes it (`claimActivePaymentForOperatePay`'s `resumeApproval`)
-  instead of POSTing `/v1/pay/approvals` again — this is what stops the
-  unattended-approval pile-up the audit observed. Mechanism: `executeOperatePay`
-  takes `pollBudgetMs` (bounds THIS call's poll loop; omitted = legacy
-  full-deadline blocking, so direct callers/unit tests are unaffected) and
-  `resumeFrom` (skips re-minting, reuses the operator keypair — required
-  because the sealed card was HPKE-encrypted to that exact keypair).
+  checkout passes it through `claimActivePaymentForOperatePay`'s
+  `resumeApproval`. `executeOperatePay` first reads the approval resource and
+  reuses it only while its id matches, it is unexpired, and it is pending (or
+  approved with the signed candidate still present). A missing, expired,
+  rejected, consumed, or otherwise terminal resource has its old private key
+  cleared and is replaced with a fresh approval. Every initiation surfaces the
+  active approval URL, including reuse, so the host can notify the user again
+  without minting a duplicate authorization. `pollBudgetMs` bounds this call's
+  poll loop; omitted retains legacy full-deadline blocking for direct callers.
+  Reusing a live approval also reuses its operator keypair because the sealed
+  card was HPKE-encrypted to that exact keypair.
 - **P1, same audit:** a card-entry page with no total (Rakuten-style split
   checkout) now returns structured `{status:"needs_cart_total", next:{tool:
   "operate_observe", hint}}` instead of a bare `payment_checkout_total_not_found`

@@ -557,6 +557,77 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     );
   });
 
+  it("replaces a missing resumed approval and only returns the existing replacement", async () => {
+    const expiresAt = new Date(Date.now() + 300_000).toISOString();
+    const createPaymentApproval = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "appr_deleted",
+        nonce: "deleted-nonce",
+        agent: "a",
+        expires_at: expiresAt,
+      })
+      .mockResolvedValueOnce({
+        id: "appr_replacement",
+        nonce: "replacement-nonce",
+        agent: "a",
+        expires_at: expiresAt,
+      });
+    const pendingApproval = (id: string) => ({
+      id,
+      status: "pending" as const,
+      merchant: "M",
+      checkout_origin: "https://m.test",
+      amount_cents: 100,
+      currency: "USD",
+      nonce: id === "appr_deleted" ? "deleted-nonce" : "replacement-nonce",
+      card_ref: "card_1",
+      operator_pubkey: "public",
+      jws: null,
+      sealed_card: null,
+      expires_at: expiresAt,
+    });
+    const getPaymentApproval = vi
+      .fn()
+      .mockResolvedValueOnce(pendingApproval("appr_deleted"))
+      .mockRejectedValueOnce(
+        new ApiCallError(
+          404,
+          "payment_approval_not_found",
+          "GET /v1/pay/approvals/appr_deleted → 404 payment_approval_not_found",
+        ),
+      )
+      .mockResolvedValueOnce(pendingApproval("appr_replacement"));
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      createPaymentApproval,
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+      getPaymentApproval,
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse(PAYMENT_DETAILS);
+    const notifyUser = vi.fn().mockResolvedValue(undefined);
+
+    await operatePayTool.handler(args, api, { notifyUser });
+    const deletedState = mockAwaitingApproval;
+    const replacement = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
+      string,
+      unknown
+    >;
+
+    expect(replacement).toMatchObject({
+      status: "approval_pending",
+      approval_id: "appr_replacement",
+    });
+    expect(createPaymentApproval).toHaveBeenCalledTimes(2);
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_deleted");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_replacement", false);
+    expect(deletedState?.keypair.privateKey).toBe("");
+    expect(notifyUser).toHaveBeenLastCalledWith(
+      "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_replacement",
+      { approval_url: "https://trustysquire.ai/vault/pay/appr_replacement" },
+    );
+  });
+
   it("restores a resumable approval when notification fails after creation", async () => {
     const createPaymentApproval = vi.fn().mockResolvedValue({
       id: "appr_restore",
