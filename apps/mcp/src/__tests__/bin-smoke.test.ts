@@ -299,7 +299,12 @@ function mcpConversation(
 ): Promise<McpResponse[]> {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [scriptPath, "server"], {
-      env: { ...process.env, HOME: home },
+      env: {
+        ...process.env,
+        HOME: home,
+        XDG_CONFIG_HOME: path.join(home, ".config"),
+        TRUSTY_SQUIRE_SESSION_FILE: "1",
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     const replies = new Map<number, McpResponse>();
