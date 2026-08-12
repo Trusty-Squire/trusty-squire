@@ -437,7 +437,9 @@ function mcpRequest(child: ChildProcess, request: object): Promise<McpResponse> 
   });
 }
 
-function waitForExit(child: ChildProcess): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+function waitForExit(
+  child: ChildProcess,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       child.kill("SIGKILL");

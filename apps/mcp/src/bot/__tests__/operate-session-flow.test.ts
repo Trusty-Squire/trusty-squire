@@ -518,6 +518,7 @@ import {
   captchaGate,
   finishProvisionSession,
   closeAllProvisionSessions,
+  activeSessionCount,
   parseElementsTable,
   replayOperatorRecipe,
   activeProvisionBrowser,
@@ -3242,6 +3243,16 @@ describe("operate session — warm browser lifecycle", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("closes an active session and its warm browser during shutdown", async () => {
+    await startProvisionSession({ serviceUrl: "https://app.example.com/" });
+    expect(activeSessionCount()).toBe(1);
+
+    await closeAllProvisionSessions();
+
+    expect(activeSessionCount()).toBe(0);
+    expect(h.closeCalls).toBe(1);
   });
 
   it("waits for an in-progress browser launch and closes its controller", async () => {
