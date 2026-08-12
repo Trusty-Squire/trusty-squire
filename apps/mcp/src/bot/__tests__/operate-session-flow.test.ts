@@ -17,6 +17,7 @@ const h = vi.hoisted(() => ({
   typed: [] as Array<{ selector: string; text: string }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
+  selectMutation: null as unknown[] | null,
   phoneCountries: [] as string[],
   phoneCountry: null as string | null,
   clearElementsOnClick: false,
@@ -45,6 +46,7 @@ const h = vi.hoisted(() => ({
   connections: [] as boolean[],
   currentUrl: "",
   elements: [] as unknown[],
+  extractInteractiveElementsCalls: 0,
   checkoutFieldNames: [] as string[],
   visibleText: "",
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
@@ -161,6 +163,7 @@ vi.mock("../browser.js", () => ({
     }
     recoverActivePage(): void {}
     async extractInteractiveElements(): Promise<unknown[]> {
+      h.extractInteractiveElementsCalls += 1;
       return h.elements;
     }
     async extractCheckoutFieldNames(): Promise<string[]> {
@@ -303,6 +306,10 @@ vi.mock("../browser.js", () => ({
           element.value = selected?.value ?? matcher ?? "";
           element.selectedOptionText = committed;
         }
+      }
+      if (h.selectMutation !== null) {
+        h.elements = h.selectMutation;
+        h.selectMutation = null;
       }
       return committed;
     }
@@ -501,6 +508,7 @@ import { join } from "node:path";
 import {
   startProvisionSession,
   act,
+  formSelectMany,
   observe,
   observedHostsForSession,
   stashSecretSlot,
@@ -545,6 +553,7 @@ import {
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
   provisionStoreLoginTool,
+  provisionActTool,
   storedExtractResult,
   withSigninHost,
 } from "../../tools/provision-drive.js";
@@ -602,6 +611,7 @@ beforeEach(() => {
   h.typed = [];
   h.uploads = [];
   h.selected = [];
+  h.selectMutation = null;
   h.phoneCountries = [];
   h.phoneCountry = null;
   h.clearElementsOnClick = false;
@@ -632,6 +642,7 @@ beforeEach(() => {
   h.connections = [];
   h.currentUrl = "";
   h.elements = [];
+  h.extractInteractiveElementsCalls = 0;
   h.checkoutFieldNames = [];
   h.visibleText = "";
   h.checkoutSummary = null;
@@ -2995,6 +3006,78 @@ describe("operate session — sealed credential transfer", () => {
     await expect(
       act(obs.session_id, { kind: "select", target: "Country", text: "South Korea" }),
     ).rejects.toThrow(/no element matched target/i);
+  });
+
+  it("returns target_stale with replacement hints instead of a bare ref error", async () => {
+    h.elements = [elem({ tag: "select", labelText: "Variant", selector: "#variant" })];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const staleRef = parseElementsTable(started.el_table ?? "")[0]?.ref;
+    expect(staleRef).toMatch(/^@e:/);
+
+    // This is the captured P3 shape: a variant change replaces the old form
+    // controls before the next queued action gets to resolve its old ref.
+    h.elements = [elem({ tag: "select", labelText: "Size", selector: "#size" })];
+    const result = (await provisionActTool.handler(
+      { session_id: started.session_id, kind: "select", target: staleRef!, text: "Large" },
+      null,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      status: "target_stale",
+      after_generation: expect.any(Number),
+      reobserve_required: true,
+      retry_policy: "do_not_retry_old_ref",
+    });
+    expect(result.replacement_candidates).toMatchObject({ Size: [expect.stringMatching(/^@e:/)] });
+    expect(JSON.stringify(result)).not.toContain("no element matched target");
+  });
+
+  it("serializes coupled selects, refreshes after variant DOM churn, and reports partial failure", async () => {
+    h.visibleText = "Configure product";
+    h.elements = [
+      elem({
+        tag: "select",
+        labelText: "Variant",
+        selector: "#variant",
+        selectOptions: [{ value: "blue", text: "Ocean Blue" }],
+      }),
+    ];
+    h.selectMutation = [
+      elem({
+        tag: "select",
+        labelText: "Size",
+        selector: "#size",
+        selectOptions: [{ value: "large", text: "Large" }],
+      }),
+    ];
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+
+    const result = await formSelectMany(started.session_id, {
+      Variant: "Blue",
+      Size: "Large",
+      Color: "Red",
+    });
+
+    expect(h.selected).toEqual([
+      { selector: "#variant", matcher: "Blue" },
+      { selector: "#size", matcher: "Large" },
+    ]);
+    expect(result.fields).toMatchObject([
+      {
+        label: "Variant",
+        option: "Blue",
+        status: "selected",
+        selected_option: "Ocean Blue",
+      },
+      { label: "Size", option: "Large", status: "selected", selected_option: "Large" },
+      { label: "Color", option: "Red", status: "failed" },
+    ]);
+    expect(result.observation.session_id).toBe(started.session_id);
+    expect(h.extractInteractiveElementsCalls).toBe(7);
   });
 
   it("upload fails loudly when the target isn't in the inventory", async () => {

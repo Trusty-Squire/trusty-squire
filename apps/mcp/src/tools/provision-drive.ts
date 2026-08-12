@@ -14,6 +14,8 @@ import {
   observe,
   act,
   cartAdd,
+  formSelectMany,
+  TargetStaleError,
   extractCredentials,
   captchaGate,
   awaitVerification,
@@ -278,7 +280,7 @@ const OBSERVE_DELTA_CONTRACT =
   "cells in header order). An empty cell = that field is absent for that element; value_len is a number, " +
   "checked/topmost are true/false; a tab, newline, carriage-return or backslash inside a cell is " +
   "backslash-escaped (\\t \\n \\r \\\\). el_table is absent when the emit has no element rows. " +
-  "The stable refs remain reusable across observes. " +
+  "stable refs remain reusable across observes while their controls still exist. " +
   "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
   "element map and rebuild it from this el_table (or from snapshot_file — the table may omit collapsed " +
   "chrome links, which the file keeps); a delta:false with NO snapshot_file already has the complete, " +
@@ -422,6 +424,30 @@ const actSchema = z
         message: "product_identity and options_hash must be provided together",
       });
     }
+    const requiredByKind: Record<string, readonly string[]> = {
+      click: ["target"],
+      js_click: ["target"],
+      type: ["target"],
+      oauth_click: ["target"],
+      select: ["target", "text"],
+      set_phone_country: ["country"],
+      goto: ["url"],
+      press: ["key"],
+      allow_host: ["host"],
+      type_secret: ["slot", "target"],
+      upload: ["target", "path"],
+    };
+    const actionValue = value as Record<string, unknown>;
+    for (const field of requiredByKind[value.kind] ?? []) {
+      const supplied = actionValue[field];
+      if (typeof supplied !== "string" || supplied.trim().length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: `Required for kind="${value.kind}"`,
+        });
+      }
+    }
     if ((value.replay_step_index === undefined) !== (value.replay_hole === undefined)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -470,6 +496,71 @@ const actSchema = z
       });
     }
   });
+
+const ACTION_KINDS = [
+  "click",
+  "js_click",
+  "type",
+  "select",
+  "set_phone_country",
+  "goto",
+  "press",
+  "oauth_click",
+  "oauth_settle",
+  "allow_host",
+  "type_secret",
+  "scroll",
+  "upload",
+] as const;
+
+function actionSchemaRepair(args: unknown, issues: readonly { path: (string | number)[] }[]) {
+  const input = args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const kind =
+    typeof input.kind === "string" &&
+    ACTION_KINDS.includes(input.kind as (typeof ACTION_KINDS)[number])
+      ? input.kind
+      : undefined;
+  const missing = [
+    ...new Set(
+      issues
+        .map((issue) => issue.path[0])
+        .filter((field): field is string => typeof field === "string"),
+    ),
+  ];
+  const example =
+    kind === "type_secret"
+      ? {
+          session_id: "<session_id>",
+          kind: "type_secret",
+          slot: "sealed_secret",
+          target: "@e:<observed-ref>",
+        }
+      : kind === "select"
+        ? {
+            session_id: "<session_id>",
+            kind: "select",
+            target: "@e:<observed-ref>",
+            text: "Option label",
+          }
+        : {
+            session_id: "<session_id>",
+            kind: "type",
+            target: "@e:<observed-ref>",
+            text: "Text to enter",
+          };
+  const safe_alternative =
+    kind === "type_secret" && missing.includes("slot")
+      ? 'First capture the value with operate_extract { into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
+      : 'Use kind "type" for text fields or "select" for options, and take target refs from operate_observe. Never enter card values with operate_act; use operate_pay.';
+  return {
+    error: "invalid_action_arguments",
+    ...(typeof input.kind === "string" ? { supplied_kind: input.kind } : {}),
+    allowed_kinds: ACTION_KINDS,
+    missing,
+    example,
+    safe_alternative,
+  };
+}
 
 function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
   const need = (v: string | undefined, name: string): string => {
@@ -589,8 +680,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "Squire-known address, contact, product_query, or quantity input; type_secret and " +
     "operate_pay record credential and card provenance from their sealed sources. " +
     "When repairing a replay fallback field, pass its replay_step_index and replay_hole. " +
-    "Stable target refs remain reusable while their element exists; if a ref appears in " +
-    "removed or no longer resolves, re-observe before retrying. " +
+    "Stable target refs remain reusable while their element exists. If an @e: ref is stale, " +
+    "the response is {status:target_stale, replacement_candidates, retry_policy:do_not_retry_old_ref}; " +
+    "call operate_observe and choose a new ref instead of retrying the old one. " +
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
     '"full" returns the legacy screen+accessibility payload. ' +
@@ -645,6 +737,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       detail: { type: "string", enum: ["none", "compact", "full"] },
     },
   },
+  schemaRepair: actionSchemaRepair,
   async handler(args) {
     // Keep the defense-in-depth guard in act() for internal/replay callers,
     // while this public tool surface makes the safe recovery explicit at the
@@ -660,14 +753,19 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
         };
       }
     }
-    return await act(
-      args.session_id,
-      buildAction(args),
-      args.detail ?? "compact",
-      args.product_identity !== undefined && args.options_hash !== undefined
-        ? { productIdentity: args.product_identity, optionsHash: args.options_hash }
-        : undefined,
-    );
+    try {
+      return await act(
+        args.session_id,
+        buildAction(args),
+        args.detail ?? "compact",
+        args.product_identity !== undefined && args.options_hash !== undefined
+          ? { productIdentity: args.product_identity, optionsHash: args.options_hash }
+          : undefined,
+      );
+    } catch (err) {
+      if (err instanceof TargetStaleError) return err.result;
+      throw err;
+    }
   },
 };
 
@@ -705,6 +803,45 @@ export const operateCartAddTool: Tool<z.infer<typeof cartAddSchema>> = {
       args.options_hash,
       args.idempotency_key,
     );
+  },
+};
+
+const formSelectManySchema = z.object({
+  session_id: z.string().min(1),
+  // A label/ref → visible option map. Labels deliberately match the existing
+  // select targeting grammar, while refs remain useful when labels collide.
+  selections: z
+    .record(z.string().min(1).max(200), z.string().min(1).max(4096))
+    .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
+    .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call"),
+});
+
+export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema>> = {
+  name: "operate_form_select_many",
+  description:
+    "Select several related form options sequentially from a label/ref-to-option map. " +
+    "Selections run in order; after every successful selection the browser is re-observed " +
+    "before the next one resolves, so variant changes cannot poison later refs. Each field " +
+    "reports selected or failed independently; successful selections are not rolled back when " +
+    "another field fails. Returns the per-field results plus the final observation. Use this for " +
+    "coupled variant or shipping selectors instead of parallel operate_act select calls.",
+  inputSchema: formSelectManySchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "selections"],
+    properties: {
+      session_id: { type: "string" },
+      selections: {
+        type: "object",
+        minProperties: 1,
+        maxProperties: 12,
+        additionalProperties: { type: "string" },
+        description: "Map each observed field label or @e: ref to its visible option text.",
+      },
+    },
+  },
+  async handler(args) {
+    return await formSelectMany(args.session_id, args.selections);
   },
 };
 
@@ -1664,6 +1801,7 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionObserveTool,
   provisionActTool,
   operateCartAddTool,
+  operateFormSelectManyTool,
   provisionCaptchaGateTool,
   provisionAwaitVerificationTool,
   provisionExtractTool,

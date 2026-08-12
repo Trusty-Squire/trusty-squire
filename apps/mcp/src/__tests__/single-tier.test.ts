@@ -71,7 +71,7 @@ describe("MCP client identity", () => {
 });
 
 describe("MCP tool argument validation", () => {
-  it("names every missing required field", async () => {
+  it("returns an executable repair object for missing payment arguments", async () => {
     const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
     const server = await buildServer(api);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -82,15 +82,19 @@ describe("MCP tool argument validation", () => {
     try {
       const result = await client.callTool({ name: "operate_pay", arguments: {} });
       expect(result.isError).toBe(true);
-      expect(result.content).toEqual([
-        { type: "text", text: "invalid arguments: item: Required; reason: Required" },
-      ]);
+      const repair = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+      expect(repair).toMatchObject({
+        allowed_kinds: ["operate_pay"],
+        missing: ["item", "reason"],
+        example: expect.any(Object),
+        safe_alternative: expect.any(String),
+      });
     } finally {
       await client.close();
     }
   });
 
-  it("preserves schema-level refinement messages", async () => {
+  it("returns repair objects for malformed action grammar and conflicting card selectors", async () => {
     const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
     const server = await buildServer(api);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -99,7 +103,19 @@ describe("MCP tool argument validation", () => {
     await client.connect(clientTransport);
 
     try {
-      const result = await client.callTool({
+      const badKind = await client.callTool({
+        name: "operate_act",
+        arguments: { session_id: "session_1", kind: "set_value", target: "@e:field", text: "x" },
+      });
+      const missingSlot = await client.callTool({
+        name: "operate_act",
+        arguments: { session_id: "session_1", kind: "type_secret", target: "@e:field" },
+      });
+      const missingTypeTarget = await client.callTool({
+        name: "operate_act",
+        arguments: { session_id: "session_1", kind: "type", text: "x" },
+      });
+      const cardConflict = await client.callTool({
         name: "operate_pay",
         arguments: {
           item: "Test item",
@@ -108,10 +124,30 @@ describe("MCP tool argument validation", () => {
           card_label: "Personal",
         },
       });
-      expect(result.isError).toBe(true);
-      expect(result.content).toEqual([
-        { type: "text", text: "invalid arguments: Provide at most one of card_ref or card_label" },
-      ]);
+      for (const result of [badKind, missingSlot, missingTypeTarget, cardConflict]) {
+        expect(result.isError).toBe(true);
+        const repair = JSON.parse((result.content as Array<{ text: string }>)[0]!.text);
+        expect(repair).toEqual(
+          expect.objectContaining({
+            allowed_kinds: expect.any(Array),
+            missing: expect.any(Array),
+            example: expect.any(Object),
+            safe_alternative: expect.any(String),
+          }),
+        );
+      }
+      const badKindRepair = JSON.parse((badKind.content as Array<{ text: string }>)[0]!.text);
+      expect(badKindRepair.allowed_kinds).toContain("select");
+      const missingSlotRepair = JSON.parse(
+        (missingSlot.content as Array<{ text: string }>)[0]!.text,
+      );
+      expect(missingSlotRepair.missing).toContain("slot");
+      const missingTypeTargetRepair = JSON.parse(
+        (missingTypeTarget.content as Array<{ text: string }>)[0]!.text,
+      );
+      expect(missingTypeTargetRepair.missing).toContain("target");
+      const cardRepair = JSON.parse((cardConflict.content as Array<{ text: string }>)[0]!.text);
+      expect(cardRepair.safe_alternative).toMatch(/only one of card_ref or card_label/i);
     } finally {
       await client.close();
     }

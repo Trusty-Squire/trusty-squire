@@ -311,6 +311,7 @@ export interface Observation {
   // merchant did not expose a count we can verify; callers still receive the
   // canonical cart URL and safe retry semantics from operate_cart_add.
   cart_delta?: "+1" | "0" | "unknown";
+  selected_option?: string;
 }
 
 export interface AccessibilitySnapshot {
@@ -767,8 +768,8 @@ const norm = (s: string | null | undefined): string =>
 // the ref the host already holds keeps resolving. The `@e:` sigil only
 // disambiguates a ref from a free-text label target (a label may legitimately end
 // in "_<digits>"). Staleness is guarded by IDENTITY, not a counter: a ref whose
-// element is now gone finds no match in resolveTarget → returns null → the caller
-// fails loudly ("no element matched") and the host re-observes.
+// element is now gone finds no match in resolveTarget → returns null → the public
+// tool returns structured target_stale guidance and the host re-observes.
 //
 // The exceptional identity form (issue #399) applies to same-base-identity
 // siblings distinguished ONLY by positional selectors. Those "volatile" members
@@ -1056,6 +1057,73 @@ export function matchAutocompleteSuggestions(
     if (normalizeAutocompleteText(text).startsWith(typed)) indices.push(index);
   });
   return indices;
+}
+
+export interface TargetStaleResult {
+  status: "target_stale";
+  target: string;
+  // The latest completed observation. The next observe increments this value
+  // and supplies the authoritative replacement inventory.
+  after_generation: number;
+  reobserve_required: true;
+  // Best-effort semantic hints only. A label can legitimately map to more than
+  // one live ref, so callers must still choose from the next observation.
+  replacement_candidates: Record<string, string[]>;
+  retry_policy: "do_not_retry_old_ref";
+}
+
+// An @e: ref is an observation-scoped handle, not a locator. Preserve that
+// distinction in the error so an agent does not retry a stale handle or guess a
+// text locator after a SPA rerender.
+export class TargetStaleError extends Error {
+  readonly code = "target_stale";
+
+  constructor(readonly result: TargetStaleResult) {
+    super(`target_stale: re-observe before selecting a replacement for "${result.target}"`);
+  }
+}
+
+function replacementCandidates(elements: readonly InteractiveElement[]): Record<string, string[]> {
+  const refs = provisionElementRefs(elements);
+  const candidates: Record<string, string[]> = {};
+  for (const el of elements) {
+    const label = [
+      el.labelText,
+      el.ariaLabel,
+      el.visibleText,
+      el.placeholder,
+      el.testId,
+      el.name,
+      el.screenPath,
+    ].find(
+      (value): value is string => value !== null && value !== undefined && value.trim().length > 0,
+    );
+    const ref = refs.get(el);
+    if (label === undefined || ref === undefined) continue;
+    const key = label.replace(/\s+/g, " ").trim();
+    if (candidates[key] === undefined) {
+      if (Object.keys(candidates).length >= 20) continue;
+      candidates[key] = [];
+    }
+    if (candidates[key]!.length < 4) candidates[key]!.push(ref);
+  }
+  return candidates;
+}
+
+function staleTargetError(
+  session: Session,
+  target: string,
+  fresh: readonly InteractiveElement[],
+): TargetStaleError | null {
+  if (parseProvisionRef(target) === null) return null;
+  return new TargetStaleError({
+    status: "target_stale",
+    target,
+    after_generation: session.generation,
+    reobserve_required: true,
+    replacement_candidates: replacementCandidates(fresh),
+    retry_policy: "do_not_retry_old_ref",
+  });
 }
 
 function elementTargetKeys(el: InteractiveElement): string[] {
@@ -4249,6 +4317,8 @@ export async function act(
       // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
+        const stale = staleTargetError(session, action.target, fresh);
+        if (stale !== null) throw stale;
         throw new Error(`type_secret: no element matched target "${action.target}".`);
       }
       resolvedEl = el;
@@ -4280,6 +4350,8 @@ export async function act(
       session.lastElements = fresh;
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
+        const stale = staleTargetError(session, action.target, fresh);
+        if (stale !== null) throw stale;
         throw new Error(
           `select: no element matched target "${action.target}". Visible: ` +
             fresh
@@ -4392,6 +4464,8 @@ export async function act(
       // changed since the last observe resolves to null, not a survivor (#399).
       const el = resolveTarget(fresh, action.target);
       if (el === null) {
+        const stale = staleTargetError(session, action.target, fresh);
+        if (stale !== null) throw stale;
         throw new Error(
           `no element matched target "${action.target}". Visible: ` +
             fresh
@@ -4564,16 +4638,85 @@ export async function act(
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
-  if (detail === "none" && !cartAffecting) {
-    return {
-      session_id: session.id,
-      url: browser.currentUrl(),
-      text: "",
-      elements: [],
-      observed: "none",
-    };
+  const observation =
+    detail === "none" && !cartAffecting
+      ? {
+          session_id: session.id,
+          url: browser.currentUrl(),
+          text: "",
+          elements: [],
+          observed: "none" as const,
+        }
+      : await observeSession(session, detail === "none" ? "compact" : detail);
+  return completedAction.kind === "select"
+    ? { ...observation, selected_option: completedAction.text }
+    : observation;
+}
+
+export interface FormSelectManyFieldResult {
+  label: string;
+  option: string;
+  status: "selected" | "failed";
+  selected_option?: string;
+  reason?: string;
+  repair?: TargetStaleResult;
+}
+
+export async function formSelectMany(
+  sessionId: string,
+  selections: Record<string, string>,
+): Promise<{ session_id: string; fields: FormSelectManyFieldResult[]; observation: Observation }> {
+  const fields: FormSelectManyFieldResult[] = [];
+
+  // Keep variant changes in one host call. Each successful select is followed
+  // by a real observe before the next target resolves: variant widgets commonly
+  // replace all dependent selects, so continuing from an old inventory is worse
+  // than reporting a partial result.
+  for (const [label, option] of Object.entries(selections)) {
+    try {
+      const actionResult = await act(
+        sessionId,
+        { kind: "select", target: label, text: option },
+        "none",
+      );
+      const selectedOption = actionResult.selected_option;
+      if (selectedOption === undefined) {
+        throw new Error("select: successful action omitted the selected option");
+      }
+      // `detail:none` is intentionally a minimal ack. The explicit observe here
+      // refreshes the DOM generation between every potentially mutating select.
+      await observe(sessionId, "compact");
+      fields.push({
+        label,
+        option,
+        status: "selected",
+        selected_option: selectedOption,
+      });
+    } catch (err) {
+      if (err instanceof TargetStaleError) {
+        fields.push({
+          label,
+          option,
+          status: "failed",
+          reason: err.message,
+          repair: err.result,
+        });
+      } else {
+        fields.push({
+          label,
+          option,
+          status: "failed",
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
-  return await observeSession(session, detail === "none" ? "compact" : detail);
+
+  return {
+    session_id: sessionId,
+    fields,
+    observation: await observe(sessionId, "compact"),
+  };
 }
 
 // PR3 privacy: in the operator model the host fills the USER's real email into

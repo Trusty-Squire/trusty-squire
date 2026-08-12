@@ -80,6 +80,11 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
     }
     const parsed = tool.inputSchema.safeParse(req.params.arguments ?? {});
     if (!parsed.success) {
+      if (tool.schemaRepair !== undefined) {
+        return errorContent(
+          JSON.stringify(tool.schemaRepair(req.params.arguments ?? {}, parsed.error.issues)),
+        );
+      }
       return errorContent(
         `invalid arguments: ${parsed.error.issues
           .map((i) => (i.path.length > 0 ? `${i.path.join(".")}: ${i.message}` : i.message))

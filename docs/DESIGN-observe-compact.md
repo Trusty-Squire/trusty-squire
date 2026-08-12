@@ -113,7 +113,13 @@ Compact observations minimize repeated context without making the stream lossy:
   selector plus its frame origin and nested-frame path, so same-label siblings
   with distinct stable selectors get distinct refs and identical selectors in
   different documents cannot collide. After one is removed, its old ref resolves
-  to `null` instead of retargeting its sibling or another frame.
+  to `null` instead of retargeting its sibling or another frame. Public
+  `operate_act` calls translate that miss into `target_stale`, carrying the last
+  completed observation generation, `reobserve_required: true`, best-effort
+  semantic-label-keyed replacement candidates, and
+  `retry_policy: "do_not_retry_old_ref"`. The candidates are hints rather than a
+  ref-identity guarantee: the caller re-observes and chooses from the current
+  inventory before retrying.
 - **Volatile positional groups (issue #399).** The dangerous recycling case is
   closed for group-size changes: sibling controls distinguishable *only* by a
   positional `:nth-child`/`:nth-of-type`/`>> nth=` selector can shift onto a
@@ -128,10 +134,11 @@ Compact observations minimize repeated context without making the stream lossy:
   (or a full resync) and resolves to `null` — never to a surviving sibling.
   Because the identity is derived from composition (not an observe counter), this
   also holds within a turn: the act path re-extracts, so a group-size change
-  between observe and act changes the fingerprint and forces a re-observe rather
-  than mis-targeting the shifted sibling. A static group's refs stay stable across
-  observes (no wasted churn), and a filled field or toggled checkbox — mutable
-  state is excluded from `stableElementId` — keeps its ref.
+  between observe and act changes the fingerprint and returns the same
+  `target_stale` repair rather than mis-targeting the shifted sibling. A static
+  group's refs stay stable across observes (no wasted churn), and a filled field
+  or toggled checkbox — mutable state is excluded from `stableElementId` — keeps
+  its ref.
   These groups are rare, so the corpus token-weighted aggregate saving is
   unchanged (~66%). Bounded residual: a size-preserving shuffle of TRULY
   indistinguishable members (delete-one-and-insert-one, or a pure reorder, where

@@ -73,6 +73,35 @@ function shouldRestorePendingCardFill(result: Record<string, unknown>): boolean 
   }
 }
 
+function paymentSchemaRepair(
+  _args: unknown,
+  issues: readonly { path: (string | number)[]; message: string }[],
+) {
+  const missing = [
+    ...new Set(
+      issues
+        .map((issue) => issue.path[0])
+        .filter((field): field is string => typeof field === "string"),
+    ),
+  ];
+  const cardSelectorConflict = issues.some((issue) =>
+    /at most one of card_ref or card_label/i.test(issue.message),
+  );
+  return {
+    error: "invalid_payment_arguments",
+    allowed_kinds: ["operate_pay"],
+    missing,
+    example: {
+      item: "Item being purchased",
+      reason: "Why this purchase is needed",
+      card_label: "Personal",
+    },
+    safe_alternative: cardSelectorConflict
+      ? "Provide only one of card_ref or card_label, or omit both to use the saved-card resolution flow. Card data stays inside operate_pay."
+      : "Provide item and reason. Use at most one saved-card selector; card data stays inside operate_pay.",
+  };
+}
+
 export const listPaymentCardsTool: Tool = {
   name: "list_payment_cards",
   description:
@@ -145,6 +174,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     destructiveHint: true,
     idempotentHint: false,
   },
+  schemaRepair: paymentSchemaRepair,
   async handler(args, api, context) {
     assertApi(api);
     const paymentClaim = claimActivePaymentForOperatePay(args.phase);

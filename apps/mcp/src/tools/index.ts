@@ -8,7 +8,7 @@
 // callable tools over stdio. Tests skip the SDK and exercise handlers
 // directly with a mock api-client.
 
-import { z, type ZodTypeAny } from "zod";
+import { z, type ZodIssue, type ZodTypeAny } from "zod";
 import type { ApiClient } from "../api-client.js";
 import { listCredentialsTool } from "./list-credentials.js";
 import { listExtractFailuresTool, getExtractFailureTool } from "./extract-failures.js";
@@ -37,6 +37,9 @@ export interface Tool<TArgs extends Record<string, unknown> = Record<string, unk
   // credential tools so Claude Code keeps their schemas resident
   // instead of deferring them behind Tool Search.
   meta?: Record<string, unknown>;
+  // Action tools can turn a schema miss into an executable repair object rather
+  // than leaving the model to infer the grammar from a prose validation error.
+  schemaRepair?: (args: unknown, issues: readonly ZodIssue[]) => Record<string, unknown>;
   handler: (args: TArgs, api: ApiClient | null, context?: ToolContext) => Promise<unknown>;
 }
 
