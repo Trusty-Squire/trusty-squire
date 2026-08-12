@@ -76,7 +76,11 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
     if (!parsed.success) {
       if (tool.schemaRepair !== undefined) {
         return errorContent(
-          JSON.stringify(tool.schemaRepair(req.params.arguments ?? {}, parsed.error.issues)),
+          "invalid_arguments",
+          "invalid arguments",
+          {
+            guidance: tool.schemaRepair(req.params.arguments ?? {}, parsed.error.issues),
+          },
         );
       }
       return errorContent(

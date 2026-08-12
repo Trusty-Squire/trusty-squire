@@ -222,7 +222,8 @@ describe("launched through a bin symlink", () => {
     };
     expect(unavailable.error?.code).toBe("server_unavailable");
     expect(unavailable.error?.retry?.max_attempts).toBe(1);
-    expect(unavailable.error?.message).toMatch(/never kill|retry once/i);
+    expect(unavailable.error?.message).toMatch(/retry once/i);
+    expect(unavailable.error?.message).toMatch(/never kill or restart/i);
     expect(replies[5]?.result?.tools?.length).toBeGreaterThan(0);
   }, 30_000);
 

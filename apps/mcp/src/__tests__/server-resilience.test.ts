@@ -38,7 +38,9 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
         arguments: { session_id: "s1", kind: "set_value", target: "この商品のみ注文", text: "2" },
       });
       expect(bad.isError).toBe(true);
-      const repair = JSON.parse(resultText(bad));
+      const { error } = JSON.parse(resultText(bad));
+      expect(error.code).toBe("invalid_arguments");
+      const repair = error.guidance;
       expect(repair).toEqual(
         expect.objectContaining({
           error: "invalid_action_arguments",
@@ -80,7 +82,9 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
       });
       expect(badTarget.isError).toBe(true);
       // Schema repair names the missing field before the session lookup runs.
-      const repair = JSON.parse(resultText(badTarget));
+      const { error } = JSON.parse(resultText(badTarget));
+      expect(error.code).toBe("invalid_arguments");
+      const repair = error.guidance;
       expect(repair).toEqual(
         expect.objectContaining({
           error: "invalid_action_arguments",
