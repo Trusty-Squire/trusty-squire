@@ -11,7 +11,6 @@ import type { Tool } from "./index.js";
 import type { ApiClient } from "../api-client.js";
 import {
   startProvisionSession,
-  reconnectProvisionSession,
   observe,
   act,
   cartAdd,
@@ -274,10 +273,6 @@ const startSchema = z.object({
   require_live_identity: z.boolean().optional(),
 });
 
-const reconnectSchema = z.object({
-  reconnect_token: z.string().uuid(),
-});
-
 const OBSERVE_DELTA_CONTRACT =
   "Compact observations carry their elements in `el_table`: a TAB-delimited table whose FIRST line is the " +
   "header (tab-joined column names, a subset of ref,label,tag,role,type,value_len,checked,href,testId," +
@@ -337,30 +332,6 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
       ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
       ...(hint !== undefined ? { hint } : {}),
       // Thread the api-client so the captcha gate can spend a vaulted 2Captcha key.
-      ...(api !== null ? { api } : {}),
-    });
-  },
-};
-
-export const provisionReconnectTool: Tool<z.infer<typeof reconnectSchema>> = {
-  name: "operate_reconnect",
-  description:
-    "Recover the single active checkout after the MCP process reconnects. Pass the reconnect_token " +
-    "returned by operate_start or a later observation. It reopens the saved checkout URL with the same " +
-    "allowed-host scope, cart summary, and approval identity; it never creates a second session or a " +
-    "duplicate approval. Retry this call once if the server was briefly unavailable. Never kill the shared " +
-    "operator process — it serves every lane/home.",
-  inputSchema: reconnectSchema,
-  jsonInputSchema: {
-    type: "object",
-    required: ["reconnect_token"],
-    properties: { reconnect_token: { type: "string", format: "uuid" } },
-  },
-  async handler(args, api) {
-    const consentInboxRead = await readInboxConsent();
-    return await reconnectProvisionSession({
-      reconnectToken: args.reconnect_token,
-      consentInboxRead,
       ...(api !== null ? { api } : {}),
     });
   },
@@ -1827,7 +1798,6 @@ export const provisionSealVaultCredentialTool: Tool<z.infer<typeof sealVaultCred
 
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
-  provisionReconnectTool,
   provisionObserveTool,
   provisionActTool,
   operateCartAddTool,

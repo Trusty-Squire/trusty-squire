@@ -507,7 +507,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   startProvisionSession,
-  reconnectProvisionSession,
   act,
   formSelectMany,
   observe,
@@ -531,14 +530,12 @@ import {
   getActivePendingApproval,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
-  recordActivePaymentApprovalCreated,
   restoreActivePendingCardFillAfterConfirmThrow,
   retainActivePaymentFieldSeal,
   clearActivePendingCardFill,
   recipeTargetFor,
   captureObserved,
 } from "../provision-session.js";
-import type { OperatorResumeMetadata, OperatorResumeStore } from "../operator-resume.js";
 import {
   isRecipeDomainLocked,
   isRecipeShareEligible,
@@ -3273,233 +3270,6 @@ describe("operate session — warm browser lifecycle", () => {
     const next = await startProvisionSession({ serviceUrl: "https://app.example.com/task-51" });
     expect(h.startCalls).toBe(2);
     await finishProvisionSession(next.session_id);
-  });
-});
-
-describe("operator reconnect recovery", () => {
-  it("persists a newly minted approval before notification can continue", async () => {
-    let record: OperatorResumeMetadata | null = null;
-    const store: OperatorResumeStore = {
-      read: () => record,
-      write: (next) => {
-        record = structuredClone(next);
-      },
-      clear: () => {
-        record = null;
-      },
-    };
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-      resumeStore: store,
-    });
-    const claim = claimActivePaymentForOperatePay(undefined);
-    if (claim.kind !== "lease") throw new Error("expected payment lease");
-
-    recordActivePaymentApprovalCreated({
-      approval_id: "approval_created",
-      approval_url: "https://vault.test/pay/approval_created",
-      checkout: {
-        merchant: "Example",
-        checkout_origin: "https://shop.example.com",
-        amount_cents: 500,
-        currency: "USD",
-      },
-    });
-
-    expect(record).toMatchObject({
-      session_id: started.session_id,
-      approval_id: "approval_created",
-    });
-    const persisted = structuredClone(record!);
-    await closeAllProvisionSessions();
-    record = persisted;
-    const recovered = await reconnectProvisionSession({
-      reconnectToken: persisted.reconnect_token,
-      resumeStore: store,
-    });
-    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(
-      /approval_created.*Do not start another approval/i,
-    );
-    await finishProvisionSession(recovered.session_id);
-  });
-
-  it("persists only non-secret checkout recovery metadata and reconnects the same session/approval", async () => {
-    let record: OperatorResumeMetadata | null = null;
-    const store: OperatorResumeStore = {
-      read: () => record,
-      write: (next) => {
-        record = structuredClone(next);
-      },
-      clear: () => {
-        record = null;
-      },
-    };
-    const started = await startProvisionSession({
-      serviceUrl:
-        "https://resume-user:resume-pass@shop.rakuten.co.jp/checkout/payment?token=resume-secret#fragment",
-      extraAllowedHosts: ["checkout.rakuten.co.jp"],
-      resumeStore: store,
-    });
-    const claim = claimActivePaymentForOperatePay("fill_card");
-    if (claim.kind !== "lease") throw new Error("expected payment lease");
-    completeActivePaymentLeaseWithPendingFill(claim.lease, {
-      approval_id: "approval_same_checkout",
-      approval_url:
-        "https://approval-user:approval-pass@vault.test/pay/approval_same_checkout?token=approval-secret",
-      checkout: {
-        merchant: "Rakuten",
-        checkout_origin: "https://checkout-user:checkout-pass@shop.rakuten.co.jp/private",
-        amount_cents: 968,
-        currency: "JPY",
-      },
-      card_ref: "opaque-card-ref",
-      last4: "4242",
-      mandate_id: "mandate_same_checkout",
-    });
-
-    const persisted = record as OperatorResumeMetadata | null;
-    if (persisted === null) throw new Error("expected resume metadata");
-    expect(persisted).toMatchObject({
-      session_id: started.session_id,
-      url: "https://shop.rakuten.co.jp/checkout/payment",
-      approval_id: "approval_same_checkout",
-      pending_fill: {
-        approval_id: "approval_same_checkout",
-        approval_url: "https://vault.test/pay/approval_same_checkout",
-        checkout: { checkout_origin: "https://shop.rakuten.co.jp" },
-      },
-      allowed_hosts: expect.arrayContaining([
-        { host: "shop.rakuten.co.jp", source: "start" },
-      ]),
-    });
-    const serialized = JSON.stringify(persisted);
-    for (const forbidden of [
-      "opaque-card-ref",
-      "4242",
-      "PAN",
-      "CVV",
-      "resume-user",
-      "resume-pass",
-      "resume-secret",
-      "approval-user",
-      "approval-pass",
-      "approval-secret",
-      "checkout-user",
-      "checkout-pass",
-    ]) {
-      expect(serialized).not.toContain(forbidden);
-    }
-    expect(persisted).not.toHaveProperty("start_url");
-
-    // Simulate abrupt process loss: closeAll performs normal cleanup, then put
-    // the exact durable crash breadcrumb back as the new process would find it.
-    await closeAllProvisionSessions();
-    record = persisted;
-    const resumed = await reconnectProvisionSession({
-      reconnectToken: persisted!.reconnect_token,
-      resumeStore: store,
-    });
-    expect(resumed.session_id).toBe(started.session_id);
-    expect(resumed.reconnect_token).toBe(persisted!.reconnect_token);
-    expect(h.gotos.at(-1)).toBe("https://shop.rakuten.co.jp/checkout/payment");
-    expect(() => claimActivePaymentForOperatePay("fill_card")).toThrow(
-      /approval_same_checkout.*Do not start another approval/i,
-    );
-    const persistedAgain = structuredClone(record!);
-    expect(persistedAgain.pending_fill).toEqual(persisted.pending_fill);
-
-    await closeAllProvisionSessions();
-    record = persistedAgain;
-    const resumedAgain = await reconnectProvisionSession({
-      reconnectToken: persistedAgain.reconnect_token,
-      resumeStore: store,
-    });
-    expect(() => claimActivePaymentForOperatePay("fill_card")).toThrow(
-      /approval_same_checkout.*Do not start another approval/i,
-    );
-    await finishProvisionSession(resumedAgain.session_id);
-  });
-
-  it("reuses a matching live session and requires reconnect for durable state", async () => {
-    let record: OperatorResumeMetadata | null = null;
-    const store: OperatorResumeStore = {
-      read: () => record,
-      write: (next) => {
-        record = structuredClone(next);
-      },
-      clear: () => {
-        record = null;
-      },
-    };
-    const serviceUrl = "https://shop.example.com/checkout";
-    const started = await startProvisionSession({ serviceUrl, resumeStore: store });
-    const gotosAfterStart = h.gotos.length;
-
-    const repeated = await startProvisionSession({ serviceUrl, resumeStore: store });
-    expect(repeated.session_id).toBe(started.session_id);
-    expect(h.gotos).toHaveLength(gotosAfterStart);
-    const liveReconnect = await reconnectProvisionSession({
-      reconnectToken: started.reconnect_token!,
-      resumeStore: store,
-    });
-    expect(liveReconnect.session_id).toBe(started.session_id);
-    expect(h.gotos).toHaveLength(gotosAfterStart);
-
-    const persisted = structuredClone(record!);
-    await closeAllProvisionSessions();
-    record = persisted;
-    await expect(startProvisionSession({ serviceUrl, resumeStore: store })).rejects.toThrow(
-      /call operate_reconnect/i,
-    );
-    const recovered = await reconnectProvisionSession({
-      reconnectToken: persisted.reconnect_token,
-      resumeStore: store,
-    });
-    expect(recovered.session_id).toBe(started.session_id);
-    await finishProvisionSession(recovered.session_id);
-  });
-
-  it("surfaces resume writes and keeps failed clears retryable", async () => {
-    const unavailableStore: OperatorResumeStore = {
-      read: () => null,
-      write: () => {
-        throw new Error("operator_resume_store_write_failed: disk unavailable");
-      },
-      clear: () => undefined,
-    };
-    await expect(
-      startProvisionSession({
-        serviceUrl: "https://shop.example.com/write-failure",
-        resumeStore: unavailableStore,
-      }),
-    ).rejects.toThrow(/operator_resume_store_write_failed/);
-
-    let record: OperatorResumeMetadata | null = null;
-    let failClear = true;
-    const clearStore: OperatorResumeStore = {
-      read: () => record,
-      write: (next) => {
-        record = structuredClone(next);
-      },
-      clear: () => {
-        if (failClear) throw new Error("operator_resume_store_clear_failed: disk unavailable");
-        record = null;
-      },
-    };
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/clear-failure",
-      resumeStore: clearStore,
-    });
-    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(
-      /operator_resume_store_clear_failed/,
-    );
-    const stillLive = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/clear-failure",
-      resumeStore: clearStore,
-    });
-    expect(stillLive.session_id).toBe(started.session_id);
-    failClear = false;
-    await finishProvisionSession(started.session_id);
   });
 });
 

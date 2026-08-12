@@ -1831,34 +1831,6 @@ describe("operate_pay non-blocking approval [P0]", () => {
     expect(env.approvalBodies).toHaveLength(1);
   });
 
-  it("publishes the approval identity before surfacing its URL", async () => {
-    const env = buildResumableEnv();
-    const events: string[] = [];
-
-    await expect(
-      executeOperatePay(baseArgs, env.api, env.browser, {
-        fetch: env.fetch,
-        vouchflowApiBase: "https://vouchflow.test",
-        vouchflowExpectedAudience: "customer_test",
-        webBase: "https://web.test",
-        onApprovalCreated: (state) => {
-          events.push(`persist:${state.approval_id}`);
-        },
-        surfaceApprovalUrl: () => {
-          events.push("surface");
-          throw new Error("notification unavailable");
-        },
-        onApprovalPending: () => {
-          events.push("pending");
-        },
-        pollBudgetMs: 0,
-      }),
-    ).rejects.toThrow("notification unavailable");
-
-    expect(events).toEqual(["persist:appr_resume", "surface", "pending"]);
-    expect(env.approvalBodies).toHaveLength(1);
-  });
-
   it("resumes the SAME approval on re-initiation — never mints a duplicate", async () => {
     const env = buildResumableEnv();
     let captured: PendingApprovalWait | null = null;

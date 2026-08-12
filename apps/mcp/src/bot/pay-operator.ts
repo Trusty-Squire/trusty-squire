@@ -85,12 +85,6 @@ export interface PendingApprovalWait {
   three_ds_wait_seconds?: number;
 }
 
-export interface PaymentApprovalCreated {
-  approval_id: string;
-  approval_url: string;
-  checkout: CheckoutSummary;
-}
-
 interface PayDependencies {
   fetch: typeof fetch;
   sleep: (ms: number) => Promise<void>;
@@ -107,7 +101,6 @@ interface PayDependencies {
   onCardFilled: (pending: PendingCardFill) => void;
   onCardFillCleanupFailed: () => void;
   onSubmitStarted: () => void;
-  onApprovalCreated: (state: PaymentApprovalCreated) => void;
   // fill_card only, and only consulted when the live card-entry page itself
   // has no readable total (Rakuten-style split checkouts). The most recent
   // successfully-parsed checkout total observed earlier in THIS session (the
@@ -350,7 +343,6 @@ function defaultDependencies(): PayDependencies {
     onCardFilled: () => undefined,
     onCardFillCleanupFailed: () => undefined,
     onSubmitStarted: () => undefined,
-    onApprovalCreated: () => undefined,
     onApprovalPending: () => undefined,
   };
 }
@@ -508,9 +500,6 @@ export async function executeOperatePay(
       ...(phaseArg === "fill_card" ? { phase: "fill_card" as const } : {}),
       ...(threeDsWaitSeconds !== undefined ? { three_ds_wait_seconds: threeDsWaitSeconds } : {}),
     });
-    if (resume === undefined) {
-      deps.onApprovalCreated({ approval_id: approvalId, approval_url: approvalUrl, checkout });
-    }
     await deps.surfaceApprovalUrl(approvalUrl);
 
     // [P0] This call's own wait budget, bounded by the server approval expiry.

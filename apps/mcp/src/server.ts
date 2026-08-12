@@ -117,10 +117,9 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
       return serverUnavailable
         ? errorContent(
             "server_unavailable",
-            `${message}. Retry once. If this was a reconnect after a server interruption, call operate_reconnect with the reconnect_token returned by operate_start. Never kill or restart the shared operator process; it serves every lane/home.`,
+            `${message}. Retry once. Never kill or restart the shared operator process; it serves every lane/home.`,
             {
               retry: { max_attempts: 1 },
-              reconnect_tool: "operate_reconnect",
             },
           )
         : errorContent(malformedAction ? "invalid_arguments" : "tool_execution_failed", message);

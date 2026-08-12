@@ -32,19 +32,11 @@ import {
 } from "./browser.js";
 import type {
   CartCheckoutObservation,
-  PaymentApprovalCreated,
   PendingApprovalWait,
   PendingCardFill,
 } from "./pay-operator.js";
 import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2captcha.js";
 import type { ApiClient } from "../api-client.js";
-import {
-  defaultOperatorResumeStore,
-  sanitizeOperatorResumeMetadata,
-  type OperatorResumeMetadata,
-  type OperatorResumePendingFill,
-  type OperatorResumeStore,
-} from "./operator-resume.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
 import { detectActiveProviderSessions, ensureOAuthSession } from "./google-login.js";
@@ -231,9 +223,6 @@ export interface ScreenOutline {
 export interface Observation {
   session_id: string;
   url: string;
-  // Opaque local capability for recovering this ONE checkout after the MCP
-  // process reconnects. It is not a credential and is never sent to merchants.
-  reconnect_token?: string;
   // Registry route guidance, present ONLY on the first (start) observation when
   // a skill exists for the service. The host agent reads it before driving.
   hint?: string;
@@ -470,8 +459,6 @@ interface CartIdentityContext {
 
 interface Session {
   id: string;
-  reconnectToken: string;
-  resumeStore: OperatorResumeStore;
   browser: BrowserController;
   allowedHosts: AllowedHostEntry[];
   generation: number;
@@ -565,16 +552,6 @@ interface Session {
   cartAddsByIdempotencyKey: Map<string, CartAddRecord>;
   cartUrls: Map<string, string>;
   lastCartMutation: CartMutation | null;
-  // A restart can recover the checkout page and public approval identity, but
-  // never the ephemeral HPKE private key or a browser-filled card. Keep this
-  // public recovery record separate from live payment state so a reconnect
-  // fails closed rather than minting a second approval.
-  recoveredPayment: {
-    approval_id: string;
-    approval_url: string | null;
-    checkout: CheckoutSummary | null;
-    pending_fill: OperatorResumePendingFill | null;
-  } | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -2297,78 +2274,10 @@ export interface StartOptions {
   // The MCP api-client, threaded from the operate_* tool layer. Enables the
   // captcha gate to spend a VAULTED 2Captcha key via the injecting proxy.
   api?: ApiClient;
-  // Internal reconnect path. The durable record contains only non-secret
-  // checkout state; live sessions never expose this implementation detail.
-  resumeMetadata?: OperatorResumeMetadata;
-  resumeStore?: OperatorResumeStore;
 }
 
 export interface HarnessStartOptions extends Omit<StartOptions, "profileDir" | "proxyUrl"> {
   browser: BrowserController;
-}
-
-export interface ReconnectOptions {
-  reconnectToken: string;
-  profileDir?: string;
-  proxyUrl?: string;
-  hint?: string;
-  requireLiveIdentity?: boolean;
-  consentInboxRead?: boolean;
-  api?: ApiClient;
-  resumeStore?: OperatorResumeStore;
-}
-
-function paymentResumeMetadata(
-  session: Session,
-): Pick<OperatorResumeMetadata, "approval_id" | "pending_fill"> {
-  const state = session.activePayment;
-  const pending =
-    state?.status === "pending" || state?.status === "confirming" ? state.pending : null;
-  const approvalId =
-    pending?.approval_id ??
-    (state?.status === "awaiting_approval" ? state.state.approval_id : null) ??
-    session.recoveredPayment?.approval_id ??
-    null;
-  return {
-    approval_id: approvalId,
-    pending_fill:
-      pending === null
-        ? (session.recoveredPayment?.pending_fill ?? null)
-        : {
-            approval_id: pending.approval_id,
-            approval_url: pending.approval_url,
-            checkout: pending.checkout,
-            ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
-          },
-  };
-}
-
-function persistResumeMetadata(session: Session, url = session.browser.currentUrl()): void {
-  const payment = paymentResumeMetadata(session);
-  session.resumeStore.write(
-    sanitizeOperatorResumeMetadata({
-      version: 1,
-      reconnect_token: session.reconnectToken,
-      session_id: session.id,
-      url,
-      allowed_hosts: session.allowedHosts.map(({ host, source }) => ({ host, source })),
-      generation: session.generation,
-      cart_summary:
-        session.lastCartCheckout === null
-          ? null
-          : {
-              checkout: session.lastCartCheckout.checkout,
-              url: session.lastCartCheckout.url,
-              observed_at: session.lastCartCheckout.observedAt,
-            },
-      ...payment,
-    }),
-  );
-}
-
-function withReconnectToken(session: Session, observation: Observation): Observation {
-  persistResumeMetadata(session, observation.url);
-  return { ...observation, reconnect_token: session.reconnectToken };
 }
 
 // Fail-closed precondition GATE — NOT autonomous recovery. An operate task that
@@ -2450,39 +2359,8 @@ async function ensureProvisionPrimaryProviderSession(
   return after.includes("google") ? after : ["google", ...after];
 }
 
-function requestedUrlMatches(session: Session, serviceUrl: string): boolean {
-  try {
-    return new URL(session.startUrl).href === new URL(serviceUrl).href;
-  } catch {
-    return session.startUrl === serviceUrl;
-  }
-}
-
-function soleLiveSession(): Session | null {
-  if (sessions.size !== 1) return null;
-  return sessions.values().next().value ?? null;
-}
-
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
-  const resume = opts.resumeMetadata;
-  const resumeStore = opts.resumeStore ?? defaultOperatorResumeStore();
-  const live = soleLiveSession();
-  if (live !== null) {
-    const matches =
-      resume !== undefined
-        ? live.reconnectToken === resume.reconnect_token
-        : requestedUrlMatches(live, opts.serviceUrl);
-    if (!matches) {
-      throw new Error("operate_start refused: another operator session is already in flight");
-    }
-    return await observeSession(live);
-  }
-  if (resume === undefined && resumeStore.read() !== null) {
-    throw new Error(
-      "operate_start refused: an active checkout recovery record exists; call operate_reconnect with its reconnect_token",
-    );
-  }
-  const id = resume?.session_id ?? randomUUID();
+  const id = randomUUID();
   touchWarmBrowser();
   if (starting || inFlight) {
     throw new Error("operate_start refused: another operator session is already in flight");
@@ -2513,16 +2391,15 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   ];
   // All start-declared hosts are sourced "start" — auto-widen chains off these,
   // and credential egress may seed from these (but never from mid_session).
-  const allowedHosts: AllowedHostEntry[] =
-    resume?.allowed_hosts.map(({ host, source }) => ({ host, source })) ??
-    [...new Set(seedHosts)].map((host) => ({ host, source: "start" as const }));
+  const allowedHosts: AllowedHostEntry[] = [...new Set(seedHosts)].map((host) => ({
+    host,
+    source: "start" as const,
+  }));
   const session: Session = {
     id,
-    reconnectToken: resume?.reconnect_token ?? randomUUID(),
-    resumeStore,
     browser,
     allowedHosts,
-    generation: resume?.generation ?? 0,
+    generation: 0,
     secretSlots: new Map(),
     sealedFieldKeys: new Set(),
     lastElements: [],
@@ -2537,14 +2414,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
-    lastCartCheckout:
-      resume?.cart_summary === null || resume?.cart_summary === undefined
-        ? null
-        : {
-            checkout: resume.cart_summary.checkout,
-            url: resume.cart_summary.url,
-            observedAt: resume.cart_summary.observed_at,
-          },
+    lastCartCheckout: null,
     cartAdds: new Map(),
     cartAddsByIdempotencyKey: new Map(),
     cartUrls: new Map(),
@@ -2554,15 +2424,6 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
     userEmail: loggedInEmail("google", opts.profileDir),
-    recoveredPayment:
-      resume?.approval_id === null || resume?.approval_id === undefined
-        ? null
-        : {
-            approval_id: resume.approval_id,
-            approval_url: resume.pending_fill?.approval_url ?? null,
-            checkout: resume.pending_fill?.checkout ?? resume.cart_summary?.checkout ?? null,
-            pending_fill: resume.pending_fill,
-          },
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
@@ -2598,11 +2459,11 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
       loginSessionGuidance(liveProviders),
       ...(opts.hint !== undefined ? [opts.hint] : []),
     ];
-    return withReconnectToken(session, {
+    return {
       ...observation,
       hint: hintParts.join("\n"),
       ...(session.userEmail !== null ? { user_email: session.userEmail } : {}),
-    });
+    };
   } catch (err) {
     sessions.delete(id);
     await releaseWarmBrowserPage(browser);
@@ -2616,8 +2477,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
 export async function startHarnessProvisionSession(
   opts: HarnessStartOptions,
 ): Promise<Observation> {
-  const resume = opts.resumeMetadata;
-  const id = resume?.session_id ?? randomUUID();
+  const id = randomUUID();
   if (starting || inFlight) {
     throw new Error("operate_start refused: another operator session is already in flight");
   }
@@ -2625,18 +2485,20 @@ export async function startHarnessProvisionSession(
     throw new Error("harness sessions cannot request live identity");
   }
   const targetHost = registrableHost(opts.serviceUrl);
-  const allowedHosts: AllowedHostEntry[] =
-    resume?.allowed_hosts.map(({ host, source }) => ({ host, source })) ??
-    [...(targetHost === null ? [] : [targetHost]), ...(opts.extraAllowedHosts ?? [])]
-      .filter((host, index, hosts) => hosts.indexOf(host) === index)
-      .map((host) => ({ host, source: "start" as const }));
+  const allowedHosts: AllowedHostEntry[] = [
+    ...(targetHost === null ? [] : [targetHost]),
+    ...(opts.extraAllowedHosts ?? []),
+  ]
+    .filter((host, index, hosts) => hosts.indexOf(host) === index)
+    .map((host) => ({
+      host,
+      source: "start" as const,
+    }));
   const session: Session = {
     id,
-    reconnectToken: resume?.reconnect_token ?? randomUUID(),
-    resumeStore: opts.resumeStore ?? defaultOperatorResumeStore(),
     browser: opts.browser,
     allowedHosts,
-    generation: resume?.generation ?? 0,
+    generation: 0,
     secretSlots: new Map(),
     sealedFieldKeys: new Set(),
     lastElements: [],
@@ -2651,14 +2513,7 @@ export async function startHarnessProvisionSession(
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
-    lastCartCheckout:
-      resume?.cart_summary === null || resume?.cart_summary === undefined
-        ? null
-        : {
-            checkout: resume.cart_summary.checkout,
-            url: resume.cart_summary.url,
-            observedAt: resume.cart_summary.observed_at,
-          },
+    lastCartCheckout: null,
     cartAdds: new Map(),
     cartAddsByIdempotencyKey: new Map(),
     cartUrls: new Map(),
@@ -2668,15 +2523,6 @@ export async function startHarnessProvisionSession(
     startUrl: opts.serviceUrl,
     consentInboxRead: false,
     userEmail: null,
-    recoveredPayment:
-      resume?.approval_id === null || resume?.approval_id === undefined
-        ? null
-        : {
-            approval_id: resume.approval_id,
-            approval_url: resume.pending_fill?.approval_url ?? null,
-            checkout: resume.pending_fill?.checkout ?? resume.cart_summary?.checkout ?? null,
-            pending_fill: resume.pending_fill,
-          },
     ...(opts.api === undefined ? {} : { api: opts.api }),
   };
   sessions.set(id, session);
@@ -2687,48 +2533,13 @@ export async function startHarnessProvisionSession(
       allowed_hosts: hostStrings(session),
     });
     await opts.browser.goto(opts.serviceUrl);
-    return withReconnectToken(session, {
-      ...(await observeSession(session)),
-      hint: opts.hint ?? "",
-    });
+    return { ...(await observeSession(session)), hint: opts.hint ?? "" };
   } catch (error) {
     sessions.delete(id);
     await opts.browser.close().catch(() => undefined);
     inFlight = false;
     throw error;
   }
-}
-
-// Recreate the one browser session after a process restart. The persisted URL
-// keeps the merchant's server-side cart/checkout in view; a stale reconnect
-// never creates a second active session. Payment recovery intentionally carries
-// only public IDs and remains fail-closed in claimActivePaymentForOperatePay.
-export async function reconnectProvisionSession(opts: ReconnectOptions): Promise<Observation> {
-  const live = soleLiveSession();
-  if (live !== null) {
-    if (live.reconnectToken !== opts.reconnectToken) {
-      throw new Error("operate_reconnect refused: another operator session is already in flight");
-    }
-    return await observeSession(live);
-  }
-  const store = opts.resumeStore ?? defaultOperatorResumeStore();
-  const resume = store.read();
-  if (resume === null || resume.reconnect_token !== opts.reconnectToken) {
-    throw new Error(
-      "reconnect token was not found for an active operator checkout; retry once with the token returned by operate_start",
-    );
-  }
-  return await startProvisionSession({
-    serviceUrl: resume.url,
-    ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
-    ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
-    ...(opts.hint !== undefined ? { hint: opts.hint } : {}),
-    ...(opts.requireLiveIdentity === true ? { requireLiveIdentity: true } : {}),
-    ...(opts.consentInboxRead === true ? { consentInboxRead: true } : {}),
-    ...(opts.api !== undefined ? { api: opts.api } : {}),
-    resumeMetadata: resume,
-    resumeStore: store,
-  });
 }
 
 export async function observe(
@@ -2850,10 +2661,8 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
 
 export function setActivePendingCardFill(pending: PendingCardFill): void {
   const session = activeProvisionSession();
-  session.recoveredPayment = null;
   session.activePayment = { status: "pending", pending };
   session.paymentFieldSealActive = true;
-  persistResumeMetadata(session);
 }
 
 export function retainActivePaymentFieldSeal(): void {
@@ -2877,34 +2686,6 @@ export function getActivePendingApproval(): PendingApprovalWait | null {
   return state?.status === "awaiting_approval" ? state.state : null;
 }
 
-// Public-only recovery state left by a restarted process. The approval ID is
-// useful for read-only status and audit continuity, but the ephemeral HPKE key
-// and any card material are deliberately absent, so it can never be used to
-// silently resume a charge or mint a duplicate approval.
-export function getActiveRecoveredPayment(): {
-  approval_id: string;
-  approval_url: string | null;
-  checkout: CheckoutSummary | null;
-  pending_fill: OperatorResumePendingFill | null;
-} | null {
-  return activeProvisionSession().recoveredPayment;
-}
-
-export function recordActivePaymentApprovalCreated(state: PaymentApprovalCreated): void {
-  const session = activeProvisionSession();
-  session.recoveredPayment = {
-    approval_id: state.approval_id,
-    approval_url: state.approval_url,
-    checkout: state.checkout,
-    pending_fill: null,
-  };
-  persistResumeMetadata(session);
-}
-
-export function clearActiveRecoveredPayment(): void {
-  activeProvisionSession().recoveredPayment = null;
-}
-
 export interface ActivePaymentLease {
   phase: "fill_card" | "single";
 }
@@ -2918,11 +2699,6 @@ export function claimActivePaymentForOperatePay(
   phase: "fill_card" | "confirm" | undefined,
 ): ActivePaymentClaim {
   const session = activeProvisionSession();
-  if (session.recoveredPayment !== null) {
-    throw new Error(
-      `payment_reconnect_required: approval ${session.recoveredPayment.approval_id} was preserved without card or key material; use operate_payment_status to inspect that SAME approval. Do not start another approval.`,
-    );
-  }
   const state = session.activePayment;
   if (state?.status === "operating") {
     throw new Error("operate_pay refused: another payment operation is already in progress");
@@ -2971,10 +2747,8 @@ export function completeActivePaymentLeaseWithPendingFill(
       "operate_pay fill_card completed without ownership of the active payment lease",
     );
   }
-  session.recoveredPayment = null;
   session.activePayment = { status: "pending", pending };
   session.paymentFieldSealActive = true;
-  persistResumeMetadata(session);
 }
 
 // [P0] Mirrors completeActivePaymentLeaseWithPendingFill for the
@@ -2992,9 +2766,7 @@ export function completeActivePaymentLeaseWithPendingApproval(
       "operate_pay approval_pending completed without ownership of the active payment lease",
     );
   }
-  session.recoveredPayment = null;
   session.activePayment = { status: "awaiting_approval", state };
-  persistResumeMetadata(session);
 }
 
 export function releaseActivePaymentLease(
@@ -3006,7 +2778,6 @@ export function releaseActivePaymentLease(
   if (state?.status !== "operating" || state.lease !== lease) return false;
   session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
   if (lease.phase === "fill_card") session.paymentFieldSealActive = !paymentFieldsCleared;
-  persistResumeMetadata(session);
   return true;
 }
 
@@ -3025,10 +2796,8 @@ export function restoreActivePendingCardFillAfterConfirmThrow(pending: PendingCa
 
 export function clearActivePendingCardFill(paymentFieldsCleared = true): void {
   const session = activeProvisionSession();
-  session.recoveredPayment = null;
   session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
   session.paymentFieldSealActive = !paymentFieldsCleared;
-  persistResumeMetadata(session);
 }
 
 export function recordActivePaymentProvenance(cardRef: string): void {
@@ -4252,37 +4021,31 @@ async function observeSession(
       // remove-then-restore-across-a-failed-persist sequence would silently drop
       // the restored element otherwise).
       session.prevObserve = null;
-      return withReconnectToken(
-        session,
-        withCheckoutState(
-          {
-            session_id: session.id,
-            url,
-            text: normalizedText,
-            ...(guidance !== undefined ? { guidance } : {}),
-            // Still a COMPACT response — carry the (uncollapsed) set as the columnar
-            // table so the host parses it the same way as any other compact observe.
-            ...emitElements([...built.fullByRef.values()], "columnar"),
-            delta: false,
-            elements_total: elements.length,
-            ...(textTruncated ? { text_truncated: true } : {}),
-          },
-          checkoutState,
-          currentCartMutation,
-        ),
-      );
-    }
-    session.prevObserve = built.nextState;
-    return withReconnectToken(
-      session,
-      withCheckoutState(
+      return withCheckoutState(
         {
-          ...built.observation,
-          snapshot_file: snapshotFile,
+          session_id: session.id,
+          url,
+          text: normalizedText,
+          ...(guidance !== undefined ? { guidance } : {}),
+          // Still a COMPACT response — carry the (uncollapsed) set as the columnar
+          // table so the host parses it the same way as any other compact observe.
+          ...emitElements([...built.fullByRef.values()], "columnar"),
+          delta: false,
+          elements_total: elements.length,
+          ...(textTruncated ? { text_truncated: true } : {}),
         },
         checkoutState,
         currentCartMutation,
-      ),
+      );
+    }
+    session.prevObserve = built.nextState;
+    return withCheckoutState(
+      {
+        ...built.observation,
+        snapshot_file: snapshotFile,
+      },
+      checkoutState,
+      currentCartMutation,
     );
   }
 
@@ -4316,64 +4079,61 @@ async function observeSession(
     sealedFieldKeys,
     session.paymentFieldSealActive,
   );
-  return withReconnectToken(
-    session,
-    withCheckoutState(
-      {
-        session_id: session.id,
-        url,
-        text: normalizedText,
-        ...(guidance !== undefined ? { guidance } : {}),
-        ...(screen !== undefined ? { screen } : {}),
-        ...(accessibility !== undefined ? { accessibility } : {}),
-        elements: elements.map((el) => {
-          const observed: ObservedElement = {
-            ref: refOf(el),
-            label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
-            tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
-            role:
-              el.role === null
-                ? null
-                : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
-            type:
-              el.type === null
-                ? null
-                : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
-            value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
-            checked: el.checked ?? null,
-            href:
-              el.href === null || el.href === undefined
-                ? null
-                : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
-            testId:
-              el.testId === null || el.testId === undefined
-                ? null
-                : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
-            path:
-              el.screenPath === null || el.screenPath === undefined
-                ? null
-                : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
-            container:
-              el.container === null || el.container === undefined
-                ? null
-                : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
-            topmost: el.topmost ?? null,
-            occluded_by:
-              el.occludedBy === null || el.occludedBy === undefined
-                ? null
-                : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
-            frame_origin:
-              el.frameOrigin === null || el.frameOrigin === undefined
-                ? null
-                : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
-          };
-          annotatePaymentControl(observed, el);
-          return observed;
-        }),
-      },
-      checkoutState,
-      currentCartMutation,
-    ),
+  return withCheckoutState(
+    {
+      session_id: session.id,
+      url,
+      text: normalizedText,
+      ...(guidance !== undefined ? { guidance } : {}),
+      ...(screen !== undefined ? { screen } : {}),
+      ...(accessibility !== undefined ? { accessibility } : {}),
+      elements: elements.map((el) => {
+        const observed: ObservedElement = {
+          ref: refOf(el),
+          label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
+          tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
+          role:
+            el.role === null
+              ? null
+              : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
+          type:
+            el.type === null
+              ? null
+              : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
+          value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
+          checked: el.checked ?? null,
+          href:
+            el.href === null || el.href === undefined
+              ? null
+              : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
+          testId:
+            el.testId === null || el.testId === undefined
+              ? null
+              : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
+          path:
+            el.screenPath === null || el.screenPath === undefined
+              ? null
+              : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
+          container:
+            el.container === null || el.container === undefined
+              ? null
+              : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
+          topmost: el.topmost ?? null,
+          occluded_by:
+            el.occludedBy === null || el.occludedBy === undefined
+              ? null
+              : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
+          frame_origin:
+            el.frameOrigin === null || el.frameOrigin === undefined
+              ? null
+              : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
+        };
+        annotatePaymentControl(observed, el);
+        return observed;
+      }),
+    },
+    checkoutState,
+    currentCartMutation,
   );
 }
 
@@ -7548,11 +7308,6 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
-  // Do not clear a newer record if another process has already replaced this
-  // completed session's local recovery breadcrumb.
-  if (session.resumeStore.read()?.reconnect_token === session.reconnectToken) {
-    session.resumeStore.clear();
-  }
   sessions.delete(sessionId);
   try {
     await releaseWarmBrowserPage(session.browser);
