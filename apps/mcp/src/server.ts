@@ -67,28 +67,30 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const tool = findTool(req.params.name);
     if (tool === null) {
-      return errorContent(`unknown tool '${req.params.name}'`);
+      return errorContent("unknown_tool", `unknown tool '${req.params.name}'`);
     }
-    // Stale install gate runs before zod parsing: telling the user
-    // "you have invalid arguments" is worse than telling them "your
-    // install needs reconnecting" when both are true.
-    if (api === null) {
-      return errorContent(
-        `This install is from before single-tier auth and isn't bound to an account. ` +
-          `Run \`npx @trusty-squire/mcp connect\` to reconnect.`,
-      );
-    }
+    // Parse before checking account state. A malformed call is always a local,
+    // structured repair opportunity; it must not be misreported as an install
+    // problem (or allowed to escape the stdio request boundary).
     const parsed = tool.inputSchema.safeParse(req.params.arguments ?? {});
     if (!parsed.success) {
       if (tool.schemaRepair !== undefined) {
-        return errorContent(
-          JSON.stringify(tool.schemaRepair(req.params.arguments ?? {}, parsed.error.issues)),
-        );
+        return errorContent("invalid_arguments", "invalid arguments", {
+          guidance: tool.schemaRepair(req.params.arguments ?? {}, parsed.error.issues),
+        });
       }
       return errorContent(
+        "invalid_arguments",
         `invalid arguments: ${parsed.error.issues
           .map((i) => (i.path.length > 0 ? `${i.path.join(".")}: ${i.message}` : i.message))
           .join("; ")}`,
+      );
+    }
+    if (api === null) {
+      return errorContent(
+        "reconnect_required",
+        `This install is from before single-tier auth and isn't bound to an account. ` +
+          `Run \`npx @trusty-squire/mcp connect\` to reconnect.`,
       );
     }
     try {
@@ -106,17 +108,36 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };
     } catch (err) {
-      return errorContent(err instanceof Error ? err.message : String(err));
+      const message = err instanceof Error ? err.message : String(err);
+      const serverUnavailable =
+        /unknown provision session|requires one active operate_start browser session/i.test(
+          message,
+        );
+      const malformedAction = /^operate_act kind=.* requires /i.test(message);
+      return serverUnavailable
+        ? errorContent(
+            "server_unavailable",
+            `${message}. Retry once. Never kill or restart the shared operator process; it serves every lane/home.`,
+            {
+              retry: { max_attempts: 1 },
+            },
+          )
+        : errorContent(malformedAction ? "invalid_arguments" : "tool_execution_failed", message);
     }
   });
 
   return server;
 }
 
-function errorContent(message: string) {
+function errorContent(code: string, message: string, guidance?: Record<string, unknown>) {
   return {
     isError: true,
-    content: [{ type: "text" as const, text: message }],
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify({ error: { code, message, ...(guidance ?? {}) } }),
+      },
+    ],
   };
 }
 
