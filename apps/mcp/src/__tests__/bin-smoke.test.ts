@@ -10,7 +10,7 @@
 // directly and never spawn the artifact. These tests spawn it.
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -168,6 +168,28 @@ describe("launched through a bin symlink", () => {
     // The startup breadcrumb (a silent no-op was the worst part of the
     // guard bug — this line makes "did it start?" answerable).
     expect(stderr).toMatch(/\[trusty-squire\] server v\d/);
+  }, 30_000);
+
+  it("exits when the MCP client closes stdin", async () => {
+    const link = await linkTo("mcp-server-eof-link.js");
+    const child = await startMcpServer(link);
+    const exited = waitForExit(child);
+
+    child.stdin!.end();
+
+    await expect(exited).resolves.toEqual({ code: 0, signal: null });
+  }, 30_000);
+
+  it("gracefully exits on SIGTERM", async () => {
+    const link = await linkTo("mcp-server-sigterm-link.js");
+    const child = await startMcpServer(link);
+    const exited = waitForExit(child);
+
+    child.kill("SIGTERM");
+
+    // A null signal proves our handler performed cleanup and exited, rather
+    // than Node terminating the process directly on SIGTERM.
+    await expect(exited).resolves.toEqual({ code: 0, signal: null });
   }, 30_000);
 
   it("stdio survives every malformed action shape captured in the operator incident", async () => {
@@ -349,6 +371,86 @@ function mcpConversation(
         "name" in request ? { name: request.name, arguments: request.arguments } : request.params;
       child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     }
+  });
+}
+
+async function startMcpServer(scriptPath: string): Promise<ChildProcess> {
+  const child = spawn(process.execPath, [scriptPath, "server"], {
+    env: {
+      ...process.env,
+      HOME: tmpDir,
+      XDG_CONFIG_HOME: path.join(tmpDir, "server-shutdown-config"),
+      TRUSTY_SQUIRE_SESSION_FILE: "1",
+    },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  await mcpRequest(child, {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "shutdown-smoke", version: "1" },
+    },
+  });
+  return child;
+}
+
+function mcpRequest(child: ChildProcess, request: object): Promise<McpResponse> {
+  return new Promise((resolve, reject) => {
+    let stdout = "";
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`MCP request timed out: ${JSON.stringify(request)}`));
+    }, 20_000);
+    const onData = (data: Buffer) => {
+      stdout += data.toString();
+      const newline = stdout.indexOf("\n");
+      if (newline === -1) return;
+      cleanup();
+      try {
+        resolve(JSON.parse(stdout.slice(0, newline)) as McpResponse);
+      } catch (err) {
+        reject(err as Error);
+      }
+    };
+    const onError = (err: Error) => {
+      cleanup();
+      reject(err);
+    };
+    const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      cleanup();
+      reject(new Error(`MCP server exited before responding (code=${code} signal=${signal})`));
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.stdout!.off("data", onData);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+
+    child.stdout!.on("data", onData);
+    child.once("error", onError);
+    child.once("exit", onExit);
+    child.stdin!.write(`${JSON.stringify(request)}\n`);
+  });
+}
+
+function waitForExit(child: ChildProcess): Promise<{ code: number | null; signal: NodeJS.Signals | null }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("MCP server did not exit within 20 seconds"));
+    }, 20_000);
+    child.once("exit", (code, signal) => {
+      clearTimeout(timer);
+      resolve({ code, signal });
+    });
+    child.once("error", (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 

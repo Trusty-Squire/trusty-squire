@@ -44,8 +44,9 @@ const isSkill = argv[0] === "skill";
 async function dispatch(): Promise<number> {
   if (isServer) {
     await runServer();
-    // runServer is a stdio loop that runs until the host agent kills
-    // it — never returns. If it does return, treat as success.
+    // runServer force-exits when its client disconnects or it receives a
+    // termination signal. A return here is therefore only a normal startup
+    // path with no active stdio loop left to keep alive.
     return 0;
   }
   if (isSkill) {
@@ -66,8 +67,8 @@ dispatch()
     // actually reap them. Without this exit the CLI appears to hang
     // after printing "You're done."
     //
-    // The `server` branch never reaches here (the stdio loop blocks
-    // forever); `skill` returns its own code via T30 taxonomy.
+    // The `server` branch exits from runServer's disconnect/signal shutdown
+    // path; `skill` returns its own code via T30 taxonomy.
     if (!isServer) process.exit(code);
   })
   .catch((err: unknown) => {

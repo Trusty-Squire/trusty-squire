@@ -15,6 +15,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
+import { closeAllProvisionSessions } from "./bot/provision-session.js";
 import { TOOLS, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
 import { VERSION } from "./version.js";
@@ -197,5 +198,48 @@ export async function runServer(): Promise<void> {
 
   const server = await buildServer(api);
   const transport = new StdioServerTransport();
+
+  // A stdio client can disappear without sending a signal (for example when
+  // its parent agent exits). Chrome keeps Node's event loop alive in that
+  // case, so close every active provisioning browser and explicitly exit.
+  // Keep the single promise so EOF, transport closure, and a signal racing
+  // together cannot run teardown twice.
+  let shutdown: Promise<void> | undefined;
+  const requestShutdown = (): void => {
+    if (shutdown !== undefined) return;
+
+    shutdown = (async () => {
+      process.stdin.removeListener("end", requestShutdown);
+      process.stdin.removeListener("close", requestShutdown);
+      process.removeListener("SIGTERM", requestShutdown);
+      process.removeListener("SIGINT", requestShutdown);
+
+      try {
+        await closeAllProvisionSessions();
+        await server.close();
+      } catch (err) {
+        // Teardown is best-effort: the host is gone, so leave a breadcrumb but
+        // never let a failed browser close turn into an orphaned MCP process.
+        process.stderr.write(
+          `[trusty-squire] server shutdown cleanup failed: ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+      }
+
+      // Browser/Chrome child processes can keep the event loop alive briefly
+      // even after their teardown. This mirrors bin.ts's forced CLI exit and
+      // makes disconnect a reliable process-lifecycle boundary.
+      process.exit(0);
+    })();
+  };
+
+  // Protocol.connect preserves a transport callback installed before it takes
+  // ownership, so this also covers an explicit transport close.
+  transport.onclose = requestShutdown;
+  process.stdin.once("end", requestShutdown);
+  process.stdin.once("close", requestShutdown);
+  process.once("SIGTERM", requestShutdown);
+  process.once("SIGINT", requestShutdown);
   await server.connect(transport);
 }
