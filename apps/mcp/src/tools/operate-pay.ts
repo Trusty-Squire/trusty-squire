@@ -4,11 +4,13 @@ import {
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
+  clearActiveRecoveredPayment,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
   getActiveRecoveredPayment,
   getActivePendingApproval,
   markActivePendingCardFillSubmitStarted,
+  recordActivePaymentApprovalCreated,
   recordActivePaymentProvenance,
   releaseActivePaymentLease,
   retainActivePaymentFieldSeal,
@@ -337,6 +339,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             paymentFieldsCleared = false;
             retainActivePaymentFieldSeal();
           },
+          onApprovalCreated: recordActivePaymentApprovalCreated,
           onApprovalPending: (state) => {
             approvalPending = state;
           },
@@ -384,6 +387,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         } else {
           paymentClaim.resumeApproval.keypair.privateKey = "";
         }
+      }
+      if (result.status !== "approval_pending" && result.status !== "payment_card_filled") {
+        clearActiveRecoveredPayment();
       }
       return result;
     } catch (error) {

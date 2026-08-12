@@ -32,6 +32,7 @@ import {
 } from "./browser.js";
 import type {
   CartCheckoutObservation,
+  PaymentApprovalCreated,
   PendingApprovalWait,
   PendingCardFill,
 } from "./pay-operator.js";
@@ -39,6 +40,7 @@ import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2c
 import type { ApiClient } from "../api-client.js";
 import {
   defaultOperatorResumeStore,
+  sanitizeOperatorResumeMetadata,
   type OperatorResumeMetadata,
   type OperatorResumePendingFill,
   type OperatorResumeStore,
@@ -2331,7 +2333,7 @@ function paymentResumeMetadata(
     approval_id: approvalId,
     pending_fill:
       pending === null
-        ? null
+        ? (session.recoveredPayment?.pending_fill ?? null)
         : {
             approval_id: pending.approval_id,
             approval_url: pending.approval_url,
@@ -2343,24 +2345,25 @@ function paymentResumeMetadata(
 
 function persistResumeMetadata(session: Session, url = session.browser.currentUrl()): void {
   const payment = paymentResumeMetadata(session);
-  session.resumeStore.write({
-    version: 1,
-    reconnect_token: session.reconnectToken,
-    session_id: session.id,
-    url,
-    start_url: session.startUrl,
-    allowed_hosts: session.allowedHosts.map(({ host, source }) => ({ host, source })),
-    generation: session.generation,
-    cart_summary:
-      session.lastCartCheckout === null
-        ? null
-        : {
-            checkout: session.lastCartCheckout.checkout,
-            url: session.lastCartCheckout.url,
-            observed_at: session.lastCartCheckout.observedAt,
-          },
-    ...payment,
-  });
+  session.resumeStore.write(
+    sanitizeOperatorResumeMetadata({
+      version: 1,
+      reconnect_token: session.reconnectToken,
+      session_id: session.id,
+      url,
+      allowed_hosts: session.allowedHosts.map(({ host, source }) => ({ host, source })),
+      generation: session.generation,
+      cart_summary:
+        session.lastCartCheckout === null
+          ? null
+          : {
+              checkout: session.lastCartCheckout.checkout,
+              url: session.lastCartCheckout.url,
+              observed_at: session.lastCartCheckout.observedAt,
+            },
+      ...payment,
+    }),
+  );
 }
 
 function withReconnectToken(session: Session, observation: Observation): Observation {
@@ -2447,8 +2450,38 @@ async function ensureProvisionPrimaryProviderSession(
   return after.includes("google") ? after : ["google", ...after];
 }
 
+function requestedUrlMatches(session: Session, serviceUrl: string): boolean {
+  try {
+    return new URL(session.startUrl).href === new URL(serviceUrl).href;
+  } catch {
+    return session.startUrl === serviceUrl;
+  }
+}
+
+function soleLiveSession(): Session | null {
+  if (sessions.size !== 1) return null;
+  return sessions.values().next().value ?? null;
+}
+
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
   const resume = opts.resumeMetadata;
+  const resumeStore = opts.resumeStore ?? defaultOperatorResumeStore();
+  const live = soleLiveSession();
+  if (live !== null) {
+    const matches =
+      resume !== undefined
+        ? live.reconnectToken === resume.reconnect_token
+        : requestedUrlMatches(live, opts.serviceUrl);
+    if (!matches) {
+      throw new Error("operate_start refused: another operator session is already in flight");
+    }
+    return await observeSession(live);
+  }
+  if (resume === undefined && resumeStore.read() !== null) {
+    throw new Error(
+      "operate_start refused: an active checkout recovery record exists; call operate_reconnect with its reconnect_token",
+    );
+  }
   const id = resume?.session_id ?? randomUUID();
   touchWarmBrowser();
   if (starting || inFlight) {
@@ -2486,7 +2519,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   const session: Session = {
     id,
     reconnectToken: resume?.reconnect_token ?? randomUUID(),
-    resumeStore: opts.resumeStore ?? defaultOperatorResumeStore(),
+    resumeStore,
     browser,
     allowedHosts,
     generation: resume?.generation ?? 0,
@@ -2518,7 +2551,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     lastCartMutation: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
-    startUrl: resume?.start_url ?? opts.serviceUrl,
+    startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
     userEmail: loggedInEmail("google", opts.profileDir),
     recoveredPayment:
@@ -2632,7 +2665,7 @@ export async function startHarnessProvisionSession(
     lastCartMutation: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
-    startUrl: resume?.start_url ?? opts.serviceUrl,
+    startUrl: opts.serviceUrl,
     consentInboxRead: false,
     userEmail: null,
     recoveredPayment:
@@ -2671,6 +2704,13 @@ export async function startHarnessProvisionSession(
 // never creates a second active session. Payment recovery intentionally carries
 // only public IDs and remains fail-closed in claimActivePaymentForOperatePay.
 export async function reconnectProvisionSession(opts: ReconnectOptions): Promise<Observation> {
+  const live = soleLiveSession();
+  if (live !== null) {
+    if (live.reconnectToken !== opts.reconnectToken) {
+      throw new Error("operate_reconnect refused: another operator session is already in flight");
+    }
+    return await observeSession(live);
+  }
   const store = opts.resumeStore ?? defaultOperatorResumeStore();
   const resume = store.read();
   if (resume === null || resume.reconnect_token !== opts.reconnectToken) {
@@ -2810,6 +2850,7 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
 
 export function setActivePendingCardFill(pending: PendingCardFill): void {
   const session = activeProvisionSession();
+  session.recoveredPayment = null;
   session.activePayment = { status: "pending", pending };
   session.paymentFieldSealActive = true;
   persistResumeMetadata(session);
@@ -2847,6 +2888,21 @@ export function getActiveRecoveredPayment(): {
   pending_fill: OperatorResumePendingFill | null;
 } | null {
   return activeProvisionSession().recoveredPayment;
+}
+
+export function recordActivePaymentApprovalCreated(state: PaymentApprovalCreated): void {
+  const session = activeProvisionSession();
+  session.recoveredPayment = {
+    approval_id: state.approval_id,
+    approval_url: state.approval_url,
+    checkout: state.checkout,
+    pending_fill: null,
+  };
+  persistResumeMetadata(session);
+}
+
+export function clearActiveRecoveredPayment(): void {
+  activeProvisionSession().recoveredPayment = null;
 }
 
 export interface ActivePaymentLease {
@@ -2915,6 +2971,7 @@ export function completeActivePaymentLeaseWithPendingFill(
       "operate_pay fill_card completed without ownership of the active payment lease",
     );
   }
+  session.recoveredPayment = null;
   session.activePayment = { status: "pending", pending };
   session.paymentFieldSealActive = true;
   persistResumeMetadata(session);
@@ -2935,6 +2992,7 @@ export function completeActivePaymentLeaseWithPendingApproval(
       "operate_pay approval_pending completed without ownership of the active payment lease",
     );
   }
+  session.recoveredPayment = null;
   session.activePayment = { status: "awaiting_approval", state };
   persistResumeMetadata(session);
 }
@@ -2948,6 +3006,7 @@ export function releaseActivePaymentLease(
   if (state?.status !== "operating" || state.lease !== lease) return false;
   session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
   if (lease.phase === "fill_card") session.paymentFieldSealActive = !paymentFieldsCleared;
+  persistResumeMetadata(session);
   return true;
 }
 
@@ -2966,6 +3025,7 @@ export function restoreActivePendingCardFillAfterConfirmThrow(pending: PendingCa
 
 export function clearActivePendingCardFill(paymentFieldsCleared = true): void {
   const session = activeProvisionSession();
+  session.recoveredPayment = null;
   session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
   session.paymentFieldSealActive = !paymentFieldsCleared;
   persistResumeMetadata(session);
@@ -7488,12 +7548,12 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
-  sessions.delete(sessionId);
   // Do not clear a newer record if another process has already replaced this
   // completed session's local recovery breadcrumb.
   if (session.resumeStore.read()?.reconnect_token === session.reconnectToken) {
     session.resumeStore.clear();
   }
+  sessions.delete(sessionId);
   try {
     await releaseWarmBrowserPage(session.browser);
   } finally {
