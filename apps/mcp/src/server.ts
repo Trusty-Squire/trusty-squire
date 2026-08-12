@@ -15,6 +15,7 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
+import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { closeAllProvisionSessions } from "./bot/provision-session.js";
 import { TOOLS, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
@@ -173,6 +174,7 @@ export function installServerProcessGuards(): void {
 // owns the process-level error handling.
 export async function runServer(): Promise<void> {
   installServerProcessGuards();
+  setSelfManagedChromeTerminationSignalExitEnabled(false);
   // Startup breadcrumb on stderr (which lands in the host agent's MCP
   // log). A silent no-op was the worst part of the entrypoint-guard
   // bug — this line makes "did the server actually start?" answerable

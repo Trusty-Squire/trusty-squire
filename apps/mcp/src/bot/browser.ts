@@ -1455,6 +1455,7 @@ async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
 
 const selfManagedChromePids = new Set<number>();
 let selfManagedCleanupInstalled = false;
+let selfManagedTerminationSignalExitEnabled = true;
 let orphanVerifierReapRan = false;
 const orphanOperatorProfilesReaped = new Set<string>();
 
@@ -1471,17 +1472,36 @@ function cleanupSelfManagedChromes(): void {
   selfManagedChromePids.clear();
 }
 
+const exitForSelfManagedSignal = (code: number): void => {
+  cleanupSelfManagedChromes();
+  process.exit(128 + code);
+};
+const onSelfManagedSigint = (): void => exitForSelfManagedSignal(2);
+const onSelfManagedSigterm = (): void => exitForSelfManagedSignal(15);
+const onSelfManagedSighup = (): void => exitForSelfManagedSignal(1);
+
+export function setSelfManagedChromeTerminationSignalExitEnabled(enabled: boolean): void {
+  if (selfManagedTerminationSignalExitEnabled === enabled) return;
+  selfManagedTerminationSignalExitEnabled = enabled;
+  if (!selfManagedCleanupInstalled) return;
+  if (enabled) {
+    process.once("SIGINT", onSelfManagedSigint);
+    process.once("SIGTERM", onSelfManagedSigterm);
+  } else {
+    process.removeListener("SIGINT", onSelfManagedSigint);
+    process.removeListener("SIGTERM", onSelfManagedSigterm);
+  }
+}
+
 function installSelfManagedChromeCleanup(): void {
   if (selfManagedCleanupInstalled) return;
   selfManagedCleanupInstalled = true;
   process.once("exit", cleanupSelfManagedChromes);
-  const exitForSignal = (code: number): void => {
-    cleanupSelfManagedChromes();
-    process.exit(128 + code);
-  };
-  process.once("SIGINT", () => exitForSignal(2));
-  process.once("SIGTERM", () => exitForSignal(15));
-  process.once("SIGHUP", () => exitForSignal(1));
+  if (selfManagedTerminationSignalExitEnabled) {
+    process.once("SIGINT", onSelfManagedSigint);
+    process.once("SIGTERM", onSelfManagedSigterm);
+  }
+  process.once("SIGHUP", onSelfManagedSighup);
 }
 
 function registerSelfManagedChrome(child: ChildProcess): void {

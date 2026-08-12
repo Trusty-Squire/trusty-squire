@@ -593,6 +593,12 @@ const WARM_BROWSER_MAX_AGE_MS = positiveEnvNumber(
 
 let warmBrowser: WarmBrowser | null = null;
 let warmBrowserIdleTimer: ReturnType<typeof setTimeout> | null = null;
+interface StartingBrowser {
+  controller: BrowserController;
+  launch: Promise<void>;
+  cancelRequested: boolean;
+}
+let startingBrowser: StartingBrowser | null = null;
 // Sequential single-page model: one start may be booting OR one task may hold
 // the browser. This is also the lifecycle/payment safety lease — every reaper
 // checks it before closing shared Chrome.
@@ -677,7 +683,20 @@ async function acquireWarmBrowser(
     ...(opts.profileDir !== undefined ? { profileDir: opts.profileDir } : {}),
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
   });
-  await startBrowserBounded(controller, sessionId);
+  const pending: StartingBrowser = {
+    controller,
+    launch: startBrowserBounded(controller, sessionId),
+    cancelRequested: false,
+  };
+  startingBrowser = pending;
+  try {
+    await pending.launch;
+    if (pending.cancelRequested) {
+      throw new Error("operate_start cancelled: operator server is shutting down");
+    }
+  } finally {
+    if (startingBrowser === pending) startingBrowser = null;
+  }
   warmBrowser = { controller, createdAt: Date.now(), reuseCount: 0 };
   touchWarmBrowser();
   return controller;
@@ -7322,6 +7341,13 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
 
 // Test/teardown helper — close every live session (used by the dev shim on exit).
 export async function closeAllProvisionSessions(): Promise<void> {
+  const pending = startingBrowser;
+  if (pending !== null) {
+    pending.cancelRequested = true;
+    await pending.controller.close().catch(() => undefined);
+    await pending.launch.catch(() => undefined);
+    await pending.controller.close().catch(() => undefined);
+  }
   for (const id of [...sessions.keys()]) {
     try {
       await finishProvisionSession(id);

@@ -38,6 +38,7 @@ const h = vi.hoisted(() => ({
   gotos: [] as string[],
   started: 0,
   startCalls: 0,
+  startGate: null as Promise<void> | null,
   closeCalls: 0,
   resetCalls: 0,
   resetFailuresRemaining: 0,
@@ -131,6 +132,7 @@ vi.mock("../browser.js", () => ({
     async start(): Promise<void> {
       h.started += 1;
       h.startCalls += 1;
+      if (h.startGate !== null) await h.startGate;
     }
     matchesLaunchOptions(opts: { profileDir?: string; proxyUrl?: string }): boolean {
       const proxy = (value: string | undefined): string | null => value?.trim() || null;
@@ -634,6 +636,7 @@ beforeEach(() => {
   h.consentCta = null;
   h.started = 0;
   h.startCalls = 0;
+  h.startGate = null;
   h.closeCalls = 0;
   h.resetCalls = 0;
   h.resetFailuresRemaining = 0;
@@ -3239,6 +3242,35 @@ describe("operate session — warm browser lifecycle", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("waits for an in-progress browser launch and closes its controller", async () => {
+    let releaseStart: (() => void) | undefined;
+    h.startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const startResult = startProvisionSession({ serviceUrl: "https://app.example.com/" }).then(
+      () => null,
+      (err: unknown) => err,
+    );
+    await vi.waitFor(() => expect(h.startCalls).toBe(1));
+
+    let shutdownSettled = false;
+    const shutdown = closeAllProvisionSessions().then(() => {
+      shutdownSettled = true;
+    });
+    await vi.waitFor(() => expect(h.closeCalls).toBe(1));
+    expect(shutdownSettled).toBe(false);
+
+    releaseStart?.();
+    await shutdown;
+
+    await expect(startResult).resolves.toEqual(
+      expect.objectContaining({
+        message: "operate_start cancelled: operator server is shutting down",
+      }),
+    );
+    expect(h.closeCalls).toBe(2);
   });
 
   it("defers max-age recycling until the in-flight task reaches finish", async () => {
