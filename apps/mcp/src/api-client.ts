@@ -674,6 +674,7 @@ export async function shortenVncUrl(
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ url: longUrl }),
+      signal: AbortSignal.timeout(5_000),
     });
     if (!res.ok) return longUrl;
     const body = (await res.json()) as { short_url?: unknown };

@@ -43,6 +43,7 @@ import {
   CHROME_PROFILE_DIR,
   clearStaleSingletonLock,
   launchWithProfileGate,
+  PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
   reapLeakedProfileHolder,
   waitForProfileFree,
@@ -1401,11 +1402,18 @@ function findFreePort(): Promise<number> {
 // Poll Chrome's DevTools HTTP endpoint until it answers (the browser is up
 // and accepting CDP), or the deadline passes. Returns the base endpoint URL
 // connectOverCDP accepts.
-async function waitForDevtools(port: number, deadlineMs: number): Promise<string> {
+async function waitForDevtools(
+  port: number,
+  deadlineMs: number,
+  child?: ChildProcess,
+): Promise<string> {
   const base = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + deadlineMs;
   let lastErr = "";
   while (Date.now() < deadline) {
+    if (child !== undefined && !childProcessIsRunning(child)) {
+      throw new Error("Chrome exited before its DevTools endpoint became available");
+    }
     try {
       const res = await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) });
       if (res.ok) return base;
@@ -1418,9 +1426,13 @@ async function waitForDevtools(port: number, deadlineMs: number): Promise<string
   throw new Error(`Chrome DevTools endpoint never came up on ${base} (${lastErr})`);
 }
 
-async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
-  const lockDir = "/tmp/trusty-squire-chrome-start.lock";
-  const deadline = Date.now() + 60_000;
+export async function withChromeStartupLock<T>(
+  fn: () => Promise<T>,
+  opts: { deadlineMs?: number; lockDir?: string } = {},
+): Promise<T> {
+  const lockDir = opts.lockDir ?? "/tmp/trusty-squire-chrome-start.lock";
+  const deadlineMs = opts.deadlineMs ?? 60_000;
+  const deadline = Date.now() + deadlineMs;
   for (;;) {
     try {
       mkdirSync(lockDir);
@@ -1437,6 +1449,7 @@ async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
         continue;
       }
       if (Date.now() >= deadline) {
+        if (deadlineMs === 0) throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
         throw new Error(
           `Timed out waiting for Chrome startup lock at ${lockDir}: ${
             err instanceof Error ? err.message : String(err)
@@ -1648,6 +1661,16 @@ export interface SelfLaunchedLogin {
   teardown: () => Promise<void>;
 }
 
+export function childProcessIsRunning(child: ChildProcess | null): boolean {
+  return child !== null && child.exitCode === null && child.signalCode === null;
+}
+
+function profileCollisionFromStderr(stderr: string): ProfileBusyError | null {
+  return /ProcessSingleton|SingletonLock|profile.*in use/i.test(stderr)
+    ? new ProfileBusyError(PROFILE_BUSY_MESSAGE)
+    : null;
+}
+
 // Self-launch Chrome + connectOverCDP for the INTERACTIVE login (connect /
 // `mcp login`), instead of Playwright's launchPersistentContext.
 //
@@ -1707,7 +1730,7 @@ export async function launchSelfManagedLoginContext(params: {
       chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
     });
     try {
-      return await waitForDevtools(port, 30_000);
+      return await waitForDevtools(port, 30_000, spawned);
     } catch (err) {
       try {
         spawned.kill("SIGKILL");
@@ -1716,12 +1739,14 @@ export async function launchSelfManagedLoginContext(params: {
       }
       reapLeakedProfileHolder(params.profileDir);
       const detail = chromeStderr.trim();
+      const collision = profileCollisionFromStderr(detail);
+      if (collision !== null) throw collision;
       throw new Error(
         `${err instanceof Error ? err.message : String(err)}` +
           `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
       );
     }
-  });
+  }, { deadlineMs: 0 });
 
   const launcher = getChromium();
   const browser = await launcher.connectOverCDP(endpoint);
@@ -1828,15 +1853,21 @@ export async function launchPlainLoginBrowser(params: {
     // profile, missing lib) should surface here, not 15min later as a blank
     // noVNC. If the process is already dead, throw with its stderr.
     await new Promise((r) => setTimeout(r, 1_200));
-    if (spawned.exitCode !== null) {
+    if (!childProcessIsRunning(spawned)) {
       reapLeakedProfileHolder(params.profileDir);
       const detail = chromeStderr.trim();
+      const collision = profileCollisionFromStderr(detail);
+      if (collision !== null) throw collision;
+      const termination =
+        spawned.exitCode !== null
+          ? `code ${spawned.exitCode}`
+          : `signal ${spawned.signalCode ?? "unknown"}`;
       throw new Error(
-        `plain login Chrome exited immediately (code ${spawned.exitCode})` +
+        `plain login Chrome exited immediately (${termination})` +
           `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
       );
     }
-  });
+  }, { deadlineMs: 0 });
 
   let torn = false;
   const teardown = async (): Promise<void> => {
@@ -1859,7 +1890,7 @@ export async function launchPlainLoginBrowser(params: {
   };
   return {
     teardown,
-    isRunning: () => child !== null && child.exitCode === null,
+    isRunning: () => childProcessIsRunning(child),
   };
 }
 

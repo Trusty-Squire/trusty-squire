@@ -44,7 +44,9 @@ import { shortenVncUrl } from "../api-client.js";
 import {
   CHROME_PROFILE_DIR,
   launchWithProfileGate,
+  PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
+  reapLeakedProfileHolder,
   waitForProfileFree,
 } from "./profile.js";
 import {
@@ -615,9 +617,6 @@ export interface HeadlessRig {
   // on the process command line where `ps` could read it. Tracked here
   // as a belt-and-suspenders unlink in case x11vnc never started.
   passFile?: string;
-  // Cleanup can run from the normal finally path, Node's exit event, and an
-  // interrupt/exception handler. Mark it so every path is safe to invoke.
-  tornDown?: boolean;
 }
 
 function spawnBg(cmd: string, args: string[], env?: NodeJS.ProcessEnv): ChildProcess {
@@ -687,36 +686,27 @@ function printBanner(opts: { tunnelUrl: string; vncPassword: string; label: stri
   );
 }
 
-export function teardownHeadlessRig(rig: HeadlessRig): void {
-  if (rig.tornDown === true) return;
-  rig.tornDown = true;
-  for (const p of rig.procs) {
-    try {
-      p.kill("SIGTERM");
-    } catch {
-      /* best-effort */
-    }
-    // SIGTERM is the polite request; the child may take a moment to
-    // exit. Meanwhile the parent's stdio pipes to the child keep
-    // Node's event loop alive — destroy them so Node can exit even
-    // if the child is mid-shutdown. unref() tells Node "this child
-    // doesn't count toward keeping the process alive."
-    try {
-      p.stdout?.destroy();
-    } catch {
-      /* best-effort */
-    }
-    try {
-      p.stderr?.destroy();
-    } catch {
-      /* best-effort */
-    }
-    try {
-      p.unref();
-    } catch {
-      /* best-effort */
-    }
-  }
+const headlessRigTeardowns = new WeakMap<HeadlessRig, Promise<void>>();
+
+function childHasExited(child: ChildProcess): boolean {
+  return child.exitCode !== null || child.signalCode !== null;
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (childHasExited(child)) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = (): void => finish(true);
+    const timer = setTimeout(() => finish(childHasExited(child)), timeoutMs);
+    const finish = (exited: boolean): void => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      resolve(exited);
+    };
+    child.once("exit", onExit);
+  });
+}
+
+function removeHeadlessRigFiles(rig: HeadlessRig): void {
   if (rig.webDir !== undefined) {
     try {
       rmSync(rig.webDir, { recursive: true, force: true });
@@ -728,8 +718,93 @@ export function teardownHeadlessRig(rig: HeadlessRig): void {
     try {
       rmSync(rig.passFile, { force: true });
     } catch {
-      // best-effort — x11vnc's `rm:` prefix usually removed it already.
+      // best-effort
     }
+  }
+}
+
+function releaseChildHandles(child: ChildProcess): void {
+  try {
+    child.stdout?.destroy();
+  } catch {
+    // best-effort
+  }
+  try {
+    child.stderr?.destroy();
+  } catch {
+    // best-effort
+  }
+  try {
+    child.unref();
+  } catch {
+    // best-effort
+  }
+}
+
+function forceTeardownHeadlessRig(rig: HeadlessRig): void {
+  for (const child of rig.procs) {
+    try {
+      if (!childHasExited(child)) child.kill("SIGKILL");
+    } catch {
+      // best-effort
+    }
+    releaseChildHandles(child);
+  }
+  removeHeadlessRigFiles(rig);
+}
+
+export function teardownHeadlessRig(rig: HeadlessRig, graceMs = 1_000): Promise<void> {
+  const existing = headlessRigTeardowns.get(rig);
+  if (existing !== undefined) return existing;
+  const teardown = (async (): Promise<void> => {
+    const running = rig.procs.filter((child) => !childHasExited(child));
+    for (const child of running) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // best-effort
+      }
+    }
+    await Promise.all(running.map((child) => waitForChildExit(child, graceMs)));
+    const resistant = running.filter((child) => !childHasExited(child));
+    for (const child of resistant) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // best-effort
+      }
+    }
+    await Promise.all(resistant.map((child) => waitForChildExit(child, graceMs)));
+    for (const child of rig.procs) releaseChildHandles(child);
+    removeHeadlessRigFiles(rig);
+  })();
+  headlessRigTeardowns.set(rig, teardown);
+  return teardown;
+}
+
+export async function teardownLoginBrowser(
+  profileDir: string,
+  closeBrowser: () => Promise<void>,
+  timeoutMs = 3_000,
+  forceClose: (profileDir: string) => unknown = reapLeakedProfileHolder,
+): Promise<void> {
+  let completed = false;
+  let timer: NodeJS.Timeout | undefined;
+  const closing = Promise.resolve()
+    .then(closeBrowser)
+    .catch(() => undefined)
+    .finally(() => {
+      completed = true;
+    });
+  await Promise.race([
+    closing,
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, timeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (!completed) {
+    forceClose(profileDir);
   }
 }
 
@@ -762,16 +837,21 @@ export function registerHeadlessRigCleanup(
   };
 
   const exitAfterCleanup = (code: number): void => {
-    if (finishing) return;
+    if (finishing) {
+      forceTeardownHeadlessRig(rig);
+      runtime.exit(code);
+      return;
+    }
     finishing = true;
-    void teardownBrowserWithin().finally(() => {
-      teardownHeadlessRig(rig);
+    void teardownBrowserWithin().finally(async () => {
+      await teardownHeadlessRig(rig);
       runtime.exit(code);
     });
   };
 
-  const onExit = (): void => teardownHeadlessRig(rig);
-  const onSignal = (): void => exitAfterCleanup(130);
+  const onExit = (): void => forceTeardownHeadlessRig(rig);
+  const onSigterm = (): void => exitAfterCleanup(143);
+  const onSigint = (): void => exitAfterCleanup(130);
   const onUncaughtException = (error: Error): void => {
     console.error("[login] uncaught exception; tearing down the login browser", error);
     exitAfterCleanup(1);
@@ -782,15 +862,15 @@ export function registerHeadlessRigCleanup(
   };
 
   runtime.once("exit", onExit);
-  runtime.once("SIGTERM", onSignal);
-  runtime.once("SIGINT", onSignal);
+  runtime.once("SIGTERM", onSigterm);
+  runtime.once("SIGINT", onSigint);
   runtime.once("uncaughtException", onUncaughtException);
   runtime.once("unhandledRejection", onUnhandledRejection);
 
   return (): void => {
     runtime.removeListener("exit", onExit);
-    runtime.removeListener("SIGTERM", onSignal);
-    runtime.removeListener("SIGINT", onSignal);
+    runtime.removeListener("SIGTERM", onSigterm);
+    runtime.removeListener("SIGINT", onSigint);
     runtime.removeListener("uncaughtException", onUncaughtException);
     runtime.removeListener("unhandledRejection", onUnhandledRejection);
   };
@@ -900,9 +980,7 @@ export async function runInBotChrome(
     deadlineMs: 0,
   });
   if (!free) {
-    throw new ProfileBusyError(
-      "another Trusty Squire session is already using the browser — close it first",
-    );
+    throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
   }
   if (hasDisplay()) {
     return await runDisplayedChrome(opts);
@@ -960,26 +1038,32 @@ async function runDisplayedChrome(
     }
   }
   const chromium = resolveChromium();
-  const context = await launchWithProfileGate(opts.profileDir, () =>
-    chromium.launchPersistentContext(opts.profileDir, {
-      channel: "chrome",
-      headless: false,
-      viewport: { width: 1280, height: 800 },
-      // Drop Playwright's default --enable-automation switch: it paints the
-      // "Chrome is being controlled by automated test software" infobar AND
-      // is itself an automation fingerprint the provider can read during the
-      // sign-in (so removing it also helps the session survive).
-      ignoreDefaultArgs: ["--enable-automation"],
-      args: [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-dev-shm-usage",
-      ],
-      ...(loginProxyOption() !== undefined ? { proxy: loginProxyOption() } : {}),
-    }),
+  const context = await launchWithProfileGate(
+    opts.profileDir,
+    () =>
+      chromium.launchPersistentContext(opts.profileDir, {
+        channel: "chrome",
+        headless: false,
+        viewport: { width: 1280, height: 800 },
+        // Drop Playwright's default --enable-automation switch: it paints the
+        // "Chrome is being controlled by automated test software" infobar AND
+        // is itself an automation fingerprint the provider can read during the
+        // sign-in (so removing it also helps the session survive).
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: [
+          "--disable-blink-features=AutomationControlled",
+          "--no-sandbox",
+          "--disable-dev-shm-usage",
+        ],
+        ...(loginProxyOption() !== undefined ? { proxy: loginProxyOption() } : {}),
+      }),
+    { failFast: true },
   );
   try {
-    if (opts.preflight !== undefined && (await opts.preflight(context))) {
+    if (
+      opts.preflight !== undefined &&
+      (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)))
+    ) {
       return { status: "preflight_satisfied" };
     }
     const page = context.pages()[0] ?? (await context.newPage());
@@ -1129,35 +1213,46 @@ async function runHeadlessChrome(
       teardownContext = launched.teardown;
     } else {
       const chromium = resolveChromium();
-      const persistent = await launchWithProfileGate(opts.profileDir, () =>
-        chromium.launchPersistentContext(opts.profileDir, {
-          channel: "chrome",
-          headless: false,
-          viewport: null, // use the real window size
-          env: { ...process.env, DISPLAY: display },
-          // Drop --enable-automation: kills the "controlled by automated test
-          // software" infobar and the matching automation fingerprint.
-          ignoreDefaultArgs: ["--enable-automation"],
-          ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
-          args: [
-            `--window-position=0,0`,
-            `--window-size=${HEADLESS_W},${HEADLESS_H}`,
-            `--app=${opts.url}`,
-            ...sharedChromeArgs,
-          ],
-        }),
+      const persistent = await launchWithProfileGate(
+        opts.profileDir,
+        () =>
+          chromium.launchPersistentContext(opts.profileDir, {
+            channel: "chrome",
+            headless: false,
+            viewport: null, // use the real window size
+            env: { ...process.env, DISPLAY: display },
+            // Drop --enable-automation: kills the "controlled by automated test
+            // software" infobar and the matching automation fingerprint.
+            ignoreDefaultArgs: ["--enable-automation"],
+            ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
+            args: [
+              `--window-position=0,0`,
+              `--window-size=${HEADLESS_W},${HEADLESS_H}`,
+              `--app=${opts.url}`,
+              ...sharedChromeArgs,
+            ],
+          }),
+        { failFast: true },
       );
       context = persistent;
       teardownContext = async (): Promise<void> => {
         await persistent.close().catch(() => undefined);
       };
     }
-    activeTeardown = teardownContext;
+    let browserTeardown: Promise<void> | undefined;
+    const teardownBrowser = (): Promise<void> => {
+      browserTeardown ??= teardownLoginBrowser(opts.profileDir, teardownContext);
+      return browserTeardown;
+    };
+    activeTeardown = teardownBrowser;
     try {
       // CDP path only: preflight + drive the first page to the URL. The plain
       // path has no context — plain Chrome's --app already opened opts.url.
       if (context !== undefined) {
-        if (opts.preflight !== undefined && (await opts.preflight(context))) {
+        if (
+          opts.preflight !== undefined &&
+          (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)))
+        ) {
           return { status: "preflight_satisfied" };
         }
         const page = context.pages()[0] ?? (await context.newPage());
@@ -1287,18 +1382,18 @@ async function runHeadlessChrome(
           }
         }
       }
-      await teardownContext();
+      await teardownBrowser();
       return { status: ok ? "completed" : "timeout" };
     } finally {
       // Idempotent (self-launch teardown guards with a `torn` flag; the
       // persistent fallback's close() is .catch-wrapped), so the success-path
       // call above and this finally can both fire safely.
-      await teardownContext();
+      await teardownBrowser();
       // Torn down — the signal handler must not double-tear it.
       activeTeardown = undefined;
     }
   } finally {
-    teardownHeadlessRig(rig);
+    await teardownHeadlessRig(rig);
     removeRigCleanup();
   }
 }
@@ -1323,38 +1418,7 @@ export async function pollUntil(
   const maxCheckMs = 15_000;
   let lastBeat = Date.now();
   while (Date.now() < deadline) {
-    assertStillLive?.();
-    const checkTimeoutMs = Math.min(maxCheckMs, Math.max(1, deadline - Date.now()));
-    if (
-      await new Promise<boolean>((resolve, reject) => {
-        let settled = false;
-        const finish = (settle: () => void): void => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(checkTimer);
-          if (livenessTimer !== undefined) clearInterval(livenessTimer);
-          settle();
-        };
-        const checkTimer = setTimeout(
-          () => finish(() => reject(new Error(LOGIN_STATUS_CHECK_STALLED_ERROR))),
-          checkTimeoutMs,
-        );
-        const livenessTimer =
-          assertStillLive === undefined
-            ? undefined
-            : setInterval(() => {
-                try {
-                  assertStillLive();
-                } catch (err) {
-                  finish(() => reject(err instanceof Error ? err : new Error(String(err))));
-                }
-              }, 1_000);
-        void check().then(
-          (result) => finish(() => resolve(result)),
-          (err: unknown) => finish(() => reject(err instanceof Error ? err : new Error(String(err)))),
-        );
-      })
-    ) {
+    if (await checkLoginStatusWithin(deadline, check, assertStillLive, maxCheckMs)) {
       return true;
     }
     await new Promise((r) => setTimeout(r, 3000));
@@ -1367,6 +1431,44 @@ export async function pollUntil(
     }
   }
   return false;
+}
+
+export function checkLoginStatusWithin(
+  deadline: number,
+  check: () => Promise<boolean>,
+  assertStillLive?: () => void,
+  maxCheckMs = 15_000,
+): Promise<boolean> {
+  assertStillLive?.();
+  const checkTimeoutMs = Math.min(maxCheckMs, Math.max(1, deadline - Date.now()));
+  return new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const finish = (settle: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(checkTimer);
+      if (livenessTimer !== undefined) clearInterval(livenessTimer);
+      settle();
+    };
+    const checkTimer = setTimeout(
+      () => finish(() => reject(new Error(LOGIN_STATUS_CHECK_STALLED_ERROR))),
+      checkTimeoutMs,
+    );
+    const livenessTimer =
+      assertStillLive === undefined
+        ? undefined
+        : setInterval(() => {
+            try {
+              assertStillLive();
+            } catch (err) {
+              finish(() => reject(err instanceof Error ? err : new Error(String(err))));
+            }
+          }, 1_000);
+    void check().then(
+      (result) => finish(() => resolve(result)),
+      (err: unknown) => finish(() => reject(err instanceof Error ? err : new Error(String(err)))),
+    );
+  });
 }
 
 // --- public entry ------------------------------------------------------

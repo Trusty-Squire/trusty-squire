@@ -28,6 +28,9 @@ export class ProfileBusyError extends Error {
   }
 }
 
+export const PROFILE_BUSY_MESSAGE =
+  "another Trusty Squire session is already using the browser — close it first";
+
 // process.kill(pid, 0) is a liveness probe — it sends no signal, it only
 // asks "does this pid exist and am I allowed to signal it". ESRCH = the
 // process is gone (stale lock). EPERM = it exists but isn't ours (still
@@ -208,14 +211,16 @@ function isSingletonCollision(err: unknown): boolean {
 export async function launchWithProfileGate<T>(
   profileDir: string,
   launch: () => Promise<T>,
-  opts: { retries?: number; reWaitMs?: number } = {},
+  opts: { retries?: number; reWaitMs?: number; failFast?: boolean } = {},
 ): Promise<T> {
   const retries = opts.retries ?? 3;
   for (let attempt = 0; ; attempt++) {
     try {
       return await launch();
     } catch (err) {
-      if (attempt >= retries || !isSingletonCollision(err)) throw err;
+      if (!isSingletonCollision(err)) throw err;
+      if (opts.failFast === true) throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+      if (attempt >= retries) throw err;
       const free = await waitForProfileFree(profileDir, {
         deadlineMs: opts.reWaitMs ?? 30_000,
         pollMs: 500,

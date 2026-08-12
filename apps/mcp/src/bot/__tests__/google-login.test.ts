@@ -8,12 +8,17 @@ import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
+import { shortenVncUrl } from "../../api-client.js";
+import { childProcessIsRunning, withChromeStartupLock } from "../browser.js";
+import { launchWithProfileGate } from "../profile.js";
 import {
   binaryOnPath,
   installHint,
   classifyGoogleAuthState,
+  checkLoginStatusWithin,
   extractGoogleAccountEmail,
   extractGoogleNumberMatch,
   extractOAuthScopes,
@@ -26,6 +31,7 @@ import {
   scopesAreBasic,
   scrapeGoogleScopePhrases,
   teardownHeadlessRig,
+  teardownLoginBrowser,
   ensureOAuthSession,
   type HeadlessRig,
 } from "../google-login.js";
@@ -35,20 +41,30 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function fakeProcess(name: string): ChildProcess {
-  return {
-    kill: vi.fn(),
+function fakeProcess(name: string, ignoreSigterm = false): ChildProcess {
+  const child = Object.assign(new EventEmitter(), {
+    exitCode: null as number | null,
+    signalCode: null as NodeJS.Signals | null,
     stdout: { destroy: vi.fn() },
     stderr: { destroy: vi.fn() },
     unref: vi.fn(),
-    // Keep a readable name in failed assertions; the rig treats every child
-    // identically, including the fallback cloudflared tunnel.
     spawnargs: [name],
-  } as unknown as ChildProcess;
+    kill: vi.fn(),
+  });
+  child.kill.mockImplementation((signal: NodeJS.Signals = "SIGTERM") => {
+    if (ignoreSigterm && signal === "SIGTERM") return true;
+    child.exitCode = 0;
+    child.signalCode = signal;
+    queueMicrotask(() => child.emit("exit", null, signal));
+    return true;
+  });
+  return child as unknown as ChildProcess;
 }
 
 function rigWithEverySessionProcess(): { rig: HeadlessRig; processes: ChildProcess[] } {
-  const processes = ["Xvfb", "x11vnc", "websockify", "cloudflared"].map(fakeProcess);
+  const processes = ["Xvfb", "x11vnc", "websockify", "cloudflared"].map((name) =>
+    fakeProcess(name),
+  );
   return { rig: { display: ":99", procs: processes }, processes };
 }
 
@@ -74,11 +90,11 @@ function cleanupRuntime(): {
 }
 
 describe("headless login VNC lifecycle", () => {
-  it("cleans every session process once from the normal timeout/error finally path", () => {
+  it("cleans every session process once from the normal timeout/error finally path", async () => {
     const { rig, processes } = rigWithEverySessionProcess();
 
-    teardownHeadlessRig(rig);
-    teardownHeadlessRig(rig);
+    await teardownHeadlessRig(rig, 1);
+    await teardownHeadlessRig(rig, 1);
 
     for (const child of processes) {
       expect(child.kill).toHaveBeenCalledTimes(1);
@@ -95,10 +111,49 @@ describe("headless login VNC lifecycle", () => {
     const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime);
 
     handlers.get(signal)!();
-    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(130));
+    const expectedCode = signal === "SIGINT" ? 130 : 143;
+    await vi.waitFor(() => expect(exit).toHaveBeenCalledWith(expectedCode));
 
     for (const child of processes) expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     remove();
+  });
+
+  it("escalates to SIGKILL when a session process ignores SIGTERM", async () => {
+    const child = fakeProcess("cloudflared", true);
+    const rig: HeadlessRig = { display: ":99", procs: [child] };
+
+    await teardownHeadlessRig(rig, 1);
+
+    expect(child.kill).toHaveBeenNthCalledWith(1, "SIGTERM");
+    expect(child.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
+  });
+
+  it("uses synchronous SIGKILL cleanup during process exit", () => {
+    const child = fakeProcess("websockify", true);
+    const rig: HeadlessRig = { display: ":99", procs: [child] };
+    const { handlers, runtime } = cleanupRuntime();
+    const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime);
+
+    handlers.get("exit")!();
+
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    remove();
+  });
+
+  it("forces browser cleanup when graceful teardown stalls", async () => {
+    vi.useFakeTimers();
+    const forceClose = vi.fn();
+    const waiting = teardownLoginBrowser(
+      "/unused-profile",
+      () => new Promise<void>(() => undefined),
+      100,
+      forceClose,
+    );
+
+    await vi.advanceTimersByTimeAsync(100);
+    await waiting;
+
+    expect(forceClose).toHaveBeenCalledWith("/unused-profile");
   });
 
   it("cleans every session process and the active browser on an uncaught exception", async () => {
@@ -125,6 +180,57 @@ describe("headless login VNC lifecycle", () => {
       "--url",
       "http://127.0.0.1:4567",
     ]);
+  });
+
+  it("bounds the fallback URL shortener request", async () => {
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
+      return new Response(JSON.stringify({ short_url: "https://trustysquire.ai/g/short" }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    await expect(
+      shortenVncUrl("https://api.test", "https://long.test/#p=secret", fetchImpl),
+    ).resolves.toBe("https://trustysquire.ai/g/short");
+  });
+});
+
+describe("login browser lifecycle guards", () => {
+  it("treats signal-terminated Chrome as closed", () => {
+    const child = fakeProcess("chrome");
+    expect(childProcessIsRunning(child)).toBe(true);
+    Object.assign(child, { signalCode: "SIGKILL" });
+    expect(childProcessIsRunning(child)).toBe(false);
+  });
+
+  it("fails immediately when another login owns the startup lock", async () => {
+    const root = mkdtempSync(join(tmpdir(), "ts-startup-lock-"));
+    const lockDir = join(root, "lock");
+    mkdirSync(lockDir);
+    try {
+      await expect(
+        withChromeStartupLock(async () => undefined, { deadlineMs: 0, lockDir }),
+      ).rejects.toThrow(
+        "another Trusty Squire session is already using the browser — close it first",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("maps a persistent-profile launch race to the contention error", async () => {
+    await expect(
+      launchWithProfileGate(
+        "/tmp/unused-profile",
+        async () => {
+          throw new Error("Failed to create a ProcessSingleton for SingletonLock");
+        },
+        { failFast: true },
+      ),
+    ).rejects.toThrow(
+      "another Trusty Squire session is already using the browser — close it first",
+    );
   });
 });
 
@@ -311,6 +417,21 @@ describe("pollUntil phase-aware heartbeat", () => {
     const rejected = expect(waiting).rejects.toThrow("login status check stopped responding");
 
     await vi.advanceTimersByTimeAsync(15_000);
+
+    await rejected;
+  });
+
+  it("applies the same timeout boundary to a preflight-style status check", async () => {
+    vi.useFakeTimers();
+    const waiting = checkLoginStatusWithin(
+      Date.now() + 60_000,
+      () => new Promise<boolean>(() => undefined),
+      undefined,
+      100,
+    );
+    const rejected = expect(waiting).rejects.toThrow("login status check stopped responding");
+
+    await vi.advanceTimersByTimeAsync(100);
 
     await rejected;
   });
