@@ -402,6 +402,8 @@ const actSchema = z
     host: z.string().min(1).max(253).optional(),
     // type_secret: the sealed slot whose value to type into `target`.
     slot: z.string().min(1).max(60).optional(),
+    product_identity: z.string().trim().min(1).max(500).optional(),
+    options_hash: z.string().trim().min(1).max(128).optional(),
     provenance: RecipeHoleSchema.shape.hole.optional(),
     replay_step_index: z.number().int().min(0).optional(),
     replay_hole: RecipeHoleSchema.shape.hole.optional(),
@@ -414,6 +416,12 @@ const actSchema = z
     detail: z.enum(["none", "compact", "full"]).optional(),
   })
   .superRefine((value, ctx) => {
+    if ((value.product_identity === undefined) !== (value.options_hash === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "product_identity and options_hash must be provided together",
+      });
+    }
     if ((value.replay_step_index === undefined) !== (value.replay_hole === undefined)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -586,6 +594,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
     '"full" returns the legacy screen+accessibility payload. ' +
+    "Cart-affecting actions require product_identity and options_hash so checkout_state identifies the affected line. " +
     OBSERVE_DELTA_CONTRACT,
   inputSchema: actSchema,
   jsonInputSchema: {
@@ -619,6 +628,8 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       key: { type: "string" },
       host: { type: "string" },
       slot: { type: "string" },
+      product_identity: { type: "string", minLength: 1 },
+      options_hash: { type: "string", minLength: 1 },
       provenance: {
         type: "string",
         pattern:
@@ -644,12 +655,19 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
         return {
           status: "manual_card_entry_refused",
           reason,
-          safe_alternative: { tool: "operate_pay", phase: "fill_card" },
+          safe_alternative: "operate_pay",
           missing_prerequisite: "verified_cart_total",
         };
       }
     }
-    return await act(args.session_id, buildAction(args), args.detail ?? "compact");
+    return await act(
+      args.session_id,
+      buildAction(args),
+      args.detail ?? "compact",
+      args.product_identity !== undefined && args.options_hash !== undefined
+        ? { productIdentity: args.product_identity, optionsHash: args.options_hash }
+        : undefined,
+    );
   },
 };
 

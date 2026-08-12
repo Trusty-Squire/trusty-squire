@@ -6921,9 +6921,15 @@ export class BrowserController {
     };
   }
 
-  async readCheckoutReviewLineItems(): Promise<Array<{ title: string; quantity: number }>> {
+  async readCheckoutReviewLineItems(): Promise<Array<{ title: string; quantity: number }>>;
+  async readCheckoutReviewLineItems(
+    includeDetails: true,
+  ): Promise<Array<{ title: string; quantity: number; details: string }>>;
+  async readCheckoutReviewLineItems(
+    includeDetails = false,
+  ): Promise<Array<{ title: string; quantity: number; details?: string }>> {
     if (!this.page) throw new Error("Browser not started");
-    return await this.page.evaluate(() => {
+    const items = await this.page.evaluate(() => {
       const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
       const visible = (element: Element): boolean => {
         if (!(element instanceof HTMLElement) || element.getClientRects().length === 0)
@@ -6975,16 +6981,24 @@ export class BrowserController {
         const title = titleFrom(row);
         return quantity === undefined || title === undefined
           ? []
-          : [{ title, quantity, size: normalize(row.textContent ?? "").length }];
+          : [{
+              title,
+              quantity,
+              details: normalize(row.textContent ?? ""),
+              size: normalize(row.textContent ?? "").length,
+            }];
       });
-      const byTitle = new Map<string, { title: string; quantity: number; size: number }>();
+      const byTitle = new Map<string, { title: string; quantity: number; details: string; size: number }>();
       for (const item of observed) {
         const key = item.title.toLowerCase();
         const previous = byTitle.get(key);
         if (previous === undefined || item.size < previous.size) byTitle.set(key, item);
       }
-      return [...byTitle.values()].map(({ title, quantity }) => ({ title, quantity }));
+      return [...byTitle.values()].map(({ title, quantity, details }) => ({ title, quantity, details }));
     });
+    return includeDetails
+      ? items
+      : items.map(({ title, quantity }) => ({ title, quantity }));
   }
 
   async readSettledCheckoutReviewSummary(

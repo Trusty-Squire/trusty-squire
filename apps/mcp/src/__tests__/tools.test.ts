@@ -377,7 +377,7 @@ describe("operate_act manual card refusal", () => {
     });
     await expect(provisionActTool.handler(args, null)).resolves.toMatchObject({
       status: "manual_card_entry_refused",
-      safe_alternative: { tool: "operate_pay", phase: "fill_card" },
+      safe_alternative: "operate_pay",
       missing_prerequisite: "verified_cart_total",
     });
   });
