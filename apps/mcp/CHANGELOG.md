@@ -1,5 +1,12 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.13 (2026-08-11)
+
+- fix(mcp): make payment approval non-blocking and persist the verified cart total (#486)
+- fix(mcp): make checkout state legible, add-to-cart idempotent, and vaulted-card selection obvious (#487)
+- fix(mcp): self-repair operator action errors with structured stale-ref recovery, atomic sequential multi-selects, and schema-repair guidance (#488)
+- fix(mcp): keep the shared stdio server process-safe on malformed operator calls and mark server unavailability retry-once (#489)
+
 ## 1.1.9-rc.12 (2026-08-11)
 
 - fix(mcp): use one approval for split checkouts — a single amount-bound passkey approval sourced from the cart total releases/decrypts the card and authorizes the charge, with no separate release or charge approval (#484)
