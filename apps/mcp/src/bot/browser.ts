@@ -2501,7 +2501,7 @@ export class BrowserController {
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
     this.launchedContext = true;
-    if (this.launchedMode !== "remote") {
+    if (!remoteMode) {
       this.launchedProfileHolderPid =
         this.childChrome?.pid ?? currentProfileHolderPid(this.profileDir);
     }

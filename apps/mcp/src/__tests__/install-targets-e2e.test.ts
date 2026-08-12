@@ -20,6 +20,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type * as BotModule from "../bot/index.js";
 import type * as GoogleLoginModule from "../bot/google-login.js";
+import type * as ProfileModule from "../bot/profile.js";
 
 // Module-level mocks for the install pipeline's external collaborators.
 // Hoisted by vitest before the install/cli.js import below, so the
@@ -74,6 +75,17 @@ vi.mock("../bot/google-login.js", async (importOriginal) => {
     // housekeeper harvest holding the profile lock) it blocks ~15s + retries
     // and times the suite out. An e2e must not launch a real browser — stub it.
     detectActiveProviderSessions: vi.fn(async () => ["google"] as const),
+  };
+});
+
+vi.mock("../bot/profile.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof ProfileModule>();
+  return {
+    ...actual,
+    // This suite verifies config writes, not contention against the user's live profile.
+    withProfileOperationGuard: vi.fn(
+      async <T>(_profileDir: string, fn: () => Promise<T>): Promise<T> => fn(),
+    ),
   };
 });
 
