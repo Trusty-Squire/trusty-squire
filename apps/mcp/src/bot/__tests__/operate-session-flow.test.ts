@@ -55,8 +55,20 @@ const h = vi.hoisted(() => ({
     amount_cents: number;
     currency: string;
   } | null,
-  cartLineItems: [] as Array<{ title: string; quantity: number; details?: string }>,
-  cartLineItemsAfterClick: null as Array<{ title: string; quantity: number; details?: string }> | null,
+  cartLineItems: [] as Array<{
+    title: string;
+    quantity: number;
+    details?: string;
+    product_identities: string[];
+    option_signatures: string[];
+  }>,
+  cartLineItemsAfterClick: null as Array<{
+    title: string;
+    quantity: number;
+    details?: string;
+    product_identities: string[];
+    option_signatures: string[];
+  }> | null,
   cartLineReadFailuresRemaining: 0,
   failNextCartLineReadAfterClick: false,
   readCheckoutSummaryCalls: 0,
@@ -167,7 +179,13 @@ vi.mock("../browser.js", () => ({
       if (h.checkoutSummary === null) throw new Error("payment_checkout_total_not_found");
       return h.checkoutSummary;
     }
-    async readCheckoutReviewLineItems(): Promise<Array<{ title: string; quantity: number; details?: string }>> {
+    async readCheckoutReviewLineItems(): Promise<Array<{
+      title: string;
+      quantity: number;
+      details?: string;
+      product_identities: string[];
+      option_signatures: string[];
+    }>> {
       if (h.cartLineReadFailuresRemaining > 0) {
         h.cartLineReadFailuresRemaining -= 1;
         throw new Error("cart line observation failed");
@@ -4245,7 +4263,12 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
       currency: "JPY",
     };
     h.clickValueMutation = { selector: "#qty", value: "1" };
-    h.cartLineItemsAfterClick = [{ title: "Tiara size M", quantity: 1 }];
+    h.cartLineItemsAfterClick = [{
+      title: "Tiara",
+      quantity: 1,
+      product_identities: ["sku:tiara"],
+      option_signatures: ["size=M"],
+    }];
     const started = await startProvisionSession({ serviceUrl: h.currentUrl });
 
     const added = await cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-1");
@@ -4282,7 +4305,12 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
       amount_cents: 968,
       currency: "JPY",
     };
-    h.cartLineItemsAfterClick = [{ title: "Tiara size M", quantity: 1 }];
+    h.cartLineItemsAfterClick = [{
+      title: "Tiara",
+      quantity: 1,
+      product_identities: ["sku:tiara"],
+      option_signatures: ["size=M"],
+    }];
     const started = await startProvisionSession({ serviceUrl: h.currentUrl });
 
     const [first, second] = await Promise.all([
@@ -4305,7 +4333,12 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
       amount_cents: 968,
       currency: "JPY",
     };
-    h.cartLineItemsAfterClick = [{ title: "Tiara size M", quantity: 1 }];
+    h.cartLineItemsAfterClick = [{
+      title: "Tiara",
+      quantity: 1,
+      product_identities: ["sku:tiara"],
+      option_signatures: ["size=M"],
+    }];
     h.failNextCartLineReadAfterClick = true;
     const started = await startProvisionSession({ serviceUrl: h.currentUrl });
 
@@ -4345,6 +4378,45 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
       subtotal: { amount_cents: 1_000, currency: "USD" },
       shipping: { amount_cents: 500, currency: "USD" },
       payable_total: { amount_cents: 1_500, currency: "USD" },
+    });
+  });
+
+  it("keeps a labeled shipping charge authoritative over promotional copy", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText =
+      "Free shipping on orders over $50. Subtotal $10.00 Shipping $5.00 Total $15.00";
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 1_500,
+      currency: "USD",
+    };
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const observed = await observe(started.session_id, "compact");
+
+    expect(observed.checkout_state?.shipping).toEqual({ amount_cents: 500, currency: "USD" });
+  });
+
+  it("resolves a cart drawer to its canonical cart link", async () => {
+    h.currentUrl = "https://shop.example.com/products/tiara";
+    h.visibleText = "Mini cart";
+    h.elements = [
+      elem({
+        tag: "a",
+        selector: "#view-cart",
+        visibleText: "View cart",
+        href: "/cart",
+        container: "cart drawer",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const observed = await observe(started.session_id, "compact");
+
+    expect(observed.checkout_state).toMatchObject({
+      stage: "cart",
+      cart_url: "https://shop.example.com/cart",
     });
   });
 
@@ -4396,6 +4468,38 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     expect(observed.checkout_state).toMatchObject({
       product_identity: "sku:tiara",
       options_hash: "size=M",
+    });
+  });
+
+  it("binds row-scoped remove controls before dispatch", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Tiara size M";
+    h.elements = [
+      elem({
+        selector: "#remove-tiara",
+        role: "button",
+        visibleText: "Remove",
+        container: "cart item Tiara size M",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    await expect(act(started.session_id, { kind: "click", target: "Remove" }))
+      .rejects.toThrow("requires product_identity and options_hash");
+    expect(h.clickCalls).toBe(0);
+    const observed = await act(
+      started.session_id,
+      { kind: "click", target: "Remove" },
+      "compact",
+      { productIdentity: "sku:tiara", optionsHash: "size=M" },
+    );
+
+    expect(observed).toMatchObject({
+      cart_delta: "unknown",
+      checkout_state: {
+        product_identity: "sku:tiara",
+        options_hash: "size=M",
+      },
     });
   });
 

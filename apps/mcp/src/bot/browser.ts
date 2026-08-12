@@ -6924,10 +6924,26 @@ export class BrowserController {
   async readCheckoutReviewLineItems(): Promise<Array<{ title: string; quantity: number }>>;
   async readCheckoutReviewLineItems(
     includeDetails: true,
-  ): Promise<Array<{ title: string; quantity: number; details: string }>>;
+  ): Promise<
+    Array<{
+      title: string;
+      quantity: number;
+      details: string;
+      product_identities: string[];
+      option_signatures: string[];
+    }>
+  >;
   async readCheckoutReviewLineItems(
     includeDetails = false,
-  ): Promise<Array<{ title: string; quantity: number; details?: string }>> {
+  ): Promise<
+    Array<{
+      title: string;
+      quantity: number;
+      details?: string;
+      product_identities?: string[];
+      option_signatures?: string[];
+    }>
+  > {
     if (!this.page) throw new Error("Browser not started");
     const items = await this.page.evaluate(() => {
       const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
@@ -6971,11 +6987,65 @@ export class BrowserController {
             !/^\$|\$\s*\d/.test(candidate),
         );
       };
+      const unique = (values: string[]): string[] => [...new Set(values.filter(Boolean))];
+      const productIdentitiesIn = (container: Element): string[] => {
+        const identities: string[] = [];
+        const candidates = [container, ...Array.from(container.querySelectorAll("*"))];
+        for (const element of candidates) {
+          const explicit = element.getAttribute("data-product-identity");
+          const sku =
+            element.getAttribute("data-sku") ??
+            (element.getAttribute("itemprop") === "sku"
+              ? element.getAttribute("content") ?? element.textContent?.trim() ?? ""
+              : "");
+          const productId = element.getAttribute("data-product-id");
+          if (explicit !== null) identities.push(explicit);
+          if (sku.length > 0) identities.push(sku, `sku:${sku}`);
+          if (productId !== null) identities.push(productId, `product:${productId}`);
+        }
+        for (const link of Array.from(container.querySelectorAll<HTMLAnchorElement>('a[href*="/product" i]'))) {
+          identities.push(link.href);
+        }
+        return unique(identities.map((identity) => normalize(identity)));
+      };
+      const optionSignaturesIn = (container: Element): string[] => {
+        const signatures: string[] = [];
+        const candidates = [container, ...Array.from(container.querySelectorAll("*"))];
+        for (const element of candidates) {
+          for (const attribute of ["data-options-hash", "data-option-signature"]) {
+            const value = element.getAttribute(attribute);
+            if (value !== null) signatures.push(value);
+          }
+          const optionName = element.getAttribute("data-option-name");
+          const optionValue = element.getAttribute("data-option-value");
+          if (optionName !== null && optionValue !== null) {
+            signatures.push(`${optionName}=${optionValue}`);
+          }
+        }
+        for (const select of Array.from(container.querySelectorAll<HTMLSelectElement>("select[name]"))) {
+          const option = select.selectedOptions[0];
+          if (option !== undefined) {
+            signatures.push(`${select.name}=${option.value}`, `${select.name}=${normalize(option.text)}`);
+          }
+        }
+        return unique(signatures.map((signature) => normalize(signature)));
+      };
       const rows = Array.from(
         document.querySelectorAll(
           'tr, [role="row"], [data-testid*="line-item" i], [data-testid*="product" i], [class*="line-item" i], [class*="product" i]',
         ),
-      ).filter(visible);
+      )
+        .filter(visible)
+        .filter(
+          (row, _index, candidates) =>
+            !candidates.some(
+              (candidate) =>
+                candidate !== row &&
+                row.contains(candidate) &&
+                quantityIn(candidate) !== undefined &&
+                titleFrom(candidate) !== undefined,
+            ),
+        );
       const observed = rows.flatMap((row) => {
         const quantity = quantityIn(row);
         const title = titleFrom(row);
@@ -6985,16 +7055,11 @@ export class BrowserController {
               title,
               quantity,
               details: normalize(row.textContent ?? ""),
-              size: normalize(row.textContent ?? "").length,
+              product_identities: productIdentitiesIn(row),
+              option_signatures: optionSignaturesIn(row),
             }];
       });
-      const byTitle = new Map<string, { title: string; quantity: number; details: string; size: number }>();
-      for (const item of observed) {
-        const key = item.title.toLowerCase();
-        const previous = byTitle.get(key);
-        if (previous === undefined || item.size < previous.size) byTitle.set(key, item);
-      }
-      return [...byTitle.values()].map(({ title, quantity, details }) => ({ title, quantity, details }));
+      return observed;
     });
     return includeDetails
       ? items

@@ -2753,46 +2753,28 @@ export interface CartAddResult {
   postcondition: { product_identity: string; options_hash: string; quantity: number | null };
 }
 
-function normalizedCartIdentity(value: string): string {
-  let decoded = value;
+function canonicalCartIdentity(value: string): string {
+  const trimmed = value.trim();
   try {
-    decoded = decodeURIComponent(value);
+    const url = new URL(trimmed);
+    url.hash = "";
+    return url.toString();
   } catch {
-    decoded = value;
+    return trimmed;
   }
-  return decoded
-    .toLowerCase()
-    .replace(/^https?:\/\//, "")
-    .replace(/\b(?:sku|product|variant|item)\b\s*[:=]/g, " ")
-    .replace(/[^\p{L}\p{N}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
-function cartIdentityTokens(value: string): string[] {
-  return normalizedCartIdentity(value)
-    .split(" ")
-    .filter((token) => token.length > 0);
-}
-
-function cartProductTokens(value: string): string[] {
-  try {
-    const url = new URL(value);
-    const segment = url.pathname.split("/").filter(Boolean).at(-1);
-    if (segment !== undefined) return cartIdentityTokens(segment);
-  } catch {}
-  const generic = new Set(["gid", "shopify", "product", "products", "item", "variant", "sku"]);
-  return cartIdentityTokens(value).filter((token) => !generic.has(token));
-}
-
-function cartLineMatches(title: string, productIdentity: string, optionsHash: string): boolean {
-  const normalizedTitle = normalizedCartIdentity(title);
-  const titleTokens = new Set(normalizedTitle.split(" ").filter(Boolean));
-  const productTokens = cartProductTokens(productIdentity);
-  const optionTokens = cartIdentityTokens(optionsHash);
-  if (productTokens.length === 0 || optionTokens.length === 0) return false;
-  const productMatch = productTokens.some((token) => token.length >= 3 && titleTokens.has(token));
-  return productMatch && optionTokens.every((token) => titleTokens.has(token));
+function cartLineMatches(
+  line: { product_identities: string[]; option_signatures: string[] },
+  productIdentity: string,
+  optionsHash: string,
+): boolean {
+  const product = canonicalCartIdentity(productIdentity);
+  const options = canonicalCartIdentity(optionsHash);
+  return (
+    line.product_identities.some((candidate) => canonicalCartIdentity(candidate) === product) &&
+    line.option_signatures.some((candidate) => canonicalCartIdentity(candidate) === options)
+  );
 }
 
 async function cartLineQuantity(
@@ -2801,9 +2783,7 @@ async function cartLineQuantity(
   optionsHash: string,
 ): Promise<number | null> {
   const lines = await session.browser.readCheckoutReviewLineItems(true);
-  const matching = lines.filter((line) =>
-    cartLineMatches(`${line.title} ${line.details}`, productIdentity, optionsHash),
-  );
+  const matching = lines.filter((line) => cartLineMatches(line, productIdentity, optionsHash));
   if (matching.length !== 1) return null;
   return matching[0]!.quantity;
 }
@@ -3611,10 +3591,7 @@ async function captureCartCheckoutForFillCardFallback(
   return null;
 }
 
-function checkoutStage(
-  url: string,
-  elements: readonly InteractiveElement[],
-): CheckoutState["stage"] | null {
+function checkoutStageFromUrl(url: string): CheckoutState["stage"] | null {
   let pathname = "";
   try {
     pathname = decodeURIComponent(new URL(url).pathname).toLowerCase();
@@ -3625,6 +3602,15 @@ function checkoutStage(
     return "checkout";
   }
   if (/(?:^|\/)(?:cart|shopping[-_]?cart|view[-_]?cart|basket|bag)(?:\.(?:php|html?))?(?:\/|$)/i.test(pathname)) return "cart";
+  return null;
+}
+
+function checkoutStage(
+  url: string,
+  elements: readonly InteractiveElement[],
+): CheckoutState["stage"] | null {
+  const routeStage = checkoutStageFromUrl(url);
+  if (routeStage !== null) return routeStage;
   if (elements.some((element) => paymentFieldForObservation(element) !== null)) return "checkout";
   const contexts = elements
     .flatMap((element) => [element.container, element.screenPath])
@@ -3669,24 +3655,23 @@ function labeledCheckoutMoney(
 }
 
 function shippingMoney(text: string, fallbackCurrency?: string): CheckoutMoney | null {
-  if (/(?:free\s+shipping|complimentary\s+(?:shipping|delivery)|送料無料)/iu.test(text)) {
-    return fallbackCurrency === undefined ? null : { amount_cents: 0, currency: fallbackCurrency };
-  }
-  const match = text.match(
-    new RegExp(
-      `(?:shipping|delivery|送料|配送料)\\s*[:：]?\\s*([\\s\\S]*?)(?=${checkoutComponentBoundary}\\s*[:：]?|$)`,
-      "iu",
-    ),
+  const pattern = new RegExp(
+    `(?:shipping|delivery|送料|配送料)\\s*[:：]?\\s*([\\s\\S]*?)(?=${checkoutComponentBoundary}\\s*[:：]?|$)`,
+    "giu",
   );
-  const value = match?.[1]?.trim();
-  if (value === undefined || value.length === 0) return null;
-  if (/^(?:free|complimentary|0|無料)(?:\s|$)/iu.test(value)) {
-    return fallbackCurrency === undefined ? null : { amount_cents: 0, currency: fallbackCurrency };
+  for (const match of text.matchAll(pattern)) {
+    const value = match[1]?.trim();
+    if (value === undefined || value.length === 0) continue;
+    if (/^(?:free|complimentary|0|無料)(?:\s|$)/iu.test(value)) {
+      return fallbackCurrency === undefined ? null : { amount_cents: 0, currency: fallbackCurrency };
+    }
+    if (!/^(?:(?:[A-Z]{3}\p{Sc}?|\p{Sc})\s*)?\d/iu.test(value)) continue;
+    const parsed = parseCheckoutAmount([`Total ${value}`], fallbackCurrency);
+    if (parsed === null) continue;
+    if (fallbackCurrency !== undefined && parsed.currency !== fallbackCurrency) return null;
+    return parsed;
   }
-  const parsed = parseCheckoutAmount([`Total ${value}`], fallbackCurrency);
-  return parsed !== null && fallbackCurrency !== undefined && parsed.currency !== fallbackCurrency
-    ? null
-    : parsed;
+  return null;
 }
 
 function originForUrl(url: string): string | null {
@@ -3707,8 +3692,7 @@ function cartMutationForUrl(session: Session, url: string): CartMutation | null 
 function cartUrlForState(session: Session, url: string, elements: readonly InteractiveElement[]): string | null {
   const origin = originForUrl(url);
   if (origin === null) return null;
-  const currentStage = checkoutStage(url, elements);
-  if (currentStage === "cart") {
+  if (checkoutStageFromUrl(url) === "cart") {
     session.cartUrls.set(origin, url);
     return url;
   }
@@ -3801,7 +3785,23 @@ function isCartAffectingAction(
       return true;
     }
     const hasQuantityContext = /(?:\b(?:quantity|qty|cart|basket|bag)\b|数量|個数|カート|かご)/i.test(target);
-    return hasQuantityContext && parts.some((part) => /^\s*(?:\+|[-−])\s*$/.test(part));
+    if (hasQuantityContext && parts.some((part) => /^\s*(?:\+|[-−])\s*$/.test(part))) {
+      return true;
+    }
+    const rowContext = `${el?.container ?? ""} ${el?.screenPath ?? ""}`;
+    const actionLabels = [
+      "target" in action ? action.target : "",
+      el?.visibleText ?? "",
+      el?.ariaLabel ?? "",
+      el?.labelText ?? "",
+      el?.name ?? "",
+      el?.id ?? "",
+      ...extraLabels,
+    ];
+    return (
+      /(?:\b(?:cart|basket|bag)(?:\s+item|\s+line)?\b|カート|かご)/i.test(rowContext) &&
+      actionLabels.some((label) => /^\s*(?:(?:remove|delete|update)\b|削除|更新)/i.test(label))
+    );
   }
   return (
     (action.kind === "type" || action.kind === "select") &&
