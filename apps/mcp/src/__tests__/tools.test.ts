@@ -680,6 +680,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
       item: PAYMENT_DETAILS.item,
       reason: PAYMENT_DETAILS.reason,
       cardRef: "card_1",
+      three_ds_wait_seconds: 600,
     };
     mockAwaitingApproval = resumeApproval;
     const createPaymentApproval = vi.fn().mockResolvedValue({
@@ -709,13 +710,19 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     } as unknown as ApiClient);
 
     await expect(
-      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+      operatePayTool.handler(
+        operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, three_ds_wait_seconds: 0 }),
+        api,
+      ),
     ).resolves.toMatchObject({
       status: "approval_pending",
       approval_id: "appr_fresh_after_terminal",
     });
     expect(createPaymentApproval).toHaveBeenCalledOnce();
-    expect(mockAwaitingApproval).toMatchObject({ approval_id: "appr_fresh_after_terminal" });
+    expect(mockAwaitingApproval).toMatchObject({
+      approval_id: "appr_fresh_after_terminal",
+      three_ds_wait_seconds: 0,
+    });
     expect(resumeApproval.keypair.privateKey).toBe("");
     expect(mockPaymentLease).toBeNull();
   });

@@ -396,9 +396,6 @@ export async function executeOperatePay(
 ): Promise<Record<string, unknown>> {
   const deps = { ...defaultDependencies(), ...overrides };
   let resume = deps.resumeFrom;
-  const threeDsWaitSeconds =
-    resume !== undefined ? resume.three_ds_wait_seconds : args.three_ds_wait_seconds;
-  const threeDsWaitMs = Math.min(Math.max(threeDsWaitSeconds ?? 180, 0), 600) * 1000;
   let keypair = resume !== undefined ? resume.keypair : await generateOperatorKeypair();
   let keypairHandedOff = resume !== undefined;
   let cardBytes: Uint8Array | undefined;
@@ -446,6 +443,10 @@ export async function executeOperatePay(
         rejectedCandidates.clear();
       }
     }
+
+    const threeDsWaitSeconds =
+      resume !== undefined ? resume.three_ds_wait_seconds : args.three_ds_wait_seconds;
+    const threeDsWaitMs = Math.min(Math.max(threeDsWaitSeconds ?? 180, 0), 600) * 1000;
 
     let checkout: CheckoutSummary;
     let item: string;
