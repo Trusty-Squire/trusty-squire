@@ -538,25 +538,25 @@ function actionSchemaRepair(args: unknown, issues: readonly { path: (string | nu
           target: "@e:<observed-provider-button-ref>",
         }
       : kind === "type_secret"
-      ? {
-          session_id: "<session_id>",
-          kind: "type_secret",
-          slot: "sealed_secret",
-          target: "@e:<observed-ref>",
-        }
-      : kind === "select"
         ? {
             session_id: "<session_id>",
-            kind: "select",
+            kind: "type_secret",
+            slot: "sealed_secret",
             target: "@e:<observed-ref>",
-            text: "Option label",
           }
-        : {
-            session_id: "<session_id>",
-            kind: "type",
-            target: "@e:<observed-ref>",
-            text: "Text to enter",
-          };
+        : kind === "select"
+          ? {
+              session_id: "<session_id>",
+              kind: "select",
+              target: "@e:<observed-ref>",
+              text: "Option label",
+            }
+          : {
+              session_id: "<session_id>",
+              kind: "type",
+              target: "@e:<observed-ref>",
+              text: "Text to enter",
+            };
   const safe_alternative =
     kind === "type_secret" && missing.includes("slot")
       ? 'First capture the value with operate_extract { into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
@@ -667,7 +667,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "the goto/allow_host domain scope, opaque frames are refused, and type_secret " +
     "never targets a cross-domain frame. Frame-scoped select supports native " +
     "<select> controls only; drive a custom framed widget with click. " +
-    "upload/oauth_click refuse frame refs. " +
+    "upload/oauth_click/oauth_login refuse frame refs. " +
     "select (target + text — pick an option in a native <select> or custom listbox " +
     "by its visible text, e.g. a country/state dropdown that `type` can't drive), " +
     "set_phone_country (country — set the dial-code country on a phone field's " +

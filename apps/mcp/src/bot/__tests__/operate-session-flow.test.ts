@@ -2680,6 +2680,7 @@ describe("operate session — OAuth lifecycle", () => {
           session_id: started.session_id,
           name: "atomic-oauth",
           goal: "Sign in",
+          verb: "login",
           inputs: {},
           postcondition: {
             kind: "execute_capability",
@@ -2691,9 +2692,7 @@ describe("operate session — OAuth lifecycle", () => {
       );
       const file = readdirSync(dir)[0];
       expect(file).toBeDefined();
-      const recipe = OperatorRecipeSchema.parse(
-        JSON.parse(readFileSync(join(dir, file!), "utf8")),
-      );
+      const recipe = OperatorRecipeSchema.parse(JSON.parse(readFileSync(join(dir, file!), "utf8")));
       expect(recipe.trace.map((entry) => entry.action.kind)).toEqual([
         "oauth_click",
         "oauth_settle",

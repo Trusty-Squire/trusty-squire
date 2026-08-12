@@ -1904,8 +1904,8 @@ export class BrowserController {
   // T6/T7 — OAuth handshake bookkeeping. Legacy startOAuth() adopts a
   // popup window as the active page, so keep the product tab parked here
   // until settleAfterOAuth() restores it. The operator's oauth_login action
-  // goes one step further: it runs the whole handshake in a disposable tab,
-  // leaving the product page out of the provider's close lifecycle.
+  // keeps the observed product page active for the click and opens a recovery
+  // tab before the provider can redirect or close either OAuth transport.
   private oauthProductPage: Page | null = null;
   private oauthProviderPage: Page | null = null;
   private oauthProviderPageClosed = false;

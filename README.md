@@ -216,9 +216,10 @@ for the system and data flows.
   must pass the same domain scope as `goto`/`allow_host`, opaque frames are
   refused, and `type_secret` never targets any cross-domain frame. Frame refs
   currently support `click`, `js_click`, `type`, `type_secret`, and `select`;
-  `upload` and `oauth_click` fail closed. If a visible control has no observed
-  ref, the four locator-capable actions (`click`, `js_click`, `type`, and
-  `type_secret`) can use a live locator; that one-off fallback is not replayable.
+  `upload`, `oauth_click`, and `oauth_login` fail closed. If a visible control
+  has no observed ref, the four locator-capable actions (`click`, `js_click`,
+  `type`, and `type_secret`) can use a live locator; that one-off fallback is not
+  replayable.
   When DOM churn invalidates an `@e:` ref, `operate_act` returns `target_stale`
   with the last observation generation, `reobserve_required: true`, best-effort
   label-keyed `replacement_candidates`, and
@@ -226,6 +227,12 @@ for the system and data flows.
   Malformed `operate_act` calls return `error.code: "invalid_arguments"` and an
   `error.guidance` repair object with the allowed kinds, missing fields, a valid
   example, and a safe alternative instead of only a validation string.
+  For a provider login, pass the observed provider-button ref to the atomic
+  `oauth_login` action. It retains the product tab across provider-owned popup
+  redirects and closes, then returns the post-login product observation even if
+  `detail` is `none`. `oauth_click` and `oauth_settle` remain for legacy replay
+  compatibility. If an observation races that legacy transition, the response
+  reports `oauth.state: "in_progress"` and directs the host to observe again.
 - `operate_form_select_many` accepts an ordered label/ref-to-option map for
   coupled variant, shipping, or similar selectors. It applies selections
   sequentially, re-observes after every success, tolerates partial failure, and
