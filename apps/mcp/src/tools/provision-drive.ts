@@ -594,7 +594,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
     '"full" returns the legacy screen+accessibility payload. ' +
-    "Cart-affecting actions require product_identity and options_hash so checkout_state identifies the affected line. " +
+    "Cart-affecting actions require product_identity and options_hash; returned checkout_state is a best-effort informational hint and never a payment charge input. " +
     OBSERVE_DELTA_CONTRACT,
   inputSchema: actSchema,
   jsonInputSchema: {
@@ -684,7 +684,8 @@ export const operateCartAddTool: Tool<z.infer<typeof cartAddSchema>> = {
     "Idempotently add the current product to cart. Pass the canonical product_identity, " +
     "the selected-variant options_hash, and a stable idempotency_key. The tool post-verifies " +
     "the cart state and returns checkout_state, cart_delta, and canonical cart_url. Retrying the " +
-    "same product/variant never clicks again: it returns already_in_cart with cart_delta '0'.",
+    "same product/variant never clicks again: it returns already_in_cart with cart_delta '0'. " +
+    "checkout_state is a best-effort informational hint; operate_pay independently verifies the charge total.",
   inputSchema: cartAddSchema,
   jsonInputSchema: {
     type: "object",

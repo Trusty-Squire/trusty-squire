@@ -4278,6 +4278,9 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
       cart_delta: "+1",
       cart_url: "https://shop.example.com/cart",
       checkout_state: {
+        authority: "informational_only",
+        completeness: "best_effort",
+        authoritative_for_payment: false,
         stage: "cart",
         product_identity: "sku:tiara",
         options_hash: "size=M",
@@ -4381,10 +4384,10 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     });
   });
 
-  it("keeps a labeled shipping charge authoritative over promotional copy", async () => {
+  it("keeps a labeled shipping charge over value-leading promotional copy", async () => {
     h.currentUrl = "https://shop.example.com/cart";
     h.visibleText =
-      "Free shipping on orders over $50. Subtotal $10.00 Shipping $5.00 Total $15.00";
+      "Shipping $0 on orders over $50. Subtotal $10.00 Shipping $5.00 Total $15.00";
     h.checkoutSummary = {
       merchant: "Synthetic Shop",
       checkout_origin: "https://shop.example.com",

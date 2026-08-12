@@ -389,6 +389,47 @@ describe("operate_act manual card refusal", () => {
 // rest state instead — verified here at the tool-wiring layer (operate-pay.ts),
 // distinct from pay-operator.test.ts's executeOperatePay-level coverage.
 describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
+  it("never consumes checkout_state as a charge input", async () => {
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_checkout_hint",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(Date.now() + 300_000).toISOString(),
+    });
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      createPaymentApproval,
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+      getPaymentApproval: vi.fn().mockResolvedValue({
+        id: "appr_checkout_hint",
+        status: "pending",
+        card_ref: "card_1",
+        jws: null,
+        sealed_card: null,
+      }),
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse({
+      ...PAYMENT_DETAILS,
+      checkout_state: {
+        authority: "informational_only",
+        completeness: "best_effort",
+        authoritative_for_payment: false,
+        payable_total: { amount_cents: 999_999, currency: "USD" },
+        shipping: { amount_cents: 999_899, currency: "USD" },
+      },
+    });
+
+    expect(args).not.toHaveProperty("checkout_state");
+    await operatePayTool.handler(args, api);
+
+    expect(mockBrowser.readCheckoutSummary).toHaveBeenCalledOnce();
+    expect(createPaymentApproval).toHaveBeenCalledOnce();
+    expect(createPaymentApproval.mock.calls[0]![0]).toMatchObject({
+      amount_cents: 100,
+      currency: "USD",
+    });
+  });
+
   it("returns approval_pending (never payment_approval_timeout) when the human hasn't responded, and marks the lease awaiting_approval", async () => {
     mockBrowser = stubBrowser();
     const createPaymentApproval = vi.fn().mockResolvedValue({

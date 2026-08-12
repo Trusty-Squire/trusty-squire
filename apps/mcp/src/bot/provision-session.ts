@@ -182,6 +182,9 @@ export interface CheckoutMoney {
 // raw accessibility inventory: a cart is a business state, not a pile of DOM
 // controls, and small models must not infer it from repeated add buttons.
 export interface CheckoutState {
+  authority: "informational_only";
+  completeness: "best_effort";
+  authoritative_for_payment: false;
   stage: "product" | "cart" | "checkout";
   product_identity: string | null;
   options_hash: string | null;
@@ -3659,19 +3662,30 @@ function shippingMoney(text: string, fallbackCurrency?: string): CheckoutMoney |
     `(?:shipping|delivery|送料|配送料)\\s*[:：]?\\s*([\\s\\S]*?)(?=${checkoutComponentBoundary}\\s*[:：]?|$)`,
     "giu",
   );
+  const candidates: CheckoutMoney[] = [];
   for (const match of text.matchAll(pattern)) {
     const value = match[1]?.trim();
     if (value === undefined || value.length === 0) continue;
+    if (
+      /\b(?:on|for)\s+(?:all\s+)?orders?\b|\borders?\s+(?:over|above|of)\b|\b(?:minimum|qualifying)\s+(?:order|spend|purchase)\b/iu.test(
+        value,
+      )
+    ) {
+      continue;
+    }
     if (/^(?:free|complimentary|0|無料)(?:\s|$)/iu.test(value)) {
-      return fallbackCurrency === undefined ? null : { amount_cents: 0, currency: fallbackCurrency };
+      if (fallbackCurrency !== undefined) {
+        candidates.push({ amount_cents: 0, currency: fallbackCurrency });
+      }
+      continue;
     }
     if (!/^(?:(?:[A-Z]{3}\p{Sc}?|\p{Sc})\s*)?\d/iu.test(value)) continue;
     const parsed = parseCheckoutAmount([`Total ${value}`], fallbackCurrency);
     if (parsed === null) continue;
-    if (fallbackCurrency !== undefined && parsed.currency !== fallbackCurrency) return null;
-    return parsed;
+    if (fallbackCurrency !== undefined && parsed.currency !== fallbackCurrency) continue;
+    candidates.push(parsed);
   }
-  return null;
+  return candidates.at(-1) ?? null;
 }
 
 function originForUrl(url: string): string | null {
@@ -3734,6 +3748,9 @@ function checkoutStateForObservation(
   const fallbackCurrency = checkout?.currency;
   const resolvedStage = stage ?? "product";
   return {
+    authority: "informational_only",
+    completeness: "best_effort",
+    authoritative_for_payment: false,
     stage: resolvedStage,
     product_identity: mutation?.productIdentity ?? null,
     options_hash: mutation?.optionsHash ?? null,
