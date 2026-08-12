@@ -16,7 +16,13 @@ const h = vi.hoisted(() => ({
   oauthStatus: "already_valid" as string,
   oauthLoginCalls: [] as string[],
   oauthReadError: null as string | null,
-  oauthTransition: null as null | { productUrl: string | null; providerPageClosed: boolean },
+  oauthTransition: null as null | {
+    productUrl: string | null;
+    providerPageClosed: boolean;
+    productPageViable: boolean;
+    browserConnected: boolean;
+  },
+  oauthRecoveryCalls: 0,
   typed: [] as Array<{ selector: string; text: string }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
@@ -445,8 +451,13 @@ vi.mock("../browser.js", () => ({
       h.visibleText = "Signed in";
     }
     async settleAfterOAuth(): Promise<void> {}
-    oauthTransitionStatus(): { productUrl: string | null; providerPageClosed: boolean } | null {
+    oauthTransitionStatus(): typeof h.oauthTransition {
       return h.oauthTransition;
+    }
+    completeOAuthTransitionRecovery(): void {
+      h.oauthRecoveryCalls += 1;
+      h.oauthTransition = null;
+      h.oauthReadError = null;
     }
     async pressKey(key: string): Promise<void> {
       h.pressedKeys.push(key);
@@ -627,6 +638,7 @@ beforeEach(() => {
   h.oauthLoginCalls = [];
   h.oauthReadError = null;
   h.oauthTransition = null;
+  h.oauthRecoveryCalls = 0;
   h.typed = [];
   h.uploads = [];
   h.selected = [];
@@ -2640,6 +2652,8 @@ describe("3.1 — autocomplete-aware type fill", () => {
 
 describe("operate session — OAuth lifecycle", () => {
   it("completes oauth_login in one action and returns the settled product observation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-atomic-oauth-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     h.visibleText = "Continue with Google";
     h.elements = [
       elem({
@@ -2660,6 +2674,34 @@ describe("operate session — OAuth lifecycle", () => {
     expect(result.url).toBe("https://app.example.com/dashboard");
     expect(result.text).toBe("Signed in");
     expect(result.oauth).toBeUndefined();
+    try {
+      await provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "atomic-oauth",
+          goal: "Sign in",
+          inputs: {},
+          postcondition: {
+            kind: "execute_capability",
+            describe: "Signed in",
+            success_signal: { text_present: "Signed in" },
+          },
+        },
+        null as unknown as ApiClient,
+      );
+      const file = readdirSync(dir)[0];
+      expect(file).toBeDefined();
+      const recipe = OperatorRecipeSchema.parse(
+        JSON.parse(readFileSync(join(dir, file!), "utf8")),
+      );
+      expect(recipe.trace.map((entry) => entry.action.kind)).toEqual([
+        "oauth_click",
+        "oauth_settle",
+      ]);
+    } finally {
+      delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("returns an actionable OAuth-in-progress observation when a provider page detaches mid-read", async () => {
@@ -2667,6 +2709,8 @@ describe("operate session — OAuth lifecycle", () => {
     h.oauthTransition = {
       productUrl: "https://app.example.com/login",
       providerPageClosed: true,
+      productPageViable: true,
+      browserConnected: true,
     };
     h.oauthReadError = "page.evaluate: Target page, context or browser has been closed";
 
@@ -2683,6 +2727,7 @@ describe("operate session — OAuth lifecycle", () => {
     });
     expect(result.guidance).toMatch(/OAuth in progress/i);
     expect(JSON.stringify(result)).not.toContain("Target page, context or browser has been closed");
+    expect(h.oauthRecoveryCalls).toBe(1);
   });
 });
 

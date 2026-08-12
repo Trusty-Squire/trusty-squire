@@ -4717,8 +4717,6 @@ export async function act(
       ]);
       if (chargeBlock !== null) throw new Error(chargeBlock);
       await browser.loginWithOAuth(el.selector);
-      // Captures model the durable semantic step, not the transport lifecycle.
-      completedAction = { kind: "oauth_click", target: action.target };
       await settleAfterStateChange(browser);
       break;
     }
@@ -5142,9 +5140,12 @@ function recordTrace(
       a = { kind: "js_click", ...withText, ...withTarget };
       break;
     case "oauth_click":
-    case "oauth_login":
       a = { kind: "oauth_click", ...withText, ...withTarget };
       break;
+    case "oauth_login":
+      session.actionTrace.push({ action: { kind: "oauth_click", ...withText, ...withTarget } });
+      session.actionTrace.push({ action: { kind: "oauth_settle" } });
+      return;
   }
   const traceIndex = session.actionTrace.length;
   session.actionTrace.push({ action: a });

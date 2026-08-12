@@ -10221,12 +10221,11 @@ export class BrowserController {
     }
   }
 
-  // Complete an OAuth handshake without ever exposing the provider page as the
-  // operator's active page. OAuth providers routinely close the popup (and some
-  // close a same-tab callback window) after exchanging the token. Running the
-  // click from a disposable copy of the product URL makes that close harmless:
-  // the original product tab remains in this.page and shares the persistent
-  // context's cookies/storage with the OAuth transport.
+  // Complete an OAuth handshake without exposing the provider page as the
+  // operator's active page after the action returns. OAuth providers routinely
+  // close the popup (and some close a same-tab callback window) after exchanging
+  // the token. A recovery tab keeps the shared browser session reachable if a
+  // provider closes the observed product page itself.
   //
   // This intentionally does not broaden authentication authority. It only
   // clicks the product's already-observed OAuth control and waits for the
@@ -10249,7 +10248,7 @@ export class BrowserController {
     let productDeparted = false;
     const onProductNavigation = (frame: Frame): void => {
       if (frame !== product.mainFrame()) return;
-      productDeparted = !this.isOAuthProductUrl(frame.url(), productUrl);
+      if (!this.isOAuthProductUrl(frame.url(), productUrl)) productDeparted = true;
     };
     product.on("framenavigated", onProductNavigation);
     try {
@@ -10328,7 +10327,9 @@ export class BrowserController {
     try {
       const candidate = new URL(candidateUrl);
       const product = new URL(productUrl);
-      return product.origin === "null" ? candidateUrl === productUrl : candidate.origin === product.origin;
+      return product.origin === "null"
+        ? candidateUrl === productUrl
+        : candidate.origin === product.origin;
     } catch {
       return candidateUrl === productUrl;
     }
@@ -10347,8 +10348,16 @@ export class BrowserController {
       if (page.isClosed()) return "closed";
       const url = page.url();
       const isProduct = this.isOAuthProductUrl(url, productUrl);
-      if (!startsOnProduct && isProduct && url !== "about:blank") return "returned";
-      if (startsOnProduct && departed && isProduct) return "returned";
+      if (startsOnProduct && departed && isProduct) {
+        const remaining = Math.max(1, deadline - Date.now());
+        const idle = await page
+          .waitForLoadState("networkidle", { timeout: remaining })
+          .then(() => true)
+          .catch(() => false);
+        return idle && !page.isClosed() && this.isOAuthProductUrl(page.url(), productUrl)
+          ? "returned"
+          : null;
+      }
       if (!isProduct && url !== "about:blank") departed = true;
       await this.sleep(50);
     }
@@ -11271,22 +11280,28 @@ export class BrowserController {
   // to close, then switches `this.page` back to the product tab.
   async settleAfterOAuth(): Promise<void> {
     const product = this.oauthProductPage;
-    this.oauthProductPage = null;
-    this.oauthProviderPage = null;
-    this.oauthProviderPageClosed = false;
-    if (product === null || product === this.page) return; // same-tab
-    for (let i = 0; i < 12 && this.page !== null && !this.page.isClosed(); i++) {
-      await this.sleep(1000);
-    }
-    if (this.page !== null && !this.page.isClosed()) {
-      await this.page.close().catch(() => undefined);
-    }
-    this.page = product;
-    await this.page.bringToFront().catch(() => undefined);
     try {
-      await this.page.waitForLoadState("domcontentloaded", { timeout: 30000 });
-    } catch {
-      // best-effort
+      if (product === null || product === this.page) return;
+      const provider = this.oauthProviderPage ?? this.page;
+      for (let i = 0; i < 12 && provider !== null && !provider.isClosed(); i++) {
+        await this.sleep(1000);
+      }
+      if (provider !== null && provider !== product && !provider.isClosed()) {
+        await provider.close().catch(() => undefined);
+      }
+      if (!product.isClosed()) {
+        this.page = product;
+        await product.bringToFront().catch(() => undefined);
+        await product
+          .waitForLoadState("domcontentloaded", { timeout: 30000 })
+          .catch(() => undefined);
+      } else {
+        this.adoptLivePage();
+      }
+    } finally {
+      this.oauthProductPage = null;
+      this.oauthProviderPage = null;
+      this.oauthProviderPageClosed = false;
     }
   }
 
