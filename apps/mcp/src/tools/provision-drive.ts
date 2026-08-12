@@ -429,6 +429,7 @@ const actSchema = z
       click: ["target"],
       js_click: ["target"],
       type: ["target"],
+      oauth_login: ["target"],
       oauth_click: ["target"],
       select: ["target", "text"],
       set_phone_country: ["country"],
@@ -506,6 +507,7 @@ const ACTION_KINDS = [
   "set_phone_country",
   "goto",
   "press",
+  "oauth_login",
   "oauth_click",
   "oauth_settle",
   "allow_host",
@@ -529,7 +531,13 @@ function actionSchemaRepair(args: unknown, issues: readonly { path: (string | nu
     ),
   ];
   const example =
-    kind === "type_secret"
+    kind === "oauth_login"
+      ? {
+          session_id: "<session_id>",
+          kind: "oauth_login",
+          target: "@e:<observed-provider-button-ref>",
+        }
+      : kind === "type_secret"
       ? {
           session_id: "<session_id>",
           kind: "type_secret",

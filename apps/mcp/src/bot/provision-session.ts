@@ -3988,8 +3988,36 @@ async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
 ): Promise<Observation> {
+  const oauthInProgress = (): Observation => {
+    session.prevObserve = null;
+    const oauth = session.browser.oauthTransitionStatus();
+    const observation: Observation = {
+      session_id: session.id,
+      url: oauth?.productUrl ?? session.startUrl,
+      text: "",
+      guidance:
+        "OAuth in progress: the provider detached or closed its page as expected. " +
+        "Do not switch login methods or close the session; call operate_observe again to read the retained product page.",
+      elements: [],
+      oauth: {
+        state: "in_progress",
+        provider_page: "closed_or_detached",
+        next_action: "operate_observe",
+      },
+    };
+    session.browser.completeOAuthTransitionRecovery();
+    return observation;
+  };
   try {
   session.browser.recoverActivePage();
+  const transition = session.browser.oauthTransitionStatus();
+  if (
+    transition?.providerPageClosed === true &&
+    transition.productPageViable &&
+    transition.browserConnected
+  ) {
+    return oauthInProgress();
+  }
   widenAllowedHostsFromCurrentUrl(session);
   session.generation += 1;
   const generation = session.generation;
@@ -4170,26 +4198,16 @@ async function observeSession(
   );
   } catch (err) {
     const oauth = session.browser.oauthTransitionStatus();
-    if (oauth !== null) {
+    if (
+      oauth?.providerPageClosed === true &&
+      oauth.productPageViable &&
+      oauth.browserConnected
+    ) {
       // A read racing an expected provider-page close must not leak the raw
       // Playwright "Target page, context or browser has been closed" exception
       // into the model's plan. Discard the delta baseline because the next
       // successful product-page read is a new authoritative snapshot.
-      session.prevObserve = null;
-      return {
-        session_id: session.id,
-        url: oauth.productUrl ?? session.startUrl,
-        text: "",
-        guidance:
-          "OAuth in progress: the provider detached or closed its page as expected. " +
-          "Do not switch login methods or close the session; call operate_observe again to read the retained product page.",
-        elements: [],
-        oauth: {
-          state: "in_progress",
-          provider_page: "closed_or_detached",
-          next_action: "operate_observe",
-        },
-      };
+      return oauthInProgress();
     }
     throw err;
   }
@@ -4727,7 +4745,7 @@ export async function act(
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
   const observation =
-    detail === "none" && !cartAffecting
+    detail === "none" && !cartAffecting && action.kind !== "oauth_login"
       ? {
           session_id: session.id,
           url: browser.currentUrl(),

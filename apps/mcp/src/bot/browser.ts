@@ -1907,6 +1907,8 @@ export class BrowserController {
   // goes one step further: it runs the whole handshake in a disposable tab,
   // leaving the product page out of the provider's close lifecycle.
   private oauthProductPage: Page | null = null;
+  private oauthProviderPage: Page | null = null;
+  private oauthProviderPageClosed = false;
   // Deep-investigation instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG): a ring
   // buffer of OAuth/SSO-relevant network responses, so we can see WHY a Clerk/
   // Stytch SSO callback fails to persist a session (cookie not set, FAPI
@@ -10196,6 +10198,8 @@ export class BrowserController {
     ) {
       this.oauthProductPage = this.page;
     }
+    this.oauthProviderPage = null;
+    this.oauthProviderPageClosed = false;
     // Race a popup `page` event against the click. context-level
     // "page" fires for both window.open popups and target=_blank.
     const popupPromise = this.context.waitForEvent("page", { timeout: 8000 }).catch(() => null);
@@ -10203,6 +10207,7 @@ export class BrowserController {
     const popup = await popupPromise;
     if (popup !== null && popup !== this.page && !popup.isClosed()) {
       this.page = popup;
+      this.oauthProviderPage = popup;
       // A provider returning from OAuth is allowed to close its own popup.
       // Recover synchronously at that boundary so a follow-up page read never
       // keeps a dead provider handle as the controller's active page.
@@ -10236,46 +10241,65 @@ export class BrowserController {
 
     this.maybeAttachOAuthNetListener();
     this.oauthProductPage = product;
-    let transport: Page | null = null;
+    this.oauthProviderPage = null;
+    this.oauthProviderPageClosed = false;
+    const productUrl = product.url();
+    let recovery: Page | null = null;
     let providerPage: Page | null = null;
+    let productDeparted = false;
+    const onProductNavigation = (frame: Frame): void => {
+      if (frame !== product.mainFrame()) return;
+      productDeparted = !this.isOAuthProductUrl(frame.url(), productUrl);
+    };
+    product.on("framenavigated", onProductNavigation);
     try {
-      // Create the transport BEFORE waiting for popup events so the listener
-      // cannot mistake this controlled tab for the provider's popup.
-      transport = await context.newPage();
-      await transport.goto(product.url(), { waitUntil: "domcontentloaded", timeout: 30_000 });
+      recovery = await context.newPage();
+      await recovery.goto(productUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
 
       const popupPromise = context
-        .waitForEvent("page", { timeout: Math.min(settleTimeoutMs, 5_000) })
+        .waitForEvent("page", { timeout: Math.min(settleTimeoutMs, 2_000) })
         .catch(() => null);
 
-      // Reuse the controller's hardened click implementation, but restore the
-      // product page before awaiting anything provider-controlled.
-      this.page = transport;
       try {
         await this.click(selector);
-      } finally {
-        this.page = product;
+      } catch (error) {
+        if (!product.isClosed()) throw error;
       }
 
       providerPage = await popupPromise;
-      const transient = providerPage ?? transport;
-      this.restoreProductPageWhenOAuthPageCloses(transient, product);
-      const closed = await this.waitForOAuthPageToClose(transient, settleTimeoutMs);
-      if (!closed) {
+      const transient = providerPage ?? product;
+      const durableProduct = providerPage === null ? recovery : product;
+      this.oauthProductPage = durableProduct;
+      this.oauthProviderPage = transient;
+      this.oauthProviderPageClosed = transient.isClosed();
+      this.restoreProductPageWhenOAuthPageCloses(transient, durableProduct);
+      const settled = await this.waitForOAuthLifecycle(
+        transient,
+        productUrl,
+        settleTimeoutMs,
+        providerPage === null,
+        productDeparted,
+      );
+      if (settled === null) {
         throw new Error(
-          "OAuth login is still awaiting the provider after 12 seconds. Retry oauth_login; do not read or close the browser session.",
+          `OAuth login is still awaiting the provider after ${Math.ceil(settleTimeoutMs / 1000)} seconds. Retry oauth_login; do not read or close the browser session.`,
         );
       }
+      if (providerPage === null && product.isClosed()) {
+        await recovery.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+      }
     } finally {
-      // The product page is the operator's durable handle even when the
-      // provider tears down every window it created.
-      this.page = product.isClosed() ? this.primaryPage : product;
+      product.off("framenavigated", onProductNavigation);
+      const retained = product.isClosed() ? recovery : product;
+      this.page = retained?.isClosed() === false ? retained : this.primaryPage;
       this.oauthProductPage = null;
+      this.oauthProviderPage = null;
+      this.oauthProviderPageClosed = false;
       if (providerPage !== null && !providerPage.isClosed()) {
         await providerPage.close().catch(() => undefined);
       }
-      if (transport !== null && !transport.isClosed()) {
-        await transport.close().catch(() => undefined);
+      if (recovery !== null && recovery !== this.page && !recovery.isClosed()) {
+        await recovery.close().catch(() => undefined);
       }
       if (this.page !== null && !this.page.isClosed()) {
         await this.page.bringToFront().catch(() => undefined);
@@ -10288,6 +10312,7 @@ export class BrowserController {
 
   private restoreProductPageWhenOAuthPageCloses(oauthPage: Page, product: Page | null): void {
     oauthPage.once("close", () => {
+      if (this.oauthProviderPage === oauthPage) this.oauthProviderPageClosed = true;
       if (product === null || product.isClosed()) {
         this.adoptLivePage();
         return;
@@ -10299,15 +10324,35 @@ export class BrowserController {
     });
   }
 
-  private async waitForOAuthPageToClose(page: Page, timeoutMs: number): Promise<boolean> {
-    if (page.isClosed()) return true;
-    return await Promise.race([
-      page
-        .waitForEvent("close")
-        .then(() => true)
-        .catch(() => true),
-      this.sleep(timeoutMs).then(() => page.isClosed()),
-    ]);
+  private isOAuthProductUrl(candidateUrl: string, productUrl: string): boolean {
+    try {
+      const candidate = new URL(candidateUrl);
+      const product = new URL(productUrl);
+      return product.origin === "null" ? candidateUrl === productUrl : candidate.origin === product.origin;
+    } catch {
+      return candidateUrl === productUrl;
+    }
+  }
+
+  private async waitForOAuthLifecycle(
+    page: Page,
+    productUrl: string,
+    timeoutMs: number,
+    startsOnProduct: boolean,
+    departedBeforeWait: boolean,
+  ): Promise<"closed" | "returned" | null> {
+    let departed = departedBeforeWait;
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (page.isClosed()) return "closed";
+      const url = page.url();
+      const isProduct = this.isOAuthProductUrl(url, productUrl);
+      if (!startsOnProduct && isProduct && url !== "about:blank") return "returned";
+      if (startsOnProduct && departed && isProduct) return "returned";
+      if (!isProduct && url !== "about:blank") departed = true;
+      await this.sleep(50);
+    }
+    return page.isClosed() ? "closed" : null;
   }
 
   // ── OAuth/SSO debug instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG) ──
@@ -10828,7 +10873,12 @@ export class BrowserController {
   // intentionally small and non-sensitive so the operator boundary can turn a
   // transient detached Playwright handle into guidance rather than exposing a
   // driver exception to the planning model.
-  oauthTransitionStatus(): { productUrl: string | null; providerPageClosed: boolean } | null {
+  oauthTransitionStatus(): {
+    productUrl: string | null;
+    providerPageClosed: boolean;
+    productPageViable: boolean;
+    browserConnected: boolean;
+  } | null {
     const product = this.oauthProductPage;
     if (product === null) return null;
     let productUrl: string | null = null;
@@ -10842,8 +10892,19 @@ export class BrowserController {
     }
     return {
       productUrl,
-      providerPageClosed: this.page === null || this.page.isClosed(),
+      providerPageClosed:
+        this.oauthProviderPageClosed || this.oauthProviderPage?.isClosed() === true,
+      productPageViable: !product.isClosed(),
+      browserConnected: this.isConnected(),
     };
+  }
+
+  completeOAuthTransitionRecovery(): void {
+    const product = this.oauthProductPage;
+    if (product !== null && !product.isClosed()) this.page = product;
+    this.oauthProductPage = null;
+    this.oauthProviderPage = null;
+    this.oauthProviderPageClosed = false;
   }
 
   // Drive a Google sign-in on the ACTIVE OAuth page (already sitting at
@@ -11211,6 +11272,8 @@ export class BrowserController {
   async settleAfterOAuth(): Promise<void> {
     const product = this.oauthProductPage;
     this.oauthProductPage = null;
+    this.oauthProviderPage = null;
+    this.oauthProviderPageClosed = false;
     if (product === null || product === this.page) return; // same-tab
     for (let i = 0; i < 12 && this.page !== null && !this.page.isClosed(); i++) {
       await this.sleep(1000);
@@ -11240,6 +11303,8 @@ export class BrowserController {
 
     this.page = primaryPage;
     this.oauthProductPage = null;
+    this.oauthProviderPage = null;
+    this.oauthProviderPageClosed = false;
     this.oauthNetLog = [];
     this.mouseX = 100;
     this.mouseY = 100;
@@ -11277,6 +11342,8 @@ export class BrowserController {
       this.page = null;
       this.primaryPage = null;
       this.oauthProductPage = null;
+      this.oauthProviderPage = null;
+      this.oauthProviderPageClosed = false;
       this.oauthNetLog = [];
       this.context = null;
       return;
@@ -11306,6 +11373,8 @@ export class BrowserController {
     this.page = null;
     this.primaryPage = null;
     this.oauthProductPage = null;
+    this.oauthProviderPage = null;
+    this.oauthProviderPageClosed = false;
     this.oauthNetLog = [];
     if (this.context) await capped(this.context.close(), 10_000);
     // Self-launch path: disconnect the CDP browser and SIGKILL the Chrome we
