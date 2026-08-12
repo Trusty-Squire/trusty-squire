@@ -40,11 +40,15 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
 import { detectAsn, type AsnClass } from "./asn.js";
 import {
+  acquireFreeProfileOperationGuard,
   CHROME_PROFILE_DIR,
   clearStaleSingletonLock,
+  currentProfileHolderPid,
   launchWithProfileGate,
+  PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
-  reapLeakedProfileHolder,
+  reapProfileHolderIfOwned,
+  type ProfileOperationLease,
   waitForProfileFree,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -1401,11 +1405,18 @@ function findFreePort(): Promise<number> {
 // Poll Chrome's DevTools HTTP endpoint until it answers (the browser is up
 // and accepting CDP), or the deadline passes. Returns the base endpoint URL
 // connectOverCDP accepts.
-async function waitForDevtools(port: number, deadlineMs: number): Promise<string> {
+async function waitForDevtools(
+  port: number,
+  deadlineMs: number,
+  child?: ChildProcess,
+): Promise<string> {
   const base = `http://127.0.0.1:${port}`;
   const deadline = Date.now() + deadlineMs;
   let lastErr = "";
   while (Date.now() < deadline) {
+    if (child !== undefined && !childProcessIsRunning(child)) {
+      throw new Error("Chrome exited before its DevTools endpoint became available");
+    }
     try {
       const res = await fetch(`${base}/json/version`, { signal: AbortSignal.timeout(2_000) });
       if (res.ok) return base;
@@ -1418,9 +1429,13 @@ async function waitForDevtools(port: number, deadlineMs: number): Promise<string
   throw new Error(`Chrome DevTools endpoint never came up on ${base} (${lastErr})`);
 }
 
-async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
-  const lockDir = "/tmp/trusty-squire-chrome-start.lock";
-  const deadline = Date.now() + 60_000;
+export async function withChromeStartupLock<T>(
+  fn: () => Promise<T>,
+  opts: { deadlineMs?: number; lockDir?: string } = {},
+): Promise<T> {
+  const lockDir = opts.lockDir ?? "/tmp/trusty-squire-chrome-start.lock";
+  const deadlineMs = opts.deadlineMs ?? 60_000;
+  const deadline = Date.now() + deadlineMs;
   for (;;) {
     try {
       mkdirSync(lockDir);
@@ -1437,6 +1452,7 @@ async function withChromeStartupLock<T>(fn: () => Promise<T>): Promise<T> {
         continue;
       }
       if (Date.now() >= deadline) {
+        if (deadlineMs === 0) throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
         throw new Error(
           `Timed out waiting for Chrome startup lock at ${lockDir}: ${
             err instanceof Error ? err.message : String(err)
@@ -1646,6 +1662,17 @@ export interface SelfLaunchedLogin {
   // Chrome child (a plain context.close() over CDP leaves the process
   // running — the zombie-chrome leak). Also reaps the profile lock.
   teardown: () => Promise<void>;
+  forceTeardown: () => void;
+}
+
+export function childProcessIsRunning(child: ChildProcess | null): boolean {
+  return child !== null && child.exitCode === null && child.signalCode === null;
+}
+
+function profileCollisionFromStderr(stderr: string): ProfileBusyError | null {
+  return /ProcessSingleton|SingletonLock|profile.*in use/i.test(stderr)
+    ? new ProfileBusyError(PROFILE_BUSY_MESSAGE)
+    : null;
 }
 
 // Self-launch Chrome + connectOverCDP for the INTERACTIVE login (connect /
@@ -1676,52 +1703,57 @@ export async function launchSelfManagedLoginContext(params: {
   extraArgs?: readonly string[];
 }): Promise<SelfLaunchedLogin> {
   let child: ChildProcess | null = null;
-  const endpoint = await withChromeStartupLock(async () => {
-    const port = await findFreePort();
-    clearStaleSingletonLock(params.profileDir);
-    const argv = [
-      `--remote-debugging-port=${port}`,
-      "--remote-debugging-address=127.0.0.1",
-      `--user-data-dir=${params.profileDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--password-store=basic",
-      "--window-position=0,0",
-      `--window-size=${params.window.width},${params.window.height}`,
-      "--lang=en-US",
-      ...(params.extraArgs ?? []),
-      ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-      // NB: we build argv ourselves, so Playwright's --enable-automation
-      // (and the rest of its launch instrumentation — the actual Turnstile
-      // tell) is never added. That is the whole point of self-launching.
-      params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
-    ];
-    const spawned = spawn(params.binary, argv, {
-      env: params.env,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    child = spawned;
-    registerSelfManagedChrome(spawned);
-    let chromeStderr = "";
-    spawned.stderr?.on("data", (chunk: Buffer) => {
-      chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-    });
-    try {
-      return await waitForDevtools(port, 30_000);
-    } catch (err) {
+  const endpoint = await withChromeStartupLock(
+    async () => {
+      const port = await findFreePort();
+      clearStaleSingletonLock(params.profileDir);
+      const argv = [
+        `--remote-debugging-port=${port}`,
+        "--remote-debugging-address=127.0.0.1",
+        `--user-data-dir=${params.profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        "--window-position=0,0",
+        `--window-size=${params.window.width},${params.window.height}`,
+        "--lang=en-US",
+        ...(params.extraArgs ?? []),
+        ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+        // NB: we build argv ourselves, so Playwright's --enable-automation
+        // (and the rest of its launch instrumentation — the actual Turnstile
+        // tell) is never added. That is the whole point of self-launching.
+        params.appMode ? `--app=${params.initialUrl}` : params.initialUrl,
+      ];
+      const spawned = spawn(params.binary, argv, {
+        env: params.env,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      child = spawned;
+      registerSelfManagedChrome(spawned);
+      let chromeStderr = "";
+      spawned.stderr?.on("data", (chunk: Buffer) => {
+        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+      });
       try {
-        spawned.kill("SIGKILL");
-      } catch {
-        /* already gone */
+        return await waitForDevtools(port, 30_000, spawned);
+      } catch (err) {
+        try {
+          spawned.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+        reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
+        const detail = chromeStderr.trim();
+        const collision = profileCollisionFromStderr(detail);
+        if (collision !== null) throw collision;
+        throw new Error(
+          `${err instanceof Error ? err.message : String(err)}` +
+            `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+        );
       }
-      reapLeakedProfileHolder(params.profileDir);
-      const detail = chromeStderr.trim();
-      throw new Error(
-        `${err instanceof Error ? err.message : String(err)}` +
-          `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-      );
-    }
-  });
+    },
+    { deadlineMs: 0 },
+  );
 
   const launcher = getChromium();
   const browser = await launcher.connectOverCDP(endpoint);
@@ -1755,15 +1787,31 @@ export async function launchSelfManagedLoginContext(params: {
         /* already gone */
       }
     }
-    reapLeakedProfileHolder(params.profileDir);
+    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
   };
 
-  return { context: ctx, teardown };
+  const forceTeardown = (): void => {
+    if (child !== null) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      if (child.pid !== undefined) selfManagedChromePids.delete(child.pid);
+    }
+    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
+  };
+
+  return { context: ctx, teardown, forceTeardown };
 }
 
 export interface PlainLoginBrowser {
   // Idempotent: kills the spawned Chrome child and reaps the profile lock.
   teardown: () => Promise<void>;
+  forceTeardown: () => void;
+  // Plain login intentionally has no CDP attachment, so expose child liveness
+  // for the polling loop to fail loudly if the visible browser disappears.
+  isRunning: () => boolean;
 }
 
 // Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
@@ -1796,46 +1844,66 @@ export async function launchPlainLoginBrowser(params: {
   extraArgs?: readonly string[];
 }): Promise<PlainLoginBrowser> {
   let child: ChildProcess | null = null;
-  await withChromeStartupLock(async () => {
-    clearStaleSingletonLock(params.profileDir);
-    const argv = [
-      `--user-data-dir=${params.profileDir}`,
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--password-store=basic",
-      "--window-position=0,0",
-      `--window-size=${params.window.width},${params.window.height}`,
-      "--lang=en-US",
-      ...(params.extraArgs ?? []),
-      ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
-      `--app=${params.url}`,
-    ];
-    const spawned = spawn(params.binary, argv, {
-      env: params.env,
-      stdio: ["ignore", "ignore", "pipe"],
-    });
-    child = spawned;
-    registerSelfManagedChrome(spawned);
-    let chromeStderr = "";
-    spawned.stderr?.on("data", (chunk: Buffer) => {
-      chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-    });
-    // Give Chrome a moment to actually come up (or die). Unlike the CDP path
-    // there is no devtools endpoint to poll — but a crash-on-launch (bad
-    // profile, missing lib) should surface here, not 15min later as a blank
-    // noVNC. If the process is already dead, throw with its stderr.
-    await new Promise((r) => setTimeout(r, 1_200));
-    if (spawned.exitCode !== null) {
-      reapLeakedProfileHolder(params.profileDir);
-      const detail = chromeStderr.trim();
-      throw new Error(
-        `plain login Chrome exited immediately (code ${spawned.exitCode})` +
-          `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-      );
-    }
-  });
+  await withChromeStartupLock(
+    async () => {
+      clearStaleSingletonLock(params.profileDir);
+      const argv = [
+        `--user-data-dir=${params.profileDir}`,
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--password-store=basic",
+        "--window-position=0,0",
+        `--window-size=${params.window.width},${params.window.height}`,
+        "--lang=en-US",
+        ...(params.extraArgs ?? []),
+        ...(params.proxyServer !== null ? [`--proxy-server=${params.proxyServer}`] : []),
+        `--app=${params.url}`,
+      ];
+      const spawned = spawn(params.binary, argv, {
+        env: params.env,
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      child = spawned;
+      registerSelfManagedChrome(spawned);
+      let chromeStderr = "";
+      spawned.stderr?.on("data", (chunk: Buffer) => {
+        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+      });
+      // Give Chrome a moment to actually come up (or die). Unlike the CDP path
+      // there is no devtools endpoint to poll — but a crash-on-launch (bad
+      // profile, missing lib) should surface here, not 15min later as a blank
+      // noVNC. If the process is already dead, throw with its stderr.
+      await new Promise((r) => setTimeout(r, 1_200));
+      if (!childProcessIsRunning(spawned)) {
+        reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
+        const detail = chromeStderr.trim();
+        const collision = profileCollisionFromStderr(detail);
+        if (collision !== null) throw collision;
+        const termination =
+          spawned.exitCode !== null
+            ? `code ${spawned.exitCode}`
+            : `signal ${spawned.signalCode ?? "unknown"}`;
+        throw new Error(
+          `plain login Chrome exited immediately (${termination})` +
+            `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+        );
+      }
+    },
+    { deadlineMs: 0 },
+  );
 
   let torn = false;
+  const forceTeardown = (): void => {
+    if (child !== null) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      if (child.pid !== undefined) selfManagedChromePids.delete(child.pid);
+    }
+    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
+  };
   const teardown = async (): Promise<void> => {
     if (torn) return;
     torn = true;
@@ -1852,9 +1920,13 @@ export async function launchPlainLoginBrowser(params: {
         /* already gone */
       }
     }
-    reapLeakedProfileHolder(params.profileDir);
+    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
   };
-  return { teardown };
+  return {
+    teardown,
+    forceTeardown,
+    isRunning: () => childProcessIsRunning(child),
+  };
 }
 
 export class BrowserController {
@@ -1873,11 +1945,10 @@ export class BrowserController {
   // the connected Browser so close() can tear both down.
   private childChrome: ChildProcess | null = null;
   private cdpBrowser: Browser | null = null;
-  // True once launchPersistentContext succeeded this session. close() only
-  // reaps a leaked Chrome when WE launched one — so a ProfileBusyError thrown
-  // BEFORE launch (while waiting on a genuine concurrent holder) never kills
-  // that other run's browser.
+  // True once launchPersistentContext succeeded this session.
   private launchedContext = false;
+  private launchedProfileHolderPid: number | null = null;
+  private profileOperationLease: ProfileOperationLease | null = null;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
@@ -2044,66 +2115,69 @@ export class BrowserController {
       }
       return ctx;
     }
-    const endpoint = await withChromeStartupLock(async () => {
-      const port = await findFreePort();
-      clearStaleSingletonLock(this.profileDir);
-      const argv = [
-        `--remote-debugging-port=${port}`,
-        "--remote-debugging-address=127.0.0.1",
-        `--user-data-dir=${this.profileDir}`,
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--password-store=basic",
-        "--window-position=0,0",
-        `--window-size=${params.window.width},${params.window.height}`,
-        "--lang=en-US",
-        ...params.args,
-        ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
-        ...(params.headless ? ["--headless=new"] : []),
-        "about:blank",
-      ];
-      const child = spawn(params.binary, argv, {
-        env: params.env,
-        stdio: ["ignore", "ignore", "pipe"],
-      });
-      this.childChrome = child;
-      registerSelfManagedChrome(child);
-      let chromeStderr = "";
-      let chromeExit = "";
-      child.stderr?.on("data", (chunk: Buffer) => {
-        chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
-      });
-      child.on("exit", (code, signal) => {
-        chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
-      });
-      try {
-        return await waitForDevtools(port, 30_000);
-      } catch (err) {
-        const alive =
-          child.pid !== undefined
-            ? (() => {
-                try {
-                  process.kill(child.pid!, 0);
-                  return true;
-                } catch {
-                  return false;
-                }
-              })()
-            : false;
+    const endpoint = await withChromeStartupLock(
+      async () => {
+        const port = await findFreePort();
+        clearStaleSingletonLock(this.profileDir);
+        const argv = [
+          `--remote-debugging-port=${port}`,
+          "--remote-debugging-address=127.0.0.1",
+          `--user-data-dir=${this.profileDir}`,
+          "--no-first-run",
+          "--no-default-browser-check",
+          "--password-store=basic",
+          "--window-position=0,0",
+          `--window-size=${params.window.width},${params.window.height}`,
+          "--lang=en-US",
+          ...params.args,
+          ...(params.proxy !== null ? [`--proxy-server=${params.proxy.server}`] : []),
+          ...(params.headless ? ["--headless=new"] : []),
+          "about:blank",
+        ];
+        const child = spawn(params.binary, argv, {
+          env: params.env,
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        this.childChrome = child;
+        registerSelfManagedChrome(child);
+        let chromeStderr = "";
+        let chromeExit = "";
+        child.stderr?.on("data", (chunk: Buffer) => {
+          chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
+        });
+        child.on("exit", (code, signal) => {
+          chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
+        });
         try {
-          child.kill("SIGKILL");
-        } catch {
-          /* already gone */
+          return await waitForDevtools(port, 30_000);
+        } catch (err) {
+          const alive =
+            child.pid !== undefined
+              ? (() => {
+                  try {
+                    process.kill(child.pid!, 0);
+                    return true;
+                  } catch {
+                    return false;
+                  }
+                })()
+              : false;
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* already gone */
+          }
+          reapProfileHolderIfOwned(this.profileDir, child.pid ?? null);
+          this.childChrome = null;
+          const detail = chromeStderr.trim();
+          throw new Error(
+            `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
+              `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
+          );
         }
-        reapLeakedProfileHolder(this.profileDir);
-        this.childChrome = null;
-        const detail = chromeStderr.trim();
-        throw new Error(
-          `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
-            `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
-        );
-      }
-    });
+      },
+      { deadlineMs: 0 },
+    );
     // Use the patchright launcher's connectOverCDP — it's the exact path the
     // falsification experiment validated (its connect avoids Runtime.enable,
     // which a plain attach would emit). The anti-detection that matters here
@@ -2191,6 +2265,19 @@ export class BrowserController {
   }
 
   async start(): Promise<void> {
+    const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
+    const lease = remoteMode ? null : await acquireFreeProfileOperationGuard(this.profileDir);
+    this.profileOperationLease = lease;
+    try {
+      await this.startWithProfileGuard();
+    } catch (err) {
+      this.profileOperationLease = null;
+      lease?.release();
+      throw err;
+    }
+  }
+
+  private async startWithProfileGuard(): Promise<void> {
     reapOrphanedBrowsersOnce(this.profileDir);
     const channel = await detectChromiumChannel();
     this.launchedChannel = channel;
@@ -2299,52 +2386,9 @@ export class BrowserController {
       this.launchedMode = "headless";
     }
 
-    // Cross-process gate on the shared Chrome profile: reclaim a stale
-    // SingletonLock from a killed run, or wait our turn behind a live
-    // `mcp login` / another signup. Without this, launchPersistentContext
-    // aborts with "Failed to create a ProcessSingleton" and bricks the run.
-    let free = await waitForProfileFree(this.profileDir, {
-      deadlineMs: 120_000,
-      onWait: () =>
-        console.error("[operator] bot Chrome profile is busy with another run — waiting…"),
-    });
+    const free = await waitForProfileFree(this.profileDir, { deadlineMs: 0 });
     if (!free) {
-      // A live-pid holder that never released within the deadline. The
-      // signup/discover loop is strictly serial (one run at a time), so a
-      // local holder that outlasts 120s is NOT a legitimate concurrent run —
-      // it's a leaked Chrome from a previously EXTERNALLY-killed run
-      // (run_timeout SIGKILL, OOM, reboot) whose JS `finally`/close() never
-      // executed, so reapLeakedProfileHolder never ran. waitForProfileFree
-      // only reclaims dead-pid / null locks, so this live orphan otherwise
-      // crashes every subsequent run with ProfileBusyError (MEASURED
-      // 2026-06-11: cyclic, railpack). A genuine concurrent `mcp login` would
-      // have released within the 120s wait — so by here, reaping the LOCAL
-      // holder (SIGKILL + clear singletons; no-ops on a remote-host holder)
-      // and retrying once is safe and recovers the run instead of failing it.
-      //
-      // That assumption is false for verifier/discovery concurrency: a live
-      // holder can be another legitimate slot still closing the same robot
-      // profile. In concurrent mode, never SIGKILL the holder; surface
-      // ProfileBusyError so the orchestrator can retry later without corrupting
-      // another run.
-      const concurrency = Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1;
-      const allowLiveReap = concurrency <= 1;
-      const reaped = allowLiveReap ? reapLeakedProfileHolder(this.profileDir) : false;
-      if (reaped) {
-        console.error(
-          "[operator] reaped a leaked Chrome holding the profile (orphan from an externally-killed run) — retrying",
-        );
-        free = await waitForProfileFree(this.profileDir, { deadlineMs: 10_000 });
-      } else if (!allowLiveReap) {
-        console.error(
-          "[operator] profile still held after wait; not reaping because HOUSEKEEPER_CONCURRENCY>1",
-        );
-      }
-      if (!free) {
-        throw new ProfileBusyError(
-          "bot Chrome profile is held by another run (a login or signup); retry shortly",
-        );
-      }
+      throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
     }
 
     // T3: a PERSISTENT context. The profile dir carries the user's
@@ -2409,15 +2453,18 @@ export class BrowserController {
         ...(chromeEnv ?? process.env),
         TZ: geo?.timezoneId ?? "America/New_York",
       };
-      context = await launchWithProfileGate(this.profileDir, () =>
-        this.launchSelfManagedContext({
-          binary: selfLaunchBinary,
-          headless: chromeHeadless,
-          args: launchArgs,
-          proxy,
-          env: selfEnv,
-          window,
-        }),
+      context = await launchWithProfileGate(
+        this.profileDir,
+        () =>
+          this.launchSelfManagedContext({
+            binary: selfLaunchBinary,
+            headless: chromeHeadless,
+            args: launchArgs,
+            proxy,
+            env: selfEnv,
+            window,
+          }),
+        { failFast: true },
       );
       // Options the default (connectOverCDP) context can't take at creation —
       // applied post-connect. Best-effort: a failure here is non-fatal (the
@@ -2442,24 +2489,31 @@ export class BrowserController {
       }
       // T3: a PERSISTENT context (the legacy path). The profile dir carries the
       // user's Google session so the OAuth-first path reuses it.
-      context = await launchWithProfileGate(this.profileDir, () =>
-        launcher.launchPersistentContext(this.profileDir, {
-          headless: chromeHeadless,
-          ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
-          ...(channel !== null ? { channel } : {}),
-          ...(proxy !== null ? { proxy } : {}),
-          args: [...launchArgs],
-          viewport: null,
-          locale: "en-US",
-          timezoneId: geo?.timezoneId ?? "America/New_York",
-          permissions: grantedPermissions,
-          ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-        }),
+      context = await launchWithProfileGate(
+        this.profileDir,
+        () =>
+          launcher.launchPersistentContext(this.profileDir, {
+            headless: chromeHeadless,
+            ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
+            ...(channel !== null ? { channel } : {}),
+            ...(proxy !== null ? { proxy } : {}),
+            args: [...launchArgs],
+            viewport: null,
+            locale: "en-US",
+            timezoneId: geo?.timezoneId ?? "America/New_York",
+            permissions: grantedPermissions,
+            ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
+          }),
+        { failFast: true },
       );
     }
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
     this.launchedContext = true;
+    if (!remoteMode) {
+      this.launchedProfileHolderPid =
+        this.childChrome?.pid ?? currentProfileHolderPid(this.profileDir);
+    }
     // Speed: optionally abort heavy/irrelevant requests before any navigation.
     await this.installResourceBlocking();
     // Dev-runtime guard: when the bot is run through `tsx`, esbuild may inject
@@ -11365,6 +11419,16 @@ export class BrowserController {
   }
 
   async close(): Promise<void> {
+    try {
+      await this.closeWithProfileGuard();
+    } finally {
+      const lease = this.profileOperationLease;
+      this.profileOperationLease = null;
+      lease?.release();
+    }
+  }
+
+  private async closeWithProfileGuard(): Promise<void> {
     if (this.harnessAttachedPage) {
       this.page = null;
       this.primaryPage = null;
@@ -11422,20 +11486,14 @@ export class BrowserController {
       if (this.childChrome.pid !== undefined) selfManagedChromePids.delete(this.childChrome.pid);
       this.childChrome = null;
     }
-    // …and context.close() doesn't always kill the browser: headed Chrome
-    // under Xvfb / some patchright teardowns leave the main process alive
-    // holding the SingletonLock. A leaked browser makes the NEXT run wait
-    // 120s and fail with ProfileBusyError — one leak bricks every subsequent
-    // service in a batch. We're done with the profile, so any holder still on
-    // THIS host is our own leaked Chrome: reap it. Gated on launchedContext so
-    // a pre-launch ProfileBusyError never kills the run we were waiting on.
     if (this.launchedContext) {
       try {
-        reapLeakedProfileHolder(this.profileDir);
+        reapProfileHolderIfOwned(this.profileDir, this.launchedProfileHolderPid);
       } catch {
         /* best-effort */
       }
       this.launchedContext = false;
+      this.launchedProfileHolderPid = null;
     }
     // F13 — release the on-demand Xvfb if we spawned one. Order
     // matters: kill Chrome (context.close) first so it has its

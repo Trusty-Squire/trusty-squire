@@ -62,7 +62,12 @@ import {
   loggedInProviders,
   markProviderLoggedIn,
 } from "../bot/login-state.js";
-import { waitForProfileFree } from "../bot/profile.js";
+import {
+  CHROME_PROFILE_DIR,
+  PROFILE_BUSY_MESSAGE,
+  ProfileBusyError,
+  withProfileOperationGuard,
+} from "../bot/profile.js";
 import { VERSION } from "../version.js";
 import { ensureLatestVersion } from "./version-check.js";
 import * as ui from "./ui.js";
@@ -480,6 +485,18 @@ async function settings(args: Argv): Promise<void> {
 }
 
 async function connect(args: Argv): Promise<void> {
+  try {
+    await withProfileOperationGuard(CHROME_PROFILE_DIR, () => connectWithProfileGuard(args));
+  } catch (err) {
+    if (err instanceof ProfileBusyError) {
+      ui.fail(PROFILE_BUSY_MESSAGE);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+async function connectWithProfileGuard(args: Argv): Promise<void> {
   // Interactive picker (clack). Walks the user through agent + advanced setup
   // before the browser install ceremony fires. The picker fills in args so the
   // rest of this function is unchanged.
@@ -578,18 +595,6 @@ async function connect(args: Argv): Promise<void> {
       clearProviderLoggedIn(args.forceReloginProvider);
     } else {
       clearAllProviderMarkers();
-    }
-    const free = await waitForProfileFree(undefined, {
-      deadlineMs: 120_000,
-      onWait: () =>
-        ui.hint("Waiting for the bot browser to finish before clearing the old session…"),
-    });
-    if (!free) {
-      ui.fail(
-        "The bot browser is still using the profile, so I can't safely switch accounts yet. " +
-          "Close the running signup/login browser and retry with --force-relogin.",
-      );
-      process.exit(1);
     }
     let cookiesCleared: boolean;
     if (args.forceReloginProvider !== undefined) {

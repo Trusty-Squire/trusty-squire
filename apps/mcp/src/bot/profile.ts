@@ -6,9 +6,11 @@
 // session instead of starting logged-out. Override with
 // TRUSTY_SQUIRE_PROFILE_DIR.
 
-import { homedir, hostname } from "node:os";
-import { lstatSync, readlinkSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, hostname, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 export const CHROME_PROFILE_DIR =
   process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? join(homedir(), ".trusty-squire", "chrome-profile");
@@ -17,14 +19,119 @@ export const CHROME_PROFILE_DIR =
 // is "<hostname>-<pid>"; the other two are sockets/cookies beside it.
 const SINGLETON_FILES = ["SingletonLock", "SingletonSocket", "SingletonCookie"] as const;
 
-// Thrown when the bot profile is held by a live run on another process and
-// doesn't free up within the wait deadline. The CLI/MCP layers surface
-// this as a clear "busy, retry" instead of a raw Playwright SingletonLock
-// stack trace.
+// Thrown when the operation guard or Chrome's SingletonLock proves that a
+// live process already owns the profile. Interactive CLI/MCP entry points
+// fail immediately with PROFILE_BUSY_MESSAGE instead of waiting or exposing
+// a raw Playwright SingletonLock stack trace.
 export class ProfileBusyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ProfileBusyError";
+  }
+}
+
+export const PROFILE_BUSY_MESSAGE =
+  "another Trusty Squire session is already using the browser — close it first";
+
+export interface ProfileOperationLease {
+  release(): void;
+}
+
+interface ProfileOperationOwner {
+  host: string;
+  pid: number;
+  token: string;
+}
+
+const profileOperationContext = new AsyncLocalStorage<ReadonlySet<string>>();
+
+function profileOperationLockDir(profileDir: string, lockRoot: string): string {
+  const digest = createHash("sha256").update(resolve(profileDir)).digest("hex").slice(0, 24);
+  return join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+}
+
+function readProfileOperationOwner(lockDir: string): ProfileOperationOwner | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(lockDir, "owner.json"), "utf8"));
+    if (parsed === null || typeof parsed !== "object") return null;
+    const owner = parsed as Partial<ProfileOperationOwner>;
+    if (
+      typeof owner.host !== "string" ||
+      typeof owner.pid !== "number" ||
+      typeof owner.token !== "string"
+    ) {
+      return null;
+    }
+    return { host: owner.host, pid: owner.pid, token: owner.token };
+  } catch {
+    return null;
+  }
+}
+
+export function acquireProfileOperationGuard(
+  profileDir: string = CHROME_PROFILE_DIR,
+  lockRoot: string = tmpdir(),
+): ProfileOperationLease {
+  const lockDir = profileOperationLockDir(profileDir, lockRoot);
+  const token = randomUUID();
+  for (;;) {
+    try {
+      mkdirSync(lockDir, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const owner = readProfileOperationOwner(lockDir);
+      if (owner !== null && owner.host === hostname() && !isPidAlive(owner.pid)) {
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+    }
+    try {
+      writeFileSync(
+        join(lockDir, "owner.json"),
+        JSON.stringify({ host: hostname(), pid: process.pid, token }),
+        { mode: 0o600 },
+      );
+    } catch (err) {
+      rmSync(lockDir, { recursive: true, force: true });
+      throw err;
+    }
+    let released = false;
+    return {
+      release: (): void => {
+        if (released) return;
+        released = true;
+        if (readProfileOperationOwner(lockDir)?.token === token) {
+          rmSync(lockDir, { recursive: true, force: true });
+        }
+      },
+    };
+  }
+}
+
+export async function acquireFreeProfileOperationGuard(
+  profileDir: string = CHROME_PROFILE_DIR,
+  lockRoot: string = tmpdir(),
+): Promise<ProfileOperationLease> {
+  const lease = acquireProfileOperationGuard(profileDir, lockRoot);
+  if (await waitForProfileFree(profileDir, { deadlineMs: 0 })) return lease;
+  lease.release();
+  throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+}
+
+export async function withProfileOperationGuard<T>(
+  profileDir: string,
+  fn: () => Promise<T>,
+  lockRoot: string = tmpdir(),
+): Promise<T> {
+  const key = resolve(profileDir);
+  const active = profileOperationContext.getStore();
+  if (active?.has(key) === true) return await fn();
+  const lease = await acquireFreeProfileOperationGuard(profileDir, lockRoot);
+  try {
+    return await profileOperationContext.run(new Set([...(active ?? []), key]), fn);
+  } finally {
+    lease.release();
   }
 }
 
@@ -73,7 +180,11 @@ function readLockHolder(profileDir: string): LockHolder | null {
 
 function removeSingletons(profileDir: string): void {
   for (const f of SINGLETON_FILES) {
-    try { rmSync(join(profileDir, f), { force: true }); } catch { /* best-effort */ }
+    try {
+      rmSync(join(profileDir, f), { force: true });
+    } catch {
+      /* best-effort */
+    }
   }
 }
 
@@ -98,34 +209,19 @@ export function clearStaleSingletonLock(profileDir: string = CHROME_PROFILE_DIR)
 // Chrome WE just started (it created the lock). Stored by the caller so
 // close() can verify the same process and reap it if it leaks. null when
 // there's no lock or the holder is on another machine.
-export function currentProfileHolderPid(
-  profileDir: string = CHROME_PROFILE_DIR,
-): number | null {
+export function currentProfileHolderPid(profileDir: string = CHROME_PROFILE_DIR): number | null {
   const holder = readLockHolder(profileDir);
   if (holder === null || holder.host !== hostname()) return null;
   return holder.pid;
 }
 
-// Free the profile after WE are done with it (called from close(), once our
-// own context is closed). context.close() is supposed to terminate the
-// browser, but headed Chrome under Xvfb (and some patchright teardowns) can
-// leave the main process alive holding the SingletonLock with a LIVE pid —
-// which the next run's waitForProfileFree treats as a genuine concurrent run
-// and waits 120s on before failing with ProfileBusyError. One leak bricks
-// EVERY subsequent run in a batch (measured: 4/7 of a discovery batch).
-//
-// We do NOT pid-match here, and deliberately so: Chrome rewrites the
-// SingletonLock asynchronously during startup, so the pid we could read right
-// after launch is often the PREVIOUS holder's — a stale value that would make
-// a pid-matched reap skip the real leak (the bug that left 2253353 alive).
-// Instead: at close() we are definitively finished with the profile and the
-// bot serializes profile access (the cross-process gate), so any holder still
-// on THIS host is our own leaked browser — SIGKILL it and clear the lock. A
-// holder on ANOTHER host (shared profile over a network mount) is left alone.
+// Broad recovery helper for a caller that exclusively owns the whole profile
+// operation but could not capture the Chrome pid. Because this does not
+// pid-match, it may kill any local holder and must never run while another
+// profile operation could be active; launch/teardown paths that know their pid
+// use reapProfileHolderIfOwned instead. A holder on another host is untouched.
 // Returns true iff it freed a live/stale local holder. Never throws.
-export function reapLeakedProfileHolder(
-  profileDir: string = CHROME_PROFILE_DIR,
-): boolean {
+export function reapLeakedProfileHolder(profileDir: string = CHROME_PROFILE_DIR): boolean {
   const holder = readLockHolder(profileDir);
   if (holder === null || holder.host !== hostname()) return false;
   try {
@@ -133,6 +229,21 @@ export function reapLeakedProfileHolder(
   } catch {
     // already gone between the read and the kill — fall through to cleanup
   }
+  removeSingletons(profileDir);
+  return true;
+}
+
+export function reapProfileHolderIfOwned(
+  profileDir: string,
+  ownedPid: number | null,
+  kill: (pid: number, signal: NodeJS.Signals) => unknown = process.kill,
+): boolean {
+  if (ownedPid === null) return false;
+  const holder = readLockHolder(profileDir);
+  if (holder === null || holder.host !== hostname() || holder.pid !== ownedPid) return false;
+  try {
+    kill(ownedPid, "SIGKILL");
+  } catch {}
   removeSingletons(profileDir);
   return true;
 }
@@ -161,8 +272,8 @@ export interface WaitForProfileOptions {
 //
 // Returns true once the profile is free to open, or false if a live
 // holder never released within the deadline (caller surfaces ProfileBusyError).
-// This is what turns "separate `mcp login` collides and crashes" into
-// "login waits its turn behind an in-flight signup, then proceeds".
+// Interactive entry points pass a zero deadline and fail immediately; narrow
+// internal probes may opt into a bounded wait.
 export async function waitForProfileFree(
   profileDir: string = CHROME_PROFILE_DIR,
   opts: WaitForProfileOptions = {},
@@ -201,21 +312,23 @@ function isSingletonCollision(err: unknown): boolean {
 // sub-second gap between "lock is absent" and Chrome creating it where a
 // second process can win — launchPersistentContext then throws
 // "Failed to create a ProcessSingleton". This wraps the launch: on that
-// specific collision it re-waits for the new holder (reclaiming it if it
-// died) and relaunches, up to `retries` times. Any other error, or a
-// holder that never releases, propagates. This is what makes the
-// cross-process gate race-free in practice.
+// specific collision, `failFast` maps it immediately to the standard busy
+// error. Legacy callers without `failFast` re-wait for the new holder
+// (reclaiming it if it died) and relaunch up to `retries` times. Any other
+// error, or a holder that never releases, propagates.
 export async function launchWithProfileGate<T>(
   profileDir: string,
   launch: () => Promise<T>,
-  opts: { retries?: number; reWaitMs?: number } = {},
+  opts: { retries?: number; reWaitMs?: number; failFast?: boolean } = {},
 ): Promise<T> {
   const retries = opts.retries ?? 3;
   for (let attempt = 0; ; attempt++) {
     try {
       return await launch();
     } catch (err) {
-      if (attempt >= retries || !isSingletonCollision(err)) throw err;
+      if (!isSingletonCollision(err)) throw err;
+      if (opts.failFast === true) throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+      if (attempt >= retries) throw err;
       const free = await waitForProfileFree(profileDir, {
         deadlineMs: opts.reWaitMs ?? 30_000,
         pollMs: 500,

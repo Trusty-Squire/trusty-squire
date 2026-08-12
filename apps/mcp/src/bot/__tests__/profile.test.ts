@@ -14,11 +14,16 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import {
+  acquireFreeProfileOperationGuard,
+  acquireProfileOperationGuard,
   clearStaleSingletonLock,
   currentProfileHolderPid,
   launchWithProfileGate,
+  ProfileBusyError,
   reapLeakedProfileHolder,
+  reapProfileHolderIfOwned,
   waitForProfileFree,
+  withProfileOperationGuard,
 } from "../profile.js";
 
 // existsSync follows symlinks, and SingletonLock's target ("host-pid") is
@@ -47,8 +52,12 @@ function deadPid(): number {
 
 describe("clearStaleSingletonLock", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it("returns false when there is no lock", () => {
     expect(clearStaleSingletonLock(dir)).toBe(false);
@@ -83,8 +92,12 @@ describe("clearStaleSingletonLock", () => {
 
 describe("waitForProfileFree (cross-process gate)", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it("returns free immediately when there is no lock", async () => {
     expect(await waitForProfileFree(dir, { deadlineMs: 200, pollMs: 20 })).toBe(true);
@@ -102,7 +115,9 @@ describe("waitForProfileFree (cross-process gate)", () => {
     const ok = await waitForProfileFree(dir, {
       deadlineMs: 150,
       pollMs: 25,
-      onWait: (h) => { waitedFor = h.pid; },
+      onWait: (h) => {
+        waitedFor = h.pid;
+      },
     });
     expect(ok).toBe(false);
     expect(waitedFor).toBe(process.pid); // onWait fired for the live holder
@@ -118,14 +133,60 @@ describe("waitForProfileFree (cross-process gate)", () => {
   });
 });
 
+describe("profile operation guard", () => {
+  let dir: string;
+  let lockRoot: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
+    lockRoot = mkdtempSync(join(tmpdir(), "ts-profile-locks-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(lockRoot, { recursive: true, force: true });
+  });
+
+  it("rejects a concurrent operation and releases cleanly", async () => {
+    const first = await acquireFreeProfileOperationGuard(dir, lockRoot);
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+    first.release();
+    const second = await acquireFreeProfileOperationGuard(dir, lockRoot);
+    second.release();
+  });
+
+  it("releases the operation lock when Chrome already owns the profile", async () => {
+    writeSingletons(dir, `${hostname()}-${process.pid}`);
+    await expect(acquireFreeProfileOperationGuard(dir, lockRoot)).rejects.toThrow(ProfileBusyError);
+    rmSync(join(dir, "SingletonLock"), { force: true });
+    const lease = await acquireFreeProfileOperationGuard(dir, lockRoot);
+    lease.release();
+  });
+
+  it("allows nested work in the same operation", async () => {
+    await expect(
+      withProfileOperationGuard(
+        dir,
+        () => withProfileOperationGuard(dir, async () => "nested", lockRoot),
+        lockRoot,
+      ),
+    ).resolves.toBe("nested");
+  });
+});
+
 describe("launchWithProfileGate (race retry)", () => {
   let dir: string; // empty → re-waits return free instantly
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it("returns the launch result on first success", async () => {
     let calls = 0;
-    const r = await launchWithProfileGate(dir, async () => { calls++; return "ctx"; });
+    const r = await launchWithProfileGate(dir, async () => {
+      calls++;
+      return "ctx";
+    });
     expect(r).toBe("ctx");
     expect(calls).toBe(1);
   });
@@ -150,7 +211,10 @@ describe("launchWithProfileGate (race retry)", () => {
   it("propagates a non-collision error without retrying", async () => {
     let calls = 0;
     await expect(
-      launchWithProfileGate(dir, async () => { calls++; throw new Error("unrelated boom"); }),
+      launchWithProfileGate(dir, async () => {
+        calls++;
+        throw new Error("unrelated boom");
+      }),
     ).rejects.toThrow("unrelated boom");
     expect(calls).toBe(1);
   });
@@ -160,7 +224,10 @@ describe("launchWithProfileGate (race retry)", () => {
     await expect(
       launchWithProfileGate(
         dir,
-        async () => { calls++; throw new Error("SingletonLock: File exists (17)"); },
+        async () => {
+          calls++;
+          throw new Error("SingletonLock: File exists (17)");
+        },
         { retries: 2, reWaitMs: 100 },
       ),
     ).rejects.toThrow(/SingletonLock/);
@@ -173,8 +240,12 @@ describe("launchWithProfileGate (race retry)", () => {
 // batch with a 120s ProfileBusyError. close() now reaps it by pid.
 describe("currentProfileHolderPid", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it("returns null when there is no lock", () => {
     expect(currentProfileHolderPid(dir)).toBeNull();
@@ -193,8 +264,12 @@ describe("currentProfileHolderPid", () => {
 
 describe("reapLeakedProfileHolder", () => {
   let dir: string;
-  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "ts-profile-")); });
-  afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   it("returns false when there is no lock", () => {
     expect(reapLeakedProfileHolder(dir)).toBe(false);
@@ -216,5 +291,39 @@ describe("reapLeakedProfileHolder", () => {
     expect(lockPresent(dir)).toBe(false);
     expect(existsSync(join(dir, "SingletonSocket"))).toBe(false);
     expect(existsSync(join(dir, "SingletonCookie"))).toBe(false);
+  });
+});
+
+describe("reapProfileHolderIfOwned", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ts-profile-"));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not kill a later holder with a different pid", () => {
+    writeSingletons(dir, `${hostname()}-${process.pid}`);
+    const killed: number[] = [];
+    expect(
+      reapProfileHolderIfOwned(dir, process.pid + 1, (pid) => {
+        killed.push(pid);
+      }),
+    ).toBe(false);
+    expect(killed).toEqual([]);
+    expect(lockPresent(dir)).toBe(true);
+  });
+
+  it("kills and clears only the captured holder", () => {
+    writeSingletons(dir, `${hostname()}-${process.pid}`);
+    const killed: number[] = [];
+    expect(
+      reapProfileHolderIfOwned(dir, process.pid, (pid) => {
+        killed.push(pid);
+      }),
+    ).toBe(true);
+    expect(killed).toEqual([process.pid]);
+    expect(lockPresent(dir)).toBe(false);
   });
 });
