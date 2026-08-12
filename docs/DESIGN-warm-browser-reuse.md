@@ -25,9 +25,12 @@ sequentially.** Section 8 owns the locked decisions; the implemented lifecycle i
    (`BOT_WARM_BROWSER_IDLE_TTL_MS`), 50 reuses (`BOT_WARM_BROWSER_MAX_REUSES`), and 24 hours of
    wall-clock age (`BOT_WARM_BROWSER_MAX_AGE_MS`). Reaping skips and re-arms while a start or task is
    in flight; reuse-count and max-age recycling occurs only at a safe task boundary.
-5. **Process cleanup remains intact.** Existing exit handlers reap self-managed Chrome on `exit`,
-   `SIGINT`, `SIGTERM`, and `SIGHUP`. The Linux PPID=1 boot-time sweep now covers verifier profiles,
-   the default interactive profile, and an explicitly requested operator profile.
+5. **The stdio connection owns server lifetime.** `runServer` handles transport close, stdin
+   EOF/close, `SIGINT`, and `SIGTERM` through one shutdown path. It closes active sessions and any
+   browser launch still in progress, closes the MCP server, then explicitly exits so Chrome cannot
+   keep Node alive. The lower-level Chrome cleanup still covers process exit and `SIGHUP` (plus
+   `SIGINT`/`SIGTERM` outside server mode). The Linux PPID=1 boot-time sweep covers verifier
+   profiles, the default interactive profile, and an explicitly requested operator profile.
 
 ```
  operate_start ──► warm slot eligible, connected, unexpired? ──yes──► reset the SAME page
@@ -37,7 +40,7 @@ sequentially.** Section 8 owns the locked decisions; the implemented lifecycle i
  operate_finish ──► reset SAME page to about:blank; keep Chrome; re-arm idle timer
  idle TTL / reuse / max-age boundary, nothing in flight ──► close warm Chrome
  reaper fires during a task ──► skip + re-arm
- server exit (SIGTERM/…) ──► existing handler SIGKILLs self-managed Chrome
+ stdio close / EOF / SIGINT / SIGTERM ──► close sessions + MCP server ──► process exit
 ```
 
 ## 3. Why the simpler ideas were ruled out (evidence)
@@ -70,7 +73,8 @@ sequentially.** Section 8 owns the locked decisions; the implemented lifecycle i
 | Page reset | `browser.ts` `resetPageForReuse` | retain the original handler-bound page, close popups, clear local state, navigate to `about:blank` |
 | Finish/reaper | `provision-drive.ts` `operate_finish`; `provision-session.ts` | reset the task page, keep Chrome, arm an unrefed idle timer, and skip/re-arm while in flight |
 | Lifetime backstops | `provision-session.ts` | recycle at safe boundaries after configured reuse-count or max-age limits |
-| Exit reap | `browser.ts` `installSelfManagedChromeCleanup` | unchanged (already reaps on signals/exit) |
+| Server shutdown | `server.ts` `runServer`; `provision-session.ts` | on stdio disconnect or termination, close sessions (including an in-progress launch), close the MCP server, and force process exit |
+| Fallback exit reap | `browser.ts` `installSelfManagedChromeCleanup` | reap self-managed Chrome on process exit and `SIGHUP`, and on `SIGINT`/`SIGTERM` outside server mode |
 | Orphan sweep | `browser.ts` `reapOrphanedBrowsersOnce` | match verifier and exact configured operator profiles on Linux |
 
 New surface is **moderate, not trivial** (review correction — the earlier "holder + timer + regex"
