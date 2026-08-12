@@ -14,6 +14,9 @@ import type * as GoogleLoginModule from "../google-login.js";
 const h = vi.hoisted(() => ({
   providers: ["google"] as string[],
   oauthStatus: "already_valid" as string,
+  oauthLoginCalls: [] as string[],
+  oauthReadError: null as string | null,
+  oauthTransition: null as null | { productUrl: string | null; providerPageClosed: boolean },
   typed: [] as Array<{ selector: string; text: string }>,
   uploads: [] as Array<{ selector: string; filePath: string }>,
   selected: [] as Array<{ selector: string; matcher: string | undefined }>,
@@ -166,12 +169,14 @@ vi.mock("../browser.js", () => ({
     recoverActivePage(): void {}
     async extractInteractiveElements(): Promise<unknown[]> {
       h.extractInteractiveElementsCalls += 1;
+      if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
       return h.elements;
     }
     async extractCheckoutFieldNames(): Promise<string[]> {
       return h.checkoutFieldNames;
     }
     async extractVisibleText(): Promise<string> {
+      if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
       return h.visibleText;
     }
     async readCheckoutSummary(): Promise<{
@@ -434,7 +439,15 @@ vi.mock("../browser.js", () => ({
       h.uploads.push({ selector, filePath });
     }
     async startOAuth(): Promise<void> {}
+    async loginWithOAuth(selector: string): Promise<void> {
+      h.oauthLoginCalls.push(selector);
+      h.currentUrl = "https://app.example.com/dashboard";
+      h.visibleText = "Signed in";
+    }
     async settleAfterOAuth(): Promise<void> {}
+    oauthTransitionStatus(): { productUrl: string | null; providerPageClosed: boolean } | null {
+      return h.oauthTransition;
+    }
     async pressKey(key: string): Promise<void> {
       h.pressedKeys.push(key);
     }
@@ -611,6 +624,9 @@ function elem(partial: Record<string, unknown>): unknown {
 beforeEach(() => {
   h.providers = ["google"];
   h.oauthStatus = "already_valid";
+  h.oauthLoginCalls = [];
+  h.oauthReadError = null;
+  h.oauthTransition = null;
   h.typed = [];
   h.uploads = [];
   h.selected = [];
@@ -2619,6 +2635,54 @@ describe("3.1 — autocomplete-aware type fill", () => {
     expect(readdirSync(dir).length).toBeGreaterThan(0);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe("operate session — OAuth lifecycle", () => {
+  it("completes oauth_login in one action and returns the settled product observation", async () => {
+    h.visibleText = "Continue with Google";
+    h.elements = [
+      elem({
+        visibleText: "Continue with Google",
+        labelText: "Continue with Google",
+        role: "button",
+        selector: "#google-oauth",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+
+    const result = await act(started.session_id, {
+      kind: "oauth_login",
+      target: "Continue with Google",
+    });
+
+    expect(h.oauthLoginCalls).toEqual(["#google-oauth"]);
+    expect(result.url).toBe("https://app.example.com/dashboard");
+    expect(result.text).toBe("Signed in");
+    expect(result.oauth).toBeUndefined();
+  });
+
+  it("returns an actionable OAuth-in-progress observation when a provider page detaches mid-read", async () => {
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/login" });
+    h.oauthTransition = {
+      productUrl: "https://app.example.com/login",
+      providerPageClosed: true,
+    };
+    h.oauthReadError = "page.evaluate: Target page, context or browser has been closed";
+
+    const result = await observe(started.session_id);
+
+    expect(result).toMatchObject({
+      session_id: started.session_id,
+      url: "https://app.example.com/login",
+      oauth: {
+        state: "in_progress",
+        provider_page: "closed_or_detached",
+        next_action: "operate_observe",
+      },
+    });
+    expect(result.guidance).toMatch(/OAuth in progress/i);
+    expect(JSON.stringify(result)).not.toContain("Target page, context or browser has been closed");
   });
 });
 

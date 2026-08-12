@@ -1901,10 +1901,11 @@ export class BrowserController {
   // HAR, then remove that route before checkout becomes live.
   private harnessAttachedPage = false;
 
-  // T6/T7 — OAuth handshake bookkeeping. When startOAuth() adopts a
-  // popup window as the active page, the original product page is
-  // parked here so settleAfterOAuth() can switch back to it once the
-  // Google handshake completes.
+  // T6/T7 — OAuth handshake bookkeeping. Legacy startOAuth() adopts a
+  // popup window as the active page, so keep the product tab parked here
+  // until settleAfterOAuth() restores it. The operator's oauth_login action
+  // goes one step further: it runs the whole handshake in a disposable tab,
+  // leaving the product page out of the provider's close lifecycle.
   private oauthProductPage: Page | null = null;
   // Deep-investigation instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG): a ring
   // buffer of OAuth/SSO-relevant network responses, so we can see WHY a Clerk/
@@ -10202,6 +10203,10 @@ export class BrowserController {
     const popup = await popupPromise;
     if (popup !== null && popup !== this.page && !popup.isClosed()) {
       this.page = popup;
+      // A provider returning from OAuth is allowed to close its own popup.
+      // Recover synchronously at that boundary so a follow-up page read never
+      // keeps a dead provider handle as the controller's active page.
+      this.restoreProductPageWhenOAuthPageCloses(popup, this.oauthProductPage);
     }
     this.adoptLivePage();
     try {
@@ -10209,6 +10214,100 @@ export class BrowserController {
     } catch {
       // best-effort — the agent's consent loop re-reads state regardless
     }
+  }
+
+  // Complete an OAuth handshake without ever exposing the provider page as the
+  // operator's active page. OAuth providers routinely close the popup (and some
+  // close a same-tab callback window) after exchanging the token. Running the
+  // click from a disposable copy of the product URL makes that close harmless:
+  // the original product tab remains in this.page and shares the persistent
+  // context's cookies/storage with the OAuth transport.
+  //
+  // This intentionally does not broaden authentication authority. It only
+  // clicks the product's already-observed OAuth control and waits for the
+  // provider-owned window to finish; no credentials, frames, or consent scopes
+  // are read or bypassed here.
+  async loginWithOAuth(selector: string, settleTimeoutMs = 12_000): Promise<void> {
+    const product = this.page;
+    const context = this.context;
+    if (product === null || product.isClosed() || context === null) {
+      throw new Error("OAuth login cannot start because the product page is unavailable");
+    }
+
+    this.maybeAttachOAuthNetListener();
+    this.oauthProductPage = product;
+    let transport: Page | null = null;
+    let providerPage: Page | null = null;
+    try {
+      // Create the transport BEFORE waiting for popup events so the listener
+      // cannot mistake this controlled tab for the provider's popup.
+      transport = await context.newPage();
+      await transport.goto(product.url(), { waitUntil: "domcontentloaded", timeout: 30_000 });
+
+      const popupPromise = context
+        .waitForEvent("page", { timeout: Math.min(settleTimeoutMs, 5_000) })
+        .catch(() => null);
+
+      // Reuse the controller's hardened click implementation, but restore the
+      // product page before awaiting anything provider-controlled.
+      this.page = transport;
+      try {
+        await this.click(selector);
+      } finally {
+        this.page = product;
+      }
+
+      providerPage = await popupPromise;
+      const transient = providerPage ?? transport;
+      this.restoreProductPageWhenOAuthPageCloses(transient, product);
+      const closed = await this.waitForOAuthPageToClose(transient, settleTimeoutMs);
+      if (!closed) {
+        throw new Error(
+          "OAuth login is still awaiting the provider after 12 seconds. Retry oauth_login; do not read or close the browser session.",
+        );
+      }
+    } finally {
+      // The product page is the operator's durable handle even when the
+      // provider tears down every window it created.
+      this.page = product.isClosed() ? this.primaryPage : product;
+      this.oauthProductPage = null;
+      if (providerPage !== null && !providerPage.isClosed()) {
+        await providerPage.close().catch(() => undefined);
+      }
+      if (transport !== null && !transport.isClosed()) {
+        await transport.close().catch(() => undefined);
+      }
+      if (this.page !== null && !this.page.isClosed()) {
+        await this.page.bringToFront().catch(() => undefined);
+        await this.page
+          .waitForLoadState("domcontentloaded", { timeout: 30_000 })
+          .catch(() => undefined);
+      }
+    }
+  }
+
+  private restoreProductPageWhenOAuthPageCloses(oauthPage: Page, product: Page | null): void {
+    oauthPage.once("close", () => {
+      if (product === null || product.isClosed()) {
+        this.adoptLivePage();
+        return;
+      }
+      if (this.page === oauthPage || this.page === null || this.page.isClosed()) {
+        this.page = product;
+        void product.bringToFront().catch(() => undefined);
+      }
+    });
+  }
+
+  private async waitForOAuthPageToClose(page: Page, timeoutMs: number): Promise<boolean> {
+    if (page.isClosed()) return true;
+    return await Promise.race([
+      page
+        .waitForEvent("close")
+        .then(() => true)
+        .catch(() => true),
+      this.sleep(timeoutMs).then(() => page.isClosed()),
+    ]);
   }
 
   // ── OAuth/SSO debug instrumentation (UNIVERSAL_BOT_OAUTH_DEBUG) ──
@@ -10723,6 +10822,28 @@ export class BrowserController {
   // popup closing IS the signal the handshake finished.
   oauthPageClosed(): boolean {
     return this.page === null || this.page.isClosed();
+  }
+
+  // A legacy oauth_click may still have a provider popup in flight. Keep this
+  // intentionally small and non-sensitive so the operator boundary can turn a
+  // transient detached Playwright handle into guidance rather than exposing a
+  // driver exception to the planning model.
+  oauthTransitionStatus(): { productUrl: string | null; providerPageClosed: boolean } | null {
+    const product = this.oauthProductPage;
+    if (product === null) return null;
+    let productUrl: string | null = null;
+    if (!product.isClosed()) {
+      try {
+        productUrl = product.url();
+      } catch {
+        // A page may detach between isClosed() and url(); the structured
+        // in-progress response must still win over the raw driver error.
+      }
+    }
+    return {
+      productUrl,
+      providerPageClosed: this.page === null || this.page.isClosed(),
+    };
   }
 
   // Drive a Google sign-in on the ACTIVE OAuth page (already sitting at

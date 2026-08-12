@@ -1,0 +1,106 @@
+// Real-browser regression for the operator OAuth lifecycle. The provider popup
+// intentionally redirects to a token-exchange page and then closes itself,
+// which is the normal OAuth return shape that previously left the controller
+// holding a detached Playwright Page. No external provider or credentials are
+// involved: the fixture drives the same popup/redirect/close lifecycle locally.
+
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { chromium, type Browser, type Page } from "playwright";
+import { BrowserController } from "../browser.js";
+
+const PRODUCT_URL = `data:text/html,${encodeURIComponent(`
+  <!doctype html>
+  <main id="state">Signed out</main>
+  <button id="oauth" type="button" onclick="window.open('about:blank', 'provider-oauth')">
+    Login with Provider
+  </button>
+`)}`;
+
+let browser: Browser;
+
+async function controllerForProduct(): Promise<{ controller: BrowserController; product: Page }> {
+  // Browser.newPage() creates a single-page convenience context that rejects
+  // context.newPage(). OAuth isolation needs a genuine multi-page context.
+  const context = await browser.newContext();
+  const product = await context.newPage();
+  await product.goto(PRODUCT_URL);
+  const controller = new BrowserController({ humanize: false });
+  // This is the same direct-controller seam used by the other real-Chromium
+  // BrowserController tests: production start() owns these fields, while the
+  // fixture supplies a deterministic local browser context.
+  Object.assign(controller as unknown as Record<string, unknown>, {
+    context: product.context(),
+    page: product,
+    primaryPage: product,
+  });
+  return { controller, product };
+}
+
+describe("BrowserController OAuth popup lifecycle", () => {
+  beforeAll(async () => {
+    browser = await chromium.launch({ headless: true, args: ["--no-sandbox"] });
+  });
+
+  afterAll(async () => {
+    await browser?.close();
+  });
+
+  it("reattaches the active controller page when a provider closes its OAuth-return popup", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    try {
+      await controller.startOAuth("#oauth");
+      const popup = (controller as unknown as { page: Page }).page;
+      expect(popup).not.toBe(product);
+
+      await popup.goto("data:text/html,provider-token-exchange");
+      await popup.close();
+      await product.waitForTimeout(0);
+
+      expect(product.isClosed()).toBe(false);
+      expect(context.pages()).toContain(product);
+      expect((controller as unknown as { page: Page }).page).toBe(product);
+    } finally {
+      await context.close().catch(() => undefined);
+    }
+  });
+
+  it("keeps the operator product tab alive when the provider redirects then closes its popup", async () => {
+    const { controller, product } = await controllerForProduct();
+    const context = product.context();
+    let resolveProviderReturned: (() => void) | null = null;
+    const providerReturned = new Promise<void>((resolve) => {
+      resolveProviderReturned = resolve;
+    });
+
+    const onPage = (candidate: Page): void => {
+      // oauth_login first creates its disposable transport page. Wait a beat so
+      // it has navigated to the product URL; the provider-created popup remains
+      // about:blank until this fixture performs the return redirect below.
+      void (async () => {
+        await candidate.waitForTimeout(30);
+        if (candidate === product || candidate.url() !== "about:blank") return;
+        await candidate.goto("data:text/html,provider-token-exchange");
+        await product.locator("#state").evaluate((el) => {
+          el.textContent = "Signed in";
+        });
+        await candidate.close();
+        resolveProviderReturned?.();
+      })();
+    };
+    context.on("page", onPage);
+
+    try {
+      await controller.loginWithOAuth("#oauth", 2_000);
+      await providerReturned;
+
+      expect(product.isClosed()).toBe(false);
+      expect((controller as unknown as { page: Page }).page).toBe(product);
+      expect(controller.currentUrl()).toBe(PRODUCT_URL);
+      expect(await controller.extractVisibleText()).toContain("Signed in");
+    } finally {
+      context.off("page", onPage);
+      await context.close().catch(() => undefined);
+    }
+  });
+});

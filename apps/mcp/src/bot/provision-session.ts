@@ -295,6 +295,15 @@ export interface Observation {
   // operate_act{observe:"none"} (action ran; no perception emitted — call
   // operate_observe before the next ref-targeted act).
   observed?: ObserveDetail;
+  // A provider-owned OAuth popup closed while a legacy two-step OAuth action
+  // was still settling. This is an expected browser lifecycle transition, not
+  // a failed login or a reason to abandon the session. The host should simply
+  // re-observe; the controller will retain or reattach the product page.
+  oauth?: {
+    state: "in_progress";
+    provider_page: "closed_or_detached";
+    next_action: "operate_observe";
+  };
   // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
   // required a live Google session that was absent. The task did NOT start; the
   // host asks the user to connect, then retries. No browser was driven.
@@ -367,6 +376,10 @@ export type ProvisionAction =
   | { kind: "oauth_click"; target: string }
   // Return to the product page after the OAuth handshake completes.
   | { kind: "oauth_settle" }
+  // Atomic operator OAuth action. The provider work happens in a disposable
+  // page, so a normal provider close cannot take down the product tab or leave
+  // a model inspecting a detached Playwright handle.
+  | { kind: "oauth_login"; target: string }
   // Operator surface — declare a host to cross into mid-session (multi-app
   // tasks: GCP Console → Firebase → the user's app). Pushed to the allow-set
   // with source "mid_session" and audited; the goto gate then permits it.
@@ -3975,6 +3988,7 @@ async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
 ): Promise<Observation> {
+  try {
   session.browser.recoverActivePage();
   widenAllowedHostsFromCurrentUrl(session);
   session.generation += 1;
@@ -4154,6 +4168,31 @@ async function observeSession(
     checkoutState,
     currentCartMutation,
   );
+  } catch (err) {
+    const oauth = session.browser.oauthTransitionStatus();
+    if (oauth !== null) {
+      // A read racing an expected provider-page close must not leak the raw
+      // Playwright "Target page, context or browser has been closed" exception
+      // into the model's plan. Discard the delta baseline because the next
+      // successful product-page read is a new authoritative snapshot.
+      session.prevObserve = null;
+      return {
+        session_id: session.id,
+        url: oauth.productUrl ?? session.startUrl,
+        text: "",
+        guidance:
+          "OAuth in progress: the provider detached or closed its page as expected. " +
+          "Do not switch login methods or close the session; call operate_observe again to read the retained product page.",
+        elements: [],
+        oauth: {
+          state: "in_progress",
+          provider_page: "closed_or_detached",
+          next_action: "operate_observe",
+        },
+      };
+    }
+    throw err;
+  }
 }
 
 export async function act(
@@ -4635,6 +4674,36 @@ export async function act(
       if (action.kind !== "type") await settleAfterStateChange(browser);
       break;
     }
+    case "oauth_login": {
+      const pageText = await browser.extractVisibleText();
+      const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
+      if (blockReason !== null) throw new Error(blockReason);
+      // Atomic OAuth deliberately accepts only the observed stable ref. A raw
+      // locator would lose the same stale-reference guarantees as every other
+      // action when replayed in the disposable transport tab.
+      const fresh = await browser.extractInteractiveElements();
+      session.lastElements = fresh;
+      const el = resolveTarget(fresh, action.target);
+      if (el === null) {
+        throw new Error(
+          `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth button ref.`,
+        );
+      }
+      resolvedEl = el;
+      assertNoFrameTarget(el, "oauth_login");
+      const chargeBlock = pendingCardFillChargeBlockReason(session, [
+        el.ariaLabel,
+        el.visibleText,
+        el.labelText,
+        el.value,
+      ]);
+      if (chargeBlock !== null) throw new Error(chargeBlock);
+      await browser.loginWithOAuth(el.selector);
+      // Captures model the durable semantic step, not the transport lifecycle.
+      completedAction = { kind: "oauth_click", target: action.target };
+      await settleAfterStateChange(browser);
+      break;
+    }
   }
   await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
   await captureReplayRepairVerification(session, completedAction, resolvedEl);
@@ -5055,6 +5124,7 @@ function recordTrace(
       a = { kind: "js_click", ...withText, ...withTarget };
       break;
     case "oauth_click":
+    case "oauth_login":
       a = { kind: "oauth_click", ...withText, ...withTarget };
       break;
   }
@@ -5114,6 +5184,7 @@ export function captureObserved(
     case "click":
     case "js_click":
     case "oauth_click":
+    case "oauth_login":
       return el === null
         ? null
         : {
@@ -5153,7 +5224,7 @@ function recordCaptureRound(
   session.captureRounds.push({
     service: captureService(session),
     round: session.captureRounds.length,
-    oauth: action.kind === "oauth_click",
+    oauth: action.kind === "oauth_click" || action.kind === "oauth_login",
     // The URL the inventory + action belong to (pre-action), NOT the post-
     // navigation URL — see urlBeforeAction in act().
     state: { url: urlAtObservation, title: "", html: "", screenshot: "" },
