@@ -818,11 +818,12 @@ const formSelectManySchema = z.object({
 export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema>> = {
   name: "operate_form_select_many",
   description:
-    "Select several related form options atomically from a label/ref-to-option map. " +
+    "Select several related form options sequentially from a label/ref-to-option map. " +
     "Selections run in order; after every successful selection the browser is re-observed " +
-    "before the next one resolves, so variant changes cannot poison later refs. Returns one " +
-    "selected/failed result per field plus the final observation. Use this for coupled variant " +
-    "or shipping selectors instead of parallel operate_act select calls.",
+    "before the next one resolves, so variant changes cannot poison later refs. Each field " +
+    "reports selected or failed independently; successful selections are not rolled back when " +
+    "another field fails. Returns the per-field results plus the final observation. Use this for " +
+    "coupled variant or shipping selectors instead of parallel operate_act select calls.",
   inputSchema: formSelectManySchema,
   jsonInputSchema: {
     type: "object",
