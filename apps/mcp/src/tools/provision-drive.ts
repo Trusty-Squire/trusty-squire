@@ -13,6 +13,7 @@ import {
   startProvisionSession,
   observe,
   act,
+  cartAdd,
   extractCredentials,
   captchaGate,
   awaitVerification,
@@ -32,6 +33,7 @@ import {
   checkoutShapeSignatureForSession,
   type ProvisionAction,
   type ExtractResult,
+  manualCardEntryBlockReason,
 } from "../bot/provision-session.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
@@ -633,7 +635,52 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     },
   },
   async handler(args) {
+    // Keep the defense-in-depth guard in act() for internal/replay callers,
+    // while this public tool surface makes the safe recovery explicit at the
+    // exact point a small model tried a forbidden manual PAN entry.
+    if (args.kind === "type") {
+      const reason = manualCardEntryBlockReason(args.text ?? "");
+      if (reason !== null) {
+        return {
+          status: "manual_card_entry_refused",
+          reason,
+          safe_alternative: { tool: "operate_pay", phase: "fill_card" },
+          missing_prerequisite: "verified_cart_total",
+        };
+      }
+    }
     return await act(args.session_id, buildAction(args), args.detail ?? "compact");
+  },
+};
+
+const cartAddSchema = z.object({
+  session_id: z.string().min(1),
+  product_identity: z.string().trim().min(1).max(500),
+  options_hash: z.string().trim().min(1).max(128),
+  idempotency_key: z.string().trim().min(1).max(256),
+});
+
+export const operateCartAddTool: Tool<z.infer<typeof cartAddSchema>> = {
+  name: "operate_cart_add",
+  description:
+    "Idempotently add the current product to cart. Pass the canonical product_identity, " +
+    "the selected-variant options_hash, and a stable idempotency_key. The tool post-verifies " +
+    "the cart state and returns checkout_state, cart_delta, and canonical cart_url. Retrying the " +
+    "same product/variant never clicks again: it returns already_in_cart with cart_delta '0'.",
+  inputSchema: cartAddSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "product_identity", "options_hash", "idempotency_key"],
+    properties: {
+      session_id: { type: "string" },
+      product_identity: { type: "string", minLength: 1 },
+      options_hash: { type: "string", minLength: 1 },
+      idempotency_key: { type: "string", minLength: 1 },
+    },
+  },
+  annotations: { readOnlyHint: false, idempotentHint: true },
+  async handler(args) {
+    return await cartAdd(args.session_id, args.product_identity, args.options_hash, args.idempotency_key);
   },
 };
 
@@ -1592,6 +1639,7 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
   provisionActTool,
+  operateCartAddTool,
   provisionCaptchaGateTool,
   provisionAwaitVerificationTool,
   provisionExtractTool,

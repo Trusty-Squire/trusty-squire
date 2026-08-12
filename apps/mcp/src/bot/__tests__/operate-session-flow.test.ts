@@ -371,6 +371,13 @@ vi.mock("../browser.js", () => ({
     }
     async clickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
+      if (h.clickValueMutation !== null) {
+        for (const element of h.elements as Array<Record<string, unknown>>) {
+          if (element.selector === h.clickValueMutation.selector) {
+            element.value = h.clickValueMutation.value;
+          }
+        }
+      }
     }
     async jsClickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
@@ -450,6 +457,7 @@ import {
   activeProvisionBrowser,
   activeProvisionBrowserForPayment,
   activeCartCheckoutForOrigin,
+  cartAdd,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
@@ -4185,6 +4193,45 @@ describe("awaiting-approval payment lease [P0]", () => {
 });
 
 describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => {
+  it("returns legible post-add cart state and suppresses a retry for the same line", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 0 Free shipping";
+    h.elements = [
+      elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "0" }),
+    ];
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 968,
+      currency: "JPY",
+    };
+    h.clickValueMutation = { selector: "#qty", value: "1" };
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const added = await cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-1");
+
+    expect(added).toMatchObject({
+      status: "added",
+      cart_delta: "+1",
+      cart_url: "https://shop.example.com/cart",
+      checkout_state: {
+        stage: "cart",
+        product_identity: "sku:tiara",
+        options_hash: "size=M",
+        quantity: 1,
+        subtotal: { amount_cents: 968, currency: "JPY" },
+        shipping: { amount_cents: 0, currency: "JPY" },
+        payable_total: { amount_cents: 968, currency: "JPY" },
+        next_action: { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" },
+      },
+    });
+    expect(h.locatorClickCalls).toBe(1);
+
+    const retried = await cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-1");
+    expect(retried).toMatchObject({ status: "already_in_cart", cart_delta: "0" });
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
   it("captures a real total observed on an earlier page and serves it for the SAME origin", async () => {
     const started = await startProvisionSession({
       serviceUrl: "https://cart.step.rakuten.co.jp/cart",

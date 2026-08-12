@@ -157,6 +157,42 @@ export interface ObservedElement {
   // signal, not decoration: operate_act re-derives which frame to act in (and
   // which domain-lock guard applies) from this, never from the top page's URL.
   frame_origin?: string | null;
+  // PCI controls are deliberately still observable, but they are never ordinary
+  // planner inputs: only operate_pay may fill a vaulted card into them.
+  payment_field?: PaymentField;
+  interaction?: "vaulted_card_only";
+  recommended_action?: { tool: "operate_pay"; phase: "fill_card" };
+}
+
+export type PaymentField =
+  | "card_number"
+  | "expiry"
+  | "expiry_month"
+  | "expiry_year"
+  | "security_code"
+  | "cardholder_name";
+
+export interface CheckoutMoney {
+  amount_cents: number;
+  currency: string;
+}
+
+// A compact purchase-state overlay. This is intentionally separate from the
+// raw accessibility inventory: a cart is a business state, not a pile of DOM
+// controls, and small models must not infer it from repeated add buttons.
+export interface CheckoutState {
+  stage: "product" | "cart" | "checkout";
+  product_identity: string | null;
+  options_hash: string | null;
+  quantity: number | null;
+  subtotal: CheckoutMoney | null;
+  shipping: CheckoutMoney | null;
+  payable_total: CheckoutMoney | null;
+  cart_url: string | null;
+  next_action:
+    | { tool: "operate_act"; kind: "click"; intent: "proceed_to_checkout" }
+    | { tool: "operate_pay"; phase: "fill_card" }
+    | { tool: "operate_observe" };
 }
 
 export interface ScreenRegion {
@@ -264,6 +300,13 @@ export interface Observation {
   // the signup email so the account is user-owned, and it is the same identity
   // whose inbox awaitVerification reads. Absent when no email was captured.
   user_email?: string;
+  // Present whenever this observation is part of a cart/checkout flow (and
+  // always after a cart mutation). It supplies one unambiguous next action.
+  checkout_state?: CheckoutState;
+  // The postcondition for a cart-add attempt. `unknown` is honest when the
+  // merchant did not expose a count we can verify; callers still receive the
+  // canonical cart URL and safe retry semantics from operate_cart_add.
+  cart_delta?: "+1" | "0" | "unknown";
 }
 
 export interface AccessibilitySnapshot {
@@ -387,6 +430,20 @@ interface RecordedValueSource {
   literal: string;
 }
 
+interface CartAddRecord {
+  productIdentity: string;
+  optionsHash: string;
+  idempotencyKey: string;
+  cartUrl: string | null;
+  quantity: number | null;
+}
+
+interface CartMutation {
+  productIdentity: string | null;
+  optionsHash: string | null;
+  cartDelta: "+1" | "0" | "unknown";
+}
+
 interface Session {
   id: string;
   browser: BrowserController;
@@ -476,6 +533,10 @@ interface Session {
   // origin still matches. Replaced (never accumulated) on each successful
   // observe of a page with a parseable total; never a caller-supplied value.
   lastCartCheckout: CartCheckoutObservation | null;
+  // Per-line idempotency records are local to the one active browser/cart. A
+  // retry must inspect this before it ever reaches a merchant add button.
+  cartAdds: Map<string, CartAddRecord>;
+  lastCartMutation: CartMutation | null;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -2272,6 +2333,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     activePayment: null,
     paymentFieldSealActive: false,
     lastCartCheckout: null,
+    cartAdds: new Map(),
+    lastCartMutation: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2367,6 +2430,8 @@ export async function startHarnessProvisionSession(
     activePayment: null,
     paymentFieldSealActive: false,
     lastCartCheckout: null,
+    cartAdds: new Map(),
+    lastCartMutation: null,
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2665,6 +2730,108 @@ export function activeCartCheckoutForOrigin(origin: string): CartCheckoutObserva
   return cached !== null && cached.checkout.checkout_origin === origin ? cached : null;
 }
 
+export interface CartAddResult {
+  status: "added" | "already_in_cart";
+  cart_delta: "+1" | "0" | "unknown";
+  cart_url: string | null;
+  checkout_state: CheckoutState;
+  postcondition: { product_identity: string; options_hash: string; quantity: number | null };
+}
+
+// Cart adds are deliberately a narrow operator primitive rather than a magic
+// retry of operate_act. The idempotency record is checked BEFORE any click and
+// the result is grounded in a fresh post-action observation.
+export async function cartAdd(
+  sessionId: string,
+  productIdentity: string,
+  optionsHash: string,
+  idempotencyKey: string,
+): Promise<CartAddResult> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  const lineKey = `${productIdentity}\u0000${optionsHash}`;
+  const existing = session.cartAdds.get(lineKey);
+  if (existing !== undefined) {
+    session.lastCartMutation = {
+      productIdentity,
+      optionsHash,
+      cartDelta: "0",
+    };
+    const observed = await observeSession(session);
+    const checkoutState = observed.checkout_state;
+    if (checkoutState === undefined) throw new Error("cart state was not observable for idempotent add");
+    return {
+      status: "already_in_cart",
+      cart_delta: "0",
+      cart_url: existing.cartUrl ?? checkoutState.cart_url,
+      checkout_state: checkoutState,
+      postcondition: {
+        product_identity: productIdentity,
+        options_hash: optionsHash,
+        quantity: checkoutState.quantity ?? existing.quantity,
+      },
+    };
+  }
+
+  const before = await observeSession(session);
+  const beforeQuantity = before.checkout_state?.quantity ?? null;
+  // Keep the generic operation's actionability and ambiguity checks, while
+  // recognizing the bounded English/Japanese affordances used by the observed
+  // storefronts. We only fall through when a label is absent; a matched but
+  // unsafe/ambiguous control still fails closed.
+  const addTargets = [
+    'text="Add to Cart"',
+    'text="Add to Bag"',
+    'text="かごに追加"',
+    'text="カートに追加"',
+  ];
+  let addError: unknown;
+  for (const target of addTargets) {
+    try {
+      await act(sessionId, { kind: "click", target });
+      addError = undefined;
+      break;
+    } catch (error) {
+      addError = error;
+      if (!(error instanceof Error) || !error.message.startsWith("no element matched locator")) {
+        throw error;
+      }
+    }
+  }
+  if (addError !== undefined) throw addError;
+  session.lastCartMutation = {
+    productIdentity,
+    optionsHash,
+    cartDelta: "unknown",
+  };
+  const observed = await observeSession(session);
+  const checkoutState = observed.checkout_state;
+  if (checkoutState === undefined) throw new Error("cart state was not observable after add");
+  const afterQuantity = checkoutState.quantity;
+  const cartDelta =
+    beforeQuantity !== null && afterQuantity !== null
+      ? afterQuantity === beforeQuantity + 1
+        ? "+1"
+        : "0"
+      : "unknown";
+  session.lastCartMutation.cartDelta = cartDelta;
+  const cartUrl = checkoutState.cart_url;
+  session.cartAdds.set(lineKey, {
+    productIdentity,
+    optionsHash,
+    idempotencyKey,
+    cartUrl,
+    quantity: afterQuantity,
+  });
+  return {
+    status: "added",
+    cart_delta: cartDelta,
+    cart_url: cartUrl,
+    checkout_state: { ...checkoutState },
+    postcondition: { product_identity: productIdentity, options_hash: optionsHash, quantity: afterQuantity },
+  };
+}
+
 // PR3c — the user's own email captured at login (the authoritative signup
 // address), or null when none was captured. The tool layer reads this to fill
 // username/password signups so the account is user-owned.
@@ -2722,6 +2889,45 @@ function shouldElideType(el: InteractiveElement): boolean {
   return el.tag === "button" || (el.role ?? "").toLowerCase() === "button";
 }
 
+// Keep this detection narrow and structural. It only annotates fields that are
+// recognizably part of collecting card data; address fields remain normal
+// checkout fields. The affordance is advisory metadata, never a relaxation of
+// the frame or PAN guards below.
+export function paymentFieldForObservation(el: InteractiveElement): PaymentField | null {
+  const autocomplete = (el.autocomplete ?? "").toLowerCase().split(/\s+/);
+  const signal = [el.name, el.id, el.ariaLabel, el.labelText, el.placeholder]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+    .toLowerCase();
+  if (autocomplete.includes("cc-number") || /card[\s_-]*number|cardnumber|\bpan\b/.test(signal)) {
+    return "card_number";
+  }
+  if (autocomplete.includes("cc-csc") || /\b(?:cvv|cvc)\b|security[\s_-]*code/.test(signal)) {
+    return "security_code";
+  }
+  if (autocomplete.includes("cc-exp-month") || /exp(?:iry|iration)?[\s_-]*month/.test(signal)) {
+    return "expiry_month";
+  }
+  if (autocomplete.includes("cc-exp-year") || /exp(?:iry|iration)?[\s_-]*year/.test(signal)) {
+    return "expiry_year";
+  }
+  if (autocomplete.includes("cc-exp") || /\bmm\s*\/\s*yy\b|exp(?:iry|iration)?[\s_-]*(?:date)?\b/.test(signal)) {
+    return "expiry";
+  }
+  if (autocomplete.includes("cc-name") || /cardholder|card[\s_-]*name/.test(signal)) {
+    return "cardholder_name";
+  }
+  return null;
+}
+
+function annotatePaymentControl(out: ObservedElement, el: InteractiveElement): void {
+  const paymentField = paymentFieldForObservation(el);
+  if (paymentField === null) return;
+  out.payment_field = paymentField;
+  out.interaction = "vaulted_card_only";
+  out.recommended_action = { tool: "operate_pay", phase: "fill_card" };
+}
+
 // One element, compacted: ref/label/tag always; every other field omitted when
 // empty. `value`→`value_len` (never the raw value — keeps the sealed-field moat);
 // `checked` kept for real checkables (true OR false), omitted when null;
@@ -2771,6 +2977,7 @@ export function toCompactElement(
   if (el.frameOrigin) {
     out.frame_origin = presentPaymentSafeString(el.frameOrigin, paymentSealActive);
   }
+  annotatePaymentControl(out, el);
   return out;
 }
 
@@ -2793,6 +3000,9 @@ const ELEMENT_TABLE_COLUMNS = [
   "topmost",
   "occluded_by",
   "frame_origin",
+  "payment_field",
+  "interaction",
+  "recommended_action",
 ] as const;
 type ElementColumn = (typeof ELEMENT_TABLE_COLUMNS)[number];
 
@@ -2824,6 +3034,12 @@ function elementCell(e: ObservedElement, col: ElementColumn): string | undefined
       return e.occluded_by ?? undefined;
     case "frame_origin":
       return e.frame_origin ?? undefined;
+    case "payment_field":
+      return e.payment_field;
+    case "interaction":
+      return e.interaction;
+    case "recommended_action":
+      return e.recommended_action === undefined ? undefined : JSON.stringify(e.recommended_action);
   }
 }
 
@@ -2883,6 +3099,23 @@ export function parseElementsTable(table: string): ObservedElement[] {
       else if (col === "topmost") e.topmost = false;
       else if (col === "occluded_by") e.occluded_by = raw;
       else if (col === "frame_origin") e.frame_origin = raw;
+      else if (
+        col === "payment_field" &&
+        ["card_number", "expiry", "expiry_month", "expiry_year", "security_code", "cardholder_name"].includes(raw)
+      )
+        e.payment_field = raw as PaymentField;
+      else if (col === "interaction" && raw === "vaulted_card_only") e.interaction = raw;
+      else if (col === "recommended_action") {
+        try {
+          const action = JSON.parse(raw) as { tool?: string; phase?: string };
+          if (action.tool === "operate_pay" && action.phase === "fill_card") {
+            e.recommended_action = { tool: "operate_pay", phase: "fill_card" };
+          }
+        } catch {
+          // A malformed optional advisory column is ignored, never allowed to
+          // break reconstruction of the actual actionable inventory.
+        }
+      }
     });
     out.push(e);
   }
@@ -3212,6 +3445,116 @@ async function captureCartCheckoutForFillCardFallback(
   }
 }
 
+function checkoutStage(url: string, text: string): CheckoutState["stage"] | null {
+  const source = `${url} ${text}`.toLowerCase();
+  if (/\b(?:checkout|payment|order[-_ ]?review)\b|(?:お支払い|注文確認)/i.test(source)) {
+    return "checkout";
+  }
+  if (/\b(?:cart|basket|bag)\b|(?:かご|カート)/i.test(source)) return "cart";
+  return null;
+}
+
+function observedCartQuantity(elements: readonly InteractiveElement[], text: string): number | null {
+  for (const el of elements) {
+    const label = `${el.name ?? ""} ${el.id ?? ""} ${el.ariaLabel ?? ""} ${el.labelText ?? ""}`;
+    if (!/\b(?:quantity|qty)\b|(?:数量|個数)/i.test(label)) continue;
+    const value = el.value?.trim() ?? "";
+    if (/^\d+$/.test(value)) return Number(value);
+  }
+  const match = text.match(/(?:quantity|qty|数量|個数)\s*[:：x×]?\s*(\d+)/i);
+  return match?.[1] === undefined ? null : Number(match[1]);
+}
+
+function zeroShipping(text: string, currency: string): CheckoutMoney | null {
+  return /(?:free\s+shipping|shipping\s*[:：]?\s*(?:free|0)|送料無料|送料\s*[:：]?\s*0)/i.test(text)
+    ? { amount_cents: 0, currency }
+    : null;
+}
+
+function cartUrlForState(session: Session, url: string, elements: readonly InteractiveElement[]): string | null {
+  const currentStage = checkoutStage(url, "");
+  if (currentStage === "cart") return url;
+  const cartLink = elements.find((el) => {
+    const label = `${el.visibleText ?? ""} ${el.ariaLabel ?? ""} ${el.labelText ?? ""}`;
+    return el.href !== null && el.href !== undefined && /\b(?:cart|basket|bag)\b|(?:かご|カート)/i.test(label);
+  });
+  if (cartLink?.href !== undefined && cartLink.href !== null) {
+    try {
+      return new URL(cartLink.href, url).toString();
+    } catch {
+      // A malformed href is not a canonical cart URL; fall through to the
+      // previously observed cart page rather than fabricating one.
+    }
+  }
+  return session.lastCartCheckout?.url ?? null;
+}
+
+function checkoutStateForObservation(
+  session: Session,
+  url: string,
+  text: string,
+  elements: readonly InteractiveElement[],
+): CheckoutState | undefined {
+  const stage = checkoutStage(url, text);
+  const mutation = session.lastCartMutation;
+  const checkout = session.lastCartCheckout?.checkout;
+  // Do not burden unrelated provision flows with an empty cart-shaped object.
+  if (stage === null && mutation === null && checkout === undefined) return undefined;
+  const money = checkout === undefined ? null : { amount_cents: checkout.amount_cents, currency: checkout.currency };
+  const resolvedStage = stage ?? "product";
+  return {
+    stage: resolvedStage,
+    product_identity: mutation?.productIdentity ?? null,
+    options_hash: mutation?.optionsHash ?? null,
+    quantity: observedCartQuantity(elements, text),
+    // A checkout summary is the only authoritative money source in this
+    // operator. On cart pages its payable total is also the best grounded
+    // subtotal we can show; shipping is only asserted when explicitly free.
+    subtotal: money,
+    shipping: money === null ? null : zeroShipping(text, money.currency),
+    payable_total: money,
+    cart_url: cartUrlForState(session, url, elements),
+    next_action:
+      resolvedStage === "checkout"
+        ? { tool: "operate_pay", phase: "fill_card" }
+        : resolvedStage === "cart"
+          ? { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" }
+          : { tool: "operate_observe" },
+  };
+}
+
+function withCheckoutState(
+  observation: Observation,
+  state: CheckoutState | undefined,
+  mutation: CartMutation | null,
+): Observation {
+  return {
+    ...observation,
+    ...(state === undefined ? {} : { checkout_state: state }),
+    ...(mutation === null ? {} : { cart_delta: mutation.cartDelta }),
+  };
+}
+
+function isCartAffectingAction(action: ProvisionAction, el: InteractiveElement | null): boolean {
+  const target = [
+    "target" in action ? action.target : "",
+    el?.visibleText ?? "",
+    el?.ariaLabel ?? "",
+    el?.labelText ?? "",
+    el?.name ?? "",
+    el?.id ?? "",
+  ].join(" ");
+  if (action.kind === "click" || action.kind === "js_click") {
+    return /(?:add\s+to\s+(?:cart|bag|basket)|remove\s+from\s+(?:cart|bag|basket)|update\s+(?:cart|bag|basket)|かごに追加|カートに追加|カートから削除)/i.test(
+      target,
+    );
+  }
+  return (
+    (action.kind === "type" || action.kind === "select") &&
+    /(?:\b(?:quantity|qty)\b|数量|個数)/i.test(target)
+  );
+}
+
 async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
@@ -3233,6 +3576,7 @@ async function observeSession(
   const guidance = provisionPerceptionGuidance(normalizedText);
   const url = session.browser.currentUrl();
   await captureCartCheckoutForFillCardFallback(session, url);
+  const checkoutState = checkoutStateForObservation(session, url, normalizedText, elements);
   const refs = provisionElementRefs(elements);
   const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
   const textTruncated = normalizedFull.length > 4000;
@@ -3273,7 +3617,7 @@ async function observeSession(
       // remove-then-restore-across-a-failed-persist sequence would silently drop
       // the restored element otherwise).
       session.prevObserve = null;
-      return {
+      return withCheckoutState({
         session_id: session.id,
         url,
         text: normalizedText,
@@ -3284,13 +3628,13 @@ async function observeSession(
         delta: false,
         elements_total: elements.length,
         ...(textTruncated ? { text_truncated: true } : {}),
-      };
+      }, checkoutState, session.lastCartMutation);
     }
     session.prevObserve = built.nextState;
-    return {
+    return withCheckoutState({
       ...built.observation,
       snapshot_file: snapshotFile,
-    };
+    }, checkoutState, session.lastCartMutation);
   }
 
   // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
@@ -3323,50 +3667,54 @@ async function observeSession(
     sealedFieldKeys,
     session.paymentFieldSealActive,
   );
-  return {
+  return withCheckoutState({
     session_id: session.id,
     url,
     text: normalizedText,
     ...(guidance !== undefined ? { guidance } : {}),
     ...(screen !== undefined ? { screen } : {}),
     ...(accessibility !== undefined ? { accessibility } : {}),
-    elements: elements.map((el) => ({
-      ref: refOf(el),
-      label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
-      tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
-      role:
-        el.role === null ? null : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
-      type:
-        el.type === null ? null : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
-      value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
-      checked: el.checked ?? null,
-      href:
-        el.href === null || el.href === undefined
-          ? null
-          : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
-      testId:
-        el.testId === null || el.testId === undefined
-          ? null
-          : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
-      path:
-        el.screenPath === null || el.screenPath === undefined
-          ? null
-          : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
-      container:
-        el.container === null || el.container === undefined
-          ? null
-          : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
-      topmost: el.topmost ?? null,
-      occluded_by:
-        el.occludedBy === null || el.occludedBy === undefined
-          ? null
-          : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
-      frame_origin:
-        el.frameOrigin === null || el.frameOrigin === undefined
-          ? null
-          : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
-    })),
-  };
+    elements: elements.map((el) => {
+      const observed: ObservedElement = {
+        ref: refOf(el),
+        label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
+        tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
+        role:
+          el.role === null ? null : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
+        type:
+          el.type === null ? null : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
+        value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
+        checked: el.checked ?? null,
+        href:
+          el.href === null || el.href === undefined
+            ? null
+            : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
+        testId:
+          el.testId === null || el.testId === undefined
+            ? null
+            : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
+        path:
+          el.screenPath === null || el.screenPath === undefined
+            ? null
+            : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
+        container:
+          el.container === null || el.container === undefined
+            ? null
+            : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
+        topmost: el.topmost ?? null,
+        occluded_by:
+          el.occludedBy === null || el.occludedBy === undefined
+            ? null
+            : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
+        frame_origin:
+          el.frameOrigin === null || el.frameOrigin === undefined
+            ? null
+            : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
+      };
+      annotatePaymentControl(observed, el);
+      return observed;
+    }),
+  }, checkoutState, session.lastCartMutation);
 }
 
 export async function act(
@@ -3840,10 +4188,18 @@ export async function act(
     recordTrace(session, completedAction, resolvedEl, sensitiveSource);
     recordCaptureRound(session, completedAction, resolvedEl, urlBeforeAction);
   }
+  const cartAffecting = isCartAffectingAction(completedAction, resolvedEl);
+  if (cartAffecting) {
+    session.lastCartMutation = {
+      productIdentity: null,
+      optionsHash: null,
+      cartDelta: "unknown",
+    };
+  }
   // `detail:"none"` returns a minimal ack (the action ran; no perception emitted)
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
-  if (detail === "none") {
+  if (detail === "none" && !cartAffecting) {
     return {
       session_id: session.id,
       url: browser.currentUrl(),
@@ -3852,7 +4208,7 @@ export async function act(
       observed: "none",
     };
   }
-  return await observeSession(session, detail);
+  return await observeSession(session, detail === "none" ? "compact" : detail);
 }
 
 // PR3 privacy: in the operator model the host fills the USER's real email into

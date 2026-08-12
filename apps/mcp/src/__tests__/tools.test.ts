@@ -148,6 +148,7 @@ import {
   revokeAppAccessTool,
   TOOLS,
 } from "../tools/index.js";
+import { provisionActTool } from "../tools/provision-drive.js";
 
 function stubBrowser(): PaymentBrowser {
   return {
@@ -362,6 +363,22 @@ describe("operate_pay card selection", () => {
     expect(result).toMatchObject({
       status: "payment_card_required",
       needs_user: { wall: "card_required" },
+    });
+  });
+});
+
+describe("operate_act manual card refusal", () => {
+  it("returns the vaulted-card alternative and its verified-total prerequisite", async () => {
+    const args = provisionActTool.inputSchema.parse({
+      session_id: "session_1",
+      kind: "type",
+      target: "Card number",
+      text: "5555 5555 5555 4444",
+    });
+    await expect(provisionActTool.handler(args, null)).resolves.toMatchObject({
+      status: "manual_card_entry_refused",
+      safe_alternative: { tool: "operate_pay", phase: "fill_card" },
+      missing_prerequisite: "verified_cart_total",
     });
   });
 });
@@ -1033,11 +1050,11 @@ describe("TOOLS registry", () => {
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
     // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
-    // 6 base tools + the 14 operator-surface tools (operate_start/observe/act/pay/
+    // 6 base tools + the 15 operator-surface tools (operate_start/observe/act/cart-add/pay/
     // captcha_gate/await_verification/extract/remember/use/finish_task/finish —
     // remember+use are the operator-recipe capture/replay pair — plus the PR3c
     // login-credential tools: prepare/store plus seal_vault_credential for signin fill.
-    expect(TOOLS).toHaveLength(26);
+    expect(TOOLS).toHaveLength(27);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
       "get_extract_failure",
@@ -1049,6 +1066,7 @@ describe("TOOLS registry", () => {
       "operate_act",
       "operate_await_verification",
       "operate_captcha_gate",
+      "operate_cart_add",
       "operate_extract",
       "operate_finish",
       "operate_finish_task",
