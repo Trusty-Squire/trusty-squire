@@ -280,7 +280,7 @@ const OBSERVE_DELTA_CONTRACT =
   "cells in header order). An empty cell = that field is absent for that element; value_len is a number, " +
   "checked/topmost are true/false; a tab, newline, carriage-return or backslash inside a cell is " +
   "backslash-escaped (\\t \\n \\r \\\\). el_table is absent when the emit has no element rows. " +
-  "The stable refs remain reusable across observes. " +
+  "Stable refs remain reusable across observes while their controls still exist. " +
   "The first observe, a URL change, or high churn returns delta:false as a full resync: discard the prior " +
   "element map and rebuild it from this el_table (or from snapshot_file — the table may omit collapsed " +
   "chrome links, which the file keeps); a delta:false with NO snapshot_file already has the complete, " +

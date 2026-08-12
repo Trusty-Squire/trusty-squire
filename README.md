@@ -214,6 +214,17 @@ for the system and data flows.
   `upload` and `oauth_click` fail closed. If a visible control has no observed
   ref, the four locator-capable actions (`click`, `js_click`, `type`, and
   `type_secret`) can use a live locator; that one-off fallback is not replayable.
+  When DOM churn invalidates an `@e:` ref, `operate_act` returns `target_stale`
+  with the last observation generation, `reobserve_required: true`, best-effort
+  label-keyed `replacement_candidates`, and
+  `retry_policy: "do_not_retry_old_ref"`; re-observe and choose a current ref.
+  Malformed `operate_act` calls return a repair object with the allowed kinds,
+  missing fields, a valid example, and a safe alternative instead of only a
+  validation string.
+- `operate_form_select_many` accepts an ordered label/ref-to-option map for
+  coupled variant, shipping, or similar selectors. It applies selections
+  sequentially, re-observes after every success, tolerates partial failure, and
+  returns each field's `selected` or `failed` outcome plus a current observation.
 - `operate_cart_add` is the retry-safe add-to-cart path. Give it the canonical
   product identity, selected-variant options hash, and a stable idempotency key;
   it post-verifies the exact cart line and returns `added` or
@@ -249,6 +260,8 @@ for the system and data flows.
   add-card approval, then fills the checkout and waits for the user to resolve
   3-D Secure before handing back unresolved challenges. It also supports the
   two-phase `fill_card` then `confirm` flow for split checkouts described above.
+  Malformed calls return the same structured repair fields as `operate_act`,
+  including a safe resolution when `card_ref` and `card_label` conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.

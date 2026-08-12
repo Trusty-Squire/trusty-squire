@@ -768,8 +768,8 @@ const norm = (s: string | null | undefined): string =>
 // the ref the host already holds keeps resolving. The `@e:` sigil only
 // disambiguates a ref from a free-text label target (a label may legitimately end
 // in "_<digits>"). Staleness is guarded by IDENTITY, not a counter: a ref whose
-// element is now gone finds no match in resolveTarget → returns null → the caller
-// fails loudly ("no element matched") and the host re-observes.
+// element is now gone finds no match in resolveTarget → returns null → the public
+// tool returns structured target_stale guidance and the host re-observes.
 //
 // The exceptional identity form (issue #399) applies to same-base-identity
 // siblings distinguished ONLY by positional selectors. Those "volatile" members
