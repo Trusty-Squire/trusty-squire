@@ -43,11 +43,13 @@ import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
 import {
   CHROME_PROFILE_DIR,
+  currentProfileHolderPid,
   launchWithProfileGate,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
-  reapLeakedProfileHolder,
+  reapProfileHolderIfOwned,
   waitForProfileFree,
+  withProfileOperationGuard,
 } from "./profile.js";
 import {
   launchPlainLoginBrowser,
@@ -783,10 +785,9 @@ export function teardownHeadlessRig(rig: HeadlessRig, graceMs = 1_000): Promise<
 }
 
 export async function teardownLoginBrowser(
-  profileDir: string,
   closeBrowser: () => Promise<void>,
+  forceClose: () => unknown,
   timeoutMs = 3_000,
-  forceClose: (profileDir: string) => unknown = reapLeakedProfileHolder,
 ): Promise<void> {
   let completed = false;
   let timer: NodeJS.Timeout | undefined;
@@ -804,7 +805,7 @@ export async function teardownLoginBrowser(
   ]);
   if (timer !== undefined) clearTimeout(timer);
   if (!completed) {
-    forceClose(profileDir);
+    forceClose();
   }
 }
 
@@ -969,6 +970,14 @@ const LOGIN_STATUS_CHECK_STALLED_ERROR =
   "the login status check stopped responding before the session completed";
 
 export async function runInBotChrome(
+  opts: RunInBotChromeOpts,
+): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+  return await withProfileOperationGuard(opts.profileDir, () =>
+    runInBotChromeWithProfileGuard(opts),
+  );
+}
+
+async function runInBotChromeWithProfileGuard(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   // `mcp login` runs in a SEPARATE process from the MCP server, so the
@@ -1177,6 +1186,7 @@ async function runHeadlessChrome(
     const plain = opts.plainProfileLogin === true;
     let context: BrowserContext | undefined;
     let teardownContext: () => Promise<void>;
+    let forceTeardownContext: () => void;
     if (plain) {
       if (opts.plainPollUntilDone === undefined) {
         throw new Error("plainProfileLogin set without plainPollUntilDone");
@@ -1195,6 +1205,7 @@ async function runHeadlessChrome(
         extraArgs: sharedChromeArgs,
       });
       teardownContext = browser.teardown;
+      forceTeardownContext = browser.forceTeardown;
       plainBrowserIsRunning = browser.isRunning;
     } else if (useSelfLaunch && chromeBinary !== null) {
       const launched = await launchSelfManagedLoginContext({
@@ -1211,6 +1222,7 @@ async function runHeadlessChrome(
       });
       context = launched.context;
       teardownContext = launched.teardown;
+      forceTeardownContext = launched.forceTeardown;
     } else {
       const chromium = resolveChromium();
       const persistent = await launchWithProfileGate(
@@ -1235,13 +1247,17 @@ async function runHeadlessChrome(
         { failFast: true },
       );
       context = persistent;
+      const persistentPid = currentProfileHolderPid(opts.profileDir);
       teardownContext = async (): Promise<void> => {
         await persistent.close().catch(() => undefined);
+      };
+      forceTeardownContext = (): void => {
+        reapProfileHolderIfOwned(opts.profileDir, persistentPid);
       };
     }
     let browserTeardown: Promise<void> | undefined;
     const teardownBrowser = (): Promise<void> => {
-      browserTeardown ??= teardownLoginBrowser(opts.profileDir, teardownContext);
+      browserTeardown ??= teardownLoginBrowser(teardownContext, forceTeardownContext);
       return browserTeardown;
     };
     activeTeardown = teardownBrowser;

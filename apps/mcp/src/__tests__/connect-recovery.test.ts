@@ -103,14 +103,16 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
 });
 
 describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
-  it("checks force-relogin profile contention without waiting", () => {
+  it("holds the fail-fast profile guard across every connect path", () => {
     const cliSource = readFileSync(
       fileURLToPath(new URL("../install/cli.ts", import.meta.url)),
       "utf8",
     );
-    expect(cliSource).toMatch(/async function connect[\s\S]{0,100}failIfProfileBusy\(\)/);
     expect(cliSource).toMatch(
-      /function failIfProfileBusy[\s\S]{0,200}waitForProfileFree\(undefined, \{ deadlineMs: 0 \}\)[\s\S]{0,100}ui\.fail\(PROFILE_BUSY_MESSAGE\)/,
+      /async function connect[\s\S]{0,250}withProfileOperationGuard\(CHROME_PROFILE_DIR, \(\) => connectWithProfileGuard\(args\)\)/,
+    );
+    expect(cliSource).toMatch(
+      /err instanceof ProfileBusyError[\s\S]{0,100}ui\.fail\(PROFILE_BUSY_MESSAGE\)[\s\S]{0,100}process\.exit\(1\)/,
     );
   });
 

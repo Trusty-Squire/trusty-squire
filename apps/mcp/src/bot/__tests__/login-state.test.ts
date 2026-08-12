@@ -52,13 +52,13 @@ describe("provider cookie clearing", () => {
     await expect(clearProviderCookiesFromContext(context, "github")).resolves.toBe(false);
   });
 
-  it("uses the retrying profile gate for the persistent context launch", () => {
+  it("uses the fail-fast profile gate for the persistent context launch", () => {
     const source = readFileSync(
       fileURLToPath(new URL("../login-state.ts", import.meta.url)),
       "utf8",
     );
     expect(source).toMatch(
-      /launchWithProfileGate\(profileDir,\s*\(\) =>\s*chromium\.launchPersistentContext/,
+      /launchWithProfileGate\([\s\S]{0,250}chromium\.launchPersistentContext[\s\S]{0,150}\{ failFast: true \}/,
     );
   });
 });

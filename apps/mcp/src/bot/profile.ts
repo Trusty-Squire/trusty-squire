@@ -6,9 +6,11 @@
 // session instead of starting logged-out. Override with
 // TRUSTY_SQUIRE_PROFILE_DIR.
 
-import { homedir, hostname } from "node:os";
-import { lstatSync, readlinkSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash, randomUUID } from "node:crypto";
+import { lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, hostname, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 
 export const CHROME_PROFILE_DIR =
   process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? join(homedir(), ".trusty-squire", "chrome-profile");
@@ -30,6 +32,108 @@ export class ProfileBusyError extends Error {
 
 export const PROFILE_BUSY_MESSAGE =
   "another Trusty Squire session is already using the browser — close it first";
+
+export interface ProfileOperationLease {
+  release(): void;
+}
+
+interface ProfileOperationOwner {
+  host: string;
+  pid: number;
+  token: string;
+}
+
+const profileOperationContext = new AsyncLocalStorage<ReadonlySet<string>>();
+
+function profileOperationLockDir(profileDir: string, lockRoot: string): string {
+  const digest = createHash("sha256").update(resolve(profileDir)).digest("hex").slice(0, 24);
+  return join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+}
+
+function readProfileOperationOwner(lockDir: string): ProfileOperationOwner | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(lockDir, "owner.json"), "utf8"));
+    if (parsed === null || typeof parsed !== "object") return null;
+    const owner = parsed as Partial<ProfileOperationOwner>;
+    if (
+      typeof owner.host !== "string" ||
+      typeof owner.pid !== "number" ||
+      typeof owner.token !== "string"
+    ) {
+      return null;
+    }
+    return { host: owner.host, pid: owner.pid, token: owner.token };
+  } catch {
+    return null;
+  }
+}
+
+export function acquireProfileOperationGuard(
+  profileDir: string = CHROME_PROFILE_DIR,
+  lockRoot: string = tmpdir(),
+): ProfileOperationLease {
+  const lockDir = profileOperationLockDir(profileDir, lockRoot);
+  const token = randomUUID();
+  for (;;) {
+    try {
+      mkdirSync(lockDir, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      const owner = readProfileOperationOwner(lockDir);
+      if (owner !== null && owner.host === hostname() && !isPidAlive(owner.pid)) {
+        rmSync(lockDir, { recursive: true, force: true });
+        continue;
+      }
+      throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+    }
+    try {
+      writeFileSync(
+        join(lockDir, "owner.json"),
+        JSON.stringify({ host: hostname(), pid: process.pid, token }),
+        { mode: 0o600 },
+      );
+    } catch (err) {
+      rmSync(lockDir, { recursive: true, force: true });
+      throw err;
+    }
+    let released = false;
+    return {
+      release: (): void => {
+        if (released) return;
+        released = true;
+        if (readProfileOperationOwner(lockDir)?.token === token) {
+          rmSync(lockDir, { recursive: true, force: true });
+        }
+      },
+    };
+  }
+}
+
+export async function acquireFreeProfileOperationGuard(
+  profileDir: string = CHROME_PROFILE_DIR,
+  lockRoot: string = tmpdir(),
+): Promise<ProfileOperationLease> {
+  const lease = acquireProfileOperationGuard(profileDir, lockRoot);
+  if (await waitForProfileFree(profileDir, { deadlineMs: 0 })) return lease;
+  lease.release();
+  throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+}
+
+export async function withProfileOperationGuard<T>(
+  profileDir: string,
+  fn: () => Promise<T>,
+  lockRoot: string = tmpdir(),
+): Promise<T> {
+  const key = resolve(profileDir);
+  const active = profileOperationContext.getStore();
+  if (active?.has(key) === true) return await fn();
+  const lease = await acquireFreeProfileOperationGuard(profileDir, lockRoot);
+  try {
+    return await profileOperationContext.run(new Set([...(active ?? []), key]), fn);
+  } finally {
+    lease.release();
+  }
+}
 
 // process.kill(pid, 0) is a liveness probe — it sends no signal, it only
 // asks "does this pid exist and am I allowed to signal it". ESRCH = the
@@ -76,7 +180,11 @@ function readLockHolder(profileDir: string): LockHolder | null {
 
 function removeSingletons(profileDir: string): void {
   for (const f of SINGLETON_FILES) {
-    try { rmSync(join(profileDir, f), { force: true }); } catch { /* best-effort */ }
+    try {
+      rmSync(join(profileDir, f), { force: true });
+    } catch {
+      /* best-effort */
+    }
   }
 }
 
@@ -101,9 +209,7 @@ export function clearStaleSingletonLock(profileDir: string = CHROME_PROFILE_DIR)
 // Chrome WE just started (it created the lock). Stored by the caller so
 // close() can verify the same process and reap it if it leaks. null when
 // there's no lock or the holder is on another machine.
-export function currentProfileHolderPid(
-  profileDir: string = CHROME_PROFILE_DIR,
-): number | null {
+export function currentProfileHolderPid(profileDir: string = CHROME_PROFILE_DIR): number | null {
   const holder = readLockHolder(profileDir);
   if (holder === null || holder.host !== hostname()) return null;
   return holder.pid;
@@ -126,9 +232,7 @@ export function currentProfileHolderPid(
 // on THIS host is our own leaked browser — SIGKILL it and clear the lock. A
 // holder on ANOTHER host (shared profile over a network mount) is left alone.
 // Returns true iff it freed a live/stale local holder. Never throws.
-export function reapLeakedProfileHolder(
-  profileDir: string = CHROME_PROFILE_DIR,
-): boolean {
+export function reapLeakedProfileHolder(profileDir: string = CHROME_PROFILE_DIR): boolean {
   const holder = readLockHolder(profileDir);
   if (holder === null || holder.host !== hostname()) return false;
   try {
@@ -136,6 +240,21 @@ export function reapLeakedProfileHolder(
   } catch {
     // already gone between the read and the kill — fall through to cleanup
   }
+  removeSingletons(profileDir);
+  return true;
+}
+
+export function reapProfileHolderIfOwned(
+  profileDir: string,
+  ownedPid: number | null,
+  kill: (pid: number, signal: NodeJS.Signals) => unknown = process.kill,
+): boolean {
+  if (ownedPid === null) return false;
+  const holder = readLockHolder(profileDir);
+  if (holder === null || holder.host !== hostname() || holder.pid !== ownedPid) return false;
+  try {
+    kill(ownedPid, "SIGKILL");
+  } catch {}
   removeSingletons(profileDir);
   return true;
 }

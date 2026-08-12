@@ -143,17 +143,12 @@ describe("headless login VNC lifecycle", () => {
   it("forces browser cleanup when graceful teardown stalls", async () => {
     vi.useFakeTimers();
     const forceClose = vi.fn();
-    const waiting = teardownLoginBrowser(
-      "/unused-profile",
-      () => new Promise<void>(() => undefined),
-      100,
-      forceClose,
-    );
+    const waiting = teardownLoginBrowser(() => new Promise<void>(() => undefined), forceClose, 100);
 
     await vi.advanceTimersByTimeAsync(100);
     await waiting;
 
-    expect(forceClose).toHaveBeenCalledWith("/unused-profile");
+    expect(forceClose).toHaveBeenCalledOnce();
   });
 
   it("cleans every session process and the active browser on an uncaught exception", async () => {
@@ -406,7 +401,9 @@ describe("pollUntil phase-aware heartbeat", () => {
         Date.now() + 60_000,
         async () => false,
         "waiting for sign-in",
-        () => { throw new Error("login browser closed"); },
+        () => {
+          throw new Error("login browser closed");
+        },
       ),
     ).rejects.toThrow("login browser closed");
   });

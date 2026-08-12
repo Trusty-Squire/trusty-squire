@@ -40,12 +40,15 @@ import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
 import { detectAsn, type AsnClass } from "./asn.js";
 import {
+  acquireFreeProfileOperationGuard,
   CHROME_PROFILE_DIR,
   clearStaleSingletonLock,
+  currentProfileHolderPid,
   launchWithProfileGate,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
-  reapLeakedProfileHolder,
+  reapProfileHolderIfOwned,
+  type ProfileOperationLease,
   waitForProfileFree,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -1659,6 +1662,7 @@ export interface SelfLaunchedLogin {
   // Chrome child (a plain context.close() over CDP leaves the process
   // running — the zombie-chrome leak). Also reaps the profile lock.
   teardown: () => Promise<void>;
+  forceTeardown: () => void;
 }
 
 export function childProcessIsRunning(child: ChildProcess | null): boolean {
@@ -1737,7 +1741,7 @@ export async function launchSelfManagedLoginContext(params: {
       } catch {
         /* already gone */
       }
-      reapLeakedProfileHolder(params.profileDir);
+      reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
       const detail = chromeStderr.trim();
       const collision = profileCollisionFromStderr(detail);
       if (collision !== null) throw collision;
@@ -1780,15 +1784,28 @@ export async function launchSelfManagedLoginContext(params: {
         /* already gone */
       }
     }
-    reapLeakedProfileHolder(params.profileDir);
+    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
   };
 
-  return { context: ctx, teardown };
+  const forceTeardown = (): void => {
+    if (child !== null) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      if (child.pid !== undefined) selfManagedChromePids.delete(child.pid);
+    }
+    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
+  };
+
+  return { context: ctx, teardown, forceTeardown };
 }
 
 export interface PlainLoginBrowser {
   // Idempotent: kills the spawned Chrome child and reaps the profile lock.
   teardown: () => Promise<void>;
+  forceTeardown: () => void;
   // Plain login intentionally has no CDP attachment, so expose child liveness
   // for the polling loop to fail loudly if the visible browser disappears.
   isRunning: () => boolean;
@@ -1854,7 +1871,7 @@ export async function launchPlainLoginBrowser(params: {
     // noVNC. If the process is already dead, throw with its stderr.
     await new Promise((r) => setTimeout(r, 1_200));
     if (!childProcessIsRunning(spawned)) {
-      reapLeakedProfileHolder(params.profileDir);
+      reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
       const detail = chromeStderr.trim();
       const collision = profileCollisionFromStderr(detail);
       if (collision !== null) throw collision;
@@ -1870,6 +1887,17 @@ export async function launchPlainLoginBrowser(params: {
   }, { deadlineMs: 0 });
 
   let torn = false;
+  const forceTeardown = (): void => {
+    if (child !== null) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        /* already gone */
+      }
+      if (child.pid !== undefined) selfManagedChromePids.delete(child.pid);
+    }
+    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
+  };
   const teardown = async (): Promise<void> => {
     if (torn) return;
     torn = true;
@@ -1886,10 +1914,11 @@ export async function launchPlainLoginBrowser(params: {
         /* already gone */
       }
     }
-    reapLeakedProfileHolder(params.profileDir);
+    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
   };
   return {
     teardown,
+    forceTeardown,
     isRunning: () => childProcessIsRunning(child),
   };
 }
@@ -1910,11 +1939,10 @@ export class BrowserController {
   // the connected Browser so close() can tear both down.
   private childChrome: ChildProcess | null = null;
   private cdpBrowser: Browser | null = null;
-  // True once launchPersistentContext succeeded this session. close() only
-  // reaps a leaked Chrome when WE launched one — so a ProfileBusyError thrown
-  // BEFORE launch (while waiting on a genuine concurrent holder) never kills
-  // that other run's browser.
+  // True once launchPersistentContext succeeded this session.
   private launchedContext = false;
+  private launchedProfileHolderPid: number | null = null;
+  private profileOperationLease: ProfileOperationLease | null = null;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
@@ -2132,7 +2160,7 @@ export class BrowserController {
         } catch {
           /* already gone */
         }
-        reapLeakedProfileHolder(this.profileDir);
+        reapProfileHolderIfOwned(this.profileDir, child.pid ?? null);
         this.childChrome = null;
         const detail = chromeStderr.trim();
         throw new Error(
@@ -2140,7 +2168,7 @@ export class BrowserController {
             `${chromeExit}${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
         );
       }
-    });
+    }, { deadlineMs: 0 });
     // Use the patchright launcher's connectOverCDP — it's the exact path the
     // falsification experiment validated (its connect avoids Runtime.enable,
     // which a plain attach would emit). The anti-detection that matters here
@@ -2228,6 +2256,19 @@ export class BrowserController {
   }
 
   async start(): Promise<void> {
+    const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
+    const lease = remoteMode ? null : await acquireFreeProfileOperationGuard(this.profileDir);
+    this.profileOperationLease = lease;
+    try {
+      await this.startWithProfileGuard();
+    } catch (err) {
+      this.profileOperationLease = null;
+      lease?.release();
+      throw err;
+    }
+  }
+
+  private async startWithProfileGuard(): Promise<void> {
     reapOrphanedBrowsersOnce(this.profileDir);
     const channel = await detectChromiumChannel();
     this.launchedChannel = channel;
@@ -2336,52 +2377,9 @@ export class BrowserController {
       this.launchedMode = "headless";
     }
 
-    // Cross-process gate on the shared Chrome profile: reclaim a stale
-    // SingletonLock from a killed run, or wait our turn behind a live
-    // `mcp login` / another signup. Without this, launchPersistentContext
-    // aborts with "Failed to create a ProcessSingleton" and bricks the run.
-    let free = await waitForProfileFree(this.profileDir, {
-      deadlineMs: 120_000,
-      onWait: () =>
-        console.error("[operator] bot Chrome profile is busy with another run — waiting…"),
-    });
+    const free = await waitForProfileFree(this.profileDir, { deadlineMs: 0 });
     if (!free) {
-      // A live-pid holder that never released within the deadline. The
-      // signup/discover loop is strictly serial (one run at a time), so a
-      // local holder that outlasts 120s is NOT a legitimate concurrent run —
-      // it's a leaked Chrome from a previously EXTERNALLY-killed run
-      // (run_timeout SIGKILL, OOM, reboot) whose JS `finally`/close() never
-      // executed, so reapLeakedProfileHolder never ran. waitForProfileFree
-      // only reclaims dead-pid / null locks, so this live orphan otherwise
-      // crashes every subsequent run with ProfileBusyError (MEASURED
-      // 2026-06-11: cyclic, railpack). A genuine concurrent `mcp login` would
-      // have released within the 120s wait — so by here, reaping the LOCAL
-      // holder (SIGKILL + clear singletons; no-ops on a remote-host holder)
-      // and retrying once is safe and recovers the run instead of failing it.
-      //
-      // That assumption is false for verifier/discovery concurrency: a live
-      // holder can be another legitimate slot still closing the same robot
-      // profile. In concurrent mode, never SIGKILL the holder; surface
-      // ProfileBusyError so the orchestrator can retry later without corrupting
-      // another run.
-      const concurrency = Number.parseInt(process.env.HOUSEKEEPER_CONCURRENCY ?? "1", 10) || 1;
-      const allowLiveReap = concurrency <= 1;
-      const reaped = allowLiveReap ? reapLeakedProfileHolder(this.profileDir) : false;
-      if (reaped) {
-        console.error(
-          "[operator] reaped a leaked Chrome holding the profile (orphan from an externally-killed run) — retrying",
-        );
-        free = await waitForProfileFree(this.profileDir, { deadlineMs: 10_000 });
-      } else if (!allowLiveReap) {
-        console.error(
-          "[operator] profile still held after wait; not reaping because HOUSEKEEPER_CONCURRENCY>1",
-        );
-      }
-      if (!free) {
-        throw new ProfileBusyError(
-          "bot Chrome profile is held by another run (a login or signup); retry shortly",
-        );
-      }
+      throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
     }
 
     // T3: a PERSISTENT context. The profile dir carries the user's
@@ -2446,15 +2444,18 @@ export class BrowserController {
         ...(chromeEnv ?? process.env),
         TZ: geo?.timezoneId ?? "America/New_York",
       };
-      context = await launchWithProfileGate(this.profileDir, () =>
-        this.launchSelfManagedContext({
-          binary: selfLaunchBinary,
-          headless: chromeHeadless,
-          args: launchArgs,
-          proxy,
-          env: selfEnv,
-          window,
-        }),
+      context = await launchWithProfileGate(
+        this.profileDir,
+        () =>
+          this.launchSelfManagedContext({
+            binary: selfLaunchBinary,
+            headless: chromeHeadless,
+            args: launchArgs,
+            proxy,
+            env: selfEnv,
+            window,
+          }),
+        { failFast: true },
       );
       // Options the default (connectOverCDP) context can't take at creation —
       // applied post-connect. Best-effort: a failure here is non-fatal (the
@@ -2479,24 +2480,31 @@ export class BrowserController {
       }
       // T3: a PERSISTENT context (the legacy path). The profile dir carries the
       // user's Google session so the OAuth-first path reuses it.
-      context = await launchWithProfileGate(this.profileDir, () =>
-        launcher.launchPersistentContext(this.profileDir, {
-          headless: chromeHeadless,
-          ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
-          ...(channel !== null ? { channel } : {}),
-          ...(proxy !== null ? { proxy } : {}),
-          args: [...launchArgs],
-          viewport: null,
-          locale: "en-US",
-          timezoneId: geo?.timezoneId ?? "America/New_York",
-          permissions: grantedPermissions,
-          ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-        }),
+      context = await launchWithProfileGate(
+        this.profileDir,
+        () =>
+          launcher.launchPersistentContext(this.profileDir, {
+            headless: chromeHeadless,
+            ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
+            ...(channel !== null ? { channel } : {}),
+            ...(proxy !== null ? { proxy } : {}),
+            args: [...launchArgs],
+            viewport: null,
+            locale: "en-US",
+            timezoneId: geo?.timezoneId ?? "America/New_York",
+            permissions: grantedPermissions,
+            ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
+          }),
+        { failFast: true },
       );
     }
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
     this.launchedContext = true;
+    if (this.launchedMode !== "remote") {
+      this.launchedProfileHolderPid =
+        this.childChrome?.pid ?? currentProfileHolderPid(this.profileDir);
+    }
     // Speed: optionally abort heavy/irrelevant requests before any navigation.
     await this.installResourceBlocking();
     // Dev-runtime guard: when the bot is run through `tsx`, esbuild may inject
@@ -11402,6 +11410,16 @@ export class BrowserController {
   }
 
   async close(): Promise<void> {
+    try {
+      await this.closeWithProfileGuard();
+    } finally {
+      const lease = this.profileOperationLease;
+      this.profileOperationLease = null;
+      lease?.release();
+    }
+  }
+
+  private async closeWithProfileGuard(): Promise<void> {
     if (this.harnessAttachedPage) {
       this.page = null;
       this.primaryPage = null;
@@ -11459,20 +11477,14 @@ export class BrowserController {
       if (this.childChrome.pid !== undefined) selfManagedChromePids.delete(this.childChrome.pid);
       this.childChrome = null;
     }
-    // …and context.close() doesn't always kill the browser: headed Chrome
-    // under Xvfb / some patchright teardowns leave the main process alive
-    // holding the SingletonLock. A leaked browser makes the NEXT run wait
-    // 120s and fail with ProfileBusyError — one leak bricks every subsequent
-    // service in a batch. We're done with the profile, so any holder still on
-    // THIS host is our own leaked Chrome: reap it. Gated on launchedContext so
-    // a pre-launch ProfileBusyError never kills the run we were waiting on.
     if (this.launchedContext) {
       try {
-        reapLeakedProfileHolder(this.profileDir);
+        reapProfileHolderIfOwned(this.profileDir, this.launchedProfileHolderPid);
       } catch {
         /* best-effort */
       }
       this.launchedContext = false;
+      this.launchedProfileHolderPid = null;
     }
     // F13 — release the on-demand Xvfb if we spawned one. Order
     // matters: kill Chrome (context.close) first so it has its

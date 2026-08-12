@@ -62,7 +62,12 @@ import {
   loggedInProviders,
   markProviderLoggedIn,
 } from "../bot/login-state.js";
-import { PROFILE_BUSY_MESSAGE, waitForProfileFree } from "../bot/profile.js";
+import {
+  CHROME_PROFILE_DIR,
+  PROFILE_BUSY_MESSAGE,
+  ProfileBusyError,
+  withProfileOperationGuard,
+} from "../bot/profile.js";
 import { VERSION } from "../version.js";
 import { ensureLatestVersion } from "./version-check.js";
 import * as ui from "./ui.js";
@@ -480,7 +485,18 @@ async function settings(args: Argv): Promise<void> {
 }
 
 async function connect(args: Argv): Promise<void> {
-  if (args.forceRelogin) await failIfProfileBusy();
+  try {
+    await withProfileOperationGuard(CHROME_PROFILE_DIR, () => connectWithProfileGuard(args));
+  } catch (err) {
+    if (err instanceof ProfileBusyError) {
+      ui.fail(PROFILE_BUSY_MESSAGE);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+async function connectWithProfileGuard(args: Argv): Promise<void> {
   // Interactive picker (clack). Walks the user through agent + advanced setup
   // before the browser install ceremony fires. The picker fills in args so the
   // rest of this function is unchanged.
@@ -575,7 +591,6 @@ async function connect(args: Argv): Promise<void> {
   // form clears only one provider; bare --force-relogin is the full-profile
   // account-switch escape hatch.
   if (args.forceRelogin) {
-    await failIfProfileBusy();
     if (args.forceReloginProvider !== undefined) {
       clearProviderLoggedIn(args.forceReloginProvider);
     } else {
@@ -742,13 +757,6 @@ async function connect(args: Argv): Promise<void> {
     ui.divider();
     ui.panel(closingLine, { color: "wine" });
   }
-}
-
-async function failIfProfileBusy(): Promise<void> {
-  const free = await waitForProfileFree(undefined, { deadlineMs: 0 });
-  if (free) return;
-  ui.fail(PROFILE_BUSY_MESSAGE);
-  process.exit(1);
 }
 
 async function hydrateArgsFromStoredPreferences(args: Argv): Promise<void> {
