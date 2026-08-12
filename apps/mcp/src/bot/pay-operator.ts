@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import canonicalize from "canonicalize";
 import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
-import type { ApiClient } from "../api-client.js";
+import { ApiCallError, type ApiClient, type PaymentApproval } from "../api-client.js";
 import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
 import { PaymentCardFillCleanupError, UnrecognizedPaymentFrameError } from "./browser.js";
 import { generateOperatorKeypair, openSealed, type OperatorKeypair } from "./payment-hpke.js";
@@ -60,11 +60,11 @@ export interface CartCheckoutObservation {
 }
 
 // Non-blocking approval [P0]: everything a LATER operate_pay call needs to
-// resume waiting for the SAME approval instead of minting a duplicate one.
-// Held by the session layer only (never the model) — it carries the operator
-// keypair's PRIVATE half, which is what makes idempotent re-initiation safe:
-// the sealed card was HPKE-encrypted to this exact keypair at creation time,
-// so a resumed poll must reuse it verbatim rather than generating a fresh one.
+// validate and potentially resume the SAME approval. Held by the session layer
+// only (never the model) — it carries the operator keypair's PRIVATE half. A
+// live resumed approval must reuse that keypair because its sealed card was
+// HPKE-encrypted to it; a stale approval is discarded with the key before a
+// fresh approval is minted.
 export interface PendingApprovalWait {
   approval_id: string;
   approval_url: string;
@@ -323,6 +323,29 @@ function needsCartTotalResult(
   };
 }
 
+function isLiveResumableApproval(
+  approval: PaymentApproval,
+  resume: PendingApprovalWait,
+  now: number,
+): boolean {
+  if (approval.id !== resume.approval_id) return false;
+  // The API always sends expires_at. Falling back to the deadline preserves
+  // compatibility with narrowly mocked clients while still using the
+  // server-issued expiry in production.
+  const expiresAt = Date.parse(approval.expires_at);
+  const deadline = Number.isFinite(expiresAt) ? expiresAt : resume.deadline;
+  if (!Number.isFinite(deadline) || deadline <= now) return false;
+  // "approved" is still resumable only while it carries the signed candidate
+  // that this operator must verify and spend. An approved record without that
+  // candidate is terminal and cannot safely authorize a retry.
+  return (
+    approval.status === "pending" ||
+    (approval.status === "approved" &&
+      typeof approval.jws === "string" &&
+      typeof approval.sealed_card === "string")
+  );
+}
+
 function defaultDependencies(): PayDependencies {
   return {
     fetch,
@@ -372,15 +395,14 @@ export async function executeOperatePay(
   overrides: Partial<PayDependencies> = {},
 ): Promise<Record<string, unknown>> {
   const deps = { ...defaultDependencies(), ...overrides };
-  const resume = deps.resumeFrom;
-  const threeDsWaitSeconds = resume !== undefined ? resume.three_ds_wait_seconds : args.three_ds_wait_seconds;
-  const threeDsWaitMs = Math.min(Math.max(threeDsWaitSeconds ?? 180, 0), 600) * 1000;
+  let resume = deps.resumeFrom;
   let keypair = resume !== undefined ? resume.keypair : await generateOperatorKeypair();
   let keypairHandedOff = resume !== undefined;
   let cardBytes: Uint8Array | undefined;
   let card: CheckoutCard | undefined;
+  const initialResume = resume;
   let resumableState: (() => PendingApprovalWait) | undefined =
-    resume !== undefined ? () => resume : undefined;
+    initialResume !== undefined ? () => initialResume : undefined;
   const rejectedCandidates = new Set<string>(resume?.rejectedCandidates ?? []);
 
   try {
@@ -396,6 +418,35 @@ export async function executeOperatePay(
         configuration: "Set VOUCHFLOW_CUSTOMER_ID on the Trusty Squire API.",
       };
     }
+
+    if (resume !== undefined) {
+      let reusable = false;
+      if (deps.now() < resume.deadline) {
+        try {
+          const live = await api.getPaymentApproval(resume.approval_id);
+          reusable = isLiveResumableApproval(live, resume, deps.now());
+        } catch (error) {
+          if (!(error instanceof ApiCallError && error.code === "payment_approval_not_found")) {
+            throw error;
+          }
+        }
+      }
+      if (!reusable) {
+        // Never re-surface a stale capability URL or retain the private half
+        // of a terminal approval's keypair. The fresh ceremony below mints a
+        // new approval and surfaces its URL instead.
+        resume.keypair.privateKey = "";
+        resume = undefined;
+        keypair = await generateOperatorKeypair();
+        keypairHandedOff = false;
+        resumableState = undefined;
+        rejectedCandidates.clear();
+      }
+    }
+
+    const threeDsWaitSeconds =
+      resume !== undefined ? resume.three_ds_wait_seconds : args.three_ds_wait_seconds;
+    const threeDsWaitMs = Math.min(Math.max(threeDsWaitSeconds ?? 180, 0), 600) * 1000;
 
     let checkout: CheckoutSummary;
     let item: string;
@@ -506,7 +557,9 @@ export async function executeOperatePay(
     // Undefined pollBudgetMs (direct executeOperatePay callers) = no additional
     // bound, i.e. the legacy full-deadline blocking behavior.
     const callDeadline =
-      deps.pollBudgetMs === undefined ? deadline : Math.min(deadline, deps.now() + deps.pollBudgetMs);
+      deps.pollBudgetMs === undefined
+        ? deadline
+        : Math.min(deadline, deps.now() + deps.pollBudgetMs);
     // True once this call's (not the overall) budget is exhausted with no
     // resolution — distinguishes "still pending, ask again" from "expired".
     let budgetExhausted = false;

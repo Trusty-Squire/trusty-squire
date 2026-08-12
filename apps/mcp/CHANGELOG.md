@@ -2,6 +2,7 @@
 
 ## 1.1.9-rc.13 (2026-08-11)
 
+- fix(mcp): re-notify users when reusing a live payment approval, and replace expired, missing, or terminal approvals
 - fix(mcp): make payment approval non-blocking and persist the verified cart total (#486)
 - fix(mcp): make checkout state legible, add-to-cart idempotent, and vaulted-card selection obvious (#487)
 - fix(mcp): self-repair operator action errors with structured stale-ref recovery, atomic sequential multi-selects, and schema-repair guidance (#488)

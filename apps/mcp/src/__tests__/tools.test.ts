@@ -461,7 +461,11 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
       currency: "USD",
     });
 
-    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
+    const notifyUser = vi.fn().mockResolvedValue(undefined);
+    const result = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
+      string,
+      unknown
+    >;
     expect(result).toMatchObject({
       status: "approval_pending",
       approval_id: "appr_wire",
@@ -475,8 +479,153 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(mockPaymentLease).toBeNull();
 
     // A re-initiation now resumes — never a second POST /v1/pay/approvals.
-    await operatePayTool.handler(args, api);
+    await operatePayTool.handler(args, api, { notifyUser });
     expect(createPaymentApproval).toHaveBeenCalledOnce();
+    expect(notifyUser).toHaveBeenCalledTimes(2);
+    expect(notifyUser).toHaveBeenNthCalledWith(
+      1,
+      "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_wire",
+      { approval_url: "https://trustysquire.ai/vault/pay/appr_wire" },
+    );
+    expect(notifyUser).toHaveBeenNthCalledWith(
+      2,
+      "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_wire",
+      { approval_url: "https://trustysquire.ai/vault/pay/appr_wire" },
+    );
+  });
+
+  it("replaces an expired approval with a new notified approval whose resource exists", async () => {
+    const createPaymentApproval = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "appr_expired",
+        nonce: "old-nonce",
+        agent: "a",
+        expires_at: new Date(Date.now() + 300_000).toISOString(),
+      })
+      .mockResolvedValueOnce({
+        id: "appr_fresh",
+        nonce: "new-nonce",
+        agent: "a",
+        expires_at: new Date(Date.now() + 300_000).toISOString(),
+      });
+    let expiredApprovalReads = 0;
+    const getPaymentApproval = vi.fn(async (id: string) => {
+      if (id === "appr_expired") expiredApprovalReads++;
+      return {
+        id,
+        status: id === "appr_expired" && expiredApprovalReads > 1 ? "expired" : "pending",
+        merchant: "M",
+        checkout_origin: "https://m.test",
+        amount_cents: 100,
+        currency: "USD",
+        nonce: id === "appr_expired" ? "old-nonce" : "new-nonce",
+        card_ref: "card_1",
+        operator_pubkey: "public",
+        jws: null,
+        sealed_card: null,
+        expires_at: new Date(Date.now() + 300_000).toISOString(),
+      };
+    });
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      createPaymentApproval,
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+      getPaymentApproval,
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse(PAYMENT_DETAILS);
+    const notifyUser = vi.fn().mockResolvedValue(undefined);
+
+    const first = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
+      string,
+      unknown
+    >;
+    const second = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
+      string,
+      unknown
+    >;
+
+    expect(first).toMatchObject({ status: "approval_pending", approval_id: "appr_expired" });
+    expect(second).toMatchObject({ status: "approval_pending", approval_id: "appr_fresh" });
+    expect(createPaymentApproval).toHaveBeenCalledTimes(2);
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_expired", false);
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_fresh", false);
+    expect(notifyUser).toHaveBeenCalledTimes(2);
+    expect(notifyUser).toHaveBeenLastCalledWith(
+      "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_fresh",
+      { approval_url: "https://trustysquire.ai/vault/pay/appr_fresh" },
+    );
+  });
+
+  it("replaces a missing resumed approval and only returns the existing replacement", async () => {
+    const expiresAt = new Date(Date.now() + 300_000).toISOString();
+    const createPaymentApproval = vi
+      .fn()
+      .mockResolvedValueOnce({
+        id: "appr_deleted",
+        nonce: "deleted-nonce",
+        agent: "a",
+        expires_at: expiresAt,
+      })
+      .mockResolvedValueOnce({
+        id: "appr_replacement",
+        nonce: "replacement-nonce",
+        agent: "a",
+        expires_at: expiresAt,
+      });
+    const pendingApproval = (id: string) => ({
+      id,
+      status: "pending" as const,
+      merchant: "M",
+      checkout_origin: "https://m.test",
+      amount_cents: 100,
+      currency: "USD",
+      nonce: id === "appr_deleted" ? "deleted-nonce" : "replacement-nonce",
+      card_ref: "card_1",
+      operator_pubkey: "public",
+      jws: null,
+      sealed_card: null,
+      expires_at: expiresAt,
+    });
+    const getPaymentApproval = vi
+      .fn()
+      .mockResolvedValueOnce(pendingApproval("appr_deleted"))
+      .mockRejectedValueOnce(
+        new ApiCallError(
+          404,
+          "payment_approval_not_found",
+          "GET /v1/pay/approvals/appr_deleted → 404 payment_approval_not_found",
+        ),
+      )
+      .mockResolvedValueOnce(pendingApproval("appr_replacement"));
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      createPaymentApproval,
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+      getPaymentApproval,
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse(PAYMENT_DETAILS);
+    const notifyUser = vi.fn().mockResolvedValue(undefined);
+
+    await operatePayTool.handler(args, api, { notifyUser });
+    const deletedState = mockAwaitingApproval;
+    const replacement = (await operatePayTool.handler(args, api, { notifyUser })) as Record<
+      string,
+      unknown
+    >;
+
+    expect(replacement).toMatchObject({
+      status: "approval_pending",
+      approval_id: "appr_replacement",
+    });
+    expect(createPaymentApproval).toHaveBeenCalledTimes(2);
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_deleted");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_replacement", false);
+    expect(deletedState?.keypair.privateKey).toBe("");
+    expect(notifyUser).toHaveBeenLastCalledWith(
+      "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_replacement",
+      { approval_url: "https://trustysquire.ai/vault/pay/appr_replacement" },
+    );
   });
 
   it("restores a resumable approval when notification fails after creation", async () => {
@@ -582,7 +731,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(mockPaymentLease).toBeNull();
   });
 
-  it("releases a terminal resumed approval instead of requeueing it", async () => {
+  it("replaces a terminal resumed approval instead of requeueing it", async () => {
     const resumeApproval: PendingApprovalWait = {
       approval_id: "appr_terminal",
       approval_url: "https://web.test/pay/appr_terminal",
@@ -602,27 +751,49 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
       item: PAYMENT_DETAILS.item,
       reason: PAYMENT_DETAILS.reason,
       cardRef: "card_1",
+      three_ds_wait_seconds: 600,
     };
     mockAwaitingApproval = resumeApproval;
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_fresh_after_terminal",
+      nonce: "fresh-nonce",
+      agent: "fresh-agent",
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+    });
     const api = makeMockApi({
       listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
       getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
-      getPaymentApproval: vi.fn().mockResolvedValue({
-        id: "appr_terminal",
-        status: "approved",
+      createPaymentApproval,
+      getPaymentApproval: vi.fn(async (id: string) => ({
+        id,
+        status: id === "appr_terminal" ? "approved" : "pending",
+        merchant: "M",
+        checkout_origin: "https://m.test",
+        amount_cents: 100,
+        currency: "USD",
+        nonce: "fresh-nonce",
         card_ref: "card_1",
+        operator_pubkey: "public",
         jws: null,
         sealed_card: null,
-      }),
+        expires_at: new Date(Date.now() + 600_000).toISOString(),
+      })),
     } as unknown as ApiClient);
 
     await expect(
-      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+      operatePayTool.handler(
+        operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, three_ds_wait_seconds: 0 }),
+        api,
+      ),
     ).resolves.toMatchObject({
-      status: "payment_mandate_rejected",
-      reason: "invalid_approval_payload",
+      status: "approval_pending",
+      approval_id: "appr_fresh_after_terminal",
     });
-    expect(mockAwaitingApproval).toBeNull();
+    expect(createPaymentApproval).toHaveBeenCalledOnce();
+    expect(mockAwaitingApproval).toMatchObject({
+      approval_id: "appr_fresh_after_terminal",
+      three_ds_wait_seconds: 0,
+    });
     expect(resumeApproval.keypair.privateKey).toBe("");
     expect(mockPaymentLease).toBeNull();
   });

@@ -4305,8 +4305,8 @@ describe("pending card-fill charge guard", () => {
 
 // [P0] The non-blocking approval rest state: operate_pay no longer holds the
 // "operating" lease across a human's phone tap, so a new state exists for
-// "the human hasn't responded yet." A later call resumes it (idempotent —
-// never a duplicate approval) instead of throwing "already in progress".
+// "the human hasn't responded yet." A later call claims it for live-resource
+// validation instead of throwing "already in progress".
 describe("awaiting-approval payment lease [P0]", () => {
   const approvalState = {
     approval_id: "appr_wait",
