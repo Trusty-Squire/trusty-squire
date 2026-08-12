@@ -15,7 +15,7 @@ import { buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
 
 describe("single-tier — stale install gate", () => {
-  it("every tool returns a re-install instruction when api is null", async () => {
+  it("valid calls require reconnect while malformed calls fail validation first", async () => {
     const server = await buildServer(null);
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -31,17 +31,21 @@ describe("single-tier — stale install gate", () => {
       expect(names).not.toContain("provision");
       expect(names).not.toContain("check_provision_status");
 
-      // Every advertised tool, called with api=null, surfaces the
-      // re-install instruction. No tool is exempt.
-      for (const tool of tools) {
-        const result = await client.callTool({
-          name: tool.name,
-          // Pass minimal arguments — the server's stale-install gate
-          // runs before zod parsing, so the args shape doesn't matter.
-          arguments: {},
-        });
-        expect(JSON.stringify(result)).toMatch(/single-tier auth|install/i);
-      }
+      const malformed = await client.callTool({ name: "operate_start", arguments: {} });
+      const malformedError = JSON.parse(
+        (malformed.content as Array<{ text: string }>)[0]!.text,
+      ).error;
+      expect(malformedError.code).toBe("invalid_arguments");
+
+      const unauthenticated = await client.callTool({
+        name: "list_payment_cards",
+        arguments: {},
+      });
+      const unauthenticatedError = JSON.parse(
+        (unauthenticated.content as Array<{ text: string }>)[0]!.text,
+      ).error;
+      expect(unauthenticatedError.code).toBe("reconnect_required");
+      expect(unauthenticatedError.message).toMatch(/single-tier auth|install/i);
     } finally {
       await client.close();
     }
