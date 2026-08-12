@@ -6,6 +6,7 @@ import {
   clearActivePendingCardFill,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  getActiveRecoveredPayment,
   getActivePendingApproval,
   markActivePendingCardFillSubmitStarted,
   recordActivePaymentProvenance,
@@ -471,6 +472,30 @@ function noPendingPaymentResult(): Record<string, unknown> {
   };
 }
 
+async function recoveredPaymentResult(
+  api: ApiClient,
+  recovered: NonNullable<ReturnType<typeof getActiveRecoveredPayment>>,
+): Promise<Record<string, unknown>> {
+  const approval = await api.getPaymentApproval(recovered.approval_id, false);
+  return {
+    status: approval.status === "expired" ? "expired" : "recovered_approval",
+    approval_id: recovered.approval_id,
+    ...(recovered.approval_url !== null ? { approval_url: recovered.approval_url } : {}),
+    ...(recovered.checkout !== null
+      ? {
+          merchant: recovered.checkout.merchant,
+          amount_cents: recovered.checkout.amount_cents,
+          currency: recovered.checkout.currency,
+        }
+      : {}),
+    pending_fill: recovered.pending_fill !== null,
+    next: {
+      tool: "operate_reconnect",
+      hint: "The checkout and this approval ID were recovered without card or key material. Retry the reconnect once if needed; do not create another approval or kill the shared operator process.",
+    },
+  };
+}
+
 export const operatePaymentStatusTool: Tool = {
   name: "operate_payment_status",
   description:
@@ -484,7 +509,12 @@ export const operatePaymentStatusTool: Tool = {
   async handler(_args, api) {
     assertApi(api);
     const state = getActivePendingApproval();
-    if (state === null) return noPendingPaymentResult();
+    if (state === null) {
+      const recovered = getActiveRecoveredPayment();
+      return recovered === null
+        ? noPendingPaymentResult()
+        : await recoveredPaymentResult(api, recovered);
+    }
     return await readApprovalStatus(api, state, false);
   },
 };

@@ -507,6 +507,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   startProvisionSession,
+  reconnectProvisionSession,
   act,
   formSelectMany,
   observe,
@@ -536,6 +537,7 @@ import {
   recipeTargetFor,
   captureObserved,
 } from "../provision-session.js";
+import type { OperatorResumeMetadata, OperatorResumeStore } from "../operator-resume.js";
 import {
   isRecipeDomainLocked,
   isRecipeShareEligible,
@@ -3270,6 +3272,74 @@ describe("operate session — warm browser lifecycle", () => {
     const next = await startProvisionSession({ serviceUrl: "https://app.example.com/task-51" });
     expect(h.startCalls).toBe(2);
     await finishProvisionSession(next.session_id);
+  });
+});
+
+describe("operator reconnect recovery", () => {
+  it("persists only non-secret checkout recovery metadata and reconnects the same session/approval", async () => {
+    let record: OperatorResumeMetadata | null = null;
+    const store: OperatorResumeStore = {
+      read: () => record,
+      write: (next) => {
+        record = structuredClone(next);
+      },
+      clear: () => {
+        record = null;
+      },
+    };
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.rakuten.co.jp/checkout/payment",
+      extraAllowedHosts: ["checkout.rakuten.co.jp"],
+      resumeStore: store,
+    });
+    const claim = claimActivePaymentForOperatePay("fill_card");
+    if (claim.kind !== "lease") throw new Error("expected payment lease");
+    completeActivePaymentLeaseWithPendingFill(claim.lease, {
+      approval_id: "approval_same_checkout",
+      approval_url: "https://vault.test/pay/approval_same_checkout",
+      checkout: {
+        merchant: "Rakuten",
+        checkout_origin: "https://shop.rakuten.co.jp",
+        amount_cents: 968,
+        currency: "JPY",
+      },
+      card_ref: "opaque-card-ref",
+      last4: "4242",
+      mandate_id: "mandate_same_checkout",
+    });
+
+    const persisted = record as OperatorResumeMetadata | null;
+    if (persisted === null) throw new Error("expected resume metadata");
+    expect(persisted).toMatchObject({
+      session_id: started.session_id,
+      url: "https://shop.rakuten.co.jp/checkout/payment",
+      approval_id: "approval_same_checkout",
+      pending_fill: {
+        approval_id: "approval_same_checkout",
+        approval_url: "https://vault.test/pay/approval_same_checkout",
+      },
+      allowed_hosts: expect.arrayContaining([{ host: "rakuten.co.jp", source: "start" }]),
+    });
+    const serialized = JSON.stringify(persisted);
+    for (const forbidden of ["opaque-card-ref", "4242", "PAN", "CVV"]) {
+      expect(serialized).not.toContain(forbidden);
+    }
+
+    // Simulate abrupt process loss: closeAll performs normal cleanup, then put
+    // the exact durable crash breadcrumb back as the new process would find it.
+    await closeAllProvisionSessions();
+    record = persisted;
+    const resumed = await reconnectProvisionSession({
+      reconnectToken: persisted!.reconnect_token,
+      resumeStore: store,
+    });
+    expect(resumed.session_id).toBe(started.session_id);
+    expect(resumed.reconnect_token).toBe(persisted!.reconnect_token);
+    expect(h.gotos.at(-1)).toBe("https://shop.rakuten.co.jp/checkout/payment");
+    expect(() => claimActivePaymentForOperatePay("fill_card")).toThrow(
+      /approval_same_checkout.*Do not start another approval/i,
+    );
+    await finishProvisionSession(resumed.session_id);
   });
 });
 

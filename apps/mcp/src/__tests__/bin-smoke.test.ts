@@ -170,6 +170,62 @@ describe("launched through a bin symlink", () => {
     expect(stderr).toMatch(/\[trusty-squire\] server v\d/);
   }, 30_000);
 
+  it("stdio survives every malformed action shape captured in the operator incident", async () => {
+    const link = await linkTo("mcp-server-malformed-actions.js");
+    const home = path.join(tmpDir, "malformed-actions-home");
+    await fs.mkdir(path.join(home, ".config", "trusty-squire"), { recursive: true });
+    await fs.writeFile(
+      path.join(home, ".config", "trusty-squire", "session.json"),
+      JSON.stringify({
+        api_base_url: "http://127.0.0.1:1",
+        agent_session_token: "test-session-token",
+        saved_at: new Date().toISOString(),
+      }),
+    );
+
+    const replies = await mcpConversation(link, home, [
+      // Exact audit shapes: set_value rather than select, type_secret without
+      // its sealed slot, and the mutually-exclusive card selectors together.
+      {
+        name: "operate_act",
+        arguments: { session_id: "s1", kind: "set_value", target: "この商品のみ注文", text: "2" },
+      },
+      {
+        name: "operate_act",
+        arguments: { session_id: "s1", kind: "type_secret", target: "pv-card-number" },
+      },
+      {
+        name: "operate_pay",
+        arguments: {
+          item: "Rakuten cart",
+          reason: "checkout",
+          card_ref: "card_a",
+          card_label: "Personal",
+        },
+      },
+      { name: "operate_act", arguments: { session_id: "s1", kind: "click" } },
+      // A real post-error request proves the child remains reachable, and its
+      // recovery guidance must teach retry-once rather than process killing.
+      { name: "operate_observe", arguments: { session_id: "lost-after-restart" } },
+      { method: "tools/list", params: {} },
+    ]);
+
+    for (const reply of replies.slice(0, 4)) {
+      expect(reply.result?.isError).toBe(true);
+      const error = JSON.parse(reply.result?.content?.[0]?.text ?? "{}") as {
+        error?: { code?: string };
+      };
+      expect(error.error?.code).toBe("invalid_arguments");
+    }
+    const unavailable = JSON.parse(replies[4]?.result?.content?.[0]?.text ?? "{}") as {
+      error?: { code?: string; message?: string; retry?: { max_attempts?: number } };
+    };
+    expect(unavailable.error?.code).toBe("server_unavailable");
+    expect(unavailable.error?.retry?.max_attempts).toBe(1);
+    expect(unavailable.error?.message).toMatch(/never kill|retry once/i);
+    expect(replies[5]?.result?.tools?.length).toBeGreaterThan(0);
+  }, 30_000);
+
   it("`mcp connect` reaches the setup flow", async () => {
     const link = await linkTo("mcp-connect-link.js");
     // Bogus api-base + sandbox HOME: it fails at the API call, but only
@@ -221,6 +277,73 @@ describe("launched through a bin symlink", () => {
 
 interface InitResponse {
   result?: { serverInfo?: { name?: string } };
+}
+
+interface McpResponse {
+  id?: number;
+  result?: {
+    isError?: boolean;
+    content?: Array<{ text?: string }>;
+    tools?: unknown[];
+  };
+}
+
+function mcpConversation(
+  scriptPath: string,
+  home: string,
+  requests: Array<
+    | { name: string; arguments: Record<string, unknown> }
+    | { method: string; params: Record<string, unknown> }
+  >,
+): Promise<McpResponse[]> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [scriptPath, "server"], {
+      env: { ...process.env, HOME: home },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    const replies = new Map<number, McpResponse>();
+    let buffer = "";
+    const expected = requests.length + 1;
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error(`stdio conversation timed out: ${buffer}`));
+    }, 20_000);
+    const finish = () => {
+      if (replies.size !== expected) return;
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+      resolve(requests.map((_request, index) => replies.get(index + 2)!));
+    };
+    child.stdout.on("data", (chunk: Buffer) => {
+      buffer += chunk.toString();
+      for (;;) {
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) break;
+        const line = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        const reply = JSON.parse(line) as McpResponse;
+        if (typeof reply.id === "number") replies.set(reply.id, reply);
+        if (replies.has(1)) finish();
+      }
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "stdio-resilience", version: "1" } } })}\n`,
+    );
+    child.stdin.write(
+      `${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized", params: {} })}\n`,
+    );
+    for (const [index, request] of requests.entries()) {
+      const id = index + 2;
+      const method = "name" in request ? "tools/call" : request.method;
+      const params =
+        "name" in request ? { name: request.name, arguments: request.arguments } : request.params;
+      child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
+    }
+  });
 }
 
 // Spawn `node <scriptPath> server`, send an MCP initialize, resolve with
