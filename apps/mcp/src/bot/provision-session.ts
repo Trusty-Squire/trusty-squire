@@ -3990,7 +3990,7 @@ async function observeSession(
 ): Promise<Observation> {
   const oauthInProgress = (): Observation => {
     session.prevObserve = null;
-    const oauth = session.browser.oauthTransitionStatus();
+    const oauth = session.browser.oauthTransitionStatus?.();
     const observation: Observation = {
       session_id: session.id,
       url: oauth?.productUrl ?? session.startUrl,
@@ -4010,7 +4010,7 @@ async function observeSession(
   };
   try {
   session.browser.recoverActivePage();
-  const transition = session.browser.oauthTransitionStatus();
+  const transition = session.browser.oauthTransitionStatus?.();
   if (
     transition?.providerPageClosed === true &&
     transition.productPageViable &&
@@ -4197,7 +4197,7 @@ async function observeSession(
     currentCartMutation,
   );
   } catch (err) {
-    const oauth = session.browser.oauthTransitionStatus();
+    const oauth = session.browser.oauthTransitionStatus?.();
     if (
       oauth?.providerPageClosed === true &&
       oauth.productPageViable &&
