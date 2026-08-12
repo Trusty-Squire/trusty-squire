@@ -12,6 +12,11 @@ import {
   recognizedPaymentProviderFrame,
   UnrecognizedPaymentFrameError,
 } from "../browser.js";
+import {
+  cartAdd,
+  closeAllProvisionSessions,
+  startHarnessProvisionSession,
+} from "../provision-session.js";
 
 // The real-browser checkout-fill test needs a Playwright Chromium binary. The
 // main CI install downloads it, but the lean mcp-only publish-verify install
@@ -1206,6 +1211,71 @@ describe("split-checkout card fill (real browser)", () => {
     });
     return { page, browser };
   }
+
+  it.skipIf(!chromiumAvailable)(
+    "post-verifies the exact requested variant through the live DOM",
+    async () => {
+      const pageUrl = "https://shop.example.test/cart";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Synthetic Shop</title>
+          <div data-testid="line-item-m" data-product-identity="sku:tiara" data-options-hash="size=M">
+            <a href="/products/tiara">Tiara</a>
+            <span>Size M</span>
+            <input name="quantity-m" value="0">
+          </div>
+          <div data-testid="line-item-l" data-product-identity="sku:tiara" data-options-hash="size=L">
+            <a href="/products/tiara">Tiara</a>
+            <span>Size L</span>
+            <input name="quantity-l" value="1">
+          </div>
+          <div>Subtotal USD 20.00 Shipping USD 5.00 Order total USD 25.00</div>
+          <button id="add">Add to Cart</button>
+          <script>
+            document.querySelector("#add").addEventListener("click", () => {
+              const quantity = document.querySelector('[name="quantity-m"]');
+              quantity.value = String(Number(quantity.value) + 1);
+              document.body.dataset.addClicks = String(Number(document.body.dataset.addClicks || "0") + 1);
+            });
+          </script>`,
+      });
+      const controller = new BrowserController({ humanize: false });
+      (controller as unknown as { page: Page }).page = page;
+      try {
+        const started = await startHarnessProvisionSession({
+          serviceUrl: pageUrl,
+          browser: controller,
+        });
+
+        const added = await cartAdd(started.session_id, "sku:tiara", "size=M", "tiara-m");
+        const retried = await cartAdd(started.session_id, "sku:tiara", "size=M", "tiara-m");
+        const lines = await controller.readCheckoutReviewLineItems(true);
+
+        expect(added).toMatchObject({ status: "added", cart_delta: "+1" });
+        expect(retried).toMatchObject({ status: "already_in_cart", cart_delta: "0" });
+        expect(lines).toEqual([
+          expect.objectContaining({
+            title: "Tiara",
+            quantity: 1,
+            product_identities: expect.arrayContaining(["sku:tiara"]),
+            option_signatures: expect.arrayContaining(["size=M"]),
+          }),
+          expect.objectContaining({
+            title: "Tiara",
+            quantity: 1,
+            product_identities: expect.arrayContaining(["sku:tiara"]),
+            option_signatures: expect.arrayContaining(["size=L"]),
+          }),
+        ]);
+        expect(await page.locator('[name="quantity-m"]').inputValue()).toBe("1");
+        expect(await page.locator('[name="quantity-l"]').inputValue()).toBe("1");
+        expect(await page.locator("body").getAttribute("data-add-clicks")).toBe("1");
+      } finally {
+        await closeAllProvisionSessions();
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "refuses card fill on a non-HTTPS main page before writing any field",

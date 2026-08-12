@@ -37,6 +37,7 @@ import {
   buildVerificationSearchQuery,
   makeTwoCaptchaVaultProxy,
   toCompactElement,
+  paymentFieldForObservation,
   matchAutocompleteSuggestions,
 } from "../provision-session.js";
 import {
@@ -75,6 +76,22 @@ describe("toCompactElement (BOT_OBSERVE_COMPACT)", () => {
     expect(c).toEqual({ ref: "@g1:x", label: "Continue", tag: "button" });
     // no null keys serialized
     expect(Object.values(c).every((v) => v !== null && v !== undefined)).toBe(true);
+  });
+
+  it("marks a card-number control as vaulted-card-only with its safe next tool", () => {
+    const card = el({
+      tag: "input",
+      type: "text",
+      autocomplete: "cc-number",
+      id: "pv-card-number",
+      labelText: "Card number",
+    });
+    expect(paymentFieldForObservation(card)).toBe("card_number");
+    expect(toCompactElement(card, "@e:card", NONE)).toMatchObject({
+      payment_field: "card_number",
+      interaction: "vaulted_card_only",
+      recommended_action: { tool: "operate_pay", phase: "fill_card" },
+    });
   });
 
   it("keeps role/type/href/testId; DROPS path from the default payload and the redundant container", () => {

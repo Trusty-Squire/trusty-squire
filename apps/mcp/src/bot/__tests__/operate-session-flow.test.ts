@@ -55,6 +55,22 @@ const h = vi.hoisted(() => ({
     amount_cents: number;
     currency: string;
   } | null,
+  cartLineItems: [] as Array<{
+    title: string;
+    quantity: number;
+    details?: string;
+    product_identities: string[];
+    option_signatures: string[];
+  }>,
+  cartLineItemsAfterClick: null as Array<{
+    title: string;
+    quantity: number;
+    details?: string;
+    product_identities: string[];
+    option_signatures: string[];
+  }> | null,
+  cartLineReadFailuresRemaining: 0,
+  failNextCartLineReadAfterClick: false,
   readCheckoutSummaryCalls: 0,
   focusedLabels: [] as string[],
   pressedKeys: [] as string[],
@@ -79,7 +95,7 @@ const h = vi.hoisted(() => ({
   consentCta: null as string | null,
   locatorResolve: {
     ok: true,
-    text: "Add To Cart",
+    text: "Control",
     safetySignals: { billingObject: false, accountSetup: false },
   } as
     | {
@@ -162,6 +178,21 @@ vi.mock("../browser.js", () => ({
       h.readCheckoutSummaryCalls += 1;
       if (h.checkoutSummary === null) throw new Error("payment_checkout_total_not_found");
       return h.checkoutSummary;
+    }
+    async readCheckoutReviewLineItems(): Promise<
+      Array<{
+        title: string;
+        quantity: number;
+        details?: string;
+        product_identities: string[];
+        option_signatures: string[];
+      }>
+    > {
+      if (h.cartLineReadFailuresRemaining > 0) {
+        h.cartLineReadFailuresRemaining -= 1;
+        throw new Error("cart line observation failed");
+      }
+      return h.cartLineItems.map((line) => ({ ...line, details: line.details ?? line.title }));
     }
     async openFirstMailResult(): Promise<boolean> {
       return false;
@@ -371,6 +402,18 @@ vi.mock("../browser.js", () => ({
     }
     async clickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
+      if (h.clickValueMutation !== null) {
+        for (const element of h.elements as Array<Record<string, unknown>>) {
+          if (element.selector === h.clickValueMutation.selector) {
+            element.value = h.clickValueMutation.value;
+          }
+        }
+      }
+      if (h.cartLineItemsAfterClick !== null) h.cartLineItems = h.cartLineItemsAfterClick;
+      if (h.failNextCartLineReadAfterClick) {
+        h.cartLineReadFailuresRemaining = 1;
+        h.failNextCartLineReadAfterClick = false;
+      }
     }
     async jsClickHandle(): Promise<void> {
       h.locatorClickCalls += 1;
@@ -398,6 +441,26 @@ vi.mock("../browser.js", () => ({
   // Mirrors the real export — the pending-card-fill charge guard reads it.
   CHECKOUT_SUBMIT_LABEL_RE:
     /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i,
+  parseCheckoutAmount: (texts: readonly string[], fallbackCurrency?: string) => {
+    for (const text of texts) {
+      const match = text.match(
+        /^\s*(?:total\s+)?(?:([A-Z]{3})\s*)?([$¥￥])?\s*([0-9]+(?:[.,][0-9]+)?)\s*(円|[A-Z]{3})?\s*$/i,
+      );
+      if (match?.[3] === undefined) continue;
+      const currency = (
+        match[1] ??
+        match[4] ??
+        (match[2] === "$" ? "USD" : undefined) ??
+        fallbackCurrency
+      )
+        ?.replace("円", "JPY")
+        .toUpperCase();
+      if (currency === undefined) continue;
+      const amount = Number(match[3].replace(",", "."));
+      return { amount_cents: Math.round(amount * (currency === "JPY" ? 1 : 100)), currency };
+    }
+    return null;
+  },
 }));
 
 vi.mock("../captcha-solver-2captcha.js", () => ({
@@ -450,6 +513,7 @@ import {
   activeProvisionBrowser,
   activeProvisionBrowserForPayment,
   activeCartCheckoutForOrigin,
+  cartAdd,
   recordActivePaymentProvenance,
   setActivePendingCardFill,
   claimActivePaymentForOperatePay,
@@ -571,6 +635,10 @@ beforeEach(() => {
   h.checkoutFieldNames = [];
   h.visibleText = "";
   h.checkoutSummary = null;
+  h.cartLineItems = [];
+  h.cartLineItemsAfterClick = null;
+  h.cartLineReadFailuresRemaining = 0;
+  h.failNextCartLineReadAfterClick = false;
   h.readCheckoutSummaryCalls = 0;
   h.focusedLabels = [];
   h.pressedKeys = [];
@@ -588,7 +656,7 @@ beforeEach(() => {
   h.twoCaptchaCalls = [];
   h.locatorResolve = {
     ok: true,
-    text: "Add To Cart",
+    text: "Control",
     safetySignals: { billingObject: false, accountSetup: false },
   };
   h.locatorClickCalls = 0;
@@ -2621,7 +2689,10 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
       safetySignals: { billingObject: false, accountSetup: false },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
-    await act(obs.session_id, { kind: "click", target: "css=#atc" });
+    await act(obs.session_id, { kind: "click", target: "css=#atc" }, "compact", {
+      productIdentity: "sku:configured-product",
+      optionsHash: "variant=default",
+    });
     expect(h.locatorClickCalls).toBe(1);
   });
 
@@ -2729,7 +2800,10 @@ describe("operate_act — locator (text=/css=) unsafe-action re-guard", () => {
       safetySignals: { billingObject: false, accountSetup: false },
     };
     const obs = await startProvisionSession({ serviceUrl: "https://dashboard.example.com/" });
-    await act(obs.session_id, { kind: "click", target: "css=#atc" });
+    await act(obs.session_id, { kind: "click", target: "css=#atc" }, "compact", {
+      productIdentity: "sku:configured-product",
+      optionsHash: "variant=default",
+    });
 
     await expect(
       provisionRememberTool.handler(
@@ -4185,6 +4259,287 @@ describe("awaiting-approval payment lease [P0]", () => {
 });
 
 describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => {
+  it("returns legible post-add cart state and suppresses a retry for the same line", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 0 Subtotal 968円 Shipping Free Total 968円";
+    h.elements = [elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "0" })];
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 968,
+      currency: "JPY",
+    };
+    h.clickValueMutation = { selector: "#qty", value: "1" };
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const added = await cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-1");
+
+    expect(added).toMatchObject({
+      status: "added",
+      cart_delta: "+1",
+      cart_url: "https://shop.example.com/cart",
+      checkout_state: {
+        authority: "informational_only",
+        completeness: "best_effort",
+        authoritative_for_payment: false,
+        stage: "cart",
+        product_identity: "sku:tiara",
+        options_hash: "size=M",
+        quantity: 1,
+        subtotal: { amount_cents: 968, currency: "JPY" },
+        shipping: { amount_cents: 0, currency: "JPY" },
+        payable_total: { amount_cents: 968, currency: "JPY" },
+        next_action: { tool: "operate_act", kind: "click", intent: "proceed_to_checkout" },
+      },
+    });
+    expect(h.locatorClickCalls).toBe(1);
+
+    const retried = await cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-1");
+    expect(retried).toMatchObject({ status: "already_in_cart", cart_delta: "0" });
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("shares an atomic reservation across concurrent retries", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 1 Total 968円";
+    h.elements = [elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "1" })];
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 968,
+      currency: "JPY",
+    };
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const [first, second] = await Promise.all([
+      cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-concurrent"),
+      cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-concurrent"),
+    ]);
+
+    expect(first.status).toBe("added");
+    expect(second).toMatchObject({ status: "already_in_cart", cart_delta: "0" });
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("reconciles the requested line after post-click observation failure", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 1 Total 968円";
+    h.elements = [elem({ name: "quantity", labelText: "Quantity", selector: "#qty", value: "1" })];
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 968,
+      currency: "JPY",
+    };
+    h.cartLineItemsAfterClick = [
+      {
+        title: "Tiara",
+        quantity: 1,
+        product_identities: ["sku:tiara"],
+        option_signatures: ["size=M"],
+      },
+    ];
+    h.failNextCartLineReadAfterClick = true;
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    await expect(
+      cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-reconcile"),
+    ).rejects.toThrow("cart line observation failed");
+    await expect(
+      cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-reconcile"),
+    ).resolves.toMatchObject({ status: "already_in_cart", cart_delta: "0" });
+    expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("does not infer checkout stage from ordinary body copy", async () => {
+    h.currentUrl = "https://shop.example.com/products/checkout-tote";
+    h.visibleText = "Add to Cart. We accept many payment methods.";
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const observed = await observe(started.session_id, "compact");
+
+    expect(observed.checkout_state).toBeUndefined();
+  });
+
+  it("reports independently labeled money components", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Subtotal $10.00 Shipping $5.00 Total $15.00";
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 1_500,
+      currency: "USD",
+    };
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const observed = await observe(started.session_id, "compact");
+
+    expect(observed.checkout_state).toMatchObject({
+      subtotal: { amount_cents: 1_000, currency: "USD" },
+      shipping: { amount_cents: 500, currency: "USD" },
+      payable_total: { amount_cents: 1_500, currency: "USD" },
+    });
+  });
+
+  it("does not fabricate component amounts from the payable total", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Total $15.00";
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 1_500,
+      currency: "USD",
+    };
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const observed = await observe(started.session_id, "compact");
+
+    expect(observed.checkout_state).toMatchObject({
+      subtotal: null,
+      shipping: null,
+      payable_total: { amount_cents: 1_500, currency: "USD" },
+    });
+  });
+
+  it("keeps a labeled shipping charge over value-leading promotional copy", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Shipping $0 on orders over $50. Subtotal $10.00 Shipping $5.00 Total $15.00";
+    h.checkoutSummary = {
+      merchant: "Synthetic Shop",
+      checkout_origin: "https://shop.example.com",
+      amount_cents: 1_500,
+      currency: "USD",
+    };
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const observed = await observe(started.session_id, "compact");
+
+    expect(observed.checkout_state?.shipping).toEqual({ amount_cents: 500, currency: "USD" });
+  });
+
+  it("resolves a cart drawer to its canonical cart link", async () => {
+    h.currentUrl = "https://shop.example.com/products/tiara";
+    h.visibleText = "Mini cart";
+    h.elements = [
+      elem({
+        tag: "a",
+        selector: "#view-cart",
+        visibleText: "View cart",
+        href: "/cart",
+        container: "cart drawer",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const observed = await observe(started.session_id, "compact");
+
+    expect(observed.checkout_state).toMatchObject({
+      stage: "cart",
+      cart_url: "https://shop.example.com/cart",
+    });
+  });
+
+  it("does not carry money or cart URLs across origins", async () => {
+    h.currentUrl = "https://merchant-a.example/cart";
+    h.visibleText = "Total $15.00";
+    h.checkoutSummary = {
+      merchant: "Merchant A",
+      checkout_origin: "https://merchant-a.example",
+      amount_cents: 1_500,
+      currency: "USD",
+    };
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+    await observe(started.session_id, "compact");
+    h.currentUrl = "https://merchant-b.example/cart";
+    h.checkoutSummary = null;
+
+    const observed = await observe(started.session_id, "compact");
+
+    expect(observed.checkout_state).toMatchObject({
+      payable_total: null,
+      cart_url: "https://merchant-b.example/cart",
+    });
+  });
+
+  it("allows generic quantity controls without identity and emits supplied hints", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Quantity: 1";
+    h.elements = [
+      elem({
+        selector: "#increase",
+        role: "button",
+        visibleText: "+",
+        ariaLabel: "Increase quantity",
+        container: "cart item Tiara size M",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const unbound = await act(started.session_id, { kind: "click", target: "+" });
+    expect(unbound.checkout_state).toMatchObject({
+      product_identity: null,
+      options_hash: null,
+    });
+    const observed = await act(started.session_id, { kind: "click", target: "+" }, "compact", {
+      productIdentity: "sku:tiara",
+      optionsHash: "size=M",
+    });
+
+    expect(observed.checkout_state).toMatchObject({
+      product_identity: "sku:tiara",
+      options_hash: "size=M",
+    });
+  });
+
+  it("allows row-scoped remove controls without identity and binds supplied hints", async () => {
+    h.currentUrl = "https://shop.example.com/cart";
+    h.visibleText = "Cart Tiara size M";
+    h.elements = [
+      elem({
+        selector: "#remove-tiara",
+        role: "button",
+        visibleText: "Remove",
+        container: "cart item Tiara size M",
+      }),
+    ];
+    const started = await startProvisionSession({ serviceUrl: h.currentUrl });
+
+    const unbound = await act(started.session_id, { kind: "click", target: "Remove" });
+    expect(unbound.checkout_state).toMatchObject({
+      product_identity: null,
+      options_hash: null,
+    });
+    expect(h.clickCalls).toBe(1);
+    const observed = await act(started.session_id, { kind: "click", target: "Remove" }, "compact", {
+      productIdentity: "sku:tiara",
+      optionsHash: "size=M",
+    });
+
+    expect(observed).toMatchObject({
+      cart_delta: "unknown",
+      checkout_state: {
+        product_identity: "sku:tiara",
+        options_hash: "size=M",
+      },
+    });
+  });
+
   it("captures a real total observed on an earlier page and serves it for the SAME origin", async () => {
     const started = await startProvisionSession({
       serviceUrl: "https://cart.step.rakuten.co.jp/cart",

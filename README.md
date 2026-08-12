@@ -214,6 +214,22 @@ for the system and data flows.
   `upload` and `oauth_click` fail closed. If a visible control has no observed
   ref, the four locator-capable actions (`click`, `js_click`, `type`, and
   `type_secret`) can use a live locator; that one-off fallback is not replayable.
+- `operate_cart_add` is the retry-safe add-to-cart path. Give it the canonical
+  product identity, selected-variant options hash, and a stable idempotency key;
+  it post-verifies the exact cart line and returns `added` or
+  `already_in_cart`, `cart_delta` (`+1`, `0`, or `unknown`), and the canonical
+  cart URL when observable, without clicking again for the same product and
+  variant. Cart and checkout observations expose an informational, best-effort
+  `checkout_state` with stage, product and variant identity, quantity,
+  separately observed subtotal and shipping, payable total when known,
+  canonical cart URL, and one `next_action`. `operate_pay` always reads the
+  authoritative charge total from the live checkout instead of accepting this
+  state as payment input.
+- Observed card controls are marked `payment_field` and
+  `interaction: "vaulted_card_only"`, with `operate_pay { phase: "fill_card" }`
+  as the recommended action. Typing a Luhn-valid, card-number-shaped value
+  manually through `operate_act` is refused with `safe_alternative: "operate_pay"`
+  and the missing prerequisite `verified_cart_total`.
 - `operate_extract` captures a generated credential into a sealed slot or the vault.
 - `operate_remember` saves a postcondition-verified local recipe under a closed
   task verb plus the service's registrable domain. It records stable target

@@ -161,6 +161,12 @@ and transferred secrets are not returned to the agent.
 ## Payment Flow
 
 ```text
+cart and checkout observations expose a best-effort checkout_state overlay with one next action
+  -> operate_cart_add reserves product+variant identity and an idempotency key,
+     post-verifies the exact line, and suppresses duplicate retry clicks
+  -> checkout_state is informational only; it is never a charge input
+  -> observed card controls direct the agent to operate_pay, while model-supplied
+     PAN-shaped entry remains refused until operate_pay independently verifies the total
 agent starts operate_pay in the active checkout
   -> agent supplies a non-empty item and reason
   -> a single-page checkout reads merchant, origin, and payable total from the

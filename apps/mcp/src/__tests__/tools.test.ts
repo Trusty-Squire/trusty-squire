@@ -67,7 +67,9 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       const lease = { phase: phase === "fill_card" ? ("fill_card" as const) : ("single" as const) };
       mockPaymentLease = lease;
       if (lease.phase === "fill_card") mockPaymentSealActive = true;
-      return resumeApproval !== undefined ? { kind: "lease", lease, resumeApproval } : { kind: "lease", lease };
+      return resumeApproval !== undefined
+        ? { kind: "lease", lease, resumeApproval }
+        : { kind: "lease", lease };
     },
     completeActivePaymentLeaseWithPendingFill: (
       lease: { phase: "fill_card" | "single" },
@@ -148,6 +150,7 @@ import {
   revokeAppAccessTool,
   TOOLS,
 } from "../tools/index.js";
+import { provisionActTool } from "../tools/provision-drive.js";
 
 function stubBrowser(): PaymentBrowser {
   return {
@@ -366,12 +369,69 @@ describe("operate_pay card selection", () => {
   });
 });
 
+describe("operate_act manual card refusal", () => {
+  it("returns the vaulted-card alternative and its verified-total prerequisite", async () => {
+    const args = provisionActTool.inputSchema.parse({
+      session_id: "session_1",
+      kind: "type",
+      target: "Card number",
+      text: "5555 5555 5555 4444",
+    });
+    await expect(provisionActTool.handler(args, null)).resolves.toMatchObject({
+      status: "manual_card_entry_refused",
+      safe_alternative: "operate_pay",
+      missing_prerequisite: "verified_cart_total",
+    });
+  });
+});
+
 // [P0] Non-blocking approval: operate_pay never blocks the RPC on the human's
 // phone tap. It makes one live check and, when nobody has responded yet,
 // hands back approval_pending and leaves the session in the awaiting_approval
 // rest state instead — verified here at the tool-wiring layer (operate-pay.ts),
 // distinct from pay-operator.test.ts's executeOperatePay-level coverage.
 describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
+  it("never consumes checkout_state as a charge input", async () => {
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_checkout_hint",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(Date.now() + 300_000).toISOString(),
+    });
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      createPaymentApproval,
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+      getPaymentApproval: vi.fn().mockResolvedValue({
+        id: "appr_checkout_hint",
+        status: "pending",
+        card_ref: "card_1",
+        jws: null,
+        sealed_card: null,
+      }),
+    } as unknown as ApiClient);
+    const args = operatePayTool.inputSchema.parse({
+      ...PAYMENT_DETAILS,
+      checkout_state: {
+        authority: "informational_only",
+        completeness: "best_effort",
+        authoritative_for_payment: false,
+        payable_total: { amount_cents: 999_999, currency: "USD" },
+        shipping: { amount_cents: 999_899, currency: "USD" },
+      },
+    });
+
+    expect(args).not.toHaveProperty("checkout_state");
+    await operatePayTool.handler(args, api);
+
+    expect(mockBrowser.readCheckoutSummary).toHaveBeenCalledOnce();
+    expect(createPaymentApproval).toHaveBeenCalledOnce();
+    expect(createPaymentApproval.mock.calls[0]![0]).toMatchObject({
+      amount_cents: 100,
+      currency: "USD",
+    });
+  });
+
   it("returns approval_pending (never payment_approval_timeout) when the human hasn't responded, and marks the lease awaiting_approval", async () => {
     mockBrowser = stubBrowser();
     const createPaymentApproval = vi.fn().mockResolvedValue({
@@ -478,10 +538,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     );
 
     await expect(
-      operatePayTool.handler(
-        operatePayTool.inputSchema.parse(PAYMENT_DETAILS),
-        makeMockApi(),
-      ),
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), makeMockApi()),
     ).rejects.toThrow("browser unavailable");
     expect(mockAwaitingApproval).toBe(resumeApproval);
     expect(mockPaymentLease).toBeNull();
@@ -625,9 +682,9 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     await expect(operatePaymentStatusTool.handler({}, api)).resolves.toMatchObject({
       status: "no_pending_payment",
     });
-    await expect(
-      operatePaymentAwaitTool.handler({}, api),
-    ).resolves.toMatchObject({ status: "no_pending_payment" });
+    await expect(operatePaymentAwaitTool.handler({}, api)).resolves.toMatchObject({
+      status: "no_pending_payment",
+    });
   });
 
   it("rejects waits longer than the 15-second tool contract", () => {
@@ -1033,11 +1090,11 @@ describe("TOOLS registry", () => {
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
     // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
-    // 6 base tools + the 14 operator-surface tools (operate_start/observe/act/pay/
+    // 6 base tools + the 15 operator-surface tools (operate_start/observe/act/cart-add/pay/
     // captcha_gate/await_verification/extract/remember/use/finish_task/finish —
     // remember+use are the operator-recipe capture/replay pair — plus the PR3c
     // login-credential tools: prepare/store plus seal_vault_credential for signin fill.
-    expect(TOOLS).toHaveLength(26);
+    expect(TOOLS).toHaveLength(27);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
       "get_extract_failure",
@@ -1049,6 +1106,7 @@ describe("TOOLS registry", () => {
       "operate_act",
       "operate_await_verification",
       "operate_captcha_gate",
+      "operate_cart_add",
       "operate_extract",
       "operate_finish",
       "operate_finish_task",

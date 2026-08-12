@@ -13,6 +13,7 @@ import {
   startProvisionSession,
   observe,
   act,
+  cartAdd,
   extractCredentials,
   captchaGate,
   awaitVerification,
@@ -32,6 +33,7 @@ import {
   checkoutShapeSignatureForSession,
   type ProvisionAction,
   type ExtractResult,
+  manualCardEntryBlockReason,
 } from "../bot/provision-session.js";
 import { signSkillForPublish } from "../skill-cli/signing.js";
 import {
@@ -400,6 +402,8 @@ const actSchema = z
     host: z.string().min(1).max(253).optional(),
     // type_secret: the sealed slot whose value to type into `target`.
     slot: z.string().min(1).max(60).optional(),
+    product_identity: z.string().trim().min(1).max(500).optional(),
+    options_hash: z.string().trim().min(1).max(128).optional(),
     provenance: RecipeHoleSchema.shape.hole.optional(),
     replay_step_index: z.number().int().min(0).optional(),
     replay_hole: RecipeHoleSchema.shape.hole.optional(),
@@ -412,6 +416,12 @@ const actSchema = z
     detail: z.enum(["none", "compact", "full"]).optional(),
   })
   .superRefine((value, ctx) => {
+    if ((value.product_identity === undefined) !== (value.options_hash === undefined)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "product_identity and options_hash must be provided together",
+      });
+    }
     if ((value.replay_step_index === undefined) !== (value.replay_hole === undefined)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -584,6 +594,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     'detail (default "compact") controls the returned payload: "none" skips it ' +
     "entirely for chained fills (then operate_observe before the next ref action), " +
     '"full" returns the legacy screen+accessibility payload. ' +
+    "For legible product/variant hints on a cart-affecting action, pass product_identity and options_hash together; returned checkout_state is best-effort informational state and never a payment charge input. " +
     OBSERVE_DELTA_CONTRACT,
   inputSchema: actSchema,
   jsonInputSchema: {
@@ -617,6 +628,8 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       key: { type: "string" },
       host: { type: "string" },
       slot: { type: "string" },
+      product_identity: { type: "string", minLength: 1 },
+      options_hash: { type: "string", minLength: 1 },
       provenance: {
         type: "string",
         pattern:
@@ -633,7 +646,65 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     },
   },
   async handler(args) {
-    return await act(args.session_id, buildAction(args), args.detail ?? "compact");
+    // Keep the defense-in-depth guard in act() for internal/replay callers,
+    // while this public tool surface makes the safe recovery explicit at the
+    // exact point a small model tried a forbidden manual PAN entry.
+    if (args.kind === "type") {
+      const reason = manualCardEntryBlockReason(args.text ?? "");
+      if (reason !== null) {
+        return {
+          status: "manual_card_entry_refused",
+          reason,
+          safe_alternative: "operate_pay",
+          missing_prerequisite: "verified_cart_total",
+        };
+      }
+    }
+    return await act(
+      args.session_id,
+      buildAction(args),
+      args.detail ?? "compact",
+      args.product_identity !== undefined && args.options_hash !== undefined
+        ? { productIdentity: args.product_identity, optionsHash: args.options_hash }
+        : undefined,
+    );
+  },
+};
+
+const cartAddSchema = z.object({
+  session_id: z.string().min(1),
+  product_identity: z.string().trim().min(1).max(500),
+  options_hash: z.string().trim().min(1).max(128),
+  idempotency_key: z.string().trim().min(1).max(256),
+});
+
+export const operateCartAddTool: Tool<z.infer<typeof cartAddSchema>> = {
+  name: "operate_cart_add",
+  description:
+    "Idempotently add the current product to cart. Pass the canonical product_identity, " +
+    "the selected-variant options_hash, and a stable idempotency_key. The tool post-verifies " +
+    "the cart state and returns checkout_state, cart_delta, and canonical cart_url. Retrying the " +
+    "same product/variant never clicks again: it returns already_in_cart with cart_delta '0'. " +
+    "checkout_state is a best-effort informational hint; operate_pay independently verifies the charge total.",
+  inputSchema: cartAddSchema,
+  jsonInputSchema: {
+    type: "object",
+    required: ["session_id", "product_identity", "options_hash", "idempotency_key"],
+    properties: {
+      session_id: { type: "string" },
+      product_identity: { type: "string", minLength: 1 },
+      options_hash: { type: "string", minLength: 1 },
+      idempotency_key: { type: "string", minLength: 1 },
+    },
+  },
+  annotations: { readOnlyHint: false, idempotentHint: true },
+  async handler(args) {
+    return await cartAdd(
+      args.session_id,
+      args.product_identity,
+      args.options_hash,
+      args.idempotency_key,
+    );
   },
 };
 
@@ -1592,6 +1663,7 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
   provisionActTool,
+  operateCartAddTool,
   provisionCaptchaGateTool,
   provisionAwaitVerificationTool,
   provisionExtractTool,
