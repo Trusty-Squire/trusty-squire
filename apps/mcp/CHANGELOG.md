@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.14 (2026-08-12)
+
+- fix(mcp): exit the server when the stdio client disconnects, preventing an operator process leak (#491)
+- fix(mcp): re-notify payment-approval reuse and replace expired, missing, or terminal approvals with a fresh approval (#492)
+- fix(mcp): make operator OAuth login atomic and resilient when the provider closes its popup/window, with actionable errors (#493)
+
 ## 1.1.9-rc.13 (2026-08-11)
 
 - fix(mcp): re-notify users when reusing a live payment approval, and replace expired, missing, or terminal approvals
