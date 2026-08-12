@@ -11,6 +11,11 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { buildServer } from "../server.js";
 import type { ApiClient } from "../api-client.js";
+import type { BrowserController } from "../bot/browser.js";
+import {
+  closeAllProvisionSessions,
+  startHarnessProvisionSession,
+} from "../bot/provision-session.js";
 
 async function connectedClient(): Promise<Client> {
   const api = { setRequestingAgent: vi.fn() } as unknown as ApiClient;
@@ -28,6 +33,52 @@ function resultText(result: Awaited<ReturnType<Client["callTool"]>>): string {
 }
 
 describe("operate_* bad input is a per-call error, never a server failure", () => {
+  it("preserves the same active in-memory session through malformed and unknown calls", async () => {
+    const url = "https://operator-resilience.test/checkout";
+    const browser = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      recoverActivePage: vi.fn(),
+      extractInteractiveElements: vi.fn().mockResolvedValue([]),
+      extractVisibleText: vi.fn().mockResolvedValue("Checkout session still active"),
+      currentUrl: vi.fn().mockReturnValue(url),
+      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("no checkout total")),
+      close: vi.fn().mockResolvedValue(undefined),
+    } as unknown as BrowserController;
+    const started = await startHarnessProvisionSession({ serviceUrl: url, browser });
+    const client = await connectedClient();
+
+    try {
+      const malformed = await client.callTool({
+        name: "operate_act",
+        arguments: {
+          session_id: started.session_id,
+          kind: "set_value",
+          target: "この商品のみ注文",
+          text: "2",
+        },
+      });
+      const unknown = await client.callTool({ name: "operate_not_real", arguments: {} });
+      const observed = await client.callTool({
+        name: "operate_observe",
+        arguments: { session_id: started.session_id },
+      });
+
+      expect(JSON.parse(resultText(malformed)).error.code).toBe("invalid_arguments");
+      expect(JSON.parse(resultText(unknown)).error.code).toBe("unknown_tool");
+      expect(observed.isError).not.toBe(true);
+      expect(started.text).toBe("Checkout session still active");
+      expect(JSON.parse(resultText(observed))).toMatchObject({
+        session_id: started.session_id,
+        url,
+        text_unchanged: true,
+      });
+      expect(browser.currentUrl).toHaveBeenCalled();
+    } finally {
+      await client.close();
+      await closeAllProvisionSessions();
+    }
+  });
+
   it("an unsupported action kind returns a structured error naming the valid kinds — and the server answers the next call", async () => {
     const client = await connectedClient();
     try {

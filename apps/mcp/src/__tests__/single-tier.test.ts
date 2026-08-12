@@ -153,8 +153,8 @@ describe("MCP tool argument validation", () => {
         (missingTypeTarget.content as Array<{ text: string }>)[0]!.text,
       ).error.guidance;
       expect(missingTypeTargetRepair.missing).toContain("target");
-      const cardRepair = JSON.parse((cardConflict.content as Array<{ text: string }>)[0]!.text).error
-        .guidance;
+      const cardRepair = JSON.parse((cardConflict.content as Array<{ text: string }>)[0]!.text)
+        .error.guidance;
       expect(cardRepair.safe_alternative).toMatch(/only one of card_ref or card_label/i);
     } finally {
       await client.close();

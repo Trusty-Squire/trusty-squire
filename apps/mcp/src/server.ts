@@ -75,13 +75,9 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
     const parsed = tool.inputSchema.safeParse(req.params.arguments ?? {});
     if (!parsed.success) {
       if (tool.schemaRepair !== undefined) {
-        return errorContent(
-          "invalid_arguments",
-          "invalid arguments",
-          {
-            guidance: tool.schemaRepair(req.params.arguments ?? {}, parsed.error.issues),
-          },
-        );
+        return errorContent("invalid_arguments", "invalid arguments", {
+          guidance: tool.schemaRepair(req.params.arguments ?? {}, parsed.error.issues),
+        });
       }
       return errorContent(
         "invalid_arguments",

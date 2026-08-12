@@ -202,6 +202,11 @@ for the system and data flows.
 
 ## MCP tools
 
+- Rejected tool calls return a JSON `error` envelope with a stable `code` and
+  message. Malformed and unknown calls fail only that request; they do not stop
+  the shared stdio process or discard its active in-memory operator session.
+  `server_unavailable` includes `retry.max_attempts: 1`: retry once, and never
+  kill or restart the shared operator process.
 - `operate_start`, `operate_observe`, and `operate_act` open a website, inspect
   the current state, and perform one browser action at a time. Ordinary controls
   inside same- and cross-origin frames are included in observations with a
@@ -218,9 +223,9 @@ for the system and data flows.
   with the last observation generation, `reobserve_required: true`, best-effort
   label-keyed `replacement_candidates`, and
   `retry_policy: "do_not_retry_old_ref"`; re-observe and choose a current ref.
-  Malformed `operate_act` calls return a repair object with the allowed kinds,
-  missing fields, a valid example, and a safe alternative instead of only a
-  validation string.
+  Malformed `operate_act` calls return `error.code: "invalid_arguments"` and an
+  `error.guidance` repair object with the allowed kinds, missing fields, a valid
+  example, and a safe alternative instead of only a validation string.
 - `operate_form_select_many` accepts an ordered label/ref-to-option map for
   coupled variant, shipping, or similar selectors. It applies selections
   sequentially, re-observes after every success, tolerates partial failure, and
@@ -260,8 +265,9 @@ for the system and data flows.
   add-card approval, then fills the checkout and waits for the user to resolve
   3-D Secure before handing back unresolved challenges. It also supports the
   two-phase `fill_card` then `confirm` flow for split checkouts described above.
-  Malformed calls return the same structured repair fields as `operate_act`,
-  including a safe resolution when `card_ref` and `card_label` conflict.
+  Malformed calls return the same `error.guidance` repair fields as
+  `operate_act`, including a safe resolution when `card_ref` and `card_label`
+  conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.
