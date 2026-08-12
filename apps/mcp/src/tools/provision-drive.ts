@@ -384,6 +384,7 @@ const actSchema = z
       "set_phone_country",
       "goto",
       "press",
+      "oauth_login",
       "oauth_click",
       "oauth_settle",
       "allow_host",
@@ -428,6 +429,7 @@ const actSchema = z
       click: ["target"],
       js_click: ["target"],
       type: ["target"],
+      oauth_login: ["target"],
       oauth_click: ["target"],
       select: ["target", "text"],
       set_phone_country: ["country"],
@@ -505,6 +507,7 @@ const ACTION_KINDS = [
   "set_phone_country",
   "goto",
   "press",
+  "oauth_login",
   "oauth_click",
   "oauth_settle",
   "allow_host",
@@ -528,26 +531,32 @@ function actionSchemaRepair(args: unknown, issues: readonly { path: (string | nu
     ),
   ];
   const example =
-    kind === "type_secret"
+    kind === "oauth_login"
       ? {
           session_id: "<session_id>",
-          kind: "type_secret",
-          slot: "sealed_secret",
-          target: "@e:<observed-ref>",
+          kind: "oauth_login",
+          target: "@e:<observed-provider-button-ref>",
         }
-      : kind === "select"
+      : kind === "type_secret"
         ? {
             session_id: "<session_id>",
-            kind: "select",
+            kind: "type_secret",
+            slot: "sealed_secret",
             target: "@e:<observed-ref>",
-            text: "Option label",
           }
-        : {
-            session_id: "<session_id>",
-            kind: "type",
-            target: "@e:<observed-ref>",
-            text: "Text to enter",
-          };
+        : kind === "select"
+          ? {
+              session_id: "<session_id>",
+              kind: "select",
+              target: "@e:<observed-ref>",
+              text: "Option label",
+            }
+          : {
+              session_id: "<session_id>",
+              kind: "type",
+              target: "@e:<observed-ref>",
+              text: "Text to enter",
+            };
   const safe_alternative =
     kind === "type_secret" && missing.includes("slot")
       ? 'First capture the value with operate_extract { into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
@@ -581,6 +590,8 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
       return { kind: "js_click", target: need(args.target, "target") };
     case "oauth_click":
       return { kind: "oauth_click", target: need(args.target, "target") };
+    case "oauth_login":
+      return { kind: "oauth_login", target: need(args.target, "target") };
     case "type":
       return {
         kind: "type",
@@ -656,15 +667,18 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "the goto/allow_host domain scope, opaque frames are refused, and type_secret " +
     "never targets a cross-domain frame. Frame-scoped select supports native " +
     "<select> controls only; drive a custom framed widget with click. " +
-    "upload/oauth_click refuse frame refs. " +
+    "upload/oauth_click/oauth_login refuse frame refs. " +
     "select (target + text — pick an option in a native <select> or custom listbox " +
     "by its visible text, e.g. a country/state dropdown that `type` can't drive), " +
     "set_phone_country (country — set the dial-code country on a phone field's " +
     "native <select>, including react-phone-number-input's hidden country select; " +
     "other phone widget families are not yet supported and throw; no target needed), " +
-    "goto (url — domain-scoped), press (key, e.g. Enter), oauth_click (target — " +
-    "use for 'Continue with Google/GitHub' so the popup is adopted), " +
-    "oauth_settle (return to the product page after the OAuth handshake), " +
+    "goto (url — domain-scoped), press (key, e.g. Enter), oauth_login (target — " +
+    "the ONLY action for a Login/Continue with provider button: it runs the OAuth " +
+    "popup/redirect atomically, retains the product tab if the provider closes its " +
+    "window, and returns the post-login observation in this call), oauth_click and " +
+    "oauth_settle are legacy replay compatibility actions; do not use them for new " +
+    "operator work, " +
     "allow_host (host — cross into another app's domain mid-task, e.g. from the " +
     "GCP console into Firebase), type_secret (slot + target — type a secret you " +
     "captured into a sealed slot via operate_extract{into_slot} into a field " +
@@ -704,6 +718,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
           "set_phone_country",
           "goto",
           "press",
+          "oauth_login",
           "oauth_click",
           "oauth_settle",
           "allow_host",

@@ -295,6 +295,15 @@ export interface Observation {
   // operate_act{observe:"none"} (action ran; no perception emitted — call
   // operate_observe before the next ref-targeted act).
   observed?: ObserveDetail;
+  // A provider-owned OAuth popup closed while a legacy two-step OAuth action
+  // was still settling. This is an expected browser lifecycle transition, not
+  // a failed login or a reason to abandon the session. The host should simply
+  // re-observe; the controller will retain or reattach the product page.
+  oauth?: {
+    state: "in_progress";
+    provider_page: "closed_or_detached";
+    next_action: "operate_observe";
+  };
   // Change 5 — fail-closed identity hand-back: set ONLY when an operate task
   // required a live Google session that was absent. The task did NOT start; the
   // host asks the user to connect, then retries. No browser was driven.
@@ -367,6 +376,10 @@ export type ProvisionAction =
   | { kind: "oauth_click"; target: string }
   // Return to the product page after the OAuth handshake completes.
   | { kind: "oauth_settle" }
+  // Atomic operator OAuth action. A recovery product tab and explicit provider
+  // lifecycle tracking prevent a normal provider close from leaving the model
+  // on a detached Playwright handle.
+  | { kind: "oauth_login"; target: string }
   // Operator surface — declare a host to cross into mid-session (multi-app
   // tasks: GCP Console → Firebase → the user's app). Pushed to the allow-set
   // with source "mid_session" and audited; the goto gate then permits it.
@@ -3976,185 +3989,232 @@ async function observeSession(
   session: Session,
   detail: "compact" | "full" = "compact",
 ): Promise<Observation> {
-  session.browser.recoverActivePage();
-  widenAllowedHostsFromCurrentUrl(session);
-  session.generation += 1;
-  const generation = session.generation;
-  const elements = await session.browser.extractInteractiveElements();
-  session.lastElements = elements;
-  const sealedFieldKeys = observationSealedFieldKeys(session, elements);
-  const text = redactPaymentObservationText(
-    await session.browser.extractVisibleText(),
-    elements,
-    session.paymentFieldSealActive,
-  );
-  const normalizedFull = text.replace(/\s+/g, " ").trim();
-  const normalizedText = normalizedFull.slice(0, 4000);
-  const guidance = provisionPerceptionGuidance(normalizedText);
-  const url = session.browser.currentUrl();
-  const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url);
-  const checkoutState = checkoutStateForObservation(
-    session,
-    url,
-    text.slice(0, 12_000),
-    elements,
-    liveCheckout,
-  );
-  const currentCartMutation = cartMutationForUrl(session, url);
-  const refs = provisionElementRefs(elements);
-  const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
-  const textTruncated = normalizedFull.length > 4000;
-
-  // Compact (default): the delta path, computed by the pure core.
-  if (detail !== "full") {
-    const built = buildCompactObservation({
-      sessionId: session.id,
-      url,
-      text: normalizedText,
-      textTruncated,
-      ...(guidance !== undefined ? { guidance } : {}),
+  const oauthInProgress = (): Observation => {
+    session.prevObserve = null;
+    const oauth = session.browser.oauthTransitionStatus?.();
+    const observation: Observation = {
+      session_id: session.id,
+      url: oauth?.productUrl ?? session.startUrl,
+      text: "",
+      guidance:
+        "OAuth in progress: the provider detached or closed its page as expected. " +
+        "Do not switch login methods or close the session; call operate_observe again to read the retained product page.",
+      elements: [],
+      oauth: {
+        state: "in_progress",
+        provider_page: "closed_or_detached",
+        next_action: "operate_observe",
+      },
+    };
+    session.browser.completeOAuthTransitionRecovery();
+    return observation;
+  };
+  try {
+    session.browser.recoverActivePage();
+    const transition = session.browser.oauthTransitionStatus?.();
+    if (
+      transition?.providerPageClosed === true &&
+      transition.productPageViable &&
+      transition.browserConnected
+    ) {
+      return oauthInProgress();
+    }
+    widenAllowedHostsFromCurrentUrl(session);
+    session.generation += 1;
+    const generation = session.generation;
+    const elements = await session.browser.extractInteractiveElements();
+    session.lastElements = elements;
+    const sealedFieldKeys = observationSealedFieldKeys(session, elements);
+    const text = redactPaymentObservationText(
+      await session.browser.extractVisibleText(),
       elements,
-      sealed: sealedFieldKeys,
-      paymentSealActive: session.paymentFieldSealActive,
-      prev: session.prevObserve,
-    });
-    // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
-    // delta safe: the host re-expands the full inventory from here.
-    const snapshotFile = persistObserveSnapshot(
-      session,
-      generation,
-      url,
-      normalizedText,
-      textTruncated,
-      built.fileElements,
+      session.paymentFieldSealActive,
     );
-    if (snapshotFile === null) {
-      // Persistence FAILED, so no recovery file exists. A delta (which omits
-      // unchanged elements) or a collapsed full snapshot (which omits chrome
-      // links) would be UNRECOVERABLE — the host would have no way to re-expand.
-      // Fall back to a FULL, UNCOLLAPSED response (every element inline). And
-      // INVALIDATE the delta baseline (null, not "leave it at the last good
-      // state"): the host's reconstruction is now THIS full set, so the next
-      // observe must emit a fresh FULL snapshot too, never a delta computed
-      // against the last-persisted baseline — that stale-baseline delta would
-      // desync a host that has already moved to this full state (a
-      // remove-then-restore-across-a-failed-persist sequence would silently drop
-      // the restored element otherwise).
-      session.prevObserve = null;
+    const normalizedFull = text.replace(/\s+/g, " ").trim();
+    const normalizedText = normalizedFull.slice(0, 4000);
+    const guidance = provisionPerceptionGuidance(normalizedText);
+    const url = session.browser.currentUrl();
+    const liveCheckout = await captureCartCheckoutForFillCardFallback(session, url);
+    const checkoutState = checkoutStateForObservation(
+      session,
+      url,
+      text.slice(0, 12_000),
+      elements,
+      liveCheckout,
+    );
+    const currentCartMutation = cartMutationForUrl(session, url);
+    const refs = provisionElementRefs(elements);
+    const refOf = (el: InteractiveElement): string => refs.get(el) ?? provisionElementRef(el);
+    const textTruncated = normalizedFull.length > 4000;
+
+    // Compact (default): the delta path, computed by the pure core.
+    if (detail !== "full") {
+      const built = buildCompactObservation({
+        sessionId: session.id,
+        url,
+        text: normalizedText,
+        textTruncated,
+        ...(guidance !== undefined ? { guidance } : {}),
+        elements,
+        sealed: sealedFieldKeys,
+        paymentSealActive: session.paymentFieldSealActive,
+        prev: session.prevObserve,
+      });
+      // Persist the COMPLETE snapshot (path INCLUDED) — the safety net that makes
+      // delta safe: the host re-expands the full inventory from here.
+      const snapshotFile = persistObserveSnapshot(
+        session,
+        generation,
+        url,
+        normalizedText,
+        textTruncated,
+        built.fileElements,
+      );
+      if (snapshotFile === null) {
+        // Persistence FAILED, so no recovery file exists. A delta (which omits
+        // unchanged elements) or a collapsed full snapshot (which omits chrome
+        // links) would be UNRECOVERABLE — the host would have no way to re-expand.
+        // Fall back to a FULL, UNCOLLAPSED response (every element inline). And
+        // INVALIDATE the delta baseline (null, not "leave it at the last good
+        // state"): the host's reconstruction is now THIS full set, so the next
+        // observe must emit a fresh FULL snapshot too, never a delta computed
+        // against the last-persisted baseline — that stale-baseline delta would
+        // desync a host that has already moved to this full state (a
+        // remove-then-restore-across-a-failed-persist sequence would silently drop
+        // the restored element otherwise).
+        session.prevObserve = null;
+        return withCheckoutState(
+          {
+            session_id: session.id,
+            url,
+            text: normalizedText,
+            ...(guidance !== undefined ? { guidance } : {}),
+            // Still a COMPACT response — carry the (uncollapsed) set as the columnar
+            // table so the host parses it the same way as any other compact observe.
+            ...emitElements([...built.fullByRef.values()], "columnar"),
+            delta: false,
+            elements_total: elements.length,
+            ...(textTruncated ? { text_truncated: true } : {}),
+          },
+          checkoutState,
+          currentCartMutation,
+        );
+      }
+      session.prevObserve = built.nextState;
       return withCheckoutState(
         {
-          session_id: session.id,
-          url,
-          text: normalizedText,
-          ...(guidance !== undefined ? { guidance } : {}),
-          // Still a COMPACT response — carry the (uncollapsed) set as the columnar
-          // table so the host parses it the same way as any other compact observe.
-          ...emitElements([...built.fullByRef.values()], "columnar"),
-          delta: false,
-          elements_total: elements.length,
-          ...(textTruncated ? { text_truncated: true } : {}),
+          ...built.observation,
+          snapshot_file: snapshotFile,
         },
         checkoutState,
         currentCartMutation,
       );
     }
-    session.prevObserve = built.nextState;
+
+    // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
+    // pre-delta full payload: every element with every field, screen, and
+    // accessibility, never a delta and never a chrome collapse.
+    session.prevObserve = null;
+    // Refresh the persisted snapshot as a SIDE EFFECT so a re-expansion after a
+    // full-only observe can't restore stale state (the previous compact snapshot).
+    // Deliberately NOT surfaced in the payload — the full escape hatch stays
+    // byte-equivalent to the legacy shape (no snapshot_file field added).
+    persistObserveSnapshot(
+      session,
+      generation,
+      url,
+      normalizedText,
+      textTruncated,
+      elements.map((el) =>
+        toCompactElement(
+          el,
+          refOf(el),
+          sealedFieldKeys,
+          true,
+          false,
+          session.paymentFieldSealActive,
+        ),
+      ),
+    );
+    const screen = buildScreenOutline(
+      elements,
+      normalizedText,
+      sealedFieldKeys,
+      session.paymentFieldSealActive,
+    );
+    const accessibility = buildAccessibilitySnapshot(
+      elements,
+      undefined,
+      sealedFieldKeys,
+      session.paymentFieldSealActive,
+    );
     return withCheckoutState(
       {
-        ...built.observation,
-        snapshot_file: snapshotFile,
+        session_id: session.id,
+        url,
+        text: normalizedText,
+        ...(guidance !== undefined ? { guidance } : {}),
+        ...(screen !== undefined ? { screen } : {}),
+        ...(accessibility !== undefined ? { accessibility } : {}),
+        elements: elements.map((el) => {
+          const observed: ObservedElement = {
+            ref: refOf(el),
+            label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
+            tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
+            role:
+              el.role === null
+                ? null
+                : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
+            type:
+              el.type === null
+                ? null
+                : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
+            value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
+            checked: el.checked ?? null,
+            href:
+              el.href === null || el.href === undefined
+                ? null
+                : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
+            testId:
+              el.testId === null || el.testId === undefined
+                ? null
+                : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
+            path:
+              el.screenPath === null || el.screenPath === undefined
+                ? null
+                : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
+            container:
+              el.container === null || el.container === undefined
+                ? null
+                : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
+            topmost: el.topmost ?? null,
+            occluded_by:
+              el.occludedBy === null || el.occludedBy === undefined
+                ? null
+                : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
+            frame_origin:
+              el.frameOrigin === null || el.frameOrigin === undefined
+                ? null
+                : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
+          };
+          annotatePaymentControl(observed, el);
+          return observed;
+        }),
       },
       checkoutState,
       currentCartMutation,
     );
+  } catch (err) {
+    const oauth = session.browser.oauthTransitionStatus?.();
+    if (oauth?.providerPageClosed === true && oauth.productPageViable && oauth.browserConnected) {
+      // A read racing an expected provider-page close must not leak the raw
+      // Playwright "Target page, context or browser has been closed" exception
+      // into the model's plan. Discard the delta baseline because the next
+      // successful product-page read is a new authoritative snapshot.
+      return oauthInProgress();
+    }
+    throw err;
   }
-
-  // Full (legacy rich) path — the explicit escape hatch. Byte-identical to the
-  // pre-delta full payload: every element with every field, screen, and
-  // accessibility, never a delta and never a chrome collapse.
-  session.prevObserve = null;
-  // Refresh the persisted snapshot as a SIDE EFFECT so a re-expansion after a
-  // full-only observe can't restore stale state (the previous compact snapshot).
-  // Deliberately NOT surfaced in the payload — the full escape hatch stays
-  // byte-equivalent to the legacy shape (no snapshot_file field added).
-  persistObserveSnapshot(
-    session,
-    generation,
-    url,
-    normalizedText,
-    textTruncated,
-    elements.map((el) =>
-      toCompactElement(el, refOf(el), sealedFieldKeys, true, false, session.paymentFieldSealActive),
-    ),
-  );
-  const screen = buildScreenOutline(
-    elements,
-    normalizedText,
-    sealedFieldKeys,
-    session.paymentFieldSealActive,
-  );
-  const accessibility = buildAccessibilitySnapshot(
-    elements,
-    undefined,
-    sealedFieldKeys,
-    session.paymentFieldSealActive,
-  );
-  return withCheckoutState(
-    {
-      session_id: session.id,
-      url,
-      text: normalizedText,
-      ...(guidance !== undefined ? { guidance } : {}),
-      ...(screen !== undefined ? { screen } : {}),
-      ...(accessibility !== undefined ? { accessibility } : {}),
-      elements: elements.map((el) => {
-        const observed: ObservedElement = {
-          ref: refOf(el),
-          label: presentLabel(el, sealedFieldKeys, session.paymentFieldSealActive),
-          tag: presentPaymentSafeString(el.tag, session.paymentFieldSealActive),
-          role:
-            el.role === null
-              ? null
-              : presentPaymentSafeString(el.role, session.paymentFieldSealActive),
-          type:
-            el.type === null
-              ? null
-              : presentPaymentSafeString(el.type, session.paymentFieldSealActive),
-          value: presentFieldValue(el, sealedFieldKeys, session.paymentFieldSealActive),
-          checked: el.checked ?? null,
-          href:
-            el.href === null || el.href === undefined
-              ? null
-              : presentPaymentSafeString(el.href, session.paymentFieldSealActive),
-          testId:
-            el.testId === null || el.testId === undefined
-              ? null
-              : presentPaymentSafeString(el.testId, session.paymentFieldSealActive),
-          path:
-            el.screenPath === null || el.screenPath === undefined
-              ? null
-              : presentPaymentSafeString(el.screenPath, session.paymentFieldSealActive),
-          container:
-            el.container === null || el.container === undefined
-              ? null
-              : presentPaymentSafeString(el.container, session.paymentFieldSealActive),
-          topmost: el.topmost ?? null,
-          occluded_by:
-            el.occludedBy === null || el.occludedBy === undefined
-              ? null
-              : presentPaymentSafeString(el.occludedBy, session.paymentFieldSealActive),
-          frame_origin:
-            el.frameOrigin === null || el.frameOrigin === undefined
-              ? null
-              : presentPaymentSafeString(el.frameOrigin, session.paymentFieldSealActive),
-        };
-        annotatePaymentControl(observed, el);
-        return observed;
-      }),
-    },
-    checkoutState,
-    currentCartMutation,
-  );
 }
 
 export async function act(
@@ -4636,6 +4696,34 @@ export async function act(
       if (action.kind !== "type") await settleAfterStateChange(browser);
       break;
     }
+    case "oauth_login": {
+      const pageText = await browser.extractVisibleText();
+      const blockReason = shouldBlockUnsafeProvisionAction(pageText, action);
+      if (blockReason !== null) throw new Error(blockReason);
+      // Atomic OAuth deliberately accepts only the observed stable ref. A raw
+      // locator would lose the same stale-reference guarantees as every other
+      // action before the provider transition begins.
+      const fresh = await browser.extractInteractiveElements();
+      session.lastElements = fresh;
+      const el = resolveTarget(fresh, action.target);
+      if (el === null) {
+        throw new Error(
+          `oauth_login: no element matched target "${action.target}". Re-observe and use the OAuth button ref.`,
+        );
+      }
+      resolvedEl = el;
+      assertNoFrameTarget(el, "oauth_login");
+      const chargeBlock = pendingCardFillChargeBlockReason(session, [
+        el.ariaLabel,
+        el.visibleText,
+        el.labelText,
+        el.value,
+      ]);
+      if (chargeBlock !== null) throw new Error(chargeBlock);
+      await browser.loginWithOAuth(el.selector);
+      await settleAfterStateChange(browser);
+      break;
+    }
   }
   await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
   await captureReplayRepairVerification(session, completedAction, resolvedEl);
@@ -4659,7 +4747,7 @@ export async function act(
   // so multi-field fills don't each echo the page. The host must call
   // operate_observe before its next ref-targeted act (refs aren't refreshed here).
   const observation =
-    detail === "none" && !cartAffecting
+    detail === "none" && !cartAffecting && action.kind !== "oauth_login"
       ? {
           session_id: session.id,
           url: browser.currentUrl(),
@@ -5058,6 +5146,10 @@ function recordTrace(
     case "oauth_click":
       a = { kind: "oauth_click", ...withText, ...withTarget };
       break;
+    case "oauth_login":
+      session.actionTrace.push({ action: { kind: "oauth_click", ...withText, ...withTarget } });
+      session.actionTrace.push({ action: { kind: "oauth_settle" } });
+      return;
   }
   const traceIndex = session.actionTrace.length;
   session.actionTrace.push({ action: a });
@@ -5115,6 +5207,7 @@ export function captureObserved(
     case "click":
     case "js_click":
     case "oauth_click":
+    case "oauth_login":
       return el === null
         ? null
         : {
@@ -5154,7 +5247,7 @@ function recordCaptureRound(
   session.captureRounds.push({
     service: captureService(session),
     round: session.captureRounds.length,
-    oauth: action.kind === "oauth_click",
+    oauth: action.kind === "oauth_click" || action.kind === "oauth_login",
     // The URL the inventory + action belong to (pre-action), NOT the post-
     // navigation URL — see urlBeforeAction in act().
     state: { url: urlAtObservation, title: "", html: "", screenshot: "" },
