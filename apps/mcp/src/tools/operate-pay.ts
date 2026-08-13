@@ -15,6 +15,7 @@ import {
   setActivePendingCardFill,
 } from "../bot/provision-session.js";
 import {
+  classifyApprovalCandidate,
   executeOperatePay,
   executeOperatePayConfirm,
   type PendingApprovalWait,
@@ -359,9 +360,12 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         completeActivePaymentLeaseWithPendingFill(paymentLease, filledPending);
         paymentLeaseCompleted = true;
       }
-      if (result.status === "approval_pending") {
+      if (
+        result.status === "approval_pending" ||
+        result.status === "approval_pending_final_signature"
+      ) {
         if (approvalPending === null) {
-          throw new Error("operate_pay approval_pending returned without resumable state");
+          throw new Error("operate_pay pending approval returned without resumable state");
         }
         completeActivePaymentLeaseWithPendingApproval(paymentLease, approvalPending);
         paymentLeaseCompleted = true;
@@ -413,7 +417,10 @@ async function readApprovalStatus(
   waitForSubmission: boolean,
   boundMs?: number,
 ): Promise<Record<string, unknown>> {
-  const fetchApproval = api.getPaymentApproval(state.approval_id, waitForSubmission);
+  const fetchApproval = api.getPaymentApproval(
+    state.approval_id,
+    waitForSubmission ? "wait-peek" : "peek",
+  );
   const approval =
     boundMs === undefined
       ? await fetchApproval
@@ -431,11 +438,19 @@ async function readApprovalStatus(
       amount_cents: state.checkout.amount_cents,
       currency: state.checkout.currency,
       candidate_submitted: false,
+      candidate_kind: state.reviewVerified === true ? "review" : "none",
+      ready_to_charge: false,
       next: { tool: "operate_payment_await", max_wait_seconds: 15 },
     };
   }
   const candidateSubmitted =
     typeof approval.jws === "string" && typeof approval.sealed_card === "string";
+  const observedCandidateKind = classifyApprovalCandidate(approval, state);
+  const candidateKind =
+    observedCandidateKind === "none" && state.reviewVerified === true
+      ? "review"
+      : observedCandidateKind;
+  const readyToCharge = observedCandidateKind === "approval";
   const expired = approval.status === "expired";
   return {
     status: expired ? "expired" : approval.status,
@@ -447,9 +462,11 @@ async function readApprovalStatus(
     amount_cents: approval.amount_cents,
     currency: approval.currency,
     candidate_submitted: candidateSubmitted,
+    candidate_kind: candidateKind,
+    ready_to_charge: readyToCharge,
     ...(expired
       ? {}
-      : candidateSubmitted
+      : readyToCharge
         ? {
             next: {
               tool: "operate_pay",
@@ -460,7 +477,36 @@ async function readApprovalStatus(
                 "never mints a new one.",
             },
           }
-        : { next: { tool: "operate_payment_await", max_wait_seconds: 15 } }),
+        : candidateKind === "review" && observedCandidateKind === "review"
+          ? {
+              next: {
+                tool: "operate_pay",
+                hint:
+                  "A legacy review signature was submitted. Call operate_pay to verify it, but " +
+                  "final payment approval is still required before any card can be released or charged. " +
+                  "Refresh the approval page if it does not advance.",
+              },
+            }
+          : candidateKind === "review"
+            ? {
+                next: {
+                  tool: "operate_payment_await",
+                  max_wait_seconds: 15,
+                  hint:
+                    "The review signature was verified. Final payment approval is still required; " +
+                    "refresh the approval page if the final prompt is not visible.",
+                },
+              }
+            : candidateKind === "invalid"
+              ? {
+                  next: {
+                    action: "refresh_approval_page",
+                    hint:
+                      "The submitted payment candidate is not bound to this approval and cannot " +
+                      "authorize a charge. Refresh the approval page and submit again.",
+                  },
+                }
+              : { next: { tool: "operate_payment_await", max_wait_seconds: 15 } }),
   };
 }
 
@@ -476,8 +522,8 @@ export const operatePaymentStatusTool: Tool = {
   description:
     "Read-only: report the status of the payment approval currently awaiting the human's phone " +
     "tap, if any — started by the most recent operate_pay call that returned approval_pending. " +
-    "Never blocks, never verifies a mandate or opens a card. When the phone has responded " +
-    "(candidate_submitted:true), call operate_pay again to complete the payment.",
+    "Never blocks, never verifies a mandate or opens a card. Only candidate_kind=approval with " +
+    "ready_to_charge=true is a final authorization; a review candidate still requires final approval.",
   inputSchema: z.object({}),
   jsonInputSchema: { type: "object", properties: {} },
   annotations: { readOnlyHint: true },
@@ -498,9 +544,9 @@ export const operatePaymentAwaitTool: Tool<z.infer<typeof paymentAwaitInputSchem
   description:
     "Bounded wait (never more than ~15s) for the payment approval currently awaiting the human's " +
     "phone tap — started by the most recent operate_pay call that returned approval_pending. " +
-    "Returns pending, approved (candidate_submitted:true — call operate_pay again to complete), " +
-    "or expired. Never hangs for minutes; call it again (or operate_payment_status) if it comes " +
-    "back pending.",
+    "Returns explicit candidate_kind and ready_to_charge fields: only an approval-bound candidate " +
+    "is ready to complete; a review-bound candidate still requires final approval. Never hangs " +
+    "for minutes; call it again (or operate_payment_status) if it comes back pending.",
   inputSchema: paymentAwaitInputSchema,
   jsonInputSchema: {
     type: "object",

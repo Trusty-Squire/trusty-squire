@@ -38,10 +38,10 @@ The dev server uses **in-memory implementations** of every store. Production wir
 | `GET` | `/v1/pay/config` | agent | Return the configured Vouchflow mandate audience |
 | `POST` | `/v1/pay/approvals` | agent | Create an account-scoped approval: card-less expires in 18 minutes; has-card in 10 minutes |
 | `POST` | `/v1/pay/approvals/:id/notify-3ds` | agent | Send a Telegram 3-D Secure nudge to the account's linked chat and return `{ sent }` |
-| `GET` | `/v1/pay/approvals/:id` | web/agent | Poll an account-owned payment approval |
+| `GET` | `/v1/pay/approvals/:id` | web/agent | Read an account-owned approval; agents may read, wait for, or peek at its relay candidate |
 | `GET` | `/v1/pay/approvals/:id/ceremony` | none | Return the canonical purchase display plus opaque PRF/HPKE inputs for a pending approval |
 | `POST` | `/v1/pay/approvals/:id/bind-card` | web | Bind an account-owned card to a card-less pending approval |
-| `POST` | `/v1/pay/approvals/:id/approve` | none | Stage a fingerprinted opaque review or final candidate in the short-TTL account relay |
+| `POST` | `/v1/pay/approvals/:id/approve` | none | Stage a fingerprinted opaque final candidate; reject retired review-protocol clients |
 | `POST` | `/v1/pay/approvals/:id/confirm` | agent | Confirm the exact operator-verified candidate for the authenticated account |
 | `GET` | `/health` | none | Liveness |
 
@@ -84,10 +84,15 @@ metadata. The anonymous approval shell renders those canonical values before one
 payment-context passkey action signs them, derives the card key, and seals the card
 to the operator.
 
-`POST /approve` accepts a server-bound JWS and operator-sealed ciphertext only
-while the approval is pending. It stores the candidate, its SHA-256 fingerprint,
-phase, and an at-most-15-second expiry in the account-owned Postgres row so an
-authenticated agent polling through a different API worker can receive it.
+`POST /approve` accepts a final, server-bound JWS and operator-sealed ciphertext
+only while the approval is pending. It stores the candidate, its SHA-256
+fingerprint, phase, and an at-most-15-second expiry in the account-owned Postgres
+row so an authenticated agent polling through a different API worker can receive
+it. New review-bound submissions are rejected with
+`409 { "error": "stale_payment_client" }`; the current web client signs the final
+purchase payload directly. Agent reads can consume a candidate immediately, wait
+up to the relay window, or use `peek_submission=1` (alone or with
+`wait_for_submission=1`) to inspect it without advancing the delivery phase.
 `POST /confirm` must use the same account and exact delivered fingerprint. Its
 body requires `jws` and `sealed_card`; for compatibility with shipped operators,
 an optional string or `null` `card_ref` is accepted but ignored. The card
@@ -95,8 +100,9 @@ reference stored on the server remains authoritative, and every other unknown
 body key is rejected. A successful final confirmation atomically marks the
 approval approved and clears all staged JWS and ciphertext; an idempotent repeat
 for that fingerprint is accepted during the relay TTL. Review-format candidates
-are compatibility-only: their successful confirmation clears the staged bytes
-but leaves the approval pending, so a review seal is never final approval.
+already staged by a legacy deployment remain compatibility-only: their
+successful confirmation clears the staged bytes but leaves the approval pending,
+so a review seal is never final approval.
 Wrong-account, changed, undelivered, or expired candidates fail closed.
 
 ## Auth model

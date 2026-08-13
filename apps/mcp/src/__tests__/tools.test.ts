@@ -7,6 +7,8 @@
 // diagnostic pair.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import canonicalize from "canonicalize";
 import { ApiCallError, type ApiClient } from "../api-client.js";
 import type { CheckoutSummary } from "../bot/browser.js";
 import type {
@@ -474,7 +476,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     // The RPC completed on a single live check — the old blocking loop that
     // polled until payment_approval_timeout never ran.
     expect(getPaymentApproval).toHaveBeenCalledOnce();
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_wire", false);
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_wire", "immediate");
     expect(mockAwaitingApproval).not.toBeNull();
     expect(mockPaymentLease).toBeNull();
 
@@ -548,8 +550,9 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(first).toMatchObject({ status: "approval_pending", approval_id: "appr_expired" });
     expect(second).toMatchObject({ status: "approval_pending", approval_id: "appr_fresh" });
     expect(createPaymentApproval).toHaveBeenCalledTimes(2);
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_expired", false);
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_fresh", false);
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(1, "appr_expired", "immediate");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_expired");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_fresh", "immediate");
     expect(notifyUser).toHaveBeenCalledTimes(2);
     expect(notifyUser).toHaveBeenLastCalledWith(
       "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_fresh",
@@ -620,7 +623,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     });
     expect(createPaymentApproval).toHaveBeenCalledTimes(2);
     expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_deleted");
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_replacement", false);
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_replacement", "immediate");
     expect(deletedState?.keypair.privateKey).toBe("");
     expect(notifyUser).toHaveBeenLastCalledWith(
       "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_replacement",
@@ -827,6 +830,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
 });
 
 describe("operate_payment_status / operate_payment_await [P0]", () => {
+  const operatorPublicKey = Buffer.from("status-operator-public-key").toString("base64url");
   const baseState = {
     approval_id: "appr_status",
     approval_url: "https://web.test/vault/pay/appr_status",
@@ -842,11 +846,43 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     boundCardRef: "card_1",
     deadline: Date.now() + 60_000,
     rejectedCandidates: [],
-    keypair: { publicKey: "pub", privateKey: "priv" },
+    keypair: { publicKey: operatorPublicKey, privateKey: "priv" },
     item: "Synthetic item",
     reason: "Synthetic purchase reason",
     cardRef: "card_1",
   };
+
+  function candidateJws(kind: "review" | "approval"): string {
+    const recipientHash = createHash("sha256")
+      .update(Buffer.from(operatorPublicKey, "base64url"))
+      .digest("base64url");
+    const approvalCanonical = canonicalize({
+      approval_id: baseState.approval_id,
+      merchant: baseState.checkout.merchant,
+      checkout_origin: baseState.checkout.checkout_origin,
+      amount_cents: baseState.checkout.amount_cents,
+      currency: baseState.checkout.currency,
+      nonce: baseState.nonce,
+      card_ref: baseState.cardRef,
+      recipient_pubkey_hash: recipientHash,
+      item: baseState.item,
+      reason: baseState.reason,
+      agent: baseState.agent,
+    })!;
+    const approvalHash = createHash("sha256").update(approvalCanonical).digest();
+    const reviewCanonical = canonicalize({
+      approval_id: baseState.approval_id,
+      approval_payload_sha256: approvalHash.toString("base64url"),
+      card_ref: baseState.cardRef,
+      recipient_pubkey_hash: recipientHash,
+    })!;
+    const hash =
+      kind === "approval" ? approvalHash : createHash("sha256").update(reviewCanonical).digest();
+    const payload = Buffer.from(
+      JSON.stringify({ context: "purchase", payload_sha256: hash.toString("base64url") }),
+    ).toString("base64url");
+    return `e30.${payload}.signature`;
+  }
 
   it("reports no_pending_payment when nothing is awaiting approval", async () => {
     const api = makeMockApi();
@@ -874,6 +910,8 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       amount_cents: 100,
       currency: "USD",
       expires_at: new Date(Date.now() + 60_000).toISOString(),
+      card_ref: "card_1",
+      operator_pubkey: operatorPublicKey,
       jws: null,
       sealed_card: null,
     });
@@ -887,13 +925,11 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       candidate_submitted: false,
       next: { tool: "operate_payment_await" },
     });
-    // waitForSubmission=false — status never asks the server to hold the
-    // response open.
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", false);
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "peek");
     expect(confirmPaymentApproval).not.toHaveBeenCalled();
   });
 
-  it("surfaces a submitted candidate as an actionable signal to call operate_pay again", async () => {
+  it("distinguishes a final candidate as ready to charge", async () => {
     mockAwaitingApproval = baseState;
     const getPaymentApproval = vi.fn().mockResolvedValue({
       id: "appr_status",
@@ -902,7 +938,9 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       amount_cents: 100,
       currency: "USD",
       expires_at: new Date(Date.now() + 60_000).toISOString(),
-      jws: "signed",
+      card_ref: "card_1",
+      operator_pubkey: operatorPublicKey,
+      jws: candidateJws("approval"),
       sealed_card: "sealed",
     });
     const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
@@ -911,9 +949,62 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     expect(result).toMatchObject({
       status: "pending",
       candidate_submitted: true,
+      candidate_kind: "approval",
+      ready_to_charge: true,
       next: { tool: "operate_pay" },
     });
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", true);
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek");
+  });
+
+  it("distinguishes a review candidate from final charge authorization", async () => {
+    mockAwaitingApproval = baseState;
+    const getPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_status",
+      status: "pending",
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      card_ref: "card_1",
+      operator_pubkey: operatorPublicKey,
+      jws: candidateJws("review"),
+      sealed_card: "sealed",
+    });
+    const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+    await expect(operatePaymentAwaitTool.handler({}, api)).resolves.toMatchObject({
+      status: "pending",
+      candidate_submitted: true,
+      candidate_kind: "review",
+      ready_to_charge: false,
+      next: { tool: "operate_pay" },
+    });
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek");
+  });
+
+  it("keeps the verified-review state explicit while waiting for the final signature", async () => {
+    mockAwaitingApproval = { ...baseState, reviewVerified: true };
+    const getPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_status",
+      status: "pending",
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      card_ref: "card_1",
+      operator_pubkey: operatorPublicKey,
+      jws: null,
+      sealed_card: null,
+    });
+    const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+    await expect(operatePaymentStatusTool.handler({}, api)).resolves.toMatchObject({
+      status: "pending",
+      candidate_submitted: false,
+      candidate_kind: "review",
+      ready_to_charge: false,
+      next: { tool: "operate_payment_await" },
+    });
   });
 
   it("reports expired without a next action", async () => {
@@ -925,6 +1016,8 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       amount_cents: 100,
       currency: "USD",
       expires_at: new Date(Date.now() - 1_000).toISOString(),
+      card_ref: "card_1",
+      operator_pubkey: operatorPublicKey,
       jws: null,
       sealed_card: null,
     });

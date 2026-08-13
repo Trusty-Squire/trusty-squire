@@ -294,7 +294,12 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
     return "not_pending";
   }
 
-  async getRelayCandidateForAccount(id: string, accountId: string, now: Date) {
+  private async readRelayCandidateForAccount(
+    id: string,
+    accountId: string,
+    now: Date,
+    markDelivered: boolean,
+  ) {
     const row = await this.prisma.pendingPaymentApproval.findFirst({
       where: { id, account_id: accountId, status: "pending", expires_at: { gt: now } },
     });
@@ -307,17 +312,19 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
       row.submission_sealed_card !== null &&
       row.submission_candidate_fingerprint !== null
     ) {
-      await this.prisma.pendingPaymentApproval.updateMany({
-        where: {
-          id,
-          account_id: accountId,
-          status: "pending",
-          submission_phase: "submitted",
-          submission_candidate_fingerprint: row.submission_candidate_fingerprint,
-          submission_expires_at: row.submission_expires_at,
-        },
-        data: { submission_phase: "delivered" },
-      });
+      if (markDelivered) {
+        await this.prisma.pendingPaymentApproval.updateMany({
+          where: {
+            id,
+            account_id: accountId,
+            status: "pending",
+            submission_phase: "submitted",
+            submission_candidate_fingerprint: row.submission_candidate_fingerprint,
+            submission_expires_at: row.submission_expires_at,
+          },
+          data: { submission_phase: "delivered" },
+        });
+      }
       return {
         binding: "approval" as const,
         jws: row.submission_jws,
@@ -333,17 +340,19 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
       row.review_sealed_card !== null &&
       row.review_candidate_fingerprint !== null
     ) {
-      await this.prisma.pendingPaymentApproval.updateMany({
-        where: {
-          id,
-          account_id: accountId,
-          status: "pending",
-          review_phase: "submitted",
-          review_candidate_fingerprint: row.review_candidate_fingerprint,
-          review_expires_at: row.review_expires_at,
-        },
-        data: { review_phase: "delivered" },
-      });
+      if (markDelivered) {
+        await this.prisma.pendingPaymentApproval.updateMany({
+          where: {
+            id,
+            account_id: accountId,
+            status: "pending",
+            review_phase: "submitted",
+            review_candidate_fingerprint: row.review_candidate_fingerprint,
+            review_expires_at: row.review_expires_at,
+          },
+          data: { review_phase: "delivered" },
+        });
+      }
       return {
         binding: "review" as const,
         jws: row.review_jws,
@@ -352,6 +361,14 @@ export class PrismaPendingPaymentApprovalStore implements PendingPaymentApproval
       };
     }
     return null;
+  }
+
+  async getRelayCandidateForAccount(id: string, accountId: string, now: Date) {
+    return await this.readRelayCandidateForAccount(id, accountId, now, true);
+  }
+
+  async peekRelayCandidateForAccount(id: string, accountId: string, now: Date) {
+    return await this.readRelayCandidateForAccount(id, accountId, now, false);
   }
 
   async confirmCandidateForAccount(

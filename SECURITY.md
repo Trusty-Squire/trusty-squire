@@ -134,7 +134,10 @@ digits.
 Unsupported-wallet detection follows the frame containing the actual visible PAN
 field. PayPal and Braintree hosted card fields fail closed, while an unrelated PayPal
 express-button frame does not disqualify a fillable merchant or recognized Shopify
-PCI card-field frame.
+PCI card-field frame. When a checkout mounts multiple card forms, the operator fills
+one complete visible and enabled group containing PAN, name, expiry, and CVV. It uses
+a uniquely active or selected group when more than one is complete and otherwise
+fails with `payment_card_form_ambiguous`; it never assembles a card across forms.
 
 The later `confirm` phase is the charge boundary. Its strict reader requires a final
 payable total from the main frame or a visible trusted payment frame, with no
@@ -168,13 +171,16 @@ marks the approval approved, and clears all persisted JWS and ciphertext bytes.
 Repeating confirmation for that same fingerprint is safe during the relay TTL,
 while a different, expired, wrong-account, or undelivered candidate fails closed.
 
-Review-format candidates remain accepted only for compatibility. A review seal
-is never final approval: operator confirmation clears its JWS and ciphertext but
-leaves the approval pending for a separately verified canonical purchase
-candidate. Review verification failures are bounded and returned to the caller;
-only transient JWKS fetch failures or timeouts may retry. Lifecycle logs contain
-identifiers, account hashes, candidate fingerprints, machine/release metadata,
-and failure codes, never card plaintext, JWS values, or sealed-card values.
+Review-format candidates already staged by a legacy deployment remain accepted
+only for compatibility; new review-bound API submissions fail with
+`stale_payment_client`. A review seal is never final approval: operator
+confirmation clears its JWS and ciphertext but leaves the approval pending for a
+separately verified canonical purchase candidate. Review verification failures
+are bounded and returned to the caller; only transient JWKS fetch failures or
+timeouts may retry. Lifecycle logs contain candidate kind and transition outcome
+alongside identifiers, account hashes, candidate fingerprints, machine/release
+metadata, and failure codes, never card plaintext, JWS values, or sealed-card
+values.
 
 The MCP operator fetches Vouchflow's JWKS and fails closed unless signature,
 issuer, audience, purchase context, payload hash, and user presence all verify.
