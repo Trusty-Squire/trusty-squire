@@ -369,17 +369,12 @@ const HOST_SCOPE_AUTH_HOSTS: readonly string[] = [
   "appleid.apple.com",
 ];
 
-// Captcha/challenge + payment SDK hosts that must NEVER be scope-blocked (a
-// blocked reCAPTCHA/Turnstile breaks the token poll; blocked Stripe JS breaks
-// card entry). Substring match, same posture as installResourceBlocking's
-// ALWAYS_ALLOW set.
-const HOST_SCOPE_ALWAYS_ALLOW: readonly string[] = [
+const HOST_SCOPE_ALWAYS_ALLOW_HOSTS: readonly string[] = [
   "challenges.cloudflare.com",
-  "turnstile",
   "hcaptcha.com",
   "newassets.hcaptcha.com",
-  "recaptcha",
-  "gstatic.com/recaptcha",
+  "www.google.com",
+  "recaptcha.net",
   "js.stripe.com",
 ];
 
@@ -391,17 +386,19 @@ const HOST_SCOPE_ALWAYS_ALLOW: readonly string[] = [
 // being silently dropped to hang the page. Reuses isSameRecipeDomain (a tested
 // tldts-backed eTLD+1 comparison) for the same-registrable-domain auto-scope.
 export function requestHostInScope(url: string, allowedHosts: readonly string[]): boolean {
-  let host: string;
+  let parsedUrl: URL;
   try {
-    host = new URL(url).hostname.toLowerCase();
+    parsedUrl = new URL(url);
   } catch {
     return true; // unparseable URL — never fail-fast-block on a parse stumble
   }
+  const host = parsedUrl.hostname.toLowerCase();
   const bySuffix = (suffix: string): boolean => host === suffix || host.endsWith(`.${suffix}`);
   if (allowedHosts.some(bySuffix)) return true;
   if (allowedHosts.some((allowed) => isSameRecipeDomain(host, allowed))) return true;
   if (HOST_SCOPE_AUTH_HOSTS.some(bySuffix)) return true;
-  if (HOST_SCOPE_ALWAYS_ALLOW.some((h) => url.includes(h))) return true;
+  if (HOST_SCOPE_ALWAYS_ALLOW_HOSTS.some(bySuffix)) return true;
+  if (bySuffix("gstatic.com") && /^\/recaptcha(?:\/|$)/u.test(parsedUrl.pathname)) return true;
   if (
     RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS.some(bySuffix) ||
     host.endsWith(".firebaseapp.com") ||
@@ -684,6 +681,7 @@ function parseCheckoutAmountResult(
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
+      if (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) continue;
       const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
       currencyUnresolved ||= result.currencyUnresolved;
       fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
@@ -704,6 +702,7 @@ function parseCheckoutConfirmAmountResult(texts: readonly string[]): CheckoutAmo
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
+      if (match[0].startsWith("小計")) continue;
       const result = parseCheckoutAmountMatch(
         text,
         match,
@@ -747,6 +746,10 @@ interface CheckoutAmountsParseResult {
   fallbackCurrencyScaleMismatch: boolean;
 }
 
+function checkoutTextHasFreeShipping(text: string): boolean {
+  return /(?:送料|配送料)\s*[:：]?\s*送料無料/u.test(text);
+}
+
 function parseCheckoutAmountsResult(
   texts: readonly string[],
   fallbackCurrency?: string,
@@ -758,6 +761,7 @@ function parseCheckoutAmountsResult(
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
+      if (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) continue;
       const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
       currencyUnresolved ||= result.currencyUnresolved;
       fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
@@ -1065,7 +1069,7 @@ export function scopedOrderSummaryText(text: string): string {
     // the line; a heading carries no price, so a bare "\d" is enough to veto it.
     const heading = line.replace(/[（(]\s*\d+\s*[）)]$/, "");
     if (heading.length === 0 || heading.length > 40) continue;
-    if (/\d/.test(line)) continue;
+    if (/\d/.test(heading)) continue;
     if (RECOMMENDATION_SECTION_HEADER.test(heading)) {
       return lines.slice(0, index).join("\n");
     }
@@ -2094,16 +2098,20 @@ export class BrowserController {
   // siblings and fails-fast on genuinely out-of-scope in-page API calls. When
   // null/never set (harness replay, non-session use) the guard is inert.
   private hostScopeAllowedHostsProvider: (() => readonly string[]) | null = null;
-  private hostScopeGuardInstalled = false;
+  private hostScopeGuardInstallation: Promise<void> | null = null;
 
   // Feed the current session's allowed hosts to the request-scope guard. Read
   // lazily per request, so allow_host / auto-widen updates take effect without
   // re-registering the route. Registers the single fail-fast route handler on
   // the first call — so the guard is only ever active for real operator
   // sessions, never for harness/replay or non-session browsers.
-  setHostScopeAllowedHosts(provider: () => readonly string[]): void {
+  async setHostScopeAllowedHosts(provider: () => readonly string[]): Promise<void> {
     this.hostScopeAllowedHostsProvider = provider;
-    void this.installHostScopeGuard();
+    this.hostScopeGuardInstallation ??= this.installHostScopeGuard().catch((error: unknown) => {
+      this.hostScopeGuardInstallation = null;
+      throw error;
+    });
+    await this.hostScopeGuardInstallation;
   }
 
   // Defect-A fail-fast request-scope guard. Only XHR/fetch subresource API
@@ -2117,10 +2125,8 @@ export class BrowserController {
   // Here it is aborted with a real net error so the page's fetch/XHR rejects
   // promptly and the site's own error handling runs.
   private async installHostScopeGuard(): Promise<void> {
-    if (this.hostScopeGuardInstalled) return;
     const ctx = this.context;
-    if (ctx === null) return;
-    this.hostScopeGuardInstalled = true;
+    if (ctx === null) throw new Error("Browser not started");
     await ctx.route("**/*", async (route) => {
       try {
         const url = route.request().url();
@@ -2129,11 +2135,9 @@ export class BrowserController {
           await route.abort("failed");
           return;
         }
-        await route.continue();
+        await route.fallback();
       } catch {
-        // Routing race / already-handled — fall through to a normal continue so
-        // a guard hiccup never wedges navigation.
-        await route.continue().catch(() => undefined);
+        await route.fallback().catch(() => undefined);
       }
     });
   }

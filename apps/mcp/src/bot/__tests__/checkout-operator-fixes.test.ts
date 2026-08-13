@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { createServer } from "node:http";
+import { chromium, type BrowserContext } from "playwright";
 import { BrowserController } from "../browser.js";
 import {
   isFailFastScopeAbort,
@@ -13,6 +16,12 @@ import { describe, expect, it, vi } from "vitest";
 //    in-page XHR/fetch fails fast (abort/net-error) instead of hanging.
 
 const RAKUTEN_CHECKOUT_HOSTS = ["cart.step.rakuten.co.jp"];
+let chromiumAvailable = false;
+try {
+  chromiumAvailable = existsSync(chromium.executablePath());
+} catch {
+  chromiumAvailable = false;
+}
 
 describe("Defect A — same-registrable-domain scope + fail-fast", () => {
   it("treats the checkout's own sibling API subdomain as in scope", () => {
@@ -52,6 +61,27 @@ describe("Defect A — same-registrable-domain scope + fail-fast", () => {
     ).toBe(true);
   });
 
+  it("does not allow a third-party host through path or query marker spoofing", () => {
+    expect(
+      requestHostInScope("https://tracker.example/api/recaptcha", RAKUTEN_CHECKOUT_HOSTS),
+    ).toBe(false);
+    expect(
+      requestHostInScope(
+        "https://tracker.example/api?next=gstatic.com/recaptcha",
+        RAKUTEN_CHECKOUT_HOSTS,
+      ),
+    ).toBe(false);
+    expect(
+      requestHostInScope(
+        "https://www.gstatic.com/recaptcha/releases/widget.js",
+        RAKUTEN_CHECKOUT_HOSTS,
+      ),
+    ).toBe(true);
+    expect(
+      requestHostInScope("https://www.gstatic.com/merchant-api", RAKUTEN_CHECKOUT_HOSTS),
+    ).toBe(false);
+  });
+
   it("a blocked/dropped out-of-scope XHR is flagged for a prompt abort — no hang", () => {
     // The load-bearing half: a dropped request that never resolves is the
     // wedge. An out-of-scope XHR/fetch must be aborted fast.
@@ -63,6 +93,43 @@ describe("Defect A — same-registrable-domain scope + fail-fast", () => {
       ),
     ).toBe(true);
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "makes an actual blocked fetch reject promptly before network egress",
+    async () => {
+      let requestCount = 0;
+      const server = createServer((_request, response) => {
+        requestCount += 1;
+        response.writeHead(200, { "Access-Control-Allow-Origin": "*" });
+        response.end("reachable");
+      });
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (address === null || typeof address === "string") throw new Error("missing test server");
+      const playwrightBrowser = await chromium.launch({ headless: true });
+      try {
+        const context = await playwrightBrowser.newContext();
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { context: BrowserContext }).context = context;
+        await controller.setHostScopeAllowedHosts(() => RAKUTEN_CHECKOUT_HOSTS);
+        const page = await context.newPage();
+        await page.setContent("<title>scope guard</title>");
+        const outcome = await page.evaluate(async (url) => {
+          return await Promise.race([
+            fetch(url).then(() => "resolved", () => "rejected"),
+            new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 1_000)),
+          ]);
+        }, `http://127.0.0.1:${address.port}/blocked`);
+        expect(outcome).toBe("rejected");
+        expect(requestCount).toBe(0);
+      } finally {
+        await playwrightBrowser.close();
+        await new Promise<void>((resolve, reject) =>
+          server.close((error) => (error === undefined ? resolve() : reject(error))),
+        );
+      }
+    },
+  );
 
   it("never fails-fast-blocks an in-scope or same-registrable-domain API sibling", () => {
     expect(
@@ -113,6 +180,12 @@ describe("Defect B — scoped order-summary total vs recommendation noise", () =
     expect(scopedOrderSummaryText(clean)).toBe(clean);
   });
 
+  it("strips a counted related-products heading", () => {
+    expect(scopedOrderSummaryText("小計 2,803円\n送料 送料無料\n関連商品（3）\n商品 9,999円")).toBe(
+      "小計 2,803円\n送料 送料無料",
+    );
+  });
+
   it("does not truncate on an おすすめ word inside a long product sentence", () => {
     const line =
       "この商品はおすすめですのでぜひ合わせてお買い求めください。内容量はたっぷりあります";
@@ -147,6 +220,38 @@ describe("Defect B — scoped order-summary total vs recommendation noise", () =
       currency: "JPY",
       checkout_origin: "https://cart.step.rakuten.co.jp",
     });
+  });
+
+  it("refuses a subtotal when shipping is not free", async () => {
+    const browser = new BrowserController({ humanize: false });
+    const frame = { evaluate: vi.fn().mockResolvedValue("小計 2,803円\n送料 500円") };
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ title: "Rakuten Cart", siteName: "" }),
+      mainFrame: () => frame,
+      frames: () => [frame],
+      url: () => "https://cart.step.rakuten.co.jp/cart",
+    };
+    Object.defineProperty(browser, "page", { value: page });
+
+    await expect(browser.readCheckoutSummary("JPY")).rejects.toThrow(
+      "payment_checkout_total_not_found",
+    );
+  });
+
+  it("does not treat a free-shipping subtotal as the final confirmation total", async () => {
+    const browser = new BrowserController({ humanize: false });
+    const frame = { evaluate: vi.fn().mockResolvedValue("小計 2,803円\n送料 送料無料") };
+    const page = {
+      evaluate: vi.fn().mockResolvedValue({ title: "Rakuten Confirm", siteName: "" }),
+      mainFrame: () => frame,
+      frames: () => [frame],
+      url: () => "https://cart.step.rakuten.co.jp/confirm",
+    };
+    Object.defineProperty(browser, "page", { value: page });
+
+    await expect(browser.readCheckoutConfirmSummary()).rejects.toThrow(
+      "payment_checkout_total_not_found",
+    );
   });
 });
 

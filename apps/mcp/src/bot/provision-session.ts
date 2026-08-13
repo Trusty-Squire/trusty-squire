@@ -2466,7 +2466,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   // allow_host / auto-widen updates apply without re-registering. Guarded so
   // mocks/harness browsers without the method stay inert.
   if (typeof browser.setHostScopeAllowedHosts === "function") {
-    browser.setHostScopeAllowedHosts(() => hostStrings(session));
+    await browser.setHostScopeAllowedHosts(() => hostStrings(session));
   }
   inFlight = true;
   try {
