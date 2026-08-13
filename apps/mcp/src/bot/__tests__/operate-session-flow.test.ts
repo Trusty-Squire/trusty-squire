@@ -2141,6 +2141,13 @@ describe("verified recipe recording", () => {
   });
 
   it("scrubs known-email variants from every persisted URL", async () => {
+    // BrowserController is mocked here, so advance the production navigation
+    // pacing without spending several seconds of wall time on each replay.
+    vi.useFakeTimers();
+    const settleNavigation = async <T>(pending: Promise<T>): Promise<T> => {
+      await vi.advanceTimersByTimeAsync(2_000);
+      return await pending;
+    };
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-email-url-"));
     const profileDir = mkdtempSync(join(tmpdir(), "verified-recipe-email-url-profile-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
@@ -2164,21 +2171,23 @@ describe("verified recipe recording", () => {
       url: "https://shop.example.com/account/buyer%40example%2Ecom",
     });
     h.visibleText = "Review order";
-    await provisionRememberTool.handler(
-      {
-        session_id: started.session_id,
-        name: "email-url",
-        goal: "Create account",
-        verb: "signup",
-        inputs: { address: { email: "buyer@example.com" } },
-        postcondition: {
-          kind: "observe_artifact",
-          describe: "Account created",
-          probe_url: "https://shop.example.com/account/buyer%2540example.com",
-          success_signal: { url_contains: "/account/buyer%2540example.com" },
+    await settleNavigation(
+      provisionRememberTool.handler(
+        {
+          session_id: started.session_id,
+          name: "email-url",
+          goal: "Create account",
+          verb: "signup",
+          inputs: { address: { email: "buyer@example.com" } },
+          postcondition: {
+            kind: "observe_artifact",
+            describe: "Account created",
+            probe_url: "https://shop.example.com/account/buyer%2540example.com",
+            success_signal: { url_contains: "/account/buyer%2540example.com" },
+          },
         },
-      },
-      null as unknown as ApiClient,
+        null as unknown as ApiClient,
+      ),
     );
     const raw = readFileSync(join(dir, "signup--example.com.json"), "utf8");
     expect(raw).toContain('"entry_mode": "runtime_service_url"');
@@ -2192,18 +2201,22 @@ describe("verified recipe recording", () => {
     const replayStarted = await startProvisionSession({
       serviceUrl: "https://shop.example.com/cart",
     });
-    const replay = await replayOperatorRecipe(replayStarted.session_id, recipe, {
-      "address.email": "buyer@example.com",
-    });
+    const replay = await settleNavigation(
+      replayOperatorRecipe(replayStarted.session_id, recipe, {
+        "address.email": "buyer@example.com",
+      }),
+    );
     expect(replay.status).toBe("complete");
-    const finished = await provisionFinishTaskTool.handler(
-      {
-        session_id: replayStarted.session_id,
-        kind: "result",
-        summary: "Account created",
-        verify_recipe: "email-url",
-      },
-      null as unknown as ApiClient,
+    const finished = await settleNavigation(
+      provisionFinishTaskTool.handler(
+        {
+          session_id: replayStarted.session_id,
+          kind: "result",
+          summary: "Account created",
+          verify_recipe: "email-url",
+        },
+        null as unknown as ApiClient,
+      ),
     );
     expect(finished).toMatchObject({
       kind: "result",
@@ -2213,28 +2226,31 @@ describe("verified recipe recording", () => {
     const consolidatedReplayStarted = await startProvisionSession({
       serviceUrl: "https://shop.example.com/cart",
     });
-    const consolidatedReplay = await replayOperatorRecipe(
-      consolidatedReplayStarted.session_id,
-      recipe,
-      { "address.email": "buyer@example.com" },
+    const consolidatedReplay = await settleNavigation(
+      replayOperatorRecipe(consolidatedReplayStarted.session_id, recipe, {
+        "address.email": "buyer@example.com",
+      }),
     );
     expect(consolidatedReplay.status).toBe("complete");
-    const consolidatedFinished = await provisionFinishTool.handler(
-      {
-        session_id: consolidatedReplayStarted.session_id,
-        outcome: {
-          kind: "result",
-          summary: "Account created",
-          verify_recipe: "email-url",
+    const consolidatedFinished = await settleNavigation(
+      provisionFinishTool.handler(
+        {
+          session_id: consolidatedReplayStarted.session_id,
+          outcome: {
+            kind: "result",
+            summary: "Account created",
+            verify_recipe: "email-url",
+          },
         },
-      },
-      null,
+        null,
+      ),
     );
     expect(consolidatedFinished).toEqual(finished);
     expect(h.gotos).toContain("https://shop.example.com/account/buyer%2540example.com");
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
     rmSync(profileDir, { recursive: true, force: true });
+    vi.useRealTimers();
   });
 
   it("rejects an unlabelled literal that matches a known input", async () => {
@@ -2402,6 +2418,7 @@ describe("verified recipe recording", () => {
   });
 });
 afterEach(async () => {
+  vi.useRealTimers();
   await closeAllProvisionSessions();
 });
 
