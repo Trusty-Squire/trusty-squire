@@ -9,6 +9,7 @@
 commands:
   test: |
     set -eu
+    pnpm install --frozen-lockfile
     pnpm --filter '@trusty-squire/registry' prisma:generate
     pnpm -r --filter "./packages/**" --if-present build
     pnpm -r --if-present test
