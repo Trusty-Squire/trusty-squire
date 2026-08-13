@@ -159,7 +159,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
   requireAny: (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
 }> = async (fastify, opts) => {
   type Submission = z.infer<typeof approveBody>;
-  const reviewTtlMs = 15_000;
+  const submissionWaitMs = 15_000;
   const relayPollIntervalMs = 1_000;
   const sleep = async (ms: number): Promise<void> =>
     await new Promise((resolve) => setTimeout(resolve, ms));
@@ -230,7 +230,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     accountId: string,
     peek: boolean,
   ): Promise<Submission | null> => {
-    const deadline = Date.now() + reviewTtlMs;
+    const deadline = Date.now() + submissionWaitMs;
     while (Date.now() < deadline) {
       const submission = await readSubmission(id, accountId, peek);
       if (submission !== null) return submission;
@@ -520,7 +520,7 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       record.id,
       record.accountId,
       { jws: parsed.data.jws, sealedCard: parsed.data.sealed_card, fingerprint },
-      new Date(Math.min(record.expiresAt.getTime(), submittedAt.getTime() + reviewTtlMs)),
+      record.expiresAt,
       submittedAt,
     );
     if (submitted === "in_progress") {

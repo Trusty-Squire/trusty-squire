@@ -458,10 +458,15 @@ describe("payment approval relay", () => {
     expect(afterRelay.json()).toMatchObject({ status: "pending", jws: null, sealed_card: null });
 
     nowMs += 15_001;
-    const verified = { ...makeSubmission(created), sealed_card: "verified-seal" };
-    const relayedVerified = await relaySubmission(created.id, verified);
-    expect(relayedVerified.approvalStatus).toBe(202);
-    expect(relayedVerified.relayed).toMatchObject(verified);
+    const replacement = { ...makeSubmission(created), sealed_card: "replacement-seal" };
+    const replacementAttempt = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/approve`,
+      payload: replacement,
+    });
+    expect(replacementAttempt.statusCode).toBe(409);
+    expect(replacementAttempt.json()).toEqual({ error: "payment_approval_in_progress" });
+    const verified = forged;
 
     const wrongAccountConfirm = await server.inject({
       method: "POST",
@@ -613,6 +618,43 @@ describe("payment approval relay", () => {
       );
     },
   );
+
+  it("retains a peeked final candidate past the long-poll window until confirmation", async () => {
+    const created = await createApproval();
+    const submission = makeSubmission(created);
+    const approved = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/approve`,
+      payload: submission,
+    });
+    expect(approved.statusCode).toBe(202);
+
+    const peek = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}?wait_for_submission=1&peek_submission=1`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(peek.statusCode).toBe(200);
+    expect(peek.json()).toMatchObject(submission);
+
+    nowMs += 15_001;
+    const completionRead = await server.inject({
+      method: "GET",
+      url: `/v1/pay/approvals/${created.id}?read_submission=1`,
+      headers: { authorization: `Bearer ${agentToken}` },
+    });
+    expect(completionRead.statusCode).toBe(200);
+    expect(completionRead.json()).toMatchObject({ status: "pending", ...submission });
+
+    const confirm = await server.inject({
+      method: "POST",
+      url: `/v1/pay/approvals/${created.id}/confirm`,
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: submission,
+    });
+    expect(confirm.statusCode).toBe(200);
+    expect(confirm.json()).toEqual({ status: "approved" });
+  });
 
   // Regression (Aug 2026 money-path outage): the deployed operator echoes the
   // approval's card_ref in its /confirm body (pay-operator.ts candidate). The
