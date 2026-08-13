@@ -484,13 +484,16 @@ describe("operate_pay", () => {
     expect(filledCards).toHaveLength(0);
   });
 
-  it("ignores a junk pending seal and confirms a valid replacement", async () => {
+  it("returns an explicit error for a final-bound pending candidate with a junk seal", async () => {
     const { result, filledCards, confirmationBodies } = await harness("junk_then_happy");
 
-    expect(result).toMatchObject({ status: "payment_submitted" });
-    expect(filledCards).toEqual([SYNTHETIC_CARD]);
-    expect(confirmationBodies).toHaveLength(1);
-    expect(confirmationBodies[0]).not.toMatchObject({ sealed_card: "junk" });
+    expect(result).toMatchObject({
+      status: "payment_card_open_failed",
+      reason: "card_open_failed",
+      candidate_kind: "approval",
+    });
+    expect(filledCards).toHaveLength(0);
+    expect(confirmationBodies).toHaveLength(0);
   });
 
   it("reconciles a lost confirm response before submitting payment", async () => {
@@ -1688,10 +1691,14 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   approvalBodies: Array<Record<string, unknown>>;
   filledCards: CheckoutCard[];
   expiresAt: string;
+  setReview: () => void;
   setApproved: () => void;
+  setInvalidFinalJws: () => void;
+  setInvalidFinalCard: () => void;
 } {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  let approved = false; // flips once "the phone responds"
+  let candidateState: "none" | "review" | "approval" | "invalid_jws" | "invalid_card" = "none";
+  let reviewConfirmed = false;
   const approvalBodies: Array<Record<string, unknown>> = [];
   const filledCards: CheckoutCard[] = [];
   const nonce = "resume-nonce";
@@ -1718,7 +1725,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     ) {
       const approval = approvalBodies[0]!;
       const operatorPublicKey = String(approval.operator_pubkey);
-      if (!approved) {
+      if (candidateState === "none" || (candidateState === "review" && reviewConfirmed)) {
         return Response.json({
           id: "appr_resume",
           status: "pending",
@@ -1748,35 +1755,50 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
         agent,
       })!;
       const aad = createHash("sha256").update(canonical, "utf8").digest();
+      const reviewCanonical = canonicalize({
+        approval_id: "appr_resume",
+        approval_payload_sha256: aad.toString("base64url"),
+        card_ref: "card_resume",
+        recipient_pubkey_hash: recipientHash,
+      })!;
+      const reviewAad = createHash("sha256").update(reviewCanonical, "utf8").digest();
+      const candidateAad = candidateState === "review" ? reviewAad : aad;
       const jws = await new SignJWT({
-        payload_sha256: aad.toString("base64url"),
+        payload_sha256: candidateAad.toString("base64url"),
         context: "purchase",
         confidence: "high",
         mandate_id: "mandate_resume",
       })
         .setProtectedHeader({ alg: "RS256", kid: "test-key" })
-        .setIssuer("https://vouchflow.dev")
+        .setIssuer(
+          candidateState === "invalid_jws"
+            ? "https://stale-vouchflow.example"
+            : "https://vouchflow.dev",
+        )
         .setAudience("customer_test")
         .sign(privateKey);
       const sealed_card = await sealToRecipient(
         operatorPublicKey,
         new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
-        aad,
+        candidateAad,
       );
       return Response.json({
         id: "appr_resume",
-        status: "approved",
+        status: candidateState === "approval" ? "approved" : "pending",
         ...checkout,
         nonce,
         card_ref: "card_resume",
         operator_pubkey: operatorPublicKey,
         jws,
-        sealed_card,
+        sealed_card: candidateState === "invalid_card" ? "invalid-sealed-card" : sealed_card,
         expires_at: expiresAt,
       });
     }
     if (url.endsWith("/v1/pay/approvals/appr_resume/confirm") && init?.method === "POST") {
-      return Response.json({ status: "approved" });
+      if (candidateState === "review") reviewConfirmed = true;
+      return Response.json({
+        status: candidateState === "review" ? "verified" : "approved",
+      });
     }
     if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
       return Response.json({ id: "audit_resume" }, { status: 201 });
@@ -1813,8 +1835,19 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     approvalBodies,
     filledCards,
     expiresAt,
+    setReview: () => {
+      candidateState = "review";
+      reviewConfirmed = false;
+    },
     setApproved: () => {
-      approved = true;
+      candidateState = "approval";
+      reviewConfirmed = false;
+    },
+    setInvalidFinalJws: () => {
+      candidateState = "invalid_jws";
+    },
+    setInvalidFinalCard: () => {
+      candidateState = "invalid_card";
     },
   };
 }
@@ -1917,6 +1950,113 @@ describe("operate_pay non-blocking approval [P0]", () => {
     expect(surfaceApprovalUrl).toHaveBeenNthCalledWith(1, "https://web.test/vault/pay/appr_resume");
     expect(surfaceApprovalUrl).toHaveBeenNthCalledWith(2, "https://web.test/vault/pay/appr_resume");
   });
+
+  it("keeps a zero-budget review candidate distinct, then charges a subsequent final candidate on the same approval", async () => {
+    const env = buildResumableEnv();
+    const mountedShopifyPanValues = ["", ""];
+    vi.mocked(env.browser.fillAndSubmitCheckout).mockImplementation(async (card) => {
+      mountedShopifyPanValues[0] = card.pan;
+      env.filledCards.push(card);
+      return { three_ds_required: false };
+    });
+    let pending: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        pending = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (pending === null) throw new Error("expected initial resumable approval");
+
+    env.setReview();
+    let afterReview: PendingApprovalWait | null = null;
+    const reviewResult = await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      resumeFrom: pending,
+      onApprovalPending: (state) => {
+        afterReview = state;
+      },
+      pollBudgetMs: 0,
+    });
+
+    expect(reviewResult).toMatchObject({
+      status: "approval_pending_final_signature",
+      candidate_kind: "review",
+      ready_to_charge: false,
+    });
+    expect(env.browser.fillAndSubmitCheckout).not.toHaveBeenCalled();
+    expect(mountedShopifyPanValues).toEqual(["", ""]);
+    expect(env.approvalBodies).toHaveLength(1);
+    if (afterReview === null) throw new Error("expected review-specific resumable approval");
+    const reviewResume = afterReview as PendingApprovalWait;
+    expect(reviewResume.reviewVerified).toBe(true);
+
+    env.setApproved();
+    const finalResult = await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      resumeFrom: reviewResume,
+      pollBudgetMs: 0,
+    });
+
+    expect(finalResult).toMatchObject({ status: "payment_submitted" });
+    expect(env.approvalBodies).toHaveLength(1);
+    expect(env.browser.fillAndSubmitCheckout).toHaveBeenCalledOnce();
+    expect(mountedShopifyPanValues[0]).toBe(SYNTHETIC_CARD.pan);
+  });
+
+  it.each([
+    ["JWS verification", "setInvalidFinalJws", "payment_mandate_verification_failed"],
+    ["card open", "setInvalidFinalCard", "payment_card_open_failed"],
+  ] as const)(
+    "returns an explicit error for a pending final candidate whose %s fails",
+    async (_label, setter, expectedStatus) => {
+      const env = buildResumableEnv();
+      let pending: PendingApprovalWait | null = null;
+      await executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        onApprovalPending: (state) => {
+          pending = state;
+        },
+        pollBudgetMs: 0,
+      });
+      if (pending === null) throw new Error("expected resumable approval");
+      env[setter]();
+
+      const result = await executeOperatePay(baseArgs, env.api, env.browser, {
+        fetch: env.fetch,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        resumeFrom: pending,
+        pollBudgetMs: 0,
+      });
+
+      expect(result).toMatchObject({
+        status: expectedStatus,
+        candidate_kind: "approval",
+      });
+      expect(result.status).not.toBe("approval_pending");
+      expect(env.browser.fillAndSubmitCheckout).not.toHaveBeenCalled();
+    },
+  );
 
   it("preserves the resumed keypair when configuration lookup fails", async () => {
     const env = buildResumableEnv();

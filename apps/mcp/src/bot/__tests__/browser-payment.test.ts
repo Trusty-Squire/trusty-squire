@@ -1409,6 +1409,90 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "fills one selected Shopify card form coherently when two variants are mounted",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/two-card-forms";
+      const { page, browser } = await servePages({
+        [pageUrl]: `<title>Kobee Japan</title><iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          <form id="combined">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+          </form>
+          <form id="split" aria-selected="true">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        expect(await frame.locator("#combined [autocomplete=cc-number]").inputValue()).toBe("");
+        expect(await frame.locator("#combined [autocomplete=cc-name]").inputValue()).toBe("");
+        expect(await frame.locator("#combined [autocomplete=cc-exp]").inputValue()).toBe("");
+        expect(await frame.locator("#combined [autocomplete=cc-csc]").inputValue()).toBe("");
+        expect(await frame.locator("#split [autocomplete=cc-number]").inputValue()).toBe(CARD.pan);
+        expect(await frame.locator("#split [autocomplete=cc-name]").inputValue()).toBe(CARD.name);
+        expect(await frame.locator("#split [autocomplete=cc-exp-month]").inputValue()).toBe("12");
+        expect(await frame.locator("#split [autocomplete=cc-exp-year]").inputValue()).toBe("30");
+        expect(await frame.locator("#split [autocomplete=cc-csc]").inputValue()).toBe(CARD.cvv);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "refuses ambiguous Shopify card forms without mixing any fields",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/ambiguous-card-forms";
+      const form = (id: string) => `
+        <form id="${id}">
+          <input autocomplete="cc-number">
+          <input autocomplete="cc-name">
+          <input autocomplete="cc-exp" placeholder="MM/YY">
+          <input autocomplete="cc-csc">
+        </form>`;
+      const { page, browser } = await servePages({
+        [pageUrl]: `<title>Kobee Japan</title><iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `${form("first")}${form("second")}`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.fillCheckoutCardFields(CARD)).rejects.toThrow(
+          "payment_card_form_ambiguous",
+        );
+
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        await expect(
+          frame
+            .locator("input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+        ).resolves.toEqual(["", "", "", "", "", "", "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "accepts confirmation totals only from visible trusted frames",
     async () => {
       const pageUrl = "https://shop.example.test/checkout/review";

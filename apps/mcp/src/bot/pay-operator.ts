@@ -1,4 +1,9 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import {
+  classifyPaymentCandidateBinding,
+  type PaymentCandidateHash,
+  type PaymentCandidateKind,
+} from "@trusty-squire/skill-schema";
 import canonicalize from "canonicalize";
 import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
@@ -77,6 +82,9 @@ export interface PendingApprovalWait {
   // never extended on resume.
   deadline: number;
   rejectedCandidates: string[];
+  // True after a legacy review-bound candidate was cryptographically verified.
+  // It is resumable state only: review verification never authorizes a charge.
+  reviewVerified?: boolean;
   keypair: OperatorKeypair;
   item: string;
   reason: string;
@@ -152,6 +160,13 @@ function toBase64Url(bytes: Uint8Array): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
+function candidateHash(bytes: Uint8Array): PaymentCandidateHash {
+  return {
+    base64url: Buffer.from(bytes).toString("base64url"),
+    hex: Buffer.from(bytes).toString("hex"),
+  };
+}
+
 function decodePayloadHash(claim: unknown): Uint8Array {
   if (typeof claim !== "string") throw new Error("missing_payload_sha256");
   let bytes: Uint8Array;
@@ -164,6 +179,101 @@ function decodePayloadHash(claim: unknown): Uint8Array {
   }
   if (bytes.byteLength !== 32) throw new Error("invalid_payload_sha256");
   return bytes;
+}
+
+interface PaymentCandidateBindingTerms {
+  approvalId: string;
+  checkout: CheckoutSummary;
+  nonce: string;
+  cardRef: string;
+  operatorPublicKey: string;
+  item: string;
+  reason: string;
+  agent: string;
+}
+
+interface PaymentCandidateBindingContext {
+  kind: PaymentCandidateKind;
+  approvalAad?: Uint8Array;
+  reviewAad?: Uint8Array;
+}
+
+function paymentCandidateBindingContext(
+  candidate: { jws: string | null; sealed_card: string | null },
+  terms: PaymentCandidateBindingTerms | null,
+): PaymentCandidateBindingContext {
+  if (candidate.jws === null && candidate.sealed_card === null) return { kind: "none" };
+  if (terms === null) return { kind: "invalid" };
+  try {
+    const recipientHash = createHash("sha256")
+      .update(fromBase64Url(terms.operatorPublicKey))
+      .digest();
+    const canonical = canonicalize({
+      approval_id: terms.approvalId,
+      merchant: terms.checkout.merchant,
+      checkout_origin: terms.checkout.checkout_origin,
+      amount_cents: terms.checkout.amount_cents,
+      currency: terms.checkout.currency,
+      nonce: terms.nonce,
+      card_ref: terms.cardRef,
+      recipient_pubkey_hash: toBase64Url(recipientHash),
+      item: terms.item,
+      reason: terms.reason,
+      agent: terms.agent,
+    });
+    if (canonical === undefined) return { kind: "invalid" };
+    const approvalAad = new Uint8Array(createHash("sha256").update(canonical, "utf8").digest());
+    const reviewCanonical = canonicalize({
+      approval_id: terms.approvalId,
+      approval_payload_sha256: toBase64Url(approvalAad),
+      card_ref: terms.cardRef,
+      recipient_pubkey_hash: toBase64Url(recipientHash),
+    });
+    if (reviewCanonical === undefined) return { kind: "invalid" };
+    const reviewAad = new Uint8Array(createHash("sha256").update(reviewCanonical, "utf8").digest());
+    let claimedPayloadHash: unknown;
+    try {
+      claimedPayloadHash =
+        candidate.jws === null ? undefined : decodeJwt(candidate.jws).payload_sha256;
+    } catch {
+      claimedPayloadHash = undefined;
+    }
+    return {
+      kind: classifyPaymentCandidateBinding({
+        jws: candidate.jws,
+        sealedCard: candidate.sealed_card,
+        claimedPayloadHash,
+        approvalPayloadHash: candidateHash(approvalAad),
+        reviewPayloadHash: candidateHash(reviewAad),
+      }),
+      approvalAad,
+      reviewAad,
+    };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
+
+export function classifyApprovalCandidate(
+  approval: Pick<PaymentApproval, "jws" | "sealed_card" | "card_ref">,
+  state: PendingApprovalWait,
+): PaymentCandidateKind {
+  const cardRef = state.cardRef ?? approval.card_ref;
+  return paymentCandidateBindingContext(
+    { jws: approval.jws, sealed_card: approval.sealed_card },
+    hasBoundCard(cardRef)
+      ? {
+          approvalId: state.approval_id,
+          checkout: state.checkout,
+          nonce: state.nonce,
+          cardRef,
+          operatorPublicKey: state.keypair.publicKey,
+          item: state.item,
+          reason: state.reason,
+          agent: state.agent,
+        }
+      : null,
+  ).kind;
 }
 
 function normalizeCard(value: unknown): CheckoutCard {
@@ -374,6 +484,23 @@ function logPaymentReviewLifecycle(event: Record<string, string>): void {
   process.stderr.write(`${JSON.stringify(event)}\n`);
 }
 
+function logPaymentCandidateLifecycle(
+  approvalId: string,
+  candidateKind: PaymentCandidateKind,
+  transitionOutcome: string,
+  failureCode?: string,
+): void {
+  process.stderr.write(
+    `${JSON.stringify({
+      event: "payment_candidate_lifecycle",
+      approval_id: approvalId,
+      candidate_kind: candidateKind,
+      transition_outcome: transitionOutcome,
+      ...(failureCode === undefined ? {} : { failure_code: failureCode }),
+    })}\n`,
+  );
+}
+
 /** The signed-payment drift check, reusable before the approval ceremony begins. */
 export function checkoutSummaryMatches(
   expected: CheckoutSummary,
@@ -401,6 +528,7 @@ export async function executeOperatePay(
   let cardBytes: Uint8Array | undefined;
   let card: CheckoutCard | undefined;
   const initialResume = resume;
+  let reviewVerified = resume?.reviewVerified ?? false;
   let resumableState: (() => PendingApprovalWait) | undefined =
     initialResume !== undefined ? () => initialResume : undefined;
   const rejectedCandidates = new Set<string>(resume?.rejectedCandidates ?? []);
@@ -441,6 +569,7 @@ export async function executeOperatePay(
         keypairHandedOff = false;
         resumableState = undefined;
         rejectedCandidates.clear();
+        reviewVerified = false;
       }
     }
 
@@ -544,6 +673,7 @@ export async function executeOperatePay(
       boundCardRef,
       deadline,
       rejectedCandidates: [...rejectedCandidates],
+      ...(reviewVerified ? { reviewVerified: true } : {}),
       keypair,
       item,
       reason,
@@ -610,8 +740,10 @@ export async function executeOperatePay(
     // spends one more live poll call past the budget it just decided to
     // respect.
     let iteration = 0;
+    let immediateReviewFollowup = false;
     while (true) {
-      if (iteration > 0 && !shouldKeepPolling()) break;
+      if (iteration > 0 && !immediateReviewFollowup && !shouldKeepPolling()) break;
+      immediateReviewFollowup = false;
       iteration++;
       const approval = await api.getPaymentApproval(approvalId, deps.now() < callDeadline);
       boundCardRef = approval.card_ref;
@@ -642,202 +774,208 @@ export async function executeOperatePay(
           rejectedCandidates.add(candidateKey);
           const cardRef = cardRefArg ?? candidate.card_ref;
           if (!hasBoundCard(cardRef)) {
-            if (approval.status === "approved") {
-              return {
-                status: "payment_mandate_rejected",
-                reason: "card_ref_unbound",
-                approval_url: approvalUrl,
-              };
-            }
+            logPaymentCandidateLifecycle(approvalId, "invalid", "rejected", "card_ref_unbound");
+            return {
+              status: "payment_mandate_rejected",
+              reason: "card_ref_unbound",
+              candidate_kind: "invalid",
+              approval_url: approvalUrl,
+            };
           } else {
-            const publicKeyBytes = fromBase64Url(keypair.publicKey);
-            const recipientHash = createHash("sha256").update(publicKeyBytes).digest();
-            const canonical = canonicalize({
-              approval_id: approvalId,
-              merchant: checkout.merchant,
-              checkout_origin: checkout.checkout_origin,
-              amount_cents: checkout.amount_cents,
-              currency: checkout.currency,
+            const binding = paymentCandidateBindingContext(candidate, {
+              approvalId,
+              checkout,
               nonce,
-              card_ref: cardRef,
-              recipient_pubkey_hash: toBase64Url(recipientHash),
+              cardRef,
+              operatorPublicKey: keypair.publicKey,
               item,
               reason,
               agent,
             });
-            if (canonical === undefined) {
-              if (approval.status === "approved") {
+            logPaymentCandidateLifecycle(approvalId, binding.kind, "observed");
+            if (binding.kind === "invalid" || binding.kind === "none") {
+              logPaymentCandidateLifecycle(
+                approvalId,
+                binding.kind,
+                "rejected",
+                "payload_hash_mismatch",
+              );
+              return {
+                status: "payment_mandate_rejected",
+                reason: "payload_hash_mismatch",
+                candidate_kind: binding.kind,
+                approval_url: approvalUrl,
+              };
+            }
+            const candidateAad =
+              binding.kind === "review" ? binding.reviewAad : binding.approvalAad;
+            if (candidateAad === undefined) {
+              logPaymentCandidateLifecycle(
+                approvalId,
+                binding.kind,
+                "rejected",
+                "canonicalization_failed",
+              );
+              return {
+                status: "payment_mandate_rejected",
+                reason: "canonicalization_failed",
+                candidate_kind: binding.kind,
+                approval_url: approvalUrl,
+              };
+            }
+            let verifiedClaims: JWTPayload;
+            try {
+              verifiedClaims = await verifyMandate(
+                candidate.jws,
+                candidateAad,
+                deps.vouchflowApiBase,
+                expectedAudience,
+                deps.fetch,
+              );
+            } catch (error) {
+              const failureReason = safeFailureReason(error);
+              logPaymentCandidateLifecycle(
+                approvalId,
+                binding.kind,
+                "verification_failed",
+                failureReason,
+              );
+              if (binding.kind === "review") {
+                logPaymentReviewLifecycle({
+                  event: "review_candidate_rejected",
+                  approval_id: approvalId,
+                  candidate_fingerprint: candidateKey,
+                  failure_code: failureReason,
+                });
                 return {
-                  status: "payment_mandate_rejected",
-                  reason: "canonicalization_failed",
+                  status: "payment_review_verification_failed",
+                  reason: failureReason,
+                  candidate_kind: "review",
                   approval_url: approvalUrl,
                 };
               }
-            } else {
-              const approvalAad = new Uint8Array(
-                createHash("sha256").update(canonical, "utf8").digest(),
+              return {
+                status:
+                  approval.status === "approved"
+                    ? "payment_mandate_rejected"
+                    : "payment_mandate_verification_failed",
+                reason: failureReason,
+                candidate_kind: "approval",
+                approval_url: approvalUrl,
+              };
+            }
+
+            let candidateCardBytes: Uint8Array | undefined;
+            let candidateCard: CheckoutCard;
+            try {
+              candidateCardBytes = await openSealed(
+                keypair.privateKey,
+                candidate.sealed_card,
+                candidateAad,
               );
-              const reviewCanonical = canonicalize({
-                approval_id: approvalId,
-                approval_payload_sha256: toBase64Url(approvalAad),
-                card_ref: cardRef,
-                recipient_pubkey_hash: toBase64Url(recipientHash),
-              });
-              if (reviewCanonical === undefined) {
+              candidateCard = normalizeCard(
+                JSON.parse(new TextDecoder().decode(candidateCardBytes)) as unknown,
+              );
+            } catch {
+              candidateCardBytes?.fill(0);
+              logPaymentCandidateLifecycle(
+                approvalId,
+                binding.kind,
+                "card_open_failed",
+                "card_open_failed",
+              );
+              if (binding.kind === "review") {
+                logPaymentReviewLifecycle({
+                  event: "review_candidate_rejected",
+                  approval_id: approvalId,
+                  candidate_fingerprint: candidateKey,
+                  failure_code: "card_open_failed",
+                });
                 return {
-                  status: "payment_mandate_rejected",
-                  reason: "canonicalization_failed",
+                  status: "payment_review_verification_failed",
+                  reason: "card_open_failed",
+                  candidate_kind: "review",
                   approval_url: approvalUrl,
                 };
               }
-              const reviewAad = new Uint8Array(
-                createHash("sha256").update(reviewCanonical, "utf8").digest(),
-              );
-              let verifiedClaims: JWTPayload | undefined;
-              let reviewCandidate = false;
-              let candidateAad: Uint8Array | undefined;
+              return {
+                status: "payment_card_open_failed",
+                reason: "card_open_failed",
+                candidate_kind: "approval",
+                approval_url: approvalUrl,
+              };
+            }
+
+            if (binding.kind === "review") {
               try {
-                const claimedHash = decodePayloadHash(decodeJwt(candidate.jws).payload_sha256);
-                if (timingSafeEqual(Buffer.from(claimedHash), Buffer.from(approvalAad))) {
-                  candidateAad = approvalAad;
-                } else if (timingSafeEqual(Buffer.from(claimedHash), Buffer.from(reviewAad))) {
-                  candidateAad = reviewAad;
-                  reviewCandidate = true;
-                } else {
-                  throw new Error("payload_hash_mismatch");
+                const confirmation = await api.confirmPaymentApproval(approvalId, candidate);
+                if (confirmation.status !== "verified") {
+                  throw new Error("review_confirmation_failed");
                 }
-                verifiedClaims = await verifyMandate(
-                  candidate.jws,
-                  candidateAad,
-                  deps.vouchflowApiBase,
-                  expectedAudience,
-                  deps.fetch,
-                );
               } catch (error) {
-                const failureReason = safeFailureReason(error);
-                if (reviewCandidate) {
-                  logPaymentReviewLifecycle({
-                    event: "review_candidate_rejected",
-                    approval_id: approvalId,
-                    candidate_fingerprint: candidateKey,
-                    failure_code: failureReason,
-                  });
-                  if (
-                    failureReason !== "jwks_fetch_failed" &&
-                    failureReason !== "jwks_fetch_timeout"
-                  ) {
-                    return {
-                      status: "payment_review_verification_failed",
-                      reason: failureReason,
-                      approval_url: approvalUrl,
-                    };
-                  }
-                }
-                if (approval.status === "approved") {
-                  return {
-                    status: "payment_mandate_rejected",
-                    reason: failureReason,
-                    approval_url: approvalUrl,
-                  };
-                }
-                if (
-                  failureReason === "jwks_fetch_failed" ||
-                  failureReason === "jwks_fetch_timeout"
-                ) {
-                  rejectedCandidates.delete(candidateKey);
-                }
+                candidateCardBytes.fill(0);
+                const failureReason =
+                  error instanceof Error && /404|409/.test(error.message)
+                    ? "confirm_status"
+                    : "confirm_failed";
+                logPaymentCandidateLifecycle(
+                  approvalId,
+                  "review",
+                  "confirmation_failed",
+                  failureReason,
+                );
+                logPaymentReviewLifecycle({
+                  event: "review_candidate_rejected",
+                  approval_id: approvalId,
+                  candidate_fingerprint: candidateKey,
+                  failure_code: failureReason,
+                });
+                return {
+                  status: "payment_review_verification_failed",
+                  reason: failureReason,
+                  candidate_kind: "review",
+                  approval_url: approvalUrl,
+                };
               }
-              if (verifiedClaims !== undefined) {
-                let candidateCardBytes: Uint8Array | undefined;
-                let candidateCard: CheckoutCard | undefined;
+              reviewVerified = true;
+              logPaymentCandidateLifecycle(approvalId, "review", "verified_final_required");
+              logPaymentReviewLifecycle({
+                event: "review_candidate_verified",
+                approval_id: approvalId,
+                candidate_fingerprint: candidateKey,
+                failure_code: "ok",
+              });
+              candidateCardBytes.fill(0);
+              immediateReviewFollowup = true;
+              continue;
+            }
+
+            if (approval.status === "pending") {
+              try {
+                const confirmation = await api.confirmPaymentApproval(approvalId, candidate);
+                if (confirmation.status !== "approved") throw new Error("confirm_status");
+              } catch (error) {
                 try {
-                  candidateCardBytes = await openSealed(
-                    keypair.privateKey,
-                    candidate.sealed_card,
-                    candidateAad!,
-                  );
-                  candidateCard = normalizeCard(
-                    JSON.parse(new TextDecoder().decode(candidateCardBytes)) as unknown,
-                  );
+                  const reconciliation = await api.confirmPaymentApproval(approvalId, candidate);
+                  if (reconciliation.status !== "approved") throw error;
                 } catch {
-                  candidateCardBytes?.fill(0);
-                  if (reviewCandidate) {
-                    logPaymentReviewLifecycle({
-                      event: "review_candidate_rejected",
-                      approval_id: approvalId,
-                      candidate_fingerprint: candidateKey,
-                      failure_code: "card_open_failed",
-                    });
-                    return {
-                      status: "payment_review_verification_failed",
-                      reason: "card_open_failed",
-                      approval_url: approvalUrl,
-                    };
-                  }
-                  if (approval.status === "approved") {
-                    return { status: "payment_card_open_failed", approval_url: approvalUrl };
-                  }
-                }
-                if (candidateCardBytes !== undefined && candidateCard !== undefined) {
-                  if (reviewCandidate) {
-                    try {
-                      const confirmation = await api.confirmPaymentApproval(approvalId, candidate);
-                      if (confirmation.status !== "verified") {
-                        throw new Error("review_confirmation_failed");
-                      }
-                    } catch (error) {
-                      candidateCardBytes.fill(0);
-                      const reason =
-                        error instanceof Error && /404|409/.test(error.message)
-                          ? "confirm_status"
-                          : "confirm_failed";
-                      logPaymentReviewLifecycle({
-                        event: "review_candidate_rejected",
-                        approval_id: approvalId,
-                        candidate_fingerprint: candidateKey,
-                        failure_code: reason,
-                      });
-                      return {
-                        status: "payment_review_verification_failed",
-                        reason,
-                        approval_url: approvalUrl,
-                      };
-                    }
-                    logPaymentReviewLifecycle({
-                      event: "review_candidate_verified",
-                      approval_id: approvalId,
-                      candidate_fingerprint: candidateKey,
-                      failure_code: "ok",
-                    });
-                    candidateCardBytes.fill(0);
-                    if (!shouldKeepPolling()) break;
-                    await deps.sleep(deps.pollIntervalMs);
-                    continue;
-                  }
-                  if (approval.status === "pending") {
-                    try {
-                      await api.confirmPaymentApproval(approvalId, candidate);
-                    } catch (error) {
-                      try {
-                        const reconciliation = await api.confirmPaymentApproval(
-                          approvalId,
-                          candidate,
-                        );
-                        if (reconciliation.status !== "approved") throw error;
-                      } catch {
-                        candidateCardBytes.fill(0);
-                        throw error;
-                      }
-                    }
-                  }
-                  cardBytes = candidateCardBytes;
-                  card = candidateCard;
-                  claims = verifiedClaims;
-                  approved = candidate;
-                  break;
+                  candidateCardBytes.fill(0);
+                  logPaymentCandidateLifecycle(
+                    approvalId,
+                    "approval",
+                    "confirmation_failed",
+                    "confirm_failed",
+                  );
+                  throw error;
                 }
               }
             }
+            logPaymentCandidateLifecycle(approvalId, "approval", "ready_to_charge");
+            cardBytes = candidateCardBytes;
+            card = candidateCard;
+            claims = verifiedClaims;
+            approved = candidate;
+            break;
           }
         }
       }
@@ -845,6 +983,30 @@ export async function executeOperatePay(
       await deps.sleep(deps.pollIntervalMs);
     }
     if (approved === undefined) {
+      if (reviewVerified && budgetExhausted) {
+        const state = resumableState();
+        keypairHandedOff = true;
+        deps.onApprovalPending(state);
+        return {
+          status: "approval_pending_final_signature",
+          approval_id: approvalId,
+          approval_url: approvalUrl,
+          expires_at: new Date(deadline).toISOString(),
+          phase: phaseArg ?? null,
+          approved_amount_cents: checkout.amount_cents,
+          currency: checkout.currency,
+          merchant: checkout.merchant,
+          candidate_kind: "review",
+          ready_to_charge: false,
+          next: {
+            tool: "operate_payment_await",
+            max_wait_seconds: 15,
+            message:
+              "The review signature was verified, but final payment approval is still required. " +
+              "Refresh the approval page if it does not advance to the final approval prompt.",
+          },
+        };
+      }
       if (budgetExhausted) {
         const state = resumableState();
         keypairHandedOff = true;
@@ -858,6 +1020,8 @@ export async function executeOperatePay(
           approved_amount_cents: checkout.amount_cents,
           currency: checkout.currency,
           merchant: checkout.merchant,
+          candidate_kind: "none",
+          ready_to_charge: false,
           next: { tool: "operate_payment_await", max_wait_seconds: 15 },
         };
       }

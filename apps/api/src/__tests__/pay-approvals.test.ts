@@ -284,7 +284,7 @@ describe("payment approval relay", () => {
     expect(JSON.stringify(response.json())).not.toContain("4242");
   });
 
-  it("releases details without a session only after operator review verification", async () => {
+  it("rejects legacy review-bound submissions as a stale payment client", async () => {
     const cardId = await createOwnedCard(webCookie);
     const created = await createApproval(cardId);
     const ceremonyResponse = await server.inject({
@@ -298,122 +298,24 @@ describe("payment approval relay", () => {
       approval_payload_sha256: string;
     };
     const review = makeReviewSubmission(ceremony);
-    const operatorWait = server.inject({
-      method: "GET",
-      url: `/v1/pay/approvals/${created.id}?wait_for_submission=1`,
-      headers: { authorization: `Bearer ${agentToken}` },
-    });
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    let detailsReleased = false;
-    const reviewRequest = server
-      .inject({
-        method: "POST",
-        url: `/v1/pay/approvals/${created.id}/approve`,
-        payload: review,
-      })
-      .then((response) => {
-        detailsReleased = true;
-        return response;
-      });
-    const relayed = await operatorWait;
-    expect(relayed.json()).toMatchObject(review);
-    expect(detailsReleased).toBe(false);
-
-    const wrongAccount = await server.inject({
+    const response = await server.inject({
       method: "POST",
-      url: `/v1/pay/approvals/${created.id}/confirm`,
-      headers: { authorization: `Bearer ${otherAgentToken}` },
+      url: `/v1/pay/approvals/${created.id}/approve`,
       payload: review,
     });
-    expect(wrongAccount.statusCode).toBe(404);
-    expect(detailsReleased).toBe(false);
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: "stale_payment_client" });
 
-    const beforeVerification = await server.inject({
+    const pending = await server.inject({
       method: "GET",
       url: `/v1/pay/approvals/${created.id}`,
       headers: { authorization: `Bearer ${agentToken}` },
     });
-    expect(beforeVerification.json()).toMatchObject({
+    expect(pending.json()).toMatchObject({
       status: "pending",
       jws: null,
       sealed_card: null,
     });
-
-    const verified = await server.inject({
-      method: "POST",
-      url: `/v1/pay/approvals/${created.id}/confirm`,
-      headers: { authorization: `Bearer ${agentToken}` },
-      payload: review,
-    });
-    expect(verified.statusCode).toBe(200);
-    expect(verified.json()).toEqual({ status: "verified" });
-
-    const released = await reviewRequest;
-    expect(released.statusCode).toBe(200);
-    expect(released.json()).toMatchObject({
-      status: "verified",
-      approval: {
-        id: created.id,
-        merchant: "Synthetic Books",
-        amount_cents: 2599,
-        item: "Synthetic Book",
-        reason: "Synthetic test purchase",
-        agent: "Hermes",
-      },
-      card: { brand: "visa", last4: "4242" },
-    });
-
-    const finalSubmission = makeSubmission({ ...created, card_ref: cardId });
-    const finalRelay = await relaySubmission(created.id, finalSubmission);
-    expect(finalRelay.approvalStatus).toBe(202);
-    const confirmed = await server.inject({
-      method: "POST",
-      url: `/v1/pay/approvals/${created.id}/confirm`,
-      headers: { authorization: `Bearer ${agentToken}` },
-      payload: finalSubmission,
-    });
-    expect(confirmed.statusCode).toBe(200);
-    expect(confirmed.json()).toEqual({ status: "approved" });
-  });
-
-  it("settles a review confirmation received by a distinct API worker", async () => {
-    const cardId = await createOwnedCard(webCookie);
-    const created = await createApproval(cardId);
-    const ceremony = (
-      await server.inject({ method: "GET", url: `/v1/pay/approvals/${created.id}/ceremony` })
-    ).json() as {
-      id: string;
-      card_ref: string;
-      operator_pubkey: string;
-      approval_payload_sha256: string;
-    };
-    const review = makeReviewSubmission(ceremony);
-    const workerB = await buildServer({ deps });
-    try {
-      const reviewer = workerB.inject({
-        method: "POST",
-        url: `/v1/pay/approvals/${created.id}/approve`,
-        payload: review,
-      });
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      const delivered = await server.inject({
-        method: "GET",
-        url: `/v1/pay/approvals/${created.id}?wait_for_submission=1`,
-        headers: { authorization: `Bearer ${agentToken}` },
-      });
-      expect(delivered.json()).toMatchObject(review);
-      const confirmed = await server.inject({
-        method: "POST",
-        url: `/v1/pay/approvals/${created.id}/confirm`,
-        headers: { authorization: `Bearer ${agentToken}` },
-        payload: review,
-      });
-      expect(confirmed.json()).toEqual({ status: "verified" });
-      expect((await reviewer).statusCode).toBe(200);
-    } finally {
-      await workerB.close();
-    }
   });
 
   it("stores item/reason and the MCP client requester header", async () => {

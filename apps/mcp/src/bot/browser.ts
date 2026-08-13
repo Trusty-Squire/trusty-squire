@@ -7462,15 +7462,137 @@ export class BrowserController {
     assertFrameEgress?: (frame: Frame, resolvedOrigin?: string) => void,
   ): Promise<void> {
     const filled = new Set<string>();
+    const expiryMonthSelectors =
+      '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i]';
+    const expiryYearSelectors =
+      '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i]';
+    const combinedExpirySelectors =
+      'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i],label:has-text("MM/YY") input,label:has-text("MM / YY") input';
+    const combinedExpiryGroupSelectors =
+      'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i]';
+    const cvvSelectors =
+      'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]';
+    const nameSelectors =
+      'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]';
+
+    type CardGroup = { frame: Frame; root: Locator; active: boolean };
+    const groups = new Map<string, CardGroup>();
+    let fillablePanCount = 0;
+    let groupSequence = 0;
+    await Promise.all(
+      frames.map((frame) =>
+        frame
+          .locator("[data-ts-payment-card-group]")
+          .evaluateAll((elements) => {
+            for (const element of elements) element.removeAttribute("data-ts-payment-card-group");
+          })
+          .catch(() => undefined),
+      ),
+    );
+    for (const [frameIndex, frame] of frames.entries()) {
+      const pans = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
+      const count = Math.min(await pans.count().catch(() => 0), 10);
+      for (let index = 0; index < count; index += 1) {
+        const pan = pans.nth(index);
+        if (!(await pan.isVisible().catch(() => false))) continue;
+        if (!(await pan.isEnabled().catch(() => false))) continue;
+        fillablePanCount += 1;
+        const proposedToken = `ts-card-group-${groupSequence++}`;
+        const group = await pan
+          .evaluate(
+            (input, selectors) => {
+              const isFillable = (element: Element): boolean => {
+                if (!(element instanceof HTMLElement)) return false;
+                const control = element as HTMLInputElement | HTMLSelectElement;
+                const style = getComputedStyle(element);
+                return (
+                  !control.disabled &&
+                  style.display !== "none" &&
+                  style.visibility !== "hidden" &&
+                  Number(style.opacity) !== 0 &&
+                  element.getClientRects().length > 0
+                );
+              };
+              const has = (root: Element, selector: string): boolean =>
+                Array.from(root.querySelectorAll(selector)).some(isFillable);
+              const form = input.closest("form");
+              let root: Element | null = form ?? input.parentElement;
+              while (root !== null && root !== document.body && root !== document.documentElement) {
+                const complete =
+                  has(root, selectors.pan) &&
+                  has(root, selectors.cvv) &&
+                  has(root, selectors.name) &&
+                  (has(root, selectors.combinedExpiry) ||
+                    (has(root, selectors.expiryMonth) && has(root, selectors.expiryYear)));
+                if (complete) {
+                  const existing = root.getAttribute("data-ts-payment-card-group");
+                  const token = existing ?? selectors.token;
+                  if (existing === null) root.setAttribute("data-ts-payment-card-group", token);
+                  const active =
+                    root.contains(document.activeElement) ||
+                    root.matches(
+                      '[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
+                    ) ||
+                    root.querySelector(
+                      'input[type="radio"]:checked,[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
+                    ) !== null;
+                  return { token, active };
+                }
+                if (form !== null) break;
+                root = root.parentElement;
+              }
+              return null;
+            },
+            {
+              token: proposedToken,
+              pan: CHECKOUT_PAN_FIELD_SELECTORS,
+              cvv: cvvSelectors,
+              name: nameSelectors,
+              combinedExpiry: combinedExpiryGroupSelectors,
+              expiryMonth: expiryMonthSelectors,
+              expiryYear: expiryYearSelectors,
+            },
+          )
+          .catch(() => null);
+        if (group !== null) {
+          groups.set(`${frameIndex}:${group.token}`, {
+            frame,
+            root: frame.locator(`[data-ts-payment-card-group="${group.token}"]`),
+            active: group.active,
+          });
+        }
+      }
+    }
+
+    let cardGroup: CardGroup | undefined;
+    if (groups.size === 1) {
+      cardGroup = [...groups.values()][0];
+    } else if (groups.size > 1) {
+      const active = [...groups.values()].filter((group) => group.active);
+      if (active.length !== 1) throw new Error("payment_card_form_ambiguous");
+      cardGroup = active[0];
+    } else if (fillablePanCount > 1) {
+      // Multiple PAN anchors with no single complete container are not safe to
+      // combine. A provider topology with one PAN and separate hosted-field
+      // frames remains supported by the cross-frame fallback below.
+      throw new Error("payment_card_form_ambiguous");
+    }
+
     const fillFirst = async (
       field: string,
       value: string | undefined,
       selectors: string,
       typePerKey = false,
+      withinCardGroup = false,
     ): Promise<boolean> => {
       if (value === undefined || value.length === 0) return false;
-      for (const frame of frames) {
-        const matches = frame.locator(selectors);
+      const candidateFrames =
+        withinCardGroup && cardGroup !== undefined ? [cardGroup.frame] : frames;
+      for (const frame of candidateFrames) {
+        const matches =
+          withinCardGroup && cardGroup !== undefined
+            ? cardGroup.root.locator(selectors)
+            : frame.locator(selectors);
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
           const input = matches.nth(i);
@@ -7579,9 +7701,14 @@ export class BrowserController {
       }
       return false;
     };
-    const hasFillable = async (selectors: string): Promise<boolean> => {
-      for (const frame of frames) {
-        const matches = frame.locator(selectors);
+    const hasFillable = async (selectors: string, withinCardGroup = false): Promise<boolean> => {
+      const candidateFrames =
+        withinCardGroup && cardGroup !== undefined ? [cardGroup.frame] : frames;
+      for (const frame of candidateFrames) {
+        const matches =
+          withinCardGroup && cardGroup !== undefined
+            ? cardGroup.root.locator(selectors)
+            : frame.locator(selectors);
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
           const input = matches.nth(i);
@@ -7592,16 +7719,19 @@ export class BrowserController {
       return false;
     };
 
-    await fillFirst("pan", card.pan, CHECKOUT_PAN_FIELD_SELECTORS);
-    const expiryMonthSelectors =
-      '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i]';
-    const expiryYearSelectors =
-      '[autocomplete~="cc-exp-year"],[name*="exp_year" i],[name*="expyear" i],[name*="exp" i][name*="year" i],[id*="exp" i][id*="year" i]';
+    await fillFirst("pan", card.pan, CHECKOUT_PAN_FIELD_SELECTORS, false, true);
     const hasSplitExpiry =
-      (await hasFillable(expiryMonthSelectors)) && (await hasFillable(expiryYearSelectors));
+      (await hasFillable(expiryMonthSelectors, true)) &&
+      (await hasFillable(expiryYearSelectors, true));
     if (hasSplitExpiry) {
-      await fillFirst("exp_month", card.exp_month.padStart(2, "0"), expiryMonthSelectors);
-      await fillFirst("exp_year", card.exp_year, expiryYearSelectors);
+      await fillFirst(
+        "exp_month",
+        card.exp_month.padStart(2, "0"),
+        expiryMonthSelectors,
+        false,
+        true,
+      );
+      await fillFirst("exp_year", card.exp_year, expiryYearSelectors, false, true);
     } else {
       // A combined expiry field's formatter owns the slash. Send only the four
       // digits as real key events so numeric-only fields accept them and the
@@ -7609,25 +7739,24 @@ export class BrowserController {
       const combined = await fillFirst(
         "expiry",
         `${card.exp_month.padStart(2, "0")}${card.exp_year.slice(-2)}`,
-        'input[autocomplete~="cc-exp"],input[name*="expir" i]:not([name*="month" i]):not([name*="year" i]),input[name="exp" i],input[name*="exp-date" i],input[id*="expir" i]:not([id*="month" i]):not([id*="year" i]),input[id="exp" i],input[id*="exp-date" i],input[placeholder="MM/YY" i],input[placeholder="MM / YY" i],input[aria-label="MM/YY" i],input[aria-label="MM / YY" i],label:has-text("MM/YY") input,label:has-text("MM / YY") input',
+        combinedExpirySelectors,
+        true,
         true,
       );
       if (!combined) {
-        await fillFirst("exp_month", card.exp_month.padStart(2, "0"), expiryMonthSelectors);
-        await fillFirst("exp_year", card.exp_year, expiryYearSelectors);
+        await fillFirst(
+          "exp_month",
+          card.exp_month.padStart(2, "0"),
+          expiryMonthSelectors,
+          false,
+          true,
+        );
+        await fillFirst("exp_year", card.exp_year, expiryYearSelectors, false, true);
       }
     }
     const fields: Array<[string, string | undefined, string, string?]> = [
-      [
-        "cvv",
-        card.cvv,
-        'input[autocomplete~="cc-csc"],input[name*="cvv" i],input[name*="cvc" i],input[name*="security-code" i],input[id*="cvv" i],input[id*="cvc" i]',
-      ],
-      [
-        "name",
-        card.name,
-        'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
-      ],
+      ["cvv", card.cvv, cvvSelectors],
+      ["name", card.name, nameSelectors],
       [
         "line1",
         card.billing.line1,
@@ -7670,6 +7799,8 @@ export class BrowserController {
         field,
         value,
         billingOnly && billingSelectors !== undefined ? billingSelectors : selectors,
+        false,
+        field === "cvv" || field === "name",
       );
     }
     for (const required of ["pan", "expiry", "cvv", "name"]) {

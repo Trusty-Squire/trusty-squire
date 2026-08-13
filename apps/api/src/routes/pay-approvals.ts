@@ -1,4 +1,9 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  classifyPaymentCandidateBinding,
+  type PaymentCandidateHash,
+  type PaymentCandidateKind,
+} from "@trusty-squire/skill-schema";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { ApiDeps } from "../services/deps.js";
@@ -50,7 +55,7 @@ const approveBody = z
   })
   .strict();
 
-function decodePayloadHash(jws: string): Buffer | null {
+function decodePayloadHash(jws: string): string | null {
   const parts = jws.split(".");
   if (parts.length !== 3 || !/^[A-Za-z0-9_-]+$/.test(parts[1]!)) return null;
   try {
@@ -60,10 +65,10 @@ function decodePayloadHash(jws: string): Buffer | null {
     };
     if (claims.context !== "purchase" || typeof claims.payload_sha256 !== "string") return null;
     if (/^[0-9a-fA-F]{64}$/.test(claims.payload_sha256)) {
-      return Buffer.from(claims.payload_sha256, "hex");
+      return claims.payload_sha256;
     }
     if (/^[A-Za-z0-9_-]{43}$/.test(claims.payload_sha256)) {
-      return Buffer.from(claims.payload_sha256, "base64url");
+      return claims.payload_sha256;
     }
     return null;
   } catch {
@@ -122,17 +127,25 @@ function reviewPayloadHash(record: ApprovalRecord, payloadHash: Buffer): Buffer 
   return createHash("sha256").update(canonical, "utf8").digest();
 }
 
+function candidateHash(hash: Buffer | null): PaymentCandidateHash | null {
+  return hash === null
+    ? null
+    : { base64url: hash.toString("base64url"), hex: hash.toString("hex") };
+}
+
 function submissionBinding(
   submission: z.infer<typeof approveBody>,
   record: ApprovalRecord,
-): "review" | "approval" | null {
-  const signedHash = decodePayloadHash(submission.jws);
-  if (signedHash === null || signedHash.byteLength !== 32) return null;
+): PaymentCandidateKind {
   const payloadHash = approvalPayloadHash(record);
-  if (payloadHash === null) return null;
-  if (timingSafeEqual(signedHash, payloadHash)) return "approval";
-  const reviewHash = reviewPayloadHash(record, payloadHash);
-  return reviewHash !== null && timingSafeEqual(signedHash, reviewHash) ? "review" : null;
+  const reviewHash = payloadHash === null ? null : reviewPayloadHash(record, payloadHash);
+  return classifyPaymentCandidateBinding({
+    jws: submission.jws,
+    sealedCard: submission.sealed_card,
+    claimedPayloadHash: decodePayloadHash(submission.jws),
+    approvalPayloadHash: candidateHash(payloadHash),
+    reviewPayloadHash: candidateHash(reviewHash),
+  });
 }
 
 const bindCardBody = z.object({
@@ -175,6 +188,24 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       "payment review lifecycle",
     );
 
+  const candidateLifecycle = (
+    record: ApprovalRecord,
+    candidateKind: PaymentCandidateKind,
+    transitionOutcome: string,
+  ) =>
+    fastify.log.info(
+      {
+        event: "payment_candidate_lifecycle",
+        approval_id: record.id,
+        candidate_kind: candidateKind,
+        transition_outcome: transitionOutcome,
+        account_hash: createHash("sha256").update(record.accountId).digest("base64url"),
+        machine_id: process.env.FLY_MACHINE_ID ?? "unknown",
+        release_id: process.env.FLY_IMAGE_REF ?? process.env.RELEASE_ID ?? "unknown",
+      },
+      "payment candidate lifecycle",
+    );
+
   const waitForSubmission = async (id: string, accountId: string): Promise<Submission | null> => {
     const deadline = Date.now() + reviewTtlMs;
     while (Date.now() < deadline) {
@@ -187,24 +218,6 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       await sleep(relayPollIntervalMs);
     }
     return null;
-  };
-
-  const waitForReviewConfirmation = async (
-    id: string,
-    accountId: string,
-    fingerprint: string,
-  ): Promise<boolean> => {
-    const deadline = Date.now() + reviewTtlMs;
-    while (Date.now() < deadline) {
-      const relay = await opts.deps.pendingPaymentApprovalStore.getReviewRelayForAccount(
-        id,
-        accountId,
-        opts.deps.now?.() ?? new Date(),
-      );
-      if (relay?.phase === "confirmed" && relay.fingerprint === fingerprint) return true;
-      await sleep(relayPollIntervalMs);
-    }
-    return false;
   };
 
   fastify.get("/v1/pay/config", { preHandler: opts.requireAgent }, async (req, reply) => {
@@ -457,73 +470,21 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       return;
     }
     const binding = submissionBinding(parsed.data, record);
-    if (binding === null) {
+    candidateLifecycle(record, binding, "submission_received");
+    if (binding === "invalid" || binding === "none") {
+      candidateLifecycle(record, binding, "binding_rejected");
       reply.code(403).send({ error: "payment_approval_binding_mismatch" });
       return;
     }
     if (binding === "review") {
       const fingerprint = submissionFingerprint(parsed.data);
-      const submitted = await opts.deps.pendingPaymentApprovalStore.submitReviewCandidate(
-        record.id,
-        record.accountId,
-        { jws: parsed.data.jws, sealedCard: parsed.data.sealed_card, fingerprint },
-        new Date(Math.min(record.expiresAt.getTime(), now.getTime() + reviewTtlMs)),
-        now,
-      );
-      if (submitted === "in_progress") {
-        event("review_submitted", record, fingerprint, "in_progress");
-        reply.code(409).send({ error: "payment_review_in_progress" });
-        return;
-      }
-      if (submitted !== "submitted") {
-        event("review_submitted", record, fingerprint, "not_pending");
-        reply.code(409).send({ error: "payment_approval_not_pending" });
-        return;
-      }
-      event("review_wait_created", record, fingerprint, "ok");
-      event("review_submitted", record, fingerprint, "ok");
-      if (!(await waitForReviewConfirmation(record.id, record.accountId, fingerprint))) {
-        event("timeout", record, fingerprint, "review_confirm_timeout");
-        reply.code(409).send({ error: "payment_review_not_verified" });
-        return;
-      }
-      const current = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
-      if (
-        current === null ||
-        current.accountId !== record.accountId ||
-        current.status !== "pending" ||
-        current.cardRef !== record.cardRef ||
-        current.expiresAt <= (opts.deps.now?.() ?? new Date())
-      ) {
-        reply.code(409).send({ error: "payment_approval_not_pending" });
-        return;
-      }
-      const card = await opts.deps.e2eCredentialStore.getByIdForAccount(
-        current.cardRef,
-        current.accountId,
-      );
-      if (card === null) {
-        reply.code(409).send({ error: "payment_card_unavailable" });
-        return;
-      }
-      return reply.code(200).send({
-        status: "verified",
-        approval: {
-          id: current.id,
-          status: current.status,
-          merchant: current.merchant,
-          checkout_origin: current.checkoutOrigin,
-          amount_cents: current.amountCents,
-          currency: current.currency,
-          nonce: current.nonce,
-          card_ref: current.cardRef,
-          operator_pubkey: current.operatorPubkey,
-          item: current.item,
-          reason: current.reason,
-          agent: current.agent,
-          expires_at: current.expiresAt.toISOString(),
-        },
-        card: { brand: card.brand, last4: card.last4 },
+      event("review_submitted", record, fingerprint, "stale_payment_client");
+      candidateLifecycle(record, "review", "stale_client_rejected");
+      return reply.code(409).send({
+        error: "stale_payment_client",
+        message:
+          "This payment approval page uses a retired review protocol. Refresh the page and " +
+          "submit the final approval again.",
       });
     }
     const submittedAt = opts.deps.now?.() ?? new Date();
@@ -536,13 +497,16 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       submittedAt,
     );
     if (submitted === "in_progress") {
+      candidateLifecycle(record, "approval", "submission_in_progress");
       reply.code(409).send({ error: "payment_approval_in_progress" });
       return;
     }
     if (submitted !== "submitted") {
+      candidateLifecycle(record, "approval", "submission_not_pending");
       reply.code(409).send({ error: "payment_approval_not_pending" });
       return;
     }
+    candidateLifecycle(record, "approval", "submission_relayed");
     return reply.code(202).send({ status: "pending" });
   });
 
@@ -579,7 +543,9 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         return;
       }
       const binding = submissionBinding(parsed.data, record);
-      if (binding === null) {
+      candidateLifecycle(record, binding, "confirmation_received");
+      if (binding === "invalid" || binding === "none") {
+        candidateLifecycle(record, binding, "confirmation_binding_rejected");
         reply.code(403).send({ error: "payment_approval_binding_mismatch" });
         return;
       }
@@ -597,10 +563,12 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
           now,
         );
         if (result !== "confirmed") {
+          candidateLifecycle(record, "review", "confirmation_rejected");
           event("review_confirm_rejected", record, fingerprint, result);
           reply.code(409).send({ error: "payment_approval_candidate_changed" });
           return;
         }
+        candidateLifecycle(record, "review", "verified_final_required");
         event("review_confirm_matched", record, fingerprint, "ok");
         return reply.code(200).send({ status: "verified" });
       }
@@ -611,9 +579,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
         now,
       );
       if (confirmed !== "confirmed") {
+        candidateLifecycle(record, "approval", "confirmation_rejected");
         reply.code(409).send({ error: "payment_approval_candidate_changed" });
         return;
       }
+      candidateLifecycle(record, "approval", "approved");
       return reply.code(200).send({ status: "approved" });
     },
   );
