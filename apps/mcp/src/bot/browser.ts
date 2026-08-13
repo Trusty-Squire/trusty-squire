@@ -53,6 +53,7 @@ import {
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
+import { localWorkerIdentity, type OperatorWorkerIdentity } from "./operator-profile-pool.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
@@ -2079,6 +2080,7 @@ export class BrowserController {
   // the connected Browser so close() can tear both down.
   private childChrome: ChildProcess | null = null;
   private cdpBrowser: Browser | null = null;
+  private cdpEndpoint: string | null = null;
   // True once launchPersistentContext succeeded this session.
   private launchedContext = false;
   private launchedProfileHolderPid: number | null = null;
@@ -2228,6 +2230,13 @@ export class BrowserController {
     const proxyUrl =
       opts.proxyUrl !== undefined && opts.proxyUrl.trim().length > 0 ? opts.proxyUrl.trim() : null;
     return this.profileDir === profileDir && this.proxyOverride === proxyUrl;
+  }
+
+  /** Identity persisted by the operator profile lease for owner-safe crash recovery. */
+  operatorWorkerIdentity(): OperatorWorkerIdentity | null {
+    const pid = this.childChrome?.pid ?? this.launchedProfileHolderPid;
+    if (pid === undefined || pid === null) return null;
+    return localWorkerIdentity(pid, this.profileDir, this.cdpEndpoint ?? undefined);
   }
 
   // Required health gate for a warm browser. BrowserContext alone is not a
@@ -2380,6 +2389,7 @@ export class BrowserController {
     const launcher = getChromium();
     const browser = await launcher.connectOverCDP(endpoint);
     this.cdpBrowser = browser;
+    this.cdpEndpoint = endpoint;
     const ctx = browser.contexts()[0];
     if (ctx === undefined) {
       throw new Error("self-launched Chrome exposed no default browser context");
@@ -11859,6 +11869,7 @@ export class BrowserController {
     if (this.cdpBrowser) {
       await capped(this.cdpBrowser.close(), 5_000);
       this.cdpBrowser = null;
+      this.cdpEndpoint = null;
     }
     if (this.childChrome) {
       try {

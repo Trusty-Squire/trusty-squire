@@ -54,6 +54,7 @@ const h = vi.hoisted(() => ({
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
   connections: [] as boolean[],
+  profileDirs: [] as Array<string | undefined>,
   currentUrl: "",
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
@@ -146,6 +147,7 @@ vi.mock("../browser.js", () => ({
       this.index = h.connections.length;
       this.opts = opts;
       h.connections.push(true);
+      h.profileDirs.push(opts.profileDir);
     }
     async start(): Promise<void> {
       h.started += 1;
@@ -595,6 +597,7 @@ import { exportJWK, SignJWT } from "jose";
 import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
+import { operatorProfilePoolTest } from "../operator-profile-pool.js";
 import {
   startProvisionSession,
   act,
@@ -739,6 +742,7 @@ beforeEach(() => {
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
   h.connections = [];
+  h.profileDirs = [];
   h.currentUrl = "";
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
@@ -3346,7 +3350,7 @@ describe("operate_extract — vault-store response", () => {
 });
 
 describe("operate session — Change 5 precondition gate", () => {
-  it("fails closed (needs_user) without starting the browser when no live Google session", async () => {
+  it("fails closed after probing the isolated worker when no live Google session exists", async () => {
     h.providers = []; // no live session
     h.oauthStatus = "failed"; // and we cannot establish one
     const obs = await startProvisionSession({
@@ -3355,7 +3359,8 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(h.started).toBe(0); // the browser was NEVER started — task did not begin
+    expect(h.startCalls).toBe(1); // the isolated worker, never the seed/canonical profile, was probed
+    expect(h.started).toBe(0); // the rejected worker was closed before returning the handoff
     expect(h.gotos).toHaveLength(0);
   });
 
@@ -3371,48 +3376,41 @@ describe("operate session — Change 5 precondition gate", () => {
   });
 });
 
-describe("operate session — warm browser lifecycle", () => {
-  it("reuses the warm browser for the same profile and proxy without a second boot", async () => {
+describe("operate session — isolated profile-pool lifecycle", () => {
+  beforeEach(() => {
+    operatorProfilePoolTest.resetDefaultPool();
+  });
+
+  it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
-      profileDir: "/tmp/operator-a",
       proxyUrl: "http://proxy-a.test:8080",
     });
     await finishProvisionSession(first.session_id);
 
     const second = await startProvisionSession({
       serviceUrl: "https://app.example.com/two",
-      profileDir: "/tmp/operator-a",
       proxyUrl: "http://proxy-a.test:8080",
     });
 
-    expect(h.startCalls).toBe(1);
-    expect(h.resetCalls).toBeGreaterThanOrEqual(2);
-    expect(h.profileProbeCalls).toBe(1);
-    expect(h.controllerProviderProbeCalls).toBe(1);
+    expect(h.startCalls).toBe(2);
+    expect(h.resetCalls).toBeGreaterThanOrEqual(1);
+    expect(h.profileProbeCalls).toBe(0);
+    expect(h.controllerProviderProbeCalls).toBe(2);
+    expect(h.profileDirs[1]).toBe(h.profileDirs[0]);
     await finishProvisionSession(second.session_id);
   });
 
-  it.each([
-    {
-      label: "profile",
-      second: { profileDir: "/tmp/operator-b", proxyUrl: "http://proxy-a.test:8080" },
-    },
-    {
-      label: "proxy",
-      second: { profileDir: "/tmp/operator-a", proxyUrl: "http://proxy-b.test:8080" },
-    },
-  ])("cold-boots on a $label mismatch", async ({ second }) => {
+  it("cold-boots a new controller with the requested proxy", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
-      profileDir: "/tmp/operator-a",
       proxyUrl: "http://proxy-a.test:8080",
     });
     await finishProvisionSession(first.session_id);
 
     const next = await startProvisionSession({
       serviceUrl: "https://app.example.com/two",
-      ...second,
+      proxyUrl: "http://proxy-b.test:8080",
     });
 
     expect(h.startCalls).toBe(2);
@@ -3420,7 +3418,7 @@ describe("operate session — warm browser lifecycle", () => {
     await finishProvisionSession(next.session_id);
   });
 
-  it("discards a disconnected warm browser and cold-boots", async () => {
+  it("never reuses the prior closed controller", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     await finishProvisionSession(first.session_id);
     h.connections[0] = false;
@@ -3432,15 +3430,26 @@ describe("operate session — warm browser lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
-  it("discards a warm browser and cold-boots when page reset fails", async () => {
+  it("discards the isolated profile when its pre-close reset fails", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    await finishProvisionSession(first.session_id);
     h.resetFailuresRemaining = 1;
+    await finishProvisionSession(first.session_id);
 
     const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
 
     expect(h.startCalls).toBe(2);
     expect(h.closeCalls).toBe(1);
+    expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
+    await finishProvisionSession(second.session_id);
+  });
+
+  it("never pools a profile whose payment fields remain sealed", async () => {
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    retainActivePaymentFieldSeal();
+    await finishProvisionSession(first.session_id);
+
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+    expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
     await finishProvisionSession(second.session_id);
   });
 
@@ -3508,7 +3517,7 @@ describe("operate session — warm browser lifecycle", () => {
     expect(h.closeCalls).toBe(2);
   });
 
-  it("defers max-age recycling until the in-flight task reaches finish", async () => {
+  it("does not age-reap an active task", async () => {
     vi.useFakeTimers();
     try {
       const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
@@ -3531,11 +3540,13 @@ describe("operate session — warm browser lifecycle", () => {
       await finishProvisionSession(session.session_id);
     }
 
-    expect(h.startCalls).toBe(1);
-    expect(h.closeCalls).toBe(1);
+    expect(h.startCalls).toBe(51);
+    expect(h.closeCalls).toBe(51);
+    expect(h.profileDirs[50]).not.toBe(h.profileDirs[49]);
 
     const next = await startProvisionSession({ serviceUrl: "https://app.example.com/task-51" });
-    expect(h.startCalls).toBe(2);
+    expect(h.startCalls).toBe(52);
+    expect(h.profileDirs[51]).toBe(h.profileDirs[50]);
     await finishProvisionSession(next.session_id);
   });
 });

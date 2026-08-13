@@ -36,7 +36,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import boxen from "boxen";
@@ -66,6 +66,7 @@ import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
+import { publishOperatorProfileSeed } from "./operator-profile-pool.js";
 
 const require = createRequire(import.meta.url);
 
@@ -973,9 +974,17 @@ const LOGIN_STATUS_CHECK_STALLED_ERROR =
 export async function runInBotChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
-  return await withProfileOperationGuard(opts.profileDir, () =>
-    runInBotChromeWithProfileGuard(opts),
-  );
+  return await withProfileOperationGuard(opts.profileDir, async () => {
+    const result = await runInBotChromeWithProfileGuard(opts);
+    // The browser is closed by runInBotChromeWithProfileGuard before it
+    // returns, while this canonical-profile operation guard is still held.
+    // Publish a fully-built immutable seed under the seed lock; custom
+    // --profile-dir identities remain isolated and never replace the default.
+    if (result.status !== "timeout" && resolve(opts.profileDir) === resolve(CHROME_PROFILE_DIR)) {
+      await publishOperatorProfileSeed(opts.profileDir);
+    }
+    return result;
+  });
 }
 
 async function runInBotChromeWithProfileGuard(
