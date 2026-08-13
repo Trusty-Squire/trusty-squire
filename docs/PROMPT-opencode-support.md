@@ -97,7 +97,7 @@ At minimum, demonstrate that OpenCode reports the Trusty Squire MCP server as co
 
 Then test one representative tool call if it can be done without mutating external accounts. Clearly distinguish "MCP connected" from a complete website-provisioning test.
 
-OpenCode automatically exposes MCP tools and Trusty Squire has roughly 22 tools. Check whether the tool inventory loads without errors or unreasonable context overhead. Record any concern instead of hiding it.
+OpenCode automatically exposes MCP tools. Use the root README's current MCP registry profiles as the authoritative inventory, and check whether the default tool set loads without errors or unreasonable context overhead. Record any concern instead of hiding it.
 
 ### 5. Documentation and discovery
 

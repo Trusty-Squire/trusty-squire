@@ -150,6 +150,7 @@ import {
   operatePaymentAwaitTool,
   operatePaymentStatusTool,
   revokeAppAccessTool,
+  buildToolRegistry,
   TOOLS,
 } from "../tools/index.js";
 import {
@@ -1354,22 +1355,20 @@ describe("audit_log", () => {
 });
 
 describe("TOOLS registry", () => {
-  it("exposes the post-0.8 public surface incl. the credential lifecycle tools", () => {
-    // 3 credential read/diagnostic tools + 2 credential write tools (store/use —
-    // write-only sink; rotation = re-store, delete is web-only) + grant_app_access
+  it("exposes the 29-tool default surface without maintainer diagnostics", () => {
+    // Credential read/write tools (write-only sink; rotation = re-store, delete
+    // is web-only) + grant_app_access
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
     // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
     // Canonical lifecycle/recipe names are additive for this compatibility
     // release: every legacy name remains registered as a delegating alias.
-    expect(TOOLS).toHaveLength(31);
+    expect(TOOLS).toHaveLength(29);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
-      "get_extract_failure",
       "grant_app_access",
       "list_app_access",
       "list_credentials",
-      "list_extract_failures",
       "list_payment_cards",
       "operate_act",
       "operate_await_verification",
@@ -1396,6 +1395,53 @@ describe("TOOLS registry", () => {
       "store_credential",
       "use_credential",
     ]);
+  });
+
+  it("adds the two-stage extract diagnostics profile only when explicitly enabled", async () => {
+    for (const disabled of [undefined, "", "0", "false", "off"]) {
+      const tools = buildToolRegistry(
+        disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
+      );
+      expect(tools).toHaveLength(29);
+      expect(tools.map((tool) => tool.name)).not.toEqual(
+        expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
+      );
+    }
+
+    const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
+    expect(tools).toHaveLength(31);
+    expect(tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
+    );
+
+    const list = tools.find((tool) => tool.name === "list_extract_failures")!;
+    const detail = tools.find((tool) => tool.name === "get_extract_failure")!;
+    const listExtractFailures = vi.fn().mockResolvedValue({
+      snapshots: [{ id: "extract_1", service: "railway" }],
+    });
+    const getExtractFailure = vi.fn().mockResolvedValue({
+      id: "extract_1",
+      html: "<button>Copy token</button>",
+      screenshot_jpeg_base64: "jpeg-bytes",
+    });
+    const api = makeMockApi({ listExtractFailures, getExtractFailure } as unknown as ApiClient);
+
+    const listed = (await list.handler(list.inputSchema.parse({ limit: 5 }), api)) as {
+      snapshots: { id: string }[];
+    };
+    const fetched = (await detail.handler(
+      detail.inputSchema.parse({ id: listed.snapshots[0]!.id }),
+      api,
+    )) as Record<string, unknown>;
+
+    expect(listExtractFailures).toHaveBeenCalledWith(5);
+    expect(getExtractFailure).toHaveBeenCalledWith("extract_1");
+    expect(fetched).toMatchObject({
+      id: "extract_1",
+      html: "<button>Copy token</button>",
+      screenshot_omitted: true,
+    });
+    expect(fetched).not.toHaveProperty("screenshot_jpeg_base64");
   });
 
   it("does not expose the legacy async provision pair", () => {
