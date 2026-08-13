@@ -7432,6 +7432,24 @@ export class BrowserController {
     return null;
   }
 
+  // Bounded wait for a PAN field to appear anywhere on the page. A
+  // single-page checkout's card entry can live in a cross-origin PCI iframe
+  // (e.g. Shopify's checkout.pci.shopifyinc.com) that mounts only after the
+  // payment section itself renders — later than the total becomes readable,
+  // and later than the approval-ceremony wait that precedes this call ends.
+  // fillAndSubmitCheckout/fillCheckoutCardFields used to take one frames()
+  // snapshot at call time; a frame that hadn't mounted YET at that exact
+  // instant made a genuinely fillable checkout fail closed.
+  private async waitForPanField(timeoutMs: number): Promise<void> {
+    if (!this.page) return;
+    const deadline = Date.now() + timeoutMs;
+    while (true) {
+      if ((await this.panFieldFrame()) !== null) return;
+      if (Date.now() >= deadline) return;
+      await this.page.waitForTimeout(200).catch(() => undefined);
+    }
+  }
+
   // Common autocomplete/name selectors. No PSP-specific adapters. `frames` is
   // the caller's trust decision: fillAndSubmitCheckout passes every
   // CDP-reachable frame (single-page checkout — fill and charge in one vetted
@@ -7663,6 +7681,7 @@ export class BrowserController {
   async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     try {
+      await this.waitForPanField(10_000);
       await this.fillCheckoutCardIntoFrames(this.page.frames(), card);
       return await this.submitFilledCheckout();
     } finally {
@@ -7686,6 +7705,11 @@ export class BrowserController {
     if (!recognizedPaymentProviderFrame(pageUrl, pageUrl)) {
       throw new Error("payment_checkout_https_required");
     }
+    // Same late-mount tolerance as fillAndSubmitCheckout: wait for a PAN
+    // field to appear anywhere before taking the trusted-frame snapshot below
+    // (which still restricts the actual fill to recognized frames — this only
+    // decides WHEN to look, never WHERE it's allowed to write).
+    await this.waitForPanField(10_000);
     const allowed = page
       .frames()
       .filter(

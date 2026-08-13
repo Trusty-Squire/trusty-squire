@@ -634,6 +634,17 @@ silent multi-minute hang, so they panic-retry or kill the server).
   string, when no persisted cart total (`Session.lastCartCheckout`) is
   usable as a fallback. Never changes what gets approved — browser-observed
   totals only, still never a model-supplied amount.
+- **Late-mounting cross-origin PCI iframe (fillAndSubmitCheckout /
+  fillCheckoutCardFields).** Both used to take one `page.frames()` snapshot
+  at call time. A single-page checkout whose card fields render in a
+  cross-origin PCI iframe (e.g. Shopify's `checkout.pci.shopifyinc.com`)
+  that mounts only after the payment section renders could miss that frame
+  if it hadn't appeared YET at that exact instant — the fill throws
+  `payment_field_not_found:pan`, the signed mandate is consumed, and the
+  session lease releases with no resumable state, so any retry mints a
+  fresh approval (looks like a re-armed `approval_pending` loop from the
+  host's side, one human tap per failed attempt). Fixed with a bounded
+  `waitForPanField` poll (10s) before both fills — `browser.ts`.
 
 ### Goose / local-dev MCP install
 
