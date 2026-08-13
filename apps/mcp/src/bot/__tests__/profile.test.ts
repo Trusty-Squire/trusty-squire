@@ -8,23 +8,57 @@
 // removes the lock iff its holder pid is provably dead on this host, and
 // NEVER yanks a lock held by a live process.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   acquireFreeProfileOperationGuard,
   acquireProfileOperationGuard,
   clearStaleSingletonLock,
   currentProfileHolderPid,
   launchWithProfileGate,
+  profileProcessIdentity,
   ProfileBusyError,
   reapLeakedProfileHolder,
   reapProfileHolderIfOwned,
+  signalProfileProcess,
   waitForProfileFree,
   withProfileOperationGuard,
 } from "../profile.js";
+
+describe("profile process identity", () => {
+  it.skipIf(process.platform !== "linux")(
+    "signals only the same process birth and user-data directory",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "ts-profile-worker-"));
+      const child = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => undefined, 1000)", "--", `--user-data-dir=${dir}`],
+        { stdio: "ignore" },
+      );
+      try {
+        let identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+        await vi.waitFor(() => {
+          identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+          expect(identity).not.toBeNull();
+        });
+        const killed: number[] = [];
+        expect(
+          signalProfileProcess(identity!, `${dir}-other`, "SIGKILL", (pid) => killed.push(pid)),
+        ).toBe(false);
+        expect(signalProfileProcess(identity!, dir, "SIGKILL", (pid) => killed.push(pid))).toBe(
+          true,
+        );
+        expect(killed).toEqual([child.pid]);
+      } finally {
+        child.kill("SIGKILL");
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
 
 // existsSync follows symlinks, and SingletonLock's target ("host-pid") is
 // a label, not a real file — so it always reports "missing". Probe the
@@ -307,23 +341,37 @@ describe("reapProfileHolderIfOwned", () => {
     writeSingletons(dir, `${hostname()}-${process.pid}`);
     const killed: number[] = [];
     expect(
-      reapProfileHolderIfOwned(dir, process.pid + 1, (pid) => {
-        killed.push(pid);
-      }),
+      reapProfileHolderIfOwned(
+        dir,
+        {
+          host: hostname(),
+          pid: process.pid + 1,
+          start_time: "different",
+          user_data_dir: dir,
+        },
+        (pid) => {
+          killed.push(pid);
+        },
+      ),
     ).toBe(false);
     expect(killed).toEqual([]);
     expect(lockPresent(dir)).toBe(true);
   });
 
-  it("kills and clears only the captured holder", () => {
-    writeSingletons(dir, `${hostname()}-${process.pid}`);
+  it("clears a dead captured holder without signaling a recycled pid", () => {
+    const pid = deadPid();
+    writeSingletons(dir, `${hostname()}-${pid}`);
     const killed: number[] = [];
     expect(
-      reapProfileHolderIfOwned(dir, process.pid, (pid) => {
-        killed.push(pid);
-      }),
+      reapProfileHolderIfOwned(
+        dir,
+        { host: hostname(), pid, start_time: "dead", user_data_dir: dir },
+        (signaledPid) => {
+          killed.push(signaledPid);
+        },
+      ),
     ).toBe(true);
-    expect(killed).toEqual([process.pid]);
+    expect(killed).toEqual([]);
     expect(lockPresent(dir)).toBe(false);
   });
 });

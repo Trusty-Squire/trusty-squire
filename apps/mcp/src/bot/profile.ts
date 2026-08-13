@@ -37,6 +37,82 @@ export interface ProfileOperationLease {
   release(): void;
 }
 
+export interface ProfileProcessIdentity {
+  host: string;
+  pid: number;
+  start_time: string;
+  user_data_dir: string;
+}
+
+function processStartTime(pid: number): string | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return null;
+    return stat.slice(close + 2).split(" ")[19] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function processUsesProfile(pid: number, profileDir: string): boolean {
+  if (process.platform !== "linux") return false;
+  try {
+    const expected = resolve(profileDir);
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8")
+      .split("\0")
+      .some(
+        (arg) =>
+          arg.startsWith("--user-data-dir=") &&
+          resolve(arg.slice("--user-data-dir=".length)) === expected,
+      );
+  } catch {
+    return false;
+  }
+}
+
+export function profileProcessIdentity(
+  pid: number,
+  profileDir: string,
+): ProfileProcessIdentity | null {
+  const startTime = processStartTime(pid);
+  if (startTime === null || !processUsesProfile(pid, profileDir)) return null;
+  return {
+    host: hostname(),
+    pid,
+    start_time: startTime,
+    user_data_dir: resolve(profileDir),
+  };
+}
+
+export function profileProcessMatches(
+  identity: ProfileProcessIdentity,
+  profileDir: string,
+): boolean {
+  return (
+    identity.host === hostname() &&
+    resolve(identity.user_data_dir) === resolve(profileDir) &&
+    processStartTime(identity.pid) === identity.start_time &&
+    processUsesProfile(identity.pid, profileDir)
+  );
+}
+
+export function signalProfileProcess(
+  identity: ProfileProcessIdentity,
+  profileDir: string,
+  signal: NodeJS.Signals,
+  kill: (pid: number, signal: NodeJS.Signals) => unknown = process.kill,
+): boolean {
+  if (!profileProcessMatches(identity, profileDir)) return false;
+  try {
+    kill(identity.pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 interface ProfileOperationOwner {
   host: string;
   pid: number;
@@ -215,19 +291,12 @@ export function currentProfileHolderPid(profileDir: string = CHROME_PROFILE_DIR)
   return holder.pid;
 }
 
-// Broad recovery helper for a caller that exclusively owns the whole profile
-// operation but could not capture the Chrome pid. Because this does not
-// pid-match, it may kill any local holder and must never run while another
-// profile operation could be active; launch/teardown paths that know their pid
-// use reapProfileHolderIfOwned instead. A holder on another host is untouched.
-// Returns true iff it freed a live/stale local holder. Never throws.
 export function reapLeakedProfileHolder(profileDir: string = CHROME_PROFILE_DIR): boolean {
   const holder = readLockHolder(profileDir);
   if (holder === null || holder.host !== hostname()) return false;
-  try {
-    process.kill(holder.pid, "SIGKILL");
-  } catch {
-    // already gone between the read and the kill — fall through to cleanup
+  if (!holder.stale) {
+    const identity = profileProcessIdentity(holder.pid, profileDir);
+    if (identity === null || !signalProfileProcess(identity, profileDir, "SIGKILL")) return false;
   }
   removeSingletons(profileDir);
   return true;
@@ -235,15 +304,13 @@ export function reapLeakedProfileHolder(profileDir: string = CHROME_PROFILE_DIR)
 
 export function reapProfileHolderIfOwned(
   profileDir: string,
-  ownedPid: number | null,
+  identity: ProfileProcessIdentity | null,
   kill: (pid: number, signal: NodeJS.Signals) => unknown = process.kill,
 ): boolean {
-  if (ownedPid === null) return false;
+  if (identity === null) return false;
   const holder = readLockHolder(profileDir);
-  if (holder === null || holder.host !== hostname() || holder.pid !== ownedPid) return false;
-  try {
-    kill(ownedPid, "SIGKILL");
-  } catch {}
+  if (holder === null || holder.host !== hostname() || holder.pid !== identity.pid) return false;
+  if (!holder.stale && !signalProfileProcess(identity, profileDir, "SIGKILL", kill)) return false;
   removeSingletons(profileDir);
   return true;
 }

@@ -592,6 +592,11 @@ interface WarmBrowser {
   lease: OperatorProfileLease;
 }
 
+interface AcquiredBrowser {
+  controller: BrowserController;
+  profileDir: string;
+}
+
 let warmBrowser: WarmBrowser | null = null;
 interface StartingBrowser {
   controller: BrowserController;
@@ -609,7 +614,10 @@ let inFlight = false;
 async function acquireWarmBrowser(
   opts: StartOptions,
   sessionId: string,
-): Promise<BrowserController> {
+): Promise<AcquiredBrowser> {
+  if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
+    throw new Error("operate_start does not support remote CDP with isolated profile leases");
+  }
   const lease = await acquireOperatorProfile(sessionId, {
     ...(opts.profileDir !== undefined ? { sourceProfileDir: opts.profileDir } : {}),
   });
@@ -644,7 +652,7 @@ async function acquireWarmBrowser(
     if (startingBrowser === pending) startingBrowser = null;
   }
   warmBrowser = { controller, lease };
-  return controller;
+  return { controller, profileDir: lease.profileDir };
 }
 
 async function releaseWarmBrowserPage(
@@ -2293,9 +2301,12 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   }
   starting = true;
   let browser: BrowserController;
+  let workerProfileDir: string;
   let liveProviders: OAuthProviderId[];
   try {
-    browser = await acquireWarmBrowser(opts, id);
+    const acquired = await acquireWarmBrowser(opts, id);
+    browser = acquired.controller;
+    workerProfileDir = acquired.profileDir;
     // Probe the claimed/cloned worker. The canonical login-authoring profile and
     // immutable seed are never opened by Chrome during an operator start.
     liveProviders = await ensureProvisionPrimaryProviderSession(browser);
@@ -2352,7 +2363,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
-    userEmail: loggedInEmail("google", opts.profileDir),
+    userEmail: loggedInEmail("google", workerProfileDir),
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);

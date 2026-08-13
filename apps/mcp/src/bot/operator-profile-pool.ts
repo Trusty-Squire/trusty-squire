@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   cpSync,
   existsSync,
   lstatSync,
@@ -15,8 +16,16 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
-import { CHROME_PROFILE_DIR, withProfileOperationGuard } from "./profile.js";
+import { basename, dirname, join, resolve } from "node:path";
+import Database from "better-sqlite3";
+import {
+  CHROME_PROFILE_DIR,
+  profileProcessIdentity,
+  profileProcessMatches,
+  signalProfileProcess,
+  type ProfileProcessIdentity,
+  withProfileOperationGuard,
+} from "./profile.js";
 
 const ACTIVE_SLOT_COUNT = 1;
 const STARTUP_GRACE_MS = 30_000;
@@ -31,17 +40,20 @@ const TRANSIENT_PROFILE_NAMES = new Set([
   "DevToolsActivePort",
 ]);
 const TRANSIENT_PROFILE_DIRS = new Set(["Cache", "Code Cache", "GPUCache", "Crashpad"]);
+const IDENTITY_SEED_FILES = [
+  "Local State",
+  "logged-in-providers.json",
+  "provider-emails.json",
+] as const;
+const IDENTITY_COOKIE_FILES = ["Default/Cookies", "Default/Network/Cookies"] as const;
+const IDENTITY_COOKIE_DOMAINS = ["google.com", "github.com"] as const;
 
 interface ProcessIdentity {
   pid: number;
   start_time: string;
 }
 
-export interface OperatorWorkerIdentity extends ProcessIdentity {
-  host: string;
-  user_data_dir: string;
-  cdp_endpoint?: string;
-}
+export type OperatorWorkerIdentity = ProfileProcessIdentity;
 
 interface ActiveOwner extends ProcessIdentity {
   host: string;
@@ -87,6 +99,15 @@ function defaultPoolRoot(): string {
   return process.env.VITEST === "true"
     ? join(tmpdir(), `trusty-squire-operator-profiles-test-${process.pid}`)
     : join(homedir(), ".trusty-squire", "operator-profiles");
+}
+
+function poolRootForSource(sourceProfileDir: string, rootDir?: string): string {
+  if (rootDir !== undefined) return resolve(rootDir);
+  const namespace = createHash("sha256")
+    .update(resolve(sourceProfileDir))
+    .digest("hex")
+    .slice(0, 24);
+  return join(defaultPoolRoot(), "namespaces", namespace);
 }
 
 function paths(rootDir?: string): PoolPaths {
@@ -162,20 +183,6 @@ function processMatches(identity: ProcessIdentity): boolean {
   return actual !== null && actual === identity.start_time;
 }
 
-function workerMatches(worker: OperatorWorkerIdentity, expectedProfileDir: string): boolean {
-  if (worker.host !== hostname() || resolve(worker.user_data_dir) !== resolve(expectedProfileDir)) {
-    return false;
-  }
-  if (!processMatches(worker)) return false;
-  if (process.platform !== "linux") return false;
-  try {
-    const cmdline = readFileSync(`/proc/${worker.pid}/cmdline`, "utf8").replaceAll("\0", " ");
-    return cmdline.includes(`--user-data-dir=${expectedProfileDir}`);
-  } catch {
-    return false;
-  }
-}
-
 function stripTransientProfileState(root: string): void {
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -188,6 +195,62 @@ function stripTransientProfileState(root: string): void {
     }
   };
   if (existsSync(root)) walk(root);
+}
+
+function copyIdentitySeedFile(sourceRoot: string, destinationRoot: string, relative: string): void {
+  const source = join(sourceRoot, relative);
+  try {
+    if (!lstatSync(source).isFile()) return;
+  } catch {
+    return;
+  }
+  const destination = join(destinationRoot, relative);
+  ensurePrivateDir(dirname(destination));
+  copyFileSync(source, destination);
+  chmodSync(destination, 0o600);
+}
+
+function retainIdentityCookies(cookiePath: string): void {
+  if (!existsSync(cookiePath)) return;
+  let db: Database.Database | null = null;
+  try {
+    db = new Database(cookiePath);
+    const cookieTable = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cookies'")
+      .get();
+    if (cookieTable === undefined) throw new Error("Chrome cookie store has no cookies table");
+    const allowed = IDENTITY_COOKIE_DOMAINS.map(
+      () => "(lower(host_key) = ? OR lower(host_key) LIKE ?)",
+    ).join(" OR ");
+    const bindings = IDENTITY_COOKIE_DOMAINS.flatMap((domain) => [domain, `%.${domain}`]);
+    db.prepare(`DELETE FROM cookies WHERE NOT (${allowed})`).run(...bindings);
+    db.pragma("wal_checkpoint(TRUNCATE)");
+  } catch {
+    db?.close();
+    for (const suffix of ["", "-wal", "-shm"] as const) {
+      rmSync(`${cookiePath}${suffix}`, { force: true });
+    }
+    return;
+  }
+  db.close();
+  rmSync(`${cookiePath}-wal`, { force: true });
+  rmSync(`${cookiePath}-shm`, { force: true });
+}
+
+function copyIdentitySeed(sourceProfileDir: string, destination: string): void {
+  if (!lstatSync(sourceProfileDir).isDirectory()) {
+    throw new Error(`operator login source is not a directory: ${sourceProfileDir}`);
+  }
+  ensurePrivateDir(destination);
+  for (const relative of IDENTITY_SEED_FILES) {
+    copyIdentitySeedFile(sourceProfileDir, destination, relative);
+  }
+  for (const relative of IDENTITY_COOKIE_FILES) {
+    copyIdentitySeedFile(sourceProfileDir, destination, relative);
+    copyIdentitySeedFile(sourceProfileDir, destination, `${relative}-wal`);
+    copyIdentitySeedFile(sourceProfileDir, destination, `${relative}-shm`);
+    retainIdentityCookies(join(destination, relative));
+  }
 }
 
 async function withSeedLock<T>(p: PoolPaths, fn: () => Promise<T> | T): Promise<T> {
@@ -258,12 +321,7 @@ function publishSeedLocked(p: PoolPaths, sourceProfileDir: string): string {
   const staging = join(p.generations, `.${generation}.tmp`);
   const destination = join(p.generations, generation);
   ensurePrivateDir(staging);
-  cpSync(sourceProfileDir, join(staging, "user-data"), {
-    recursive: true,
-    force: false,
-    errorOnExist: true,
-  });
-  stripTransientProfileState(join(staging, "user-data"));
+  copyIdentitySeed(sourceProfileDir, join(staging, "user-data"));
   renameSync(staging, destination);
   const nextLink = join(p.seed, `.current-${generation}`);
   symlinkSync(join("generations", generation), nextLink, "dir");
@@ -280,9 +338,10 @@ export async function publishOperatorProfileSeed(
   sourceProfileDir: string = CHROME_PROFILE_DIR,
   opts: Pick<OperatorProfilePoolOptions, "rootDir"> = {},
 ): Promise<string> {
-  const p = paths(opts.rootDir);
+  const resolvedSource = resolve(sourceProfileDir);
+  const p = paths(poolRootForSource(resolvedSource, opts.rootDir));
   initializePool(p);
-  return await withSeedLock(p, () => publishSeedLocked(p, resolve(sourceProfileDir)));
+  return await withSeedLock(p, () => publishSeedLocked(p, resolvedSource));
 }
 
 async function ensureSeed(p: PoolPaths, sourceProfileDir: string): Promise<string> {
@@ -380,16 +439,12 @@ function reapQuarantinedActive(p: PoolPaths, tombstone: string): void {
   const dir = profileDir(p, lease.profile_id);
   const worker = lease.worker;
   if (worker !== undefined && processMatches(worker)) {
-    if (!workerMatches(worker, dir)) {
+    if (!profileProcessMatches(worker, dir)) {
       // PID exists but its birth/cmdline/profile identity cannot be proven. Keep
       // the private tombstone and profile; freeing capacity is safe, signalling is not.
       return;
     }
-    try {
-      process.kill(worker.pid, "SIGKILL");
-    } catch {
-      // It exited after identity validation.
-    }
+    if (!signalProfileProcess(worker, dir, "SIGKILL")) return;
   }
   removeProfile(p, lease);
   rmSync(tombstone, { recursive: true, force: true });
@@ -524,15 +579,7 @@ export async function acquireOperatorProfile(
   opts: OperatorProfilePoolOptions = {},
 ): Promise<OperatorProfileLease> {
   const sourceProfileDir = resolve(opts.sourceProfileDir ?? CHROME_PROFILE_DIR);
-  const customNamespace =
-    opts.rootDir === undefined && sourceProfileDir !== resolve(CHROME_PROFILE_DIR)
-      ? join(
-          defaultPoolRoot(),
-          "namespaces",
-          createHash("sha256").update(sourceProfileDir).digest("hex").slice(0, 24),
-        )
-      : opts.rootDir;
-  const p = paths(customNamespace);
+  const p = paths(poolRootForSource(sourceProfileDir, opts.rootDir));
   const now = opts.now ?? Date.now;
   initializePool(p);
   await ensureSeed(p, sourceProfileDir);
@@ -640,21 +687,13 @@ export async function acquireOperatorProfile(
 export function localWorkerIdentity(
   pid: number,
   userDataDir: string,
-  cdpEndpoint?: string,
 ): OperatorWorkerIdentity | null {
-  const startTime = processStartTime(pid);
-  if (startTime === null) return null;
-  return {
-    host: hostname(),
-    pid,
-    start_time: startTime,
-    user_data_dir: resolve(userDataDir),
-    ...(cdpEndpoint !== undefined ? { cdp_endpoint: cdpEndpoint } : {}),
-  };
+  return profileProcessIdentity(pid, userDataDir);
 }
 
 export const operatorProfilePoolTest = {
   paths,
+  poolRootForSource,
   currentGeneration,
   processStartTime,
   resetDefaultPool: (): void => rmSync(defaultPoolRoot(), { recursive: true, force: true }),

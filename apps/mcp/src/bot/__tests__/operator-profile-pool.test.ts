@@ -1,6 +1,15 @@
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   acquireOperatorProfile,
@@ -10,13 +19,48 @@ import {
 
 const roots: string[] = [];
 
+function writeCookies(
+  source: string,
+  rows: Array<{ host: string; value: string }>,
+): void {
+  const path = join(source, "Default", "Cookies");
+  mkdirSync(join(source, "Default"), { recursive: true });
+  rmSync(path, { force: true });
+  const db = new Database(path);
+  db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, value TEXT NOT NULL)");
+  const insert = db.prepare("INSERT INTO cookies (host_key, value) VALUES (?, ?)");
+  for (const row of rows) insert.run(row.host, row.value);
+  db.close();
+}
+
+function cookieValues(profileDir: string): string[] {
+  const db = new Database(join(profileDir, "Default", "Cookies"), { readonly: true });
+  const values = db
+    .prepare("SELECT value FROM cookies ORDER BY value")
+    .all()
+    .map((row) => (row as { value: string }).value);
+  db.close();
+  return values;
+}
+
 function fixture(): { root: string; source: string } {
   const base = mkdtempSync(join(tmpdir(), "operator-profile-pool-test-"));
   roots.push(base);
   const source = join(base, "source");
   const root = join(base, "pool");
   mkdirSync(join(source, "Default", "Cache"), { recursive: true });
-  writeFileSync(join(source, "Default", "Cookies"), "session-cookie");
+  writeCookies(source, [
+    { host: ".google.com", value: "identity-cookie" },
+    { host: "checkout.example.com", value: "payment-approval-cookie" },
+  ]);
+  writeFileSync(join(source, "Local State"), "identity-key-state");
+  writeFileSync(
+    join(source, "provider-emails.json"),
+    JSON.stringify({ google: "worker@example.com" }),
+  );
+  writeFileSync(join(source, "Default", "Web Data"), "saved-card-number");
+  mkdirSync(join(source, "Default", "Local Storage"), { recursive: true });
+  writeFileSync(join(source, "Default", "Local Storage", "payment"), "approval-token");
   writeFileSync(join(source, "Default", "Cache", "discard"), "cache");
   writeFileSync(join(source, "SingletonLock"), "stale");
   return { root, source };
@@ -24,22 +68,28 @@ function fixture(): { root: string; source: string } {
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  operatorProfilePoolTest.resetDefaultPool();
 });
 
 describe("operator profile pool migration stage", () => {
-  it("publishes a complete immutable seed and deterministically GCs the old generation", async () => {
+  it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
     const { root, source } = fixture();
     const first = await publishOperatorProfileSeed(source, { rootDir: root });
     const p = operatorProfilePoolTest.paths(root);
-    expect(
-      readFileSync(join(p.generations, first, "user-data", "Default", "Cookies"), "utf8"),
-    ).toBe("session-cookie");
+    const firstSeed = join(p.generations, first, "user-data");
+    expect(cookieValues(firstSeed)).toEqual(["identity-cookie"]);
+    expect(readFileSync(join(firstSeed, "Local State"), "utf8")).toBe("identity-key-state");
+    expect(readFileSync(join(firstSeed, "provider-emails.json"), "utf8")).toContain(
+      "worker@example.com",
+    );
+    expect(existsSync(join(firstSeed, "Default", "Web Data"))).toBe(false);
+    expect(existsSync(join(firstSeed, "Default", "Local Storage"))).toBe(false);
     expect(() => readFileSync(join(p.generations, first, "user-data", "SingletonLock"))).toThrow();
     expect(() =>
       readFileSync(join(p.generations, first, "user-data", "Default", "Cache", "discard")),
     ).toThrow();
 
-    writeFileSync(join(source, "Default", "Cookies"), "new-session-cookie");
+    writeCookies(source, [{ host: ".google.com", value: "new-identity-cookie" }]);
     const second = await publishOperatorProfileSeed(source, { rootDir: root });
     expect(second).not.toBe(first);
     expect(readdirSync(p.generations)).toEqual([second]);
@@ -54,9 +104,8 @@ describe("operator profile pool migration stage", () => {
       sourceProfileDir: source,
     });
     expect(first.profileDir).not.toBe(source);
-    expect(readFileSync(join(first.profileDir, "Default", "Cookies"), "utf8")).toBe(
-      "session-cookie",
-    );
+    expect(cookieValues(first.profileDir)).toEqual(["identity-cookie"]);
+    expect(existsSync(join(first.profileDir, "Default", "Web Data"))).toBe(false);
     await expect(
       acquireOperatorProfile("session-b", { rootDir: root, sourceProfileDir: source }),
     ).rejects.toThrow("capacity reached");
@@ -91,7 +140,7 @@ describe("operator profile pool migration stage", () => {
     });
     const staleProfile = first.profileDir;
     await first.returnWarm();
-    writeFileSync(join(source, "Default", "Cookies"), "replacement");
+    writeCookies(source, [{ host: ".google.com", value: "replacement" }]);
     await publishOperatorProfileSeed(source, { rootDir: root });
 
     const second = await acquireOperatorProfile("session-b", {
@@ -99,7 +148,35 @@ describe("operator profile pool migration stage", () => {
       sourceProfileDir: source,
     });
     expect(second.profileDir).not.toBe(staleProfile);
-    expect(readFileSync(join(second.profileDir, "Default", "Cookies"), "utf8")).toBe("replacement");
+    expect(cookieValues(second.profileDir)).toEqual(["replacement"]);
+    await second.destroy();
+  });
+
+  it("isolates default namespaces for distinct source profiles", async () => {
+    const firstFixture = fixture();
+    const secondFixture = fixture();
+    writeFileSync(
+      join(secondFixture.source, "provider-emails.json"),
+      JSON.stringify({ google: "second@example.com" }),
+    );
+    await publishOperatorProfileSeed(firstFixture.source);
+    await publishOperatorProfileSeed(secondFixture.source);
+
+    const first = await acquireOperatorProfile("source-a", {
+      sourceProfileDir: firstFixture.source,
+    });
+    expect(readFileSync(join(first.profileDir, "provider-emails.json"), "utf8")).toContain(
+      "worker@example.com",
+    );
+    await first.destroy();
+
+    const second = await acquireOperatorProfile("source-b", {
+      sourceProfileDir: secondFixture.source,
+    });
+    expect(second.profileDir).not.toBe(first.profileDir);
+    expect(readFileSync(join(second.profileDir, "provider-emails.json"), "utf8")).toContain(
+      "second@example.com",
+    );
     await second.destroy();
   });
 

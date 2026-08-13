@@ -36,7 +36,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import boxen from "boxen";
@@ -46,6 +46,7 @@ import {
   CHROME_PROFILE_DIR,
   currentProfileHolderPid,
   launchWithProfileGate,
+  profileProcessIdentity,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
   reapProfileHolderIfOwned,
@@ -269,42 +270,44 @@ async function validateProviderSession(
 export async function detectActiveProviderSessions(
   profileDir: string = CHROME_PROFILE_DIR,
 ): Promise<OAuthProviderId[]> {
-  // Quick best-effort gate — this runs at install boundaries, so a short
-  // wait is fine: reclaim a stale lock, or briefly yield to a live run.
-  await waitForProfileFree(profileDir, { deadlineMs: 15_000, pollMs: 500 });
-  const chromium = resolveChromium();
-  const ctx = await launchWithProfileGate(profileDir, () =>
-    chromium.launchPersistentContext(profileDir, {
-      // channel:"chrome" — launch the SAME system Chrome the login flow
-      // (runDisplayedChrome / runHeadlessChrome) uses. Without it Playwright
-      // reaches for its bundled Chromium, which isn't installed on boxes that
-      // run Chrome via the system channel — so this probe was the ONE launch
-      // in the connect flow that threw "Executable doesn't exist", surfacing
-      // as the spurious "Provider session check failed (continuing)" ✗ on
-      // every connect while the markers it left behind still printed
-      // "connected". The session cookies live in the profile dir regardless of
-      // which Chromium reads them, so matching the login launcher is enough.
-      channel: "chrome",
-      headless: true,
-      ignoreDefaultArgs: ["--enable-automation"],
-      args: ["--no-sandbox", "--disable-dev-shm-usage"],
-    }),
-  );
-  try {
-    const present: OAuthProviderId[] = [];
-    for (const id of Object.keys(LOGIN_TARGETS) as OAuthProviderId[]) {
-      // ALWAYS validate (not just cookie-present) — this kills the "GitHub
-      // marker lies" class on EVERY path, including the hot provision start, not
-      // just the install display. validateProviderSession is cheap: it returns
-      // a fast false when no cookie is present (no navigation), and only pays
-      // the github.com round-trip when a github cookie EXISTS and must be proven
-      // live. Google stays presence-based (it doesn't lie this way).
-      if (await validateProviderSession(ctx, LOGIN_TARGETS[id])) present.push(id);
+  return await withProfileOperationGuard(profileDir, async () => {
+    // Quick best-effort gate — this runs at install boundaries, so a short
+    // wait is fine: reclaim a stale lock, or briefly yield to a live run.
+    await waitForProfileFree(profileDir, { deadlineMs: 15_000, pollMs: 500 });
+    const chromium = resolveChromium();
+    const ctx = await launchWithProfileGate(profileDir, () =>
+      chromium.launchPersistentContext(profileDir, {
+        // channel:"chrome" — launch the SAME system Chrome the login flow
+        // (runDisplayedChrome / runHeadlessChrome) uses. Without it Playwright
+        // reaches for its bundled Chromium, which isn't installed on boxes that
+        // run Chrome via the system channel — so this probe was the ONE launch
+        // in the connect flow that threw "Executable doesn't exist", surfacing
+        // as the spurious "Provider session check failed (continuing)" ✗ on
+        // every connect while the markers it left behind still printed
+        // "connected". The session cookies live in the profile dir regardless of
+        // which Chromium reads them, so matching the login launcher is enough.
+        channel: "chrome",
+        headless: true,
+        ignoreDefaultArgs: ["--enable-automation"],
+        args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      }),
+    );
+    try {
+      const present: OAuthProviderId[] = [];
+      for (const id of Object.keys(LOGIN_TARGETS) as OAuthProviderId[]) {
+        // ALWAYS validate (not just cookie-present) — this kills the "GitHub
+        // marker lies" class on EVERY path, including the hot provision start, not
+        // just the install display. validateProviderSession is cheap: it returns
+        // a fast false when no cookie is present (no navigation), and only pays
+        // the github.com round-trip when a github cookie EXISTS and must be proven
+        // live. Google stays presence-based (it doesn't lie this way).
+        if (await validateProviderSession(ctx, LOGIN_TARGETS[id])) present.push(id);
+      }
+      return present;
+    } finally {
+      await ctx.close();
     }
-    return present;
-  } finally {
-    await ctx.close();
-  }
+  });
 }
 
 // --- T5: Google auth-page state detection ------------------------------
@@ -978,9 +981,9 @@ export async function runInBotChrome(
     const result = await runInBotChromeWithProfileGuard(opts);
     // The browser is closed by runInBotChromeWithProfileGuard before it
     // returns, while this canonical-profile operation guard is still held.
-    // Publish a fully-built immutable seed under the seed lock; custom
-    // --profile-dir identities remain isolated and never replace the default.
-    if (result.status !== "timeout" && resolve(opts.profileDir) === resolve(CHROME_PROFILE_DIR)) {
+    // Publish a fully-built immutable seed under the seed lock. The publisher
+    // namespaces every source profile, including environment and CLI overrides.
+    if (result.status !== "timeout") {
       await publishOperatorProfileSeed(opts.profileDir);
     }
     return result;
@@ -1258,11 +1261,13 @@ async function runHeadlessChrome(
       );
       context = persistent;
       const persistentPid = currentProfileHolderPid(opts.profileDir);
+      const persistentIdentity =
+        persistentPid === null ? null : profileProcessIdentity(persistentPid, opts.profileDir);
       teardownContext = async (): Promise<void> => {
         await persistent.close().catch(() => undefined);
       };
       forceTeardownContext = (): void => {
-        reapProfileHolderIfOwned(opts.profileDir, persistentPid);
+        reapProfileHolderIfOwned(opts.profileDir, persistentIdentity);
       };
     }
     let browserTeardown: Promise<void> | undefined;

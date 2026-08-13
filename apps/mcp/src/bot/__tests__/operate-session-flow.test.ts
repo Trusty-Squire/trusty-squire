@@ -55,6 +55,12 @@ const h = vi.hoisted(() => ({
   controllerProviderProbeCalls: 0,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
+  leaseSerial: 0,
+  warmLeaseProfileDir: null as string | null,
+  nextLeaseProfileDir: null as string | null,
+  leaseAcquireCalls: 0,
+  leaseReturnCalls: 0,
+  leaseDestroyCalls: 0,
   currentUrl: "",
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
@@ -588,6 +594,41 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../operator-profile-pool.js", () => ({
+  acquireOperatorProfile: async (
+    _sessionId: string,
+    opts: { sourceProfileDir?: string } = {},
+  ) => {
+    h.leaseAcquireCalls += 1;
+    const warm = h.warmLeaseProfileDir;
+    h.warmLeaseProfileDir = null;
+    const profileDir =
+      h.nextLeaseProfileDir ??
+      opts.sourceProfileDir ??
+      warm ??
+      `/tmp/trusty-squire-unit-profile-${process.pid}-${++h.leaseSerial}`;
+    h.nextLeaseProfileDir = null;
+    let finished = false;
+    return {
+      profileDir,
+      profileId: `unit-${h.leaseSerial}`,
+      seedGeneration: "unit-seed",
+      bindWorker: () => undefined,
+      returnWarm: async () => {
+        if (finished) return;
+        finished = true;
+        h.leaseReturnCalls += 1;
+        h.warmLeaseProfileDir = profileDir;
+      },
+      destroy: async () => {
+        if (finished) return;
+        finished = true;
+        h.leaseDestroyCalls += 1;
+      },
+    };
+  },
+}));
+
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -597,7 +638,6 @@ import { exportJWK, SignJWT } from "jose";
 import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
-import { operatorProfilePoolTest } from "../operator-profile-pool.js";
 import {
   startProvisionSession,
   act,
@@ -610,6 +650,7 @@ import {
   finishProvisionSession,
   closeAllProvisionSessions,
   activeSessionCount,
+  getSessionUserEmail,
   parseElementsTable,
   replayOperatorRecipe,
   activeProvisionBrowser,
@@ -743,6 +784,12 @@ beforeEach(() => {
   h.controllerProviderProbeCalls = 0;
   h.connections = [];
   h.profileDirs = [];
+  h.leaseSerial = 0;
+  h.warmLeaseProfileDir = null;
+  h.nextLeaseProfileDir = null;
+  h.leaseAcquireCalls = 0;
+  h.leaseReturnCalls = 0;
+  h.leaseDestroyCalls = 0;
   h.currentUrl = "";
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
@@ -3377,10 +3424,6 @@ describe("operate session — Change 5 precondition gate", () => {
 });
 
 describe("operate session — isolated profile-pool lifecycle", () => {
-  beforeEach(() => {
-    operatorProfilePoolTest.resetDefaultPool();
-  });
-
   it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
@@ -3450,7 +3493,45 @@ describe("operate session — isolated profile-pool lifecycle", () => {
 
     const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
     expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
+    expect(h.leaseDestroyCalls).toBe(1);
     await finishProvisionSession(second.session_id);
+  });
+
+  it("reads the authoritative email from the claimed worker profile", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "operator-canonical-email-"));
+    const worker = mkdtempSync(join(tmpdir(), "operator-worker-email-"));
+    writeFileSync(
+      join(canonical, "provider-emails.json"),
+      JSON.stringify({ google: "canonical@example.com" }),
+    );
+    writeFileSync(
+      join(worker, "provider-emails.json"),
+      JSON.stringify({ google: "worker@example.com" }),
+    );
+    h.nextLeaseProfileDir = worker;
+    try {
+      const session = await startProvisionSession({
+        serviceUrl: "https://app.example.com/",
+        profileDir: canonical,
+      });
+      expect(getSessionUserEmail(session.session_id)).toBe("worker@example.com");
+      await finishProvisionSession(session.session_id);
+    } finally {
+      rmSync(canonical, { recursive: true, force: true });
+      rmSync(worker, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects remote CDP before acquiring an isolated profile", async () => {
+    vi.stubEnv("BOT_CDP_ENDPOINT", "http://remote.example.test:9222");
+    try {
+      await expect(
+        startProvisionSession({ serviceUrl: "https://app.example.com/" }),
+      ).rejects.toThrow("does not support remote CDP");
+      expect(h.leaseAcquireCalls).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("refuses a second task while the single shared page is in flight", async () => {
@@ -3532,22 +3613,17 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     }
   });
 
-  it("recycles at the configured default reuse-count boundary", async () => {
-    for (let index = 0; index <= 50; index += 1) {
+  it("returns each clean closed profile through the lease boundary", async () => {
+    for (let index = 0; index < 3; index += 1) {
       const session = await startProvisionSession({
         serviceUrl: `https://app.example.com/task-${index}`,
       });
       await finishProvisionSession(session.session_id);
     }
 
-    expect(h.startCalls).toBe(51);
-    expect(h.closeCalls).toBe(51);
-    expect(h.profileDirs[50]).not.toBe(h.profileDirs[49]);
-
-    const next = await startProvisionSession({ serviceUrl: "https://app.example.com/task-51" });
-    expect(h.startCalls).toBe(52);
-    expect(h.profileDirs[51]).toBe(h.profileDirs[50]);
-    await finishProvisionSession(next.session_id);
+    expect(h.leaseAcquireCalls).toBe(3);
+    expect(h.leaseReturnCalls).toBe(3);
+    expect(h.leaseDestroyCalls).toBe(0);
   });
 });
 

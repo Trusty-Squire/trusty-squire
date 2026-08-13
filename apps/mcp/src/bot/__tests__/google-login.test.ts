@@ -13,12 +13,17 @@ import type { ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
 import { shortenVncUrl } from "../../api-client.js";
 import { childProcessIsRunning, withChromeStartupLock } from "../browser.js";
-import { launchWithProfileGate } from "../profile.js";
+import {
+  acquireProfileOperationGuard,
+  launchWithProfileGate,
+  ProfileBusyError,
+} from "../profile.js";
 import {
   binaryOnPath,
   installHint,
   classifyGoogleAuthState,
   checkLoginStatusWithin,
+  detectActiveProviderSessions,
   extractGoogleAccountEmail,
   extractGoogleNumberMatch,
   extractOAuthScopes,
@@ -35,6 +40,19 @@ import {
   ensureOAuthSession,
   type HeadlessRig,
 } from "../google-login.js";
+
+describe("canonical profile operation guard", () => {
+  it("blocks provider-session probes while publication could own the profile", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-google-session-guard-"));
+    const lease = acquireProfileOperationGuard(dir);
+    try {
+      await expect(detectActiveProviderSessions(dir)).rejects.toBeInstanceOf(ProfileBusyError);
+    } finally {
+      lease.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 afterEach(() => {
   vi.useRealTimers();
