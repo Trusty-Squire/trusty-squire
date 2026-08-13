@@ -162,10 +162,16 @@ describe("headless login VNC lifecycle", () => {
   it("forces browser cleanup when graceful teardown stalls", async () => {
     vi.useFakeTimers();
     const forceClose = vi.fn();
-    const waiting = teardownLoginBrowser(() => new Promise<void>(() => undefined), forceClose, 100);
+    const waiting = teardownLoginBrowser({
+      profileDir: "/unused/profile",
+      identity: null,
+      closeBrowser: () => new Promise<void>(() => undefined),
+      forceClose,
+      timeoutMs: 100,
+    });
 
     await vi.advanceTimersByTimeAsync(100);
-    await waiting;
+    await expect(waiting).resolves.toBe("force_closed_unproven");
 
     expect(forceClose).toHaveBeenCalledOnce();
   });

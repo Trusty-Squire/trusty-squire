@@ -44,12 +44,15 @@ import chalk from "chalk";
 import { shortenVncUrl } from "../api-client.js";
 import {
   CHROME_PROFILE_DIR,
+  closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
   profileProcessIdentity,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
   reapProfileHolderIfOwned,
+  type ProfileCloseState,
+  type ProfileProcessIdentity,
   waitForProfileFree,
   withProfileOperationGuard,
 } from "./profile.js";
@@ -794,28 +797,21 @@ export function teardownHeadlessRig(rig: HeadlessRig, graceMs = 1_000): Promise<
 }
 
 export async function teardownLoginBrowser(
-  closeBrowser: () => Promise<void>,
-  forceClose: () => unknown,
-  timeoutMs = 3_000,
-): Promise<void> {
-  let completed = false;
-  let timer: NodeJS.Timeout | undefined;
-  const closing = Promise.resolve()
-    .then(closeBrowser)
-    .catch(() => undefined)
-    .finally(() => {
-      completed = true;
-    });
-  await Promise.race([
-    closing,
-    new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutMs);
-    }),
-  ]);
-  if (timer !== undefined) clearTimeout(timer);
-  if (!completed) {
-    forceClose();
-  }
+  opts: {
+    profileDir: string;
+    identity: ProfileProcessIdentity | null;
+    closeBrowser: () => Promise<void>;
+    forceClose: () => unknown;
+    timeoutMs?: number;
+  },
+): Promise<ProfileCloseState> {
+  return await closeProfileWithProof({
+    profileDir: opts.profileDir,
+    identity: opts.identity,
+    close: opts.closeBrowser,
+    forceClose: opts.forceClose,
+    ...(opts.timeoutMs !== undefined ? { closeTimeoutMs: opts.timeoutMs } : {}),
+  });
 }
 
 type LoginProcessRuntime = Pick<NodeJS.Process, "once" | "removeListener" | "exit">;
@@ -989,17 +985,22 @@ export async function runInBotChrome(
     // returns, while this canonical-profile operation guard is still held.
     // Publish a fully-built immutable seed under the seed lock. The publisher
     // namespaces every source profile, including environment and CLI overrides.
-    if (result.status !== "timeout") {
+    if (result.status !== "timeout" && result.closeState === "closed") {
       await opts.beforeSeedPublish?.();
-      await publishOperatorProfileSeed(opts.profileDir);
+      await publishOperatorProfileSeed(opts.profileDir, { closeState: result.closeState });
     }
-    return result;
+    return { status: result.status };
   });
+}
+
+interface LoginRunResult {
+  status: "completed" | "preflight_satisfied" | "timeout";
+  closeState: ProfileCloseState;
 }
 
 async function runInBotChromeWithProfileGuard(
   opts: RunInBotChromeOpts,
-): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+): Promise<LoginRunResult> {
   // `mcp login` runs in a SEPARATE process from the MCP server, so the
   // in-process OAuth mutex can't serialize it against an in-flight signup.
   // Chrome's SingletonLock is the cross-process semaphore: reclaim a stale
@@ -1019,7 +1020,7 @@ async function runInBotChromeWithProfileGuard(
 
 async function runDisplayedChrome(
   opts: RunInBotChromeOpts,
-): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+): Promise<LoginRunResult> {
   // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
   // detect completion off the API + SQLite cookie store. See
   // launchPlainLoginBrowser / RunInBotChromeOpts.plainProfileLogin.
@@ -1044,6 +1045,8 @@ async function runDisplayedChrome(
         proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
       extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
+    let status: LoginRunResult["status"] = "timeout";
+    let closeState: ProfileCloseState = "unknown";
     try {
       console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
       const ok = await pollUntil(
@@ -1061,10 +1064,16 @@ async function runDisplayedChrome(
           /* swallow */
         }
       }
-      return { status: ok ? "completed" : "timeout" };
+      status = ok ? "completed" : "timeout";
     } finally {
-      await browser.teardown();
+      closeState = await teardownLoginBrowser({
+        profileDir: opts.profileDir,
+        identity: browser.identity,
+        closeBrowser: browser.teardown,
+        forceClose: browser.forceTeardown,
+      });
     }
+    return { status, closeState };
   }
   const chromium = resolveChromium();
   const context = await launchWithProfileGate(
@@ -1088,40 +1097,48 @@ async function runDisplayedChrome(
       }),
     { failFast: true },
   );
+  const holderPid = currentProfileHolderPid(opts.profileDir);
+  const identity = holderPid === null ? null : profileProcessIdentity(holderPid, opts.profileDir);
+  let status: LoginRunResult["status"] = "timeout";
+  let closeState: ProfileCloseState = "unknown";
   try {
-    if (
+    const preflightSatisfied =
       opts.preflight !== undefined &&
-      (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)))
-    ) {
-      return { status: "preflight_satisfied" };
-    }
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(opts.url, { waitUntil: "domcontentloaded" });
-    console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
-    const ok = await pollUntil(
-      opts.deadline,
-      () => opts.pollUntilDone(context),
-      opts.heartbeatMessage,
-    );
-    if (ok && opts.onSuccess !== undefined) {
-      // Best-effort: a hook failure must not pretend the user's login
-      // didn't happen. They did the work; the caller will read the
-      // session marker (or not) on the next signup.
-      try {
-        await opts.onSuccess(context);
-      } catch {
-        /* swallow */
+      (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)));
+    if (preflightSatisfied) {
+      status = "preflight_satisfied";
+    } else {
+      const page = context.pages()[0] ?? (await context.newPage());
+      await page.goto(opts.url, { waitUntil: "domcontentloaded" });
+      console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
+      const ok = await pollUntil(
+        opts.deadline,
+        () => opts.pollUntilDone(context),
+        opts.heartbeatMessage,
+      );
+      if (ok && opts.onSuccess !== undefined) {
+        try {
+          await opts.onSuccess(context);
+        } catch {
+          /* swallow */
+        }
       }
+      status = ok ? "completed" : "timeout";
     }
-    return { status: ok ? "completed" : "timeout" };
   } finally {
-    await context.close().catch(() => undefined);
+    closeState = await teardownLoginBrowser({
+      profileDir: opts.profileDir,
+      identity,
+      closeBrowser: () => context.close(),
+      forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
+    });
   }
+  return { status, closeState };
 }
 
 async function runHeadlessChrome(
   opts: RunInBotChromeOpts,
-): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+): Promise<LoginRunResult> {
   requireBinaries(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
   if (!existsSync("/usr/share/novnc")) {
     throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
@@ -1207,6 +1224,7 @@ async function runHeadlessChrome(
     let context: BrowserContext | undefined;
     let teardownContext: () => Promise<void>;
     let forceTeardownContext: () => void;
+    let profileIdentity: ProfileProcessIdentity | null = null;
     if (plain) {
       if (opts.plainPollUntilDone === undefined) {
         throw new Error("plainProfileLogin set without plainPollUntilDone");
@@ -1227,6 +1245,7 @@ async function runHeadlessChrome(
       teardownContext = browser.teardown;
       forceTeardownContext = browser.forceTeardown;
       plainBrowserIsRunning = browser.isRunning;
+      profileIdentity = browser.identity;
     } else if (useSelfLaunch && chromeBinary !== null) {
       const launched = await launchSelfManagedLoginContext({
         binary: chromeBinary,
@@ -1243,6 +1262,7 @@ async function runHeadlessChrome(
       context = launched.context;
       teardownContext = launched.teardown;
       forceTeardownContext = launched.forceTeardown;
+      profileIdentity = launched.identity;
     } else {
       const chromium = resolveChromium();
       const persistent = await launchWithProfileGate(
@@ -1271,18 +1291,26 @@ async function runHeadlessChrome(
       const persistentIdentity =
         persistentPid === null ? null : profileProcessIdentity(persistentPid, opts.profileDir);
       teardownContext = async (): Promise<void> => {
-        await persistent.close().catch(() => undefined);
+        await persistent.close();
       };
       forceTeardownContext = (): void => {
         reapProfileHolderIfOwned(opts.profileDir, persistentIdentity);
       };
+      profileIdentity = persistentIdentity;
     }
-    let browserTeardown: Promise<void> | undefined;
-    const teardownBrowser = (): Promise<void> => {
-      browserTeardown ??= teardownLoginBrowser(teardownContext, forceTeardownContext);
+    let browserTeardown: Promise<ProfileCloseState> | undefined;
+    const teardownBrowser = (): Promise<ProfileCloseState> => {
+      browserTeardown ??= teardownLoginBrowser({
+        profileDir: opts.profileDir,
+        identity: profileIdentity,
+        closeBrowser: teardownContext,
+        forceClose: forceTeardownContext,
+      });
       return browserTeardown;
     };
-    activeTeardown = teardownBrowser;
+    activeTeardown = async () => {
+      await teardownBrowser();
+    };
     try {
       // CDP path only: preflight + drive the first page to the URL. The plain
       // path has no context — plain Chrome's --app already opened opts.url.
@@ -1291,7 +1319,8 @@ async function runHeadlessChrome(
           opts.preflight !== undefined &&
           (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)))
         ) {
-          return { status: "preflight_satisfied" };
+          const closeState = await teardownBrowser();
+          return { status: "preflight_satisfied", closeState };
         }
         const page = context.pages()[0] ?? (await context.newPage());
         await page.goto(opts.url, { waitUntil: "domcontentloaded" });
@@ -1420,8 +1449,8 @@ async function runHeadlessChrome(
           }
         }
       }
-      await teardownBrowser();
-      return { status: ok ? "completed" : "timeout" };
+      const closeState = await teardownBrowser();
+      return { status: ok ? "completed" : "timeout", closeState };
     } finally {
       // Idempotent (self-launch teardown guards with a `torn` flag; the
       // persistent fallback's close() is .catch-wrapped), so the success-path

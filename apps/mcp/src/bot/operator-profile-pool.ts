@@ -20,9 +20,12 @@ import { basename, dirname, join, resolve } from "node:path";
 import Database from "better-sqlite3";
 import {
   CHROME_PROFILE_DIR,
+  processBirthIdentity,
+  processBirthIdentityState,
   profileProcessIdentity,
-  profileProcessMatches,
+  profileProcessIdentityState,
   signalProfileProcess,
+  type ProfileCloseState,
   type ProfileProcessIdentity,
   withProfileOperationGuard,
 } from "./profile.js";
@@ -157,30 +160,12 @@ function readJson<T>(path: string): T | null {
   }
 }
 
-function processStartTime(pid: number): string | null {
-  if (process.platform !== "linux") return null;
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const close = stat.lastIndexOf(")");
-    if (close < 0) return null;
-    const fields = stat.slice(close + 2).split(" ");
-    return fields[19] ?? null;
-  } catch {
-    return null;
-  }
-}
-
 function currentProcessIdentity(): ProcessIdentity {
-  return { pid: process.pid, start_time: processStartTime(process.pid) ?? "unknown" };
+  return processBirthIdentity(process.pid) ?? { pid: process.pid, start_time: "unknown" };
 }
 
-function processMatches(identity: ProcessIdentity): boolean {
-  if (identity.pid === process.pid) return true;
-  // A platform without a process birth marker cannot safely prove an owner is
-  // stale. Conservatively retain it instead of treating raw PID liveness as identity.
-  if (identity.start_time === "unknown") return true;
-  const actual = processStartTime(identity.pid);
-  return actual !== null && actual === identity.start_time;
+function processState(identity: ProcessIdentity): "matching" | "stale" | "unknown" {
+  return processBirthIdentityState(identity);
 }
 
 function stripTransientProfileState(root: string): void {
@@ -352,7 +337,7 @@ async function withSeedLock<T>(p: PoolPaths, fn: () => Promise<T> | T): Promise<
         })();
       if (
         malformedAndOld ||
-        (owner !== null && owner.host === hostname() && !processMatches(owner))
+        (owner !== null && owner.host === hostname() && processState(owner) === "stale")
       ) {
         const stale = join(p.tombstones, `seed-lock-${randomUUID()}`);
         try {
@@ -418,8 +403,11 @@ export function assertOperatorProfileRuntimeSupported(
 
 export async function publishOperatorProfileSeed(
   sourceProfileDir: string = CHROME_PROFILE_DIR,
-  opts: Pick<OperatorProfilePoolOptions, "rootDir"> = {},
+  opts: Pick<OperatorProfilePoolOptions, "rootDir"> & { closeState: ProfileCloseState },
 ): Promise<string> {
+  if (opts.closeState !== "closed") {
+    throw new Error("operator profile seed publication requires verified Chrome closure");
+  }
   assertOperatorProfileRuntimeSupported();
   const resolvedSource = resolve(sourceProfileDir);
   const p = paths(poolRootForSource(resolvedSource, opts.rootDir));
@@ -501,7 +489,10 @@ function quarantineOwnedActiveSlot(
 
 function reapQuarantinedActive(p: PoolPaths, tombstone: string): void {
   const owner = readJson<ActiveOwner>(join(tombstone, "owner.json"));
-  if (owner !== null && (owner.host !== hostname() || processMatches(owner))) {
+  if (
+    owner !== null &&
+    (owner.host !== hostname() || processState(owner) !== "stale")
+  ) {
     // A transient identity read failed before quarantine. Restore the lease if
     // its public slot is still free; never inspect or signal the worker.
     const publicSlot = join(p.active, "slot-0");
@@ -522,12 +513,9 @@ function reapQuarantinedActive(p: PoolPaths, tombstone: string): void {
   const dir = profileDir(p, lease.profile_id);
   const worker = lease.worker;
   if (worker === undefined) return;
-  if (processMatches(worker)) {
-    if (!profileProcessMatches(worker, dir)) {
-      // PID exists but its birth/cmdline/profile identity cannot be proven. Keep
-      // the private tombstone and profile; freeing capacity is safe, signalling is not.
-      return;
-    }
+  const workerState = profileProcessIdentityState(worker, dir);
+  if (workerState === "unknown") return;
+  if (workerState === "matching") {
     if (!signalProfileProcess(worker, dir, "SIGKILL")) return;
   }
   removeProfile(p, lease);
@@ -541,7 +529,7 @@ function scavengeActiveSlots(p: PoolPaths, now: number): void {
     const owner = readJson<ActiveOwner>(join(slot, "owner.json"));
     if (owner === null) {
       if (now - statSync(slot).mtimeMs < STARTUP_GRACE_MS) continue;
-    } else if (owner.host !== hostname() || processMatches(owner)) {
+    } else if (owner.host !== hostname() || processState(owner) !== "stale") {
       continue;
     }
     // The public slot is only a candidate until this rename wins. No process is
@@ -599,8 +587,12 @@ export class OperatorProfileLease {
     writePrivateJson(join(this.claimDir, "lease.json"), this.descriptor);
   }
 
-  async returnWarm(): Promise<void> {
+  async returnWarm(closeState: ProfileCloseState): Promise<void> {
     if (this.finished) return;
+    if (closeState !== "closed") {
+      await this.retain();
+      return;
+    }
     const { worker: _worker, ...withoutWorker } = this.descriptor;
     this.descriptor = {
       ...withoutWorker,
@@ -631,6 +623,12 @@ export class OperatorProfileLease {
   async destroy(): Promise<void> {
     if (this.finished) return;
     this.discardOwnedSlot();
+    this.finished = true;
+  }
+
+  async retain(): Promise<void> {
+    if (this.finished) return;
+    quarantineOwnedActiveSlot(this.p, this.slotDir, this.ownerToken, "unverified-close");
     this.finished = true;
   }
 
@@ -780,6 +778,5 @@ export const operatorProfilePoolTest = {
   paths,
   poolRootForSource,
   currentGeneration,
-  processStartTime,
   resetDefaultPool: (): void => rmSync(defaultPoolRoot(), { recursive: true, force: true }),
 };

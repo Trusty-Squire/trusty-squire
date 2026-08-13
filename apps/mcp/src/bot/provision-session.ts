@@ -645,8 +645,9 @@ async function acquireWarmBrowser(
       if (worker !== null) lease.bindWorker(worker);
     }
   } catch (err) {
-    await controller.close().catch(() => undefined);
-    await lease.destroy().catch(() => undefined);
+    if (!pending.cancelRequested) {
+      await closeLeasedBrowser(controller, lease, false);
+    }
     throw err;
   } finally {
     if (startingBrowser === pending) startingBrowser = null;
@@ -667,13 +668,24 @@ async function releaseWarmBrowserPage(
   warmBrowser = null;
   try {
     if (reusable) await browser.resetPageForReuse();
-    await browser.close();
-    if (reusable) await slot.lease.returnWarm();
-    else await slot.lease.destroy();
+    await closeLeasedBrowser(browser, slot.lease, reusable);
   } catch {
-    await browser.close().catch(() => undefined);
-    await slot.lease.destroy().catch(() => undefined);
+    await closeLeasedBrowser(browser, slot.lease, false);
   }
+}
+
+async function closeLeasedBrowser(
+  browser: BrowserController,
+  lease: OperatorProfileLease,
+  reusable: boolean,
+): Promise<void> {
+  const closeState = await browser.close().catch(() => "unknown" as const);
+  if (closeState !== "closed") {
+    await lease.retain();
+    return;
+  }
+  if (reusable) await lease.returnWarm(closeState);
+  else await lease.destroy();
 }
 
 function sessionForCall(sessionId: string): Session | undefined {
@@ -7350,7 +7362,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
     pending.cancelRequested = true;
     await pending.controller.close().catch(() => undefined);
     await pending.launch.catch(() => undefined);
-    await pending.lease.destroy().catch(() => undefined);
+    await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
   }
   for (const [id, session] of [...sessions.entries()]) {
     sessions.delete(id);
@@ -7359,8 +7371,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
   const slot = warmBrowser;
   warmBrowser = null;
   if (slot !== null) {
-    await slot.controller.close().catch(() => undefined);
-    await slot.lease.destroy().catch(() => undefined);
+    await closeLeasedBrowser(slot.controller, slot.lease, false).catch(() => undefined);
   }
   inFlight = false;
   starting = false;

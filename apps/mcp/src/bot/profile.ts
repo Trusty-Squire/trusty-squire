@@ -44,31 +44,60 @@ export interface ProfileProcessIdentity {
   user_data_dir: string;
 }
 
-function processStartTime(pid: number): string | null {
-  if (process.platform !== "linux") return null;
+export type ProcessIdentityState = "matching" | "stale" | "unknown";
+export type ProfileCloseState = "closed" | "force_closed_unproven" | "unknown";
+
+export type ProcessStartTimeRead =
+  | { state: "present"; startTime: string }
+  | { state: "missing" }
+  | { state: "unknown" };
+
+function readProcessStartTime(pid: number): ProcessStartTimeRead {
+  if (process.platform !== "linux") return { state: "unknown" };
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
     const close = stat.lastIndexOf(")");
-    if (close < 0) return null;
-    return stat.slice(close + 2).split(" ")[19] ?? null;
-  } catch {
-    return null;
+    const startTime = close < 0 ? undefined : stat.slice(close + 2).split(" ")[19];
+    return startTime === undefined ? { state: "unknown" } : { state: "present", startTime };
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? { state: "missing" } : { state: "unknown" };
   }
 }
 
-function processUsesProfile(pid: number, profileDir: string): boolean {
-  if (process.platform !== "linux") return false;
+export function processBirthIdentity(
+  pid: number,
+): Pick<ProfileProcessIdentity, "pid" | "start_time"> | null {
+  const read = readProcessStartTime(pid);
+  return read.state === "present" ? { pid, start_time: read.startTime } : null;
+}
+
+export function processBirthIdentityState(
+  identity: Pick<ProfileProcessIdentity, "pid" | "start_time">,
+  readStartTime: (pid: number) => ProcessStartTimeRead = readProcessStartTime,
+): ProcessIdentityState {
+  if (identity.start_time === "unknown") return "unknown";
+  const actual = readStartTime(identity.pid);
+  if (actual.state === "missing") return "stale";
+  if (actual.state === "unknown") return "unknown";
+  return actual.startTime === identity.start_time ? "matching" : "stale";
+}
+
+function processProfileState(pid: number, profileDir: string): ProcessIdentityState {
+  if (process.platform !== "linux") return "unknown";
   try {
     const expected = resolve(profileDir);
-    return readFileSync(`/proc/${pid}/cmdline`, "utf8")
+    const matches = readFileSync(`/proc/${pid}/cmdline`, "utf8")
       .split("\0")
       .some(
         (arg) =>
           arg.startsWith("--user-data-dir=") &&
           resolve(arg.slice("--user-data-dir=".length)) === expected,
       );
-  } catch {
-    return false;
+    return matches ? "matching" : "stale";
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "ENOENT" || code === "ESRCH" ? "stale" : "unknown";
   }
 }
 
@@ -76,26 +105,34 @@ export function profileProcessIdentity(
   pid: number,
   profileDir: string,
 ): ProfileProcessIdentity | null {
-  const startTime = processStartTime(pid);
-  if (startTime === null || !processUsesProfile(pid, profileDir)) return null;
+  const startTime = readProcessStartTime(pid);
+  if (startTime.state !== "present" || processProfileState(pid, profileDir) !== "matching") {
+    return null;
+  }
   return {
     host: hostname(),
     pid,
-    start_time: startTime,
+    start_time: startTime.startTime,
     user_data_dir: resolve(profileDir),
   };
+}
+
+export function profileProcessIdentityState(
+  identity: ProfileProcessIdentity,
+  profileDir: string,
+): ProcessIdentityState {
+  if (identity.host !== hostname()) return "unknown";
+  if (resolve(identity.user_data_dir) !== resolve(profileDir)) return "stale";
+  const birth = processBirthIdentityState(identity);
+  if (birth !== "matching") return birth;
+  return processProfileState(identity.pid, profileDir);
 }
 
 export function profileProcessMatches(
   identity: ProfileProcessIdentity,
   profileDir: string,
 ): boolean {
-  return (
-    identity.host === hostname() &&
-    resolve(identity.user_data_dir) === resolve(profileDir) &&
-    processStartTime(identity.pid) === identity.start_time &&
-    processUsesProfile(identity.pid, profileDir)
-  );
+  return profileProcessIdentityState(identity, profileDir) === "matching";
 }
 
 export function signalProfileProcess(
@@ -111,6 +148,59 @@ export function signalProfileProcess(
   } catch {
     return false;
   }
+}
+
+export async function closeProfileWithProof(opts: {
+  profileDir: string;
+  identity: ProfileProcessIdentity | null;
+  close: () => Promise<void>;
+  forceClose: () => unknown;
+  closeTimeoutMs?: number;
+  proofTimeoutMs?: number;
+  pollMs?: number;
+  identityState?: () => ProcessIdentityState;
+}): Promise<ProfileCloseState> {
+  const closeTimeoutMs = opts.closeTimeoutMs ?? 15_000;
+  const proofTimeoutMs = opts.proofTimeoutMs ?? 2_000;
+  const pollMs = opts.pollMs ?? 25;
+  let timer: NodeJS.Timeout | undefined;
+  const outcome = await Promise.race([
+    Promise.resolve()
+      .then(opts.close)
+      .then(
+        () => "resolved" as const,
+        () => "rejected" as const,
+      ),
+    new Promise<"timeout">((resolveTimeout) => {
+      timer = setTimeout(() => resolveTimeout("timeout"), closeTimeoutMs);
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (outcome !== "resolved") {
+    try {
+      opts.forceClose();
+    } catch {
+      return "force_closed_unproven";
+    }
+    return "force_closed_unproven";
+  }
+  if (opts.identity === null) return "unknown";
+  const identityState =
+    opts.identityState ?? (() => profileProcessIdentityState(opts.identity!, opts.profileDir));
+  const deadline = Date.now() + proofTimeoutMs;
+  let state = identityState();
+  while (state !== "stale" && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));
+    state = identityState();
+  }
+  if (state === "stale") return "closed";
+  if (state === "unknown") return "unknown";
+  try {
+    opts.forceClose();
+  } catch {
+    return "force_closed_unproven";
+  }
+  return "force_closed_unproven";
 }
 
 interface ProfileOperationOwner {

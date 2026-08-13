@@ -49,6 +49,7 @@ const h = vi.hoisted(() => ({
   startCalls: 0,
   startGate: null as Promise<void> | null,
   closeCalls: 0,
+  closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
   resetCalls: 0,
   resetFailuresRemaining: 0,
   profileProbeCalls: 0,
@@ -61,6 +62,7 @@ const h = vi.hoisted(() => ({
   leaseAcquireCalls: 0,
   leaseReturnCalls: 0,
   leaseDestroyCalls: 0,
+  leaseRetainCalls: 0,
   currentUrl: "",
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
@@ -531,10 +533,11 @@ vi.mock("../browser.js", () => ({
     async waitForThreeDsResolution(): Promise<"succeeded" | "failed" | "timeout"> {
       return h.waitForThreeDsResult;
     }
-    async close(): Promise<void> {
+    async close(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
+      return h.closeState;
     }
   },
   // Mirrors the real export — the pending-card-fill charge guard reads it.
@@ -595,6 +598,7 @@ vi.mock("../google-login.js", async (importOriginal) => {
 });
 
 vi.mock("../operator-profile-pool.js", () => ({
+  OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
   acquireOperatorProfile: async (
     _sessionId: string,
     opts: { sourceProfileDir?: string } = {},
@@ -624,6 +628,11 @@ vi.mock("../operator-profile-pool.js", () => ({
         if (finished) return;
         finished = true;
         h.leaseDestroyCalls += 1;
+      },
+      retain: async () => {
+        if (finished) return;
+        finished = true;
+        h.leaseRetainCalls += 1;
       },
     };
   },
@@ -778,6 +787,7 @@ beforeEach(() => {
   h.startCalls = 0;
   h.startGate = null;
   h.closeCalls = 0;
+  h.closeState = "closed";
   h.resetCalls = 0;
   h.resetFailuresRemaining = 0;
   h.profileProbeCalls = 0;
@@ -790,6 +800,7 @@ beforeEach(() => {
   h.leaseAcquireCalls = 0;
   h.leaseReturnCalls = 0;
   h.leaseDestroyCalls = 0;
+  h.leaseRetainCalls = 0;
   h.currentUrl = "";
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
@@ -3625,6 +3636,21 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.leaseReturnCalls).toBe(3);
     expect(h.leaseDestroyCalls).toBe(0);
   });
+
+  it.each(["force_closed_unproven", "unknown"] as const)(
+    "quarantines a %s profile instead of warming it",
+    async (closeState) => {
+      h.closeState = closeState;
+      const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      await finishProvisionSession(first.session_id);
+
+      const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+      expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
+      expect(h.leaseReturnCalls).toBe(0);
+      expect(h.leaseRetainCalls).toBe(1);
+      await finishProvisionSession(second.session_id);
+    },
+  );
 });
 
 describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {

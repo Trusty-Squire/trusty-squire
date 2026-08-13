@@ -44,6 +44,7 @@ import {
   acquireFreeProfileOperationGuard,
   CHROME_PROFILE_DIR,
   clearStaleSingletonLock,
+  closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
   profileProcessIdentity,
@@ -54,6 +55,7 @@ import {
   signalProfileProcess,
   type ProfileProcessIdentity,
   type ProfileOperationLease,
+  type ProfileCloseState,
   waitForProfileFree,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
@@ -1814,6 +1816,7 @@ export interface SelfLaunchedLogin {
   // running — the zombie-chrome leak). Also reaps the profile lock.
   teardown: () => Promise<void>;
   forceTeardown: () => void;
+  identity: ProfileProcessIdentity | null;
 }
 
 export function childProcessIsRunning(child: ChildProcess | null): boolean {
@@ -1923,21 +1926,10 @@ export async function launchSelfManagedLoginContext(params: {
     // Disconnect the CDP browser first; over connectOverCDP this leaves the
     // real Chrome running, so kill the child explicitly (SIGTERM, then a
     // hard SIGKILL after a short grace) to avoid the zombie-chrome leak.
-    try {
-      await browser.close();
-    } catch {
-      /* best-effort disconnect */
+    await browser.close();
+    if (child !== null && childIdentity !== null) {
+      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
     }
-    if (child !== null) {
-      if (childIdentity !== null) {
-        signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-      }
-      await new Promise((r) => setTimeout(r, 1_500));
-      if (childIdentity !== null) {
-        signalProfileProcess(childIdentity, params.profileDir, "SIGKILL");
-      }
-    }
-    reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
 
   const forceTeardown = (): void => {
@@ -1948,7 +1940,7 @@ export async function launchSelfManagedLoginContext(params: {
     reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
 
-  return { context: ctx, teardown, forceTeardown };
+  return { context: ctx, teardown, forceTeardown, identity: childIdentity };
 }
 
 export interface PlainLoginBrowser {
@@ -1958,6 +1950,7 @@ export interface PlainLoginBrowser {
   // Plain login intentionally has no CDP attachment, so expose child liveness
   // for the polling loop to fail loudly if the visible browser disappears.
   isRunning: () => boolean;
+  identity: ProfileProcessIdentity | null;
 }
 
 // Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
@@ -2053,21 +2046,15 @@ export async function launchPlainLoginBrowser(params: {
   const teardown = async (): Promise<void> => {
     if (torn) return;
     torn = true;
-    if (child !== null) {
-      if (childIdentity !== null) {
-        signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
-      }
-      await new Promise((r) => setTimeout(r, 1_500));
-      if (childIdentity !== null) {
-        signalProfileProcess(childIdentity, params.profileDir, "SIGKILL");
-      }
+    if (child !== null && childIdentity !== null) {
+      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
     }
-    reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
   return {
     teardown,
     forceTeardown,
     isRunning: () => childProcessIsRunning(child),
+    identity: childIdentity,
   };
 }
 
@@ -11814,9 +11801,9 @@ export class BrowserController {
     });
   }
 
-  async close(): Promise<void> {
+  async close(): Promise<ProfileCloseState> {
     try {
-      await this.closeWithProfileGuard();
+      return await this.closeWithProfileGuard();
     } finally {
       const lease = this.profileOperationLease;
       this.profileOperationLease = null;
@@ -11824,7 +11811,7 @@ export class BrowserController {
     }
   }
 
-  private async closeWithProfileGuard(): Promise<void> {
+  private async closeWithProfileGuard(): Promise<ProfileCloseState> {
     if (this.harnessAttachedPage) {
       this.page = null;
       this.primaryPage = null;
@@ -11833,7 +11820,7 @@ export class BrowserController {
       this.oauthProviderPageClosed = false;
       this.oauthNetLog = [];
       this.context = null;
-      return;
+      return "closed";
     }
     // Each step is best-effort and independent: a throw closing the page
     // or context must NOT skip the Xvfb teardown below, or the virtual
@@ -11848,46 +11835,46 @@ export class BrowserController {
     // minutes and bricked the next 3 services (MEASURED 2026-06-09: supabase
     // crash → cockroachdb/weaviate/honeycomb all "profile held"). The cap
     // guarantees we always reach the SIGKILL reap.
-    const capped = (p: Promise<unknown>, ms: number): Promise<void> =>
-      Promise.race([
-        Promise.resolve(p).then(
-          () => undefined,
-          () => undefined,
-        ),
-        new Promise<void>((r) => setTimeout(r, ms)),
-      ]);
-    if (this.page) await capped(this.page.close(), 5_000);
+    const page = this.page;
+    const context = this.context;
+    const cdpBrowser = this.cdpBrowser;
+    const childIdentity = this.childChromeIdentity;
+    const holderIdentity = this.launchedProfileHolderIdentity;
+    const identity = childIdentity ?? holderIdentity;
     this.page = null;
     this.primaryPage = null;
     this.oauthProductPage = null;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
     this.oauthNetLog = [];
-    if (this.context) await capped(this.context.close(), 10_000);
+    this.context = null;
+    this.cdpBrowser = null;
+    this.childChrome = null;
+    this.childChromeIdentity = null;
+    this.launchedContext = false;
+    this.launchedProfileHolderIdentity = null;
+    const closeState = await closeProfileWithProof({
+      profileDir: this.profileDir,
+      identity,
+      close: async () => {
+        if (page !== null) await page.close();
+        if (context !== null) await context.close();
+        if (cdpBrowser !== null) await cdpBrowser.close();
+        if (childIdentity !== null) {
+          signalProfileProcess(childIdentity, this.profileDir, "SIGTERM");
+        }
+      },
+      forceClose: () => {
+        if (identity !== null) signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        reapProfileHolderIfOwned(this.profileDir, identity);
+      },
+    });
     // Self-launch path: disconnect the CDP browser and SIGKILL the Chrome we
     // spawned. context.close() on a connectOverCDP context only disconnects —
     // it does NOT necessarily exit the browser process, which would leak the
     // SingletonLock and brick the next run (the reap below is the backstop, but
     // killing our own child directly is cleaner and faster).
-    if (this.cdpBrowser) {
-      await capped(this.cdpBrowser.close(), 5_000);
-      this.cdpBrowser = null;
-    }
-    if (this.childChromeIdentity !== null) {
-      signalProfileProcess(this.childChromeIdentity, this.profileDir, "SIGKILL");
-      selfManagedChromes.delete(this.childChromeIdentity.pid);
-    }
-    this.childChrome = null;
-    this.childChromeIdentity = null;
-    if (this.launchedContext) {
-      try {
-        reapProfileHolderIfOwned(this.profileDir, this.launchedProfileHolderIdentity);
-      } catch {
-        /* best-effort */
-      }
-      this.launchedContext = false;
-      this.launchedProfileHolderIdentity = null;
-    }
+    if (childIdentity !== null) selfManagedChromes.delete(childIdentity.pid);
     // F13 — release the on-demand Xvfb if we spawned one. Order
     // matters: kill Chrome (context.close) first so it has its
     // display until it exits, THEN kill Xvfb.
@@ -11899,6 +11886,7 @@ export class BrowserController {
       }
       this.xvfb = null;
     }
+    return closeState;
   }
 }
 

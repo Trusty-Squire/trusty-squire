@@ -17,9 +17,11 @@ import {
   acquireFreeProfileOperationGuard,
   acquireProfileOperationGuard,
   clearStaleSingletonLock,
+  closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
   profileProcessIdentity,
+  processBirthIdentityState,
   ProfileBusyError,
   reapLeakedProfileHolder,
   reapProfileHolderIfOwned,
@@ -29,6 +31,20 @@ import {
 } from "../profile.js";
 
 describe("profile process identity", () => {
+  it("treats a reused current pid as stale when its birth time differs", () => {
+    expect(processBirthIdentityState({ pid: process.pid, start_time: "not-this-process" })).toBe(
+      "stale",
+    );
+  });
+
+  it("retains an identity when its birth time cannot be read", () => {
+    expect(
+      processBirthIdentityState({ pid: process.pid, start_time: "1" }, () => ({
+        state: "unknown",
+      })),
+    ).toBe("unknown");
+  });
+
   it.skipIf(process.platform !== "linux")(
     "signals only the same process birth and user-data directory",
     async () => {
@@ -58,6 +74,55 @@ describe("profile process identity", () => {
       }
     },
   );
+});
+
+describe("profile close proof", () => {
+  it("returns closed only after exact identity disappearance is observed", async () => {
+    const states: Array<"matching" | "stale"> = ["matching", "stale"];
+    await expect(
+      closeProfileWithProof({
+        profileDir: "/unused/profile",
+        identity: {
+          host: hostname(),
+          pid: 123,
+          start_time: "1",
+          user_data_dir: "/unused/profile",
+        },
+        close: async () => undefined,
+        forceClose: vi.fn(),
+        pollMs: 0,
+        identityState: () => states.shift() ?? "stale",
+      }),
+    ).resolves.toBe("closed");
+  });
+
+  it("returns unknown when closure identity cannot be proven", async () => {
+    await expect(
+      closeProfileWithProof({
+        profileDir: "/unused/profile",
+        identity: null,
+        close: async () => undefined,
+        forceClose: vi.fn(),
+      }),
+    ).resolves.toBe("unknown");
+  });
+
+  it("returns force_closed_unproven when graceful close stalls", async () => {
+    vi.useFakeTimers();
+    const forceClose = vi.fn();
+    const closing = closeProfileWithProof({
+      profileDir: "/unused/profile",
+      identity: null,
+      close: () => new Promise<void>(() => undefined),
+      forceClose,
+      closeTimeoutMs: 100,
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(closing).resolves.toBe("force_closed_unproven");
+    expect(forceClose).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
 });
 
 // existsSync follows symlinks, and SingletonLock's target ("host-pid") is
