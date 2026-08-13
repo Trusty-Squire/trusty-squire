@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.15 (2026-08-12)
+
+- fix(mcp): prevent VNC login leaks and contention hangs — teardown on every exit, fail loudly on profile contention, and use the `--protocol http2` fallback (#495)
+- fix(mcp): harden split-checkout payment handling — blocked in-page requests fail fast, merchant API subdomains are reached safely, `operate_pay` uses the payable total, and Shopify PCI hosted card fields are filled (#496)
+
 ## 1.1.9-rc.14 (2026-08-12)
 
 - fix(mcp): exit the server when the stdio client disconnects, preventing an operator process leak (#491)
