@@ -272,19 +272,34 @@ for the system and data flows.
   as the recommended action. Typing a Luhn-valid, card-number-shaped value
   manually through `operate_act` is refused with `safe_alternative: "operate_pay"`
   and the missing prerequisite `verified_cart_total`.
-- `operate_remember` saves a postcondition-verified local recipe under a closed
-  task verb plus the service's registrable domain. It records stable target
+- `operate_login` owns the sealed username/password lifecycle. Its
+  `prepare_signup` action seals the user's captured email and a generated
+  password, `store_signup` vaults those slots with explicit login-host policy,
+  and `load_saved` retrieves an allowed saved login through encrypted
+  browser-fill into sealed session slots. Raw values never enter the tool
+  result. `operate_prepare_login`, `operate_store_login`, and
+  `operate_seal_vault_credential` remain delegating aliases with the same return
+  shapes.
+- `operate_finish` closes the session and optionally accepts a nested `outcome`.
+  `none` only closes; `credentials` requires `store` and preserves credential
+  extraction, vault storage, and auto-promotion; `result` requires `summary` or
+  `data` and can run `verify_recipe` before closing. `operate_finish_task`
+  remains a delegating compatibility alias for the credential and result
+  outcomes.
+- `operate_recipe_save` saves a postcondition-verified local recipe under a
+  closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs
   or plaintext secrets. Recipes that pass a share-eligibility check (no
   personal or secret-shaped literals) and a registrable-domain lock are also
   written live to the shared registry, making them immediately reusable by
-  other installs without a promotion step. `operate_use` binds the replaying
-  user's own values and replays those steps, preferring the local recipe and
-  falling back to the shared one. A recipe cannot navigate outside the site it
-  was recorded for; normal keyed replay refuses a violation before navigation
-  and continues with cold driving. On one ordinary missed step, replay returns
-  a local repair point and can continue in the same session. Older name-only
-  recipes remain planning hints.
+  other installs without a promotion step. `operate_recipe_run` binds the
+  replaying user's own values and replays those steps, preferring the local
+  recipe and falling back to the shared one. A recipe cannot navigate outside
+  the site it was recorded for; normal keyed replay refuses a violation before
+  navigation and continues with cold driving. On one ordinary missed step,
+  replay returns a local repair point and can continue in the same session.
+  Older name-only recipes remain planning hints. `operate_remember` and
+  `operate_use` remain behavior-identical aliases.
 - `list_payment_cards` returns saved-card labels and opaque references;
   `operate_pay` can use a selected card, the only card on file, or a just-in-time
   add-card approval, then fills the checkout and waits for the user to resolve

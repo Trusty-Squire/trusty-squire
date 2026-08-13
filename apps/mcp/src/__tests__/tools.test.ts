@@ -152,7 +152,13 @@ import {
   revokeAppAccessTool,
   TOOLS,
 } from "../tools/index.js";
-import { provisionActTool } from "../tools/provision-drive.js";
+import {
+  operateLoginTool,
+  operateRecipeRunTool,
+  operateRecipeSaveTool,
+  provisionActTool,
+  provisionFinishTool,
+} from "../tools/provision-drive.js";
 
 function stubBrowser(): PaymentBrowser {
   return {
@@ -1354,11 +1360,9 @@ describe("TOOLS registry", () => {
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
     // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
-    // 6 base tools + the operator-surface tools (operate_start/observe/act/cart-add/select-many/pay/
-    // captcha_gate/await_verification/extract/remember/use/finish_task/finish —
-    // remember+use are the operator-recipe capture/replay pair — plus the PR3c
-    // login-credential tools: prepare/store plus seal_vault_credential for signin fill.
-    expect(TOOLS).toHaveLength(28);
+    // Canonical lifecycle/recipe names are additive for this compatibility
+    // release: every legacy name remains registered as a delegating alias.
+    expect(TOOLS).toHaveLength(31);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
       "get_extract_failure",
@@ -1375,11 +1379,14 @@ describe("TOOLS registry", () => {
       "operate_finish",
       "operate_finish_task",
       "operate_form_select_many",
+      "operate_login",
       "operate_observe",
       "operate_pay",
       "operate_payment_await",
       "operate_payment_status",
       "operate_prepare_login",
+      "operate_recipe_run",
+      "operate_recipe_save",
       "operate_remember",
       "operate_seal_vault_credential",
       "operate_start",
@@ -1418,6 +1425,43 @@ describe("TOOLS registry", () => {
         "operate_extract",
         "operate_captcha_gate",
         "operate_await_verification",
+      ]),
+    );
+  });
+
+  it("exposes consolidated lifecycle/recipe schemas while retaining all six aliases", () => {
+    const loginVariants = operateLoginTool.jsonInputSchema.oneOf as {
+      properties: { action: { const: string } };
+    }[];
+    expect(loginVariants.map((variant) => variant.properties.action.const)).toEqual([
+      "prepare_signup",
+      "store_signup",
+      "load_saved",
+    ]);
+
+    const finishProperties = provisionFinishTool.jsonInputSchema.properties as Record<
+      string,
+      unknown
+    >;
+    const finishVariants = (finishProperties.outcome as { oneOf: Record<string, unknown>[] }).oneOf;
+    expect(finishVariants).toHaveLength(3);
+    expect(finishVariants[1]).toMatchObject({ required: ["kind", "store"] });
+    expect(finishVariants[2]).toMatchObject({
+      required: ["kind"],
+      anyOf: [{ required: ["summary"] }, { required: ["data"] }],
+    });
+
+    expect(operateRecipeRunTool.name).toBe("operate_recipe_run");
+    expect(operateRecipeSaveTool.name).toBe("operate_recipe_save");
+    const names = TOOLS.map((tool) => tool.name);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "operate_prepare_login",
+        "operate_store_login",
+        "operate_seal_vault_credential",
+        "operate_finish_task",
+        "operate_use",
+        "operate_remember",
       ]),
     );
   });

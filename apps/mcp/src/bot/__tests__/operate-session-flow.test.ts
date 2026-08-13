@@ -194,6 +194,19 @@ vi.mock("../browser.js", () => ({
       if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
       return h.visibleText;
     }
+    async revealMaskedCredentials(): Promise<void> {}
+    async extractLabeledCredentialCandidates(): Promise<unknown[]> {
+      return [];
+    }
+    async extractAllInputValues(): Promise<string[]> {
+      return [];
+    }
+    async extractCredentialsNearCopyButtons(): Promise<string[]> {
+      return [];
+    }
+    async readClipboard(): Promise<string> {
+      return "";
+    }
     async readCheckoutSummary(): Promise<{
       merchant: string;
       checkout_origin: string;
@@ -628,9 +641,13 @@ import {
   provisionRememberTool,
   provisionUseTool,
   provisionFinishTaskTool,
+  provisionFinishTool,
   provisionPrepareLoginTool,
   provisionSealVaultCredentialTool,
   provisionStoreLoginTool,
+  operateLoginTool,
+  operateRecipeRunTool,
+  operateRecipeSaveTool,
   provisionActTool,
   storedExtractResult,
   withSigninHost,
@@ -1652,6 +1669,8 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
   });
 
   it("only replays a shape recipe through the dedicated checkout-leg path", async () => {
+    expect(operateRecipeRunTool.handler).toBe(provisionUseTool.handler);
+    expect(operateRecipeRunTool.inputSchema).toBe(provisionUseTool.inputSchema);
     const dir = mkdtempSync(join(tmpdir(), "shape-recipe-path-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
     const fields = ["email", "firstName", "lastName"];
@@ -1682,7 +1701,7 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
       }),
     ];
     const started = await startProvisionSession({ serviceUrl: "https://store.example/checkout" });
-    const result = (await provisionUseTool.handler(
+    const result = (await operateRecipeRunTool.handler(
       { verb: "purchase", session_id: started.session_id, leg: "checkout", params: {} },
       null as unknown as ApiClient,
     )) as { replay: { status: string } };
@@ -1842,7 +1861,9 @@ describe("verified recipe recording", () => {
       provenance: { hole: "product_query" },
     });
     h.visibleText = "Review order";
-    const saved = await provisionRememberTool.handler(
+    expect(operateRecipeSaveTool.handler).toBe(provisionRememberTool.handler);
+    expect(operateRecipeSaveTool.inputSchema).toBe(provisionRememberTool.inputSchema);
+    const saved = await operateRecipeSaveTool.handler(
       {
         session_id: started.session_id,
         name: "buy-coffee",
@@ -2188,6 +2209,28 @@ describe("verified recipe recording", () => {
       kind: "result",
       verified: { confirmed: true },
     });
+
+    const consolidatedReplayStarted = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/cart",
+    });
+    const consolidatedReplay = await replayOperatorRecipe(
+      consolidatedReplayStarted.session_id,
+      recipe,
+      { "address.email": "buyer@example.com" },
+    );
+    expect(consolidatedReplay.status).toBe("complete");
+    const consolidatedFinished = await provisionFinishTool.handler(
+      {
+        session_id: consolidatedReplayStarted.session_id,
+        outcome: {
+          kind: "result",
+          summary: "Account created",
+          verify_recipe: "email-url",
+        },
+      },
+      null,
+    );
+    expect(consolidatedFinished).toEqual(finished);
     expect(h.gotos).toContain("https://shop.example.com/account/buyer%2540example.com");
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
@@ -3650,6 +3693,142 @@ describe("operate session — captcha gate", () => {
   });
 });
 
+describe("operate_finish lifecycle consolidation", () => {
+  it("keeps the no-outcome close shape identical with explicit or omitted kind=none", async () => {
+    const legacySession = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+    });
+    const legacy = (await provisionFinishTool.handler(
+      { session_id: legacySession.session_id },
+      null,
+    )) as Record<string, unknown>;
+
+    const consolidatedSession = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+    });
+    const consolidated = (await provisionFinishTool.handler(
+      {
+        session_id: consolidatedSession.session_id,
+        outcome: { kind: "none" },
+      },
+      null,
+    )) as Record<string, unknown>;
+
+    expect({ ...consolidated, session_id: "normalized" }).toEqual({
+      ...legacy,
+      session_id: "normalized",
+    });
+  });
+
+  it("returns the legacy result shape from outcome=result, including scalar data coercion", async () => {
+    const legacySession = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+    });
+    const legacyArgs = provisionFinishTaskTool.inputSchema.parse({
+      session_id: legacySession.session_id,
+      kind: "result",
+      summary: "Task complete",
+      data: { confirmed: true, count: 2 },
+    });
+    const legacy = await provisionFinishTaskTool.handler(legacyArgs, null);
+
+    const consolidatedSession = await startProvisionSession({
+      serviceUrl: "https://app.example.com/done",
+    });
+    const consolidatedArgs = provisionFinishTool.inputSchema.parse({
+      session_id: consolidatedSession.session_id,
+      outcome: {
+        kind: "result",
+        summary: "Task complete",
+        data: { confirmed: true, count: 2 },
+      },
+    });
+    const consolidated = await provisionFinishTool.handler(consolidatedArgs, null);
+
+    expect(consolidated).toEqual(legacy);
+    expect(consolidated).toMatchObject({
+      kind: "result",
+      summary: "Task complete",
+      data: { confirmed: "true", count: "2" },
+    });
+  });
+
+  it("returns the legacy credential result without leaking the extracted value", async () => {
+    const secret = "sk-live-finish-parity-secret-123456789";
+    const previousAutoPromote = process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
+    process.env.TRUSTY_SQUIRE_AUTO_PROMOTE = "0";
+    try {
+      const storeCredential = vi.fn().mockImplementation(async (input: { service: string }) => ({
+        reference: "vault://acct/finish-parity",
+        service: input.service,
+        label: "default",
+        field_names: ["api_key"],
+        allowed_hosts: ["app.example.com"],
+        created_at: "now",
+        updated: false,
+      }));
+      const api = { storeCredential } as unknown as ApiClient;
+
+      h.visibleText = `API key ${secret}`;
+      const legacySession = await startProvisionSession({
+        serviceUrl: "https://app.example.com/api-keys",
+      });
+      const legacy = await provisionFinishTaskTool.handler(
+        {
+          session_id: legacySession.session_id,
+          kind: "credentials",
+          store: { service: "example" },
+        },
+        api,
+      );
+
+      h.visibleText = `API key ${secret}`;
+      const consolidatedSession = await startProvisionSession({
+        serviceUrl: "https://app.example.com/api-keys",
+      });
+      const consolidated = await provisionFinishTool.handler(
+        {
+          session_id: consolidatedSession.session_id,
+          outcome: { kind: "credentials", store: { service: "example" } },
+        },
+        api,
+      );
+
+      expect(consolidated).toEqual(legacy);
+      expect(consolidated).toMatchObject({
+        kind: "credentials",
+        stored_credential: { reference: "vault://acct/finish-parity" },
+      });
+      expect(storeCredential).toHaveBeenCalledTimes(2);
+      expect(JSON.stringify({ legacy, consolidated })).not.toContain(secret);
+    } finally {
+      if (previousAutoPromote === undefined) delete process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
+      else process.env.TRUSTY_SQUIRE_AUTO_PROMOTE = previousAutoPromote;
+    }
+  });
+
+  it("rejects invalid consolidated outcomes at schema parse time", () => {
+    expect(
+      provisionFinishTool.inputSchema.safeParse({
+        session_id: "session_1",
+        outcome: { kind: "credentials" },
+      }).success,
+    ).toBe(false);
+    expect(
+      provisionFinishTool.inputSchema.safeParse({
+        session_id: "session_1",
+        outcome: { kind: "result" },
+      }).success,
+    ).toBe(false);
+    expect(
+      provisionFinishTool.inputSchema.safeParse({
+        session_id: "session_1",
+        outcome: { kind: "result", data: { confirmed: true } },
+      }).success,
+    ).toBe(true);
+  });
+});
+
 describe("operate session — PR3c username/password login (capture-at-login sourced)", () => {
   let profileDir: string;
   beforeEach(() => {
@@ -3666,17 +3845,32 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   it("prepare_login seals the captured user email + a generated password (masked handles only)", async () => {
     withEmail("ada@example.com");
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/", profileDir });
-    const res = (await provisionPrepareLoginTool.handler(
+    const legacy = (await provisionPrepareLoginTool.handler(
       { session_id: obs.session_id },
       null as unknown as ApiClient,
     )) as {
-      slots: { login: { preview: string }; password: { length: number } };
+      slots: {
+        login: { slot: string; preview: string; length: number };
+        password: { slot: string; preview: string; length: number };
+      };
       email_preview: string;
     };
+    const consolidated = (await operateLoginTool.handler(
+      { action: "prepare_signup", session_id: obs.session_id },
+      null as unknown as ApiClient,
+    )) as typeof legacy;
+
+    expect(consolidated).toMatchObject({
+      session_id: obs.session_id,
+      slots: {
+        login: { slot: legacy.slots.login.slot, length: legacy.slots.login.length },
+        password: { slot: legacy.slots.password.slot, length: legacy.slots.password.length },
+      },
+      email_preview: legacy.email_preview,
+    });
     // Neither the handle preview nor the email_preview leaks the raw address.
-    expect(res.email_preview).not.toContain("ada@example.com");
-    expect(res.slots.login.preview).not.toContain("ada@example.com");
-    expect(res.slots.password.length).toBeGreaterThanOrEqual(16);
+    expect(JSON.stringify({ legacy, consolidated })).not.toContain("ada@example.com");
+    expect(consolidated.slots.password.length).toBeGreaterThanOrEqual(16);
   });
 
   it("prepare_login hands back when no user email was captured", async () => {
@@ -3697,16 +3891,14 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       null as unknown as ApiClient,
     );
 
-    let captured:
-      | {
-          service: string;
-          type?: string;
-          auth_strategy?: string;
-          fields?: Record<string, string>;
-          login_hosts?: string[];
-          signin_url?: string;
-        }
-      | undefined;
+    const captured: {
+      service: string;
+      type?: string;
+      auth_strategy?: string;
+      fields?: Record<string, string>;
+      login_hosts?: string[];
+      signin_url?: string;
+    }[] = [];
     const api = {
       storeCredential: async (input: {
         service: string;
@@ -3716,7 +3908,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
         login_hosts?: string[];
         signin_url?: string;
       }) => {
-        captured = input;
+        captured.push(input);
         return {
           reference: "vault://acct/login1",
           service: input.service,
@@ -3732,25 +3924,37 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       },
     } as unknown as ApiClient;
 
-    const res = (await provisionStoreLoginTool.handler(
-      {
-        session_id: obs.session_id,
-        service: "example",
-        login_hosts: ["app.example.com"],
-        signin_url: "https://app.example.com/login",
-      },
+    const args = {
+      session_id: obs.session_id,
+      service: "example",
+      login_hosts: ["example.com"],
+      signin_url: "https://app.example.com/login",
+    };
+    const legacy = (await provisionStoreLoginTool.handler(args, api)) as {
+      reference: string;
+      type: string;
+      login_hosts: string[];
+    };
+    const consolidated = (await operateLoginTool.handler(
+      { action: "store_signup", ...args },
       api,
-    )) as { reference: string; type: string; login_hosts: string[] };
+    )) as typeof legacy;
 
-    expect(captured?.type).toBe("username_password");
-    expect(captured?.auth_strategy).toBe("username_password");
-    expect(captured?.fields?.login).toBe("ada@example.com");
-    expect((captured?.fields?.password ?? "").length).toBeGreaterThanOrEqual(16);
-    expect(captured?.login_hosts).toEqual(["app.example.com"]);
-    expect(res.login_hosts).toEqual(["app.example.com"]);
-    expect(res.reference).toBe("vault://acct/login1");
+    expect(consolidated).toEqual(legacy);
+    expect(captured).toHaveLength(2);
+    for (const call of captured) {
+      expect(call.type).toBe("username_password");
+      expect(call.auth_strategy).toBe("username_password");
+      expect(call.fields?.login).toBe("ada@example.com");
+      expect((call.fields?.password ?? "").length).toBeGreaterThanOrEqual(16);
+      expect(call.login_hosts).toEqual(["example.com", "app.example.com"]);
+    }
+    expect(legacy.login_hosts).toEqual(["example.com", "app.example.com"]);
+    expect(legacy.reference).toBe("vault://acct/login1");
     // The raw password must not appear in the tool's response.
-    expect(JSON.stringify(res)).not.toContain(captured?.fields?.password ?? "UNSET");
+    expect(JSON.stringify({ legacy, consolidated })).not.toContain(
+      captured[0]?.fields?.password ?? "UNSET",
+    );
   });
 
   it("seal_vault_credential stashes browser-fill fields as slots without returning raw values", async () => {
@@ -3758,14 +3962,12 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       serviceUrl: "https://app.example.com/login",
       profileDir,
     });
-    let captured:
-      | {
-          current_host: string;
-          reference?: string;
-          fields: string[];
-          encrypted_response_public_key: string;
-        }
-      | undefined;
+    const captured: {
+      current_host: string;
+      reference?: string;
+      fields: string[];
+      encrypted_response_public_key: string;
+    }[] = [];
     const api = {
       browserFillCredential: async (input: {
         current_host: string;
@@ -3773,7 +3975,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
         fields: string[];
         encrypted_response_public_key: string;
       }) => {
-        captured = input;
+        captured.push(input);
         const encrypt = (value: string) =>
           publicEncrypt(
             {
@@ -3793,26 +3995,36 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       },
     } as unknown as ApiClient;
 
-    const res = (await provisionSealVaultCredentialTool.handler(
-      {
-        session_id: obs.session_id,
-        reference: "vault://acct/login1",
-        fields: ["login", "password"],
-        slot_prefix: "signin",
-      },
-      api,
-    )) as { reference: string; slots: Record<string, { slot: string }> };
-
-    expect(captured).toMatchObject({
-      current_host: "https://app.example.com/login",
+    const args = {
+      session_id: obs.session_id,
       reference: "vault://acct/login1",
       fields: ["login", "password"],
-    });
-    expect(res.reference).toBe("vault://acct/login1");
-    expect(res.slots.login?.slot).toBe("signin_login");
-    expect(res.slots.password?.slot).toBe("signin_password");
-    expect(JSON.stringify(res)).not.toContain("ada@example.com");
-    expect(JSON.stringify(res)).not.toContain("correct-horse");
+      slot_prefix: "signin",
+    };
+    const legacy = (await provisionSealVaultCredentialTool.handler(args, api)) as {
+      reference: string;
+      slots: Record<string, { slot: string }>;
+    };
+    const consolidated = (await operateLoginTool.handler(
+      { action: "load_saved", ...args },
+      api,
+    )) as typeof legacy;
+
+    expect(consolidated).toEqual(legacy);
+    expect(captured).toHaveLength(2);
+    for (const call of captured) {
+      expect(call).toMatchObject({
+        current_host: "https://app.example.com/login",
+        reference: "vault://acct/login1",
+        fields: ["login", "password"],
+      });
+      expect(call.encrypted_response_public_key).toContain("BEGIN PUBLIC KEY");
+    }
+    expect(legacy.reference).toBe("vault://acct/login1");
+    expect(legacy.slots.login?.slot).toBe("signin_login");
+    expect(legacy.slots.password?.slot).toBe("signin_password");
+    expect(JSON.stringify({ legacy, consolidated })).not.toContain("ada@example.com");
+    expect(JSON.stringify({ legacy, consolidated })).not.toContain("correct-horse");
 
     h.elements = [elem({ visibleText: "Email", selector: "#email" })];
     await act(obs.session_id, { kind: "type_secret", slot: "signin_login", target: "Email" });

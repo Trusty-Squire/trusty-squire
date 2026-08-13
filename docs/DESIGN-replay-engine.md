@@ -7,10 +7,13 @@ the host.
 
 ## Purpose
 
-Repeated `operate_use` tasks can skip rediscovering every browser action. A
+Repeated `operate_recipe_run` tasks can skip rediscovering every browser action. A
 successful run is recorded as ordered mechanics plus typed parameter holes, then
 replayed with fresh values. The host LLM classifies the task and repairs a local
 miss; it does not choose targets during a clean replay.
+
+`operate_remember` and `operate_use` remain behavior-identical compatibility
+aliases for `operate_recipe_save` and `operate_recipe_run`, respectively.
 
 ## Recipe identity
 
@@ -39,7 +42,7 @@ This key does not alter registry Skill lookup or `serviceSlugFromUrl`.
 
 ## Shared registry and domain lock
 
-Every closed recipe verb is eligible for sharing. After `operate_remember`
+Every closed recipe verb is eligible for sharing. After `operate_recipe_save`
 writes locally, the client best-effort publishes a recipe that passes both the
 domain lock and share-eligibility gate. `POST /recipes` is unauthenticated and
 rate-limited per source IP; it repeats both checks, then upserts directly into
@@ -70,7 +73,7 @@ below apply unchanged.
 
 ## Recording contract
 
-`operate_remember` requires a name, goal, closed verb, complete authoritative
+`operate_recipe_save` requires a name, goal, closed verb, complete authoritative
 input ledger, and machine-checkable postcondition. It checks the postcondition
 before writing, so an unverified run never creates or replaces a recipe.
 Sessions that used an off-inventory `text=`/`css=` locator or violated a replay
@@ -126,11 +129,11 @@ missing or mismatched role signal is a miss, never a confident fill.
 
 ## Replay and repair
 
-New calls select a recipe with `operate_use { verb, service_url, params }`.
+New calls select a recipe with `operate_recipe_run { verb, service_url, params }`.
 `params` binds hole names and any legacy `${VAR}` templates. A keyed cache miss
 opens a normal cold session and returns `replay.status = "cache_miss"`. Legacy
 name-only recipes remain hint-only and do not enter deterministic replay.
-`operate_use { verb, session_id, leg: "checkout" }` (no `service_url`,
+`operate_recipe_run { verb, session_id, leg: "checkout" }` (no `service_url`,
 no `resume_from`) instead resolves and replays only the checkout leg against
 the already-open session's current page, keyed by that page's shape
 signature; a miss returns `replay.status = "cache_miss"` and the host drives
@@ -140,15 +143,15 @@ Replay walks the trace in order. A binding, target, live-ref, or action miss
 returns exactly one `fallback_required` result containing the missed step and a
 `next_index`. Extraction and payment also return local repair points because
 credential discovery and the existing `operate_pay` approval flow remain
-host-driven. After repairing that step, the host calls `operate_use` with the
-same recipe bindings, `session_id`, and `resume_from = next_index`; replay checks
-the continuation against the same recipe and bindings, then continues.
+host-driven. After repairing that step, the host calls `operate_recipe_run` with
+the same recipe bindings, `session_id`, and `resume_from = next_index`; replay
+checks the continuation against the same recipe and bindings, then continues.
 
 Organic redirects and OAuth popups remain outside the explicit-action domain
 lock and follow the existing session navigation model.
 
 The saved postcondition is bound from the active replay's parameters before
-`operate_finish_task` verifies it.
+`operate_finish` verifies it through a `result` outcome's `verify_recipe`.
 
 ## Money-path guards
 
@@ -184,7 +187,7 @@ The existing `operate_pay` phone approval, passkey mandate, card injection,
 | Shared recipe write/read routes and submission rate limit | `apps/registry/src/routes/recipes.ts` |
 | Local persistence, render/bind, target resolver | `apps/mcp/src/bot/operator-recipe.ts` |
 | Action-time provenance, verified recording, replay, repair, field guards | `apps/mcp/src/bot/provision-session.ts` |
-| Public `operate_remember` / `operate_use` contracts | `apps/mcp/src/tools/provision-drive.ts` |
+| Public `operate_recipe_save` / `operate_recipe_run` contracts | `apps/mcp/src/tools/provision-drive.ts` |
 | Card-source attestation and payment gate | `apps/mcp/src/tools/operate-pay.ts`, `apps/mcp/src/bot/pay-operator.ts` |
 | Registry Skill keying | `packages/skill-schema/src/service-slugs.ts` |
 
