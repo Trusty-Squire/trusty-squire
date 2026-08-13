@@ -613,8 +613,7 @@ interface ActionRepair {
   safe_alternative: string;
 }
 
-const manualCardRecovery =
-  " Never enter card values with operate_act; use operate_pay.";
+const manualCardRecovery = " Never enter card values with operate_act; use operate_pay.";
 
 const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
   cart_add: {
@@ -676,8 +675,7 @@ const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
 function actionSchemaRepair(args: unknown, issues: readonly { path: (string | number)[] }[]) {
   const input = args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {};
   const kind =
-    typeof input.kind === "string" &&
-    ACTION_KINDS.includes(input.kind as ActionKind)
+    typeof input.kind === "string" && ACTION_KINDS.includes(input.kind as ActionKind)
       ? (input.kind as ActionKind)
       : undefined;
   const missing = [
@@ -692,37 +690,37 @@ function actionSchemaRepair(args: unknown, issues: readonly { path: (string | nu
     kindRepair !== undefined
       ? kindRepair.example
       : kind === "oauth_login"
-      ? {
-          session_id: "<session_id>",
-          kind: "oauth_login",
-          target: "@e:<observed-provider-button-ref>",
-        }
-      : kind === "type_secret"
         ? {
             session_id: "<session_id>",
-            kind: "type_secret",
-            slot: "sealed_secret",
-            target: "@e:<observed-ref>",
+            kind: "oauth_login",
+            target: "@e:<observed-provider-button-ref>",
           }
-        : kind === "select"
+        : kind === "type_secret"
           ? {
               session_id: "<session_id>",
-              kind: "select",
+              kind: "type_secret",
+              slot: "sealed_secret",
               target: "@e:<observed-ref>",
-              text: "Option label",
             }
-          : {
-              session_id: "<session_id>",
-              kind: "type",
-              target: "@e:<observed-ref>",
-              text: "Text to enter",
-            };
+          : kind === "select"
+            ? {
+                session_id: "<session_id>",
+                kind: "select",
+                target: "@e:<observed-ref>",
+                text: "Option label",
+              }
+            : {
+                session_id: "<session_id>",
+                kind: "type",
+                target: "@e:<observed-ref>",
+                text: "Text to enter",
+              };
   const safe_alternative =
     kindRepair !== undefined
       ? kindRepair.safe_alternative
       : kind === "type_secret" && missing.includes("slot")
-      ? 'First capture the value with operate_extract { into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
-      : 'Use kind "type" for text fields or "select" for options, and take target refs from operate_observe. Never enter card values with operate_act; use operate_pay.';
+        ? 'First capture the value with operate_extract { into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
+        : 'Use kind "type" for text fields or "select" for options, and take target refs from operate_observe. Never enter card values with operate_act; use operate_pay.';
   return {
     error: "invalid_action_arguments",
     ...(typeof input.kind === "string" ? { supplied_kind: input.kind } : {}),
