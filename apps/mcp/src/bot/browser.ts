@@ -7504,14 +7504,23 @@ export class BrowserController {
               const isFillable = (element: Element): boolean => {
                 if (!(element instanceof HTMLElement)) return false;
                 const control = element as HTMLInputElement | HTMLSelectElement;
-                const style = getComputedStyle(element);
-                return (
-                  !control.disabled &&
-                  style.display !== "none" &&
-                  style.visibility !== "hidden" &&
-                  Number(style.opacity) !== 0 &&
-                  element.getClientRects().length > 0
-                );
+                if (control.matches(":disabled") || element.getClientRects().length === 0) {
+                  return false;
+                }
+                let current: Element | null = element;
+                while (current !== null) {
+                  const style = getComputedStyle(current);
+                  if (
+                    style.display === "none" ||
+                    style.visibility === "hidden" ||
+                    style.visibility === "collapse" ||
+                    Number.parseFloat(style.opacity) <= 0
+                  ) {
+                    return false;
+                  }
+                  current = current.parentElement;
+                }
+                return true;
               };
               const has = (root: Element, selector: string): boolean =>
                 Array.from(root.querySelectorAll(selector)).some(isFillable);

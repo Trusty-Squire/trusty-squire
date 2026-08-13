@@ -1455,6 +1455,53 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "ignores a selected Shopify card form hidden by an ancestor",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/hidden-selected-card-form";
+      const { page, browser } = await servePages({
+        [pageUrl]: `<title>Kobee Japan</title><iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          <section style="opacity: 0">
+            <form id="stale" aria-selected="true">
+              <input autocomplete="cc-number">
+              <input autocomplete="cc-name">
+              <input autocomplete="cc-exp" placeholder="MM/YY">
+              <input autocomplete="cc-csc">
+            </form>
+          </section>
+          <form id="visible">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        await expect(
+          frame
+            .locator("#stale input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+        ).resolves.toEqual(["", "", "", ""]);
+        expect(await frame.locator("#visible [autocomplete=cc-number]").inputValue()).toBe(CARD.pan);
+        expect(await frame.locator("#visible [autocomplete=cc-name]").inputValue()).toBe(CARD.name);
+        expect(await frame.locator("#visible [autocomplete=cc-exp]").inputValue()).toBe("1230");
+        expect(await frame.locator("#visible [autocomplete=cc-csc]").inputValue()).toBe(CARD.cvv);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "refuses ambiguous Shopify card forms without mixing any fields",
     async () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
