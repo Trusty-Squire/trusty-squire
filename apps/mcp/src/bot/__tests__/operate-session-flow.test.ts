@@ -4593,11 +4593,13 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
     api: ApiClient;
     fetch: typeof fetch;
     approvalBodies: Array<Record<string, unknown>>;
+    immediateApprovalReads: boolean[];
     setApproved: () => void;
   } {
     const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     let approved = false;
     const approvalBodies: Array<Record<string, unknown>> = [];
+    const immediateApprovalReads: boolean[] = [];
     const nonce = "kobee-nonce";
     const agent = "kobee-agent";
     const expiresAt = new Date(Date.now() + 600_000).toISOString();
@@ -4617,12 +4619,16 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
       }
       if (
         (url.endsWith("/v1/pay/approvals/appr_kobee") ||
-          url.endsWith("/v1/pay/approvals/appr_kobee?wait_for_submission=1")) &&
+          url.endsWith("/v1/pay/approvals/appr_kobee?wait_for_submission=1") ||
+          url.endsWith("/v1/pay/approvals/appr_kobee?read_submission=1")) &&
         init?.method === "GET"
       ) {
         const approval = approvalBodies[0]!;
         const operatorPublicKey = String(approval.operator_pubkey);
-        if (!approved) {
+        const readsRelayCandidate =
+          url.endsWith("?wait_for_submission=1") || url.endsWith("?read_submission=1");
+        if (url.endsWith("?read_submission=1")) immediateApprovalReads.push(approved);
+        if (!approved || !readsRelayCandidate) {
           return Response.json({
             id: "appr_kobee",
             status: "pending",
@@ -4695,7 +4701,13 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
       fetch: fetchMock,
     });
 
-    return { api, fetch: fetchMock, approvalBodies, setApproved: () => (approved = true) };
+    return {
+      api,
+      fetch: fetchMock,
+      approvalBodies,
+      immediateApprovalReads,
+      setApproved: () => (approved = true),
+    };
   }
 
   let originalAudience: string | undefined;
@@ -4731,6 +4743,7 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
     const first = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
     expect(first.status).toBe("approval_pending");
     expect(env.approvalBodies).toHaveLength(1);
+    expect(env.immediateApprovalReads).toEqual([false]);
     expect(getActivePendingApproval()).not.toBeNull();
 
     // The human taps approve on their phone.
@@ -4742,6 +4755,7 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
     const second = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
 
     expect(second.status).toBe("payment_submitted");
+    expect(env.immediateApprovalReads).toEqual([false, true]);
     // Exactly ONE approval was ever minted across both calls — a re-arm would
     // show up here as a second POST /v1/pay/approvals.
     expect(env.approvalBodies).toHaveLength(1);
@@ -4769,6 +4783,7 @@ describe("operate_pay tool completion — resumes the SAME approval [P0]", () =>
     expect(["payment_submitted", "payment_3ds_required", "payment_declined"]).toContain(
       second.status,
     );
+    expect(env.immediateApprovalReads).toEqual([false, true]);
   });
 });
 
