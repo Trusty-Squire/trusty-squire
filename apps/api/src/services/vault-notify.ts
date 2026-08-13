@@ -58,13 +58,13 @@ export function formatVaultEventMessage(event: VaultAuditEventInput, at: Date): 
     case VAULT_AUDIT_TYPES.deleted:
       return p.purpose === "user:revoke_all"
         ? `🛑 Credential revoked (kill-switch): ${subject} · ${ts}`
-        : `🗑 Credential deleted: ${subject} · ${ts}`;
+        : `🗑 Credential deleted: ${credentialDeletionSubject(p)} · ${p.reference} · ${ts}`;
     case VAULT_AUDIT_TYPES.restored:
       return `↩️ Credential restored: ${subject} · ${ts}`;
     case VAULT_AUDIT_TYPES.cardStored:
       return `💳 Card added: ${cardSubject(p)} · ${ts}`;
     case VAULT_AUDIT_TYPES.cardDeleted:
-      return `💳 Card removed: ${cardSubject(p)} · ${ts}`;
+      return `💳 Card removed: ${cardSubject(p)} · ${p.reference} · ${ts}`;
     case VAULT_AUDIT_TYPES.paymentExecuted:
       return `💸 Payment ${p.payment_status ?? "executed"}: ${p.merchant ?? "unknown merchant"}${
         p.amount_cents !== undefined && p.currency !== undefined
@@ -85,6 +85,11 @@ export function formatVaultEventMessage(event: VaultAuditEventInput, at: Date): 
 function credentialSubject(p: VaultAuditPayload): string {
   const service = p.service ?? p.reference;
   return p.label !== undefined && p.label !== "default" ? `${service} (${p.label})` : service;
+}
+
+function credentialDeletionSubject(p: VaultAuditPayload): string {
+  if (p.service === undefined) return "credential";
+  return p.label !== undefined && p.label !== "default" ? `${p.service} (${p.label})` : p.service;
 }
 
 function cardSubject(p: VaultAuditPayload): string {

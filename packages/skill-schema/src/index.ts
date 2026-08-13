@@ -42,6 +42,12 @@ export {
   ACCOUNT_EXISTS_KIND,
 } from "./failure-taxonomy.js";
 export type { FailureClass } from "./failure-taxonomy.js";
+export { classifyPaymentCandidateBinding } from "./payment-candidate.js";
+export type {
+  PaymentCandidateBindingInput,
+  PaymentCandidateHash,
+  PaymentCandidateKind,
+} from "./payment-candidate.js";
 export {
   canonicalizeServiceSlug,
   serviceSlugFromHost,

@@ -540,6 +540,8 @@ export class CredentialVault implements VaultClient {
     await this.recordAudit(accountId, VAULT_AUDIT_TYPES.deleted, {
       reference,
       requester: "user",
+      ...(typeof existing.metadata.service === "string" ? { service: existing.metadata.service } : {}),
+      label: existing.label,
     });
   }
 
