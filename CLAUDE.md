@@ -634,6 +634,14 @@ silent multi-minute hang, so they panic-retry or kill the server).
   string, when no persisted cart total (`Session.lastCartCheckout`) is
   usable as a fallback. Never changes what gets approved — browser-observed
   totals only, still never a model-supplied amount.
+- **Late-mounting cross-origin PCI iframe (fillAndSubmitCheckout /
+  fillCheckoutCardFields).** Before taking their `page.frames()` snapshot,
+  both paths wait up to 10 seconds for a PAN field. This lets a single-page
+  checkout complete within the existing approval when its cross-origin PCI
+  iframe mounts after the payment section renders. The wait changes only
+  when the snapshot is taken: `fillCheckoutCardFields` still writes only to
+  the main frame or a frame accepted by `recognizedPaymentProviderFrame`,
+  preserving split-checkout trust boundaries — `browser.ts`.
 
 ### Goose / local-dev MCP install
 

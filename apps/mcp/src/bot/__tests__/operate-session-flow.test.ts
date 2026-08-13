@@ -127,6 +127,15 @@ const h = vi.hoisted(() => ({
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
+  isPayPalHostedCheckout: false,
+  filledCards: [] as unknown[],
+  fillAndSubmitError: null as Error | null,
+  fillAndSubmitResult: { three_ds_required: false } as {
+    three_ds_required: boolean;
+    challenge_url?: string;
+  },
+  clearSealedPaymentFieldsCalls: 0,
+  waitForThreeDsResult: "timeout" as "succeeded" | "failed" | "timeout",
 }));
 
 vi.mock("../browser.js", () => ({
@@ -465,6 +474,42 @@ vi.mock("../browser.js", () => ({
     async focusedElementLabels(): Promise<string[]> {
       return h.focusedLabels;
     }
+    // Payment surface (operate_pay completion-resume coverage) — the real
+    // isPayPalHostedCheckout/fillAndSubmitCheckout/etc. live in browser.ts;
+    // these mirror only what executeOperatePay actually calls.
+    async isPayPalHostedCheckout(): Promise<boolean> {
+      return h.isPayPalHostedCheckout;
+    }
+    async readCheckoutConfirmSummary(): Promise<{
+      merchant: string;
+      checkout_origin: string;
+      amount_cents: number;
+      currency: string;
+    }> {
+      if (h.checkoutSummary === null) throw new Error("payment_checkout_total_not_found");
+      return h.checkoutSummary;
+    }
+    async fillAndSubmitCheckout(card: unknown): Promise<{
+      three_ds_required: boolean;
+      challenge_url?: string;
+    }> {
+      h.filledCards.push(card);
+      if (h.fillAndSubmitError !== null) throw h.fillAndSubmitError;
+      return h.fillAndSubmitResult;
+    }
+    async fillCheckoutCardFields(card: unknown): Promise<void> {
+      h.filledCards.push(card);
+      if (h.fillAndSubmitError !== null) throw h.fillAndSubmitError;
+    }
+    async submitFilledCheckout(): Promise<{ three_ds_required: boolean; challenge_url?: string }> {
+      return h.fillAndSubmitResult;
+    }
+    async clearSealedPaymentFields(): Promise<void> {
+      h.clearSealedPaymentFieldsCalls += 1;
+    }
+    async waitForThreeDsResolution(): Promise<"succeeded" | "failed" | "timeout"> {
+      return h.waitForThreeDsResult;
+    }
     async close(): Promise<void> {
       h.closeCalls += 1;
       if (h.connections[this.index] === true) h.started -= 1;
@@ -531,6 +576,12 @@ vi.mock("../google-login.js", async (importOriginal) => {
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createHash, generateKeyPairSync } from "node:crypto";
+import canonicalize from "canonicalize";
+import { exportJWK, SignJWT } from "jose";
+import { sealToRecipient } from "../payment-hpke.js";
+import { operatePayTool } from "../../tools/operate-pay.js";
+import { ApiClient } from "../../api-client.js";
 import {
   startProvisionSession,
   act,
@@ -584,7 +635,6 @@ import {
   storedExtractResult,
   withSigninHost,
 } from "../../tools/provision-drive.js";
-import type { ApiClient } from "../../api-client.js";
 
 function elem(partial: Record<string, unknown>): unknown {
   // Default locale-stable role signals for money-path fixtures so the
@@ -706,6 +756,12 @@ beforeEach(() => {
   h.locatorTypeCalls = [];
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
+  h.isPayPalHostedCheckout = false;
+  h.filledCards = [];
+  h.fillAndSubmitError = null;
+  h.fillAndSubmitResult = { three_ds_required: false };
+  h.clearSealedPaymentFieldsCalls = 0;
+  h.waitForThreeDsResult = "timeout";
 });
 
 const replayRecipe = (overrides: Partial<OperatorRecipe> = {}): OperatorRecipe => ({
@@ -4489,6 +4545,230 @@ describe("awaiting-approval payment lease [P0]", () => {
     if (resumed.kind !== "lease") throw new Error("expected a resumed lease");
     expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
     expect(releaseActivePaymentLease(resumed.lease, true)).toBe(true);
+  });
+});
+
+// ── operate_pay tool completion — resumes the SAME approval [P0] ───────────
+//
+// The full operate_pay MCP tool (session lease + executeOperatePay), not just
+// the pure executeOperatePay unit. A single-page checkout whose card fields
+// live in a late-mounting cross-origin PCI iframe: the first call creates the
+// approval and hands back approval_pending; once the phone taps approve, a
+// SECOND operate_pay call with the SAME arguments must resume that exact
+// approval and fill+submit within it — never mint a fresh approval, never
+// re-arm approval_pending once the mandate is already signed.
+describe("operate_pay tool completion — resumes the SAME approval [P0]", () => {
+  const CHECKOUT = {
+    merchant: "Kobee Japan",
+    checkout_origin: "https://store.kobeejapan.net",
+    amount_cents: 490_000,
+    currency: "JPY",
+  };
+  const SYNTHETIC_CARD = {
+    pan: "4242424242424242",
+    exp_month: "12",
+    exp_year: "30",
+    name: "Synthetic Cardholder",
+    cvv: "123",
+    billing: {
+      line1: "123 Test Street",
+      city: "Testville",
+      postal_code: "10001",
+      country: "US",
+    },
+  };
+  const baseArgs = {
+    card_ref: "card_kobee",
+    merchant: CHECKOUT.merchant,
+    amount_cents: CHECKOUT.amount_cents,
+    currency: CHECKOUT.currency,
+    item: "Matcha set",
+    reason: "gift",
+  };
+
+  // Mirrors buildResumableEnv in pay-operator.test.ts but drives the payment
+  // through the REAL operate_pay tool + session-lease glue instead of calling
+  // executeOperatePay directly — the layer that has no coverage otherwise.
+  function buildPaymentEnv(): {
+    api: ApiClient;
+    fetch: typeof fetch;
+    approvalBodies: Array<Record<string, unknown>>;
+    setApproved: () => void;
+  } {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    let approved = false;
+    const approvalBodies: Array<Record<string, unknown>> = [];
+    const nonce = "kobee-nonce";
+    const agent = "kobee-agent";
+    const expiresAt = new Date(Date.now() + 600_000).toISOString();
+
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url === "https://vouchflow.test/.well-known/jwks.json") {
+        const jwk = await exportJWK(publicKey);
+        return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
+      }
+      if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+        approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return Response.json(
+          { id: "appr_kobee", nonce, agent, expires_at: expiresAt },
+          { status: 201 },
+        );
+      }
+      if (
+        (url.endsWith("/v1/pay/approvals/appr_kobee") ||
+          url.endsWith("/v1/pay/approvals/appr_kobee?wait_for_submission=1")) &&
+        init?.method === "GET"
+      ) {
+        const approval = approvalBodies[0]!;
+        const operatorPublicKey = String(approval.operator_pubkey);
+        if (!approved) {
+          return Response.json({
+            id: "appr_kobee",
+            status: "pending",
+            ...CHECKOUT,
+            nonce,
+            card_ref: "card_kobee",
+            operator_pubkey: operatorPublicKey,
+            jws: null,
+            sealed_card: null,
+            expires_at: expiresAt,
+          });
+        }
+        const recipientHash = createHash("sha256")
+          .update(Buffer.from(operatorPublicKey, "base64url"))
+          .digest("base64url");
+        const canonical = canonicalize({
+          approval_id: "appr_kobee",
+          merchant: CHECKOUT.merchant,
+          checkout_origin: CHECKOUT.checkout_origin,
+          amount_cents: CHECKOUT.amount_cents,
+          currency: CHECKOUT.currency,
+          nonce,
+          card_ref: "card_kobee",
+          recipient_pubkey_hash: recipientHash,
+          item: approval.item,
+          reason: approval.reason,
+          agent,
+        })!;
+        const aad = createHash("sha256").update(canonical, "utf8").digest();
+        const jws = await new SignJWT({
+          payload_sha256: aad.toString("base64url"),
+          context: "purchase",
+          confidence: "high",
+          mandate_id: "mandate_kobee",
+        })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+          .setIssuer("https://vouchflow.dev")
+          .setAudience("customer_test")
+          .sign(privateKey);
+        const sealed_card = await sealToRecipient(
+          operatorPublicKey,
+          new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
+          aad,
+        );
+        return Response.json({
+          id: "appr_kobee",
+          status: "approved",
+          ...CHECKOUT,
+          nonce,
+          card_ref: "card_kobee",
+          operator_pubkey: operatorPublicKey,
+          jws,
+          sealed_card,
+          expires_at: expiresAt,
+        });
+      }
+      if (url.endsWith("/v1/pay/approvals/appr_kobee/confirm") && init?.method === "POST") {
+        return Response.json({ status: "approved" });
+      }
+      if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
+        return Response.json({ id: "audit_kobee" }, { status: 201 });
+      }
+      return Response.json({ error: "not_found" }, { status: 404 });
+    }) as typeof fetch;
+
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session-token",
+      fetch: fetchMock,
+    });
+
+    return { api, fetch: fetchMock, approvalBodies, setApproved: () => (approved = true) };
+  }
+
+  let originalAudience: string | undefined;
+  let originalVouchflowBase: string | undefined;
+  let originalFetch: typeof fetch;
+
+  beforeEach(() => {
+    originalAudience = process.env.VOUCHFLOW_EXPECTED_AUDIENCE;
+    originalVouchflowBase = process.env.VOUCHFLOW_API_BASE;
+    process.env.VOUCHFLOW_EXPECTED_AUDIENCE = "customer_test";
+    process.env.VOUCHFLOW_API_BASE = "https://vouchflow.test";
+    originalFetch = global.fetch;
+    h.checkoutSummary = CHECKOUT;
+    h.isPayPalHostedCheckout = false;
+  });
+  afterEach(() => {
+    if (originalAudience === undefined) delete process.env.VOUCHFLOW_EXPECTED_AUDIENCE;
+    else process.env.VOUCHFLOW_EXPECTED_AUDIENCE = originalAudience;
+    if (originalVouchflowBase === undefined) delete process.env.VOUCHFLOW_API_BASE;
+    else process.env.VOUCHFLOW_API_BASE = originalVouchflowBase;
+    global.fetch = originalFetch;
+  });
+
+  it("fills and submits within the SAME approval once the phone has responded — never re-arms approval_pending", async () => {
+    const env = buildPaymentEnv();
+    // executeOperatePay's own JWKS fetch goes through the real global fetch
+    // (the tool layer never overrides deps.fetch) — route it through the same
+    // mock backing the ApiClient.
+    global.fetch = env.fetch;
+
+    await startProvisionSession({ serviceUrl: "https://store.kobeejapan.net/checkout" });
+
+    const first = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
+    expect(first.status).toBe("approval_pending");
+    expect(env.approvalBodies).toHaveLength(1);
+    expect(getActivePendingApproval()).not.toBeNull();
+
+    // The human taps approve on their phone.
+    env.setApproved();
+
+    // Completion call: same arguments, no phase — the single-page path. The
+    // card fields live in the (by now mounted) cross-origin PCI iframe; the
+    // mock's fillAndSubmitCheckout stands in for that fill.
+    const second = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
+
+    expect(second.status).toBe("payment_submitted");
+    // Exactly ONE approval was ever minted across both calls — a re-arm would
+    // show up here as a second POST /v1/pay/approvals.
+    expect(env.approvalBodies).toHaveLength(1);
+    expect(h.filledCards).toEqual([SYNTHETIC_CARD]);
+    // The lease resolved to a terminal outcome — no dangling awaiting_approval
+    // state left behind for a THIRD call to loop on.
+    expect(getActivePendingApproval()).toBeNull();
+  });
+
+  it("never returns approval_pending a second time once the mandate is signed — terminal or a genuine handoff, not a re-arm", async () => {
+    const env = buildPaymentEnv();
+    global.fetch = env.fetch;
+
+    await startProvisionSession({ serviceUrl: "https://store.kobeejapan.net/checkout" });
+
+    const first = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
+    expect(first.status).toBe("approval_pending");
+
+    env.setApproved();
+    const second = (await operatePayTool.handler(baseArgs, env.api)) as Record<string, unknown>;
+
+    // Never a dead-end re-arm: the mandate is either spent on a terminal
+    // outcome or the host gets an explicit, non-looping status.
+    expect(second.status).not.toBe("approval_pending");
+    expect(["payment_submitted", "payment_3ds_required", "payment_declined"]).toContain(
+      second.status,
+    );
   });
 });
 

@@ -558,6 +558,73 @@ describe("checkout payment parsing", () => {
       }
     },
   );
+
+  it.skipIf(!chromiumAvailable)(
+    "fills and submits a single-page checkout whose card fields mount in a cross-origin iframe AFTER the call starts",
+    async () => {
+      const pciUrl = "https://checkout.pci.shopifyinc.test/card-fields";
+      const playwrightBrowser = await chromium.launch({ headless: true });
+      try {
+        const page = await playwrightBrowser.newPage();
+        await page.route("**/*", async (route) => {
+          const url = route.request().url();
+          if (url === pciUrl) {
+            return route.fulfill({
+              contentType: "text/html",
+              body: `
+                <input autocomplete="cc-number">
+                <input inputmode="numeric" placeholder="MM/YY">
+                <input autocomplete="cc-csc">
+                <input autocomplete="cc-name">`,
+            });
+          }
+          return route.continue();
+        });
+        await page.setContent(`
+          <title>Kobee Japan</title>
+          <div>Order total 4,900円</div>
+          <button type="button" id="place-order">Place order</button>
+          <script>
+            // The PCI iframe mounts only once the payment section renders —
+            // absent on first load, appearing well after the call to fill it
+            // has already started.
+            setTimeout(() => {
+              const frame = document.createElement("iframe");
+              frame.src = "${pciUrl}";
+              document.body.append(frame);
+            }, 500);
+            document.querySelector("#place-order").addEventListener("click", () => {
+              document.body.dataset.submitted = "true";
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const result = await controller.fillAndSubmitCheckout({
+          pan: "4242424242424242",
+          exp_month: "12",
+          exp_year: "30",
+          cvv: "123",
+          name: "Synthetic Cardholder",
+          billing: {
+            line1: "123 Synthetic Street",
+            city: "Testville",
+            postal_code: "10001",
+            country: "JP",
+          },
+        });
+
+        expect(result.three_ds_required).toBe(false);
+        expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+        const pciFrame = page.frames().find((frame) => frame.url() === pciUrl)!;
+        expect(await pciFrame.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+      } finally {
+        await playwrightBrowser.close();
+      }
+    },
+    20_000,
+  );
 });
 
 function orderJsonLd(due: Record<string, unknown>): string {
