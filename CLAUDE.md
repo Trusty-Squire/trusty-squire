@@ -16,7 +16,7 @@ user's machine; an API on Fly.io handles persistence and orchestration.
 
 **Interactive operator driver** — the host agent plans each step with
 `operate_start`, `operate_observe`, `operate_act`, `operate_extract`,
-and `operate_finish_task`/`operate_finish`; Trusty Squire supplies the scoped
+and `operate_finish`; Trusty Squire supplies the scoped
 browser, DOM/screenshot observations, vault extraction, and registry hints.
 Account-bound, vault-backed. Provisioning is free during beta (no signup quota).
 Closed-loop with the skill registry: eligible successful runs publish a Skill that
@@ -119,7 +119,7 @@ silent failures.
     gate), verification-link click, and post-verify navigation primitives
     the host agent drives via `operate_*`.
   - DOM/screenshot observation + vault-backed credential extraction +
-    operator-recipe replay (`operate_use`) the host agent composes per step.
+    operator-recipe replay (`operate_recipe_run`) the host agent composes per step.
   - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
     controls now retain their frame origin through observation, action, and
     operator-recipe replay. The user-facing contract lives in README's MCP-tool
@@ -560,12 +560,12 @@ own signature; Shopify↔WooCommerce mutual discrimination holds, 0 overlap).
   pattern-matching. `rememberRecipe` writes the ordinary whole-task recipe
   UNCHANGED, then (verb in `MONEY_REPLAY_VERBS` and a money field exists)
   ALSO writes a second, narrower recipe covering just `trace.slice(legStart)`,
-  keyed by the LIVE checkout page's signature at `operate_remember` time
+  keyed by the LIVE checkout page's signature at `operate_recipe_save` time
   (`BrowserController.extractCheckoutFieldNames`, deliberately reading
   `type=hidden` fields that `extractInteractiveElements` deliberately
   skips). Both publish to the registry independently, live on write
-  (`operate_remember`'s `checkout_leg_registry_publish`).
-- **Independent replay entry point:** `operate_use{verb, session_id,
+  (`operate_recipe_save`'s `checkout_leg_registry_publish`).
+- **Independent replay entry point:** `operate_recipe_run{verb, session_id,
   leg:"checkout"}` (no `service_url`) resolves+replays just the checkout
   leg against an ALREADY-OPEN session's current page — local store first,
   then the registry, by signature. Degrades to `replay.status:"cache_miss"`

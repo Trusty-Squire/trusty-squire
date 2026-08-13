@@ -1,6 +1,6 @@
 # DESIGN — generalized skill steps as operator guidance
 
-Scope note: this document owns registry skill guidance. Local `operate_use`
+Scope note: this document owns registry skill guidance. Local `operate_recipe_run`
 replay is a separate system; [DESIGN-replay-engine.md](DESIGN-replay-engine.md)
 owns that contract and supersedes this document's earlier blind-replay
 assumptions.
@@ -83,7 +83,7 @@ OPERATOR gets them as guidance:
 - The operator already treats the hint as a prior, not a command (its tool
   description says "read it and …"). No change to the drive loop. The operator
   observes, adapts, and a stale step just costs a re-look, not a failure.
-- Local `operate_use` recipes are not registry Skills; their deterministic
+- Local `operate_recipe_run` recipes are not registry Skills; their deterministic
   replay and repair behavior is specified in `DESIGN-replay-engine.md`.
 
 ## Producer — capture at verified success
@@ -93,19 +93,20 @@ To have generalized steps to serve, the operate_* flow must produce the capture
 (Codex's original recommendation), now safe because the output is consumed as
 guidance, not blind-replayed.
 
-- **Hook:** `operate_finish_task kind=credentials` (`provision-drive.ts:554`).
+- **Hook:** `operate_finish` with `outcome.kind="credentials"`
+  (`handleFinishOutcome` in `provision-drive.ts`).
 - **Verified-success gate:** produce only when `stored_credential != null` AND
   `blocked_reason == undefined` AND a `verifyPostcondition` check passes
   (`provision-session.ts:1552`, reused on the just-extracted field). A skill from
   an unverified run poisons the registry.
 - On the gate passing, run `promoteToSkill` on the capture (with the Fix-1
   generalization) and POST to `/skills` as pending-review; the housekeeper verify
-  pass promotes to active on a clean replay. Fire on the awaited gate result, log
-  outcome to the finish_task trail with an `[auto-promote]` prefix; never fail the
-  parent provision.
+  pass promotes to active on a clean replay. Fire on the awaited gate result,
+  log the outcome to the finish trail with an `[auto-promote]` prefix; never fail
+  the parent provision.
 
 ```
-operate_finish_task (verified success)
+operate_finish outcome.kind=credentials (verified success)
       │
       ├─ promoteToSkill(capture)  →  generalize volatile fields  →  POST /skills (pending-review)
       │                                                                    │
