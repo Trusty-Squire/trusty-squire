@@ -163,14 +163,13 @@ ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash
 is the HPKE associated data, so the envelope cannot be moved to a different
 approval, card, purchase, or operator. The API temporarily stages only the JWS,
 operator-sealed ciphertext, SHA-256 candidate fingerprint, phase, and expiry in
-the account-owned approval row. This durable relay survives API-worker changes,
-and only an authenticated agent for the same account can receive or confirm it;
-the [API route reference](apps/api/README.md#endpoints) owns its polling and
-lifetime contract.
+the account-owned approval row. The 15-second relay survives API-worker changes;
+only an authenticated agent for the same account can receive or confirm it.
 After the operator verifies the mandate issuer, audience, canonical payload, and
 envelope, final confirmation must match the delivered fingerprint, atomically
 marks the approval approved, and clears all persisted JWS and ciphertext bytes.
-A different, expired, wrong-account, or undelivered candidate fails closed.
+Repeating confirmation for that same fingerprint is safe during the relay TTL,
+while a different, expired, wrong-account, or undelivered candidate fails closed.
 
 Review-format candidates already staged by a legacy deployment remain accepted
 only for compatibility; new review-bound API submissions fail with
