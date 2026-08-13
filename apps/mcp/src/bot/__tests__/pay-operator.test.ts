@@ -1507,6 +1507,40 @@ describe("operate_pay split checkout — confirm", () => {
     expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
   });
 
+  it("Rakuten-style: fill_card approves the cart 小計, then a higher 注文確認 total refuses closed", async () => {
+    // fill_card sources the cart's subtotal (小計 2,803円 — the session's
+    // carried cart total) as the approved amount.
+    const rakutenCart: CheckoutSummary = {
+      merchant: "Rakuten",
+      checkout_origin: "https://shop.split.test",
+      amount_cents: 2_803,
+      currency: "JPY",
+    };
+    const { result: fillResult, approvalBodies } = await runSplitFill({
+      cartFallbackCheckout: rakutenCart,
+    });
+    expect(fillResult).toMatchObject({
+      status: "payment_card_filled",
+      amount_cents: 2_803,
+      currency: "JPY",
+    });
+    expect(approvalBodies[0]).toMatchObject({ amount_cents: 2_803, currency: "JPY" });
+
+    // confirm sees a strictly higher FINAL total on the order-confirmation page
+    // and refuses — the SAME approval is never exceeded, no second tap.
+    const { result: confirmResult, browser } = await runConfirm({
+      approvedCheckout: rakutenCart,
+      live: { ...rakutenCart, amount_cents: 3_000 },
+    });
+    expect(confirmResult).toMatchObject({
+      status: "payment_amount_exceeds_approval",
+      approved_amount_cents: 2_803,
+      live_amount_cents: 3_000,
+    });
+    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
+  });
+
   it("refuses to charge while the total is still not visible", async () => {
     const { result, auditBodies, browser } = await runConfirm({
       live: new Error("payment_checkout_total_not_found"),

@@ -2459,6 +2459,15 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
+  // Feed the session's live allowed hosts to the browser's fail-fast
+  // request-scope guard (Defect A): same-registrable-domain merchant API
+  // siblings are auto-scoped in, and genuinely out-of-scope in-page API
+  // calls fail fast instead of hanging the page. Read lazily, so future
+  // allow_host / auto-widen updates apply without re-registering. Guarded so
+  // mocks/harness browsers without the method stay inert.
+  if (typeof browser.setHostScopeAllowedHosts === "function") {
+    browser.setHostScopeAllowedHosts(() => hostStrings(session));
+  }
   inFlight = true;
   try {
     audit(id, "start", {
