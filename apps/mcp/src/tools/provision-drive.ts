@@ -373,6 +373,71 @@ export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   },
 };
 
+// Shared credential destination shape. Both operate_act(kind:"extract") and
+// the legacy operate_extract alias validate and execute this exact contract.
+// The credentials terminal also reuses it below.
+const storeShape = z.object({
+  service: z.string().min(1).max(120),
+  label: z.string().min(1).max(60).optional(),
+  env_var_suggestion: z.string().min(1).max(120).optional(),
+  type: z.string().min(1).max(60).optional(),
+  // Explicit egress hosts: where this key may LATER be sent by the proxy.
+  // Read them off the API base URL the page/SDK snippet shows — a grounded
+  // read, not a guess. Unioned with the service-default + start/auto_widen
+  // scope (never mid_session task scope). Omit for a single-service key.
+  egress_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
+  auth_shape: z
+    .string()
+    .max(120)
+    .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
+    .optional(),
+});
+type StoreSpec = z.infer<typeof storeShape>;
+
+const storeJsonProps = {
+  service: { type: "string" },
+  label: { type: "string" },
+  env_var_suggestion: { type: "string" },
+  type: { type: "string" },
+  egress_hosts: { type: "array", items: { type: "string" } },
+  auth_shape: { type: "string" },
+} as const;
+
+const formSelectionsSchema = z
+  .record(z.string().min(1).max(200), z.string().min(1).max(4096))
+  .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
+  .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call");
+
+interface CartAddArgs {
+  session_id: string;
+  product_identity: string;
+  options_hash: string;
+  idempotency_key: string;
+}
+
+interface FormSelectManyArgs {
+  session_id: string;
+  selections: Record<string, string>;
+}
+
+interface ExtractArgs {
+  session_id: string;
+  into_slot?: string | undefined;
+  secret_label?: string | undefined;
+  store?: StoreSpec | undefined;
+}
+
+interface CaptchaArgs {
+  session_id: string;
+}
+
+interface AwaitVerificationArgs {
+  session_id: string;
+  sender?: string | undefined;
+  into_slot?: string | undefined;
+  grant_inbox_consent?: boolean | undefined;
+}
+
 const actSchema = z
   .object({
     session_id: z.string().min(1),
@@ -391,6 +456,11 @@ const actSchema = z
       "type_secret",
       "scroll",
       "upload",
+      "cart_add",
+      "select_many",
+      "extract",
+      "solve_captcha",
+      "await_verification",
     ]),
     target: z.string().min(1).max(200).optional(),
     text: z.string().max(4096).optional(),
@@ -407,6 +477,13 @@ const actSchema = z
     slot: z.string().min(1).max(60).optional(),
     product_identity: z.string().trim().min(1).max(500).optional(),
     options_hash: z.string().trim().min(1).max(128).optional(),
+    idempotency_key: z.string().trim().min(1).max(256).optional(),
+    selections: formSelectionsSchema.optional(),
+    into_slot: z.string().min(1).max(60).optional(),
+    secret_label: z.string().min(1).max(60).optional(),
+    store: storeShape.optional(),
+    sender: z.string().min(1).max(120).optional(),
+    grant_inbox_consent: z.boolean().optional(),
     provenance: RecipeHoleSchema.shape.hole.optional(),
     replay_step_index: z.number().int().min(0).optional(),
     replay_hole: RecipeHoleSchema.shape.hole.optional(),
@@ -438,6 +515,7 @@ const actSchema = z
       allow_host: ["host"],
       type_secret: ["slot", "target"],
       upload: ["target", "path"],
+      cart_add: ["product_identity", "options_hash", "idempotency_key"],
     };
     const actionValue = value as Record<string, unknown>;
     for (const field of requiredByKind[value.kind] ?? []) {
@@ -449,6 +527,13 @@ const actSchema = z
           message: `Required for kind="${value.kind}"`,
         });
       }
+    }
+    if (value.kind === "select_many" && value.selections === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["selections"],
+        message: 'Required for kind="select_many"',
+      });
     }
     if ((value.replay_step_index === undefined) !== (value.replay_hole === undefined)) {
       ctx.addIssue({
@@ -514,6 +599,11 @@ const ACTION_KINDS = [
   "type_secret",
   "scroll",
   "upload",
+  "cart_add",
+  "select_many",
+  "extract",
+  "solve_captcha",
+  "await_verification",
 ] as const;
 
 function actionSchemaRepair(args: unknown, issues: readonly { path: (string | number)[] }[]) {
@@ -551,12 +641,26 @@ function actionSchemaRepair(args: unknown, issues: readonly { path: (string | nu
               target: "@e:<observed-ref>",
               text: "Option label",
             }
-          : {
-              session_id: "<session_id>",
-              kind: "type",
-              target: "@e:<observed-ref>",
-              text: "Text to enter",
-            };
+          : kind === "cart_add"
+            ? {
+                session_id: "<session_id>",
+                kind: "cart_add",
+                product_identity: "<canonical-product-identity>",
+                options_hash: "<selected-options-hash>",
+                idempotency_key: "<stable-idempotency-key>",
+              }
+            : kind === "select_many"
+              ? {
+                  session_id: "<session_id>",
+                  kind: "select_many",
+                  selections: { "Observed field label": "Visible option label" },
+                }
+              : {
+                  session_id: "<session_id>",
+                  kind: "type",
+                  target: "@e:<observed-ref>",
+                  text: "Text to enter",
+                };
   const safe_alternative =
     kind === "type_secret" && missing.includes("slot")
       ? 'First capture the value with operate_extract { into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
@@ -637,7 +741,99 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
       };
     case "upload":
       return { kind: "upload", target: need(args.target, "target"), path: need(args.path, "path") };
+    case "cart_add":
+    case "select_many":
+    case "extract":
+    case "solve_captcha":
+    case "await_verification":
+      throw new Error(`operate_act kind="${args.kind}" must use its delegated handler`);
   }
+}
+
+async function handleCartAdd(args: CartAddArgs) {
+  return await cartAdd(
+    args.session_id,
+    args.product_identity,
+    args.options_hash,
+    args.idempotency_key,
+  );
+}
+
+async function handleFormSelectMany(args: FormSelectManyArgs) {
+  return await formSelectMany(args.session_id, args.selections);
+}
+
+async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
+  const extracted = await extractCredentials(args.session_id);
+
+  // Sealed transfer: capture the primary secret into a session-local slot and
+  // return ONLY a masked handle. The value never reaches the host. A later
+  // type_secret enters it into another site's form. Mutually exclusive with
+  // store (a slotted secret is being shuttled, not vaulted, in this call).
+  if (args.into_slot !== undefined) {
+    const values = extracted.credentials;
+    // A still-masked display (Google's OAuth secret shows "GOCSPX-••••" with a
+    // copy button) must NOT be sealed — the slot would hold junk. Reject any
+    // value with mask glyphs (canonical isMaskedDisplay) or the truncated-capture
+    // marker, and prefer a full value over the masked api_key when the page has both.
+    const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const candidates = Object.entries(values).filter(
+      ([k, v]) =>
+        !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !isMaskedDisplay(v),
+    );
+    // When the page shows several credentials (Google's client ID + secret),
+    // a secret_label picks the right one by field name; otherwise take the
+    // first full value. Falling back avoids a hard fail when the label misses.
+    const wantKey = args.secret_label !== undefined ? norm(args.secret_label) : null;
+    const matched =
+      wantKey !== null ? candidates.find(([k]) => norm(k).includes(wantKey)) : undefined;
+    const full = (matched ?? candidates[0])?.[1];
+    if (typeof full !== "string" || full.length === 0) {
+      return {
+        session_id: extracted.session_id,
+        url: extracted.url,
+        candidate_count: extracted.candidate_count,
+        sealed: false,
+        slot: null,
+        blocked_reason:
+          "the secret is still masked/hidden — reveal it first (click the " +
+          "show/reveal/copy control near the key), then operate_extract again",
+      };
+    }
+    const handle = stashSecretSlot(args.session_id, args.into_slot, full);
+    // Strip raw credential VALUES from the response — host gets the handle only.
+    return {
+      session_id: extracted.session_id,
+      url: extracted.url,
+      candidate_count: extracted.candidate_count,
+      sealed: true,
+      slot: handle,
+      ...(extracted.blocked_reason !== undefined
+        ? { blocked_reason: extracted.blocked_reason }
+        : {}),
+    };
+  }
+
+  if (args.store === undefined || Object.keys(extracted.credentials).length === 0) {
+    return extracted;
+  }
+  if (api === null) {
+    throw new Error("operate_extract store requires an active Trusty Squire session");
+  }
+  const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
+  return storedExtractResult(extracted, stored);
+}
+
+async function handleCaptcha(args: CaptchaArgs) {
+  return await captchaGate(args.session_id);
+}
+
+async function handleAwaitVerification(args: AwaitVerificationArgs) {
+  return await awaitVerification(args.session_id, {
+    ...(args.sender !== undefined ? { sender: args.sender } : {}),
+    ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
+    ...(args.grant_inbox_consent === true ? { grantConsent: true } : {}),
+  });
 }
 
 export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
@@ -690,6 +886,14 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "path. The bot sets the file via the browser's file chooser, so no OS dialog " +
     "is driven and no API credential is needed — it uses the session you're " +
     "already signed into). " +
+    "cart_add (product_identity + options_hash + idempotency_key — reserve an " +
+    "idempotent cart mutation, exact-line post-verify it, and return its postcondition), " +
+    "select_many (ordered selections map — select sequentially, re-observe after " +
+    "each success, and retain partial results), extract (into_slot/secret_label/store — " +
+    "the same credential-safe slot/vault behavior as operate_extract), solve_captcha " +
+    "(the same solver and needs_user fail-fast handoff as operate_captcha_gate), and " +
+    "await_verification (sender/into_slot/grant_inbox_consent — the same sealed OTP " +
+    "and consent gate as operate_await_verification). The five legacy tool names remain aliases. " +
     "For type/select/set_phone_country, pass provenance when the value came from a " +
     "Squire-known address, contact, product_query, or quantity input; type_secret and " +
     "operate_pay record credential and card provenance from their sealed sources. " +
@@ -725,6 +929,11 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
           "type_secret",
           "scroll",
           "upload",
+          "cart_add",
+          "select_many",
+          "extract",
+          "solve_captcha",
+          "await_verification",
         ],
       },
       target: { type: "string" },
@@ -737,6 +946,23 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       slot: { type: "string" },
       product_identity: { type: "string", minLength: 1 },
       options_hash: { type: "string", minLength: 1 },
+      idempotency_key: { type: "string", minLength: 1 },
+      selections: {
+        type: "object",
+        minProperties: 1,
+        maxProperties: 12,
+        additionalProperties: { type: "string" },
+        description: "Map each observed field label or @e: ref to its visible option text.",
+      },
+      into_slot: { type: "string" },
+      secret_label: { type: "string" },
+      store: {
+        type: "object",
+        required: ["service"],
+        properties: storeJsonProps,
+      },
+      sender: { type: "string" },
+      grant_inbox_consent: { type: "boolean" },
       provenance: {
         type: "string",
         pattern:
@@ -753,7 +979,19 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     },
   },
   schemaRepair: actionSchemaRepair,
-  async handler(args) {
+  async handler(args, api) {
+    switch (args.kind) {
+      case "cart_add":
+        return await handleCartAdd(args as CartAddArgs);
+      case "select_many":
+        return await handleFormSelectMany(args as FormSelectManyArgs);
+      case "extract":
+        return await handleExtract(args, api);
+      case "solve_captcha":
+        return await handleCaptcha(args);
+      case "await_verification":
+        return await handleAwaitVerification(args);
+    }
     // Keep the defense-in-depth guard in act() for internal/replay callers,
     // while this public tool surface makes the safe recovery explicit at the
     // exact point a small model tried a forbidden manual PAN entry.
@@ -811,24 +1049,14 @@ export const operateCartAddTool: Tool<z.infer<typeof cartAddSchema>> = {
     },
   },
   annotations: { readOnlyHint: false, idempotentHint: true },
-  async handler(args) {
-    return await cartAdd(
-      args.session_id,
-      args.product_identity,
-      args.options_hash,
-      args.idempotency_key,
-    );
-  },
+  handler: handleCartAdd,
 };
 
 const formSelectManySchema = z.object({
   session_id: z.string().min(1),
   // A label/ref → visible option map. Labels deliberately match the existing
   // select targeting grammar, while refs remain useful when labels collide.
-  selections: z
-    .record(z.string().min(1).max(200), z.string().min(1).max(4096))
-    .refine((value) => Object.keys(value).length > 0, "Provide at least one selection")
-    .refine((value) => Object.keys(value).length <= 12, "At most 12 selections per call"),
+  selections: formSelectionsSchema,
 });
 
 export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema>> = {
@@ -855,39 +1083,8 @@ export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema
       },
     },
   },
-  async handler(args) {
-    return await formSelectMany(args.session_id, args.selections);
-  },
+  handler: handleFormSelectMany,
 };
-
-// Shared "store this credential in the vault" shape — used by both the
-// mid-session extract tool and the credentials terminal (operate_finish_task).
-const storeShape = z.object({
-  service: z.string().min(1).max(120),
-  label: z.string().min(1).max(60).optional(),
-  env_var_suggestion: z.string().min(1).max(120).optional(),
-  type: z.string().min(1).max(60).optional(),
-  // Explicit egress hosts: where this key may LATER be sent by the proxy.
-  // Read them off the API base URL the page/SDK snippet shows — a grounded
-  // read, not a guess. Unioned with the service-default + start/auto_widen
-  // scope (never mid_session task scope). Omit for a single-service key.
-  egress_hosts: z.array(z.string().min(1).max(253)).max(10).optional(),
-  auth_shape: z
-    .string()
-    .max(120)
-    .regex(/^(bearer|header:.+|query:.+)$/, "auth_shape must be bearer|header:<name>|query:<param>")
-    .optional(),
-});
-type StoreSpec = z.infer<typeof storeShape>;
-
-const storeJsonProps = {
-  service: { type: "string" },
-  label: { type: "string" },
-  env_var_suggestion: { type: "string" },
-  type: { type: "string" },
-  egress_hosts: { type: "array", items: { type: "string" } },
-  auth_shape: { type: "string" },
-} as const;
 
 // Vault-store an extracted credential. Shared by extract + the credentials
 // terminal so the stored record is byte-identical regardless of entry point.
@@ -1004,69 +1201,7 @@ export const provisionExtractTool: Tool<z.infer<typeof extractSchema>> = {
       },
     },
   },
-  async handler(args, api) {
-    const extracted = await extractCredentials(args.session_id);
-
-    // Sealed transfer: capture the primary secret into a session-local slot and
-    // return ONLY a masked handle. The value never reaches the host. A later
-    // type_secret enters it into another site's form. Mutually exclusive with
-    // store (a slotted secret is being shuttled, not vaulted, in this call).
-    if (args.into_slot !== undefined) {
-      const values = extracted.credentials;
-      // A still-masked display (Google's OAuth secret shows "GOCSPX-••••" with a
-      // copy button) must NOT be sealed — the slot would hold junk. Reject any
-      // value with mask glyphs (canonical isMaskedDisplay) or the truncated-capture
-      // marker, and prefer a full value over the masked api_key when the page has both.
-      const norm = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]/g, "");
-      const candidates = Object.entries(values).filter(
-        ([k, v]) =>
-          !k.endsWith("_truncated") &&
-          typeof v === "string" &&
-          v.length >= 8 &&
-          !isMaskedDisplay(v),
-      );
-      // When the page shows several credentials (Google's client ID + secret),
-      // a secret_label picks the right one by field name; otherwise take the
-      // first full value. Falling back avoids a hard fail when the label misses.
-      const wantKey = args.secret_label !== undefined ? norm(args.secret_label) : null;
-      const matched =
-        wantKey !== null ? candidates.find(([k]) => norm(k).includes(wantKey)) : undefined;
-      const full = (matched ?? candidates[0])?.[1];
-      if (typeof full !== "string" || full.length === 0) {
-        return {
-          session_id: extracted.session_id,
-          url: extracted.url,
-          candidate_count: extracted.candidate_count,
-          sealed: false,
-          slot: null,
-          blocked_reason:
-            "the secret is still masked/hidden — reveal it first (click the " +
-            "show/reveal/copy control near the key), then operate_extract again",
-        };
-      }
-      const handle = stashSecretSlot(args.session_id, args.into_slot, full);
-      // Strip raw credential VALUES from the response — host gets the handle only.
-      return {
-        session_id: extracted.session_id,
-        url: extracted.url,
-        candidate_count: extracted.candidate_count,
-        sealed: true,
-        slot: handle,
-        ...(extracted.blocked_reason !== undefined
-          ? { blocked_reason: extracted.blocked_reason }
-          : {}),
-      };
-    }
-
-    if (args.store === undefined || Object.keys(extracted.credentials).length === 0) {
-      return extracted;
-    }
-    if (api === null) {
-      throw new Error("operate_extract store requires an active Trusty Squire session");
-    }
-    const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
-    return storedExtractResult(extracted, stored);
-  },
+  handler: handleExtract,
 };
 
 const captchaSchema = z.object({ session_id: z.string().min(1) });
@@ -1087,9 +1222,7 @@ export const provisionCaptchaGateTool: Tool<z.infer<typeof captchaSchema>> = {
     required: ["session_id"],
     properties: { session_id: { type: "string" } },
   },
-  async handler(args) {
-    return await captchaGate(args.session_id);
-  },
+  handler: handleCaptcha,
 };
 
 const verifySchema = z.object({
@@ -1138,13 +1271,7 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
       grant_inbox_consent: { type: "boolean" },
     },
   },
-  async handler(args) {
-    return await awaitVerification(args.session_id, {
-      ...(args.sender !== undefined ? { sender: args.sender } : {}),
-      ...(args.into_slot !== undefined ? { intoSlot: args.into_slot } : {}),
-      ...(args.grant_inbox_consent === true ? { grantConsent: true } : {}),
-    });
-  },
+  handler: handleAwaitVerification,
 };
 
 // Change 2 — the pluggable terminal. Two outcome kinds: `credentials` (the

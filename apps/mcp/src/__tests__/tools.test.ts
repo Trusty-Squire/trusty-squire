@@ -1304,6 +1304,31 @@ describe("TOOLS registry", () => {
     expect(names).not.toContain("check_provision_status");
   });
 
+  it("exposes consolidated operate_act kinds while retaining all five delegating aliases", () => {
+    const properties = provisionActTool.jsonInputSchema.properties as Record<string, unknown>;
+    const kinds = (properties.kind as { enum: string[] }).enum;
+    expect(kinds).toEqual(
+      expect.arrayContaining([
+        "cart_add",
+        "select_many",
+        "extract",
+        "solve_captcha",
+        "await_verification",
+      ]),
+    );
+
+    const names = TOOLS.map((tool) => tool.name);
+    expect(names).toEqual(
+      expect.arrayContaining([
+        "operate_cart_add",
+        "operate_form_select_many",
+        "operate_extract",
+        "operate_captcha_gate",
+        "operate_await_verification",
+      ]),
+    );
+  });
+
   it("every tool has a non-trivial description (helps the coding agent decide when to call)", () => {
     for (const t of TOOLS) {
       // >40 chars catches empty/one-word descriptions while allowing the
