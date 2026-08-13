@@ -1491,7 +1491,9 @@ describe("split-checkout card fill (real browser)", () => {
             .locator("#stale input")
             .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
         ).resolves.toEqual(["", "", "", ""]);
-        expect(await frame.locator("#visible [autocomplete=cc-number]").inputValue()).toBe(CARD.pan);
+        expect(await frame.locator("#visible [autocomplete=cc-number]").inputValue()).toBe(
+          CARD.pan,
+        );
         expect(await frame.locator("#visible [autocomplete=cc-name]").inputValue()).toBe(CARD.name);
         expect(await frame.locator("#visible [autocomplete=cc-exp]").inputValue()).toBe("1230");
         expect(await frame.locator("#visible [autocomplete=cc-csc]").inputValue()).toBe(CARD.cvv);

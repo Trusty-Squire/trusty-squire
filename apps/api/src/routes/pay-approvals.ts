@@ -330,51 +330,47 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       read_submission?: string;
       peek_submission?: string;
     };
-  }>(
-    "/v1/pay/approvals/:id",
-    { preHandler: opts.requireAny },
-    async (req, reply) => {
-      const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
-        req.params.id,
-        req.auth!.account_id,
-      );
-      if (record === null) {
-        reply.code(404).send({ error: "payment_approval_not_found" });
-        return;
-      }
-      const now = opts.deps.now?.() ?? new Date();
-      const status =
-        record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
-      const canReadSubmission = req.auth!.kind === "agent" && status === "pending";
-      const peekSubmission = req.query.peek_submission === "1";
-      const submission = !canReadSubmission
-        ? null
-        : req.query.wait_for_submission === "1"
-          ? await waitForSubmission(record.id, record.accountId, peekSubmission)
-          : req.query.read_submission === "1" || peekSubmission
-            ? await readSubmission(record.id, record.accountId, peekSubmission)
-            : null;
-      if (submission !== null && !peekSubmission)
-        event("candidate_delivered", record, submissionFingerprint(submission), "ok");
-      return reply.code(200).send({
-        id: record.id,
-        status,
-        merchant: record.merchant,
-        checkout_origin: record.checkoutOrigin,
-        amount_cents: record.amountCents,
-        currency: record.currency,
-        nonce: record.nonce,
-        card_ref: record.cardRef,
-        operator_pubkey: record.operatorPubkey,
-        item: record.item,
-        reason: record.reason,
-        agent: record.agent,
-        jws: submission?.jws ?? record.jws,
-        sealed_card: submission?.sealed_card ?? record.sealedCard,
-        expires_at: record.expiresAt.toISOString(),
-      });
-    },
-  );
+  }>("/v1/pay/approvals/:id", { preHandler: opts.requireAny }, async (req, reply) => {
+    const record = await opts.deps.pendingPaymentApprovalStore.getByIdForAccount(
+      req.params.id,
+      req.auth!.account_id,
+    );
+    if (record === null) {
+      reply.code(404).send({ error: "payment_approval_not_found" });
+      return;
+    }
+    const now = opts.deps.now?.() ?? new Date();
+    const status =
+      record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
+    const canReadSubmission = req.auth!.kind === "agent" && status === "pending";
+    const peekSubmission = req.query.peek_submission === "1";
+    const submission = !canReadSubmission
+      ? null
+      : req.query.wait_for_submission === "1"
+        ? await waitForSubmission(record.id, record.accountId, peekSubmission)
+        : req.query.read_submission === "1" || peekSubmission
+          ? await readSubmission(record.id, record.accountId, peekSubmission)
+          : null;
+    if (submission !== null && !peekSubmission)
+      event("candidate_delivered", record, submissionFingerprint(submission), "ok");
+    return reply.code(200).send({
+      id: record.id,
+      status,
+      merchant: record.merchant,
+      checkout_origin: record.checkoutOrigin,
+      amount_cents: record.amountCents,
+      currency: record.currency,
+      nonce: record.nonce,
+      card_ref: record.cardRef,
+      operator_pubkey: record.operatorPubkey,
+      item: record.item,
+      reason: record.reason,
+      agent: record.agent,
+      jws: submission?.jws ?? record.jws,
+      sealed_card: submission?.sealed_card ?? record.sealedCard,
+      expires_at: record.expiresAt.toISOString(),
+    });
+  });
 
   fastify.get<{ Params: { id: string } }>("/v1/pay/approvals/:id/ceremony", async (req, reply) => {
     const record = await opts.deps.pendingPaymentApprovalStore.getById(req.params.id);
