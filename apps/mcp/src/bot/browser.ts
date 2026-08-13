@@ -379,13 +379,17 @@ const HOST_SCOPE_ALWAYS_ALLOW_HOSTS: readonly string[] = [
 ];
 
 // Whether a request URL's host is inside the operator's egress scope. In-scope
-// when it matches an allowed host (or subdomain), shares the SAME registrable
+// when it matches an allowed host, shares the SAME registrable
 // domain (eTLD+1) as an already-trusted host (the merchant's own API siblings —
 // the Rakuten cart/checkout backend), or is a known auth/captcha/payment host.
 // A request outside this scope is a candidate for fail-fast blocking rather than
 // being silently dropped to hang the page. Reuses isSameRecipeDomain (a tested
 // tldts-backed eTLD+1 comparison) for the same-registrable-domain auto-scope.
-export function requestHostInScope(url: string, allowedHosts: readonly string[]): boolean {
+export function requestHostInScope(
+  url: string,
+  allowedHosts: readonly string[],
+  siblingDomainHosts: readonly string[] = allowedHosts,
+): boolean {
   let parsedUrl: URL;
   try {
     parsedUrl = new URL(url);
@@ -394,8 +398,8 @@ export function requestHostInScope(url: string, allowedHosts: readonly string[])
   }
   const host = parsedUrl.hostname.toLowerCase();
   const bySuffix = (suffix: string): boolean => host === suffix || host.endsWith(`.${suffix}`);
-  if (allowedHosts.some(bySuffix)) return true;
-  if (allowedHosts.some((allowed) => isSameRecipeDomain(host, allowed))) return true;
+  if (allowedHosts.some((allowed) => host === allowed.toLowerCase())) return true;
+  if (siblingDomainHosts.some((allowed) => isSameRecipeDomain(host, allowed))) return true;
   if (HOST_SCOPE_AUTH_HOSTS.some(bySuffix)) return true;
   if (HOST_SCOPE_ALWAYS_ALLOW_HOSTS.some(bySuffix)) return true;
   if (bySuffix("gstatic.com") && /^\/recaptcha(?:\/|$)/u.test(parsedUrl.pathname)) return true;
@@ -419,10 +423,11 @@ export function isFailFastScopeAbort(
   url: string,
   resourceType: string,
   allowedHosts: readonly string[] | null,
+  siblingDomainHosts?: readonly string[],
 ): boolean {
   if (allowedHosts === null) return false;
   if (resourceType !== "xhr" && resourceType !== "fetch") return false;
-  return !requestHostInScope(url, allowedHosts);
+  return !requestHostInScope(url, allowedHosts, siblingDomainHosts);
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -1048,7 +1053,7 @@ export function parseStructuredCheckoutTotal(
 // Anchored at the START of the line so a product/category NAME that merely
 // contains "関連商品" mid-text is never treated as a section boundary.
 const RECOMMENDATION_SECTION_HEADER =
-  /^(?:ショップ内の関連商品|関連商品(?:[（(]\s*\d+\s*[）)])?|関連item|おすすめ(?:商品)?(?:[（(]\s*\d+\s*[）)])?|あなたへのおすすめ|こちらの商品(?:も|は)?|合わせて買う|セットで購入|人気商品|related\s*products|you\s+may\s+also\s+like|you\s+might\s+also\s+like|recommended(?:\s+for\s+you)?|more\s+(?:products|items)|similar\s+(?:products|items)|other\s+items?|picked\s+for\s+you)/i;
+  /^(?:ショップ内の関連商品|関連商品|関連item|おすすめ(?:商品)?|あなたへのおすすめ|こちらの商品(?:も|は)?|合わせて買う|セットで購入|人気商品|related\s*products|you\s+may\s+also\s+like|you\s+might\s+also\s+like|recommended(?:\s+for\s+you)?|more\s+(?:products|items)|similar\s+(?:products|items)|other\s+items?|picked\s+for\s+you)$/i;
 
 /**
  * Drop the "related products / recommendations" tail from a checkout order-
@@ -2097,7 +2102,9 @@ export class BrowserController {
   // exists so the guard auto-scopes same-registrable-domain merchant API
   // siblings and fails-fast on genuinely out-of-scope in-page API calls. When
   // null/never set (harness replay, non-session use) the guard is inert.
-  private hostScopeAllowedHostsProvider: (() => readonly string[]) | null = null;
+  private hostScopeAllowedHostsProvider:
+    | (() => { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] })
+    | null = null;
   private hostScopeGuardInstallation: Promise<void> | null = null;
 
   // Feed the current session's allowed hosts to the request-scope guard. Read
@@ -2105,8 +2112,14 @@ export class BrowserController {
   // re-registering the route. Registers the single fail-fast route handler on
   // the first call — so the guard is only ever active for real operator
   // sessions, never for harness/replay or non-session browsers.
-  async setHostScopeAllowedHosts(provider: () => readonly string[]): Promise<void> {
-    this.hostScopeAllowedHostsProvider = provider;
+  async setHostScopeAllowedHosts(
+    provider: () => readonly string[],
+    siblingDomainProvider: () => readonly string[] = provider,
+  ): Promise<void> {
+    this.hostScopeAllowedHostsProvider = () => ({
+      allowedHosts: provider(),
+      siblingDomainHosts: siblingDomainProvider(),
+    });
     this.hostScopeGuardInstallation ??= this.installHostScopeGuard().catch((error: unknown) => {
       this.hostScopeGuardInstallation = null;
       throw error;
@@ -2131,7 +2144,15 @@ export class BrowserController {
       try {
         const url = route.request().url();
         const type = route.request().resourceType();
-        if (isFailFastScopeAbort(url, type, this.hostScopeAllowedHostsProvider?.() ?? null)) {
+        const scope = this.hostScopeAllowedHostsProvider?.() ?? null;
+        if (
+          isFailFastScopeAbort(
+            url,
+            type,
+            scope?.allowedHosts ?? null,
+            scope?.siblingDomainHosts,
+          )
+        ) {
           await route.abort("failed");
           return;
         }

@@ -581,6 +581,10 @@ function egressSeedHosts(session: Session): string[] {
   return session.allowedHosts.filter((e) => e.source !== "mid_session").map((e) => e.host);
 }
 
+function merchantSiblingSeedHosts(session: Session): string[] {
+  return session.allowedHosts.filter((e) => e.source !== "mid_session").map((e) => e.host);
+}
+
 const sessions = new Map<string, Session>();
 
 interface WarmBrowser {
@@ -2459,17 +2463,14 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
-  // Feed the session's live allowed hosts to the browser's fail-fast
-  // request-scope guard (Defect A): same-registrable-domain merchant API
-  // siblings are auto-scoped in, and genuinely out-of-scope in-page API
-  // calls fail fast instead of hanging the page. Read lazily, so future
-  // allow_host / auto-widen updates apply without re-registering. Guarded so
-  // mocks/harness browsers without the method stay inert.
-  if (typeof browser.setHostScopeAllowedHosts === "function") {
-    await browser.setHostScopeAllowedHosts(() => hostStrings(session));
-  }
   inFlight = true;
   try {
+    if (typeof browser.setHostScopeAllowedHosts === "function") {
+      await browser.setHostScopeAllowedHosts(
+        () => hostStrings(session),
+        () => merchantSiblingSeedHosts(session),
+      );
+    }
     audit(id, "start", {
       service_url: opts.serviceUrl,
       allowed_hosts: hostStrings(session),

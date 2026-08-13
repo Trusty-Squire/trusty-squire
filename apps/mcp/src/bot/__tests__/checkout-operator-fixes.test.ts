@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { createServer } from "node:http";
-import { chromium, type BrowserContext } from "playwright";
+import { chromium, type Browser, type BrowserContext } from "playwright";
 import { BrowserController } from "../browser.js";
 import {
   isFailFastScopeAbort,
@@ -46,6 +46,24 @@ describe("Defect A — same-registrable-domain scope + fail-fast", () => {
     ).toBe(false);
     expect(
       requestHostInScope("https://tracker.third-party.example/b", RAKUTEN_CHECKOUT_HOSTS),
+    ).toBe(false);
+  });
+
+  it("does not derive sibling scope from a mid-session declared host", () => {
+    const allowedHosts = [...RAKUTEN_CHECKOUT_HOSTS, "api.partner.example"];
+    expect(
+      requestHostInScope(
+        "https://api.partner.example/data",
+        allowedHosts,
+        RAKUTEN_CHECKOUT_HOSTS,
+      ),
+    ).toBe(true);
+    expect(
+      requestHostInScope(
+        "https://vault.partner.example/secrets",
+        allowedHosts,
+        RAKUTEN_CHECKOUT_HOSTS,
+      ),
     ).toBe(false);
   });
 
@@ -104,10 +122,11 @@ describe("Defect A — same-registrable-domain scope + fail-fast", () => {
         response.end("reachable");
       });
       await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-      const address = server.address();
-      if (address === null || typeof address === "string") throw new Error("missing test server");
-      const playwrightBrowser = await chromium.launch({ headless: true });
+      let playwrightBrowser: Browser | null = null;
       try {
+        const address = server.address();
+        if (address === null || typeof address === "string") throw new Error("missing test server");
+        playwrightBrowser = await chromium.launch({ headless: true });
         const context = await playwrightBrowser.newContext();
         const controller = new BrowserController({ humanize: false });
         (controller as unknown as { context: BrowserContext }).context = context;
@@ -123,10 +142,13 @@ describe("Defect A — same-registrable-domain scope + fail-fast", () => {
         expect(outcome).toBe("rejected");
         expect(requestCount).toBe(0);
       } finally {
-        await playwrightBrowser.close();
-        await new Promise<void>((resolve, reject) =>
-          server.close((error) => (error === undefined ? resolve() : reject(error))),
-        );
+        try {
+          await playwrightBrowser?.close();
+        } finally {
+          await new Promise<void>((resolve, reject) =>
+            server.close((error) => (error === undefined ? resolve() : reject(error))),
+          );
+        }
       }
     },
   );
@@ -198,6 +220,14 @@ describe("Defect B — scoped order-summary total vs recommendation noise", () =
     const cart = "関連商品セット 1,000円\n小計 2,803円\n送料 送料無料";
     expect(scopedOrderSummaryText(cart)).toBe(cart);
   });
+
+  it.each(["おすすめ商品ギフトセット", "関連商品セット"])(
+    "does not truncate a digit-free cart item title: %s",
+    (title) => {
+      const cart = `${title}\n1,000円\n小計 2,803円\n送料 送料無料`;
+      expect(scopedOrderSummaryText(cart)).toBe(cart);
+    },
+  );
 
   it("sources the cart's 小計 (payable) from a Rakuten-style split cart amid recommendation prices", async () => {
     const browser = new BrowserController({ humanize: false });
