@@ -606,12 +606,79 @@ const ACTION_KINDS = [
   "await_verification",
 ] as const;
 
+type ActionKind = (typeof ACTION_KINDS)[number];
+
+interface ActionRepair {
+  example: Record<string, unknown>;
+  safe_alternative: string;
+}
+
+const manualCardRecovery =
+  " Never enter card values with operate_act; use operate_pay.";
+
+const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
+  cart_add: {
+    example: {
+      session_id: "<session_id>",
+      kind: "cart_add",
+      product_identity: "<canonical-product-identity>",
+      options_hash: "<selected-options-hash>",
+      idempotency_key: "<stable-idempotency-key>",
+    },
+    safe_alternative:
+      "Retry cart_add with the same stable idempotency_key for the same product_identity and options_hash. Do not replace it with click: cart_add reserves the mutation and exact-line post-verifies the cart." +
+      manualCardRecovery,
+  },
+  select_many: {
+    example: {
+      session_id: "<session_id>",
+      kind: "select_many",
+      selections: { "Observed field label": "Visible option label" },
+    },
+    safe_alternative:
+      "Retry select_many with selections in the intended order. It selects sequentially, re-observes after each success, and returns partial results; do not replace it with parallel select calls." +
+      manualCardRecovery,
+  },
+  extract: {
+    example: {
+      session_id: "<session_id>",
+      kind: "extract",
+      into_slot: "sealed_secret",
+      secret_label: "API key",
+    },
+    safe_alternative:
+      "Retry extract after navigating to the credential page. Use into_slot with optional secret_label to seal a value without exposing it, or store with a service to vault it; never put credential values in arguments or seal a still-masked value." +
+      manualCardRecovery,
+  },
+  solve_captcha: {
+    example: {
+      session_id: "<session_id>",
+      kind: "solve_captcha",
+    },
+    safe_alternative:
+      "Retry solve_captcha so the dedicated solver handles the gate. If it returns needs_user, relay the exact remedy and stop driving; do not bypass the gate or keep churning." +
+      manualCardRecovery,
+  },
+  await_verification: {
+    example: {
+      session_id: "<session_id>",
+      kind: "await_verification",
+      sender: "service.example",
+      into_slot: "otp",
+      grant_inbox_consent: false,
+    },
+    safe_alternative:
+      "Retry await_verification with sender scoped to the service and prefer into_slot so the OTP stays sealed. Leave grant_inbox_consent false unless the user explicitly agrees; only retry with grant_inbox_consent:true after that explicit yes." +
+      manualCardRecovery,
+  },
+};
+
 function actionSchemaRepair(args: unknown, issues: readonly { path: (string | number)[] }[]) {
   const input = args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {};
   const kind =
     typeof input.kind === "string" &&
-    ACTION_KINDS.includes(input.kind as (typeof ACTION_KINDS)[number])
-      ? input.kind
+    ACTION_KINDS.includes(input.kind as ActionKind)
+      ? (input.kind as ActionKind)
       : undefined;
   const missing = [
     ...new Set(
@@ -620,8 +687,11 @@ function actionSchemaRepair(args: unknown, issues: readonly { path: (string | nu
         .filter((field): field is string => typeof field === "string"),
     ),
   ];
+  const kindRepair = kind === undefined ? undefined : ACTION_REPAIR_BY_KIND[kind];
   const example =
-    kind === "oauth_login"
+    kindRepair !== undefined
+      ? kindRepair.example
+      : kind === "oauth_login"
       ? {
           session_id: "<session_id>",
           kind: "oauth_login",
@@ -641,28 +711,16 @@ function actionSchemaRepair(args: unknown, issues: readonly { path: (string | nu
               target: "@e:<observed-ref>",
               text: "Option label",
             }
-          : kind === "cart_add"
-            ? {
-                session_id: "<session_id>",
-                kind: "cart_add",
-                product_identity: "<canonical-product-identity>",
-                options_hash: "<selected-options-hash>",
-                idempotency_key: "<stable-idempotency-key>",
-              }
-            : kind === "select_many"
-              ? {
-                  session_id: "<session_id>",
-                  kind: "select_many",
-                  selections: { "Observed field label": "Visible option label" },
-                }
-              : {
-                  session_id: "<session_id>",
-                  kind: "type",
-                  target: "@e:<observed-ref>",
-                  text: "Text to enter",
-                };
+          : {
+              session_id: "<session_id>",
+              kind: "type",
+              target: "@e:<observed-ref>",
+              text: "Text to enter",
+            };
   const safe_alternative =
-    kind === "type_secret" && missing.includes("slot")
+    kindRepair !== undefined
+      ? kindRepair.safe_alternative
+      : kind === "type_secret" && missing.includes("slot")
       ? 'First capture the value with operate_extract { into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
       : 'Use kind "type" for text fields or "select" for options, and take target refs from operate_observe. Never enter card values with operate_act; use operate_pay.';
   return {
