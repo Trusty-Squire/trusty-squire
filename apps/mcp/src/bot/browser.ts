@@ -251,9 +251,10 @@ const RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS: readonly string[] = [
   "stripe.com", // Stripe Elements / Payment Element iframes (js.stripe.com)
   "adyen.com", // Adyen web components hosted fields (checkoutshopper-*.adyen.com)
   "braintreegateway.com", // Braintree Hosted Fields (assets.braintreegateway.com)
-  "paypal.com", // PayPal advanced card fields (PayPal-hosted wallet checkout is refused earlier)
+  "paypal.com", // Scope classification only; an actual PayPal PAN frame is refused before fill
   "worldpay.com", // Worldpay / Access Worldpay hosted payment fields
   "payment.global.rakuten.com", // Rakuten Payment platform hosted card fields
+  "checkout.pci.shopifyinc.com", // Shopify PCI-compliant hosted card fields
 ];
 
 // True when a child frame is a surface the vaulted card may be filled into:
@@ -323,6 +324,9 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
 export const CHECKOUT_SUBMIT_LABEL_RE =
   /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
 
+// Descriptor-level PayPal surface classifier retained for callers that need to
+// inventory wallet/card frames. It is not the payment refusal gate: the operator
+// keys that decision off the frame containing the actual visible PAN field.
 export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescriptor[]): boolean {
   return frames.some((frame) => {
     const marker = `${frame.url} ${frame.name} ${frame.title}`.toLowerCase();
@@ -340,6 +344,93 @@ export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescr
       return false;
     }
   });
+}
+
+// The frame hosts that render UNFILLABLE PayPal/Braintree-hosted card fields.
+// A PayPal EXPRESS button frame (smart/checkout) is deliberately NOT here —
+// the operator must not refuse a fillable checkout (e.g. Shopify-PCI card
+// fields with a plain PayPal express button) merely because a button exists.
+function isPayPalBraintreeHostedFieldsHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return (
+    h === "paypal.com" ||
+    h.endsWith(".paypal.com") ||
+    h === "paypalobjects.com" ||
+    h.endsWith(".paypalobjects.com") ||
+    h === "braintreegateway.com" ||
+    h.endsWith(".braintreegateway.com")
+  );
+}
+
+// Identity-provider + auth-handler hosts a page legitimately bounces subresource
+// traffic through. Mirror of provision-session.ts DEFAULT_AUTH_HOSTS, kept local
+// so browser.ts's request-scope guard never creates a circular import.
+const HOST_SCOPE_AUTH_HOSTS: readonly string[] = [
+  "accounts.google.com",
+  "github.com",
+  "login.microsoftonline.com",
+  "appleid.apple.com",
+];
+
+const HOST_SCOPE_ALWAYS_ALLOW_HOSTS: readonly string[] = [
+  "challenges.cloudflare.com",
+  "hcaptcha.com",
+  "newassets.hcaptcha.com",
+  "www.google.com",
+  "recaptcha.net",
+  "js.stripe.com",
+];
+
+// Whether a request URL's host is inside the operator's egress scope. In-scope
+// when it matches an allowed host, shares the SAME registrable
+// domain (eTLD+1) as an already-trusted host (the merchant's own API siblings —
+// the Rakuten cart/checkout backend), or is a known auth/captcha/payment host.
+// A request outside this scope is a candidate for fail-fast blocking rather than
+// being silently dropped to hang the page. Reuses isSameRecipeDomain (a tested
+// tldts-backed eTLD+1 comparison) for the same-registrable-domain auto-scope.
+export function requestHostInScope(
+  url: string,
+  allowedHosts: readonly string[],
+  siblingDomainHosts: readonly string[] = allowedHosts,
+): boolean {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(url);
+  } catch {
+    return true; // unparseable URL — never fail-fast-block on a parse stumble
+  }
+  const host = parsedUrl.hostname.toLowerCase();
+  const bySuffix = (suffix: string): boolean => host === suffix || host.endsWith(`.${suffix}`);
+  if (allowedHosts.some((allowed) => host === allowed.toLowerCase())) return true;
+  if (siblingDomainHosts.some((allowed) => isSameRecipeDomain(host, allowed))) return true;
+  if (HOST_SCOPE_AUTH_HOSTS.some(bySuffix)) return true;
+  if (HOST_SCOPE_ALWAYS_ALLOW_HOSTS.some(bySuffix)) return true;
+  if (bySuffix("gstatic.com") && /^\/recaptcha(?:\/|$)/u.test(parsedUrl.pathname)) return true;
+  if (
+    RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS.some(bySuffix) ||
+    host.endsWith(".firebaseapp.com") ||
+    host.endsWith(".web.app")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+// The fail-fast decision the request-scope guard calls. A request is aborted
+// (net error → the page's fetch/XHR rejects promptly instead of hanging) only
+// when it is an in-page XHR/fetch API call TO A HOST OUTSIDE THE SESSION SCOPE.
+// Page-load resources (scripts/styles/images/frames) and every in-scope call
+// (including same-registrable-domain merchant API siblings) always continue. A
+// null allowedHosts (harness/replay, no active session) never blocks.
+export function isFailFastScopeAbort(
+  url: string,
+  resourceType: string,
+  allowedHosts: readonly string[] | null,
+  siblingDomainHosts?: readonly string[],
+): boolean {
+  if (allowedHosts === null) return false;
+  if (resourceType !== "xhr" && resourceType !== "fetch") return false;
+  return !requestHostInScope(url, allowedHosts, siblingDomainHosts);
 }
 
 const CURRENCY_SYMBOLS: Record<string, string> = {
@@ -598,6 +689,7 @@ function parseCheckoutAmountResult(
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
+      if (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) continue;
       const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
       currencyUnresolved ||= result.currencyUnresolved;
       fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
@@ -618,6 +710,7 @@ function parseCheckoutConfirmAmountResult(texts: readonly string[]): CheckoutAmo
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
+      if (match[0].startsWith("小計")) continue;
       const result = parseCheckoutAmountMatch(
         text,
         match,
@@ -661,6 +754,10 @@ interface CheckoutAmountsParseResult {
   fallbackCurrencyScaleMismatch: boolean;
 }
 
+function checkoutTextHasFreeShipping(text: string): boolean {
+  return /(?:送料|配送料)\s*[:：]?\s*送料無料/u.test(text);
+}
+
 function parseCheckoutAmountsResult(
   texts: readonly string[],
   fallbackCurrency?: string,
@@ -672,6 +769,7 @@ function parseCheckoutAmountsResult(
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
+      if (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) continue;
       const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
       currencyUnresolved ||= result.currencyUnresolved;
       fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
@@ -949,6 +1047,42 @@ export function parseStructuredCheckoutTotal(
   )
     ? first
     : null;
+}
+
+// A standalone heading line that opens a "related products / recommendations"
+// block whose prices must NEVER be mistaken for the checkout total. Rakuten
+// cart pages bury the payable amount (only 小計 + 送料 送料無料) among ~30
+// ショップ内の関連商品 prices; those block prices are not the order total.
+// Anchored at the START of the line so a product/category NAME that merely
+// contains "関連商品" mid-text is never treated as a section boundary.
+const RECOMMENDATION_SECTION_HEADER =
+  /^(?:ショップ内の関連商品|関連商品|関連item|おすすめ(?:商品)?|あなたへのおすすめ|こちらの商品(?:も|は)?|合わせて買う|セットで購入|人気商品|related\s*products|you\s+may\s+also\s+like|you\s+might\s+also\s+like|recommended(?:\s+for\s+you)?|more\s+(?:products|items)|similar\s+(?:products|items)|other\s+items?|picked\s+for\s+you)$/i;
+
+/**
+ * Drop the "related products / recommendations" tail from a checkout order-
+ * summary innerText before parsing, so recommendation prices can never be
+ * mistaken for (or selected over) the real payable total. Recommendations are
+ * rendered below the cart summary in DOM order, so truncating at the first
+ * recommendation-section heading — a short standalone line — is a faithful,
+ * structurally-true boundary. The heading must be a short standalone line that
+ * opens the block (anchored start, no price digits): a recap total inside a
+ * long product sentence ("…おすすめ…") or a cart item line that merely carries
+ * a price is never a heading, so it is never truncated.
+ */
+export function scopedOrderSummaryText(text: string): string {
+  const lines = text.split(/\r?\n/u);
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]!.trim();
+    // Strip a trailing parenthetical count like "関連商品（3）" before judging
+    // the line; a heading carries no price, so a bare "\d" is enough to veto it.
+    const heading = line.replace(/[（(]\s*\d+\s*[）)]$/, "");
+    if (heading.length === 0 || heading.length > 40) continue;
+    if (/\d/.test(heading)) continue;
+    if (RECOMMENDATION_SECTION_HEADER.test(heading)) {
+      return lines.slice(0, index).join("\n");
+    }
+  }
+  return text;
 }
 
 function extractCheckoutSummaryText(): string {
@@ -1965,6 +2099,67 @@ export class BrowserController {
   // a captcha failure behind a residential proxy is materially
   // different signal from the same failure on a raw datacenter IP.
   private proxyServer: string | null = null;
+
+  // Optional live provider of the session's current allowed hosts, used by the
+  // fail-fast request-scope guard. Set by provision-session once a session
+  // exists so the guard auto-scopes same-registrable-domain merchant API
+  // siblings and fails-fast on genuinely out-of-scope in-page API calls. When
+  // null/never set (harness replay, non-session use) the guard is inert.
+  private hostScopeAllowedHostsProvider:
+    | (() => { allowedHosts: readonly string[]; siblingDomainHosts: readonly string[] })
+    | null = null;
+  private hostScopeGuardInstallation: Promise<void> | null = null;
+
+  // Feed the current session's allowed hosts to the request-scope guard. Read
+  // lazily per request, so allow_host / auto-widen updates take effect without
+  // re-registering the route. Registers the single fail-fast route handler on
+  // the first call — so the guard is only ever active for real operator
+  // sessions, never for harness/replay or non-session browsers.
+  async setHostScopeAllowedHosts(
+    provider: () => readonly string[],
+    siblingDomainProvider: () => readonly string[] = provider,
+  ): Promise<void> {
+    this.hostScopeAllowedHostsProvider = () => ({
+      allowedHosts: provider(),
+      siblingDomainHosts: siblingDomainProvider(),
+    });
+    this.hostScopeGuardInstallation ??= this.installHostScopeGuard().catch((error: unknown) => {
+      this.hostScopeGuardInstallation = null;
+      throw error;
+    });
+    await this.hostScopeGuardInstallation;
+  }
+
+  // Defect-A fail-fast request-scope guard. Only XHR/fetch subresource API
+  // calls are scope-guarded; page-load resources (scripts/styles/images/frames)
+  // always continue, so a legitimate render is never broken by the guard. A
+  // checkout SPA's own backend API often lives on a same-registrable-domain
+  // sibling subdomain (e.g. cart-api.step.rakuten.co.jp beside
+  // cart.step.rakuten.co.jp) and is auto-scoped in via requestHostInScope. For
+  // a genuinely out-of-scope call the old behavior was a silently-dropped
+  // request that never resolved — wedging the page with an infinite spinner.
+  // Here it is aborted with a real net error so the page's fetch/XHR rejects
+  // promptly and the site's own error handling runs.
+  private async installHostScopeGuard(): Promise<void> {
+    const ctx = this.context;
+    if (ctx === null) throw new Error("Browser not started");
+    await ctx.route("**/*", async (route) => {
+      try {
+        const url = route.request().url();
+        const type = route.request().resourceType();
+        const scope = this.hostScopeAllowedHostsProvider?.() ?? null;
+        if (
+          isFailFastScopeAbort(url, type, scope?.allowedHosts ?? null, scope?.siblingDomainHosts)
+        ) {
+          await route.abort("failed");
+          return;
+        }
+        await route.fallback();
+      } catch {
+        await route.fallback().catch(() => undefined);
+      }
+    });
+  }
 
   private readonly profileDir: string;
 
@@ -6804,7 +6999,7 @@ export class BrowserController {
     const parsedFrames = await Promise.all(
       frames.map(async (frame) => {
         const [text, structuredExtract] = await Promise.all([
-          frame.evaluate(extractCheckoutSummaryText).catch(() => ""),
+          scopedOrderSummaryText(await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
           frame.evaluate(extractStructuredCheckoutData).catch(() => null),
         ]);
         const parsedAmounts = parseCheckoutAmountsResult([text], fallbackCurrency);
@@ -6864,7 +7059,9 @@ export class BrowserController {
     const parsedFrames = await Promise.all(
       frames.map(async (frame) =>
         parseCheckoutConfirmAmountResult([
-          await frame.evaluate(extractCheckoutConfirmSummaryText).catch(() => ""),
+          scopedOrderSummaryText(
+            await frame.evaluate(extractCheckoutConfirmSummaryText).catch(() => ""),
+          ),
         ]),
       ),
     );
@@ -6966,7 +7163,11 @@ export class BrowserController {
       Promise.all(
         page
           .frames()
-          .map(async (frame) => await frame.evaluate(extractCheckoutSummaryText).catch(() => "")),
+          .map(async (frame) =>
+            scopedOrderSummaryText(
+              await frame.evaluate(extractCheckoutSummaryText).catch(() => ""),
+            ),
+          ),
       ),
       Promise.all(
         page
@@ -7198,19 +7399,37 @@ export class BrowserController {
 
   async isPayPalHostedCheckout(): Promise<boolean> {
     if (!this.page) throw new Error("Browser not started");
-    const iframeDescriptors = await this.page.evaluate(() =>
-      Array.from(document.querySelectorAll<HTMLIFrameElement>("iframe"), (iframe) => ({
-        url: iframe.src,
-        name: iframe.name,
-        title: iframe.title,
-      })),
-    );
-    const frameDescriptors = this.page.frames().map((frame) => ({
-      url: frame.url(),
-      name: frame.name(),
-      title: "",
-    }));
-    return hasPayPalHostedCheckoutFrame([...iframeDescriptors, ...frameDescriptors]);
+    // Key the refusal off the ACTUAL card (PAN) input's frame, not off "any
+    // PayPal iframe on the page." Shopify checkout frames card entry in a
+    // recognized PayPal-independent surface (checkout.pci.shopifyinc.com); a
+    // PayPal EXPRESS button (an unfillable-wallet iframe, not card fields)
+    // must not cause a false-positive refusal of a fillable checkout.
+    const panFrame = await this.panFieldFrame();
+    if (panFrame === null) return false;
+    try {
+      return isPayPalBraintreeHostedFieldsHost(new URL(panFrame.url()).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  // The first frame that actually renders a visible card (PAN) input, or null.
+  private async panFieldFrame(): Promise<Frame | null> {
+    if (!this.page) return null;
+    for (const frame of this.page.frames()) {
+      const locator = frame.locator(CHECKOUT_PAN_FIELD_SELECTORS);
+      const count = Math.min(await locator.count().catch(() => 0), 10);
+      for (let i = 0; i < count; i += 1) {
+        const input = locator.nth(i);
+        if (
+          (await input.isVisible().catch(() => false)) &&
+          (await input.isEnabled().catch(() => false))
+        ) {
+          return frame;
+        }
+      }
+    }
+    return null;
   }
 
   // Common autocomplete/name selectors. No PSP-specific adapters. `frames` is

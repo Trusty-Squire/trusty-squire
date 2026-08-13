@@ -72,9 +72,11 @@ payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission.
 
 Some split checkouts collect the card before the final order-confirmation step. On the
-card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. If
-that page exposes no total, it uses the most recent real total observed earlier in the
-same browser session, such as the cart subtotal, only when the checkout origin still
+card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
+subtotal qualifies as that payable amount only when the same order summary says
+shipping is free; recommendation and related-product prices are excluded. If that
+page exposes no total, it uses the most recent real total observed earlier in the same
+browser session, such as the cart subtotal, only when the checkout origin still
 matches. It never uses a caller-supplied amount for this fallback. One phone approval
 binds that amount, releases the card, and authorizes the eventual charge up to the
 approved amount; Trusty Squire then fills the card without submitting. It fills only
@@ -91,10 +93,11 @@ not re-approved. A changed page title does not invalidate the merchant because t
 checkout origin is the trust anchor. A missing or conflicting final total is never
 replaced with caller-supplied payment values.
 
-Before an initial single-page or `fill_card` call, a checkout that exposes PayPal
-Smart Buttons or PayPal-hosted fields is handed back before Trusty Squire selects a
-saved card or creates an approval. Trusty Squire does not sign in to PayPal or use
-vaulted PayPal credentials. If the issuer requires 3-D Secure, Trusty Squire notifies
+Before an initial single-page or `fill_card` call, Trusty Squire follows the actual
+visible card-number field and hands the checkout back when that field is hosted by
+PayPal or Braintree. A separate PayPal express button does not block fillable merchant
+or Shopify PCI card fields. Trusty Squire does not sign in to PayPal or use vaulted
+PayPal credentials. If the issuer requires 3-D Secure, Trusty Squire notifies
 your linked Telegram chat and waits 180 seconds by default for you to complete
 the challenge in the open checkout instead of automating it. It reports a
 visible success or decline and hands an unresolved challenge back on timeout.
@@ -220,6 +223,11 @@ for the system and data flows.
   has no observed ref, the four locator-capable actions (`click`, `js_click`,
   `type`, and `type_secret`) can use a live locator; that one-off fallback is not
   replayable.
+  In a live operator session, in-page XHR/fetch calls to merchant API sibling
+  subdomains are automatically in scope only when they share the registrable
+  domain of a host trusted at session start. Calls outside the session scope fail
+  promptly instead of hanging; page-load resources continue normally, and a
+  mid-session `allow_host` does not seed sibling-domain widening.
   When DOM churn invalidates an `@e:` ref, `operate_act` returns `target_stale`
   with the last observation generation, `reobserve_required: true`, best-effort
   label-keyed `replacement_candidates`, and

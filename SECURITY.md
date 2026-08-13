@@ -115,9 +115,11 @@ A split checkout may collect card details before it exposes the final payable to
 On every observation, the session best-effort captures the most recent real checkout
 total read from the current page, replacing the prior value only after a successful
 read and scoping it to that page's origin. The `fill_card` phase prefers the live
-card-entry page's own total. Only when that page has no readable total may it use the
-same session's captured value, after re-checking that the current origin matches; a
-caller-supplied amount is never a fallback. The resulting single amount-bound
+card-entry page's own total. A subtotal is accepted as the payable amount only when
+the same scoped order summary states that shipping is free; recommendation sections
+are excluded before any amount is selected. Only when that page has no readable total
+may it use the same session's captured value, after re-checking that the current origin
+matches; a caller-supplied amount is never a fallback. The resulting single amount-bound
 approval both releases the card and authorizes a later charge up to that amount.
 After approval it requires the live page origin to equal the mandate's checkout
 origin, fills no submit control, and permits card data only in the main frame,
@@ -128,6 +130,11 @@ card is zeroed in the operator, while the page fields remain sealed and
 observation-masked for the checkout's review step; session state retains only
 approval and mandate metadata, the checkout binding, card reference, and last four
 digits.
+
+Unsupported-wallet detection follows the frame containing the actual visible PAN
+field. PayPal and Braintree hosted card fields fail closed, while an unrelated PayPal
+express-button frame does not disqualify a fillable merchant or recognized Shopify
+PCI card-field frame.
 
 The later `confirm` phase is the charge boundary. Its strict reader requires a final
 payable total from the main frame or a visible trusted payment frame, with no

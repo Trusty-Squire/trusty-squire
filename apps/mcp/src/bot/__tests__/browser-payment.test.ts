@@ -209,7 +209,7 @@ describe("checkout payment parsing", () => {
   });
 
   it.each([
-    ["小計 2,904 円", 2_904],
+    ["小計 2,904 円\n送料 送料無料", 2_904],
     ["合計 968円", 968],
     ["ご請求金額 ¥1,065", 1_065],
     ["請求金額 1,065円", 1_065],
@@ -224,17 +224,22 @@ describe("checkout payment parsing", () => {
   });
 
   it("keeps all Japanese checkout matches so review selection uses the settled final total", () => {
-    expect(parseCheckoutAmounts(["小計 2,904円", "送料 500円", "合計 1,468円"])).toEqual([
+    expect(parseCheckoutAmounts(["小計 2,904円\n送料 送料無料", "合計 1,468円"])).toEqual([
       { amount_cents: 2_904, currency: "JPY" },
       { amount_cents: 1_468, currency: "JPY" },
     ]);
   });
 
   it("uses a Rakuten card-step subtotal when no final payable label exists", () => {
-    expect(parseCheckoutAmount(["小計 3,872 円"])).toEqual({
+    expect(parseCheckoutAmount(["小計 3,872 円\n送料 送料無料"])).toEqual({
       amount_cents: 3_872,
       currency: "JPY",
     });
+  });
+
+  it("refuses a subtotal when shipping is paid or unknown", () => {
+    expect(parseCheckoutAmount(["小計 3,872 円\n送料 500円"])).toBeNull();
+    expect(parseCheckoutAmount(["小計 3,872 円"])).toBeNull();
   });
 
   it("skips a merchandise subtotal (商品合計) and resolves the payable total", () => {

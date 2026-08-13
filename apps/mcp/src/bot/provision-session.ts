@@ -581,6 +581,10 @@ function egressSeedHosts(session: Session): string[] {
   return session.allowedHosts.filter((e) => e.source !== "mid_session").map((e) => e.host);
 }
 
+function merchantSiblingSeedHosts(session: Session): string[] {
+  return session.allowedHosts.filter((e) => e.source !== "mid_session").map((e) => e.host);
+}
+
 const sessions = new Map<string, Session>();
 
 interface WarmBrowser {
@@ -2461,6 +2465,12 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   sessions.set(id, session);
   inFlight = true;
   try {
+    if (typeof browser.setHostScopeAllowedHosts === "function") {
+      await browser.setHostScopeAllowedHosts(
+        () => hostStrings(session),
+        () => merchantSiblingSeedHosts(session),
+      );
+    }
     audit(id, "start", {
       service_url: opts.serviceUrl,
       allowed_hosts: hostStrings(session),
