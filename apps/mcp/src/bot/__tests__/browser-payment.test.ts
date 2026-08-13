@@ -224,9 +224,7 @@ describe("checkout payment parsing", () => {
   });
 
   it("keeps all Japanese checkout matches so review selection uses the settled final total", () => {
-    expect(
-      parseCheckoutAmounts(["小計 2,904円\n送料 送料無料", "合計 1,468円"]),
-    ).toEqual([
+    expect(parseCheckoutAmounts(["小計 2,904円\n送料 送料無料", "合計 1,468円"])).toEqual([
       { amount_cents: 2_904, currency: "JPY" },
       { amount_cents: 1_468, currency: "JPY" },
     ]);

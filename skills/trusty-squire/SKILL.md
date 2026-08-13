@@ -103,8 +103,10 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   Card fields never return through MCP.
 - On a split checkout whose card-entry step shows no total (or only a subtotal),
   call `operate_pay` with `phase: "fill_card"`. It approves the live card-entry
-  total when readable; otherwise it may use the most recent real total observed in
-  this session on the same origin. That one approval releases and fills the card,
+  total when readable; a subtotal qualifies only when the same order summary says
+  shipping is free, and recommendation prices never qualify. Otherwise it may use
+  the most recent real total observed in this session on the same origin. That one
+  approval releases and fills the card,
   charging nothing yet, and authorizes the eventual charge up to the approved
   amount. Advance only through non-charge navigation such as **Next** or
   **Continue to review**, then call `operate_pay` with `phase: "confirm"` once the

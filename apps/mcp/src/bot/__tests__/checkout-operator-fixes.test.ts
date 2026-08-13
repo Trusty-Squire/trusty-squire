@@ -52,11 +52,7 @@ describe("Defect A — same-registrable-domain scope + fail-fast", () => {
   it("does not derive sibling scope from a mid-session declared host", () => {
     const allowedHosts = [...RAKUTEN_CHECKOUT_HOSTS, "api.partner.example"];
     expect(
-      requestHostInScope(
-        "https://api.partner.example/data",
-        allowedHosts,
-        RAKUTEN_CHECKOUT_HOSTS,
-      ),
+      requestHostInScope("https://api.partner.example/data", allowedHosts, RAKUTEN_CHECKOUT_HOSTS),
     ).toBe(true);
     expect(
       requestHostInScope(
@@ -95,9 +91,9 @@ describe("Defect A — same-registrable-domain scope + fail-fast", () => {
         RAKUTEN_CHECKOUT_HOSTS,
       ),
     ).toBe(true);
-    expect(
-      requestHostInScope("https://www.gstatic.com/merchant-api", RAKUTEN_CHECKOUT_HOSTS),
-    ).toBe(false);
+    expect(requestHostInScope("https://www.gstatic.com/merchant-api", RAKUTEN_CHECKOUT_HOSTS)).toBe(
+      false,
+    );
   });
 
   it("a blocked/dropped out-of-scope XHR is flagged for a prompt abort — no hang", () => {
@@ -135,7 +131,10 @@ describe("Defect A — same-registrable-domain scope + fail-fast", () => {
         await page.setContent("<title>scope guard</title>");
         const outcome = await page.evaluate(async (url) => {
           return await Promise.race([
-            fetch(url).then(() => "resolved", () => "rejected"),
+            fetch(url).then(
+              () => "resolved",
+              () => "rejected",
+            ),
             new Promise<string>((resolve) => setTimeout(() => resolve("timed-out"), 1_000)),
           ]);
         }, `http://127.0.0.1:${address.port}/blocked`);

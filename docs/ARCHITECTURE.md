@@ -177,9 +177,12 @@ agent starts operate_pay in the active checkout
      when a later page has no total; the value remains scoped to its page origin
   -> split fill_card first reads the live card-entry total; only when none is
      readable may it use that same session's captured total after re-checking the
-     current origin. Caller-supplied amounts never provide this fallback
-  -> PayPal Smart Button or hosted-field frames hand initial/fill checkout calls to
-     the user before saved-card resolution or approval creation
+     current origin. Subtotal and recommendation-price qualification follows the
+     payment safety contract in [SECURITY.md](../SECURITY.md); caller-supplied
+     amounts never provide this fallback
+  -> the actual visible PAN field's frame controls the unsupported-wallet gate:
+     PayPal/Braintree hosted card fields hand initial/fill calls to the user, while
+     a separate PayPal express button does not block fillable Shopify PCI fields
   -> an explicit card is used; otherwise one saved card is selected automatically,
      no saved cards starts add-card, and multiple cards require a user choice
   -> operator creates an ephemeral key; API creates a short-lived approval relay

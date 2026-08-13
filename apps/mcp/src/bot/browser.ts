@@ -251,7 +251,7 @@ const RECOGNIZED_PAYMENT_PROVIDER_FRAME_HOSTS: readonly string[] = [
   "stripe.com", // Stripe Elements / Payment Element iframes (js.stripe.com)
   "adyen.com", // Adyen web components hosted fields (checkoutshopper-*.adyen.com)
   "braintreegateway.com", // Braintree Hosted Fields (assets.braintreegateway.com)
-  "paypal.com", // PayPal advanced card fields (PayPal-hosted wallet checkout is refused earlier)
+  "paypal.com", // Scope classification only; an actual PayPal PAN frame is refused before fill
   "worldpay.com", // Worldpay / Access Worldpay hosted payment fields
   "payment.global.rakuten.com", // Rakuten Payment platform hosted card fields
   "checkout.pci.shopifyinc.com", // Shopify PCI-compliant hosted card fields
@@ -324,6 +324,9 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
 export const CHECKOUT_SUBMIT_LABEL_RE =
   /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
 
+// Descriptor-level PayPal surface classifier retained for callers that need to
+// inventory wallet/card frames. It is not the payment refusal gate: the operator
+// keys that decision off the frame containing the actual visible PAN field.
 export function hasPayPalHostedCheckoutFrame(frames: readonly CheckoutFrameDescriptor[]): boolean {
   return frames.some((frame) => {
     const marker = `${frame.url} ${frame.name} ${frame.title}`.toLowerCase();
@@ -2146,12 +2149,7 @@ export class BrowserController {
         const type = route.request().resourceType();
         const scope = this.hostScopeAllowedHostsProvider?.() ?? null;
         if (
-          isFailFastScopeAbort(
-            url,
-            type,
-            scope?.allowedHosts ?? null,
-            scope?.siblingDomainHosts,
-          )
+          isFailFastScopeAbort(url, type, scope?.allowedHosts ?? null, scope?.siblingDomainHosts)
         ) {
           await route.abort("failed");
           return;
