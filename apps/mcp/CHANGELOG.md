@@ -1,5 +1,11 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.17 (2026-08-13)
+
+- fix(mcp): preserve final payment approval boundaries — distinguish review from charge candidates, return a review-verified state, reject stale review-protocol clients, and fill one coherent card form so real checkouts can complete (#501)
+- feat(mcp): consolidate operator actions into discriminated `operate_act` kinds while retaining the previous tool names as delegating aliases (#500)
+- feat(mcp): consolidate operator lifecycle tools and rename recipe operations while retaining the previous tool names as delegating aliases (#502)
+
 ## 1.1.9-rc.16 (2026-08-12)
 
 - fix(mcp): complete payments in late-mounting PCI frames — after approval, wait for the cross-origin card frame, fill the vaulted card, and place the order within the same approval (#498)
