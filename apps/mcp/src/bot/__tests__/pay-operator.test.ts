@@ -1693,11 +1693,18 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
   expiresAt: string;
   setReview: () => void;
   setApproved: () => void;
+  setPendingApproved: () => void;
   setInvalidFinalJws: () => void;
   setInvalidFinalCard: () => void;
 } {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
-  let candidateState: "none" | "review" | "approval" | "invalid_jws" | "invalid_card" = "none";
+  let candidateState:
+    | "none"
+    | "review"
+    | "approval"
+    | "approval_pending"
+    | "invalid_jws"
+    | "invalid_card" = "none";
   let reviewConfirmed = false;
   const approvalBodies: Array<Record<string, unknown>> = [];
   const filledCards: CheckoutCard[] = [];
@@ -1850,6 +1857,10 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
       candidateState = "approval";
       reviewConfirmed = false;
     },
+    setPendingApproved: () => {
+      candidateState = "approval_pending";
+      reviewConfirmed = false;
+    },
     setInvalidFinalJws: () => {
       candidateState = "invalid_jws";
     },
@@ -1956,6 +1967,38 @@ describe("operate_pay non-blocking approval [P0]", () => {
     expect(surfaceApprovalUrl).toHaveBeenCalledTimes(2);
     expect(surfaceApprovalUrl).toHaveBeenNthCalledWith(1, "https://web.test/vault/pay/appr_resume");
     expect(surfaceApprovalUrl).toHaveBeenNthCalledWith(2, "https://web.test/vault/pay/appr_resume");
+  });
+
+  it("charges a pending final relay with a zero poll budget", async () => {
+    const env = buildResumableEnv();
+    let pending: PendingApprovalWait | null = null;
+    await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      onApprovalPending: (state) => {
+        pending = state;
+      },
+      pollBudgetMs: 0,
+    });
+    if (pending === null) throw new Error("expected initial resumable approval");
+
+    env.setPendingApproved();
+    const result = await executeOperatePay(baseArgs, env.api, env.browser, {
+      fetch: env.fetch,
+      vouchflowApiBase: "https://vouchflow.test",
+      vouchflowExpectedAudience: "customer_test",
+      webBase: "https://web.test",
+      surfaceApprovalUrl: vi.fn(),
+      resumeFrom: pending,
+      pollBudgetMs: 0,
+    });
+
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(env.browser.fillAndSubmitCheckout).toHaveBeenCalledOnce();
+    expect(env.filledCards).toEqual([SYNTHETIC_CARD]);
   });
 
   it("keeps a zero-budget review candidate distinct, then charges a subsequent final candidate on the same approval", async () => {
