@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.16 (2026-08-12)
+
+- fix(mcp): complete payments in late-mounting PCI frames — after approval, wait for the cross-origin card frame, fill the vaulted card, and place the order within the same approval (#498)
+
 ## 1.1.9-rc.15 (2026-08-12)
 
 - fix(mcp): prevent VNC login leaks and contention hangs — teardown on every exit, fail loudly on profile contention, and use the `--protocol http2` fallback (#495)
