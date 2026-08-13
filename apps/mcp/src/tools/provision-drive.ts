@@ -1334,7 +1334,11 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
 // signup case — extract + vault-store, byte-identical to operate_extract's
 // store path) and `result` (any operate task — a summary + optional structured
 // data: design-review findings, "task done" with confirmed in data, etc.).
-// Both close the session. `operate_finish` stays for abort/give-up.
+// Both close the session. The legacy operate_finish_task tool delegates here.
+const finishDataSchema = z.record(
+  z.union([z.string().max(4000), z.number(), z.boolean()]).transform(String),
+);
+
 const finishTaskSchema = z.object({
   session_id: z.string().min(1),
   kind: z.enum(["credentials", "result"]),
@@ -1345,13 +1349,86 @@ const finishTaskSchema = z.object({
   // Accept scalar values (a "task done" flag is naturally a boolean/number) and
   // coerce to string so the trail stays Record<string,string> — rejecting a bare
   // boolean forced callers to stringify by hand.
-  data: z
-    .record(z.union([z.string().max(4000), z.number(), z.boolean()]).transform(String))
-    .optional(),
+  data: finishDataSchema.optional(),
   // result kind: verify a saved operator-recipe's postcondition before closing
   // (the anti-false-green gate). `verified.confirmed` reflects the machine check.
   verify_recipe: z.string().min(1).max(80).optional(),
 });
+
+const finishOutcomeSchema = z.union([
+  z.object({ kind: z.literal("none") }),
+  z.object({
+    kind: z.literal("credentials"),
+    store: storeShape,
+  }),
+  z
+    .object({
+      kind: z.literal("result"),
+      summary: z.string().max(4000).optional(),
+      data: finishDataSchema.optional(),
+      verify_recipe: z.string().min(1).max(80).optional(),
+    })
+    .refine((outcome) => outcome.summary !== undefined || outcome.data !== undefined, {
+      message: "result outcome requires summary or data",
+    }),
+]);
+
+type FinishOutcome = z.infer<typeof finishOutcomeSchema>;
+
+async function handleFinishOutcome(
+  sessionId: string,
+  outcome: Exclude<FinishOutcome, { kind: "none" }>,
+  api: ApiClient,
+  extractedOverride?: Awaited<ReturnType<typeof extractCredentials>>,
+) {
+  if (outcome.kind === "credentials") {
+    const extracted = extractedOverride ?? (await extractCredentials(sessionId));
+    const blocked = extracted.blocked_reason;
+    const stored =
+      Object.keys(extracted.credentials).length > 0
+        ? await persistExtracted(sessionId, extracted.credentials, outcome.store, api)
+        : null;
+    // Verified success — a real credential was vaulted and nothing blocked.
+    // Capture the run as a pending-review skill so the NEXT provision of this
+    // service gets a hint (docs/DESIGN-operator-hints.md). Runs while the
+    // session is still alive (before finishProvisionSession); best-effort,
+    // never fails the provision.
+    const autoPromote =
+      stored !== null && blocked === undefined ? await autoPromoteProvision(sessionId) : undefined;
+    emitProvisionMeasurement(
+      sessionId,
+      stored !== null && blocked === undefined ? "success" : "fail",
+    );
+    const closed = await finishProvisionSession(sessionId);
+    return {
+      kind: "credentials" as const,
+      url: closed.url,
+      candidate_count: extracted.candidate_count,
+      ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
+      stored_credential: stored,
+      ...(autoPromote !== undefined ? { auto_promote: autoPromote } : {}),
+    };
+  }
+  // result kind — optionally verify a saved recipe's postcondition (the
+  // anti-false-green gate) against the live session BEFORE closing, then close.
+  const verified =
+    outcome.verify_recipe === undefined
+      ? undefined
+      : ((await verifyActiveRecipePostcondition(sessionId, outcome.verify_recipe)) ??
+        (await verifySavedRecipePostcondition(sessionId, await readRecipe(outcome.verify_recipe))));
+  emitProvisionMeasurement(
+    sessionId,
+    verified === undefined || verified.confirmed ? "success" : "fail",
+  );
+  const closed = await finishProvisionSession(sessionId);
+  return {
+    kind: "result" as const,
+    url: closed.url,
+    summary: (outcome.summary ?? "").slice(0, 4000),
+    ...(verified !== undefined ? { verified } : {}),
+    ...(outcome.data !== undefined ? { data: outcome.data } : {}),
+  };
+}
 
 export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
   name: "operate_finish_task",
@@ -1382,6 +1459,8 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
   },
   async handler(args, api) {
     if (args.kind === "credentials") {
+      // Preserve the legacy tool's validation order: it historically performs
+      // extraction before reporting a missing store/API requirement.
       const extracted = await extractCredentials(args.session_id);
       if (args.store === undefined) {
         throw new Error("operate_finish_task kind=credentials requires `store`");
@@ -1389,74 +1468,87 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
       if (api === null) {
         throw new Error("operate_finish_task credentials requires an active Trusty Squire session");
       }
-      const blocked = extracted.blocked_reason;
-      const stored =
-        Object.keys(extracted.credentials).length > 0
-          ? await persistExtracted(args.session_id, extracted.credentials, args.store, api)
-          : null;
-      // Verified success — a real credential was vaulted and nothing blocked.
-      // Capture the run as a pending-review skill so the NEXT provision of this
-      // service gets a hint (docs/DESIGN-operator-hints.md). Runs while the
-      // session is still alive (before finishProvisionSession); best-effort,
-      // never fails the provision.
-      const autoPromote =
-        stored !== null && blocked === undefined
-          ? await autoPromoteProvision(args.session_id)
-          : undefined;
-      emitProvisionMeasurement(
+      return await handleFinishOutcome(
         args.session_id,
-        stored !== null && blocked === undefined ? "success" : "fail",
+        { kind: "credentials", store: args.store },
+        api,
+        extracted,
       );
-      const closed = await finishProvisionSession(args.session_id);
-      return {
-        kind: "credentials" as const,
-        url: closed.url,
-        candidate_count: extracted.candidate_count,
-        ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
-        stored_credential: stored,
-        ...(autoPromote !== undefined ? { auto_promote: autoPromote } : {}),
-      };
     }
-    // result kind — optionally verify a saved recipe's postcondition (the
-    // anti-false-green gate) against the live session BEFORE closing, then close.
-    const verified =
-      args.verify_recipe === undefined
-        ? undefined
-        : ((await verifyActiveRecipePostcondition(args.session_id, args.verify_recipe)) ??
-          (await verifySavedRecipePostcondition(
-            args.session_id,
-            await readRecipe(args.verify_recipe),
-          )));
-    emitProvisionMeasurement(
+    return await handleFinishOutcome(
       args.session_id,
-      verified === undefined || verified.confirmed ? "success" : "fail",
+      {
+        kind: "result",
+        ...(args.summary !== undefined ? { summary: args.summary } : {}),
+        ...(args.data !== undefined ? { data: args.data } : {}),
+        ...(args.verify_recipe !== undefined ? { verify_recipe: args.verify_recipe } : {}),
+      },
+      api as ApiClient,
     );
-    const closed = await finishProvisionSession(args.session_id);
-    return {
-      kind: "result" as const,
-      url: closed.url,
-      summary: (args.summary ?? "").slice(0, 4000),
-      ...(verified !== undefined ? { verified } : {}),
-      ...(args.data !== undefined ? { data: args.data } : {}),
-    };
   },
 };
 
-const finishSchema = z.object({ session_id: z.string().min(1) });
+const finishSchema = z.object({
+  session_id: z.string().min(1),
+  outcome: finishOutcomeSchema.optional(),
+});
 
 export const provisionFinishTool: Tool<z.infer<typeof finishSchema>> = {
   name: "operate_finish",
   description:
-    "Close a provisioning session and reset its task page. Always call this " +
-    "when the run is complete (success or give-up); Chrome stays warm for the next task.",
+    "Finish an operate task and close its session. outcome.kind='none' closes " +
+    "without a reported outcome (and remains the default for compatibility); " +
+    "'credentials' extracts and vault-stores a credential using required `store`; " +
+    "'result' reports required `summary` or `data` and can verify_recipe before closing. " +
+    "All credential values remain server-side and Chrome stays warm for the next task.",
   inputSchema: finishSchema,
   jsonInputSchema: {
     type: "object",
     required: ["session_id"],
-    properties: { session_id: { type: "string" } },
+    properties: {
+      session_id: { type: "string" },
+      outcome: {
+        oneOf: [
+          {
+            type: "object",
+            required: ["kind"],
+            properties: { kind: { const: "none" } },
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            required: ["kind", "store"],
+            properties: {
+              kind: { const: "credentials" },
+              store: { type: "object", required: ["service"], properties: storeJsonProps },
+            },
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            required: ["kind"],
+            anyOf: [{ required: ["summary"] }, { required: ["data"] }],
+            properties: {
+              kind: { const: "result" },
+              summary: { type: "string" },
+              data: { type: "object" },
+              verify_recipe: { type: "string" },
+            },
+            additionalProperties: false,
+          },
+        ],
+      },
+    },
   },
-  async handler(args) {
-    return await finishProvisionSession(args.session_id);
+  async handler(args, api) {
+    const outcome = args.outcome ?? { kind: "none" as const };
+    if (outcome.kind === "none") {
+      return await finishProvisionSession(args.session_id);
+    }
+    if (outcome.kind === "credentials" && api === null) {
+      throw new Error("operate_finish credentials requires an active Trusty Squire session");
+    }
+    return await handleFinishOutcome(args.session_id, outcome, api as ApiClient);
   },
 };
 
@@ -1785,6 +1877,23 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
   },
 };
 
+export const operateRecipeSaveTool: Tool<z.infer<typeof rememberSchema>> = {
+  ...provisionRememberTool,
+  name: "operate_recipe_save",
+  description: provisionRememberTool.description.replaceAll(
+    "operate_remember",
+    "operate_recipe_save",
+  ),
+};
+
+export const operateRecipeRunTool: Tool<z.infer<typeof useSchema>> = {
+  ...provisionUseTool,
+  name: "operate_recipe_run",
+  description: provisionUseTool.description
+    .replaceAll("operate_use", "operate_recipe_run")
+    .replaceAll("operate_remember", "operate_recipe_save"),
+};
+
 // PR3c — username/password signup credential lifecycle (no Trusty Squire alias).
 const prepareLoginSchema = z.object({
   session_id: z.string().min(1),
@@ -1792,6 +1901,34 @@ const prepareLoginSchema = z.object({
   password_slot: z.string().min(1).max(60).optional(),
   password_length: z.number().int().min(16).max(64).optional(),
 });
+
+async function handlePrepareLogin(args: z.infer<typeof prepareLoginSchema>) {
+  const email = getSessionUserEmail(args.session_id);
+  if (email === null) {
+    return {
+      session_id: args.session_id,
+      needs_user: {
+        wall: "user_email",
+        message:
+          "No user email is on file for this session, so the operator cannot " +
+          "fill a user-owned signup. Ask the user to run `npx @trusty-squire/mcp " +
+          "connect` (Google login) so their identity is captured, then retry.",
+        resume: "connect",
+      },
+    };
+  }
+  const login = stashSecretSlot(args.session_id, args.login_slot ?? "login", email);
+  const password = stashSecretSlot(
+    args.session_id,
+    args.password_slot ?? "password",
+    generatePassword(args.password_length ?? 24),
+  );
+  return {
+    session_id: args.session_id,
+    slots: { login, password },
+    email_preview: login.preview,
+  };
+}
 
 export const provisionPrepareLoginTool: Tool<z.infer<typeof prepareLoginSchema>> = {
   name: "operate_prepare_login",
@@ -1815,33 +1952,7 @@ export const provisionPrepareLoginTool: Tool<z.infer<typeof prepareLoginSchema>>
       password_length: { type: "number" },
     },
   },
-  async handler(args) {
-    const email = getSessionUserEmail(args.session_id);
-    if (email === null) {
-      return {
-        session_id: args.session_id,
-        needs_user: {
-          wall: "user_email",
-          message:
-            "No user email is on file for this session, so the operator cannot " +
-            "fill a user-owned signup. Ask the user to run `npx @trusty-squire/mcp " +
-            "connect` (Google login) so their identity is captured, then retry.",
-          resume: "connect",
-        },
-      };
-    }
-    const login = stashSecretSlot(args.session_id, args.login_slot ?? "login", email);
-    const password = stashSecretSlot(
-      args.session_id,
-      args.password_slot ?? "password",
-      generatePassword(args.password_length ?? 24),
-    );
-    return {
-      session_id: args.session_id,
-      slots: { login, password },
-      email_preview: login.preview,
-    };
-  },
+  handler: handlePrepareLogin,
 };
 
 // The signin_url's host is, by definition, where this login gets filled back —
@@ -1871,6 +1982,35 @@ const storeLoginSchema = z.object({
   login_hosts: z.array(z.string().min(1).max(253)).min(1).max(20),
 });
 
+async function handleStoreLogin(args: z.infer<typeof storeLoginSchema>, api: ApiClient | null) {
+  if (api === null) {
+    throw new Error("operate_store_login requires an active Trusty Squire session");
+  }
+  const login = readSecretSlotValue(args.session_id, args.login_slot ?? "login");
+  const password = readSecretSlotValue(args.session_id, args.password_slot ?? "password");
+  const observedHosts = observedHostsForSession(args.session_id);
+  const stored = await api.storeCredential({
+    service: args.service,
+    ...(args.label !== undefined ? { label: args.label } : {}),
+    fields: { login, password },
+    type: "username_password",
+    auth_strategy: "username_password",
+    login_hosts: withSigninHost(args.login_hosts, args.signin_url),
+    ...(args.signin_url !== undefined ? { signin_url: args.signin_url } : {}),
+    ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
+  });
+  return {
+    session_id: args.session_id,
+    reference: stored.reference,
+    service: stored.service,
+    type: "username_password",
+    field_names: stored.field_names,
+    login_hosts: stored.login_hosts,
+    signin_url: stored.signin_url,
+    updated: stored.updated,
+  };
+}
+
 export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
   name: "operate_store_login",
   description:
@@ -1895,47 +2035,62 @@ export const provisionStoreLoginTool: Tool<z.infer<typeof storeLoginSchema>> = {
       login_hosts: { type: "array", items: { type: "string" } },
     },
   },
-  async handler(args, api) {
-    if (api === null) {
-      throw new Error("operate_store_login requires an active Trusty Squire session");
-    }
-    const login = readSecretSlotValue(args.session_id, args.login_slot ?? "login");
-    const password = readSecretSlotValue(args.session_id, args.password_slot ?? "password");
-    const observedHosts = observedHostsForSession(args.session_id);
-    const stored = await api.storeCredential({
-      service: args.service,
-      ...(args.label !== undefined ? { label: args.label } : {}),
-      fields: { login, password },
-      type: "username_password",
-      auth_strategy: "username_password",
-      login_hosts: withSigninHost(args.login_hosts, args.signin_url),
-      ...(args.signin_url !== undefined ? { signin_url: args.signin_url } : {}),
-      ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
-    });
-    return {
-      session_id: args.session_id,
-      reference: stored.reference,
-      service: stored.service,
-      type: "username_password",
-      field_names: stored.field_names,
-      login_hosts: stored.login_hosts,
-      signin_url: stored.signin_url,
-      updated: stored.updated,
-    };
-  },
+  handler: handleStoreLogin,
 };
 
-const sealVaultCredentialSchema = z
-  .object({
-    session_id: z.string().min(1),
-    reference: z.string().min(1).max(400).optional(),
-    service: z.string().min(1).max(120).optional(),
-    fields: z.array(z.string().min(1).max(120)).min(1).max(20).default(["login", "password"]),
-    slot_prefix: z.string().min(1).max(60).default("vault"),
-  })
-  .refine((b) => b.reference !== undefined || b.service !== undefined, {
+const sealVaultCredentialBaseSchema = z.object({
+  session_id: z.string().min(1),
+  reference: z.string().min(1).max(400).optional(),
+  service: z.string().min(1).max(120).optional(),
+  fields: z.array(z.string().min(1).max(120)).min(1).max(20).default(["login", "password"]),
+  slot_prefix: z.string().min(1).max(60).default("vault"),
+});
+
+const sealVaultCredentialSchema = sealVaultCredentialBaseSchema.refine(
+  (b) => b.reference !== undefined || b.service !== undefined,
+  {
     message: "one of reference or service is required",
+  },
+);
+
+async function handleSealVaultCredential(
+  args: z.infer<typeof sealVaultCredentialSchema>,
+  api: ApiClient | null,
+) {
+  if (api === null) {
+    throw new Error("operate_seal_vault_credential requires an active Trusty Squire session");
+  }
+  const current = currentProvisionUrl(args.session_id);
+  const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    publicKeyEncoding: { type: "spki", format: "pem" },
+    privateKeyEncoding: { type: "pkcs8", format: "pem" },
   });
+  const response = await api.browserFillCredential({
+    ...(args.reference !== undefined ? { reference: args.reference } : {}),
+    ...(args.service !== undefined ? { service: args.service } : {}),
+    current_host: current,
+    fields: args.fields,
+    encrypted_response_public_key: publicKey,
+  });
+  const slots: Record<string, ReturnType<typeof stashSecretSlot>> = {};
+  for (const [field, encrypted] of Object.entries(response.encrypted_fields)) {
+    const value = privateDecrypt(
+      {
+        key: privateKey,
+        padding: constants.RSA_PKCS1_OAEP_PADDING,
+        oaepHash: "sha256",
+      },
+      Buffer.from(encrypted, "base64"),
+    ).toString("utf8");
+    slots[field] = stashSecretSlot(args.session_id, `${args.slot_prefix}_${field}`, value);
+  }
+  return {
+    session_id: args.session_id,
+    reference: response.reference,
+    slots,
+  };
+}
 
 export const provisionSealVaultCredentialTool: Tool<z.infer<typeof sealVaultCredentialSchema>> = {
   name: "operate_seal_vault_credential",
@@ -1957,40 +2112,84 @@ export const provisionSealVaultCredentialTool: Tool<z.infer<typeof sealVaultCred
       slot_prefix: { type: "string" },
     },
   },
-  async handler(args, api) {
-    if (api === null) {
-      throw new Error("operate_seal_vault_credential requires an active Trusty Squire session");
-    }
-    const current = currentProvisionUrl(args.session_id);
-    const { publicKey, privateKey } = generateKeyPairSync("rsa", {
-      modulusLength: 2048,
-      publicKeyEncoding: { type: "spki", format: "pem" },
-      privateKeyEncoding: { type: "pkcs8", format: "pem" },
-    });
-    const response = await api.browserFillCredential({
-      ...(args.reference !== undefined ? { reference: args.reference } : {}),
-      ...(args.service !== undefined ? { service: args.service } : {}),
-      current_host: current,
-      fields: args.fields,
-      encrypted_response_public_key: publicKey,
-    });
-    const slots: Record<string, ReturnType<typeof stashSecretSlot>> = {};
-    for (const [field, encrypted] of Object.entries(response.encrypted_fields)) {
-      const value = privateDecrypt(
-        {
-          key: privateKey,
-          padding: constants.RSA_PKCS1_OAEP_PADDING,
-          oaepHash: "sha256",
+  handler: handleSealVaultCredential,
+};
+
+const loginPrepareSignupSchema = prepareLoginSchema.extend({
+  action: z.literal("prepare_signup"),
+});
+const loginStoreSignupSchema = storeLoginSchema.extend({
+  action: z.literal("store_signup"),
+});
+const loginLoadSavedSchema = sealVaultCredentialBaseSchema
+  .extend({ action: z.literal("load_saved") })
+  .refine((b) => b.reference !== undefined || b.service !== undefined, {
+    message: "one of reference or service is required",
+  });
+const loginSchema = z.union([
+  loginPrepareSignupSchema,
+  loginStoreSignupSchema,
+  loginLoadSavedSchema,
+]);
+
+export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
+  name: "operate_login",
+  description:
+    "Drive the sealed username/password login lifecycle without exposing raw values. " +
+    "action='prepare_signup' seals the user's captured email and a generated password; " +
+    "'store_signup' vaults those prepared slots with the same login-host safeguards; " +
+    "'load_saved' fetches an allowed saved login through encrypted browser-fill and seals " +
+    "its fields into session slots. Use operate_act kind='type_secret' to fill returned slots.",
+  inputSchema: loginSchema,
+  jsonInputSchema: {
+    type: "object",
+    oneOf: [
+      {
+        required: ["action", "session_id"],
+        properties: {
+          action: { const: "prepare_signup" },
+          session_id: { type: "string" },
+          login_slot: { type: "string" },
+          password_slot: { type: "string" },
+          password_length: { type: "number" },
         },
-        Buffer.from(encrypted, "base64"),
-      ).toString("utf8");
-      slots[field] = stashSecretSlot(args.session_id, `${args.slot_prefix}_${field}`, value);
+      },
+      {
+        required: ["action", "session_id", "service", "login_hosts"],
+        properties: {
+          action: { const: "store_signup" },
+          session_id: { type: "string" },
+          service: { type: "string" },
+          login_slot: { type: "string" },
+          password_slot: { type: "string" },
+          label: { type: "string" },
+          signin_url: { type: "string" },
+          login_hosts: { type: "array", items: { type: "string" } },
+        },
+      },
+      {
+        required: ["action", "session_id"],
+        anyOf: [{ required: ["reference"] }, { required: ["service"] }],
+        properties: {
+          action: { const: "load_saved" },
+          session_id: { type: "string" },
+          reference: { type: "string" },
+          service: { type: "string" },
+          fields: { type: "array", items: { type: "string" } },
+          slot_prefix: { type: "string" },
+        },
+      },
+    ],
+  },
+  async handler(args, api) {
+    switch (args.action) {
+      case "prepare_signup":
+        return await handlePrepareLogin(args);
+      case "store_signup":
+        return await handleStoreLogin(args, api);
+      case "load_saved":
+        return await handleSealVaultCredential(args, api);
     }
-    return {
-      session_id: args.session_id,
-      reference: response.reference,
-      slots,
-    };
   },
 };
 
@@ -2003,9 +2202,12 @@ export const OPERATE_TOOLS: Tool[] = [
   provisionCaptchaGateTool,
   provisionAwaitVerificationTool,
   provisionExtractTool,
+  operateLoginTool,
   provisionPrepareLoginTool,
   provisionStoreLoginTool,
   provisionSealVaultCredentialTool,
+  operateRecipeSaveTool,
+  operateRecipeRunTool,
   provisionRememberTool,
   provisionUseTool,
   provisionFinishTaskTool,
