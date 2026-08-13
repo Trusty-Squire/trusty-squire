@@ -194,8 +194,8 @@ agent starts operate_pay in the active checkout
      requesting agent, amount, and currency from the short-lived server record
   -> the user reviews that intent and one passkey ceremony signs the canonical
      payload, unlocks the card, and seals it to the ephemeral operator
-  -> the API stages that opaque candidate in an account-scoped Postgres relay;
-     the delivery and confirmation contract is documented in apps/api/README.md
+  -> the API stages that opaque candidate in an account-scoped Postgres relay with
+     a 15-second TTL so another API worker can deliver it to the waiting operator
   -> the operator verifies the final JWS, opens the card, and confirms the exact
      candidate fingerprint; successful confirmation clears the JWS and ciphertext
   -> single-page add-card re-reads every signed checkout field, then fills and
