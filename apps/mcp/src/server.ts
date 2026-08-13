@@ -17,7 +17,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
 import { closeAllProvisionSessions } from "./bot/provision-session.js";
-import { TOOLS, findTool } from "./tools/index.js";
+import { buildToolRegistry, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
 import { VERSION } from "./version.js";
 
@@ -51,13 +51,14 @@ Routing rules for THIS server's tools:
   Trusty Squire web vault themselves.`;
 
 export async function buildServer(api: ApiClient | null): Promise<Server> {
+  const tools = buildToolRegistry();
   const server = new Server(
     { name: SERVER_NAME, version: VERSION },
     { capabilities: { tools: {} }, instructions: SERVER_INSTRUCTIONS },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: TOOLS.map((t) => ({
+    tools: tools.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.jsonInputSchema,
@@ -67,7 +68,7 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const tool = findTool(req.params.name);
+    const tool = findTool(req.params.name, tools);
     if (tool === null) {
       return errorContent("unknown_tool", `unknown tool '${req.params.name}'`);
     }

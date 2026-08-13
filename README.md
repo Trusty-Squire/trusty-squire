@@ -205,6 +205,11 @@ for the system and data flows.
 
 ## MCP tools
 
+The default MCP registry exposes 29 tools. The maintainer-only
+`list_extract_failures` → `get_extract_failure` DOM-diagnostics pair is excluded
+from that surface; set `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server
+environment to opt into the 31-tool diagnostics profile.
+
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop
   the shared stdio process or discard its active in-memory operator session.
