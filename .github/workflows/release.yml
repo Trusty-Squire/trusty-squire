@@ -139,14 +139,10 @@ jobs:
           MCP_SKIP_PACK_SMOKE: "1"
         run: pnpm --filter @trusty-squire/mcp test
 
-      # Preflight: refuse to publish mcp if its runtime workspace dep
-      # (@trusty-squire/skill-schema) isn't on the npm registry at a version
-      # the published mcp tarball will resolve to. Without this, mcp can
-      # ship "successfully" but `npm install` fails for end users with
-      # ETARGET. Skip the check if mcp's skill-schema dep is still a
-      # `workspace:` spec — that means we're in a state where mcp isn't
-      # being bumped right now (path filter probably tripped accidentally).
-      - name: Preflight — skill-schema dep resolvable on npm
+      # Preflight: refuse to publish mcp unless the exact skill-schema version
+      # its tarball will use exists on npm and exports every runtime symbol MCP
+      # imports. Resolvability alone let rc.17 publish against a stale package.
+      - name: Preflight — skill-schema runtime exports available on npm
         if: steps.fast_path.outputs.already_released != 'true'
         run: |
           set -euo pipefail
@@ -157,10 +153,10 @@ jobs:
             exit 0
           fi
           if [[ "$DEP_SPEC" == workspace:* ]]; then
-            # pnpm will rewrite workspace:^ → ^<local-version> at publish.
+            # pnpm rewrites an exact workspace protocol to the local version.
             LOCAL_V=$(node -p "require('./packages/skill-schema/package.json').version")
-            echo "workspace spec — will be rewritten to ^$LOCAL_V at publish."
-            DEP_SPEC="^$LOCAL_V"
+            echo "workspace spec — will be rewritten to $LOCAL_V at publish."
+            DEP_SPEC="$LOCAL_V"
           fi
           echo "Checking npm has a version satisfying: $DEP_SPEC"
           # If skill-schema's release workflow is running in parallel (same push
@@ -176,7 +172,15 @@ jobs:
             echo "::error::No published @trusty-squire/skill-schema satisfies '$DEP_SPEC' after 5min. Publish skill-schema first."
             exit 1
           fi
-          echo "✓ skill-schema $MATCH satisfies $DEP_SPEC on the registry."
+          echo "Installing skill-schema $MATCH from npm to verify its runtime exports."
+          VERIFY_DIR=$(mktemp -d)
+          trap 'rm -rf "$VERIFY_DIR"' EXIT
+          npm install --prefix "$VERIFY_DIR" --ignore-scripts --no-audit --no-fund \
+            "@trusty-squire/skill-schema@$MATCH"
+          node tools/verify-package-runtime-exports.mjs \
+            '@trusty-squire/skill-schema' \
+            "$VERIFY_DIR/node_modules/@trusty-squire/skill-schema/dist/index.js" \
+            apps/mcp/src
 
       - name: Read package version + decide
         id: read

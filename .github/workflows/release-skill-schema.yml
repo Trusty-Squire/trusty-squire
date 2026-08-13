@@ -155,11 +155,13 @@ jobs:
         run: |
           rm -rf dist
           pnpm build
-          # Sentinel: refuse to publish if the build didn't produce parseSkill.
-          if ! grep -q 'parseSkill' dist/index.js; then
-            echo "::error::Built dist/index.js is missing parseSkill — refusing to publish broken tarball"
-            exit 1
-          fi
+          # Sentinels: refuse to publish if the build omitted required runtime exports.
+          for EXPORT in parseSkill classifyPaymentCandidateBinding; do
+            if ! grep -q "$EXPORT" dist/index.js; then
+              echo "::error::Built dist/index.js is missing $EXPORT — refusing to publish broken tarball"
+              exit 1
+            fi
+          done
 
       # pnpm publish (not npm publish) — pnpm rewrites `workspace:` specifiers
       # to real semver before tarball assembly. Critical for monorepo packages
@@ -221,9 +223,13 @@ jobs:
             fi
             sleep 10
           done
-          curl -sSL "$URL" | tar -xzO package/dist/index.js | grep -q 'parseSkill' \
-            || { echo "::error::Published tarball missing parseSkill"; exit 1; }
-          echo "✓ Tarball contains parseSkill"
+          DIST_INDEX=$(mktemp)
+          curl -sSL "$URL" | tar -xzO package/dist/index.js > "$DIST_INDEX"
+          for EXPORT in parseSkill classifyPaymentCandidateBinding; do
+            grep -q "$EXPORT" "$DIST_INDEX" \
+              || { echo "::error::Published tarball missing $EXPORT"; exit 1; }
+          done
+          echo "✓ Tarball contains required runtime exports"
 
       # pnpm publish in workspace mode has been observed to silently ignore
       # --tag, tagging the new version as `next` instead of `latest`. The

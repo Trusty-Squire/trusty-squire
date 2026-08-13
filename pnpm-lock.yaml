@@ -115,7 +115,7 @@ importers:
         specifier: workspace:*
         version: link:../../packages/recipe-schema
       '@trusty-squire/skill-schema':
-        specifier: workspace:*
+        specifier: workspace:0.1.6-rc.1
         version: link:../../packages/skill-schema
       better-sqlite3:
         specifier: 12.8.0

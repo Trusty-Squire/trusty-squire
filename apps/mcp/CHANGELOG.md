@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.18 (2026-08-13)
+
+- fix(release): publish skill-schema classifyPaymentCandidateBinding export so the operator starts (rc.17 was DOA)
+
 ## 1.1.9-rc.17 (2026-08-13)
 
 - fix(mcp): preserve final payment approval boundaries — distinguish review from charge candidates, return a review-verified state, reject stale review-protocol clients, and fill one coherent card form so real checkouts can complete (#501)
