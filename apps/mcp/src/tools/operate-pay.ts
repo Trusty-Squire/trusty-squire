@@ -417,7 +417,10 @@ async function readApprovalStatus(
   waitForSubmission: boolean,
   boundMs?: number,
 ): Promise<Record<string, unknown>> {
-  const fetchApproval = api.getPaymentApproval(state.approval_id, waitForSubmission);
+  const fetchApproval = api.getPaymentApproval(
+    state.approval_id,
+    waitForSubmission ? "wait-peek" : "peek",
+  );
   const approval =
     boundMs === undefined
       ? await fetchApproval

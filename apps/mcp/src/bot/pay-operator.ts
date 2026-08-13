@@ -745,7 +745,10 @@ export async function executeOperatePay(
       if (iteration > 0 && !immediateReviewFollowup && !shouldKeepPolling()) break;
       immediateReviewFollowup = false;
       iteration++;
-      const approval = await api.getPaymentApproval(approvalId, deps.now() < callDeadline);
+      const approval = await api.getPaymentApproval(
+        approvalId,
+        deps.now() < callDeadline ? true : "immediate",
+      );
       boundCardRef = approval.card_ref;
       if (approval.status === "expired") {
         resumableState = undefined;

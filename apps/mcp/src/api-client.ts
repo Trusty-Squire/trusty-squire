@@ -160,8 +160,20 @@ export class ApiClient {
     return this.post("/v1/pay/approvals", input);
   }
 
-  async getPaymentApproval(id: string, waitForSubmission = false): Promise<PaymentApproval> {
-    const query = waitForSubmission ? "?wait_for_submission=1" : "";
+  async getPaymentApproval(
+    id: string,
+    candidateRead: boolean | "immediate" | "peek" | "wait-peek" = false,
+  ): Promise<PaymentApproval> {
+    const query =
+      candidateRead === true
+        ? "?wait_for_submission=1"
+        : candidateRead === "immediate"
+          ? "?read_submission=1"
+          : candidateRead === "peek"
+            ? "?peek_submission=1"
+            : candidateRead === "wait-peek"
+              ? "?wait_for_submission=1&peek_submission=1"
+              : "";
     return this.get(`/v1/pay/approvals/${encodeURIComponent(id)}${query}`);
   }
 

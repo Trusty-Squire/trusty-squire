@@ -206,15 +206,34 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       "payment candidate lifecycle",
     );
 
-  const waitForSubmission = async (id: string, accountId: string): Promise<Submission | null> => {
+  const readSubmission = async (
+    id: string,
+    accountId: string,
+    peek: boolean,
+  ): Promise<Submission | null> => {
+    const candidate = peek
+      ? await opts.deps.pendingPaymentApprovalStore.peekRelayCandidateForAccount(
+          id,
+          accountId,
+          opts.deps.now?.() ?? new Date(),
+        )
+      : await opts.deps.pendingPaymentApprovalStore.getRelayCandidateForAccount(
+          id,
+          accountId,
+          opts.deps.now?.() ?? new Date(),
+        );
+    return candidate === null ? null : { jws: candidate.jws, sealed_card: candidate.sealedCard };
+  };
+
+  const waitForSubmission = async (
+    id: string,
+    accountId: string,
+    peek: boolean,
+  ): Promise<Submission | null> => {
     const deadline = Date.now() + reviewTtlMs;
     while (Date.now() < deadline) {
-      const candidate = await opts.deps.pendingPaymentApprovalStore.getRelayCandidateForAccount(
-        id,
-        accountId,
-        opts.deps.now?.() ?? new Date(),
-      );
-      if (candidate !== null) return { jws: candidate.jws, sealed_card: candidate.sealedCard };
+      const submission = await readSubmission(id, accountId, peek);
+      if (submission !== null) return submission;
       await sleep(relayPollIntervalMs);
     }
     return null;
@@ -304,7 +323,14 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
     },
   );
 
-  fastify.get<{ Params: { id: string }; Querystring: { wait_for_submission?: string } }>(
+  fastify.get<{
+    Params: { id: string };
+    Querystring: {
+      wait_for_submission?: string;
+      read_submission?: string;
+      peek_submission?: string;
+    };
+  }>(
     "/v1/pay/approvals/:id",
     { preHandler: opts.requireAny },
     async (req, reply) => {
@@ -319,11 +345,16 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       const now = opts.deps.now?.() ?? new Date();
       const status =
         record.status === "pending" && record.expiresAt <= now ? "expired" : record.status;
-      const submission =
-        req.auth!.kind === "agent" && req.query.wait_for_submission === "1" && status === "pending"
-          ? await waitForSubmission(record.id, record.accountId)
-          : null;
-      if (submission !== null)
+      const canReadSubmission = req.auth!.kind === "agent" && status === "pending";
+      const peekSubmission = req.query.peek_submission === "1";
+      const submission = !canReadSubmission
+        ? null
+        : req.query.wait_for_submission === "1"
+          ? await waitForSubmission(record.id, record.accountId, peekSubmission)
+          : req.query.read_submission === "1" || peekSubmission
+            ? await readSubmission(record.id, record.accountId, peekSubmission)
+            : null;
+      if (submission !== null && !peekSubmission)
         event("candidate_delivered", record, submissionFingerprint(submission), "ok");
       return reply.code(200).send({
         id: record.id,

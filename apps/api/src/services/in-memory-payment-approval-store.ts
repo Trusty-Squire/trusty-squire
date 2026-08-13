@@ -84,6 +84,11 @@ export interface PendingPaymentApprovalStore {
     accountId: string,
     now: Date,
   ): Promise<PaymentRelayCandidate | null>;
+  peekRelayCandidateForAccount(
+    id: string,
+    accountId: string,
+    now: Date,
+  ): Promise<PaymentRelayCandidate | null>;
   confirmCandidateForAccount(
     id: string,
     accountId: string,
@@ -283,11 +288,12 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
     return "submitted";
   }
 
-  async getRelayCandidateForAccount(
+  private relayCandidateForAccount(
     id: string,
     accountId: string,
     now: Date,
-  ): Promise<PaymentRelayCandidate | null> {
+    markDelivered: boolean,
+  ): PaymentRelayCandidate | null {
     const record = this.records.get(id);
     if (
       record === undefined ||
@@ -304,7 +310,7 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
       record.submissionSealedCard !== null &&
       record.submissionCandidateFingerprint !== null
     ) {
-      record.submissionPhase = "delivered";
+      if (markDelivered) record.submissionPhase = "delivered";
       return {
         binding: "approval",
         jws: record.submissionJws,
@@ -320,7 +326,7 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
       record.reviewSealedCard !== null &&
       record.reviewCandidateFingerprint !== null
     ) {
-      record.reviewPhase = "delivered";
+      if (markDelivered) record.reviewPhase = "delivered";
       return {
         binding: "review",
         jws: record.reviewJws,
@@ -329,6 +335,22 @@ export class InMemoryPendingPaymentApprovalStore implements PendingPaymentApprov
       };
     }
     return null;
+  }
+
+  async getRelayCandidateForAccount(
+    id: string,
+    accountId: string,
+    now: Date,
+  ): Promise<PaymentRelayCandidate | null> {
+    return this.relayCandidateForAccount(id, accountId, now, true);
+  }
+
+  async peekRelayCandidateForAccount(
+    id: string,
+    accountId: string,
+    now: Date,
+  ): Promise<PaymentRelayCandidate | null> {
+    return this.relayCandidateForAccount(id, accountId, now, false);
   }
 
   async confirmCandidateForAccount(

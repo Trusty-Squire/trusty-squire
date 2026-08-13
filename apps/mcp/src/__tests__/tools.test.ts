@@ -476,7 +476,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     // The RPC completed on a single live check — the old blocking loop that
     // polled until payment_approval_timeout never ran.
     expect(getPaymentApproval).toHaveBeenCalledOnce();
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_wire", false);
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_wire", "immediate");
     expect(mockAwaitingApproval).not.toBeNull();
     expect(mockPaymentLease).toBeNull();
 
@@ -550,8 +550,9 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(first).toMatchObject({ status: "approval_pending", approval_id: "appr_expired" });
     expect(second).toMatchObject({ status: "approval_pending", approval_id: "appr_fresh" });
     expect(createPaymentApproval).toHaveBeenCalledTimes(2);
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_expired", false);
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_fresh", false);
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(1, "appr_expired", "immediate");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_expired");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_fresh", "immediate");
     expect(notifyUser).toHaveBeenCalledTimes(2);
     expect(notifyUser).toHaveBeenLastCalledWith(
       "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_fresh",
@@ -622,7 +623,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     });
     expect(createPaymentApproval).toHaveBeenCalledTimes(2);
     expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_deleted");
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_replacement", false);
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_replacement", "immediate");
     expect(deletedState?.keypair.privateKey).toBe("");
     expect(notifyUser).toHaveBeenLastCalledWith(
       "Approve this payment on your phone: https://trustysquire.ai/vault/pay/appr_replacement",
@@ -924,9 +925,7 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       candidate_submitted: false,
       next: { tool: "operate_payment_await" },
     });
-    // waitForSubmission=false — status never asks the server to hold the
-    // response open.
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", false);
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "peek");
     expect(confirmPaymentApproval).not.toHaveBeenCalled();
   });
 
@@ -954,7 +953,7 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       ready_to_charge: true,
       next: { tool: "operate_pay" },
     });
-    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", true);
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek");
   });
 
   it("distinguishes a review candidate from final charge authorization", async () => {
@@ -980,6 +979,7 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       ready_to_charge: false,
       next: { tool: "operate_pay" },
     });
+    expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek");
   });
 
   it("keeps the verified-review state explicit while waiting for the final signature", async () => {

@@ -528,6 +528,92 @@ describe("payment approval relay", () => {
     });
   });
 
+  it.each(["review", "approval"] as const)(
+    "peeks at an in-flight %s candidate without consuming delivery state",
+    async (binding) => {
+      const created = await createApproval();
+      const submission =
+        binding === "review"
+          ? makeReviewSubmission({
+              id: created.id,
+              card_ref: "card_synthetic_1",
+              operator_pubkey: "c3ludGhldGljLW9wZXJhdG9yLWtleQ",
+              approval_payload_sha256: createHash("sha256")
+                .update(
+                  JSON.stringify({
+                    agent: "Hermes",
+                    amount_cents: 2599,
+                    approval_id: created.id,
+                    card_ref: "card_synthetic_1",
+                    checkout_origin: "https://checkout.synthetic.test",
+                    currency: "USD",
+                    item: "Synthetic Book",
+                    merchant: "Synthetic Books",
+                    nonce: created.nonce,
+                    reason: "Synthetic test purchase",
+                    recipient_pubkey_hash: createHash("sha256")
+                      .update(Buffer.from("c3ludGhldGljLW9wZXJhdG9yLWtleQ", "base64url"))
+                      .digest("base64url"),
+                  }),
+                )
+                .digest("base64url"),
+            })
+          : makeSubmission(created);
+      const fingerprint = createHash("sha256")
+        .update(JSON.stringify([submission.jws, submission.sealed_card]))
+        .digest("base64url");
+      const candidate = {
+        jws: submission.jws,
+        sealedCard: submission.sealed_card,
+        fingerprint,
+      };
+      const relayExpiresAt = new Date(nowMs + 15_000);
+      const submitted =
+        binding === "review"
+          ? await deps.pendingPaymentApprovalStore.submitReviewCandidate(
+              created.id,
+              (await deps.pendingPaymentApprovalStore.getById(created.id))!.accountId,
+              candidate,
+              relayExpiresAt,
+              new Date(nowMs),
+            )
+          : await deps.pendingPaymentApprovalStore.submitCandidate(
+              created.id,
+              (await deps.pendingPaymentApprovalStore.getById(created.id))!.accountId,
+              candidate,
+              relayExpiresAt,
+              new Date(nowMs),
+            );
+      expect(submitted).toBe("submitted");
+
+      for (const query of ["peek_submission=1", "wait_for_submission=1&peek_submission=1"]) {
+        const peek = await server.inject({
+          method: "GET",
+          url: `/v1/pay/approvals/${created.id}?${query}`,
+          headers: { authorization: `Bearer ${agentToken}` },
+        });
+        expect(peek.statusCode).toBe(200);
+        expect(peek.json()).toMatchObject(submission);
+        const stored = await deps.pendingPaymentApprovalStore.getById(created.id);
+        expect(binding === "review" ? stored?.reviewPhase : stored?.submissionPhase).toBe(
+          "submitted",
+        );
+      }
+
+      const delivered = await server.inject({
+        method: "GET",
+        url: `/v1/pay/approvals/${created.id}?read_submission=1`,
+        headers: { authorization: `Bearer ${agentToken}` },
+      });
+      expect(delivered.statusCode).toBe(200);
+      expect(delivered.json()).toMatchObject(submission);
+      const stored = await deps.pendingPaymentApprovalStore.getById(created.id);
+      expect(binding === "review" ? stored?.reviewPhase : stored?.submissionPhase).toBe(
+        "delivered",
+      );
+    },
+  );
+
   // Regression (Aug 2026 money-path outage): the deployed operator echoes the
   // approval's card_ref in its /confirm body (pay-operator.ts candidate). The
   // #432 bare-.strict() schema rejected that key, 400ing every confirm after

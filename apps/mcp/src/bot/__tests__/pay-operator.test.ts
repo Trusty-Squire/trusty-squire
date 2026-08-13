@@ -1720,12 +1720,19 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     }
     if (
       (url.endsWith("/v1/pay/approvals/appr_resume") ||
-        url.endsWith("/v1/pay/approvals/appr_resume?wait_for_submission=1")) &&
+        url.endsWith("/v1/pay/approvals/appr_resume?wait_for_submission=1") ||
+        url.endsWith("/v1/pay/approvals/appr_resume?read_submission=1")) &&
       init?.method === "GET"
     ) {
       const approval = approvalBodies[0]!;
       const operatorPublicKey = String(approval.operator_pubkey);
-      if (candidateState === "none" || (candidateState === "review" && reviewConfirmed)) {
+      const readsRelayCandidate =
+        url.endsWith("?wait_for_submission=1") || url.endsWith("?read_submission=1");
+      if (
+        !readsRelayCandidate ||
+        candidateState === "none" ||
+        (candidateState === "review" && reviewConfirmed)
+      ) {
         return Response.json({
           id: "appr_resume",
           status: "pending",
