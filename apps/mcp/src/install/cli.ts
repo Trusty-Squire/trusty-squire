@@ -1338,6 +1338,19 @@ async function logout(): Promise<void> {
 // Unlike the login stage inside `install`, this command fails loud on
 // timeout/error — it's the explicit retry path.
 async function login(args: Argv): Promise<void> {
+  const profileDir = args.profileDir ?? CHROME_PROFILE_DIR;
+  try {
+    await withProfileOperationGuard(profileDir, () => loginWithProfileGuard(args, profileDir));
+  } catch (err) {
+    if (err instanceof ProfileBusyError) {
+      ui.fail(PROFILE_BUSY_MESSAGE);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<void> {
   const provider: OAuthProviderId = args.providerArg ?? args.forceReloginProvider ?? "google";
   const label = provider === "github" ? "GitHub" : "Google";
   ui.heading(`Sign in to ${label}`);
@@ -1348,7 +1361,7 @@ async function login(args: Argv): Promise<void> {
   // leaving logged-in-providers.json claiming a session whose auth cookie
   // (user_session) no longer exists. ensureOAuthSession re-adds the marker
   // only when it confirms a live cookie, so success still records it.
-  if (args.forceRelogin) clearProviderLoggedIn(provider);
+  if (args.forceRelogin) clearProviderLoggedIn(provider, profileDir);
   const result = await ensureOAuthSession({
     provider,
     apiBaseUrl: args.apiBase,

@@ -38,6 +38,7 @@ import {
   teardownHeadlessRig,
   teardownLoginBrowser,
   ensureOAuthSession,
+  runInBotChrome,
   type HeadlessRig,
 } from "../google-login.js";
 
@@ -261,6 +262,22 @@ describe("headless login profile contention", () => {
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("login seed publication platform gate", () => {
+  it("refuses login before Chrome opens when process closure cannot be proven", async () => {
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+
+    await expect(
+      runInBotChrome({
+        profileDir: "/unused/nonlinux-profile",
+        url: "https://accounts.google.com/",
+        deadline: Date.now() + 1_000,
+        bannerLabel: "unused",
+        pollUntilDone: async () => false,
+      }),
+    ).rejects.toThrow("operator profile seed publication requires Linux process identity");
   });
 });
 

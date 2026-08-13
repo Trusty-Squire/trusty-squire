@@ -67,7 +67,11 @@ import { markProviderLoggedIn } from "./login-state.js";
 import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
-import { publishOperatorProfileSeed } from "./operator-profile-pool.js";
+import {
+  assertOperatorProfileRuntimeSupported,
+  OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
+  publishOperatorProfileSeed,
+} from "./operator-profile-pool.js";
 
 const require = createRequire(import.meta.url);
 
@@ -134,7 +138,7 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
     label: "Google",
     loginUrl: "https://accounts.google.com/",
     cookieOrigin: "https://www.google.com",
-    cookies: ["__Secure-1PSID", "SAPISID", "SID"],
+    cookies: OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
   },
   github: {
     provider: "github",
@@ -967,6 +971,7 @@ export interface RunInBotChromeOpts {
   // Plain-mode success hook, run after plainPollUntilDone returns true while the
   // browser is still open (read which provider cookies seeded, etc.).
   plainOnSuccess?: (profileDir: string) => Promise<void>;
+  beforeSeedPublish?: () => Promise<void>;
 }
 
 const LOGIN_BROWSER_CLOSED_ERROR =
@@ -977,6 +982,7 @@ const LOGIN_STATUS_CHECK_STALLED_ERROR =
 export async function runInBotChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
+  assertOperatorProfileRuntimeSupported();
   return await withProfileOperationGuard(opts.profileDir, async () => {
     const result = await runInBotChromeWithProfileGuard(opts);
     // The browser is closed by runInBotChromeWithProfileGuard before it
@@ -984,6 +990,7 @@ export async function runInBotChrome(
     // Publish a fully-built immutable seed under the seed lock. The publisher
     // namespaces every source profile, including environment and CLI overrides.
     if (result.status !== "timeout") {
+      await opts.beforeSeedPublish?.();
       await publishOperatorProfileSeed(opts.profileDir);
     }
     return result;
@@ -1563,6 +1570,7 @@ export async function ensureOAuthSession(opts?: {
         return hasProviderSession(ctx, target);
       },
       pollUntilDone: (ctx) => hasProviderSession(ctx, target),
+      beforeSeedPublish: async () => markProviderLoggedIn(provider, profileDir),
       ...(opts?.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
     });
     // Map runInBotChrome's status set to ensureOAuthSession's contract.
@@ -1573,11 +1581,6 @@ export async function ensureOAuthSession(opts?: {
       mapped = { status: "logged_in" };
     } else {
       mapped = { status: "timeout", detail: "no login completed before the deadline" };
-    }
-    // A confirmed session — record it so the signup bot can auto-prefer
-    // this provider's OAuth path without a probe round-trip.
-    if (mapped.status === "logged_in" || mapped.status === "already_valid") {
-      markProviderLoggedIn(provider, profileDir);
     }
     return mapped;
   } catch (err) {

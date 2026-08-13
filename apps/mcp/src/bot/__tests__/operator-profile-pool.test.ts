@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   acquireOperatorProfile,
   operatorProfilePoolTest,
@@ -21,15 +21,18 @@ const roots: string[] = [];
 
 function writeCookies(
   source: string,
-  rows: Array<{ host: string; value: string }>,
+  rows: Array<{ host: string; name: string; value: string }>,
 ): void {
   const path = join(source, "Default", "Cookies");
   mkdirSync(join(source, "Default"), { recursive: true });
   rmSync(path, { force: true });
   const db = new Database(path);
-  db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, value TEXT NOT NULL)");
-  const insert = db.prepare("INSERT INTO cookies (host_key, value) VALUES (?, ?)");
-  for (const row of rows) insert.run(row.host, row.value);
+  db.exec(
+    "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL, value TEXT NOT NULL)",
+  );
+  db.prepare("INSERT INTO meta (key, value) VALUES (?, ?)").run("version", "24");
+  const insert = db.prepare("INSERT INTO cookies (host_key, name, value) VALUES (?, ?, ?)");
+  for (const row of rows) insert.run(row.host, row.name, row.value);
   db.close();
 }
 
@@ -50,8 +53,9 @@ function fixture(): { root: string; source: string } {
   const root = join(base, "pool");
   mkdirSync(join(source, "Default", "Cache"), { recursive: true });
   writeCookies(source, [
-    { host: ".google.com", value: "identity-cookie" },
-    { host: "checkout.example.com", value: "payment-approval-cookie" },
+    { host: ".google.com", name: "SID", value: "identity-cookie" },
+    { host: ".google.com", name: "payment_approval", value: "google-payment-cookie" },
+    { host: "checkout.example.com", name: "approval", value: "payment-approval-cookie" },
   ]);
   writeFileSync(join(source, "Local State"), "identity-key-state");
   writeFileSync(
@@ -67,6 +71,7 @@ function fixture(): { root: string; source: string } {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
   operatorProfilePoolTest.resetDefaultPool();
 });
@@ -78,6 +83,9 @@ describe("operator profile pool migration stage", () => {
     const p = operatorProfilePoolTest.paths(root);
     const firstSeed = join(p.generations, first, "user-data");
     expect(cookieValues(firstSeed)).toEqual(["identity-cookie"]);
+    const cookieBytes = readFileSync(join(firstSeed, "Default", "Cookies"));
+    expect(cookieBytes.includes(Buffer.from("google-payment-cookie"))).toBe(false);
+    expect(cookieBytes.includes(Buffer.from("payment-approval-cookie"))).toBe(false);
     expect(readFileSync(join(firstSeed, "Local State"), "utf8")).toBe("identity-key-state");
     expect(readFileSync(join(firstSeed, "provider-emails.json"), "utf8")).toContain(
       "worker@example.com",
@@ -89,7 +97,9 @@ describe("operator profile pool migration stage", () => {
       readFileSync(join(p.generations, first, "user-data", "Default", "Cache", "discard")),
     ).toThrow();
 
-    writeCookies(source, [{ host: ".google.com", value: "new-identity-cookie" }]);
+    writeCookies(source, [
+      { host: ".google.com", name: "SID", value: "new-identity-cookie" },
+    ]);
     const second = await publishOperatorProfileSeed(source, { rootDir: root });
     expect(second).not.toBe(first);
     expect(readdirSync(p.generations)).toEqual([second]);
@@ -140,7 +150,7 @@ describe("operator profile pool migration stage", () => {
     });
     const staleProfile = first.profileDir;
     await first.returnWarm();
-    writeCookies(source, [{ host: ".google.com", value: "replacement" }]);
+    writeCookies(source, [{ host: ".google.com", name: "SID", value: "replacement" }]);
     await publishOperatorProfileSeed(source, { rootDir: root });
 
     const second = await acquireOperatorProfile("session-b", {
@@ -180,7 +190,7 @@ describe("operator profile pool migration stage", () => {
     await second.destroy();
   });
 
-  it("quarantines a dead active owner before reclaiming its profile and slot", async () => {
+  it("retains an unbound dead lease while atomically freeing its active slot", async () => {
     const { root, source } = fixture();
     await publishOperatorProfileSeed(source, { rootDir: root });
     const abandoned = await acquireOperatorProfile("session-dead", {
@@ -205,7 +215,18 @@ describe("operator profile pool migration stage", () => {
       sourceProfileDir: source,
     });
     expect(replacement.profileId).not.toBe(abandoned.profileId);
-    expect(readdirSync(p.tombstones)).toEqual([]);
+    expect(readdirSync(p.tombstones)).toHaveLength(1);
+    expect(existsSync(abandoned.profileDir)).toBe(true);
     await replacement.destroy();
+  });
+
+  it("refuses seed publication where process closure cannot be proven", async () => {
+    const { root, source } = fixture();
+    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
+
+    await expect(publishOperatorProfileSeed(source, { rootDir: root })).rejects.toThrow(
+      "operator profile seed publication requires Linux process identity",
+    );
+    expect(existsSync(join(root, "seed"))).toBe(false);
   });
 });

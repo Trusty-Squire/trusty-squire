@@ -46,7 +46,7 @@ const IDENTITY_SEED_FILES = [
   "provider-emails.json",
 ] as const;
 const IDENTITY_COOKIE_FILES = ["Default/Cookies", "Default/Network/Cookies"] as const;
-const IDENTITY_COOKIE_DOMAINS = ["google.com", "github.com"] as const;
+export const OPERATOR_SEED_GOOGLE_COOKIE_NAMES = ["__Secure-1PSID", "SAPISID", "SID"] as const;
 
 interface ProcessIdentity {
   pid: number;
@@ -210,31 +210,103 @@ function copyIdentitySeedFile(sourceRoot: string, destinationRoot: string, relat
   chmodSync(destination, 0o600);
 }
 
-function retainIdentityCookies(cookiePath: string): void {
-  if (!existsSync(cookiePath)) return;
-  let db: Database.Database | null = null;
+interface SqliteSchemaRow {
+  type: "table" | "index";
+  name: string;
+  tbl_name: string;
+  sql: string;
+}
+
+interface SqliteColumnRow {
+  name: string;
+}
+
+function quoteSqliteIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function copyTableRows(
+  source: Database.Database,
+  destination: Database.Database,
+  table: "meta" | "cookies",
+  where = "",
+  bindings: readonly string[] = [],
+): void {
+  const columns = source.pragma(`table_info(${table})`) as SqliteColumnRow[];
+  if (columns.length === 0) return;
+  const identifiers = columns.map((column) => quoteSqliteIdentifier(column.name));
+  const rows = source
+    .prepare(`SELECT ${identifiers.join(", ")} FROM ${quoteSqliteIdentifier(table)}${where}`)
+    .all(...bindings) as Record<string, unknown>[];
+  const insert = destination.prepare(
+    `INSERT INTO ${quoteSqliteIdentifier(table)} (${identifiers.join(", ")}) VALUES (${columns
+      .map(() => "?")
+      .join(", ")})`,
+  );
+  destination.transaction((selected: Record<string, unknown>[]) => {
+    for (const row of selected) insert.run(...columns.map((column) => row[column.name]));
+  })(rows);
+}
+
+function copyIdentityCookies(sourcePath: string, destinationPath: string): void {
+  if (!existsSync(sourcePath)) return;
+  let source: Database.Database | null = null;
+  let destination: Database.Database | null = null;
   try {
-    db = new Database(cookiePath);
-    const cookieTable = db
-      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'cookies'")
-      .get();
+    source = new Database(sourcePath, { readonly: true, fileMustExist: true });
+    source.defaultSafeIntegers(true);
+    const schema = source
+      .prepare(
+        "SELECT type, name, tbl_name, sql FROM sqlite_schema WHERE sql IS NOT NULL AND ((type = 'table' AND name IN ('meta', 'cookies')) OR (type = 'index' AND tbl_name = 'cookies')) ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END, name",
+      )
+      .all() as SqliteSchemaRow[];
+    const cookieTable = schema.find((row) => row.type === "table" && row.name === "cookies");
     if (cookieTable === undefined) throw new Error("Chrome cookie store has no cookies table");
-    const allowed = IDENTITY_COOKIE_DOMAINS.map(
-      () => "(lower(host_key) = ? OR lower(host_key) LIKE ?)",
-    ).join(" OR ");
-    const bindings = IDENTITY_COOKIE_DOMAINS.flatMap((domain) => [domain, `%.${domain}`]);
-    db.prepare(`DELETE FROM cookies WHERE NOT (${allowed})`).run(...bindings);
-    db.pragma("wal_checkpoint(TRUNCATE)");
-  } catch {
-    db?.close();
-    for (const suffix of ["", "-wal", "-shm"] as const) {
-      rmSync(`${cookiePath}${suffix}`, { force: true });
+    const cookieColumns = source.pragma("table_info(cookies)") as SqliteColumnRow[];
+    if (!cookieColumns.some((column) => column.name === "host_key")) {
+      throw new Error("Chrome cookie store has no host_key column");
     }
-    return;
+    if (!cookieColumns.some((column) => column.name === "name")) {
+      throw new Error("Chrome cookie store has no name column");
+    }
+
+    ensurePrivateDir(dirname(destinationPath));
+    destination = new Database(destinationPath);
+    destination.defaultSafeIntegers(true);
+    for (const row of schema.filter((entry) => entry.type === "table")) {
+      destination.exec(row.sql);
+    }
+    if (schema.some((row) => row.type === "table" && row.name === "meta")) {
+      copyTableRows(source, destination, "meta");
+    }
+    const names = [...OPERATOR_SEED_GOOGLE_COOKIE_NAMES];
+    copyTableRows(
+      source,
+      destination,
+      "cookies",
+      ` WHERE (lower(host_key) = ? OR lower(host_key) LIKE ?) AND name IN (${names
+        .map(() => "?")
+        .join(", ")})`,
+      ["google.com", "%.google.com", ...names],
+    );
+    for (const row of schema.filter((entry) => entry.type === "index")) {
+      destination.exec(row.sql);
+    }
+    const userVersion = Number(source.pragma("user_version", { simple: true }));
+    if (Number.isSafeInteger(userVersion) && userVersion >= 0) {
+      destination.pragma(`user_version = ${userVersion}`);
+    }
+    destination.close();
+    destination = null;
+    source.close();
+    source = null;
+    chmodSync(destinationPath, 0o600);
+  } catch (err) {
+    destination?.close();
+    source?.close();
+    rmSync(destinationPath, { force: true });
+    throw err;
   }
-  db.close();
-  rmSync(`${cookiePath}-wal`, { force: true });
-  rmSync(`${cookiePath}-shm`, { force: true });
 }
 
 function copyIdentitySeed(sourceProfileDir: string, destination: string): void {
@@ -246,10 +318,7 @@ function copyIdentitySeed(sourceProfileDir: string, destination: string): void {
     copyIdentitySeedFile(sourceProfileDir, destination, relative);
   }
   for (const relative of IDENTITY_COOKIE_FILES) {
-    copyIdentitySeedFile(sourceProfileDir, destination, relative);
-    copyIdentitySeedFile(sourceProfileDir, destination, `${relative}-wal`);
-    copyIdentitySeedFile(sourceProfileDir, destination, `${relative}-shm`);
-    retainIdentityCookies(join(destination, relative));
+    copyIdentityCookies(join(sourceProfileDir, relative), join(destination, relative));
   }
 }
 
@@ -320,24 +389,38 @@ function publishSeedLocked(p: PoolPaths, sourceProfileDir: string): string {
   const generation = randomUUID();
   const staging = join(p.generations, `.${generation}.tmp`);
   const destination = join(p.generations, generation);
-  ensurePrivateDir(staging);
-  copyIdentitySeed(sourceProfileDir, join(staging, "user-data"));
-  renameSync(staging, destination);
-  const nextLink = join(p.seed, `.current-${generation}`);
-  symlinkSync(join("generations", generation), nextLink, "dir");
-  renameSync(nextLink, p.current);
-  for (const entry of readdirSync(p.generations, { withFileTypes: true })) {
-    if (entry.name !== generation) {
-      rmSync(join(p.generations, entry.name), { recursive: true, force: true });
+  try {
+    ensurePrivateDir(staging);
+    copyIdentitySeed(sourceProfileDir, join(staging, "user-data"));
+    renameSync(staging, destination);
+    const nextLink = join(p.seed, `.current-${generation}`);
+    symlinkSync(join("generations", generation), nextLink, "dir");
+    renameSync(nextLink, p.current);
+    for (const entry of readdirSync(p.generations, { withFileTypes: true })) {
+      if (entry.name !== generation) {
+        rmSync(join(p.generations, entry.name), { recursive: true, force: true });
+      }
     }
+    return generation;
+  } catch (err) {
+    rmSync(staging, { recursive: true, force: true });
+    throw err;
   }
-  return generation;
+}
+
+export function assertOperatorProfileRuntimeSupported(
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== "linux") {
+    throw new Error("operator profile seed publication requires Linux process identity");
+  }
 }
 
 export async function publishOperatorProfileSeed(
   sourceProfileDir: string = CHROME_PROFILE_DIR,
   opts: Pick<OperatorProfilePoolOptions, "rootDir"> = {},
 ): Promise<string> {
+  assertOperatorProfileRuntimeSupported();
   const resolvedSource = resolve(sourceProfileDir);
   const p = paths(poolRootForSource(resolvedSource, opts.rootDir));
   initializePool(p);
@@ -438,7 +521,8 @@ function reapQuarantinedActive(p: PoolPaths, tombstone: string): void {
   }
   const dir = profileDir(p, lease.profile_id);
   const worker = lease.worker;
-  if (worker !== undefined && processMatches(worker)) {
+  if (worker === undefined) return;
+  if (processMatches(worker)) {
     if (!profileProcessMatches(worker, dir)) {
       // PID exists but its birth/cmdline/profile identity cannot be proven. Keep
       // the private tombstone and profile; freeing capacity is safe, signalling is not.
@@ -578,6 +662,7 @@ export async function acquireOperatorProfile(
   sessionId: string,
   opts: OperatorProfilePoolOptions = {},
 ): Promise<OperatorProfileLease> {
+  assertOperatorProfileRuntimeSupported();
   const sourceProfileDir = resolve(opts.sourceProfileDir ?? CHROME_PROFILE_DIR);
   const p = paths(poolRootForSource(sourceProfileDir, opts.rootDir));
   const now = opts.now ?? Date.now;
