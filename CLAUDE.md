@@ -635,16 +635,13 @@ silent multi-minute hang, so they panic-retry or kill the server).
   usable as a fallback. Never changes what gets approved — browser-observed
   totals only, still never a model-supplied amount.
 - **Late-mounting cross-origin PCI iframe (fillAndSubmitCheckout /
-  fillCheckoutCardFields).** Both used to take one `page.frames()` snapshot
-  at call time. A single-page checkout whose card fields render in a
-  cross-origin PCI iframe (e.g. Shopify's `checkout.pci.shopifyinc.com`)
-  that mounts only after the payment section renders could miss that frame
-  if it hadn't appeared YET at that exact instant — the fill throws
-  `payment_field_not_found:pan`, the signed mandate is consumed, and the
-  session lease releases with no resumable state, so any retry mints a
-  fresh approval (looks like a re-armed `approval_pending` loop from the
-  host's side, one human tap per failed attempt). Fixed with a bounded
-  `waitForPanField` poll (10s) before both fills — `browser.ts`.
+  fillCheckoutCardFields).** Before taking their `page.frames()` snapshot,
+  both paths wait up to 10 seconds for a PAN field. This lets a single-page
+  checkout complete within the existing approval when its cross-origin PCI
+  iframe mounts after the payment section renders. The wait changes only
+  when the snapshot is taken: `fillCheckoutCardFields` still writes only to
+  the main frame or a frame accepted by `recognizedPaymentProviderFrame`,
+  preserving split-checkout trust boundaries — `browser.ts`.
 
 ### Goose / local-dev MCP install
 
