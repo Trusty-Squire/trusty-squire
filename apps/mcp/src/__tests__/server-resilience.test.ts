@@ -150,6 +150,80 @@ describe("operate_* bad input is a per-call error, never a server failure", () =
     }
   });
 
+  it("repairs every consolidated action kind without crossing workflow boundaries", async () => {
+    const client = await connectedClient();
+    const cases = [
+      {
+        arguments: { session_id: "s1", kind: "cart_add" },
+        example: {
+          session_id: "<session_id>",
+          kind: "cart_add",
+          product_identity: "<canonical-product-identity>",
+          options_hash: "<selected-options-hash>",
+          idempotency_key: "<stable-idempotency-key>",
+        },
+        guidance: [/same stable idempotency_key/i, /exact-line post-verifies/i],
+      },
+      {
+        arguments: { session_id: "s1", kind: "select_many" },
+        example: {
+          session_id: "<session_id>",
+          kind: "select_many",
+          selections: { "Observed field label": "Visible option label" },
+        },
+        guidance: [/intended order/i, /re-observes after each success/i, /partial results/i],
+      },
+      {
+        arguments: { session_id: "s1", kind: "extract", store: { service: "" } },
+        example: {
+          session_id: "<session_id>",
+          kind: "extract",
+          into_slot: "sealed_secret",
+          secret_label: "API key",
+        },
+        guidance: [/without exposing it/i, /never put credential values in arguments/i, /masked/i],
+      },
+      {
+        arguments: { session_id: "", kind: "solve_captcha" },
+        example: { session_id: "<session_id>", kind: "solve_captcha" },
+        guidance: [/dedicated solver/i, /needs_user/i, /stop driving/i],
+      },
+      {
+        arguments: { session_id: "s1", kind: "await_verification", sender: "" },
+        example: {
+          session_id: "<session_id>",
+          kind: "await_verification",
+          sender: "service.example",
+          into_slot: "otp",
+          grant_inbox_consent: false,
+        },
+        guidance: [/OTP stays sealed/i, /explicitly agrees/i, /grant_inbox_consent:true/i],
+      },
+    ];
+
+    try {
+      for (const testCase of cases) {
+        const result = await client.callTool({
+          name: "operate_act",
+          arguments: testCase.arguments,
+        });
+        expect(result.isError).toBe(true);
+        const { error } = JSON.parse(resultText(result));
+        expect(error.code).toBe("invalid_arguments");
+        expect(error.guidance.example).toEqual(testCase.example);
+        expect(error.guidance.supplied_kind).toBe(testCase.arguments.kind);
+        expect(error.guidance.safe_alternative).toMatch(
+          /Never enter card values with operate_act; use operate_pay/,
+        );
+        for (const pattern of testCase.guidance) {
+          expect(error.guidance.safe_alternative).toMatch(pattern);
+        }
+      }
+    } finally {
+      await client.close();
+    }
+  });
+
   it("a burst of erroring calls leaves the server reachable", async () => {
     const client = await connectedClient();
     try {

@@ -162,8 +162,9 @@ and transferred secrets are not returned to the agent.
 
 ```text
 cart and checkout observations expose a best-effort checkout_state overlay with one next action
-  -> operate_cart_add reserves product+variant identity and an idempotency key,
-     post-verifies the exact line, and suppresses duplicate retry clicks
+  -> operate_act kind=cart_add reserves product+variant identity and an
+     idempotency key, post-verifies the exact line, and suppresses duplicate
+     retry clicks (operate_cart_add remains a delegating compatibility alias)
   -> checkout_state is informational only; it is never a charge input
   -> observed card controls direct the agent to operate_pay, while model-supplied
      PAN-shaped entry remains refused until operate_pay independently verifies the total
