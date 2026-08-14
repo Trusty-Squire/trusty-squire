@@ -1419,7 +1419,8 @@ function extractVisibleTopmostTextSignals({
   const body = document.body;
   if (body === null) return signals;
   const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-  const splitCandidates = new Set<Element>();
+  const splitCandidateMatches = new Map<Element, string | null>();
+  const splitCandidates = new Map<Element, string>();
   let node = walker.nextNode();
   while (node !== null) {
     const text = normalize(node.textContent ?? "");
@@ -1432,13 +1433,20 @@ function extractVisibleTopmostTextSignals({
     } else if (match === null && text.length > 0) {
       let container = node.parentElement;
       for (let depth = 0; container !== null && depth < 4; depth += 1) {
-        const combined = normalize(container.textContent ?? "");
-        pattern.lastIndex = 0;
-        const combinedMatch =
-          combined.length > 0 && combined.length <= 500 ? pattern.exec(combined) : null;
-        pattern.lastIndex = 0;
-        if (combinedMatch !== null) {
-          splitCandidates.add(container);
+        let combinedMatchText: string | null;
+        if (splitCandidateMatches.has(container)) {
+          combinedMatchText = splitCandidateMatches.get(container) ?? null;
+        } else {
+          const combined = normalize(container.textContent ?? "");
+          pattern.lastIndex = 0;
+          const combinedMatch =
+            combined.length > 0 && combined.length <= 500 ? pattern.exec(combined) : null;
+          pattern.lastIndex = 0;
+          combinedMatchText = combinedMatch?.[0] ?? null;
+          splitCandidateMatches.set(container, combinedMatchText);
+        }
+        if (combinedMatchText !== null) {
+          splitCandidates.set(container, combinedMatchText);
           break;
         }
         container = container.parentElement;
@@ -1446,12 +1454,7 @@ function extractVisibleTopmostTextSignals({
     }
     node = walker.nextNode();
   }
-  for (const container of splitCandidates) {
-    const combined = normalize(container.textContent ?? "");
-    pattern.lastIndex = 0;
-    const match = pattern.exec(combined);
-    pattern.lastIndex = 0;
-    if (match === null) continue;
+  for (const [container, match] of splitCandidates) {
     const textNodes: Text[] = [];
     const containerWalker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
     let textNode = containerWalker.nextNode();
@@ -1460,7 +1463,7 @@ function extractVisibleTopmostTextSignals({
       textNode = containerWalker.nextNode();
     }
     if (textNodes.length < 2 || !textNodes.every(visibleAndTopmost)) continue;
-    const signal = canonicalize(match[0]);
+    const signal = canonicalize(match);
     if (signal.length > 0) signals[signal] = (signals[signal] ?? 0) + 1;
   }
   return signals;
