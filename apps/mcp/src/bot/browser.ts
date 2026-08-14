@@ -248,6 +248,9 @@ interface CheckoutCardGroupScope {
 
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
+  // A dispatched click is not a payment outcome. The submit path sets this
+  // only after it observes a receipt/order-confirmation signal.
+  order_confirmed: boolean;
   challenge_url?: string;
 }
 
@@ -8294,7 +8297,11 @@ export class BrowserController {
     this.checkoutCardGroupScope = undefined;
     try {
       await this.waitForPanField(10_000);
-      const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card);
+      // A single-page checkout's generic address controls are its shipping
+      // controls. Only an explicitly marked billing control is eligible here:
+      // sealing a shipping field would make the payment cleanup erase the
+      // merchant's selected address, country, and shipping rate after submit.
+      const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card, true);
       return await this.submitFilledCheckoutInScope(cardGroup);
     } finally {
       await this.clearSealedPaymentFields();
@@ -8405,6 +8412,7 @@ export class BrowserController {
     cardGroup?: CheckoutCardGroupScope,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
+    const submitStartUrl = this.page.url();
     let submitted = false;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
@@ -8468,9 +8476,12 @@ export class BrowserController {
     while (Date.now() < challengeDeadline) {
       const challenge = await this.detectThreeDsChallenge();
       if (challenge.three_ds_required) return challenge;
+      if (await this.hasConfirmedCheckoutOutcome(submitStartUrl)) {
+        return { three_ds_required: false, order_confirmed: true };
+      }
       await this.page.waitForTimeout(250).catch(() => undefined);
     }
-    return { three_ds_required: false };
+    return { three_ds_required: false, order_confirmed: false };
   }
 
   async clearSealedPaymentFields(): Promise<void> {
@@ -8583,29 +8594,56 @@ export class BrowserController {
               ) !== null
             )
               return true;
-            return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
-              document.body?.innerText ?? "",
+            const visibleText = document.body?.innerText ?? "";
+            return (
+              /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
+                visibleText,
+              ) ||
+              // Shopify's PCI host is also used for ordinary card entry, so a
+              // host-only check would false-positive. Its DBS push challenge,
+              // however, renders this user-visible countdown/approval copy.
+              /\b\d{1,3}\s+seconds?\s+to\s+confirm\b|\b(?:confirm|approve)\b[\s\S]{0,80}\b(?:bank|banking|issuer)\s+app\b/i.test(
+                visibleText,
+              )
             );
           })
           .catch(() => false));
       if (detected) {
         return {
           three_ds_required: true,
+          order_confirmed: false,
           challenge_url: frame.url() || this.page.url(),
         };
       }
     }
-    return { three_ds_required: false };
+    return { three_ds_required: false, order_confirmed: false };
+  }
+
+  private async hasConfirmedCheckoutOutcome(startUrl: string): Promise<boolean> {
+    if (!this.page) return false;
+    const successUrl =
+      /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|\/paid\b|payment_intent=.*succe/i;
+    const successText =
+      /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
+    const texts = await Promise.all(
+      this.page
+        .frames()
+        .map(
+          async (frame) =>
+            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+        ),
+    );
+    const currentUrl = this.page.url();
+    return (
+      texts.some((text) => successText.test(text)) ||
+      (currentUrl !== startUrl && successUrl.test(currentUrl))
+    );
   }
 
   async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
     if (!this.page) throw new Error("Browser not started");
     const startUrl = this.page.url();
     const deadline = Date.now() + timeoutMs;
-    const successUrl =
-      /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|\/paid\b|payment_intent=.*succe/i;
-    const successText =
-      /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     do {
@@ -8619,12 +8657,7 @@ export class BrowserController {
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
       const challenge = await this.detectThreeDsChallenge();
-      const currentUrl = this.page.url();
-      if (
-        !challenge.three_ds_required &&
-        (texts.some((text) => successText.test(text)) ||
-          (currentUrl !== startUrl && successUrl.test(currentUrl)))
-      ) {
+      if (!challenge.three_ds_required && (await this.hasConfirmedCheckoutOutcome(startUrl))) {
         return "succeeded";
       }
       await this.page.waitForTimeout(1_000).catch(() => undefined);

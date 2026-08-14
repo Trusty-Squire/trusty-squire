@@ -331,7 +331,7 @@ async function runSeam(cfg: {
     currentUrl: vi.fn().mockReturnValue(`${CHECKOUT.checkout_origin}/session/test`),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
-      return { three_ds_required: false };
+      return { three_ds_required: false, order_confirmed: true };
     }),
     fillCheckoutCardFields: vi.fn(),
     submitFilledCheckout: vi.fn(),

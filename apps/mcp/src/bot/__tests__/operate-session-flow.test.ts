@@ -143,8 +143,9 @@ const h = vi.hoisted(() => ({
   isPayPalHostedCheckout: false,
   filledCards: [] as unknown[],
   fillAndSubmitError: null as Error | null,
-  fillAndSubmitResult: { three_ds_required: false } as {
+  fillAndSubmitResult: { three_ds_required: false, order_confirmed: true } as {
     three_ds_required: boolean;
+    order_confirmed: boolean;
     challenge_url?: string;
   },
   clearSealedPaymentFieldsCalls: 0,
@@ -523,6 +524,7 @@ vi.mock("../browser.js", () => ({
     }
     async fillAndSubmitCheckout(card: unknown): Promise<{
       three_ds_required: boolean;
+      order_confirmed: boolean;
       challenge_url?: string;
     }> {
       h.filledCards.push(card);
@@ -533,7 +535,11 @@ vi.mock("../browser.js", () => ({
       h.filledCards.push(card);
       if (h.fillAndSubmitError !== null) throw h.fillAndSubmitError;
     }
-    async submitFilledCheckout(): Promise<{ three_ds_required: boolean; challenge_url?: string }> {
+    async submitFilledCheckout(): Promise<{
+      three_ds_required: boolean;
+      order_confirmed: boolean;
+      challenge_url?: string;
+    }> {
       return h.fillAndSubmitResult;
     }
     async clearSealedPaymentFields(): Promise<void> {
@@ -850,7 +856,7 @@ beforeEach(() => {
   h.isPayPalHostedCheckout = false;
   h.filledCards = [];
   h.fillAndSubmitError = null;
-  h.fillAndSubmitResult = { three_ds_required: false };
+  h.fillAndSubmitResult = { three_ds_required: false, order_confirmed: true };
   h.clearSealedPaymentFieldsCalls = 0;
   h.waitForThreeDsResult = "timeout";
 });

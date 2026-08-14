@@ -254,9 +254,10 @@ async function harness(
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
       return threeDs === undefined
-        ? { three_ds_required: false }
+        ? { three_ds_required: false, order_confirmed: true }
         : {
             three_ds_required: true,
+            order_confirmed: false,
             challenge_url: "https://issuer.synthetic.test/challenge",
           };
     }),
@@ -848,7 +849,7 @@ async function runJit(cfg: {
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
-      return { three_ds_required: false };
+      return { three_ds_required: false, order_confirmed: true };
     }),
     waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
   };
@@ -1399,7 +1400,7 @@ async function runConfirm(cfg: {
   const notifyCalls: string[] = [];
   const approvedCheckout = cfg.approvedCheckout ?? SPLIT_CHECKOUT;
   const live = cfg.live ?? { ...approvedCheckout };
-  const submit = cfg.submit ?? { three_ds_required: false };
+  const submit = cfg.submit ?? { three_ds_required: false, order_confirmed: true };
 
   const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
@@ -1457,6 +1458,15 @@ async function runConfirm(cfg: {
 }
 
 describe("operate_pay split checkout — confirm", () => {
+  it("does not report payment_submitted when post-submit confirmation is absent", async () => {
+    const { result, auditBodies } = await runConfirm({
+      submit: { three_ds_required: false, order_confirmed: false },
+    });
+
+    expect(result).toMatchObject({ status: "payment_outcome_unknown" });
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+  });
+
   it("charges within the approved amount when the final total matches it exactly", async () => {
     const { result, auditBodies, browser } = await runConfirm({});
 
@@ -1665,7 +1675,11 @@ describe("operate_pay split checkout — confirm", () => {
 
   it("runs the 3DS wait against the fill-time approval id — no second approval to mint one", async () => {
     const { result, notifyCalls } = await runConfirm({
-      submit: { three_ds_required: true, challenge_url: "https://issuer.synthetic.test/c" },
+      submit: {
+        three_ds_required: true,
+        order_confirmed: false,
+        challenge_url: "https://issuer.synthetic.test/c",
+      },
       threeDsResolution: "succeeded",
     });
 
@@ -1830,7 +1844,7 @@ function buildResumableEnv(checkout: CheckoutSummary = CHECKOUT): {
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
       filledCards.push(card);
-      return { three_ds_required: false };
+      return { three_ds_required: false, order_confirmed: true };
     }),
     waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
   };
@@ -2007,7 +2021,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
     vi.mocked(env.browser.fillAndSubmitCheckout).mockImplementation(async (card) => {
       mountedShopifyPanValues[0] = card.pan;
       env.filledCards.push(card);
-      return { three_ds_required: false };
+      return { three_ds_required: false, order_confirmed: true };
     });
     let pending: PendingApprovalWait | null = null;
     await executeOperatePay(baseArgs, env.api, env.browser, {
@@ -2164,7 +2178,10 @@ describe("operate_pay non-blocking approval [P0]", () => {
     if (captured === null) throw new Error("expected resumable state");
     const resumeState: PendingApprovalWait = captured;
     env.setApproved();
-    vi.mocked(env.browser.fillAndSubmitCheckout).mockResolvedValue({ three_ds_required: true });
+    vi.mocked(env.browser.fillAndSubmitCheckout).mockResolvedValue({
+      three_ds_required: true,
+      order_confirmed: false,
+    });
     vi.mocked(env.browser.waitForThreeDsResolution).mockRejectedValue(new Error("3DS unavailable"));
     const onApprovalPending = vi.fn();
 

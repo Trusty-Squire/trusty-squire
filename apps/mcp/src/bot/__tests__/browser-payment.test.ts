@@ -562,6 +562,161 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "keeps Shopify shipping controls intact while clearing a single-page PCI card form",
+    async () => {
+      const pciUrl = "https://checkout.pci.shopifyinc.test/card-fields";
+      const playwrightBrowser = await chromium.launch({ headless: true });
+      try {
+        const page = await playwrightBrowser.newPage();
+        await page.route("**/*", async (route) => {
+          if (route.request().url() !== pciUrl) return route.continue();
+          return route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form id="card-form">
+                <input autocomplete="cc-number">
+                <input autocomplete="cc-exp">
+                <input autocomplete="cc-csc">
+                <input autocomplete="cc-name">
+              </form>`,
+          });
+        });
+        await page.setContent(`
+          <input id="shipping-address" autocomplete="address-line1" value="1-2-3 Shibuya">
+          <input id="shipping-city" autocomplete="address-level2" value="Tokyo">
+          <input id="shipping-postal" autocomplete="postal-code" value="150-0002">
+          <select id="shipping-country" autocomplete="country"><option value="JP" selected>Japan</option></select>
+          <iframe src="${pciUrl}"></iframe>
+          <button id="pay-now">Pay now</button>
+          <script>
+            document.querySelector("#pay-now").addEventListener("click", () => {
+              document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(
+          controller.fillAndSubmitCheckout({
+            pan: "4242424242424242",
+            exp_month: "12",
+            exp_year: "30",
+            cvv: "123",
+            name: "Synthetic Cardholder",
+            billing: {
+              line1: "123 Billing Street",
+              city: "Billingville",
+              postal_code: "10001",
+              country: "US",
+            },
+          }),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+
+        expect(await page.locator("#shipping-address").inputValue()).toBe("1-2-3 Shibuya");
+        expect(await page.locator("#shipping-city").inputValue()).toBe("Tokyo");
+        expect(await page.locator("#shipping-postal").inputValue()).toBe("150-0002");
+        expect(await page.locator("#shipping-country").inputValue()).toBe("JP");
+        const pciFrame = page.frames().find((frame) => frame.url() === pciUrl)!;
+        expect(await pciFrame.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await page.locator('[data-ts-sealed-payment="1"]').count()).toBe(0);
+      } finally {
+        await playwrightBrowser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "recognizes Shopify's visible bank-app countdown as a 3-D Secure challenge",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              setTimeout(() => {
+                document.body.insertAdjacentHTML("beforeend", "<div>60 seconds to confirm</div>");
+              }, 50);
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(
+          controller.fillAndSubmitCheckout({
+            pan: "4242424242424242",
+            exp_month: "12",
+            exp_year: "30",
+            cvv: "123",
+            name: "Synthetic Cardholder",
+            billing: {
+              line1: "123 Billing Street",
+              city: "Billingville",
+              postal_code: "10001",
+              country: "US",
+            },
+          }),
+        ).resolves.toMatchObject({ three_ds_required: true, order_confirmed: false });
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "returns an unconfirmed outcome when a Pay now click has no receipt signal",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <form id="checkout">
+            <input autocomplete="cc-number"><input autocomplete="cc-exp">
+            <input autocomplete="cc-csc"><input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>document.querySelector("#checkout").addEventListener("submit", (event) => event.preventDefault());</script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(
+          controller.fillAndSubmitCheckout({
+            pan: "4242424242424242",
+            exp_month: "12",
+            exp_year: "30",
+            cvv: "123",
+            name: "Synthetic Cardholder",
+            billing: {
+              line1: "123 Billing Street",
+              city: "Billingville",
+              postal_code: "10001",
+              country: "US",
+            },
+          }),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: false });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "fills and submits a single-page checkout whose card fields mount in a cross-origin iframe AFTER the call starts",
     async () => {
       const pciUrl = "https://checkout.pci.shopifyinc.test/card-fields";
