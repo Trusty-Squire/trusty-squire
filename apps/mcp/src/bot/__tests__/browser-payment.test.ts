@@ -1409,7 +1409,7 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "fills one selected Shopify card form coherently when two variants are mounted",
+    "fills the more complete Shopify card form coherently when two variants are mounted",
     async () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
       const frameUrl = "https://checkout.pci.shopifyinc.com/two-card-forms";
@@ -1422,7 +1422,7 @@ describe("split-checkout card fill (real browser)", () => {
             <input autocomplete="cc-exp" placeholder="MM/YY">
             <input autocomplete="cc-csc">
           </form>
-          <form id="split" aria-selected="true">
+          <form id="split">
             <input autocomplete="cc-number">
             <input autocomplete="cc-name">
             <input autocomplete="cc-exp-month">

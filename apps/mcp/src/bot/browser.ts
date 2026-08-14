@@ -7475,7 +7475,7 @@ export class BrowserController {
     const nameSelectors =
       'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]';
 
-    type CardGroup = { frame: Frame; root: Locator; active: boolean };
+    type CardGroup = { frame: Frame; root: Locator; active: boolean; controlCount: number };
     const groups = new Map<string, CardGroup>();
     let fillablePanCount = 0;
     let groupSequence = 0;
@@ -7527,12 +7527,14 @@ export class BrowserController {
               const form = input.closest("form");
               let root: Element | null = form ?? input.parentElement;
               while (root !== null && root !== document.body && root !== document.documentElement) {
+                const hasCombinedExpiry = has(root, selectors.combinedExpiry);
+                const hasSplitExpiry =
+                  has(root, selectors.expiryMonth) && has(root, selectors.expiryYear);
                 const complete =
                   has(root, selectors.pan) &&
                   has(root, selectors.cvv) &&
                   has(root, selectors.name) &&
-                  (has(root, selectors.combinedExpiry) ||
-                    (has(root, selectors.expiryMonth) && has(root, selectors.expiryYear)));
+                  (hasCombinedExpiry || hasSplitExpiry);
                 if (complete) {
                   const existing = root.getAttribute("data-ts-payment-card-group");
                   const token = existing ?? selectors.token;
@@ -7545,7 +7547,13 @@ export class BrowserController {
                     root.querySelector(
                       'input[type="radio"]:checked,[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
                     ) !== null;
-                  return { token, active };
+                  return {
+                    token,
+                    active,
+                    // A split expiry contributes two independently fillable
+                    // controls, so it outranks an otherwise-equal fallback.
+                    controlCount: 3 + (hasCombinedExpiry ? 1 : 2),
+                  };
                 }
                 if (form !== null) break;
                 root = root.parentElement;
@@ -7568,6 +7576,7 @@ export class BrowserController {
             frame,
             root: frame.locator(`[data-ts-payment-card-group="${group.token}"]`),
             active: group.active,
+            controlCount: group.controlCount,
           });
         }
       }
@@ -7577,9 +7586,18 @@ export class BrowserController {
     if (groups.size === 1) {
       cardGroup = [...groups.values()][0];
     } else if (groups.size > 1) {
-      const active = [...groups.values()].filter((group) => group.active);
-      if (active.length !== 1) throw new Error("payment_card_form_ambiguous");
-      cardGroup = active[0];
+      const ranked = [...groups.values()].sort(
+        (left, right) =>
+          Number(right.active) - Number(left.active) || right.controlCount - left.controlCount,
+      );
+      const selected = ranked[0]!;
+      const equallyRanked = ranked.filter(
+        (candidate) =>
+          candidate.active === selected.active &&
+          candidate.controlCount === selected.controlCount,
+      );
+      if (equallyRanked.length !== 1) throw new Error("payment_card_form_ambiguous");
+      cardGroup = selected;
     } else if (fillablePanCount > 1) {
       // Multiple PAN anchors with no single complete container are not safe to
       // combine. A provider topology with one PAN and separate hosted-field
