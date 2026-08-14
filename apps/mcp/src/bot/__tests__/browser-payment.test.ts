@@ -867,8 +867,7 @@ describe("checkout payment parsing", () => {
           <section id="identity-review"><div>Verify your identity</div></section>
           <div style="display:none" id="dbs-bank-app-challenge">60 seconds to confirm</div>
           <section id="covered-countdown">
-            <div id="shopify-bank-app-challenge">60 seconds to confirm</div>
-            <div id="countdown-cover">Merchant offer</div>
+            <div id="shopify-bank-app-challenge">60 seconds to confirm<div id="countdown-cover">Merchant offer</div></div>
           </section>
           <form id="checkout">
             <input autocomplete="cc-number"><input autocomplete="cc-exp">
@@ -933,6 +932,83 @@ describe("checkout payment parsing", () => {
         ).resolves.toEqual({ three_ds_required: false, order_confirmed: false });
       } finally {
         now.mockRestore();
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "fails closed when pre-submit payment signal baselines cannot be read",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <p>Order confirmed</p>
+          <p>Payment declined</p>
+          <form id="checkout">
+            <input autocomplete="cc-number"><input autocomplete="cc-exp">
+            <input autocomplete="cc-csc"><input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              const challenge = document.createElement("iframe");
+              challenge.id = "bank-app";
+              challenge.title = "Issuer authentication";
+              challenge.srcdoc = "<div>60 seconds to confirm</div>";
+              document.body.append(challenge);
+            });
+          </script>
+        `);
+        await page.evaluate(() => {
+          const originalCreateTreeWalker = document.createTreeWalker.bind(document);
+          let remainingFailures = 2;
+          Object.defineProperty(document, "createTreeWalker", {
+            configurable: true,
+            value(root: Node, whatToShow?: number, filter?: NodeFilter | null) {
+              if (remainingFailures > 0) {
+                remainingFailures -= 1;
+                throw new Error("synthetic baseline read failure");
+              }
+              return originalCreateTreeWalker(root, whatToShow, filter);
+            },
+          });
+        });
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(
+          controller.fillAndSubmitCheckout({
+            pan: "4242424242424242",
+            exp_month: "12",
+            exp_year: "30",
+            cvv: "123",
+            name: "Synthetic Cardholder",
+            billing: {
+              line1: "123 Billing Street",
+              city: "Billingville",
+              postal_code: "10001",
+              country: "US",
+            },
+          }),
+        ).resolves.toMatchObject({ three_ds_required: true, order_confirmed: false });
+
+        await page.locator("#bank-app").evaluate((element) => element.remove());
+        let clock = 0;
+        const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+        const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+          clock += timeout;
+        });
+        try {
+          await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
+        } finally {
+          wait.mockRestore();
+          now.mockRestore();
+        }
+      } finally {
         await browser.close();
       }
     },
@@ -1017,7 +1093,7 @@ describe("checkout payment parsing", () => {
         const page = await browser.newPage();
         await page.setContent(`
           <style>
-            #covered-confirmation { position: relative; }
+            #covered-confirmation { display: block; position: relative; }
             #confirmation-cover { background: white; inset: 0; position: absolute; z-index: 2; }
           </style>
           <form id="checkout">
@@ -1032,7 +1108,7 @@ describe("checkout payment parsing", () => {
                 "beforeend",
                 '<p style="display:none">Order confirmed</p>' +
                   '<p style="opacity:0">Order confirmed</p>' +
-                  '<section id="covered-confirmation"><p>Order confirmed</p><div id="confirmation-cover">Still processing</div></section>',
+                  '<p id="covered-confirmation">Order confirmed<span id="confirmation-cover">Still processing</span></p>',
               );
             });
           </script>

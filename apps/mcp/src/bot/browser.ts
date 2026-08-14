@@ -253,10 +253,10 @@ interface CheckoutPaymentFieldRoot {
 
 interface CheckoutOutcomeBaseline {
   url: string;
-  domSignals: Readonly<Record<string, number>>;
+  domSignals: Readonly<Record<string, number>> | null;
 }
 
-type CheckoutFailureBaseline = Readonly<Record<string, number>>;
+type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
 
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
@@ -1247,7 +1247,7 @@ function extractVisibleTopmostTextSignals({
       const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
       const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
       const hit = document.elementFromPoint(x, y);
-      if (hit !== null && (hit === element || element.contains(hit))) return true;
+      if (hit === element) return true;
     }
     return false;
   };
@@ -9019,7 +9019,7 @@ export class BrowserController {
               const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
               const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
               const hit = document.elementFromPoint(x, y);
-              return hit !== null && (hit === element || element.contains(hit));
+              return hit === element;
             };
             const structural = Array.from(
               document.querySelectorAll(
@@ -9062,19 +9062,24 @@ export class BrowserController {
             while (node !== null) {
               const text = (node.nodeValue ?? "").replace(/\s+/g, " ").trim();
               const element = node.parentElement;
-              if (text.length > 0 && element !== null && visibleAndTopmost(element)) {
-                if (explicitText.test(text)) return true;
+              if (text.length > 0 && element !== null) {
+                const explicitMatch = explicitText.test(text);
+                const dbsBankAppMatch = dbsBankAppText.test(text);
+                const countdownMatch = countdownText.test(text);
+                const bankAppMatch = bankAppText.test(text);
+                const contextualMatch = contextualText.test(text);
                 if (
-                  dbsBankAppText.test(text) ||
-                  (shopifyPciFrame && (countdownText.test(text) || bankAppText.test(text)))
+                  (explicitMatch ||
+                    dbsBankAppMatch ||
+                    countdownMatch ||
+                    bankAppMatch ||
+                    contextualMatch) &&
+                  visibleAndTopmost(element)
                 ) {
-                  return true;
-                }
-                if (
-                  contextualText.test(text) ||
-                  countdownText.test(text) ||
-                  bankAppText.test(text)
-                ) {
+                  if (explicitMatch) return true;
+                  if (dbsBankAppMatch || (shopifyPciFrame && (countdownMatch || bankAppMatch))) {
+                    return true;
+                  }
                   const context: string[] = [externalContext];
                   let ancestor: Element | null = element;
                   for (let depth = 0; ancestor !== null && depth < 8; depth += 1) {
@@ -9112,7 +9117,7 @@ export class BrowserController {
   }
 
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
-    if (!this.page) return { url: "", domSignals: {} };
+    if (!this.page) return { url: "", domSignals: null };
     const successText =
       /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt (?:number|#)/i;
     const domSignals = await this.page
@@ -9121,7 +9126,7 @@ export class BrowserController {
         source: successText.source,
         flags: successText.flags,
       })
-      .catch(() => ({}));
+      .catch(() => null);
     return { url: this.page.url(), domSignals };
   }
 
@@ -9142,14 +9147,16 @@ export class BrowserController {
     return (
       sameCheckoutOrigin &&
       ((current.url !== baseline.url && terminalMerchantPath) ||
-        Object.entries(current.domSignals).some(
-          ([signal, count]) => count > (baseline.domSignals[signal] ?? 0),
-        ))
+        (baseline.domSignals !== null &&
+          current.domSignals !== null &&
+          Object.entries(current.domSignals).some(
+            ([signal, count]) => count > (baseline.domSignals?.[signal] ?? 0),
+          )))
     );
   }
 
   private async captureVisibleCheckoutFailureSignals(): Promise<CheckoutFailureBaseline> {
-    if (!this.page) return {};
+    if (!this.page) return null;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     const mainFrame = this.page.mainFrame();
@@ -9161,7 +9168,8 @@ export class BrowserController {
             source: failureText.source,
             flags: failureText.flags,
           })
-          .catch(() => ({}));
+          .catch(() => null);
+        if (signals === null) return null;
         const frameKey = frame === mainFrame ? "main" : `${frame.name()} ${frame.url()}`;
         return Object.fromEntries(
           Object.entries(signals).map(([signal, count]) => [`${frameKey}\n${signal}`, count]),
@@ -9170,6 +9178,7 @@ export class BrowserController {
     );
     const combined: Record<string, number> = {};
     for (const signals of frameSignals) {
+      if (signals === null) return null;
       for (const [signal, count] of Object.entries(signals)) {
         combined[signal] = (combined[signal] ?? 0) + count;
       }
@@ -9180,7 +9189,9 @@ export class BrowserController {
   private async hasNewVisibleCheckoutFailure(
     baseline: CheckoutFailureBaseline,
   ): Promise<boolean> {
+    if (baseline === null) return false;
     const current = await this.captureVisibleCheckoutFailureSignals();
+    if (current === null) return false;
     return Object.entries(current).some(
       ([signal, count]) => count > (baseline[signal] ?? 0),
     );
