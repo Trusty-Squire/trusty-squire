@@ -16,6 +16,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
+import { cancelActiveLoginBrowsers } from "./bot/google-login.js";
 import { closeAllProvisionSessions, withProvisionSessionCall } from "./bot/provision-session.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
@@ -228,6 +229,12 @@ export async function runServer(): Promise<void> {
       process.removeListener("SIGINT", requestShutdown);
 
       try {
+        // The OAuth-bootstrap login Chrome (google-login) is tracked apart
+        // from provision sessions — drain it too so it cannot outlive the
+        // server. Its own signal handlers stand down in server mode (see
+        // registerHeadlessRigCleanup), leaving this coordinator as the one
+        // exit owner.
+        await cancelActiveLoginBrowsers();
         await closeAllProvisionSessions();
         await server.close();
       } catch (err) {

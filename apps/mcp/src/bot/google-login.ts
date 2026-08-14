@@ -57,10 +57,12 @@ import {
   withProfileOperationGuard,
 } from "./profile.js";
 import {
+  isSelfManagedChromeTerminationSignalExitEnabled,
   launchPlainLoginBrowser,
   launchSelfManagedLoginContext,
   resolveChannelBinary,
   selfLaunchEnabled,
+  setSelfManagedChromeTerminationSignalExitEnabled,
 } from "./browser.js";
 export { extractGoogleAccountEmail } from "./browser.js";
 import {
@@ -827,17 +829,73 @@ export async function teardownLoginBrowser(opts: {
   });
 }
 
+// --- shutdown coordination with the operator server -------------------
+// Every in-flight login run registers a cancel closure here so an external
+// shutdown owner (the MCP server's disconnect coordinator) can close the
+// OAuth-bootstrap Chrome instead of orphaning it. The closures wrap the run's
+// own proof-checked teardown (closeProfileWithProof over the launch-time
+// process identity), so cancellation never signals a PID it cannot prove
+// ownership of.
+const activeLoginBrowserCancels = new Set<() => Promise<void>>();
+
+// Exported for tests; runDisplayedChrome/runHeadlessChrome are the real
+// callers. Returns the unregister disposer for the normal completion path.
+export function trackActiveLoginBrowser(cancel: () => Promise<void>): () => void {
+  activeLoginBrowserCancels.add(cancel);
+  return (): void => {
+    activeLoginBrowserCancels.delete(cancel);
+  };
+}
+
+// Cancel every in-flight login run's browser (and headless rig, where one
+// exists). Called by the MCP server's shutdown path; idempotent and
+// best-effort — a failed teardown must not stall the process exit, whose
+// process-level exit hooks still force-kill anything identity-proven.
+export async function cancelActiveLoginBrowsers(): Promise<void> {
+  const pending = [...activeLoginBrowserCancels];
+  activeLoginBrowserCancels.clear();
+  await Promise.all(pending.map((cancel) => cancel().catch(() => undefined)));
+}
+
 type LoginProcessRuntime = Pick<NodeJS.Process, "once" | "removeListener" | "exit">;
+
+// How registerHeadlessRigCleanup coordinates exit ownership with browser.ts's
+// self-managed Chrome signal handlers. Injectable for tests; the default is
+// the real process-wide flag.
+export interface LoginSignalExitCoordination {
+  enabled(): boolean;
+  set(enabled: boolean): void;
+}
+
+const selfManagedSignalExitCoordination: LoginSignalExitCoordination = {
+  enabled: isSelfManagedChromeTerminationSignalExitEnabled,
+  set: setSelfManagedChromeTerminationSignalExitEnabled,
+};
 
 // Attach the per-login rig to every process termination route. The function
 // returns a disposer for the normal completion path; callers must keep the
 // browser teardown in the getter so an interrupt can also release the Chrome
 // profile lock before Node exits. The hard cap prevents a wedged browser from
 // keeping Xvfb/x11vnc/websockify (or cloudflared) alive indefinitely.
+//
+// Exit ownership is coordinated through `signalExit`, one owner at a time:
+// - When self-managed signal exits are ENABLED (the CLI default), this login
+//   takes sole ownership for its duration — it suspends browser.ts's
+//   SIGKILL-and-exit handlers (which would otherwise preempt the capped
+//   graceful teardown below on the same signal) and restores them on
+//   disposal. The always-on `exit` hooks (here for the rig, browser.ts's for
+//   identity-proven Chromes) stay as the force-kill backstop.
+// - When they are DISABLED, a central shutdown coordinator (the MCP server's
+//   requestShutdown) already owns process exit and drains this login via
+//   cancelActiveLoginBrowsers(); installing exit-calling signal or
+//   uncaughtException handlers here would race it (and would violate the
+//   server's log-and-keep-serving process guards), so only the pure-cleanup
+//   `exit` hook is registered.
 export function registerHeadlessRigCleanup(
   rig: HeadlessRig,
   activeBrowserTeardown: () => (() => Promise<void>) | undefined,
   runtime: LoginProcessRuntime = process,
+  signalExit: LoginSignalExitCoordination = selfManagedSignalExitCoordination,
 ): () => void {
   let finishing = false;
 
@@ -881,17 +939,23 @@ export function registerHeadlessRigCleanup(
   };
 
   runtime.once("exit", onExit);
-  runtime.once("SIGTERM", onSigterm);
-  runtime.once("SIGINT", onSigint);
-  runtime.once("uncaughtException", onUncaughtException);
-  runtime.once("unhandledRejection", onUnhandledRejection);
+  const ownsTerminationExit = signalExit.enabled();
+  if (ownsTerminationExit) {
+    signalExit.set(false);
+    runtime.once("SIGTERM", onSigterm);
+    runtime.once("SIGINT", onSigint);
+    runtime.once("uncaughtException", onUncaughtException);
+    runtime.once("unhandledRejection", onUnhandledRejection);
+  }
 
   return (): void => {
     runtime.removeListener("exit", onExit);
+    if (!ownsTerminationExit) return;
     runtime.removeListener("SIGTERM", onSigterm);
     runtime.removeListener("SIGINT", onSigint);
     runtime.removeListener("uncaughtException", onUncaughtException);
     runtime.removeListener("unhandledRejection", onUnhandledRejection);
+    signalExit.set(true);
   };
 }
 
@@ -1113,6 +1177,21 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
     });
     let status: LoginRunResult["status"] = "timeout";
     let closeState: ProfileCloseState = "unknown";
+    // Memoized so the normal finally and an external shutdown cancel share
+    // one proof-checked teardown instead of racing two.
+    let browserTeardown: Promise<ProfileCloseState> | undefined;
+    const teardownBrowser = (): Promise<ProfileCloseState> => {
+      browserTeardown ??= teardownLoginBrowser({
+        profileDir: opts.profileDir,
+        identity: browser.identity,
+        closeBrowser: browser.teardown,
+        forceClose: browser.forceTeardown,
+      });
+      return browserTeardown;
+    };
+    const untrackLoginRun = trackActiveLoginBrowser(async () => {
+      await teardownBrowser();
+    });
     try {
       console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
       const ok = await pollUntil(
@@ -1132,12 +1211,8 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
       }
       status = ok ? "completed" : "timeout";
     } finally {
-      closeState = await teardownLoginBrowser({
-        profileDir: opts.profileDir,
-        identity: browser.identity,
-        closeBrowser: browser.teardown,
-        forceClose: browser.forceTeardown,
-      });
+      untrackLoginRun();
+      closeState = await teardownBrowser();
     }
     return { status, closeState };
   }
@@ -1168,6 +1243,19 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
   const identity = holderPid === null ? null : profileProcessIdentity(holderPid, opts.profileDir);
   let status: LoginRunResult["status"] = "timeout";
   let closeState: ProfileCloseState = "unknown";
+  let browserTeardown: Promise<ProfileCloseState> | undefined;
+  const teardownBrowser = (): Promise<ProfileCloseState> => {
+    browserTeardown ??= teardownLoginBrowser({
+      profileDir: opts.profileDir,
+      identity,
+      closeBrowser: () => context.close(),
+      forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
+    });
+    return browserTeardown;
+  };
+  const untrackLoginRun = trackActiveLoginBrowser(async () => {
+    await teardownBrowser();
+  });
   try {
     const preflightSatisfied =
       opts.preflight !== undefined &&
@@ -1193,12 +1281,8 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
       status = ok ? "completed" : "timeout";
     }
   } finally {
-    closeState = await teardownLoginBrowser({
-      profileDir: opts.profileDir,
-      identity,
-      closeBrowser: () => context.close(),
-      forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
-    });
+    untrackLoginRun();
+    closeState = await teardownBrowser();
   }
   return { status, closeState };
 }
@@ -1246,6 +1330,15 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
   // Cover normal cleanup, interrupts, and fatal process errors. The returned
   // disposer removes process-global listeners once this login finishes.
   const removeRigCleanup = registerHeadlessRigCleanup(rig, () => activeTeardown);
+  // Register for external shutdown BEFORE the Chrome launch so the whole
+  // starting phase is cancellable: a cancel mid-launch still tears the rig,
+  // and once activeTeardown exists it closes the bootstrap Chrome through its
+  // identity-proven teardown.
+  const untrackLoginRun = trackActiveLoginBrowser(async () => {
+    const closeBrowser = activeTeardown;
+    if (closeBrowser !== undefined) await closeBrowser().catch(() => undefined);
+    await teardownHeadlessRig(rig);
+  });
 
   try {
     // 1. Virtual display — phone-shaped.
@@ -1531,6 +1624,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
       activeTeardown = undefined;
     }
   } finally {
+    untrackLoginRun();
     await teardownHeadlessRig(rig);
     removeRigCleanup();
   }

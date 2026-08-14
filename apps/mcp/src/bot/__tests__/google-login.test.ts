@@ -29,6 +29,7 @@ import {
 import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
 import {
   binaryOnPath,
+  cancelActiveLoginBrowsers,
   installHint,
   installClaimPollCompleted,
   openInstallConfirmInBotChrome,
@@ -48,6 +49,7 @@ import {
   scrapeGoogleScopePhrases,
   teardownHeadlessRig,
   teardownLoginBrowser,
+  trackActiveLoginBrowser,
   ensureOAuthSession,
   finalizeLoginRun,
   launchPersistentLoginContext,
@@ -224,6 +226,50 @@ describe("headless login VNC lifecycle", () => {
     remove();
   });
 
+  it("takes sole signal ownership from the self-managed Chrome handlers for its duration", () => {
+    const { rig } = rigWithEverySessionProcess();
+    const { handlers, runtime } = cleanupRuntime();
+    const set = vi.fn();
+    const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime, {
+      enabled: () => true,
+      set,
+    });
+
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(set).toHaveBeenCalledWith(false);
+    for (const event of ["exit", "SIGTERM", "SIGINT", "uncaughtException", "unhandledRejection"]) {
+      expect(handlers.has(event)).toBe(true);
+    }
+
+    remove();
+    expect(set).toHaveBeenLastCalledWith(true);
+    expect(handlers.size).toBe(0);
+  });
+
+  it("stands down to the central shutdown coordinator when signal exit is disabled", () => {
+    const { rig } = rigWithEverySessionProcess();
+    const { handlers, runtime } = cleanupRuntime();
+    const set = vi.fn();
+    const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime, {
+      enabled: () => false,
+      set,
+    });
+
+    // Only the pure-cleanup exit hook: the server's requestShutdown owns
+    // signals/exit and drains the login via cancelActiveLoginBrowsers, and
+    // exit-calling uncaught/unhandled handlers would break the server's
+    // log-and-keep-serving process guards.
+    expect(handlers.has("exit")).toBe(true);
+    for (const event of ["SIGTERM", "SIGINT", "uncaughtException", "unhandledRejection"]) {
+      expect(handlers.has(event)).toBe(false);
+    }
+    expect(set).not.toHaveBeenCalled();
+
+    remove();
+    expect(set).not.toHaveBeenCalled();
+    expect(handlers.size).toBe(0);
+  });
+
   it("uses HTTP/2 for the per-session cloudflared fallback", () => {
     expect(fallbackCloudflaredArgs(4567)).toEqual([
       "tunnel",
@@ -245,6 +291,56 @@ describe("headless login VNC lifecycle", () => {
     await expect(
       shortenVncUrl("https://api.test", "https://long.test/#p=secret", fetchImpl),
     ).resolves.toBe("https://trustysquire.ai/g/short");
+  });
+});
+
+describe("operator shutdown — OAuth-bootstrap login browser cancellation", () => {
+  it("cancels every tracked login browser once and drains the registry", async () => {
+    const closed: string[] = [];
+    trackActiveLoginBrowser(async () => {
+      closed.push("displayed");
+    });
+    trackActiveLoginBrowser(async () => {
+      closed.push("headless");
+      throw new Error("teardown failed mid-shutdown");
+    });
+
+    await cancelActiveLoginBrowsers();
+    expect(closed.sort()).toEqual(["displayed", "headless"]);
+
+    // Drained: a second shutdown trigger must not double-tear anything.
+    await cancelActiveLoginBrowsers();
+    expect(closed).toHaveLength(2);
+  });
+
+  it("skips a login run that already completed and unregistered", async () => {
+    const cancel = vi.fn(async () => undefined);
+    const untrack = trackActiveLoginBrowser(cancel);
+    untrack();
+
+    await cancelActiveLoginBrowsers();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("shares one teardown between the shutdown cancel and the login's own finally", async () => {
+    // Mirrors the memoized teardownBrowser used by runDisplayedChrome /
+    // runHeadlessChrome: whichever of requestShutdown or the run's finally
+    // fires first performs the close, and the other awaits the same promise.
+    let closes = 0;
+    let teardown: Promise<void> | undefined;
+    const teardownBrowser = (): Promise<void> =>
+      (teardown ??= (async () => {
+        closes += 1;
+      })());
+    const untrack = trackActiveLoginBrowser(async () => {
+      await teardownBrowser();
+    });
+
+    await cancelActiveLoginBrowsers(); // the server shutdown wins the race
+    untrack(); // …then the interrupted login run's finally still executes
+    await teardownBrowser();
+
+    expect(closes).toBe(1);
   });
 });
 
