@@ -397,6 +397,23 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
+### 9. Decoupled/out-of-band (app-push) 3DS needs an authoritative signal, not DOM watching
+
+`BrowserController.waitForThreeDsResolution` (`apps/mcp/src/bot/browser.ts`) only
+watched the browser for 3DS completion — that works when the cardholder completes
+the challenge *inside* the CardinalCommerce iframe, but decoupled/app-push 3DS
+(e.g. DBS) authenticates entirely out of band in the issuer's mobile app, and the
+merchant page's own JS may never receive a postMessage back into that frame. The
+fix polls the Stripe PaymentIntent status directly (publishable-key only, parsed
+from the hosted-challenge URL — never the secret key) as the authoritative signal,
+then reloads the checkout page so the merchant's own completion logic re-evaluates
+server state, and requires a genuine merchant order-completion route within a
+bounded grace window before reporting success. See
+`payment_3ds_authenticated_pending_order` in `pay-operator.ts` for the fail-closed
+outcome when the issuer authenticated but the order never visibly confirmed —
+never invent a third "detect completion" heuristic without first checking whether
+the provider already exposes an authoritative status you can poll.
+
 ---
 
 ## Maintaining this file
@@ -404,6 +421,13 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 This file is a living contract, not a historical record. When you learn something during a task that would have changed how you approached it — a gotcha, a footgun, a rule that saved you from a mistake — add it here in the same pass, in the appropriate section. Keep entries proportionate: durable, repo-specific knowledge that the code/CI itself doesn't already make obvious, not step-by-step task narration. Prefer pointing at the authoritative file/command/doc over duplicating its content. Remove or correct entries you find to be stale or wrong rather than leaving them to mislead the next agent.
 
 ---
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.
 
 ## Final note
 
