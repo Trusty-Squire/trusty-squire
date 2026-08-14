@@ -139,8 +139,8 @@ one complete visible and enabled group containing PAN, name, expiry, and CVV. Wh
 multiple groups are complete, it uses the PAN's rendered center-point hit-test and
 selects only the unique topmost, non-occluded group; otherwise it fails with
 `payment_card_form_ambiguous`. Card filling stays inside that selected group. Charge
-controls inside a card group are
-eligible only for the selected group in both same-step and later confirmation,
+controls inside a card group are eligible only for the selected group in both
+same-step and later confirmation,
 and both card fields and charge controls follow their HTML `form` relationship when
 mounted elsewhere in the DOM; a merchant checkout control outside every card group
 remains eligible.

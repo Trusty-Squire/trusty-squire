@@ -2,7 +2,7 @@
 
 ## 1.1.9-rc.19 (2026-08-13)
 
-- fix(mcp): select coherent Shopify card forms — rank card-field groups, fill and submit within one form, and enforce `.form` semantic-ownership checks, so checkouts that render two card forms (e.g. KobeeJapan) complete instead of returning `payment_card_form_ambiguous` (#510)
+- fix(mcp): select coherent Shopify card forms — use each PAN's rendered hit-test to choose the unique topmost group, then fill and submit only within that form, so two-form checkouts such as KobeeJapan complete without touching an occluded duplicate (#510)
 
 ## 1.1.9-rc.18 (2026-08-13)
 
