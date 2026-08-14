@@ -75,6 +75,7 @@ import {
   canPublishOperatorProfileSeed,
   GOOGLE_LOGIN_COOKIE_MARKERS,
   publishOperatorProfileSeed,
+  type OperatorSeedGoogleValidation,
 } from "./operator-profile-pool.js";
 
 const require = createRequire(import.meta.url);
@@ -969,7 +970,7 @@ export interface RunInBotChromeOpts {
   plainOnSuccess?: (profileDir: string) => Promise<void>;
   onConfirmedLogin?: () => Promise<void>;
   seedProvider?: OAuthProviderId | (() => OAuthProviderId | null);
-  validateGoogleSeed?: (profileDir: string) => Promise<boolean>;
+  validateGoogleSeed?: (profileDir: string) => Promise<OperatorSeedGoogleValidation>;
 }
 
 const LOGIN_BROWSER_CLOSED_ERROR =
@@ -1017,26 +1018,37 @@ export async function finalizeLoginRun(
 export async function validateGoogleProfileSession(
   profileDir: string,
   launcher: PersistentLauncher = resolveChromium(),
-): Promise<boolean> {
+  closeValidationBrowser: typeof teardownLoginBrowser = teardownLoginBrowser,
+): Promise<OperatorSeedGoogleValidation> {
+  const proxyOpt = loginProxyOption();
   const context = await launchWithProfileGate(profileDir, () =>
     launchPersistentLoginContext(launcher, profileDir, {
       headless: true,
       ignoreDefaultArgs: ["--enable-automation"],
       args: ["--no-sandbox", "--disable-dev-shm-usage"],
+      ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
     }),
   );
+  const holderPid = currentProfileHolderPid(profileDir);
+  const identity = holderPid === null ? null : profileProcessIdentity(holderPid, profileDir);
+  let googleSignedIn = false;
   try {
     const page = context.pages()[0] ?? (await context.newPage());
     await page.goto("https://myaccount.google.com/", {
       waitUntil: "domcontentloaded",
       timeout: 30_000,
     });
-    return new URL(page.url()).hostname === "myaccount.google.com";
+    googleSignedIn = new URL(page.url()).hostname === "myaccount.google.com";
   } catch {
-    return false;
-  } finally {
-    await context.close().catch(() => undefined);
+    googleSignedIn = false;
   }
+  const closeState = await closeValidationBrowser({
+    profileDir,
+    identity,
+    closeBrowser: () => context.close(),
+    forceClose: () => reapProfileHolderIfOwned(profileDir, identity),
+  });
+  return { googleSignedIn, closeState };
 }
 
 async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
@@ -1659,36 +1671,43 @@ export async function ensureOAuthSession(opts?: {
 // sign-in happens inside this Chrome instance — so the bot's profile gets
 // a provider session as a free side effect, and there's no separate
 // "log into Google for the bot" step after install.
-export async function openInstallConfirmInBotChrome(opts: {
-  confirmUrl: string;
-  // Returns claimed only after the install ceremony succeeds. The login browser
-  // runs PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
-  // attach), so the predicate gets the profileDir, NOT a live context: it
-  // composes the API claim with either the normal wizard's per-run loopback
-  // Finish callback or forced re-login's on-disk provider-session seed.
-  pollUntilClaimed: (
-    profileDir: string,
-    wizardCompleted: boolean,
-  ) => Promise<InstallClaimPollResult>;
-  profileDir?: string;
-  timeoutMinutes?: number;
-  // G15: API base URL used to shorten the headless cloudflared
-  // tunnel URL before printing it in the banner. Same value the
-  // install handshake calls against; threaded down to the rig.
-  apiBaseUrl?: string;
-  // Phase-aware terminal copy supplied by connect.
-  heartbeatMessage?: string | (() => string);
-}): Promise<{ status: "claimed" | "timeout" | "error"; detail?: string }> {
+export async function openInstallConfirmInBotChrome(
+  opts: {
+    confirmUrl: string;
+    // Returns claimed only after the install ceremony succeeds. The login browser
+    // runs PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
+    // attach), so the predicate gets the profileDir, NOT a live context: it
+    // composes the API claim with either the normal wizard's per-run loopback
+    // Finish callback or forced re-login's on-disk provider-session seed.
+    pollUntilClaimed: (
+      profileDir: string,
+      wizardCompleted: boolean,
+    ) => Promise<InstallClaimPollResult>;
+    profileDir?: string;
+    timeoutMinutes?: number;
+    // G15: API base URL used to shorten the headless cloudflared
+    // tunnel URL before printing it in the banner. Same value the
+    // install handshake calls against; threaded down to the rig.
+    apiBaseUrl?: string;
+    // Phase-aware terminal copy supplied by connect.
+    heartbeatMessage?: string | (() => string);
+  },
+  runChrome: typeof runInBotChrome = runInBotChrome,
+): Promise<{
+  status: "claimed" | "timeout" | "error";
+  detail?: string;
+}> {
   const profileDir = opts.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
   let completion: Awaited<ReturnType<typeof startInstallCompletionListener>> | undefined;
+  let observedGoogleIdentity = false;
 
   try {
     const doneUrl = new URL("/install/done", opts.confirmUrl).toString();
     completion = await startInstallCompletionListener(doneUrl, opts.confirmUrl);
     const confirmUrl = withInstallCompletionCallback(opts.confirmUrl, completion.callbackUrl);
-    const result = await runInBotChrome({
+    const result = await runChrome({
       profileDir,
       url: confirmUrl,
       deadline,
@@ -1715,6 +1734,7 @@ export async function openInstallConfirmInBotChrome(opts: {
         for (const provider of ["google", "github"] as const) {
           if (profileHasProviderCookies(dir, provider)) {
             markProviderLoggedIn(provider, dir);
+            if (provider === "google") observedGoogleIdentity = true;
           }
         }
         // NB: eager Google-email capture (captureGoogleEmail) needed a live
@@ -1724,6 +1744,8 @@ export async function openInstallConfirmInBotChrome(opts: {
         // when unset, so dropping eager capture is safe and keeping CDP off
         // the OAuth login is the whole point of the plain path.
       },
+      seedProvider: () => (observedGoogleIdentity ? "google" : null),
+      validateGoogleSeed: validateGoogleProfileSession,
     });
     if (result.status === "completed") {
       return { status: "claimed" };

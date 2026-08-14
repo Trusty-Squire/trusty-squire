@@ -21,6 +21,7 @@ import {
   operatorProfilePoolTest,
   OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
   publishOperatorProfileSeed as publishOperatorProfileSeedRaw,
+  type OperatorSeedGoogleValidation,
 } from "../operator-profile-pool.js";
 import { profilePathIdentity } from "../profile.js";
 
@@ -34,12 +35,14 @@ const verifiedLoginProof = {
 function publishOperatorProfileSeed(
   sourceProfileDir: string,
   opts: Omit<Parameters<typeof publishOperatorProfileSeedRaw>[1], "validateGoogleIdentity"> & {
-    validateGoogleIdentity?: (profileDir: string) => Promise<boolean>;
+    validateGoogleIdentity?: (profileDir: string) => Promise<OperatorSeedGoogleValidation>;
   },
 ): ReturnType<typeof publishOperatorProfileSeedRaw> {
   return publishOperatorProfileSeedRaw(sourceProfileDir, {
     ...opts,
-    validateGoogleIdentity: opts.validateGoogleIdentity ?? (() => Promise.resolve(true)),
+    validateGoogleIdentity:
+      opts.validateGoogleIdentity ??
+      (() => Promise.resolve({ googleSignedIn: true, closeState: "closed" })),
   });
 }
 
@@ -196,7 +199,7 @@ describe("operator profile pool migration stage", () => {
         validateGoogleIdentity: async (profileDir) => {
           expect(profileDir).not.toBe(source);
           expect(cookieValues(profileDir)).toEqual(["replacement"]);
-          return false;
+          return { googleSignedIn: false, closeState: "closed" };
         },
       }),
     ).rejects.toThrow("failed Google identity validation");
@@ -204,6 +207,36 @@ describe("operator profile pool migration stage", () => {
     expect(operatorProfilePoolTest.currentGeneration(p)).toBe(first);
     expect(readdirSync(p.generations)).toEqual([first]);
     expect(readdirSync(p.tombstones)).toEqual([]);
+  });
+
+  it("retains validation profile state when Chrome closure is unproven", async () => {
+    const { root, source } = fixture();
+    const first = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+
+    await expect(
+      publishOperatorProfileSeed(source, {
+        rootDir: root,
+        proof: verifiedLoginProof,
+        validateGoogleIdentity: async (profileDir) => {
+          writeFileSync(join(profileDir, "validation-live"), "retained");
+          return { googleSignedIn: true, closeState: "unknown" };
+        },
+      }),
+    ).rejects.toThrow("validation Chrome closure was not proven");
+
+    expect(operatorProfilePoolTest.currentGeneration(p)).toBe(first);
+    expect(readdirSync(p.generations)).toEqual([first]);
+    const validation = readdirSync(p.tombstones).find((entry) =>
+      entry.startsWith("seed-validation-"),
+    );
+    expect(validation).toBeDefined();
+    expect(readFileSync(join(p.tombstones, validation!, "validation-live"), "utf8")).toBe(
+      "retained",
+    );
   });
 
   it("admits one active lease and never launches from the login-authoring profile", async () => {
