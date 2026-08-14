@@ -1269,6 +1269,22 @@ describe("split-checkout card fill (real browser)", () => {
       });
     </script>`;
 
+  const TOPMOST_SPLIT_PAN_STYLE = `
+    <style>
+      #combined [autocomplete="cc-number"],
+      [form="combined"][autocomplete="cc-number"],
+      #split [autocomplete="cc-number"],
+      [form="split"][autocomplete="cc-number"] {
+        left: 0;
+        position: absolute;
+        top: 0;
+      }
+      #split [autocomplete="cc-number"],
+      [form="split"][autocomplete="cc-number"] {
+        z-index: 1;
+      }
+    </style>`;
+
   async function servePages(pages: Record<string, string>): Promise<{
     page: Page;
     browser: Browser;
@@ -1416,6 +1432,7 @@ describe("split-checkout card fill (real browser)", () => {
       const { page, browser } = await servePages({
         [pageUrl]: `<title>Kobee Japan</title><iframe src="${frameUrl}"></iframe>`,
         [frameUrl]: `
+          ${TOPMOST_SPLIT_PAN_STYLE}
           <form id="combined">
             <input autocomplete="cc-number">
             <input autocomplete="cc-name">
@@ -1461,6 +1478,7 @@ describe("split-checkout card fill (real browser)", () => {
       try {
         const page = await browser.newPage();
         await page.setContent(`
+          ${TOPMOST_SPLIT_PAN_STYLE}
           <form id="combined">
             <input autocomplete="cc-number">
             <input autocomplete="cc-name">
@@ -1626,6 +1644,7 @@ describe("split-checkout card fill (real browser)", () => {
             });
           </script>`,
         [frameUrl]: `
+          ${TOPMOST_SPLIT_PAN_STYLE}
           <form id="combined">
             <input autocomplete="cc-number">
             <input autocomplete="cc-name">
@@ -1662,6 +1681,7 @@ describe("split-checkout card fill (real browser)", () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
       const { page, browser } = await servePages({
         [pageUrl]: `
+          ${TOPMOST_SPLIT_PAN_STYLE}
           <form id="combined">
             <input autocomplete="cc-number">
             <input autocomplete="cc-name">
@@ -1717,6 +1737,7 @@ describe("split-checkout card fill (real browser)", () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
       const { page, browser } = await servePages({
         [pageUrl]: `
+          ${TOPMOST_SPLIT_PAN_STYLE}
           <form id="combined"></form>
           <form id="split"></form>
           <input form="combined" autocomplete="cc-number">
