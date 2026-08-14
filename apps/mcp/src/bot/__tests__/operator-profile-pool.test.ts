@@ -322,6 +322,39 @@ describe("operator profile pool migration stage", () => {
     expect(readdirSync(p.activeClaims)).toEqual([]);
   });
 
+  it("restores an ambiguous quarantined lease to its original second slot", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const first = await acquireOperatorProfile("first-session", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    const second = await acquireOperatorProfile("second-session", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const secondSlot = join(p.active, "slot-1");
+    const owner = JSON.parse(readFileSync(join(secondSlot, "owner.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    writeFileSync(
+      join(secondSlot, "owner.json"),
+      `${JSON.stringify({ ...owner, host: "remote-host" })}\n`,
+    );
+    const tombstone = join(p.tombstones, "active-1-test");
+    renameSync(secondSlot, tombstone);
+
+    operatorProfilePoolTest.scavengeQuarantinedActive(p);
+
+    expect(existsSync(join(p.active, "slot-0"))).toBe(true);
+    expect(existsSync(join(p.active, "slot-1"))).toBe(true);
+    expect(existsSync(tombstone)).toBe(false);
+    await second.destroy();
+    await first.destroy();
+  });
+
   it("binds a canonical worker identity through a symlinked pool root", async () => {
     const { root, source } = fixture();
     mkdirSync(root);

@@ -61,6 +61,7 @@ const h = vi.hoisted(() => ({
   warmLeaseProfileDir: null as string | null,
   nextLeaseProfileDir: null as string | null,
   leaseAcquireCalls: 0,
+  activeLeaseCount: 0,
   leaseReturnCalls: 0,
   leaseDestroyCalls: 0,
   leaseRetainCalls: 0,
@@ -616,6 +617,12 @@ vi.mock("../operator-profile-pool.js", () => ({
   OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
   acquireOperatorProfile: async (_sessionId: string, opts: { sourceProfileDir?: string } = {}) => {
     h.leaseAcquireCalls += 1;
+    if (h.activeLeaseCount >= 2) {
+      throw new Error(
+        "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
+      );
+    }
+    h.activeLeaseCount += 1;
     const warm = h.warmLeaseProfileDir;
     h.warmLeaseProfileDir = null;
     const profileDir =
@@ -633,17 +640,20 @@ vi.mock("../operator-profile-pool.js", () => ({
       returnWarm: async () => {
         if (finished) return;
         finished = true;
+        h.activeLeaseCount -= 1;
         h.leaseReturnCalls += 1;
         h.warmLeaseProfileDir = profileDir;
       },
       destroy: async () => {
         if (finished) return;
         finished = true;
+        h.activeLeaseCount -= 1;
         h.leaseDestroyCalls += 1;
       },
       retain: async (destroyRequired = false) => {
         if (finished) return;
         finished = true;
+        h.activeLeaseCount -= 1;
         h.leaseRetainCalls += 1;
         h.leaseRetainDestroyRequired.push(destroyRequired);
       },
@@ -813,6 +823,7 @@ beforeEach(() => {
   h.warmLeaseProfileDir = null;
   h.nextLeaseProfileDir = null;
   h.leaseAcquireCalls = 0;
+  h.activeLeaseCount = 0;
   h.leaseReturnCalls = 0;
   h.leaseDestroyCalls = 0;
   h.leaseRetainCalls = 0;
@@ -3680,6 +3691,75 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
     await finishProvisionSession(first.session_id);
     await finishProvisionSession(second.session_id);
+  });
+
+  it("starts the same pending third task after one active lease finishes", async () => {
+    vi.useFakeTimers();
+    try {
+      const [first, second] = await Promise.all([
+        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
+        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+      ]);
+      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      expect(h.leaseAcquireCalls).toBe(3);
+
+      expect(h.startCalls).toBe(2);
+      await finishProvisionSession(first.session_id);
+      await vi.advanceTimersByTimeAsync(50);
+
+      const third = await thirdStart;
+      expect(h.startCalls).toBe(3);
+      expect(h.profileDirs).toHaveLength(3);
+      await finishProvisionSession(second.session_id);
+      await finishProvisionSession(third.session_id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out a third task without launching another browser", async () => {
+    vi.useFakeTimers();
+    try {
+      const [first, second] = await Promise.all([
+        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
+        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+      ]);
+      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      expect(h.leaseAcquireCalls).toBe(3);
+      const rejection = expect(thirdStart).rejects.toThrow("capacity wait timed out");
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await rejection;
+      expect(h.startCalls).toBe(2);
+      expect(h.profileDirs).toHaveLength(2);
+      await finishProvisionSession(first.session_id);
+      await finishProvisionSession(second.session_id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("cancels a capacity waiter before shutdown frees an active slot", async () => {
+    vi.useFakeTimers();
+    try {
+      await Promise.all([
+        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
+        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+      ]);
+      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      expect(h.leaseAcquireCalls).toBe(3);
+      const rejection = expect(thirdStart).rejects.toThrow("operator server is shutting down");
+
+      await closeAllProvisionSessions();
+
+      await rejection;
+      expect(h.startCalls).toBe(2);
+      expect(h.profileDirs).toHaveLength(2);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not reap the shared browser while a session is in flight", async () => {

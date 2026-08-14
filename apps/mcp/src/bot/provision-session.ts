@@ -609,12 +609,22 @@ interface StartingBrowser {
   cancelRequested: boolean;
 }
 
+interface CapacityWaiter {
+  generation: number;
+  cancelRequested: boolean;
+  wake: () => void;
+  settled: Promise<void>;
+  resolveSettled: () => void;
+}
+
 // The pool is authoritative for cross-process capacity; these maps only retain
 // the local controller/lease pairing needed for lifecycle cleanup.  In
 // particular, they deliberately do not impose a process-global single-session
 // gate: each entry owns an isolated profile lease.
 const leasedBrowsers = new Map<BrowserController, WarmBrowser>();
 const startingBrowsers = new Set<StartingBrowser>();
+const capacityWaiters = new Set<CapacityWaiter>();
+let shutdownGeneration = 0;
 const START_CAPACITY_WAIT_MS = 30_000;
 const START_CAPACITY_RETRY_MS = 50;
 
@@ -625,24 +635,60 @@ function isOperatorCapacityError(error: unknown): boolean {
 async function acquireOperatorProfileBounded(
   opts: StartOptions,
   sessionId: string,
+  generation: number,
 ): Promise<OperatorProfileLease> {
+  let wake = (): void => undefined;
+  let resolveSettled = (): void => undefined;
+  const waiter: CapacityWaiter = {
+    generation,
+    cancelRequested: false,
+    wake: () => wake(),
+    settled: new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    }),
+    resolveSettled: () => resolveSettled(),
+  };
+  capacityWaiters.add(waiter);
   const deadline = Date.now() + START_CAPACITY_WAIT_MS;
-  for (;;) {
-    try {
-      return await acquireOperatorProfile(sessionId, {
-        ...(opts.profileDir !== undefined ? { sourceProfileDir: opts.profileDir } : {}),
-      });
-    } catch (error) {
-      if (!isOperatorCapacityError(error) || Date.now() >= deadline) {
-        if (isOperatorCapacityError(error)) {
-          throw new Error(
-            "operate_start capacity wait timed out: 2 operator sessions are active; finish one and retry",
-          );
-        }
-        throw error;
+  try {
+    for (;;) {
+      if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+        throw new Error("operate_start cancelled: operator server is shutting down");
       }
-      await new Promise<void>((resolve) => setTimeout(resolve, START_CAPACITY_RETRY_MS));
+      try {
+        const lease = await acquireOperatorProfile(sessionId, {
+          ...(opts.profileDir !== undefined ? { sourceProfileDir: opts.profileDir } : {}),
+        });
+        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+          await lease.destroy();
+          throw new Error("operate_start cancelled: operator server is shutting down");
+        }
+        return lease;
+      } catch (error) {
+        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+          throw new Error("operate_start cancelled: operator server is shutting down");
+        }
+        if (!isOperatorCapacityError(error) || Date.now() >= deadline) {
+          if (isOperatorCapacityError(error)) {
+            throw new Error(
+              "operate_start capacity wait timed out: 2 operator sessions are active; finish one and retry",
+            );
+          }
+          throw error;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          const timer = setTimeout(resolve, START_CAPACITY_RETRY_MS);
+          waiter.wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      }
     }
+  } finally {
+    capacityWaiters.delete(waiter);
+    waiter.resolveSettled();
   }
 }
 
@@ -650,7 +696,12 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
   if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
     throw new Error("operate_start does not support remote CDP with isolated profile leases");
   }
-  const lease = await acquireOperatorProfileBounded(opts, sessionId);
+  const generation = shutdownGeneration;
+  const lease = await acquireOperatorProfileBounded(opts, sessionId, generation);
+  if (generation !== shutdownGeneration) {
+    await lease.destroy();
+    throw new Error("operate_start cancelled: operator server is shutting down");
+  }
   const controller = new BrowserController({
     profileDir: lease.profileDir,
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
@@ -7513,10 +7564,17 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
 
 // Test/teardown helper — close every live session (used by the dev shim on exit).
 export async function closeAllProvisionSessions(): Promise<void> {
+  shutdownGeneration += 1;
+  const waiters = [...capacityWaiters];
+  for (const waiter of waiters) {
+    waiter.cancelRequested = true;
+    waiter.wake();
+  }
+  await Promise.all(waiters.map((waiter) => waiter.settled));
   for (const pending of [...startingBrowsers]) {
     pending.cancelRequested = true;
     await pending.controller.close({ cancelStart: true }).catch(() => undefined);
-    void pending.launch.catch(() => undefined);
+    await pending.launch.catch(() => undefined);
     await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
   }
   for (const [id, session] of [...sessions.entries()]) {

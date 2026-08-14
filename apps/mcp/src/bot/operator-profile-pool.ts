@@ -677,9 +677,9 @@ function reapQuarantinedActive(
 ): void {
   const owner = readJson<ActiveOwner>(join(tombstone, "owner.json"));
   if (owner !== null && (owner.host !== hostname() || processState(owner) !== "stale")) {
-    // A transient identity read failed before quarantine. Restore the lease if
-    // its public slot is still free; never inspect or signal the worker.
-    const publicSlot = join(p.active, "slot-0");
+    const slotIndex = /^active-(\d+)-/.exec(basename(tombstone))?.[1];
+    if (slotIndex === undefined) return;
+    const publicSlot = join(p.active, `slot-${slotIndex}`);
     try {
       renameSync(tombstone, publicSlot);
     } catch {
