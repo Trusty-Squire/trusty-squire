@@ -87,6 +87,7 @@ async function harness(
   const notifyCalls: string[] = [];
   const resolvedCardRefs: string[] = [];
   const confirmationBodies: Array<Record<string, unknown>> = [];
+  const pendingStates: PendingApprovalWait[] = [];
   const nonce = "synthetic-nonce";
   const agent = "synthetic-payment-test-agent";
   let approvalPolls = 0;
@@ -295,6 +296,7 @@ async function harness(
       webBase: "https://web.test",
       surfaceApprovalUrl: vi.fn(),
       onCardResolved: (cardRef) => resolvedCardRefs.push(cardRef),
+      onApprovalPending: (state) => pendingStates.push(state),
     },
   );
 
@@ -306,6 +308,7 @@ async function harness(
     notifyCalls,
     resolvedCardRefs,
     confirmationBodies,
+    pendingStates,
     browser,
   };
 }
@@ -511,8 +514,24 @@ describe("operate_pay", () => {
     expect(confirmationBodies[1]).toEqual(confirmationBodies[0]);
   });
 
-  it("does not reconcile a lost response to a different approved candidate", async () => {
-    await expect(harness("confirm_response_lost_changed")).rejects.toThrow("confirm response lost");
+  it("fails closed instead of resurrecting the candidate when reconciliation can't confirm it", async () => {
+    const { result, filledCards, auditBodies, pendingStates } = await harness(
+      "confirm_response_lost_changed",
+    );
+
+    // The confirm may have actually succeeded server-side (its response was
+    // merely lost); reconciliation coming back "candidate_changed" means we
+    // can't prove that either way. This must be a clean terminal failure —
+    // never a resurrected still-awaiting approval that a later call could
+    // re-confirm and re-charge.
+    expect(result).toMatchObject({
+      status: "payment_confirmation_failed",
+      reason: "confirm_failed",
+      candidate_kind: "approval",
+    });
+    expect(pendingStates).toHaveLength(0);
+    expect(filledCards).toHaveLength(0);
+    expect(auditBodies).toHaveLength(0);
   });
 
   it("rejects a validly-signed mandate whose amount differs from the live checkout", async () => {

@@ -972,13 +972,29 @@ export async function executeOperatePay(
                   if (reconciliation.status !== "approved") throw error;
                 } catch {
                   candidateCardBytes.fill(0);
+                  // The initial confirm may have actually gone through server-side (its
+                  // response was merely lost) even though reconciliation couldn't prove
+                  // it. Throwing here would leave resumableState live, and the outer
+                  // catch would resurrect this candidate as still-awaiting — letting a
+                  // later call re-confirm and re-charge a purchase that may already be
+                  // spent. Fail closed with a terminal result instead, mirroring the
+                  // review-candidate branch above.
+                  const failureReason =
+                    error instanceof Error && /404|409/.test(error.message)
+                      ? "confirm_status"
+                      : "confirm_failed";
                   logPaymentCandidateLifecycle(
                     approvalId,
                     "approval",
                     "confirmation_failed",
-                    "confirm_failed",
+                    failureReason,
                   );
-                  throw error;
+                  return {
+                    status: "payment_confirmation_failed",
+                    reason: failureReason,
+                    candidate_kind: "approval",
+                    approval_url: approvalUrl,
+                  };
                 }
               }
             }
