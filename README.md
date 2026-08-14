@@ -78,9 +78,11 @@ that confirmation, returns `payment_outcome_unknown` instead of guessing that th
 charge succeeded.
 
 Every payment response includes its `session_id`. Pass that same ID to every
-follow-up `operate_pay`, `operate_payment_status`, and `operate_payment_await`
-call. Omitting it remains compatible only while this MCP process has exactly one
-session; it never selects a newest or arbitrary checkout.
+follow-up `operate_pay` and `operate_payment_status` call (pass `wait_seconds`,
+0-15, to bound-wait for a change instead of an instant peek; `operate_payment_await`
+remains a compatible `max_wait_seconds` alias). Omitting `session_id` remains
+compatible only while this MCP process has exactly one session; it never selects
+a newest or arbitrary checkout.
 
 Some split checkouts collect the card before the final order-confirmation step. On the
 card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
@@ -325,15 +327,20 @@ environment to opt into the 31-tool diagnostics profile.
   Older name-only recipes remain planning hints. `operate_remember` and
   `operate_use` remain behavior-identical aliases.
 - `list_payment_cards` returns saved-card labels and opaque references;
-  `operate_pay` can use a selected card, the only card on file, or a just-in-time
+  `operate_pay` accepts an explicit `session_id` and `phase` of `"single"`
+  (the default, also implied by omitting phase), `"fill_card"`, or `"confirm"`.
+  It can use a selected card, the only card on file, or a just-in-time
   add-card approval, then fills the checkout and waits for the user to resolve
   3-D Secure before handing back unresolved challenges. It also supports the
   two-phase `fill_card` then `confirm` flow for split checkouts described above.
-  Payment status and await calls return the same session ID and include it in every
-  follow-up tool hint, so an approval is always resumed in its originating browser.
-  Malformed calls return the same `error.guidance` repair fields as
-  `operate_act`, including a safe resolution when `card_ref` and `card_label`
-  conflict.
+  `operate_payment_status` reports the addressed session's pending approval and
+  accepts `wait_seconds` (0-15, default 0) to bound-wait for a change instead of
+  an instant peek; `operate_payment_await` remains a delegating alias with the
+  same wait bound via `max_wait_seconds`. Both return the same session ID and
+  include it in every follow-up tool hint, so an approval is always resumed in
+  its originating browser. Malformed calls return the same `error.guidance`
+  repair fields as `operate_act`, including a safe resolution when `card_ref`
+  and `card_label` conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.
 - `grant_app_access` and `revoke_app_access` create and remove scoped backend access.
 - `audit_log` reports credential activity without exposing credential values.

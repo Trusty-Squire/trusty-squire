@@ -639,7 +639,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
     expect(result).toMatchObject({
       status: "approval_pending",
       approval_id: "appr_wire",
-      next: { tool: "operate_payment_await", max_wait_seconds: 15 },
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
     });
     // The RPC completed on a single live check — the old blocking loop that
     // polled until payment_approval_timeout never ran.
@@ -1167,6 +1167,44 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     expect(operatePaymentAwaitTool.jsonInputSchema).toMatchObject({
       properties: { max_wait_seconds: { maximum: 15 } },
     });
+    expect(() => operatePaymentStatusTool.inputSchema.parse({ wait_seconds: 16 })).toThrow();
+    expect(() => operatePaymentStatusTool.inputSchema.parse({ wait_seconds: -1 })).toThrow();
+    expect(operatePaymentStatusTool.jsonInputSchema).toMatchObject({
+      properties: { wait_seconds: { minimum: 0, maximum: 15 } },
+    });
+  });
+
+  it("operate_payment_await is a delegating alias for operate_payment_status(wait_seconds)", async () => {
+    mockAwaitingApproval = baseState;
+    const getPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_status",
+      status: "pending",
+      merchant: "M",
+      amount_cents: 100,
+      currency: "USD",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      card_ref: "card_1",
+      operator_pubkey: operatorPublicKey,
+      jws: null,
+      sealed_card: null,
+    });
+    const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
+
+    const viaAlias = await operatePaymentAwaitTool.handler({ max_wait_seconds: 5 }, api);
+    const viaCanonical = await operatePaymentStatusTool.handler({ wait_seconds: 5 }, api);
+    expect(viaAlias).toEqual(viaCanonical);
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(1, "appr_status", "wait-peek");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_status", "wait-peek");
+
+    // Omitting max_wait_seconds on the alias still waits (defaults to 15s),
+    // unlike omitting wait_seconds on the canonical tool (defaults to an
+    // instant peek, 0s).
+    const aliasDefault = await operatePaymentAwaitTool.handler({}, api);
+    const statusDefault = await operatePaymentStatusTool.handler({}, api);
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_status", "wait-peek");
+    expect(getPaymentApproval).toHaveBeenNthCalledWith(4, "appr_status", "peek");
+    expect(aliasDefault).toMatchObject({ status: "pending" });
+    expect(statusDefault).toMatchObject({ status: "pending" });
   });
 
   it("status: read-only — never opens the card or confirms a candidate", async () => {
@@ -1192,7 +1230,7 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       status: "pending",
       approval_id: "appr_status",
       candidate_submitted: false,
-      next: { tool: "operate_payment_await", session_id: paymentSessionId },
+      next: { tool: "operate_payment_status", session_id: paymentSessionId, wait_seconds: 15 },
     });
     expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "peek");
     expect(confirmPaymentApproval).not.toHaveBeenCalled();
@@ -1273,7 +1311,7 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       candidate_submitted: false,
       candidate_kind: "review",
       ready_to_charge: false,
-      next: { tool: "operate_payment_await" },
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
     });
   });
 
@@ -1325,7 +1363,10 @@ describe("operate_pay split checkout phases", () => {
     mandate_id: "mandate_split",
   };
 
-  it("accepts the two phase values and rejects unknown ones", () => {
+  it("accepts the three phase values and rejects unknown ones", () => {
+    expect(() =>
+      operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "single" }),
+    ).not.toThrow();
     expect(() =>
       operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "fill_card" }),
     ).not.toThrow();
@@ -1335,6 +1376,43 @@ describe("operate_pay split checkout phases", () => {
     expect(() =>
       operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "charge" }),
     ).toThrow();
+  });
+
+  it("treats phase:\"single\" identically to omitting phase", async () => {
+    mockBrowser = stubBrowser();
+    const createPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_single",
+      nonce: "n",
+      agent: "a",
+      expires_at: new Date(Date.now() + 300_000).toISOString(),
+    });
+    const getPaymentConfig = vi.fn().mockResolvedValue({ vouchflow_audience: "cust" });
+    const getPaymentApproval = vi.fn().mockResolvedValue({
+      id: "appr_single",
+      status: "pending",
+      card_ref: "card_1",
+      jws: null,
+      sealed_card: null,
+    });
+    const makeApi = () =>
+      makeMockApi({
+        listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+        createPaymentApproval,
+        getPaymentConfig,
+        getPaymentApproval,
+      } as unknown as ApiClient);
+
+    const omitted = await operatePayTool.handler(
+      operatePayTool.inputSchema.parse(PAYMENT_DETAILS),
+      makeApi(),
+    );
+    mockPaymentLease = null;
+    mockAwaitingApproval = null;
+    const explicit = await operatePayTool.handler(
+      operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "single" }),
+      makeApi(),
+    );
+    expect(explicit).toEqual(omitted);
   });
 
   it("refuses confirm when no card fill is pending", async () => {
