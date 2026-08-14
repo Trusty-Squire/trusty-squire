@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.19 (2026-08-13)
+
+- fix(mcp): select coherent Shopify card forms — rank card-field groups, fill and submit within one form, and enforce `.form` semantic-ownership checks, so checkouts that render two card forms (e.g. KobeeJapan) complete instead of returning `payment_card_form_ambiguous` (#510)
+
 ## 1.1.9-rc.18 (2026-08-13)
 
 - fix(release): publish skill-schema classifyPaymentCandidateBinding export so the operator starts (rc.17 was DOA)
