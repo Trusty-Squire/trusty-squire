@@ -254,12 +254,10 @@ interface CheckoutPaymentFieldRoot {
 interface CheckoutOutcomeBaseline {
   url: string;
   terminalUrlIdentity: string | null;
-  domSignals: Readonly<Record<string, number>> | null;
 }
 
 interface CheckoutOutcomeDispatchSnapshot {
   url: string;
-  domSignals: Record<string, number>;
 }
 
 type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
@@ -267,7 +265,7 @@ type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
   // A dispatched click is not a payment outcome. The submit path sets this
-  // only after it observes a receipt/order-confirmation signal.
+  // only after it observes a terminal merchant order route.
   order_confirmed: boolean;
   challenge_url?: string;
 }
@@ -275,9 +273,6 @@ export interface CheckoutSubmitResult {
 export type ThreeDsResolution = "succeeded" | "failed" | "timeout" | "unconfirmed";
 
 const THREE_DS_RESOLUTION_GRACE_MS = 5_000;
-
-const CHECKOUT_ORDER_CONFIRMATION_TEXT_RE =
-  /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt\s*(?:number|#)\s*[:#-]?\s*[a-z0-9*•●◦▪■□×][a-z0-9_\/*•●◦▪■□×-]*/i;
 
 interface CheckoutFrameDescriptor {
   url: string;
@@ -425,25 +420,12 @@ function isSubstantiveCheckoutIdentity(identity: string): boolean {
   return !/^x{2,}\d*$/i.test(compactIdentity);
 }
 
-function validatedCheckoutOutcomeDomSignals(
-  capturedDomSignals: Readonly<Record<string, number>> | null,
-): Readonly<Record<string, number>> | null {
-  if (capturedDomSignals === null) return null;
-  return Object.fromEntries(
-    Object.entries(capturedDomSignals).filter(([signal]) => {
-      const receipt = /^receipt(?: number)?\s+(.+)$/i.exec(signal);
-      return receipt === null || isSubstantiveCheckoutIdentity(receipt[1] ?? "");
-    }),
-  );
-}
-
 function checkoutOutcomeBaselineFromDispatchSnapshot(
   snapshot: CheckoutOutcomeDispatchSnapshot,
 ): CheckoutOutcomeBaseline {
   return {
     url: snapshot.url,
     terminalUrlIdentity: checkoutTerminalUrlIdentity(snapshot.url),
-    domSignals: validatedCheckoutOutcomeDomSignals(snapshot.domSignals),
   };
 }
 
@@ -9167,7 +9149,7 @@ export class BrowserController {
         const dispatchBaselineStorageKey = `__trusty_squire_payment_baseline_${dispatchToken}`;
         const dispatchTrackingInstalled = await candidate
           .evaluate((element, options) => {
-            const { baselineStorageKey, successFlags, successSource, token } = options;
+            const { baselineStorageKey, token } = options;
             const stateWindow = window as Window & {
               __trustySquirePaymentSubmitDispatch?: {
                 token: string;
@@ -9194,26 +9176,8 @@ export class BrowserController {
               try {
                 const merchantWindow = window.top;
                 if (merchantWindow === null) return;
-                const text = (merchantWindow.document.body?.innerText ?? "")
-                  .replace(/\s+/g, " ")
-                  .trim();
-                const pattern = new RegExp(
-                  successSource,
-                  successFlags.includes("g") ? successFlags : `${successFlags}g`,
-                );
-                const domSignals: Record<string, number> = {};
-                for (const match of text.matchAll(pattern)) {
-                  const signal = (match[0] ?? "")
-                    .normalize("NFKC")
-                    .toLowerCase()
-                    .replace(/[*•●◦▪■□×]+/g, " masked ")
-                    .replace(/[^a-z0-9]+/g, " ")
-                    .trim();
-                  if (signal.length > 0) domSignals[signal] = 1;
-                }
                 const snapshot: CheckoutOutcomeDispatchSnapshot = {
                   url: merchantWindow.location.href,
-                  domSignals,
                 };
                 const baselineWindow = merchantWindow as Window & {
                   __trustySquirePaymentDispatchBaselines?: Record<
@@ -9239,8 +9203,6 @@ export class BrowserController {
             element.addEventListener("click", listener, { capture: true, once: true });
           }, {
             baselineStorageKey: dispatchBaselineStorageKey,
-            successFlags: CHECKOUT_ORDER_CONFIRMATION_TEXT_RE.flags,
-            successSource: CHECKOUT_ORDER_CONFIRMATION_TEXT_RE.source,
             token: dispatchToken,
           })
           .then(() => true)
@@ -9280,10 +9242,7 @@ export class BrowserController {
             .catch(() => null);
           if (
             snapshot === null ||
-            typeof snapshot.url !== "string" ||
-            snapshot.domSignals === null ||
-            typeof snapshot.domSignals !== "object" ||
-            Object.values(snapshot.domSignals).some((count) => typeof count !== "number")
+            typeof snapshot.url !== "string"
           ) {
             return null;
           }
@@ -9788,17 +9747,9 @@ export class BrowserController {
   }
 
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
-    if (!this.page) return { url: "", terminalUrlIdentity: null, domSignals: null };
-    const capturedDomSignals = await this.page
-      .mainFrame()
-      .evaluate(extractVisibleTopmostTextSignals, {
-        source: CHECKOUT_ORDER_CONFIRMATION_TEXT_RE.source,
-        flags: CHECKOUT_ORDER_CONFIRMATION_TEXT_RE.flags,
-      })
-      .catch(() => null);
-    const domSignals = validatedCheckoutOutcomeDomSignals(capturedDomSignals);
+    if (!this.page) return { url: "", terminalUrlIdentity: null };
     const url = this.page.url();
-    return { url, terminalUrlIdentity: checkoutTerminalUrlIdentity(url), domSignals };
+    return { url, terminalUrlIdentity: checkoutTerminalUrlIdentity(url) };
   }
 
   private async hasConfirmedCheckoutOutcome(baseline: CheckoutOutcomeBaseline): Promise<boolean> {
@@ -9813,13 +9764,8 @@ export class BrowserController {
     }
     return (
       sameCheckoutOrigin &&
-      ((current.terminalUrlIdentity !== null &&
-        current.terminalUrlIdentity !== baseline.terminalUrlIdentity) ||
-        (baseline.domSignals !== null &&
-          current.domSignals !== null &&
-          Object.entries(current.domSignals).some(
-            ([signal, count]) => count > (baseline.domSignals?.[signal] ?? 0),
-          )))
+      current.terminalUrlIdentity !== null &&
+      current.terminalUrlIdentity !== baseline.terminalUrlIdentity
     );
   }
 

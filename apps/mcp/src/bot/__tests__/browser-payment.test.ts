@@ -587,6 +587,9 @@ describe("checkout payment parsing", () => {
       try {
         const page = await playwrightBrowser.newPage();
         await page.route("**/*", async (route) => {
+          if (route.request().url() === "https://merchant.test/checkout") {
+            return route.fulfill({ contentType: "text/html", body: "" });
+          }
           if (route.request().url() !== pciUrl) return route.continue();
           return route.fulfill({
             contentType: "text/html",
@@ -619,6 +622,7 @@ describe("checkout payment parsing", () => {
               </script>`,
           });
         });
+        await page.goto("https://merchant.test/checkout");
         await page.setContent(`
           <style>
             #merchant-layer { min-height: 180px; position: relative; }
@@ -657,6 +661,7 @@ describe("checkout payment parsing", () => {
               document.body.dataset.directSiblingAlternatePostal = event.target.value;
             });
             document.querySelector("#pay-now").addEventListener("click", () => {
+              history.pushState({}, "", "/receipt/ORD-12345");
               document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
             });
           </script>
@@ -728,6 +733,9 @@ describe("checkout payment parsing", () => {
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
+        await page.route("https://merchant.test/checkout", async (route) =>
+          route.fulfill({ contentType: "text/html", body: "" }),
+        );
         await page.route(pciUrl, async (route) =>
           route.fulfill({
             contentType: "text/html",
@@ -740,6 +748,7 @@ describe("checkout payment parsing", () => {
               </form>`,
           }),
         );
+        await page.goto("https://merchant.test/checkout");
         await page.setContent(`
           <section id="payment-method">
             <div class="card-fields">
@@ -755,6 +764,7 @@ describe("checkout payment parsing", () => {
               document.body.dataset.leafBillingCity = event.target.value;
             });
             document.querySelector("#pay-now").addEventListener("click", () => {
+              history.pushState({}, "", "/receipt/ORD-12345");
               document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
             });
           </script>
@@ -791,10 +801,15 @@ describe("checkout payment parsing", () => {
       const browser = await chromium.launch({ headless: true });
       try {
         const page = await browser.newPage();
+        await page.route("https://merchant.test/checkout", async (route) =>
+          route.fulfill({ contentType: "text/html", body: "" }),
+        );
+        await page.goto("https://merchant.test/checkout");
         await page.setContent(`
           <button id="pay">Pay now</button>
           <script>
             document.querySelector("#pay").addEventListener("click", () => {
+              history.pushState({}, "", "/receipt/ORD-12345");
               document.body.insertAdjacentHTML(
                 "beforeend",
                 '<p>Order confirmed</p><iframe title="3D Secure"></iframe>',
@@ -1144,6 +1159,7 @@ describe("checkout payment parsing", () => {
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: xxxx1234</p>")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: ORD-XXXX1234</p>")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: 1234****</p>")',
+          'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: 1234 ****</p>")',
         ]) {
           const now = vi
             .spyOn(Date, "now")
@@ -2077,18 +2093,24 @@ describe("3-D Secure resolution", () => {
     },
   );
 
-  it.skipIf(!chromiumAvailable)("accepts new merchant order-confirmation text", async () => {
-    const { browser, page, controller } = await setupChallenge();
-    try {
-      await page.locator("#bank-approval").evaluate((element) => element.remove());
-      await page.locator("body").evaluate((body) => {
-        body.insertAdjacentHTML("beforeend", "<p>Thank you <strong>for your order</strong></p>");
-      });
-      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
-    } finally {
-      await browser.close();
-    }
-  });
+  it.skipIf(!chromiumAvailable)(
+    "does not accept merchant order-confirmation text without a terminal route",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      try {
+        await page.locator("#bank-approval").evaluate((element) => element.remove());
+        await page.locator("body").evaluate((body) => {
+          body.insertAdjacentHTML(
+            "beforeend",
+            "<p>Thank you <strong>for your order</strong></p>",
+          );
+        });
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("unconfirmed");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)("accepts a transitioned merchant receipt URL", async () => {
     const { browser, page, controller } = await setupChallenge();
@@ -2101,18 +2123,21 @@ describe("3-D Secure resolution", () => {
     }
   });
 
-  it.skipIf(!chromiumAvailable)("accepts a substantive merchant receipt number", async () => {
-    const { browser, page, controller } = await setupChallenge();
-    try {
-      await page.locator("#bank-approval").evaluate((element) => element.remove());
-      await page.locator("body").evaluate((body) => {
-        body.insertAdjacentHTML("beforeend", "<p>Receipt number: ORD-12345</p>");
-      });
-      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
-    } finally {
-      await browser.close();
-    }
-  });
+  it.skipIf(!chromiumAvailable)(
+    "does not accept a merchant receipt number without a terminal route",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      try {
+        await page.locator("#bank-approval").evaluate((element) => element.remove());
+        await page.locator("body").evaluate((body) => {
+          body.insertAdjacentHTML("beforeend", "<p>Receipt number: ORD-12345</p>");
+        });
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("unconfirmed");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "returns unconfirmed for payment-only DOM and URL states",
@@ -2165,6 +2190,7 @@ describe("3-D Secure resolution", () => {
         }
         if (waits === 3) {
           await page.locator("body").evaluate((body) => {
+            history.pushState({}, "", "/receipt/ORD-12345");
             body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
           });
         }
