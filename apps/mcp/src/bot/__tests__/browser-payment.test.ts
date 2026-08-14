@@ -562,7 +562,7 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "keeps Shopify shipping controls intact while clearing a single-page PCI card form",
+    "keeps non-selected checkout controls intact while clearing the selected Shopify payment form",
     async () => {
       const pciUrl = "https://checkout.pci.shopifyinc.test/card-fields";
       const playwrightBrowser = await chromium.launch({ headless: true });
@@ -573,12 +573,32 @@ describe("checkout payment parsing", () => {
           return route.fulfill({
             contentType: "text/html",
             body: `
-              <form id="card-form">
-                <input autocomplete="cc-number">
-                <input autocomplete="cc-exp">
-                <input autocomplete="cc-csc">
-                <input autocomplete="cc-name">
-              </form>`,
+              <style>
+                #card-layer { position: relative; height: 200px; }
+                #card-layer form { inset: 0; position: absolute; }
+                #active-card { z-index: 2; }
+              </style>
+              <section id="card-layer">
+                <form id="covered-card">
+                  <input autocomplete="cc-number">
+                  <input autocomplete="cc-exp">
+                  <input autocomplete="cc-csc">
+                  <input autocomplete="cc-name">
+                  <input id="covered-billing-line1" name="billing_address1" value="Covered Billing">
+                </form>
+                <form id="active-card">
+                  <input autocomplete="cc-number">
+                  <input autocomplete="cc-exp">
+                  <input autocomplete="cc-csc">
+                  <input autocomplete="cc-name">
+                  <input id="active-billing-line1" name="billing_address1">
+                </form>
+              </section>
+              <script>
+                document.querySelector("#active-billing-line1").addEventListener("input", (event) => {
+                  document.body.dataset.activeBillingLine1 = event.target.value;
+                });
+              </script>`,
           });
         });
         await page.setContent(`
@@ -586,9 +606,19 @@ describe("checkout payment parsing", () => {
           <input id="shipping-city" autocomplete="address-level2" value="Tokyo">
           <input id="shipping-postal" autocomplete="postal-code" value="150-0002">
           <select id="shipping-country" autocomplete="country"><option value="JP" selected>Japan</option></select>
-          <iframe src="${pciUrl}"></iframe>
+          <input id="outside-billing-city" name="billing_city" value="Outside Billing">
+          <section style="display: none">
+            <input id="hidden-billing-postal" name="billing_postal" value="Hidden Billing">
+          </section>
+          <section id="payment-method">
+            <iframe src="${pciUrl}"></iframe>
+            <input id="active-billing-city" name="billing_city">
+          </section>
           <button id="pay-now">Pay now</button>
           <script>
+            document.querySelector("#active-billing-city").addEventListener("input", (event) => {
+              document.body.dataset.activeBillingCity = event.target.value;
+            });
             document.querySelector("#pay-now").addEventListener("click", () => {
               document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
             });
@@ -617,8 +647,23 @@ describe("checkout payment parsing", () => {
         expect(await page.locator("#shipping-city").inputValue()).toBe("Tokyo");
         expect(await page.locator("#shipping-postal").inputValue()).toBe("150-0002");
         expect(await page.locator("#shipping-country").inputValue()).toBe("JP");
+        expect(await page.locator("#outside-billing-city").inputValue()).toBe("Outside Billing");
+        expect(await page.locator("#hidden-billing-postal").inputValue()).toBe("Hidden Billing");
+        expect(await page.locator("body").getAttribute("data-active-billing-city")).toBe(
+          "Billingville",
+        );
+        expect(await page.locator("#active-billing-city").inputValue()).toBe("");
         const pciFrame = page.frames().find((frame) => frame.url() === pciUrl)!;
-        expect(await pciFrame.locator('[autocomplete="cc-number"]').inputValue()).toBe("");
+        expect(await pciFrame.locator("#covered-billing-line1").inputValue()).toBe(
+          "Covered Billing",
+        );
+        expect(await pciFrame.locator("body").getAttribute("data-active-billing-line1")).toBe(
+          "123 Billing Street",
+        );
+        expect(await pciFrame.locator("#active-billing-line1").inputValue()).toBe("");
+        expect(
+          await pciFrame.locator('#active-card [autocomplete="cc-number"]').inputValue(),
+        ).toBe("");
         expect(await page.locator('[data-ts-sealed-payment="1"]').count()).toBe(0);
       } finally {
         await playwrightBrowser.close();
@@ -676,13 +721,19 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "returns an unconfirmed outcome when a Pay now click has no receipt signal",
+    "ignores a merchant confirmation signal that predates the Pay now click",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(15_000);
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
       try {
         const page = await browser.newPage();
         await page.setContent(`
+          <p>Order confirmed</p>
           <form id="checkout">
             <input autocomplete="cc-number"><input autocomplete="cc-exp">
             <input autocomplete="cc-csc"><input autocomplete="cc-name">
@@ -710,6 +761,62 @@ describe("checkout payment parsing", () => {
         ).resolves.toEqual({ three_ds_required: false, order_confirmed: false });
       } finally {
         now.mockRestore();
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not treat issuer-frame success copy as merchant confirmation after 3DS",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <form id="checkout">
+            <input autocomplete="cc-number"><input autocomplete="cc-exp">
+            <input autocomplete="cc-csc"><input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              const challenge = document.createElement("iframe");
+              challenge.id = "bank-app";
+              challenge.title = "Bank approval";
+              challenge.srcdoc = "<div>60 seconds to confirm</div>";
+              document.body.append(challenge);
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(
+          controller.fillAndSubmitCheckout({
+            pan: "4242424242424242",
+            exp_month: "12",
+            exp_year: "30",
+            cvv: "123",
+            name: "Synthetic Cardholder",
+            billing: {
+              line1: "123 Billing Street",
+              city: "Billingville",
+              postal_code: "10001",
+              country: "US",
+            },
+          }),
+        ).resolves.toMatchObject({ three_ds_required: true, order_confirmed: false });
+
+        const bankFrame = page.frames().find((frame) => frame !== page.mainFrame())!;
+        await bankFrame.locator("body").evaluate((body) => {
+          body.textContent = "Payment successful";
+        });
+        const wait = vi.spyOn(page, "waitForTimeout").mockResolvedValue();
+        await expect(controller.waitForThreeDsResolution(-1)).resolves.toBe("timeout");
+        wait.mockRestore();
+      } finally {
         await browser.close();
       }
     },
@@ -1281,9 +1388,14 @@ function controllerWithResolutionPage(options: {
   text?: string;
 }): BrowserController {
   let currentUrl = options.startUrl;
+  let outcomeSnapshots = 0;
   const frame = {
     url: () => "https://issuer.synthetic.test/",
     evaluate: async (fn: () => unknown) => {
+      if (String(fn).includes("querySelectorAll")) {
+        outcomeSnapshots += 1;
+        return outcomeSnapshots > 1 && options.text !== undefined ? { [options.text]: 1 } : {};
+      }
       if (String(fn).includes("querySelector")) return false;
       if (options.nextUrl !== undefined) currentUrl = options.nextUrl;
       return options.text ?? "";
@@ -1291,6 +1403,7 @@ function controllerWithResolutionPage(options: {
   };
   const page = {
     url: () => currentUrl,
+    mainFrame: () => frame,
     frames: () => [frame],
     waitForTimeout: async () => undefined,
   };
@@ -2189,13 +2302,16 @@ describe("split-checkout card fill (real browser)", () => {
     async () => {
       const pageUrl = "https://shop.example.test/checkout/payment";
       const { page, browser } = await servePages({
-        [pageUrl]: `${FRAME_FORM}
+        [pageUrl]: `
           <input id="shipping-line1" autocomplete="shipping address-line1" value="9 Delivery Road">
           <input id="ambiguous-city" autocomplete="address-level2" value="Delivery City">
-          <input id="billing-line1" autocomplete="billing address-line1">
-          <input id="billing-city" name="billing_city">
-          <input id="billing-postal" autocomplete="billing postal-code">
-          <input id="billing-country" name="billing_country">`,
+          <section id="payment-method">
+            ${FRAME_FORM}
+            <input id="billing-line1" autocomplete="billing address-line1">
+            <input id="billing-city" name="billing_city">
+            <input id="billing-postal" autocomplete="billing postal-code">
+            <input id="billing-country" name="billing_country">
+          </section>`,
       });
       try {
         await page.goto(pageUrl);

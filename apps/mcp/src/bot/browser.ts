@@ -246,6 +246,16 @@ interface CheckoutCardGroupScope {
   groups: readonly CheckoutCardGroupRoot[];
 }
 
+interface CheckoutPaymentFieldRoot {
+  frame: Frame;
+  root: Locator;
+}
+
+interface CheckoutOutcomeBaseline {
+  url: string;
+  domSignals: Readonly<Record<string, number>>;
+}
+
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
   // A dispatched click is not a payment outcome. The submit path sets this
@@ -2368,6 +2378,7 @@ export class BrowserController {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
+  private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
   // reuse must always restore this original page rather than adopting a popup
@@ -7917,11 +7928,14 @@ export class BrowserController {
     await Promise.all(
       frames.map((frame) =>
         frame
-          .locator("[data-ts-payment-card-group],[data-ts-payment-card-control-group]")
+          .locator(
+            "[data-ts-payment-card-group],[data-ts-payment-card-control-group],[data-ts-payment-billing-context]",
+          )
           .evaluateAll((elements) => {
             for (const element of elements) {
               element.removeAttribute("data-ts-payment-card-group");
               element.removeAttribute("data-ts-payment-card-control-group");
+              element.removeAttribute("data-ts-payment-billing-context");
             }
           })
           .catch(() => undefined),
@@ -8054,23 +8068,144 @@ export class BrowserController {
       throw new Error("payment_card_form_ambiguous");
     }
 
+    const billingRoots: CheckoutPaymentFieldRoot[] = [];
+    const addBillingRoot = async (
+      frame: Frame,
+      anchor: ElementHandle<Element>,
+    ): Promise<void> => {
+      const proposedToken = `ts-billing-context-${groupSequence++}`;
+      const token = await anchor
+        .evaluate((element, candidateToken) => {
+          const isFillable = (control: Element): boolean => {
+            if (!(control instanceof HTMLElement)) return false;
+            if (control.matches(":disabled") || control.getClientRects().length === 0) {
+              return false;
+            }
+            let current: Element | null = control;
+            while (current !== null) {
+              const style = getComputedStyle(current);
+              if (
+                style.display === "none" ||
+                style.visibility === "hidden" ||
+                style.visibility === "collapse" ||
+                Number.parseFloat(style.opacity) <= 0
+              ) {
+                return false;
+              }
+              current = current.parentElement;
+            }
+            return true;
+          };
+          const isExplicitBillingControl = (control: Element): boolean => {
+            if (
+              !(control instanceof HTMLInputElement) &&
+              !(control instanceof HTMLSelectElement) &&
+              !(control instanceof HTMLTextAreaElement)
+            ) {
+              return false;
+            }
+            const autocomplete = (control.getAttribute("autocomplete") ?? "")
+              .toLowerCase()
+              .split(/\s+/);
+            return (
+              autocomplete.includes("billing") ||
+              /billing/i.test(control.getAttribute("name") ?? "") ||
+              /billing/i.test(control.id)
+            );
+          };
+          const isPaymentBoundary = (candidate: Element): boolean => {
+            const identity = [
+              candidate.id,
+              candidate.className,
+              candidate.getAttribute("name"),
+              candidate.getAttribute("aria-label"),
+              candidate.getAttribute("data-step"),
+              candidate.getAttribute("data-section"),
+              candidate.getAttribute("data-testid"),
+            ]
+              .filter((value): value is string => typeof value === "string")
+              .join(" ");
+            return /(?:^|[^a-z])(?:payment|billing|credit.?card)(?:[^a-z]|$)/i.test(identity);
+          };
+          let candidate = element.parentElement;
+          while (
+            candidate !== null &&
+            candidate !== document.body &&
+            candidate !== document.documentElement
+          ) {
+            if (
+              isPaymentBoundary(candidate) &&
+              Array.from(candidate.querySelectorAll("input,select,textarea")).some(
+                (control) => isExplicitBillingControl(control) && isFillable(control),
+              )
+            ) {
+              candidate.setAttribute("data-ts-payment-billing-context", candidateToken);
+              return candidateToken;
+            }
+            candidate = candidate.parentElement;
+          }
+          return null;
+        }, proposedToken)
+        .catch(() => null);
+      await anchor.dispose().catch(() => undefined);
+      if (token !== null) {
+        billingRoots.push({
+          frame,
+          root: frame.locator(`[data-ts-payment-billing-context="${token}"]`),
+        });
+      }
+    };
+    if (cardGroup !== undefined) {
+      billingRoots.push({ frame: cardGroup.frame, root: cardGroup.root });
+      const cardRoot = await cardGroup.root.elementHandle().catch(() => null);
+      if (cardRoot !== null) await addBillingRoot(cardGroup.frame, cardRoot);
+      let childFrame = cardGroup.frame;
+      let parentFrame = childFrame.parentFrame();
+      while (parentFrame !== null && frames.includes(parentFrame)) {
+        const frameElement = await childFrame.frameElement().catch(() => null);
+        if (frameElement === null) break;
+        await addBillingRoot(parentFrame, frameElement);
+        childFrame = parentFrame;
+        parentFrame = childFrame.parentFrame();
+      }
+    }
+
     const fillFirst = async (
       field: string,
       value: string | undefined,
       selectors: string,
       typePerKey = false,
       withinCardGroup = false,
+      withinBillingContext = false,
     ): Promise<boolean> => {
       if (value === undefined || value.length === 0) return false;
-      const candidateFrames =
-        withinCardGroup && cardGroup !== undefined ? [cardGroup.frame] : frames;
-      for (const frame of candidateFrames) {
-        const matches =
-          withinCardGroup && cardGroup !== undefined
-            ? frame
-                .locator(selectors)
-                .and(frame.locator(`[data-ts-payment-card-control-group="${cardGroup.token}"]`))
-            : frame.locator(selectors);
+      const candidates: Array<{ frame: Frame; matches: Locator }> =
+        withinCardGroup && cardGroup !== undefined
+          ? [
+              {
+                frame: cardGroup.frame,
+                matches: cardGroup.frame
+                  .locator(selectors)
+                  .and(
+                    cardGroup.frame.locator(
+                      `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
+                    ),
+                  ),
+              },
+            ]
+          : withinBillingContext
+            ? billingRoots.map(({ frame, root }) => ({
+                frame,
+                matches: root
+                  .locator(selectors)
+                  .and(
+                    frame.locator(
+                      `:not([data-ts-payment-card-control-group]),[data-ts-payment-card-control-group="${cardGroup?.token ?? ""}"]`,
+                    ),
+                  ),
+              }))
+            : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
+      for (const { frame, matches } of candidates) {
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
           const input = matches.nth(i);
@@ -8275,12 +8410,14 @@ export class BrowserController {
       ],
     ];
     for (const [field, value, selectors, billingSelectors] of fields) {
+      const withinBillingContext = billingOnly && billingSelectors !== undefined;
       await fillFirst(
         field,
         value,
-        billingOnly && billingSelectors !== undefined ? billingSelectors : selectors,
+        withinBillingContext ? billingSelectors : selectors,
         false,
         field === "cvv" || field === "name",
+        withinBillingContext,
       );
     }
     for (const required of ["pan", "expiry", "cvv", "name"]) {
@@ -8412,7 +8549,8 @@ export class BrowserController {
     cardGroup?: CheckoutCardGroupScope,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
-    const submitStartUrl = this.page.url();
+    const outcomeBaseline = await this.captureCheckoutOutcomeBaseline();
+    this.checkoutOutcomeBaseline = outcomeBaseline;
     let submitted = false;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
@@ -8476,7 +8614,7 @@ export class BrowserController {
     while (Date.now() < challengeDeadline) {
       const challenge = await this.detectThreeDsChallenge();
       if (challenge.three_ds_required) return challenge;
-      if (await this.hasConfirmedCheckoutOutcome(submitStartUrl)) {
+      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
         return { three_ds_required: false, order_confirmed: true };
       }
       await this.page.waitForTimeout(250).catch(() => undefined);
@@ -8619,30 +8757,86 @@ export class BrowserController {
     return { three_ds_required: false, order_confirmed: false };
   }
 
-  private async hasConfirmedCheckoutOutcome(startUrl: string): Promise<boolean> {
+  private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
+    if (!this.page) return { url: "", domSignals: {} };
+    const successText =
+      /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
+    const domSignals = await this.page
+      .mainFrame()
+      .evaluate(({ source, flags }) => {
+        const pattern = new RegExp(source, flags);
+        const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
+        const visible = (element: HTMLElement): boolean => {
+          if (element.getClientRects().length === 0) return false;
+          let current: HTMLElement | null = element;
+          while (current !== null) {
+            const style = getComputedStyle(current);
+            if (
+              style.display === "none" ||
+              style.visibility === "hidden" ||
+              style.visibility === "collapse" ||
+              Number.parseFloat(style.opacity) <= 0
+            ) {
+              return false;
+            }
+            current = current.parentElement;
+          }
+          return true;
+        };
+        const matches = (element: HTMLElement): string | null => {
+          if (!visible(element)) return null;
+          const text = normalize(element.innerText);
+          return text.length > 0 && text.length <= 500 && pattern.test(text) ? text : null;
+        };
+        const signals: Record<string, number> = {};
+        const elements =
+          document.body === null
+            ? []
+            : [document.body, ...Array.from(document.body.querySelectorAll<HTMLElement>("*"))];
+        for (const element of elements) {
+          const signal = matches(element);
+          if (signal === null) continue;
+          if (
+            Array.from(element.children).some(
+              (child) => child instanceof HTMLElement && matches(child) !== null,
+            )
+          ) {
+            continue;
+          }
+          signals[signal] = (signals[signal] ?? 0) + 1;
+        }
+        return signals;
+      }, { source: successText.source, flags: successText.flags })
+      .catch(() => ({}));
+    return { url: this.page.url(), domSignals };
+  }
+
+  private async hasConfirmedCheckoutOutcome(
+    baseline: CheckoutOutcomeBaseline,
+  ): Promise<boolean> {
     if (!this.page) return false;
     const successUrl =
       /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|\/paid\b|payment_intent=.*succe/i;
-    const successText =
-      /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
-    const texts = await Promise.all(
-      this.page
-        .frames()
-        .map(
-          async (frame) =>
-            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-        ),
-    );
-    const currentUrl = this.page.url();
+    const current = await this.captureCheckoutOutcomeBaseline();
+    let sameCheckoutOrigin = false;
+    try {
+      sameCheckoutOrigin = new URL(current.url).origin === new URL(baseline.url).origin;
+    } catch {
+      sameCheckoutOrigin = current.url === baseline.url;
+    }
     return (
-      texts.some((text) => successText.test(text)) ||
-      (currentUrl !== startUrl && successUrl.test(currentUrl))
+      sameCheckoutOrigin &&
+      ((current.url !== baseline.url && successUrl.test(current.url)) ||
+        Object.entries(current.domSignals).some(
+          ([signal, count]) => count > (baseline.domSignals[signal] ?? 0),
+        ))
     );
   }
 
   async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
     if (!this.page) throw new Error("Browser not started");
-    const startUrl = this.page.url();
+    const outcomeBaseline =
+      this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
     const deadline = Date.now() + timeoutMs;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
@@ -8657,7 +8851,10 @@ export class BrowserController {
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
       const challenge = await this.detectThreeDsChallenge();
-      if (!challenge.three_ds_required && (await this.hasConfirmedCheckoutOutcome(startUrl))) {
+      if (
+        !challenge.three_ds_required &&
+        (await this.hasConfirmedCheckoutOutcome(outcomeBaseline))
+      ) {
         return "succeeded";
       }
       await this.page.waitForTimeout(1_000).catch(() => undefined);
