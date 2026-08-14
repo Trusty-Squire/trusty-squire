@@ -779,7 +779,12 @@ describe("checkout payment parsing", () => {
             exp_year: "30",
             cvv: "123",
             name: "Synthetic Cardholder",
-            billing: { city: "Billingville" },
+            billing: {
+              line1: "",
+              city: "Billingville",
+              postal_code: "",
+              country: "",
+            },
           }),
         ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
 

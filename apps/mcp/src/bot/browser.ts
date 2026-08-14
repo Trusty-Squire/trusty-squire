@@ -9164,7 +9164,8 @@ export class BrowserController {
   }
 
   // The charge: find and click the pay/place-order control, then poll for a
-  // 3-D Secure challenge. Callers gate this on a verified visible total.
+  // terminal merchant order route or a 3-D Secure challenge. Callers gate this
+  // on a verified visible total.
   async submitFilledCheckout(): Promise<CheckoutSubmitResult> {
     return await this.submitFilledCheckoutInScope(this.checkoutCardGroupScope);
   }

@@ -1220,10 +1220,9 @@ export async function executeOperatePay(
       return {
         status: paymentStatus,
         audit_recorded,
-        reason:
-          outcomeUnknown
-            ? "payment_submit_outcome_unknown"
-            : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
+        reason: outcomeUnknown
+          ? "payment_submit_outcome_unknown"
+          : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
             ? error.message
             : "payment_checkout_failed",
         approval_url: approvalUrl,
