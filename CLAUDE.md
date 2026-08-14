@@ -598,12 +598,17 @@ own signature; Shopify↔WooCommerce mutual discrimination holds, 0 overlap).
 
 ### Non-blocking payment approval (operate_payment_status/await)
 
+The public tool contract lives in the [README payment guide](README.md#one-prompt),
+the data flow in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#payment-flow), and
+the cross-session authorization boundary in [`SECURITY.md`](SECURITY.md#client-encrypted-card-data).
+This section records only implementation details.
+
 `operate_pay` (fill_card and single-page initiation — NOT `phase:"confirm"`,
 which was never a wait) no longer blocks the MCP call for up to 5 (18 for
 JIT) minutes polling for the human's phone tap. It makes ONE live
 `getPaymentApproval` check and, if not yet approved, returns
-`{status:"approval_pending", approval_id, approval_url, expires_at, phase,
-approved_amount_cents, next:{tool:"operate_payment_await"}}` — the
+`{session_id, status:"approval_pending", approval_id, approval_url, expires_at,
+phase, approved_amount_cents, next:{tool:"operate_payment_await", session_id}}` — the
 friction-audit P0 fix (small models can't tell "pending" from "broken" on a
 silent multi-minute hang, so they panic-retry or kill the server).
 - **New read-only tools:** `operate_payment_status` (single check, no
@@ -628,6 +633,12 @@ silent multi-minute hang, so they panic-retry or kill the server).
   poll loop; omitted retains legacy full-deadline blocking for direct callers.
   Reusing a live approval also reuses its operator keypair because the sealed
   card was HPKE-encrypted to that exact keypair.
+- **Session-addressed resume.** `withPaymentSessionCall` resolves the optional
+  `session_id` exactly once at tool entry, requires it when more than one session
+  exists, and carries the selected `Session` through every await. Payment results
+  and tool hints repeat the same ID. `operate_finish*` closes admission, drains
+  entered calls, and refuses teardown while payment state remains active or
+  resumable.
 - **P1, same audit:** a card-entry page with no total (Rakuten-style split
   checkout) now returns structured `{status:"needs_cart_total", next:{tool:
   "operate_observe", hint}}` instead of a bare `payment_checkout_total_not_found`

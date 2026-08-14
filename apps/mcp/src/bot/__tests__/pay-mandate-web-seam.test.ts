@@ -459,7 +459,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
       boundCardRef: "card_RIGHT",
       signCardRef: "card_WRONG",
     });
-    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
     expect(confirmationBodies).toHaveLength(1);
     expect(resolvedCardRefs).toHaveLength(0);
@@ -470,7 +470,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
       boundCardRef: "card_bound_by_server",
       signAmountCents: CHECKOUT.amount_cents + 100,
     });
-    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
     expect(confirmationBodies).toHaveLength(1);
     expect(resolvedCardRefs).toHaveLength(0);
@@ -481,7 +481,7 @@ describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
       boundCardRef: "card_bound_by_server",
       signApprovalId: "appr_other",
     });
-    expect(result).toMatchObject({ status: "payment_approval_timeout" });
+    expect(result).toMatchObject({ status: "payment_mandate_rejected" });
     expect(filledCards).toHaveLength(0);
     expect(confirmationBodies).toHaveLength(1);
     expect(resolvedCardRefs).toHaveLength(0);

@@ -562,8 +562,8 @@ const paymentStatusInputSchema = z.object({ session_id: z.string().uuid().option
 export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSchema>> = {
   name: "operate_payment_status",
   description:
-    "Read-only: report the status of the payment approval currently awaiting the human's phone " +
-    "tap, if any — started by the most recent operate_pay call that returned approval_pending. " +
+    "Read-only: report the status of the addressed session's payment approval currently awaiting " +
+    "the human's phone tap, if any — started by an operate_pay call that returned approval_pending. " +
     "Never blocks, never verifies a mandate or opens a card. Only candidate_kind=approval with " +
     "ready_to_charge=true is a final authorization; a review candidate still requires final approval.",
   inputSchema: paymentStatusInputSchema,
@@ -596,8 +596,8 @@ const paymentAwaitInputSchema = z.object({
 export const operatePaymentAwaitTool: Tool<z.infer<typeof paymentAwaitInputSchema>> = {
   name: "operate_payment_await",
   description:
-    "Bounded wait (never more than ~15s) for the payment approval currently awaiting the human's " +
-    "phone tap — started by the most recent operate_pay call that returned approval_pending. " +
+    "Bounded wait (never more than ~15s) for the addressed session's payment approval currently " +
+    "awaiting the human's phone tap — started by an operate_pay call that returned approval_pending. " +
     "Returns explicit candidate_kind and ready_to_charge fields: only an approval-bound candidate " +
     "is ready to complete; a review-bound candidate still requires final approval. Never hangs " +
     "for minutes; call it again (or operate_payment_status) if it comes back pending.",

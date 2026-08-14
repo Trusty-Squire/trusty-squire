@@ -101,6 +101,10 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   card remains available for the retry. Set `three_ds_wait_seconds` to `0` only
   when the user wants the immediate handoff without notification or waiting.
   Card fields never return through MCP.
+- Every payment response includes a `session_id`. Pass that same ID to every
+  follow-up `operate_pay`, `operate_payment_status`, and `operate_payment_await`
+  call. Omit it only when this MCP process has exactly one live session; the
+  compatibility path never guesses the newest checkout.
 - On a split checkout whose card-entry step shows no total (or only a subtotal),
   call `operate_pay` with `phase: "fill_card"`. It approves the live card-entry
   total when readable; a subtotal qualifies only when the same order summary says
@@ -117,6 +121,9 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   required on both calls. Never click a pay/place-order control or press Enter
   while the card fill is pending; confirm owns the strict amount check and charge.
   An unrecognized payment iframe is a hard stop.
+- Do not call `operate_finish` while a payment is in progress, awaiting approval,
+  or filled and awaiting confirmation. Finish drains calls already using that
+  session and refuses to close until its payment state is terminal.
 
 **Safety rules the agent must follow:**
 

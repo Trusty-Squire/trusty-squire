@@ -71,11 +71,10 @@ operator-sealed final authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission.
 
-Every payment response includes its `session_id`. Pass it to follow-up
-`operate_pay`, `operate_payment_status`, and `operate_payment_await` calls whenever
-more than one operator session is active. Omitting it remains compatible only while
-this MCP process has exactly one session; it never selects a newest or arbitrary
-checkout.
+Every payment response includes its `session_id`. Pass that same ID to every
+follow-up `operate_pay`, `operate_payment_status`, and `operate_payment_await`
+call. Omitting it remains compatible only while this MCP process has exactly one
+session; it never selects a newest or arbitrary checkout.
 
 Some split checkouts collect the card before the final order-confirmation step. On the
 card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
@@ -299,7 +298,10 @@ environment to opt into the 31-tool diagnostics profile.
   extraction, vault storage, and auto-promotion; `result` requires `summary` or
   `data` and can run `verify_recipe` before closing. `operate_finish_task`
   remains a delegating compatibility alias for the credential and result
-  outcomes.
+  outcomes. Finish first stops new calls and drains calls already using that
+  session. It refuses to close while a payment is in progress, awaiting approval,
+  or filled and awaiting confirmation, so the browser cannot be reset or pooled
+  out from under a resumable charge.
 - `operate_recipe_save` saves a postcondition-verified local recipe under a
   closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs

@@ -164,6 +164,16 @@ if submission has not started. If field cleanup cannot be confirmed, pending met
 is discarded, the observation seal remains active, and the session refuses further
 payment operations.
 
+Payment state, the approval keypair, and the verified mandate remain attached to the
+addressed operate session. `operate_pay`, `operate_payment_status`, and
+`operate_payment_await` resolve `session_id` once at tool entry and return that ID in
+their results and follow-up hints. Omitting the ID is accepted only when exactly one
+process-local session exists; no path selects a newest or arbitrary session. Closing a
+session first rejects new calls and drains calls that already entered, then refuses
+teardown while a payment is operating, confirming, awaiting approval, or filled and
+awaiting confirmation. A browser therefore cannot be reset, pooled, or substituted
+while that session can still authorize a charge.
+
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash
 is the HPKE associated data, so the envelope cannot be moved to a different
