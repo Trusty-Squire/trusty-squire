@@ -70,6 +70,8 @@ const h = vi.hoisted(() => ({
   extractInteractiveElementsCalls: 0,
   checkoutFieldNames: [] as string[],
   visibleText: "",
+  visibleTextGate: null as Promise<void> | null,
+  extractVisibleTextCalls: 0,
   // fill_card cart-total-carry-forward (Session.lastCartCheckout): null means
   // "no total on this page" (readCheckoutSummary rejects, the common case).
   checkoutSummary: null as {
@@ -206,6 +208,8 @@ vi.mock("../browser.js", () => ({
       return h.checkoutFieldNames;
     }
     async extractVisibleText(): Promise<string> {
+      h.extractVisibleTextCalls += 1;
+      if (h.visibleTextGate !== null) await h.visibleTextGate;
       if (h.oauthReadError !== null) throw new Error(h.oauthReadError);
       return h.visibleText;
     }
@@ -812,6 +816,8 @@ beforeEach(() => {
   h.extractInteractiveElementsCalls = 0;
   h.checkoutFieldNames = [];
   h.visibleText = "";
+  h.visibleTextGate = null;
+  h.extractVisibleTextCalls = 0;
   h.checkoutSummary = null;
   h.cartLineItems = [];
   h.cartLineItemsAfterClick = null;
@@ -3476,6 +3482,65 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
+  it("refuses finish while an approval or filled card remains resumable", async () => {
+    const approvalSession = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    const approvalClaim = claimActivePaymentForOperatePay(undefined);
+    if (approvalClaim.kind !== "lease") throw new Error("expected payment lease");
+    const approval = {
+      approval_id: "appr_finish_guard",
+      approval_url: "https://web.test/vault/pay/appr_finish_guard",
+      nonce: "nonce_finish_guard",
+      agent: "agent_finish_guard",
+      checkout: {
+        merchant: "Shop",
+        checkout_origin: "https://shop.example.com",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      jit: false,
+      boundCardRef: "card_finish_guard",
+      deadline: Date.now() + 60_000,
+      rejectedCandidates: [],
+      keypair: { publicKey: "public", privateKey: "private" },
+      item: "Widget",
+      reason: "Synthetic purchase",
+      cardRef: "card_finish_guard",
+    };
+    completeActivePaymentLeaseWithPendingApproval(approvalClaim.lease, approval);
+
+    await expect(finishProvisionSession(approvalSession.session_id)).rejects.toThrow(
+      /approval is still awaiting resolution/,
+    );
+    expect(getActivePendingApproval()).toBe(approval);
+    expect(approval.keypair.privateKey).toBe("private");
+    expect(h.resetCalls).toBe(0);
+
+    const resumed = claimActivePaymentForOperatePay(undefined);
+    if (resumed.kind !== "lease") throw new Error("expected resumed payment lease");
+    releaseActivePaymentLease(resumed.lease);
+    await finishProvisionSession(approvalSession.session_id);
+
+    const pendingSession = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill({
+      approval_id: "appr_pending_finish_guard",
+      approval_url: "https://web.test/vault/pay/appr_pending_finish_guard",
+      checkout: approval.checkout,
+      card_ref: "card_finish_guard",
+      last4: "4242",
+    });
+
+    await expect(finishProvisionSession(pendingSession.session_id)).rejects.toThrow(
+      /filled payment is still awaiting confirmation/,
+    );
+    expect(h.resetCalls).toBe(1);
+    clearActivePendingCardFill();
+    await finishProvisionSession(pendingSession.session_id);
+  });
+
   it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
@@ -3877,6 +3942,56 @@ describe("operate session — captcha gate", () => {
 });
 
 describe("operate_finish lifecycle consolidation", () => {
+  it("owns the session before outcome extraction begins", async () => {
+    const previousAutoPromote = process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
+    process.env.TRUSTY_SQUIRE_AUTO_PROMOTE = "0";
+    let releaseExtraction: (() => void) | undefined;
+    h.visibleText = "API key sk-live-finish-exclusive-123456789";
+    const storeCredential = vi.fn().mockResolvedValue({
+      reference: "vault://acct/finish-exclusive",
+      service: "example",
+      label: "default",
+      field_names: ["api_key"],
+      allowed_hosts: ["app.example.com"],
+      created_at: "now",
+      updated: false,
+    });
+    const api = { storeCredential } as unknown as ApiClient;
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/api-keys",
+    });
+    h.visibleTextGate = new Promise<void>((resolve) => {
+      releaseExtraction = resolve;
+    });
+
+    try {
+      const finishing = provisionFinishTool.handler(
+        {
+          session_id: started.session_id,
+          outcome: { kind: "credentials", store: { service: "example" } },
+        },
+        api,
+      );
+      await vi.waitFor(() => expect(h.extractVisibleTextCalls).toBeGreaterThan(0));
+
+      await expect(
+        provisionFinishTool.handler({ session_id: started.session_id }, null),
+      ).rejects.toThrow(/already closing/);
+      expect(h.resetCalls).toBe(0);
+
+      releaseExtraction?.();
+      await expect(finishing).resolves.toMatchObject({
+        kind: "credentials",
+        stored_credential: { reference: "vault://acct/finish-exclusive" },
+      });
+      expect(h.resetCalls).toBe(1);
+    } finally {
+      releaseExtraction?.();
+      if (previousAutoPromote === undefined) delete process.env.TRUSTY_SQUIRE_AUTO_PROMOTE;
+      else process.env.TRUSTY_SQUIRE_AUTO_PROMOTE = previousAutoPromote;
+    }
+  });
+
   it("keeps the no-outcome close shape identical with explicit or omitted kind=none", async () => {
     const legacySession = await startProvisionSession({
       serviceUrl: "https://app.example.com/done",

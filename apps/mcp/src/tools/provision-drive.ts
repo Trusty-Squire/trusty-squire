@@ -20,6 +20,7 @@ import {
   captchaGate,
   awaitVerification,
   finishProvisionSession,
+  finishProvisionSessionWithPreparation,
   observedHostsForSession,
   currentProvisionUrl,
   stashSecretSlot,
@@ -1379,55 +1380,54 @@ async function handleFinishOutcome(
   sessionId: string,
   outcome: Exclude<FinishOutcome, { kind: "none" }>,
   api: ApiClient,
-  extractedOverride?: Awaited<ReturnType<typeof extractCredentials>>,
 ) {
-  if (outcome.kind === "credentials") {
-    const extracted = extractedOverride ?? (await extractCredentials(sessionId));
-    const blocked = extracted.blocked_reason;
-    const stored =
-      Object.keys(extracted.credentials).length > 0
-        ? await persistExtracted(sessionId, extracted.credentials, outcome.store, api)
-        : null;
-    // Verified success — a real credential was vaulted and nothing blocked.
-    // Capture the run as a pending-review skill so the NEXT provision of this
-    // service gets a hint (docs/DESIGN-operator-hints.md). Runs while the
-    // session is still alive (before finishProvisionSession); best-effort,
-    // never fails the provision.
-    const autoPromote =
-      stored !== null && blocked === undefined ? await autoPromoteProvision(sessionId) : undefined;
-    emitProvisionMeasurement(
-      sessionId,
-      stored !== null && blocked === undefined ? "success" : "fail",
-    );
-    const closed = await finishProvisionSession(sessionId);
-    return {
-      kind: "credentials" as const,
-      url: closed.url,
-      candidate_count: extracted.candidate_count,
-      ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
-      stored_credential: stored,
-      ...(autoPromote !== undefined ? { auto_promote: autoPromote } : {}),
-    };
-  }
-  // result kind — optionally verify a saved recipe's postcondition (the
-  // anti-false-green gate) against the live session BEFORE closing, then close.
-  const verified =
-    outcome.verify_recipe === undefined
-      ? undefined
-      : ((await verifyActiveRecipePostcondition(sessionId, outcome.verify_recipe)) ??
-        (await verifySavedRecipePostcondition(sessionId, await readRecipe(outcome.verify_recipe))));
-  emitProvisionMeasurement(
+  const { finish, prepared } = await finishProvisionSessionWithPreparation(
     sessionId,
-    verified === undefined || verified.confirmed ? "success" : "fail",
+    async () => {
+      if (outcome.kind === "credentials") {
+        const extracted = await extractCredentials(sessionId);
+        const blocked = extracted.blocked_reason;
+        const stored =
+          Object.keys(extracted.credentials).length > 0
+            ? await persistExtracted(sessionId, extracted.credentials, outcome.store, api)
+            : null;
+        const autoPromote =
+          stored !== null && blocked === undefined
+            ? await autoPromoteProvision(sessionId)
+            : undefined;
+        emitProvisionMeasurement(
+          sessionId,
+          stored !== null && blocked === undefined ? "success" : "fail",
+        );
+        return {
+          kind: "credentials" as const,
+          candidate_count: extracted.candidate_count,
+          ...(blocked !== undefined ? { blocked_reason: blocked } : {}),
+          stored_credential: stored,
+          ...(autoPromote !== undefined ? { auto_promote: autoPromote } : {}),
+        };
+      }
+      const verified =
+        outcome.verify_recipe === undefined
+          ? undefined
+          : ((await verifyActiveRecipePostcondition(sessionId, outcome.verify_recipe)) ??
+            (await verifySavedRecipePostcondition(
+              sessionId,
+              await readRecipe(outcome.verify_recipe),
+            )));
+      emitProvisionMeasurement(
+        sessionId,
+        verified === undefined || verified.confirmed ? "success" : "fail",
+      );
+      return {
+        kind: "result" as const,
+        summary: (outcome.summary ?? "").slice(0, 4000),
+        ...(verified !== undefined ? { verified } : {}),
+        ...(outcome.data !== undefined ? { data: outcome.data } : {}),
+      };
+    },
   );
-  const closed = await finishProvisionSession(sessionId);
-  return {
-    kind: "result" as const,
-    url: closed.url,
-    summary: (outcome.summary ?? "").slice(0, 4000),
-    ...(verified !== undefined ? { verified } : {}),
-    ...(outcome.data !== undefined ? { data: outcome.data } : {}),
-  };
+  return { ...prepared, url: finish.url };
 }
 
 export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
@@ -1459,9 +1459,6 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
   },
   async handler(args, api) {
     if (args.kind === "credentials") {
-      // Preserve the legacy tool's validation order: it historically performs
-      // extraction before reporting a missing store/API requirement.
-      const extracted = await extractCredentials(args.session_id);
       if (args.store === undefined) {
         throw new Error("operate_finish_task kind=credentials requires `store`");
       }
@@ -1472,7 +1469,6 @@ export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
         args.session_id,
         { kind: "credentials", store: args.store },
         api,
-        extracted,
       );
     }
     return await handleFinishOutcome(

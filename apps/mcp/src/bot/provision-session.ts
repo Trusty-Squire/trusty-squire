@@ -7434,6 +7434,11 @@ export interface FinishResult {
   closed: true;
 }
 
+export interface PreparedFinishResult<T> {
+  finish: FinishResult;
+  prepared: T;
+}
+
 function profileRequiresDestroy(session: Session): boolean {
   return (
     session.activePayment !== null ||
@@ -7442,31 +7447,59 @@ function profileRequiresDestroy(session: Session): boolean {
   );
 }
 
-export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
-  if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
-  session.closing = true;
-  if (
-    session.activePayment?.status === "operating" ||
-    session.activePayment?.status === "confirming"
-  ) {
-    session.closing = false;
+function assertFinishPaymentResolved(session: Session): void {
+  const status = session.activePayment?.status;
+  if (status === "operating" || status === "confirming") {
     throw new Error("operate_finish retry: payment operation is still in progress");
   }
-  await waitForSessionCallsToDrain(session);
+  if (status === "awaiting_approval") {
+    throw new Error(
+      "operate_finish refused: payment approval is still awaiting resolution; resolve it before finishing",
+    );
+  }
+  if (status === "pending") {
+    throw new Error(
+      "operate_finish refused: a filled payment is still awaiting confirmation; resolve it before finishing",
+    );
+  }
+}
+
+async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {
+  const sessionId = session.id;
+  assertFinishPaymentResolved(session);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
   sessions.delete(sessionId);
   try {
-    if (session.activePayment?.status === "awaiting_approval") {
-      session.activePayment.state.keypair.privateKey = "";
-    }
     await releaseWarmBrowserPage(session.browser, !profileRequiresDestroy(session));
   } finally {
     inFlight = false;
   }
   return { session_id: sessionId, url, closed: true };
+}
+
+export async function finishProvisionSessionWithPreparation<T>(
+  sessionId: string,
+  prepare: () => Promise<T>,
+): Promise<PreparedFinishResult<T>> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
+  session.closing = true;
+  try {
+    await waitForSessionCallsToDrain(session);
+    assertFinishPaymentResolved(session);
+    const prepared = await prepare();
+    const finish = await closeFinishingProvisionSession(session);
+    return { finish, prepared };
+  } catch (error) {
+    if (sessions.get(sessionId) === session) session.closing = false;
+    throw error;
+  }
+}
+
+export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
+  return (await finishProvisionSessionWithPreparation(sessionId, async () => undefined)).finish;
 }
 
 // Test/teardown helper — close every live session (used by the dev shim on exit).
