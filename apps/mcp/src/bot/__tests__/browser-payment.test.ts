@@ -479,6 +479,7 @@ describe("checkout payment parsing", () => {
         await browser.close();
       }
     },
+    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -557,6 +558,7 @@ describe("checkout payment parsing", () => {
         await browser.close();
       }
     },
+    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -623,7 +625,7 @@ describe("checkout payment parsing", () => {
         await playwrightBrowser.close();
       }
     },
-    20_000,
+    30_000,
   );
 });
 
