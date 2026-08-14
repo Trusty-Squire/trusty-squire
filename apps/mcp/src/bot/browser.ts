@@ -8473,6 +8473,7 @@ export class BrowserController {
               )) {
                 if (!isExplicitBillingControl(control) || !isFillable(control)) continue;
                 if (!isTopmost(control)) continue;
+                if (isPaymentMethodBoundary(control)) continue;
                 const owner = control.getAttribute("data-ts-payment-card-control-group");
                 const selectedOwner = element.getAttribute("data-ts-payment-card-group");
                 if (owner !== null && owner !== selectedOwner) continue;
@@ -8607,6 +8608,7 @@ export class BrowserController {
                 /billing/i.test(control.getAttribute("name") ?? "") ||
                 /billing/i.test(control.id);
               if (!explicit) continue;
+              if (isPaymentMethodBoundary(control)) continue;
               const owner = control.getAttribute("data-ts-payment-card-control-group");
               if (owner !== null && owner !== groupToken) continue;
               if (selectedPan === undefined || selectedBranch === null) continue;

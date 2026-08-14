@@ -499,6 +499,7 @@ describe("checkout payment parsing", () => {
             <input autocomplete="cc-csc">
             <input autocomplete="cc-name">
             <input id="selected-billing-city" name="billing_city">
+            <input id="self-tagged-alternate-billing-city" name="billing_city" data-payment-method="paypal" value="Alternate Payment Billing">
           </section>
           <button type="submit">Pay now</button>
         </form>
@@ -563,11 +564,14 @@ describe("checkout payment parsing", () => {
           "Alternate Billing",
         );
         expect(await page.locator("#selected-billing-city").inputValue()).toBe("");
+        expect(await page.locator("#self-tagged-alternate-billing-city").inputValue()).toBe(
+          "Alternate Payment Billing",
+        );
         expect(
           await page
             .locator("input")
             .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
-        ).toEqual(["", "Alternate Billing", "", "", "", "", ""]);
+        ).toEqual(["", "Alternate Billing", "", "", "", "", "", "Alternate Payment Billing"]);
       } finally {
         await browser.close();
       }
@@ -639,7 +643,7 @@ describe("checkout payment parsing", () => {
                 <input id="active-billing-city" name="billing_city">
               </div>
             </div>
-            <input id="direct-sibling-alternate-postal" name="billing_postal">
+            <input id="direct-sibling-alternate-postal" name="billing_postal" data-payment-method="paypal" value="Alternate Postal">
             <section data-payment-method="paypal">
               <input id="alternate-payment-billing-city" name="billing_city" value="Alternate Payment Billing">
             </section>
@@ -691,7 +695,9 @@ describe("checkout payment parsing", () => {
         expect(
           await page.locator("body").getAttribute("data-direct-sibling-alternate-postal"),
         ).toBeNull();
-        expect(await page.locator("#direct-sibling-alternate-postal").inputValue()).toBe("");
+        expect(await page.locator("#direct-sibling-alternate-postal").inputValue()).toBe(
+          "Alternate Postal",
+        );
         expect(await page.locator("body").getAttribute("data-active-billing-city")).toBe(
           "Billingville",
         );
