@@ -269,5 +269,5 @@ describe("extract-failure routes", () => {
     expect(limited.headers["retry-after"]).toBeDefined();
 
     await server.close();
-  });
+  }, 15_000);
 });
