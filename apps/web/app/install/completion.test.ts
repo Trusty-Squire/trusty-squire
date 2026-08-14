@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearInstallCompletionUrl,
   installCompletionAcknowledgementUrl,
+  installCompletionProviderUrl,
   normalizeInstallCompletionUrl,
   readInstallCompletionUrl,
 } from "./completion";
@@ -18,6 +19,16 @@ describe("install completion callback validation", () => {
     const callback =
       "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "a".repeat(48);
     expect(normalizeInstallCompletionUrl(callback)).toBe(callback);
+  });
+
+  it("adds only providers completed in this install ceremony", () => {
+    const callback =
+      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "e".repeat(48);
+    const completed = installCompletionProviderUrl(callback, ["google", "github"]);
+    const url = new URL(completed!);
+
+    expect(url.searchParams.getAll("provider")).toEqual(["google", "github"]);
+    expect(url.pathname).toBe(new URL(callback).pathname);
   });
 
   it.each([

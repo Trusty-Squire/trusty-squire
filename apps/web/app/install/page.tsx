@@ -22,6 +22,7 @@ import { Shield } from "../components/Shield";
 import {
   clearInstallCompletionUrl,
   installCompletionAcknowledgementUrl,
+  installCompletionProviderUrl,
   readInstallCompletionUrl,
 } from "./completion";
 
@@ -115,7 +116,14 @@ export default function InstallPage() {
   // as done when the OAuth ran here this session, which is what actually
   // (re)establishes the bot's github.com login.
   const returnedFromGithub = useQueryParam("gh") === "1";
+  const [googleSessionFresh, setGoogleSessionFresh] = useState(false);
   const [githubSessionFresh, setGithubSessionFresh] = useState(false);
+
+  useEffect(() => {
+    if (returnedFromAuth && identities.includes("google")) {
+      void Promise.resolve().then(() => setGoogleSessionFresh(true));
+    }
+  }, [returnedFromAuth, identities]);
 
   // Initial load: fetch state + whoami in parallel. A missing token is
   // handled at render (see below), so just bail here without touching state.
@@ -294,11 +302,17 @@ export default function InstallPage() {
       clearInstallCompletionUrl(token);
     }
     if (completionUrl !== null) {
-      window.location.assign(completionUrl);
-      return;
+      const callback = installCompletionProviderUrl(completionUrl, [
+        ...(googleSessionFresh ? (["google"] as const) : []),
+        ...(githubSessionFresh ? (["github"] as const) : []),
+      ]);
+      if (callback !== null) {
+        window.location.assign(callback);
+        return;
+      }
     }
     router.push("/install/done");
-  }, [completionUrl, router, token]);
+  }, [completionUrl, githubSessionFresh, googleSessionFresh, router, token]);
 
   // ---- Render branches -----------------------------------------------
 

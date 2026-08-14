@@ -1232,7 +1232,10 @@ async function runInstallClaim(
       wizardCompleted,
     );
     if (tearDown) {
-      return "claimed";
+      return {
+        status: "claimed",
+        provider: options.completeOnClaim ? options.completionProvider : null,
+      };
     }
     if (claimedThisPoll) {
       console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));

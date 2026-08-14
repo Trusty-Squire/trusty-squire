@@ -88,7 +88,13 @@ const require = createRequire(import.meta.url);
 // "logged-in marker lies" failure: the marker records a login whose auth
 // cookie the provider already invalidated. Honors UNIVERSAL_BOT_PROXY_URL;
 // unset (the default for end users) → direct, no change.
-function loginProxyOption(): { server: string; username?: string; password?: string } | undefined {
+export type LoginProxyDisposition = {
+  server: string;
+  username?: string;
+  password?: string;
+} | null;
+
+function loginProxyOption(): Exclude<LoginProxyDisposition, null> | undefined {
   const raw = process.env.UNIVERSAL_BOT_PROXY_URL;
   if (raw === undefined || raw.trim().length === 0) return undefined;
   try {
@@ -103,6 +109,12 @@ function loginProxyOption(): { server: string; username?: string; password?: str
   } catch {
     return undefined;
   }
+}
+
+function selfLaunchProxyDisposition(
+  proxy: Exclude<LoginProxyDisposition, null> | undefined,
+): LoginProxyDisposition {
+  return proxy === undefined ? null : { server: proxy.server };
 }
 
 // --- stealth chromium (mirrors BrowserController) ----------------------
@@ -968,6 +980,7 @@ export interface RunInBotChromeOpts {
   // Plain-mode success hook, run after plainPollUntilDone returns true while the
   // browser is still open (read which provider cookies seeded, etc.).
   plainOnSuccess?: (profileDir: string) => Promise<void>;
+  onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
   onConfirmedLogin?: () => Promise<void>;
   seedProvider?: OAuthProviderId | (() => OAuthProviderId | null);
   validateGoogleSeed?: (profileDir: string) => Promise<OperatorSeedGoogleValidation>;
@@ -1017,16 +1030,16 @@ export async function finalizeLoginRun(
 
 export async function validateGoogleProfileSession(
   profileDir: string,
+  proxyDisposition: LoginProxyDisposition,
   launcher: PersistentLauncher = resolveChromium(),
   closeValidationBrowser: typeof teardownLoginBrowser = teardownLoginBrowser,
 ): Promise<OperatorSeedGoogleValidation> {
-  const proxyOpt = loginProxyOption();
   const context = await launchWithProfileGate(profileDir, () =>
     launchPersistentLoginContext(launcher, profileDir, {
       headless: true,
       ignoreDefaultArgs: ["--enable-automation"],
       args: ["--no-sandbox", "--disable-dev-shm-usage"],
-      ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
+      ...(proxyDisposition !== null ? { proxy: proxyDisposition } : {}),
     }),
   );
   const holderPid = currentProfileHolderPid(profileDir);
@@ -1082,6 +1095,11 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
       throw new Error("no Chrome binary found for the plain login browser");
     }
     const proxyOpt = loginProxyOption();
+    const proxyDisposition =
+      proxyOpt !== undefined && proxyOpt.password === undefined
+        ? selfLaunchProxyDisposition(proxyOpt)
+        : null;
+    opts.onProxyDisposition?.(proxyDisposition);
     const browser = await launchPlainLoginBrowser({
       binary,
       profileDir: opts.profileDir,
@@ -1091,7 +1109,7 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
       // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
       // proxy (direct). Connect from the box is the point anyway.
       proxyServer:
-        proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
+        proxyDisposition?.server ?? null,
       extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
     let status: LoginRunResult["status"] = "timeout";
@@ -1125,6 +1143,8 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
     return { status, closeState };
   }
   const chromium = resolveChromium();
+  const proxyOpt = loginProxyOption();
+  opts.onProxyDisposition?.(proxyOpt ?? null);
   const context = await launchWithProfileGate(
     opts.profileDir,
     () =>
@@ -1141,7 +1161,7 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
           "--no-sandbox",
           "--disable-dev-shm-usage",
         ],
-        ...(loginProxyOption() !== undefined ? { proxy: loginProxyOption() } : {}),
+        ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
       }),
     { failFast: true },
   );
@@ -1278,14 +1298,18 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
       if (chromeBinary === null) {
         throw new Error("no Chrome binary found for the plain login browser");
       }
+      const proxyDisposition =
+        proxyOpt !== undefined && proxyOpt.password === undefined
+          ? selfLaunchProxyDisposition(proxyOpt)
+          : null;
+      opts.onProxyDisposition?.(proxyDisposition);
       const browser = await launchPlainLoginBrowser({
         binary: chromeBinary,
         profileDir: opts.profileDir,
         url: opts.url,
         window: { width: HEADLESS_W, height: HEADLESS_H },
         env: { ...process.env, DISPLAY: display },
-        proxyServer:
-          proxyOpt !== undefined && proxyOpt.password === undefined ? proxyOpt.server : null,
+        proxyServer: proxyDisposition?.server ?? null,
         extraArgs: sharedChromeArgs,
       });
       teardownContext = browser.teardown;
@@ -1293,6 +1317,8 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
       plainBrowserIsRunning = browser.isRunning;
       profileIdentity = browser.identity;
     } else if (useSelfLaunch && chromeBinary !== null) {
+      const proxyDisposition = selfLaunchProxyDisposition(proxyOpt);
+      opts.onProxyDisposition?.(proxyDisposition);
       const launched = await launchSelfManagedLoginContext({
         binary: chromeBinary,
         profileDir: opts.profileDir,
@@ -1302,7 +1328,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
         appMode: true,
         window: { width: HEADLESS_W, height: HEADLESS_H },
         env: { ...process.env, DISPLAY: display },
-        proxyServer: proxyOpt?.server ?? null,
+        proxyServer: proxyDisposition?.server ?? null,
         extraArgs: sharedChromeArgs,
       });
       context = launched.context;
@@ -1311,6 +1337,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
       profileIdentity = launched.identity;
     } else {
       const chromium = resolveChromium();
+      opts.onProxyDisposition?.(proxyOpt ?? null);
       const persistent = await launchWithProfileGate(
         opts.profileDir,
         () =>
@@ -1608,6 +1635,7 @@ export async function ensureOAuthSession(opts?: {
   const profileDir = opts?.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts?.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
+  let proxyDisposition: LoginProxyDisposition = null;
 
   try {
     const result = await runInBotChrome({
@@ -1644,9 +1672,13 @@ export async function ensureOAuthSession(opts?: {
         return hasProviderSession(ctx, target);
       },
       pollUntilDone: (ctx) => hasProviderSession(ctx, target),
+      onProxyDisposition: (proxy) => {
+        proxyDisposition = proxy;
+      },
       onConfirmedLogin: async () => markProviderLoggedIn(provider, profileDir),
       seedProvider: provider,
-      validateGoogleSeed: validateGoogleProfileSession,
+      validateGoogleSeed: (validationProfile) =>
+        validateGoogleProfileSession(validationProfile, proxyDisposition),
       ...(opts?.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
     });
     // Map runInBotChrome's status set to ensureOAuthSession's contract.
@@ -1693,6 +1725,7 @@ export async function openInstallConfirmInBotChrome(
     heartbeatMessage?: string | (() => string);
   },
   runChrome: typeof runInBotChrome = runInBotChrome,
+  validateGoogleSeed: typeof validateGoogleProfileSession = validateGoogleProfileSession,
 ): Promise<{
   status: "claimed" | "timeout" | "error";
   detail?: string;
@@ -1702,6 +1735,8 @@ export async function openInstallConfirmInBotChrome(
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
   let completion: Awaited<ReturnType<typeof startInstallCompletionListener>> | undefined;
   let observedGoogleIdentity = false;
+  let proxyDisposition: LoginProxyDisposition = null;
+  const completedProviders = new Set<OAuthProviderId>();
 
   try {
     const doneUrl = new URL("/install/done", opts.confirmUrl).toString();
@@ -1720,10 +1755,16 @@ export async function openInstallConfirmInBotChrome(
       // stub to satisfy the (CDP-path) type.
       plainProfileLogin: true,
       pollUntilDone: () => Promise.resolve(false),
-      plainPollUntilDone: async (dir) =>
-        installClaimPollCompleted(
-          await opts.pollUntilClaimed(dir, completion?.isCompleted() === true),
-        ),
+      plainPollUntilDone: async (dir) => {
+        const claim = await opts.pollUntilClaimed(dir, completion?.isCompleted() === true);
+        if (typeof claim === "object" && claim.provider !== null) {
+          completedProviders.add(claim.provider);
+        }
+        for (const provider of completion?.completedProviders() ?? []) {
+          completedProviders.add(provider);
+        }
+        return installClaimPollCompleted(claim);
+      },
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
       // The user's sign-in inside this Chrome leaves a provider session in the
@@ -1734,7 +1775,9 @@ export async function openInstallConfirmInBotChrome(
         for (const provider of ["google", "github"] as const) {
           if (profileHasProviderCookies(dir, provider)) {
             markProviderLoggedIn(provider, dir);
-            if (provider === "google") observedGoogleIdentity = true;
+            if (provider === "google" && completedProviders.has("google")) {
+              observedGoogleIdentity = true;
+            }
           }
         }
         // NB: eager Google-email capture (captureGoogleEmail) needed a live
@@ -1744,8 +1787,12 @@ export async function openInstallConfirmInBotChrome(
         // when unset, so dropping eager capture is safe and keeping CDP off
         // the OAuth login is the whole point of the plain path.
       },
+      onProxyDisposition: (proxy) => {
+        proxyDisposition = proxy;
+      },
       seedProvider: () => (observedGoogleIdentity ? "google" : null),
-      validateGoogleSeed: validateGoogleProfileSession,
+      validateGoogleSeed: (validationProfile) =>
+        validateGoogleSeed(validationProfile, proxyDisposition),
     });
     if (result.status === "completed") {
       return { status: "claimed" };
@@ -1758,11 +1805,14 @@ export async function openInstallConfirmInBotChrome(
   }
 }
 
-export type InstallClaimPollResult = "pending" | "claimed" | "expired";
+export type InstallClaimPollResult =
+  | "pending"
+  | "expired"
+  | { status: "claimed"; provider: OAuthProviderId | null };
 
 export function installClaimPollCompleted(result: InstallClaimPollResult): boolean {
   if (result === "expired") {
     throw new Error("the install claim expired before sign-in completed");
   }
-  return result === "claimed";
+  return typeof result === "object" && result.status === "claimed";
 }

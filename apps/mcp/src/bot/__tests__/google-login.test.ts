@@ -249,7 +249,8 @@ describe("headless login VNC lifecycle", () => {
 });
 
 describe("login browser lifecycle guards", () => {
-  it("settles and closes a cancelled persistent launch before returning", async () => {
+  it("bounds cancellation without waiting for a wedged persistent launch", async () => {
+    vi.useFakeTimers();
     let cancel: (() => void) | undefined;
     let finishLaunch: ((value: string) => void) | undefined;
     const cancellation = new Promise<void>((resolve) => {
@@ -261,7 +262,6 @@ describe("login browser lifecycle guards", () => {
 
     const cleanupCancelled = vi.fn(async () => "closed" as const);
     const cleanupRejected = vi.fn(async () => "closed" as const);
-    let settled = false;
     const launchImpl = vi.fn(
       (options: { headless: boolean; timeout: number }): Promise<string> => {
         expect(options).toEqual({ headless: true, timeout: 30_000 });
@@ -274,18 +274,18 @@ describe("login browser lifecycle guards", () => {
       cancellation,
       cleanupCancelled,
       cleanupRejected,
-    }).then((outcome) => {
-      settled = true;
-      return outcome;
+      cancellationSettleMs: 25,
     });
     await Promise.resolve();
     cancel?.();
-    await Promise.resolve();
-    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(25);
+    await expect(result).resolves.toEqual({ status: "cancelled", closeState: "unknown" });
+    expect(cleanupRejected).toHaveBeenCalledOnce();
+
     finishLaunch?.("late browser");
-    await expect(result).resolves.toEqual({ status: "cancelled", closeState: "closed" });
+    await Promise.resolve();
+    await Promise.resolve();
     expect(cleanupCancelled).toHaveBeenCalledWith("late browser");
-    expect(cleanupRejected).not.toHaveBeenCalled();
   });
 
   it("bounds persistent fallback identity proof when a live holder stays unreadable", async () => {
@@ -672,7 +672,7 @@ describe("bot Chrome launch consistency", () => {
 describe("confirmed login finalization", () => {
   it("distinguishes a claimed install from pending and expired polls", () => {
     expect(installClaimPollCompleted("pending")).toBe(false);
-    expect(installClaimPollCompleted("claimed")).toBe(true);
+    expect(installClaimPollCompleted({ status: "claimed", provider: "google" })).toBe(true);
     expect(() => installClaimPollCompleted("expired")).toThrow(/expired/);
   });
 
@@ -758,23 +758,38 @@ describe("confirmed login finalization", () => {
     }
   });
 
-  it("threads observed Google provenance through the claimed connect flow", async () => {
+  it("threads completed Google provenance and the actual direct proxy disposition", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-seed-"));
+    const previousProxy = process.env.UNIVERSAL_BOT_PROXY_URL;
+    process.env.UNIVERSAL_BOT_PROXY_URL = "http://agent:secret@proxy.example:8080";
     mkdirSync(join(profileDir, "Default"));
     const db = new Database(join(profileDir, "Default", "Cookies"));
     db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
     db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)").run(".google.com", "SID");
     db.close();
-    const pollUntilClaimed = vi.fn(async () => "claimed" as const);
+    const pollUntilClaimed = vi.fn(async () => ({ status: "claimed", provider: null } as const));
+    const validateGoogleSeed = vi.fn(async () => ({
+      googleSignedIn: true,
+      closeState: "closed" as const,
+    }));
     const runChrome = vi.fn(async (runOpts: RunInBotChromeOpts) => {
+      const callback = new URLSearchParams(new URL(runOpts.url).hash.slice(1)).get(
+        "ts_install_complete",
+      );
+      expect(callback).not.toBeNull();
+      await fetch(`${callback!}?provider=google`, { redirect: "manual" });
       await expect(runOpts.plainPollUntilDone!(profileDir)).resolves.toBe(true);
       await runOpts.plainOnSuccess!(profileDir);
+      runOpts.onProxyDisposition?.(null);
       const provider =
         typeof runOpts.seedProvider === "function"
           ? runOpts.seedProvider()
           : (runOpts.seedProvider ?? null);
       expect(provider).toBe("google");
-      expect(runOpts.validateGoogleSeed).toBe(validateGoogleProfileSession);
+      await expect(runOpts.validateGoogleSeed!("/validation-profile")).resolves.toEqual({
+        googleSignedIn: true,
+        closeState: "closed",
+      });
       return { status: "completed" as const };
     });
 
@@ -787,10 +802,52 @@ describe("confirmed login finalization", () => {
             pollUntilClaimed,
           },
           runChrome,
+          validateGoogleSeed,
         ),
       ).resolves.toEqual({ status: "claimed" });
-      expect(pollUntilClaimed).toHaveBeenCalledWith(profileDir, false);
+      expect(pollUntilClaimed).toHaveBeenCalledWith(profileDir, true);
+      expect(validateGoogleSeed).toHaveBeenCalledWith("/validation-profile", null);
       expect(runChrome).toHaveBeenCalledOnce();
+    } finally {
+      if (previousProxy === undefined) delete process.env.UNIVERSAL_BOT_PROXY_URL;
+      else process.env.UNIVERSAL_BOT_PROXY_URL = previousProxy;
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not derive Google provenance from ambient cookies after GitHub completion", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-seed-"));
+    mkdirSync(join(profileDir, "Default"));
+    const db = new Database(join(profileDir, "Default", "Cookies"));
+    db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
+    db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)").run(".google.com", "SID");
+    db.close();
+    const runChrome = vi.fn(async (runOpts: RunInBotChromeOpts) => {
+      const callback = new URLSearchParams(new URL(runOpts.url).hash.slice(1)).get(
+        "ts_install_complete",
+      );
+      await fetch(`${callback!}?provider=github`, { redirect: "manual" });
+      await expect(runOpts.plainPollUntilDone!(profileDir)).resolves.toBe(true);
+      await runOpts.plainOnSuccess!(profileDir);
+      const provider =
+        typeof runOpts.seedProvider === "function"
+          ? runOpts.seedProvider()
+          : (runOpts.seedProvider ?? null);
+      expect(provider).toBeNull();
+      return { status: "completed" as const };
+    });
+
+    try {
+      await expect(
+        openInstallConfirmInBotChrome(
+          {
+            confirmUrl: "https://example.com/install",
+            profileDir,
+            pollUntilClaimed: async () => ({ status: "claimed", provider: null }),
+          },
+          runChrome,
+        ),
+      ).resolves.toEqual({ status: "claimed" });
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
@@ -804,8 +861,11 @@ describe("Google seed validation", () => {
     ["https://myaccount.google.com/", true, "unknown"],
   ] as const)("observes Google identity and proven closure at %s", async (url, signedIn, closeState) => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-google-seed-validation-"));
-    const previousProxy = process.env.UNIVERSAL_BOT_PROXY_URL;
-    process.env.UNIVERSAL_BOT_PROXY_URL = "http://agent:secret@proxy.example:8080";
+    const proxyDisposition = {
+      server: "http://proxy.example:8080",
+      username: "agent",
+      password: "secret",
+    };
     const close = vi.fn(async () => undefined);
     const goto = vi.fn(async () => undefined);
     const page = { goto, url: () => url };
@@ -825,7 +885,12 @@ describe("Google seed validation", () => {
 
     try {
       await expect(
-        validateGoogleProfileSession(profileDir, launcher, closeValidationBrowser),
+        validateGoogleProfileSession(
+          profileDir,
+          proxyDisposition,
+          launcher,
+          closeValidationBrowser,
+        ),
       ).resolves.toEqual({ googleSignedIn: signedIn, closeState });
       expect(goto).toHaveBeenCalledWith("https://myaccount.google.com/", {
         waitUntil: "domcontentloaded",
@@ -847,8 +912,6 @@ describe("Google seed validation", () => {
       );
       expect(close).toHaveBeenCalledOnce();
     } finally {
-      if (previousProxy === undefined) delete process.env.UNIVERSAL_BOT_PROXY_URL;
-      else process.env.UNIVERSAL_BOT_PROXY_URL = previousProxy;
       rmSync(profileDir, { recursive: true, force: true });
     }
   });

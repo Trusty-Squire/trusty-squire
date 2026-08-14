@@ -3,6 +3,7 @@ const COMPLETION_ACK_FRAGMENT_KEY = "ts_install_complete_ack";
 const COMPLETION_STORAGE_PREFIX = "ts-install-completion:";
 const COMPLETION_ACK_STORAGE_PREFIX = "ts-install-completion-ack:";
 const COMPLETION_PATH = /^\/\.well-known\/trusty-squire\/install-complete\/[a-f0-9]{48}$/;
+type InstallCompletionProvider = "google" | "github";
 
 export function normalizeInstallCompletionUrl(raw: string | null): string | null {
   if (raw === null) return null;
@@ -90,4 +91,15 @@ export function clearInstallCompletionUrl(token: string): void {
   } catch {
     // Best-effort cleanup after Finish.
   }
+}
+
+export function installCompletionProviderUrl(
+  callbackUrl: string,
+  providers: readonly InstallCompletionProvider[],
+): string | null {
+  const normalized = normalizeInstallCompletionUrl(callbackUrl);
+  if (normalized === null) return null;
+  const callback = new URL(normalized);
+  for (const provider of providers) callback.searchParams.append("provider", provider);
+  return callback.toString();
 }

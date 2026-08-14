@@ -4,11 +4,14 @@ import type { AddressInfo } from "node:net";
 
 export const INSTALL_COMPLETION_FRAGMENT_KEY = "ts_install_complete";
 
+export type InstallCompletionProvider = "google" | "github";
+
 const COMPLETION_PATH_PREFIX = "/.well-known/trusty-squire/install-complete/";
 
 export interface InstallCompletionListener {
   callbackUrl: string;
   isCompleted: () => boolean;
+  completedProviders: () => readonly InstallCompletionProvider[];
   close: () => Promise<void>;
 }
 
@@ -40,9 +43,11 @@ export async function startInstallCompletionListener(
   const completionPath = `${COMPLETION_PATH_PREFIX}${nonce}`;
   const acknowledgementPath = `${completionPath}/ack`;
   let completed = false;
+  let completedProviders: readonly InstallCompletionProvider[] = [];
 
   const server = createServer((req, res) => {
-    const path = req.url === undefined ? "" : new URL(req.url, "http://127.0.0.1").pathname;
+    const requestUrl = new URL(req.url ?? "", "http://127.0.0.1");
+    const path = requestUrl.pathname;
     if (req.method === "GET" && path === acknowledgementPath) {
       const redirect = new URL(confirmUrl);
       const fragment = new URLSearchParams(redirect.hash.slice(1));
@@ -71,6 +76,12 @@ export async function startInstallCompletionListener(
     }
 
     completed = true;
+    completedProviders = requestUrl.searchParams
+      .getAll("provider")
+      .filter(
+        (provider): provider is InstallCompletionProvider =>
+          provider === "google" || provider === "github",
+      );
     res.writeHead(302, {
       "Cache-Control": "no-store",
       Connection: "close",
@@ -100,6 +111,7 @@ export async function startInstallCompletionListener(
   return {
     callbackUrl,
     isCompleted: () => completed,
+    completedProviders: () => completedProviders,
     close: async () => {
       if (closed) return;
       closed = true;

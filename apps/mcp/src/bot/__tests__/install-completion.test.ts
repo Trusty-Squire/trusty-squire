@@ -19,6 +19,7 @@ describe("plain install completion listener", () => {
     listener = await startInstallCompletionListener(doneUrl, confirmUrl);
 
     expect(listener.isCompleted()).toBe(false);
+    expect(listener.completedProviders()).toEqual([]);
     const wrong = await fetch(`${listener.callbackUrl}/wrong`, {
       redirect: "manual",
     });
@@ -38,10 +39,13 @@ describe("plain install completion listener", () => {
     expect(acknowledgementFragment.get("ts_install_complete_ack")).toBe("1");
     expect(listener.isCompleted()).toBe(false);
 
-    const finished = await fetch(listener.callbackUrl, { redirect: "manual" });
+    const finished = await fetch(`${listener.callbackUrl}?provider=google&provider=github`, {
+      redirect: "manual",
+    });
     expect(finished.status).toBe(302);
     expect(finished.headers.get("location")).toBe(doneUrl);
     expect(listener.isCompleted()).toBe(true);
+    expect(listener.completedProviders()).toEqual(["google", "github"]);
   });
 
   it("carries the callback in the confirm URL fragment, outside request logs", () => {

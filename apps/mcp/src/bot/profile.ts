@@ -388,6 +388,49 @@ function scavengeProfileOperationArtifacts(lockDir: string, lockRoot: string): b
   return retainedTombstone;
 }
 
+function restoreOwnedProfileOperationTombstone(
+  lockDir: string,
+  lockRoot: string,
+  token: string,
+): boolean {
+  for (const tombstone of profileOperationArtifacts(lockDir, lockRoot, "stale")) {
+    if (readProfileOperationOwner(tombstone)?.token !== token) continue;
+    try {
+      linkSync(tombstone, lockDir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") return false;
+      if (readProfileOperationOwner(lockDir)?.token !== token) return false;
+    }
+    rmSync(tombstone, { force: true });
+    return readProfileOperationOwner(lockDir)?.token === token;
+  }
+  return false;
+}
+
+function ownedProfileOperationLease(
+  lockDir: string,
+  lockRoot: string,
+  token: string,
+): ProfileOperationLease {
+  let released = false;
+  return {
+    release: (): void => {
+      if (released) return;
+      released = true;
+      if (readProfileOperationOwner(lockDir)?.token === token) {
+        rmSync(lockDir, { recursive: true, force: true });
+        return;
+      }
+      for (const tombstone of profileOperationArtifacts(lockDir, lockRoot, "stale")) {
+        if (readProfileOperationOwner(tombstone)?.token === token) {
+          rmSync(tombstone, { recursive: true, force: true });
+          return;
+        }
+      }
+    },
+  };
+}
+
 export function acquireProfileOperationGuard(
   profileDir: string = CHROME_PROFILE_DIR,
   lockRoot: string = tmpdir(),
@@ -398,6 +441,12 @@ export function acquireProfileOperationGuard(
   const startTime = birth?.start_time ?? "unknown";
   for (;;) {
     if (scavengeProfileOperationArtifacts(lockDir, lockRoot)) {
+      if (
+        restoreOwnedProfileOperationTombstone(lockDir, lockRoot, token) &&
+        !scavengeProfileOperationArtifacts(lockDir, lockRoot)
+      ) {
+        return ownedProfileOperationLease(lockDir, lockRoot, token);
+      }
       throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
     }
     const claimPath = `${lockDir}.claim-${randomUUID()}`;
@@ -425,8 +474,13 @@ export function acquireProfileOperationGuard(
     rmSync(claimPath, { force: true });
     try {
       if (scavengeProfileOperationArtifacts(lockDir, lockRoot)) {
-        rmSync(lockDir, { recursive: true, force: true });
-        throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+        if (
+          !restoreOwnedProfileOperationTombstone(lockDir, lockRoot, token) ||
+          scavengeProfileOperationArtifacts(lockDir, lockRoot)
+        ) {
+          rmSync(lockDir, { recursive: true, force: true });
+          throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+        }
       }
     } catch (err) {
       if (readProfileOperationOwner(lockDir)?.token === token) {
@@ -434,23 +488,7 @@ export function acquireProfileOperationGuard(
       }
       throw err;
     }
-    let released = false;
-    return {
-      release: (): void => {
-        if (released) return;
-        released = true;
-        if (readProfileOperationOwner(lockDir)?.token === token) {
-          rmSync(lockDir, { recursive: true, force: true });
-          return;
-        }
-        for (const tombstone of profileOperationArtifacts(lockDir, lockRoot, "stale")) {
-          if (readProfileOperationOwner(tombstone)?.token === token) {
-            rmSync(tombstone, { recursive: true, force: true });
-            return;
-          }
-        }
-      },
-    };
+    return ownedProfileOperationLease(lockDir, lockRoot, token);
   }
 }
 

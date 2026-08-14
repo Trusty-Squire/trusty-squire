@@ -1547,6 +1547,7 @@ export function selfLaunchEnabled(): boolean {
 }
 
 const PERSISTENT_CONTEXT_LAUNCH_TIMEOUT_MS = 30_000;
+const PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS = 2_000;
 const PROFILE_IDENTITY_PROOF_TIMEOUT_MS = 2_000;
 const PROFILE_IDENTITY_POLL_MS = 25;
 const PROFILE_HOLDER_ABSENCE_GRACE_MS = 100;
@@ -1600,6 +1601,7 @@ export async function launchCancellablePersistentContext<T, O extends object>(op
   cancellation: Promise<void>;
   cleanupCancelled: (value: T) => Promise<ProfileCloseState>;
   cleanupRejected: () => Promise<ProfileCloseState>;
+  cancellationSettleMs?: number;
 }): Promise<
   { status: "launched"; value: T } | { status: "cancelled"; closeState: ProfileCloseState }
 > {
@@ -1611,16 +1613,30 @@ export async function launchCancellablePersistentContext<T, O extends object>(op
     opts.cancellation.then(() => ({ status: "cancelled" as const })),
   ]);
   if (outcome.status === "launched") return outcome;
-  try {
-    const value = await launch;
-    return { status: "cancelled", closeState: await opts.cleanupCancelled(value) };
-  } catch {
-    try {
-      return { status: "cancelled", closeState: await opts.cleanupRejected() };
-    } catch {
-      return { status: "cancelled", closeState: "unknown" };
-    }
-  }
+  let rejectedCleanup: Promise<ProfileCloseState> | undefined;
+  const cleanupRejected = (): Promise<ProfileCloseState> => {
+    rejectedCleanup ??= Promise.resolve()
+      .then(opts.cleanupRejected)
+      .catch(() => "unknown" as const);
+    return rejectedCleanup;
+  };
+  const lateCleanup = launch
+    .then(opts.cleanupCancelled, cleanupRejected)
+    .catch(() => "unknown" as const);
+  const settleMs = opts.cancellationSettleMs ?? PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS;
+  let timer: NodeJS.Timeout | undefined;
+  const settled = await Promise.race([
+    lateCleanup.then((closeState) => ({ settled: true as const, closeState })),
+    new Promise<{ settled: false }>((resolveTimeout) => {
+      timer = setTimeout(() => resolveTimeout({ settled: false }), settleMs);
+      timer.unref();
+    }),
+  ]);
+  if (timer !== undefined) clearTimeout(timer);
+  if (settled.settled) return { status: "cancelled", closeState: settled.closeState };
+  void lateCleanup;
+  void cleanupRejected();
+  return { status: "cancelled", closeState: "unknown" };
 }
 
 // Find an ephemeral TCP port for Chrome's --remote-debugging-port.
