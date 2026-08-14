@@ -60,6 +60,10 @@ const h = vi.hoisted(() => ({
   leaseSerial: 0,
   warmLeaseProfileDir: null as string | null,
   nextLeaseProfileDir: null as string | null,
+  profileAcquisitionInterruption: null as null | {
+    reason: "timeout" | "cancelled";
+    phase: "profile" | "seed_lock";
+  },
   leaseAcquireCalls: 0,
   activeLeaseCount: 0,
   leaseReturnCalls: 0,
@@ -613,60 +617,77 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../operator-profile-pool.js", () => ({
-  OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
-  OperatorProfileAcquisitionInterruptedError: class extends Error {
+vi.mock("../operator-profile-pool.js", () => {
+  class OperatorProfileAcquisitionInterruptedError extends Error {
     readonly reason: "timeout" | "cancelled";
-    constructor(reason: "timeout" | "cancelled") {
+    readonly phase: "profile" | "seed_lock";
+    constructor(
+      reason: "timeout" | "cancelled",
+      phase: "profile" | "seed_lock" = "profile",
+    ) {
       super(`operator profile acquisition ${reason}`);
       this.reason = reason;
+      this.phase = phase;
     }
-  },
-  acquireOperatorProfile: async (_sessionId: string, opts: { sourceProfileDir?: string } = {}) => {
-    h.leaseAcquireCalls += 1;
-    if (h.activeLeaseCount >= 2) {
-      throw new Error(
-        "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
-      );
-    }
-    h.activeLeaseCount += 1;
-    const warm = h.warmLeaseProfileDir;
-    h.warmLeaseProfileDir = null;
-    const profileDir =
-      h.nextLeaseProfileDir ??
-      opts.sourceProfileDir ??
-      warm ??
-      `/tmp/trusty-squire-unit-profile-${process.pid}-${++h.leaseSerial}`;
-    h.nextLeaseProfileDir = null;
-    let finished = false;
-    return {
-      profileDir,
-      profileId: `unit-${h.leaseSerial}`,
-      seedGeneration: "unit-seed",
-      bindWorker: () => undefined,
-      returnWarm: async () => {
-        if (finished) return;
-        finished = true;
-        h.activeLeaseCount -= 1;
-        h.leaseReturnCalls += 1;
-        h.warmLeaseProfileDir = profileDir;
-      },
-      destroy: async () => {
-        if (finished) return;
-        finished = true;
-        h.activeLeaseCount -= 1;
-        h.leaseDestroyCalls += 1;
-      },
-      retain: async (destroyRequired = false) => {
-        if (finished) return;
-        finished = true;
-        h.activeLeaseCount -= 1;
-        h.leaseRetainCalls += 1;
-        h.leaseRetainDestroyRequired.push(destroyRequired);
-      },
-    };
-  },
-}));
+  }
+  return {
+    OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
+    OperatorProfileAcquisitionInterruptedError,
+    acquireOperatorProfile: async (
+      _sessionId: string,
+      opts: { sourceProfileDir?: string } = {},
+    ) => {
+      h.leaseAcquireCalls += 1;
+      if (h.profileAcquisitionInterruption !== null) {
+        throw new OperatorProfileAcquisitionInterruptedError(
+          h.profileAcquisitionInterruption.reason,
+          h.profileAcquisitionInterruption.phase,
+        );
+      }
+      if (h.activeLeaseCount >= 2) {
+        throw new Error(
+          "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
+        );
+      }
+      h.activeLeaseCount += 1;
+      const warm = h.warmLeaseProfileDir;
+      h.warmLeaseProfileDir = null;
+      const profileDir =
+        h.nextLeaseProfileDir ??
+        opts.sourceProfileDir ??
+        warm ??
+        `/tmp/trusty-squire-unit-profile-${process.pid}-${++h.leaseSerial}`;
+      h.nextLeaseProfileDir = null;
+      let finished = false;
+      return {
+        profileDir,
+        profileId: `unit-${h.leaseSerial}`,
+        seedGeneration: "unit-seed",
+        bindWorker: () => undefined,
+        returnWarm: async () => {
+          if (finished) return;
+          finished = true;
+          h.activeLeaseCount -= 1;
+          h.leaseReturnCalls += 1;
+          h.warmLeaseProfileDir = profileDir;
+        },
+        destroy: async () => {
+          if (finished) return;
+          finished = true;
+          h.activeLeaseCount -= 1;
+          h.leaseDestroyCalls += 1;
+        },
+        retain: async (destroyRequired = false) => {
+          if (finished) return;
+          finished = true;
+          h.activeLeaseCount -= 1;
+          h.leaseRetainCalls += 1;
+          h.leaseRetainDestroyRequired.push(destroyRequired);
+        },
+      };
+    },
+  };
+});
 
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -829,6 +850,7 @@ beforeEach(() => {
   h.leaseSerial = 0;
   h.warmLeaseProfileDir = null;
   h.nextLeaseProfileDir = null;
+  h.profileAcquisitionInterruption = null;
   h.leaseAcquireCalls = 0;
   h.activeLeaseCount = 0;
   h.leaseReturnCalls = 0;
@@ -3745,6 +3767,21 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("reports a shared seed-lock deadline without blaming active capacity", async () => {
+    h.profileAcquisitionInterruption = {
+      reason: "timeout",
+      phase: "seed_lock",
+    };
+
+    await expect(
+      startProvisionSession({ serviceUrl: "https://app.example.com/" }),
+    ).rejects.toThrow(
+      "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
+    );
+    expect(h.startCalls).toBe(0);
+    expect(h.activeLeaseCount).toBe(0);
   });
 
   it("cancels a capacity waiter before shutdown frees an active slot", async () => {

@@ -683,10 +683,19 @@ async function acquireOperatorProfileBounded(
           throw new Error("operate_start cancelled: operator server is shutting down");
         }
         if (
-          (error instanceof OperatorProfileAcquisitionInterruptedError &&
-            error.reason === "timeout") ||
-          (isOperatorCapacityError(error) && Date.now() >= deadline)
+          error instanceof OperatorProfileAcquisitionInterruptedError &&
+          error.reason === "timeout"
         ) {
+          if (error.phase === "seed_lock") {
+            throw new Error(
+              "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
+            );
+          }
+          throw new Error(
+            "operate_start failed: start deadline exceeded while acquiring an isolated operator profile",
+          );
+        }
+        if (isOperatorCapacityError(error) && Date.now() >= deadline) {
           throw new Error(
             "operate_start capacity wait timed out: 2 operator sessions are active; finish one and retry",
           );

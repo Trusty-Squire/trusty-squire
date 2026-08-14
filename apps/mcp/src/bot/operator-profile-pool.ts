@@ -131,7 +131,10 @@ export interface OperatorProfilePoolOptions {
 }
 
 export class OperatorProfileAcquisitionInterruptedError extends Error {
-  constructor(readonly reason: "timeout" | "cancelled") {
+  constructor(
+    readonly reason: "timeout" | "cancelled",
+    readonly phase: "profile" | "seed_lock" = "profile",
+  ) {
     super(`operator profile acquisition ${reason === "timeout" ? "timed out" : "was cancelled"}`);
     this.name = "OperatorProfileAcquisitionInterruptedError";
   }
@@ -426,17 +429,20 @@ function copyIdentitySeed(sourceProfileDir: string, destination: string): void {
   }
 }
 
-function assertProfileAcquisitionActive(control: OperatorProfileAcquisitionControl): void {
+function assertProfileAcquisitionActive(
+  control: OperatorProfileAcquisitionControl,
+  phase: "profile" | "seed_lock" = "profile",
+): void {
   if (control.signal?.aborted === true) {
-    throw new OperatorProfileAcquisitionInterruptedError("cancelled");
+    throw new OperatorProfileAcquisitionInterruptedError("cancelled", phase);
   }
   if (control.deadline !== undefined && Date.now() >= control.deadline) {
-    throw new OperatorProfileAcquisitionInterruptedError("timeout");
+    throw new OperatorProfileAcquisitionInterruptedError("timeout", phase);
   }
 }
 
 async function waitForSeedLockRetry(control: OperatorProfileAcquisitionControl): Promise<void> {
-  assertProfileAcquisitionActive(control);
+  assertProfileAcquisitionActive(control, "seed_lock");
   const delay =
     control.deadline === undefined
       ? 25
@@ -455,7 +461,7 @@ async function waitForSeedLockRetry(control: OperatorProfileAcquisitionControl):
     control.signal?.addEventListener("abort", finish, { once: true });
     if (control.signal?.aborted === true) finish();
   });
-  assertProfileAcquisitionActive(control);
+  assertProfileAcquisitionActive(control, "seed_lock");
 }
 
 async function withSeedLock<T>(
@@ -470,7 +476,7 @@ async function withSeedLock<T>(
     token,
   } satisfies SeedLockOwner;
   for (;;) {
-    assertProfileAcquisitionActive(control);
+    assertProfileAcquisitionActive(control, "seed_lock");
     if (scavengeSeedLockArtifacts(p)) {
       await waitForSeedLockRetry(control);
       continue;
@@ -497,7 +503,7 @@ async function withSeedLock<T>(
     break;
   }
   try {
-    assertProfileAcquisitionActive(control);
+    assertProfileAcquisitionActive(control, "seed_lock");
     return await fn();
   } finally {
     if (readSeedLockOwner(p.seedLock)?.token === token) {

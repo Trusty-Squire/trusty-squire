@@ -187,7 +187,10 @@ describe("operator profile pool migration stage", () => {
         sourceProfileDir: source,
         deadline: Date.now() + 100,
       });
-      const rejection = expect(third).rejects.toThrow("acquisition timed out");
+      const rejection = expect(third).rejects.toMatchObject({
+        reason: "timeout",
+        phase: "seed_lock",
+      });
 
       await vi.advanceTimersByTimeAsync(100);
 
