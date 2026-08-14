@@ -90,22 +90,30 @@ describe("profile process identity", () => {
 
 describe("profile close proof", () => {
   it("returns closed only after exact identity disappearance is observed", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-profile-close-proof-"));
+    const pid = deadPid();
+    writeSingletons(profileDir, `${hostname()}-${pid}`);
     const states: Array<"matching" | "stale"> = ["matching", "stale"];
-    await expect(
-      closeProfileWithProof({
-        profileDir: "/unused/profile",
-        identity: {
-          host: hostname(),
-          pid: 123,
-          start_time: "1",
-          user_data_dir: "/unused/profile",
-        },
-        close: async () => undefined,
-        forceClose: vi.fn(),
-        pollMs: 0,
-        identityState: () => states.shift() ?? "stale",
-      }),
-    ).resolves.toBe("closed");
+    try {
+      await expect(
+        closeProfileWithProof({
+          profileDir,
+          identity: {
+            host: hostname(),
+            pid,
+            start_time: "1",
+            user_data_dir: profileDir,
+          },
+          close: async () => undefined,
+          forceClose: vi.fn(),
+          pollMs: 0,
+          identityState: () => states.shift() ?? "stale",
+        }),
+      ).resolves.toBe("closed");
+      expect(lockPresent(profileDir)).toBe(false);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
   });
 
   it("returns unknown when closure identity cannot be proven", async () => {
@@ -505,6 +513,35 @@ describe("reapProfileHolderIfOwned", () => {
     expect(killed).toEqual([]);
     expect(lockPresent(dir)).toBe(true);
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "retains a live holder singleton after requesting exact termination",
+    async () => {
+      const child = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => undefined, 1000)", "--", `--user-data-dir=${dir}`],
+        { stdio: "ignore" },
+      );
+      try {
+        let identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+        await vi.waitFor(() => {
+          identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+          expect(identity).not.toBeNull();
+        });
+        writeSingletons(dir, `${hostname()}-${child.pid}`);
+        const killed: number[] = [];
+        expect(
+          reapProfileHolderIfOwned(dir, identity, (pid) => {
+            killed.push(pid);
+          }),
+        ).toBe(false);
+        expect(killed).toEqual([child.pid]);
+        expect(lockPresent(dir)).toBe(true);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    },
+  );
 
   it("clears a dead captured holder without signaling a recycled pid", () => {
     const pid = deadPid();

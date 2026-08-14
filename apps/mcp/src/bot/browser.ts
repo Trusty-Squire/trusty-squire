@@ -2211,6 +2211,7 @@ export class BrowserController {
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<ProfileCloseState> | null = null;
   private startCancellationRequested = false;
+  private startLaunchCommitted = false;
   private startSettled = false;
   private resolveStartCancellation: (() => void) | null = null;
   private readonly startCancellation = new Promise<void>((resolveCancellation) => {
@@ -2471,6 +2472,7 @@ export class BrowserController {
           ...(params.headless ? ["--headless=new"] : []),
           "about:blank",
         ];
+        this.commitProfileLaunch();
         const child = spawn(params.binary, argv, {
           env: params.env,
           stdio: ["ignore", "ignore", "pipe"],
@@ -2644,6 +2646,11 @@ export class BrowserController {
     if (this.startCancellationRequested) throw new Error("BrowserController start cancelled");
   }
 
+  private commitProfileLaunch(): void {
+    this.throwIfStartCancelled();
+    this.startLaunchCommitted = true;
+  }
+
   private async startWithProfileGuard(): Promise<void> {
     this.throwIfStartCancelled();
     reapOrphanedBrowsersOnce(this.profileDir);
@@ -2651,6 +2658,7 @@ export class BrowserController {
     this.throwIfStartCancelled();
     this.launchedChannel = channel;
     const proxy = await this.resolveProxy();
+    this.throwIfStartCancelled();
     this.proxyServer = proxy?.server ?? null;
     // Stderr so the MCP stdio transport's framing stays clean (the
     // module's existing logging convention).
@@ -2681,6 +2689,7 @@ export class BrowserController {
     // timezone in at creation, with no way to set it afterward. Skipped in
     // remote mode — the remote host's own clock/IP are the authentic truth.
     const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy);
+    this.throwIfStartCancelled();
     if (geo !== null) {
       console.error(
         `[operator] egress geo: timezone=${geo.timezoneId}` +
@@ -2731,8 +2740,13 @@ export class BrowserController {
         // and with viewport:null the page read it straight back. A 720p
         // screen whose availHeight==height (no taskbar) is a headless
         // signature strict Turnstiles (exa/cartesia) score against.
-        this.xvfb = await startXvfb({ width: 1920, height: 1080 });
-        chromeEnv = { ...process.env, DISPLAY: this.xvfb.display };
+        const xvfb = await startXvfb({ width: 1920, height: 1080 });
+        if (this.startCancellationRequested) {
+          xvfb.stop();
+          this.throwIfStartCancelled();
+        }
+        this.xvfb = xvfb;
+        chromeEnv = { ...process.env, DISPLAY: xvfb.display };
         chromeHeadless = false;
         this.launchedMode = "xvfb";
         console.error(
@@ -2756,6 +2770,7 @@ export class BrowserController {
     }
 
     const free = await waitForProfileFree(this.profileDir, { deadlineMs: 0 });
+    this.throwIfStartCancelled();
     if (!free) {
       throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
     }
@@ -2864,7 +2879,7 @@ export class BrowserController {
       context = await launchWithProfileGate(
         this.profileDir,
         () => {
-          this.throwIfStartCancelled();
+          this.commitProfileLaunch();
           return launcher.launchPersistentContext(this.profileDir, {
             headless: chromeHeadless,
             ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
@@ -12025,6 +12040,13 @@ export class BrowserController {
   }
 
   private async closeCancelledStart(): Promise<ProfileCloseState> {
+    if (!this.startLaunchCommitted) {
+      await this.closeWithProfileGuard();
+      const lease = this.profileOperationLease;
+      this.profileOperationLease = null;
+      lease?.release();
+      return "closed";
+    }
     const [closeState] = await Promise.all([
       this.closeWithProfileGuard(),
       this.reapCancelledStartProcess(),
@@ -12034,7 +12056,7 @@ export class BrowserController {
       this.profileOperationLease = null;
       lease?.release();
     }
-    return !this.startSettled && closeState === "closed" ? "unknown" : closeState;
+    return closeState;
   }
 
   private async reapCancelledStartProcess(): Promise<void> {

@@ -266,7 +266,10 @@ export async function closeProfileWithProof(opts: {
     await new Promise((resolveWait) => setTimeout(resolveWait, pollMs));
     state = identityState();
   }
-  if (state === "stale") return "closed";
+  if (state === "stale") {
+    clearStaleSingletonLock(opts.profileDir);
+    return "closed";
+  }
   if (state === "unknown") return "unknown";
   try {
     opts.forceClose();
@@ -559,7 +562,8 @@ export function reapLeakedProfileHolder(profileDir: string = CHROME_PROFILE_DIR)
   if (holder === null || holder.host !== hostname()) return false;
   if (!holder.stale) {
     const identity = profileProcessIdentity(holder.pid, profileDir);
-    if (identity === null || !signalProfileProcess(identity, profileDir, "SIGKILL")) return false;
+    if (identity !== null) signalProfileProcess(identity, profileDir, "SIGKILL");
+    return false;
   }
   removeSingletons(profileDir);
   return true;
@@ -573,7 +577,10 @@ export function reapProfileHolderIfOwned(
   if (identity === null) return false;
   const holder = readLockHolder(profileDir);
   if (holder === null || holder.host !== hostname() || holder.pid !== identity.pid) return false;
-  if (!holder.stale && !signalProfileProcess(identity, profileDir, "SIGKILL", kill)) return false;
+  if (!holder.stale) {
+    signalProfileProcess(identity, profileDir, "SIGKILL", kill);
+    return false;
+  }
   removeSingletons(profileDir);
   return true;
 }

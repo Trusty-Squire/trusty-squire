@@ -243,7 +243,30 @@ describe("headless login VNC lifecycle", () => {
 });
 
 describe("login browser lifecycle guards", () => {
-  it("waits for a cancelled start to reach terminal settlement", async () => {
+  it("cancels a wedged pre-launch stage without awaiting its settlement", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
+    const controller = new BrowserController({ profileDir });
+    const internals = controller as unknown as {
+      startWithProfileGuard: () => Promise<void>;
+      closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+    };
+    const startImpl = vi.fn(() => new Promise<void>(() => undefined));
+    const closeImpl = vi.fn(async () => "unknown" as const);
+    internals.startWithProfileGuard = startImpl;
+    internals.closeWithProfileGuard = closeImpl;
+
+    try {
+      void controller.start().catch(() => undefined);
+      await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
+      await expect(controller.close({ cancelStart: true })).resolves.toBe("closed");
+      await expect(controller.close()).resolves.toBe("closed");
+      expect(closeImpl).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for a committed launch to reach terminal settlement", async () => {
     vi.useFakeTimers();
     const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
     let releaseStart: (() => void) | undefined;
@@ -252,6 +275,7 @@ describe("login browser lifecycle guards", () => {
     });
     const controller = new BrowserController({ profileDir });
     const internals = controller as unknown as {
+      startLaunchCommitted: boolean;
       startWithProfileGuard: () => Promise<void>;
       closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
     };
@@ -263,6 +287,7 @@ describe("login browser lifecycle guards", () => {
     try {
       const starting = controller.start().catch((error: unknown) => error);
       await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
+      internals.startLaunchCommitted = true;
       let closeSettled = false;
       const closing = controller.close({ cancelStart: true }).then((state) => {
         closeSettled = true;
