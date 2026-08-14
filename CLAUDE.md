@@ -608,15 +608,21 @@ which was never a wait) no longer blocks the MCP call for up to 5 (18 for
 JIT) minutes polling for the human's phone tap. It makes ONE live
 `getPaymentApproval` check and, if not yet approved, returns
 `{session_id, status:"approval_pending", approval_id, approval_url, expires_at,
-phase, approved_amount_cents, next:{tool:"operate_payment_await", session_id}}` — the
-friction-audit P0 fix (small models can't tell "pending" from "broken" on a
-silent multi-minute hang, so they panic-retry or kill the server).
-- **New read-only tools:** `operate_payment_status` (single check, no
-  side effects) and `operate_payment_await` (bounded ~15s wait, client-side
-  race in `readApprovalStatus`, `apps/mcp/src/tools/operate-pay.ts`) —
-  both report `pending`/`approved`/`expired` plus `candidate_submitted`
+phase, approved_amount_cents, next:{tool:"operate_payment_status", session_id,
+wait_seconds:15}}` — the friction-audit P0 fix (small models can't tell
+"pending" from "broken" on a silent multi-minute hang, so they panic-retry or
+kill the server).
+- **One canonical read-only tool, `operate_payment_status(session_id?, wait_seconds?)`.**
+  `wait_seconds` (0-15, default 0) is an instant peek at 0, a bound-wait
+  (client-side race in `readApprovalStatus`, `apps/mcp/src/tools/operate-pay.ts`)
+  above 0. Reports `pending`/`approved`/`expired` plus `candidate_submitted`
   (the phone responded; call `operate_pay` again to actually verify the
-  mandate, open the card, and fill/charge — these two tools never do that).
+  mandate, open the card, and fill/charge — this tool never does that).
+  `operate_payment_await(session_id?, max_wait_seconds?)` (increment-4
+  consolidation) is now a delegating alias — `paymentStatusResult()` in
+  `operate-pay.ts` is the single shared handler both tools call, with
+  `max_wait_seconds` translated to `wait_seconds` (default 15, so the alias
+  always waits, unlike the canonical tool's default instant peek).
 - **Validated idempotent resume.** A still-pending call
   hands its resumable state (approval id/nonce/keypair/checkout/rejected-
   candidates — `PendingApprovalWait` in `pay-operator.ts`) to session state

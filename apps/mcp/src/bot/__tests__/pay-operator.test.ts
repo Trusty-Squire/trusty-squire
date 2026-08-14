@@ -2008,7 +2008,7 @@ describe("operate_pay non-blocking approval [P0]", () => {
       approved_amount_cents: CHECKOUT.amount_cents,
       currency: CHECKOUT.currency,
       phase: null,
-      next: { tool: "operate_payment_await", max_wait_seconds: 15 },
+      next: { tool: "operate_payment_status", wait_seconds: 15 },
     });
     expect(result.approval_url).toContain("appr_resume");
     expect(result.expires_at).toBe(env.expiresAt);

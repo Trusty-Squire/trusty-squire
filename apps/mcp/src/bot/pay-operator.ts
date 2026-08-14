@@ -1052,8 +1052,8 @@ export async function executeOperatePay(
           candidate_kind: "review",
           ready_to_charge: false,
           next: {
-            tool: "operate_payment_await",
-            max_wait_seconds: 15,
+            tool: "operate_payment_status",
+            wait_seconds: 15,
             message:
               "The review signature was verified, but final payment approval is still required. " +
               "Refresh the approval page if it does not advance to the final approval prompt.",
@@ -1075,7 +1075,7 @@ export async function executeOperatePay(
           merchant: checkout.merchant,
           candidate_kind: "none",
           ready_to_charge: false,
-          next: { tool: "operate_payment_await", max_wait_seconds: 15 },
+          next: { tool: "operate_payment_status", wait_seconds: 15 },
         };
       }
       if (jit) {

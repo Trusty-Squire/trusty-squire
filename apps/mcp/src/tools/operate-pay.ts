@@ -37,7 +37,9 @@ const inputSchema = z
       .optional(),
     card_ref: z.string().min(1).max(64).optional(),
     card_label: z.string().min(1).max(256).optional(),
-    phase: z.enum(["fill_card", "confirm"]).optional(),
+    // "single" is the explicit spelling of the default single-page checkout;
+    // omitting phase means the same thing, kept for compatibility.
+    phase: z.enum(["single", "fill_card", "confirm"]).optional(),
     item: z.string().trim().min(1).max(500),
     reason: z.string().trim().min(1).max(500),
     three_ds_wait_seconds: z
@@ -132,7 +134,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   name: "operate_pay",
   description:
     "Pay the checkout in the addressed operate_start browser session. session_id is required " +
-    "when multiple operator sessions are active (and optional only for a sole local session). Reads the live " +
+    "when multiple operator sessions are active (and optional only for a sole local session). " +
+    'phase="single" (the default, also implied by omitting phase) is an ordinary one-step checkout. ' +
+    "Reads the live " +
     "merchant and authoritative checkout total independently of informational checkout_state, " +
     "creates a phone approval link, waits for approval, " +
     "verifies the passkey-signed purchase mandate, opens the card only in this process, " +
@@ -170,13 +174,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
       card_label: { type: "string" },
       phase: {
         type: "string",
-        enum: ["fill_card", "confirm"],
+        enum: ["single", "fill_card", "confirm"],
         description:
-          'Split checkouts only: "fill_card" approves an amount (falling back to the most ' +
+          '"single" (the default; also implied by omitting phase) is an ordinary one-step ' +
+          'checkout. Split checkouts only: "fill_card" approves an amount (falling back to the most ' +
           "recent real total this session observed when the card-entry page itself has none) " +
           'and releases the vaulted card without charging; "confirm" reads the final total and ' +
           "charges within that SAME approval — no second tap — refusing instead if the final " +
-          "total exceeds it. Omit for single-page checkouts.",
+          "total exceeds it.",
       },
       item: { type: "string", minLength: 1 },
       reason: { type: "string", minLength: 1 },
@@ -197,13 +202,16 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   schemaRepair: paymentSchemaRepair,
   async handler(args, api, context) {
     assertApi(api);
+    // "single" is the explicit spelling of the default; every downstream check
+    // below only distinguishes "confirm" / "fill_card" from everything else.
+    const phase = args.phase === "single" ? undefined : args.phase;
     return await withPaymentSessionCall(args.session_id, async (session) => {
-      const paymentClaim = claimActivePaymentForOperatePay(args.phase, session);
+      const paymentClaim = claimActivePaymentForOperatePay(phase, session);
       // Confirm step of a split checkout: the card is already filled (and the
       // mandate already signed), so no card resolution and no PayPal gate — the
       // job is verify-the-total-then-charge. Routed before the PayPal check so
       // an incidental PayPal button iframe on the review page can't block it.
-      if (args.phase === "confirm") {
+      if (phase === "confirm") {
         if (paymentClaim.kind === "missing_confirm") {
           throw new Error(
             'operate_pay phase="confirm" requires a completed phase="fill_card" in this ' +
@@ -337,7 +345,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             ...(args.three_ds_wait_seconds !== undefined
               ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
               : {}),
-            ...(args.phase === "fill_card" ? { phase: "fill_card" as const } : {}),
+            ...(phase === "fill_card" ? { phase: "fill_card" as const } : {}),
           },
           api,
           browser,
@@ -470,7 +478,7 @@ async function readApprovalStatus(
       candidate_submitted: false,
       candidate_kind: state.reviewVerified === true ? "review" : "none",
       ready_to_charge: false,
-      next: { tool: "operate_payment_await", session_id: sessionId, max_wait_seconds: 15 },
+      next: { tool: "operate_payment_status", session_id: sessionId, wait_seconds: 15 },
     };
   }
   const candidateSubmitted =
@@ -522,9 +530,9 @@ async function readApprovalStatus(
           : candidateKind === "review"
             ? {
                 next: {
-                  tool: "operate_payment_await",
+                  tool: "operate_payment_status",
                   session_id: sessionId,
-                  max_wait_seconds: 15,
+                  wait_seconds: 15,
                   hint:
                     "The review signature was verified. Final payment approval is still required; " +
                     "refresh the approval page if the final prompt is not visible.",
@@ -541,9 +549,9 @@ async function readApprovalStatus(
                 }
               : {
                   next: {
-                    tool: "operate_payment_await",
+                    tool: "operate_payment_status",
                     session_id: sessionId,
-                    max_wait_seconds: 15,
+                    wait_seconds: 15,
                   },
                 }),
   };
@@ -557,15 +565,38 @@ function noPendingPaymentResult(session: Session): Record<string, unknown> {
   };
 }
 
-const paymentStatusInputSchema = z.object({ session_id: z.string().uuid().optional() });
+// Shared by operate_payment_status and its operate_payment_await alias: an
+// immediate peek (waitSeconds <= 0) never blocks, a positive waitSeconds
+// bound-waits (clamped to [1s, 15s] — the server's wait-peek window is a
+// fixed ~15s regardless of what's requested).
+async function paymentStatusResult(
+  api: ApiClient,
+  session: Session,
+  waitSeconds: number,
+): Promise<Record<string, unknown>> {
+  const state = getActivePendingApproval(session);
+  if (state === null) return noPendingPaymentResult(session);
+  if (waitSeconds <= 0) {
+    return paymentResult(session, await readApprovalStatus(api, state, session.id, false));
+  }
+  const boundMs = Math.min(Math.max(waitSeconds * 1000, 1_000), 15_000);
+  return paymentResult(session, await readApprovalStatus(api, state, session.id, true, boundMs));
+}
+
+const paymentStatusInputSchema = z.object({
+  session_id: z.string().uuid().optional(),
+  wait_seconds: z.number().int().min(0).max(15).optional(),
+});
 
 export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSchema>> = {
   name: "operate_payment_status",
   description:
     "Read-only: report the status of the addressed session's payment approval currently awaiting " +
     "the human's phone tap, if any — started by an operate_pay call that returned approval_pending. " +
-    "Never blocks, never verifies a mandate or opens a card. Only candidate_kind=approval with " +
-    "ready_to_charge=true is a final authorization; a review candidate still requires final approval.",
+    "Pass `wait_seconds` (0-15, default 0) to bound-wait for a change instead of an instant peek; " +
+    "never blocks longer than that. Never verifies a mandate or opens a card. Only " +
+    "candidate_kind=approval with ready_to_charge=true is a final authorization; a review candidate " +
+    "still requires final approval.",
   inputSchema: paymentStatusInputSchema,
   jsonInputSchema: {
     type: "object",
@@ -575,16 +606,21 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
         format: "uuid",
         description: "The payment session; omit only when exactly one local session is active.",
       },
+      wait_seconds: {
+        type: "integer",
+        minimum: 0,
+        maximum: 15,
+        description:
+          "Upper bound on this call's wait. 0 (default) is an instant peek; 1-15 bound-waits for a change.",
+      },
     },
   },
   annotations: { readOnlyHint: true },
   async handler(args, api) {
     assertApi(api);
-    return await withPaymentSessionCall(args.session_id, async (session) => {
-      const state = getActivePendingApproval(session);
-      if (state === null) return noPendingPaymentResult(session);
-      return paymentResult(session, await readApprovalStatus(api, state, session.id, false));
-    });
+    return await withPaymentSessionCall(args.session_id, (session) =>
+      paymentStatusResult(api, session, args.wait_seconds ?? 0),
+    );
   },
 };
 
@@ -600,7 +636,8 @@ export const operatePaymentAwaitTool: Tool<z.infer<typeof paymentAwaitInputSchem
     "awaiting the human's phone tap — started by an operate_pay call that returned approval_pending. " +
     "Returns explicit candidate_kind and ready_to_charge fields: only an approval-bound candidate " +
     "is ready to complete; a review-bound candidate still requires final approval. Never hangs " +
-    "for minutes; call it again (or operate_payment_status) if it comes back pending.",
+    "for minutes; call it again (or operate_payment_status) if it comes back pending. Equivalent to " +
+    "operate_payment_status with wait_seconds set from max_wait_seconds.",
   inputSchema: paymentAwaitInputSchema,
   jsonInputSchema: {
     type: "object",
@@ -621,14 +658,8 @@ export const operatePaymentAwaitTool: Tool<z.infer<typeof paymentAwaitInputSchem
   annotations: { readOnlyHint: true },
   async handler(args, api) {
     assertApi(api);
-    return await withPaymentSessionCall(args.session_id, async (session) => {
-      const state = getActivePendingApproval(session);
-      if (state === null) return noPendingPaymentResult(session);
-      const boundMs = Math.min(Math.max((args.max_wait_seconds ?? 15) * 1000, 1_000), 15_000);
-      return paymentResult(
-        session,
-        await readApprovalStatus(api, state, session.id, true, boundMs),
-      );
-    });
+    return await withPaymentSessionCall(args.session_id, (session) =>
+      paymentStatusResult(api, session, args.max_wait_seconds ?? 15),
+    );
   },
 };
