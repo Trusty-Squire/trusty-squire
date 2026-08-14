@@ -246,10 +246,35 @@ interface CheckoutCardGroupScope {
   groups: readonly CheckoutCardGroupRoot[];
 }
 
+interface CheckoutPaymentFieldRoot {
+  frame: Frame;
+  token: string;
+}
+
+interface CheckoutOutcomeBaseline {
+  url: string;
+  orderUrlIdentities: readonly string[];
+  terminalUrlIdentity: string | null;
+}
+
+interface CheckoutOutcomeDispatchSnapshot {
+  url: string;
+  urls: readonly string[];
+}
+
+type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
+
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
+  // A dispatched click is not a payment outcome. The submit path sets this
+  // only after it observes a terminal merchant order route.
+  order_confirmed: boolean;
   challenge_url?: string;
 }
+
+export type ThreeDsResolution = "succeeded" | "failed" | "timeout" | "unconfirmed";
+
+const THREE_DS_RESOLUTION_GRACE_MS = 5_000;
 
 interface CheckoutFrameDescriptor {
   url: string;
@@ -319,6 +344,219 @@ export class PaymentCardFillCleanupError extends Error {
     super(source.message);
     this.name = "PaymentCardFillCleanupError";
     if (source instanceof UnrecognizedPaymentFrameError) this.frameOrigin = source.frameOrigin;
+  }
+}
+
+export class PaymentSubmitOutcomeUnknownError extends Error {
+  constructor() {
+    super("payment_submit_outcome_unknown");
+    this.name = "PaymentSubmitOutcomeUnknownError";
+  }
+}
+
+const CHECKOUT_TERMINAL_RESERVED_SEGMENTS = new Set([
+  "about_blank",
+  "blank",
+  "checkout",
+  "checkouts",
+  "complete",
+  "confirmation",
+  "confirmed",
+  "loading",
+  "lookup",
+  "masked",
+  "n_a",
+  "na",
+  "new",
+  "null",
+  "not_available",
+  "order",
+  "orders",
+  "pending",
+  "preview",
+  "processing",
+  "receipt",
+  "receipts",
+  "success",
+  "thank_you",
+  "undefined",
+  "unknown",
+]);
+
+const CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS = new Set([
+  "blank",
+  "complete",
+  "confirmation",
+  "confirmed",
+  "loading",
+  "lookup",
+  "masked",
+  "new",
+  "null",
+  "pending",
+  "preview",
+  "processing",
+  "success",
+  "undefined",
+  "unknown",
+]);
+
+function isSubstantiveCheckoutIdentity(identity: string): boolean {
+  const rawIdentity = identity.normalize("NFKC").trim();
+  if (/(?:x{2,}|[*•●◦▪■□×])/iu.test(rawIdentity)) return false;
+  const normalizedIdentity = rawIdentity
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (normalizedIdentity.length === 0) return false;
+  if (CHECKOUT_TERMINAL_RESERVED_SEGMENTS.has(normalizedIdentity)) return false;
+  const identityTokens = normalizedIdentity.split("_").filter(Boolean);
+  if (
+    identityTokens.length === 0 ||
+    identityTokens.every((token) => /^0+$/.test(token)) ||
+    identityTokens.some((token) => CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS.has(token))
+  ) {
+    return false;
+  }
+  const compactIdentity = identityTokens.join("");
+  return !/^x{2,}\d*$/i.test(compactIdentity);
+}
+
+function checkoutOutcomeBaselineFromDispatchSnapshot(
+  snapshot: CheckoutOutcomeDispatchSnapshot,
+): CheckoutOutcomeBaseline {
+  const identities = checkoutUrlOrderIdentities(snapshot.url);
+  const orderUrlIdentities = new Set<string>();
+  for (const url of [snapshot.url, ...snapshot.urls]) {
+    for (const identity of checkoutUrlOrderIdentities(url)?.orders ?? []) {
+      orderUrlIdentities.add(identity);
+    }
+  }
+  return {
+    url: snapshot.url,
+    orderUrlIdentities: [...orderUrlIdentities],
+    terminalUrlIdentity: identities?.terminal ?? null,
+  };
+}
+
+function checkoutUrlOrderIdentities(
+  rawUrl: string,
+): { orders: readonly string[]; terminal: string | null } | null {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    const canonicalIdentity = (identity: string | undefined): string | null => {
+      if (identity === undefined || !isSubstantiveCheckoutIdentity(identity)) return null;
+      const normalizedIdentity = identity.normalize("NFKC").trim().toLowerCase();
+      return `${url.origin}/order/${encodeURIComponent(normalizedIdentity)}`;
+    };
+    const surfaces: Array<{ pathname: string; searchParams: URLSearchParams }> = [
+      { pathname: url.pathname, searchParams: url.searchParams },
+    ];
+    const fragment = url.hash.slice(1).replace(/^!/, "");
+    if (fragment.length > 0) {
+      let decodedFragment = fragment;
+      try {
+        decodedFragment = decodeURIComponent(fragment);
+      } catch {
+        decodedFragment = fragment;
+      }
+      if (/^[^/?#]+=[^#]*$/.test(decodedFragment)) {
+        surfaces.push({ pathname: "", searchParams: new URLSearchParams(decodedFragment) });
+      } else {
+        try {
+          const fragmentUrl = new URL(
+            /^[a-z][a-z\d+.-]*:/i.test(decodedFragment)
+              ? decodedFragment
+              : decodedFragment.startsWith("/")
+                ? `${url.origin}${decodedFragment}`
+                : `${url.origin}/${decodedFragment}`,
+          );
+          surfaces.push({
+            pathname: fragmentUrl.pathname,
+            searchParams: fragmentUrl.searchParams,
+          });
+        } catch {
+          surfaces.push({ pathname: decodedFragment, searchParams: new URLSearchParams() });
+        }
+      }
+    }
+    const orders = new Set<string>();
+    let terminal: string | null = null;
+    for (const surface of surfaces) {
+      const segments = surface.pathname
+        .split("/")
+        .filter((segment) => segment.length > 0)
+        .map((segment) => {
+          try {
+            return decodeURIComponent(segment);
+          } catch {
+            return segment;
+          }
+        });
+      const routeSegment = (offset: number): string =>
+        (segments.at(offset) ?? "").toLowerCase().replace(/-/g, "_");
+      if (
+        segments.some((segment) =>
+          ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")),
+        )
+      ) {
+        continue;
+      }
+      for (let index = 0; index < segments.length - 1; index += 1) {
+        const marker = segments[index]?.toLowerCase().replace(/-/g, "_");
+        if (
+          !["checkout", "checkouts", "order", "orders", "receipt", "receipts"].includes(
+            marker ?? "",
+          )
+        ) {
+          continue;
+        }
+        const order = canonicalIdentity(segments[index + 1]);
+        if (order !== null) orders.add(order);
+      }
+      for (const [key, value] of surface.searchParams) {
+        const normalizedKey = key
+          .normalize("NFKC")
+          .replace(/([a-z\d])([A-Z])/g, "$1_$2")
+          .toLowerCase()
+          .replace(/[^a-z\d]+/g, "_")
+          .replace(/^_+|_+$/g, "");
+        if (!/(?:^|_)(?:order|receipt)(?:_(?:id|number|token))?(?:_|$)/.test(normalizedKey)) {
+          continue;
+        }
+        const order = canonicalIdentity(value);
+        if (order !== null) orders.add(order);
+      }
+      let terminalIdentity: string | undefined;
+      if (["receipt", "receipts"].includes(routeSegment(-2))) {
+        terminalIdentity = segments.at(-1);
+      } else if (
+        ["order", "orders"].includes(routeSegment(-3)) &&
+        ["confirmation", "confirmed", "thank_you"].includes(routeSegment(-1))
+      ) {
+        terminalIdentity = segments.at(-2);
+      } else if (
+        ["order_confirmation", "order_confirmed", "order_complete", "thank_you"].includes(
+          routeSegment(-2),
+        )
+      ) {
+        terminalIdentity = segments.at(-1);
+      } else if (
+        ["checkout", "checkouts"].includes(routeSegment(-3)) &&
+        routeSegment(-1) === "thank_you"
+      ) {
+        terminalIdentity = segments.at(-2);
+      }
+      const surfaceTerminal = canonicalIdentity(terminalIdentity);
+      if (surfaceTerminal !== null) {
+        orders.add(surfaceTerminal);
+        terminal ??= surfaceTerminal;
+      }
+    }
+    return { orders: [...orders], terminal };
+  } catch {
+    return null;
   }
 }
 
@@ -1194,6 +1432,143 @@ function extractObservationVisibleText(): string {
     }
   }
   return text;
+}
+
+function extractVisibleTopmostTextSignals({
+  source,
+  flags,
+}: {
+  source: string;
+  flags: string;
+}): Record<string, number> {
+  const pattern = new RegExp(source, flags);
+  const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
+  const canonicalize = (text: string): string =>
+    text
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/[*•●◦▪■□×]+/g, " masked ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
+  const visuallyTopmostAtPoint = (element: Element, x: number, y: number): boolean => {
+    const restored: Array<{
+      element: HTMLElement;
+      priority: string;
+      value: string;
+    }> = [];
+    for (const candidate of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
+      const style = getComputedStyle(candidate);
+      if (
+        style.pointerEvents !== "none" ||
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        Number.parseFloat(style.opacity) <= 0 ||
+        !Array.from(candidate.getClientRects()).some(
+          (rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
+        )
+      ) {
+        continue;
+      }
+      restored.push({
+        element: candidate,
+        priority: candidate.style.getPropertyPriority("pointer-events"),
+        value: candidate.style.getPropertyValue("pointer-events"),
+      });
+      candidate.style.setProperty("pointer-events", "auto", "important");
+    }
+    const hit = document.elementFromPoint(x, y);
+    for (const original of restored) {
+      if (original.value.length === 0) {
+        original.element.style.removeProperty("pointer-events");
+      } else {
+        original.element.style.setProperty("pointer-events", original.value, original.priority);
+      }
+    }
+    return hit === element;
+  };
+  const visibleAndTopmost = (node: Text): boolean => {
+    const element = node.parentElement;
+    if (element === null) return false;
+    let ancestor: HTMLElement | null = element as HTMLElement;
+    while (ancestor !== null) {
+      const style = getComputedStyle(ancestor);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        Number.parseFloat(style.opacity) <= 0
+      ) {
+        return false;
+      }
+      ancestor = ancestor.parentElement;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    for (const rect of Array.from(range.getClientRects())) {
+      if (rect.width < 1 || rect.height < 1) continue;
+      const left = Math.max(0, rect.left);
+      const right = Math.min(window.innerWidth, rect.right);
+      const top = Math.max(0, rect.top);
+      const bottom = Math.min(window.innerHeight, rect.bottom);
+      if (right <= left || bottom <= top) continue;
+      const x = left + (right - left) / 2;
+      const y = top + (bottom - top) / 2;
+      if (visuallyTopmostAtPoint(element, x, y)) return true;
+    }
+    return false;
+  };
+  const signals: Record<string, number> = {};
+  const body = document.body;
+  if (body === null) return signals;
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  const splitCandidateMatches = new Map<Element, string | null>();
+  const splitCandidates = new Map<Element, string>();
+  let node = walker.nextNode();
+  while (node !== null) {
+    const text = normalize(node.textContent ?? "");
+    pattern.lastIndex = 0;
+    const match = text.length > 0 && text.length <= 500 ? pattern.exec(text) : null;
+    pattern.lastIndex = 0;
+    if (match !== null && visibleAndTopmost(node as Text)) {
+      const signal = canonicalize(match[0]);
+      if (signal.length > 0) signals[signal] = 1;
+    } else if (match === null && text.length > 0) {
+      let container = node.parentElement;
+      for (let depth = 0; container !== null && depth < 4; depth += 1) {
+        let combinedMatchText: string | null;
+        if (splitCandidateMatches.has(container)) {
+          combinedMatchText = splitCandidateMatches.get(container) ?? null;
+        } else {
+          const combined = normalize(container.textContent ?? "");
+          pattern.lastIndex = 0;
+          const combinedMatch =
+            combined.length > 0 && combined.length <= 500 ? pattern.exec(combined) : null;
+          pattern.lastIndex = 0;
+          combinedMatchText = combinedMatch?.[0] ?? null;
+          splitCandidateMatches.set(container, combinedMatchText);
+        }
+        if (combinedMatchText !== null) {
+          splitCandidates.set(container, combinedMatchText);
+          break;
+        }
+        container = container.parentElement;
+      }
+    }
+    node = walker.nextNode();
+  }
+  for (const [container, match] of splitCandidates) {
+    const textNodes: Text[] = [];
+    const containerWalker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let textNode = containerWalker.nextNode();
+    while (textNode !== null) {
+      if (normalize(textNode.textContent ?? "").length > 0) textNodes.push(textNode as Text);
+      textNode = containerWalker.nextNode();
+    }
+    if (textNodes.length < 2 || !textNodes.every(visibleAndTopmost)) continue;
+    const signal = canonicalize(match);
+    if (signal.length > 0) signals[signal] = 1;
+  }
+  return signals;
 }
 
 const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
@@ -2365,6 +2740,10 @@ export class BrowserController {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
+  private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
+  private checkoutFailureBaseline: CheckoutFailureBaseline | undefined;
+  private checkoutThreeDsPending = false;
+  private checkoutSubmitSequence = 0;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
   // reuse must always restore this original page rather than adopting a popup
@@ -7914,11 +8293,16 @@ export class BrowserController {
     await Promise.all(
       frames.map((frame) =>
         frame
-          .locator("[data-ts-payment-card-group],[data-ts-payment-card-control-group]")
+          .locator(
+            "[data-ts-payment-card-group],[data-ts-payment-card-control-group],[data-ts-payment-billing-context],[data-ts-payment-billing-owner],[data-ts-payment-frame-owner]",
+          )
           .evaluateAll((elements) => {
             for (const element of elements) {
               element.removeAttribute("data-ts-payment-card-group");
               element.removeAttribute("data-ts-payment-card-control-group");
+              element.removeAttribute("data-ts-payment-billing-context");
+              element.removeAttribute("data-ts-payment-billing-owner");
+              element.removeAttribute("data-ts-payment-frame-owner");
             }
           })
           .catch(() => undefined),
@@ -8051,28 +8435,406 @@ export class BrowserController {
       throw new Error("payment_card_form_ambiguous");
     }
 
+    const billingRoots: CheckoutPaymentFieldRoot[] = [];
+    const addBillingRoot = async (frame: Frame, anchor: ElementHandle): Promise<void> => {
+      const proposedToken = `ts-billing-context-${groupSequence++}`;
+      const token = await anchor
+        .evaluate((element, candidateToken) => {
+          if (!(element instanceof Element)) return null;
+          const isFillable = (control: Element): boolean => {
+            if (!(control instanceof HTMLElement)) return false;
+            if (control.matches(":disabled") || control.getClientRects().length === 0) {
+              return false;
+            }
+            let current: Element | null = control;
+            while (current !== null) {
+              const style = getComputedStyle(current);
+              if (
+                style.display === "none" ||
+                style.visibility === "hidden" ||
+                style.visibility === "collapse" ||
+                Number.parseFloat(style.opacity) <= 0
+              ) {
+                return false;
+              }
+              current = current.parentElement;
+            }
+            return true;
+          };
+          const isExplicitBillingControl = (control: Element): boolean => {
+            if (
+              !(control instanceof HTMLInputElement) &&
+              !(control instanceof HTMLSelectElement) &&
+              !(control instanceof HTMLTextAreaElement)
+            ) {
+              return false;
+            }
+            const autocomplete = (control.getAttribute("autocomplete") ?? "")
+              .toLowerCase()
+              .split(/\s+/);
+            return (
+              autocomplete.includes("billing") ||
+              /billing/i.test(control.getAttribute("name") ?? "") ||
+              /billing/i.test(control.id)
+            );
+          };
+          const paymentBoundaryIdentity = (candidate: Element): string =>
+            [
+              candidate.id,
+              candidate.className,
+              candidate.getAttribute("name"),
+              candidate.getAttribute("aria-label"),
+              candidate.getAttribute("data-step"),
+              candidate.getAttribute("data-section"),
+              candidate.getAttribute("data-testid"),
+              candidate.getAttribute("data-payment-method"),
+              candidate.getAttribute("data-payment-method-type"),
+              candidate.getAttribute("data-payment-gateway"),
+              candidate.getAttribute("data-gateway"),
+              candidate.getAttribute("data-method"),
+              candidate.getAttribute("data-provider"),
+            ]
+              .filter((value): value is string => typeof value === "string")
+              .join(" ");
+          const isPaymentBoundary = (candidate: Element): boolean =>
+            /(?:^|[^a-z])(?:payment|billing|credit.?card)(?:[^a-z]|$)/i.test(
+              paymentBoundaryIdentity(candidate),
+            );
+          const isPaymentMethodBoundary = (candidate: Element): boolean =>
+            candidate.hasAttribute("data-ts-payment-frame-owner") ||
+            candidate.hasAttribute("data-ts-payment-card-group") ||
+            candidate.hasAttribute("data-payment-method") ||
+            candidate.hasAttribute("data-payment-method-type") ||
+            candidate.hasAttribute("data-payment-gateway") ||
+            candidate.hasAttribute("data-gateway") ||
+            candidate.hasAttribute("data-method") ||
+            candidate.hasAttribute("data-provider") ||
+            /(?:^|[^a-z])(?:payment|credit.?card|paypal|klarna|afterpay|shop.?pay|apple.?pay|google.?pay|bank.?transfer)(?:[^a-z]|$)/i.test(
+              paymentBoundaryIdentity(candidate),
+            );
+          const isTopmost = (control: Element): boolean => {
+            if (!(control instanceof HTMLElement)) return false;
+            const rect = control.getBoundingClientRect();
+            if (rect.width < 1 || rect.height < 1) return false;
+            const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
+            const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
+            let hit = document.elementFromPoint(x, y);
+            if (hit === null) return false;
+            while (hit.shadowRoot !== null) {
+              const deeper = hit.shadowRoot.elementFromPoint(x, y);
+              if (deeper === null || deeper === hit) break;
+              hit = deeper;
+            }
+            return hit === control || control.contains(hit);
+          };
+          const branchUnder = (root: Element, descendant: Element): Element => {
+            let branch = descendant;
+            while (branch.parentElement !== null && branch.parentElement !== root) {
+              branch = branch.parentElement;
+            }
+            return branch;
+          };
+          let candidate = element.parentElement;
+          while (
+            candidate !== null &&
+            candidate !== document.body &&
+            candidate !== document.documentElement
+          ) {
+            if (
+              isPaymentBoundary(candidate) &&
+              Array.from(candidate.querySelectorAll("input,select,textarea")).some(
+                (control) => isExplicitBillingControl(control) && isFillable(control),
+              )
+            ) {
+              const frameOwners = Array.from(
+                candidate.querySelectorAll("[data-ts-payment-frame-owner]"),
+              );
+              const cardGroups = Array.from(
+                candidate.querySelectorAll("[data-ts-payment-card-group]"),
+              );
+              if (
+                frameOwners.some((owner) => owner !== element) ||
+                cardGroups.some((group) => group !== element)
+              ) {
+                return null;
+              }
+              const anchorBranch = branchUnder(candidate, element);
+              const selectedLeafBoundary =
+                frameOwners.length === 1 &&
+                frameOwners[0] === element &&
+                !Array.from(candidate.querySelectorAll("*")).some(
+                  (descendant) =>
+                    descendant !== element &&
+                    !descendant.contains(element) &&
+                    !isExplicitBillingControl(descendant) &&
+                    isPaymentMethodBoundary(descendant),
+                );
+              let marked = 0;
+              for (const control of Array.from(
+                candidate.querySelectorAll("input,select,textarea"),
+              )) {
+                if (!isExplicitBillingControl(control) || !isFillable(control)) continue;
+                if (!isTopmost(control)) continue;
+                if (isPaymentMethodBoundary(control)) continue;
+                const owner = control.getAttribute("data-ts-payment-card-control-group");
+                const selectedOwner = element.getAttribute("data-ts-payment-card-group");
+                if (owner !== null && owner !== selectedOwner) continue;
+                const controlForm = control.closest("form");
+                const sharesSelectedForm = controlForm !== null && controlForm.contains(element);
+                if (controlForm !== null && !sharesSelectedForm) continue;
+                const hasSelectedOwner =
+                  owner !== null && selectedOwner !== null && owner === selectedOwner;
+                let nestedBoundary = control.parentElement;
+                while (nestedBoundary !== null && nestedBoundary !== candidate) {
+                  if (isPaymentMethodBoundary(nestedBoundary)) break;
+                  nestedBoundary = nestedBoundary.parentElement;
+                }
+                if (
+                  nestedBoundary !== null &&
+                  nestedBoundary !== candidate &&
+                  !nestedBoundary.contains(element)
+                ) {
+                  continue;
+                }
+                const controlBranch = branchUnder(candidate, control);
+                if (
+                  controlBranch !== anchorBranch &&
+                  !sharesSelectedForm &&
+                  !hasSelectedOwner &&
+                  !selectedLeafBoundary
+                ) {
+                  continue;
+                }
+                control.setAttribute("data-ts-payment-billing-owner", candidateToken);
+                marked += 1;
+              }
+              if (marked === 0) return null;
+              candidate.setAttribute("data-ts-payment-billing-context", candidateToken);
+              return candidateToken;
+            }
+            candidate = candidate.parentElement;
+          }
+          return null;
+        }, proposedToken)
+        .catch(() => null);
+      await anchor.dispose().catch(() => undefined);
+      if (token !== null) {
+        billingRoots.push({ frame, token });
+      }
+    };
+    if (cardGroup !== undefined) {
+      const directToken = `ts-billing-context-${groupSequence++}`;
+      const directCount = await cardGroup.root
+        .locator("input,select,textarea")
+        .evaluateAll(
+          (controls, { token, groupToken, selectors }) => {
+            const paymentBoundaryIdentity = (candidate: Element): string =>
+              [
+                candidate.id,
+                candidate.className,
+                candidate.getAttribute("name"),
+                candidate.getAttribute("aria-label"),
+                candidate.getAttribute("data-step"),
+                candidate.getAttribute("data-section"),
+                candidate.getAttribute("data-testid"),
+                candidate.getAttribute("data-payment-method"),
+                candidate.getAttribute("data-payment-method-type"),
+                candidate.getAttribute("data-payment-gateway"),
+                candidate.getAttribute("data-gateway"),
+                candidate.getAttribute("data-method"),
+                candidate.getAttribute("data-provider"),
+              ]
+                .filter((value): value is string => typeof value === "string")
+                .join(" ");
+            const isPaymentMethodBoundary = (candidate: Element): boolean =>
+              candidate.hasAttribute("data-payment-method") ||
+              candidate.hasAttribute("data-payment-method-type") ||
+              candidate.hasAttribute("data-payment-gateway") ||
+              candidate.hasAttribute("data-gateway") ||
+              candidate.hasAttribute("data-method") ||
+              candidate.hasAttribute("data-provider") ||
+              /(?:^|[^a-z])(?:payment|card|credit.?card|paypal|klarna|afterpay|shop.?pay|apple.?pay|google.?pay|bank.?transfer)(?:[^a-z]|$)/i.test(
+                paymentBoundaryIdentity(candidate),
+              );
+            const isPan = (input: Element): boolean => {
+              const autocomplete = (input.getAttribute("autocomplete") ?? "")
+                .toLowerCase()
+                .split(/\s+/);
+              return (
+                autocomplete.includes("cc-number") ||
+                /cardnumber/i.test(input.getAttribute("name") ?? "") ||
+                /card-?number|cardnumber/i.test(input.id)
+              );
+            };
+            const selectedPan = controls.find(
+              (control) =>
+                isPan(control) &&
+                control.getAttribute("data-ts-payment-card-control-group") === groupToken,
+            );
+            const groupRoot = selectedPan?.closest("[data-ts-payment-card-group]") ?? null;
+            const hasSelectedControl = (candidate: Element, selector: string): boolean =>
+              controls.some(
+                (control) =>
+                  candidate.contains(control) &&
+                  control.matches(selector) &&
+                  control.getAttribute("data-ts-payment-card-control-group") === groupToken,
+              );
+            const isCompleteSelectedCardBranch = (candidate: Element): boolean =>
+              hasSelectedControl(candidate, selectors.pan) &&
+              hasSelectedControl(candidate, selectors.cvv) &&
+              hasSelectedControl(candidate, selectors.name) &&
+              (hasSelectedControl(candidate, selectors.combinedExpiry) ||
+                (hasSelectedControl(candidate, selectors.expiryMonth) &&
+                  hasSelectedControl(candidate, selectors.expiryYear)));
+            let branchCandidate = selectedPan?.parentElement ?? null;
+            let selectedBranch: Element | null = null;
+            while (branchCandidate !== null) {
+              if (
+                isPaymentMethodBoundary(branchCandidate) &&
+                isCompleteSelectedCardBranch(branchCandidate)
+              ) {
+                selectedBranch = branchCandidate;
+                break;
+              }
+              if (branchCandidate === groupRoot) break;
+              branchCandidate = branchCandidate.parentElement;
+            }
+            let marked = 0;
+            for (const control of controls) {
+              const autocomplete = (control.getAttribute("autocomplete") ?? "")
+                .toLowerCase()
+                .split(/\s+/);
+              const explicit =
+                autocomplete.includes("billing") ||
+                /billing/i.test(control.getAttribute("name") ?? "") ||
+                /billing/i.test(control.id);
+              if (!explicit) continue;
+              if (isPaymentMethodBoundary(control)) continue;
+              const owner = control.getAttribute("data-ts-payment-card-control-group");
+              if (owner !== null && owner !== groupToken) continue;
+              if (selectedPan === undefined || selectedBranch === null) continue;
+              if (!selectedBranch.contains(control)) continue;
+              let paymentMethodBoundary = control.parentElement;
+              while (
+                paymentMethodBoundary !== null &&
+                paymentMethodBoundary !== selectedBranch &&
+                !isPaymentMethodBoundary(paymentMethodBoundary)
+              ) {
+                paymentMethodBoundary = paymentMethodBoundary.parentElement;
+              }
+              if (
+                paymentMethodBoundary !== null &&
+                paymentMethodBoundary !== selectedBranch &&
+                !paymentMethodBoundary.contains(selectedPan)
+              ) {
+                continue;
+              }
+              control.setAttribute("data-ts-payment-billing-owner", token);
+              marked += 1;
+            }
+            return marked;
+          },
+          {
+            token: directToken,
+            groupToken: cardGroup.token,
+            selectors: {
+              pan: CHECKOUT_PAN_FIELD_SELECTORS,
+              cvv: cvvSelectors,
+              name: nameSelectors,
+              combinedExpiry: combinedExpiryGroupSelectors,
+              expiryMonth: expiryMonthSelectors,
+              expiryYear: expiryYearSelectors,
+            },
+          },
+        )
+        .catch(() => 0);
+      if (directCount > 0) billingRoots.push({ frame: cardGroup.frame, token: directToken });
+
+      const groupFrames = new Set([...groups.values()].map((group) => group.frame));
+      for (const groupFrame of groupFrames) {
+        let childFrame = groupFrame;
+        let parentFrame = childFrame.parentFrame();
+        while (parentFrame !== null && frames.includes(parentFrame)) {
+          const frameElement = await childFrame.frameElement().catch(() => null);
+          if (frameElement === null) break;
+          await frameElement
+            .evaluate((element, selected) => {
+              if (!(element instanceof Element)) return;
+              element.setAttribute("data-ts-payment-frame-owner", selected ? "selected" : "other");
+            }, groupFrame === cardGroup.frame)
+            .catch(() => undefined);
+          await frameElement.dispose().catch(() => undefined);
+          childFrame = parentFrame;
+          parentFrame = childFrame.parentFrame();
+        }
+      }
+
+      const cardRoot = await cardGroup.root.elementHandle().catch(() => null);
+      if (cardRoot !== null) await addBillingRoot(cardGroup.frame, cardRoot);
+      let childFrame = cardGroup.frame;
+      let parentFrame = childFrame.parentFrame();
+      while (parentFrame !== null && frames.includes(parentFrame)) {
+        const frameElement = await childFrame.frameElement().catch(() => null);
+        if (frameElement === null) break;
+        await addBillingRoot(parentFrame, frameElement);
+        childFrame = parentFrame;
+        parentFrame = childFrame.parentFrame();
+      }
+    }
+
     const fillFirst = async (
       field: string,
       value: string | undefined,
       selectors: string,
       typePerKey = false,
       withinCardGroup = false,
+      withinBillingContext = false,
     ): Promise<boolean> => {
       if (value === undefined || value.length === 0) return false;
-      const candidateFrames =
-        withinCardGroup && cardGroup !== undefined ? [cardGroup.frame] : frames;
-      for (const frame of candidateFrames) {
-        const matches =
-          withinCardGroup && cardGroup !== undefined
-            ? frame
-                .locator(selectors)
-                .and(frame.locator(`[data-ts-payment-card-control-group="${cardGroup.token}"]`))
-            : frame.locator(selectors);
+      const candidates: Array<{ frame: Frame; matches: Locator }> =
+        withinCardGroup && cardGroup !== undefined
+          ? [
+              {
+                frame: cardGroup.frame,
+                matches: cardGroup.frame
+                  .locator(selectors)
+                  .and(
+                    cardGroup.frame.locator(
+                      `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
+                    ),
+                  ),
+              },
+            ]
+          : withinBillingContext
+            ? billingRoots.map(({ frame, token }) => ({
+                frame,
+                matches: frame
+                  .locator(selectors)
+                  .and(frame.locator(`[data-ts-payment-billing-owner="${token}"]`)),
+              }))
+            : frames.map((frame) => ({ frame, matches: frame.locator(selectors) }));
+      for (const { frame, matches } of candidates) {
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
           const input = matches.nth(i);
           if (!(await input.isVisible().catch(() => false))) continue;
           if (!(await input.isEnabled().catch(() => false))) continue;
+          if (
+            withinBillingContext &&
+            !(await input
+              .evaluate((element) => {
+                if (!(element instanceof HTMLElement)) return false;
+                const rect = element.getBoundingClientRect();
+                if (rect.width < 1 || rect.height < 1) return false;
+                const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
+                const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
+                const hit = document.elementFromPoint(x, y);
+                return hit !== null && (hit === element || element.contains(hit));
+              })
+              .catch(() => false))
+          ) {
+            continue;
+          }
           if (assertFrameEgress !== undefined) {
             const resolveHandle = async (): Promise<{
               handle: ElementHandle<Element>;
@@ -8272,12 +9034,14 @@ export class BrowserController {
       ],
     ];
     for (const [field, value, selectors, billingSelectors] of fields) {
+      const withinBillingContext = billingOnly && billingSelectors !== undefined;
       await fillFirst(
         field,
         value,
-        billingOnly && billingSelectors !== undefined ? billingSelectors : selectors,
+        withinBillingContext ? billingSelectors : selectors,
         false,
         field === "cvv" || field === "name",
+        withinBillingContext,
       );
     }
     for (const required of ["pan", "expiry", "cvv", "name"]) {
@@ -8294,7 +9058,11 @@ export class BrowserController {
     this.checkoutCardGroupScope = undefined;
     try {
       await this.waitForPanField(10_000);
-      const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card);
+      // A single-page checkout's generic address controls are its shipping
+      // controls. Only an explicitly marked billing control is eligible here:
+      // sealing a shipping field would make the payment cleanup erase the
+      // merchant's selected address, country, and shipping rate after submit.
+      const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card, true);
       return await this.submitFilledCheckoutInScope(cardGroup);
     } finally {
       await this.clearSealedPaymentFields();
@@ -8396,7 +9164,8 @@ export class BrowserController {
   }
 
   // The charge: find and click the pay/place-order control, then poll for a
-  // 3-D Secure challenge. Callers gate this on a verified visible total.
+  // terminal merchant order route or a 3-D Secure challenge. Callers gate this
+  // on a verified visible total.
   async submitFilledCheckout(): Promise<CheckoutSubmitResult> {
     return await this.submitFilledCheckoutInScope(this.checkoutCardGroupScope);
   }
@@ -8405,6 +9174,11 @@ export class BrowserController {
     cardGroup?: CheckoutCardGroupScope,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
+    this.checkoutThreeDsPending = false;
+    const failureBaseline = await this.captureVisibleCheckoutFailureSignals();
+    let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
+    this.checkoutOutcomeBaseline = undefined;
+    this.checkoutFailureBaseline = failureBaseline;
     let submitted = false;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
@@ -8457,20 +9231,214 @@ export class BrowserController {
           )
           .catch(() => "");
         if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
-        await candidate.click();
+        const dispatchToken = `ts-payment-submit-${this.checkoutSubmitSequence++}`;
+        const dispatchBaselineStorageKey = `__trusty_squire_payment_baseline_${dispatchToken}`;
+        const preDispatchFrameUrls = this.page.frames().map((pageFrame) => pageFrame.url());
+        const dispatchTrackingInstalled = await candidate
+          .evaluate(
+            (element, options) => {
+              const { baselineStorageKey, frameUrls, token } = options;
+              const stateWindow = window as Window & {
+                __trustySquirePaymentSubmitDispatch?: {
+                  token: string;
+                  dispatched: boolean;
+                };
+              };
+              const tracked = element as Element & {
+                __tsPaymentSubmitDispatchListener?: EventListener;
+              };
+              if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
+                element.removeEventListener(
+                  "click",
+                  tracked.__tsPaymentSubmitDispatchListener,
+                  true,
+                );
+              }
+              stateWindow.__trustySquirePaymentSubmitDispatch = {
+                token,
+                dispatched: false,
+              };
+              const listener: EventListener = () => {
+                const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+                if (state?.token !== token) return;
+                try {
+                  const merchantWindow = window.top;
+                  if (merchantWindow === null) return;
+                  const urls = new Set(frameUrls);
+                  const collectFrameUrls = (currentWindow: Window): void => {
+                    try {
+                      urls.add(currentWindow.location.href);
+                      for (let index = 0; index < currentWindow.frames.length; index += 1) {
+                        collectFrameUrls(currentWindow.frames[index]!);
+                      }
+                    } catch (error) {
+                      void error;
+                    }
+                  };
+                  collectFrameUrls(merchantWindow);
+                  const snapshot: CheckoutOutcomeDispatchSnapshot = {
+                    url: merchantWindow.location.href,
+                    urls: [...urls],
+                  };
+                  const baselineWindow = merchantWindow as Window & {
+                    __trustySquirePaymentDispatchBaselines?: Record<
+                      string,
+                      CheckoutOutcomeDispatchSnapshot
+                    >;
+                  };
+                  baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
+                  baselineWindow.__trustySquirePaymentDispatchBaselines[token] = snapshot;
+                  try {
+                    merchantWindow.sessionStorage.setItem(
+                      baselineStorageKey,
+                      JSON.stringify(snapshot),
+                    );
+                  } catch (error) {
+                    void error;
+                  }
+                } finally {
+                  state.dispatched = true;
+                }
+              };
+              tracked.__tsPaymentSubmitDispatchListener = listener;
+              element.addEventListener("click", listener, { capture: true, once: true });
+            },
+            {
+              baselineStorageKey: dispatchBaselineStorageKey,
+              frameUrls: preDispatchFrameUrls,
+              token: dispatchToken,
+            },
+          )
+          .then(() => true)
+          .catch(() => false);
+        if (!dispatchTrackingInstalled) continue;
+        const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
+          const snapshot = await this.page!.mainFrame()
+            .evaluate(
+              ({ baselineStorageKey, token }) => {
+                const baselineWindow = window as Window & {
+                  __trustySquirePaymentDispatchBaselines?: Record<
+                    string,
+                    CheckoutOutcomeDispatchSnapshot
+                  >;
+                };
+                let captured =
+                  baselineWindow.__trustySquirePaymentDispatchBaselines?.[token] ?? null;
+                if (captured !== null) {
+                  delete baselineWindow.__trustySquirePaymentDispatchBaselines?.[token];
+                }
+                if (captured === null) {
+                  try {
+                    const stored = sessionStorage.getItem(baselineStorageKey);
+                    if (stored !== null) {
+                      captured = JSON.parse(stored) as CheckoutOutcomeDispatchSnapshot;
+                    }
+                  } catch {
+                    captured = null;
+                  }
+                }
+                try {
+                  sessionStorage.removeItem(baselineStorageKey);
+                } catch (error) {
+                  void error;
+                }
+                return captured;
+              },
+              { baselineStorageKey: dispatchBaselineStorageKey, token: dispatchToken },
+            )
+            .catch(() => null);
+          if (
+            snapshot === null ||
+            typeof snapshot.url !== "string" ||
+            !Array.isArray(snapshot.urls) ||
+            !snapshot.urls.every((url) => typeof url === "string")
+          ) {
+            return null;
+          }
+          return checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
+        };
+        const clearDispatchTracking = async (): Promise<void> => {
+          await candidate
+            .evaluate((element) => {
+              const tracked = element as Element & {
+                __tsPaymentSubmitDispatchListener?: EventListener;
+              };
+              if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
+                element.removeEventListener(
+                  "click",
+                  tracked.__tsPaymentSubmitDispatchListener,
+                  true,
+                );
+                delete tracked.__tsPaymentSubmitDispatchListener;
+              }
+            })
+            .catch(() => undefined);
+          await frame
+            .evaluate((token) => {
+              const stateWindow = window as Window & {
+                __trustySquirePaymentSubmitDispatch?: {
+                  token: string;
+                  dispatched: boolean;
+                };
+              };
+              if (stateWindow.__trustySquirePaymentSubmitDispatch?.token === token) {
+                delete stateWindow.__trustySquirePaymentSubmitDispatch;
+              }
+            }, dispatchToken)
+            .catch(() => undefined);
+          await readDispatchOutcomeBaseline();
+        };
+        try {
+          await candidate.click();
+        } catch (error) {
+          const dispatchState = await frame
+            .evaluate((token) => {
+              const stateWindow = window as Window & {
+                __trustySquirePaymentSubmitDispatch?: {
+                  token: string;
+                  dispatched: boolean;
+                };
+              };
+              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+              return {
+                sameDocument: state?.token === token,
+                dispatched: state?.token === token && state.dispatched,
+              };
+            }, dispatchToken)
+            .catch(() => null);
+          await clearDispatchTracking();
+          if (dispatchState?.sameDocument === true && !dispatchState.dispatched) throw error;
+          throw new PaymentSubmitOutcomeUnknownError();
+        }
+        outcomeBaseline =
+          (await readDispatchOutcomeBaseline()) ?? (await this.captureCheckoutOutcomeBaseline());
+        this.checkoutOutcomeBaseline = outcomeBaseline;
+        await clearDispatchTracking();
         submitted = true;
         break;
       }
       if (submitted) break;
     }
-    if (!submitted) throw new Error("payment_submit_not_found");
-    const challengeDeadline = Date.now() + 15_000;
-    while (Date.now() < challengeDeadline) {
-      const challenge = await this.detectThreeDsChallenge();
-      if (challenge.three_ds_required) return challenge;
-      await this.page.waitForTimeout(250).catch(() => undefined);
+    if (!submitted || outcomeBaseline === undefined) throw new Error("payment_submit_not_found");
+    try {
+      const challengeDeadline = Date.now() + 15_000;
+      while (Date.now() < challengeDeadline) {
+        if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
+          this.checkoutThreeDsPending = false;
+          return { three_ds_required: false, order_confirmed: true };
+        }
+        const challenge = await this.detectThreeDsChallenge();
+        if (challenge.three_ds_required) {
+          this.checkoutThreeDsPending = true;
+          return challenge;
+        }
+        await this.page.waitForTimeout(250).catch(() => undefined);
+      }
+      return { three_ds_required: false, order_confirmed: false };
+    } catch (error) {
+      if (error instanceof PaymentSubmitOutcomeUnknownError) throw error;
+      throw new PaymentSubmitOutcomeUnknownError();
     }
-    return { three_ds_required: false };
   }
 
   async clearSealedPaymentFields(): Promise<void> {
@@ -8568,67 +9536,430 @@ export class BrowserController {
     }
   }
 
+  private async isFrameSurfaceTopmost(frame: Frame): Promise<boolean> {
+    let childFrame = frame;
+    let parentFrame = childFrame.parentFrame();
+    while (parentFrame !== null) {
+      const owner = await childFrame.frameElement().catch(() => null);
+      if (owner === null) return false;
+      const topmost = await owner
+        .evaluate((element) => {
+          const visualHitAtPoint = (x: number, y: number): Element | null => {
+            const restored: Array<{
+              element: HTMLElement;
+              priority: string;
+              value: string;
+            }> = [];
+            for (const candidate of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
+              const style = getComputedStyle(candidate);
+              if (
+                style.pointerEvents !== "none" ||
+                style.display === "none" ||
+                style.visibility === "hidden" ||
+                Number.parseFloat(style.opacity) <= 0 ||
+                !Array.from(candidate.getClientRects()).some(
+                  (rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
+                )
+              ) {
+                continue;
+              }
+              restored.push({
+                element: candidate,
+                priority: candidate.style.getPropertyPriority("pointer-events"),
+                value: candidate.style.getPropertyValue("pointer-events"),
+              });
+              candidate.style.setProperty("pointer-events", "auto", "important");
+            }
+            const hit = document.elementFromPoint(x, y);
+            for (const original of restored) {
+              if (original.value.length === 0) {
+                original.element.style.removeProperty("pointer-events");
+              } else {
+                original.element.style.setProperty(
+                  "pointer-events",
+                  original.value,
+                  original.priority,
+                );
+              }
+            }
+            return hit;
+          };
+          if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) {
+            return false;
+          }
+          let current: HTMLElement | null = element;
+          while (current !== null) {
+            const style = getComputedStyle(current);
+            if (
+              style.display === "none" ||
+              style.visibility === "hidden" ||
+              style.visibility === "collapse" ||
+              Number.parseFloat(style.opacity) <= 0
+            ) {
+              return false;
+            }
+            current = current.parentElement;
+          }
+          const rect = element.getBoundingClientRect();
+          if (rect.width < 1 || rect.height < 1) return false;
+          const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
+          const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
+          const hit = visualHitAtPoint(x, y);
+          return hit !== null && (hit === element || element.contains(hit));
+        })
+        .catch(() => false);
+      await owner.dispose().catch(() => undefined);
+      if (!topmost) return false;
+      childFrame = parentFrame;
+      parentFrame = childFrame.parentFrame();
+    }
+    return true;
+  }
+
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
-    const urlPattern =
-      /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/|challenge)/i;
+    const urlPattern = /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/)/i;
     for (const frame of this.page.frames()) {
+      if (!(await this.isFrameSurfaceTopmost(frame))) continue;
+      let frameContext = frame === this.page.mainFrame() ? "" : `${frame.name()} ${frame.url()}`;
+      if (frame !== this.page.mainFrame()) {
+        const owner = await frame.frameElement().catch(() => null);
+        if (owner !== null) {
+          frameContext += await owner
+            .evaluate((element) => {
+              if (!(element instanceof Element)) return "";
+              return [
+                element.id,
+                element.className,
+                element.getAttribute("name"),
+                element.getAttribute("title"),
+                element.getAttribute("aria-label"),
+                element.getAttribute("data-testid"),
+              ]
+                .filter((value): value is string => typeof value === "string")
+                .join(" ");
+            })
+            .catch(() => "");
+          await owner.dispose().catch(() => undefined);
+        }
+      }
+      let frameUrlContext = frame.url();
+      let shopifyPciFrame = false;
+      try {
+        const parsedFrameUrl = new URL(frameUrlContext);
+        shopifyPciFrame =
+          parsedFrameUrl.protocol === "https:" &&
+          parsedFrameUrl.hostname === "checkout.pci.shopifyinc.com";
+        frameUrlContext = `${parsedFrameUrl.hostname}${parsedFrameUrl.pathname}`;
+      } catch {
+        frameUrlContext = "";
+      }
       const detected =
-        urlPattern.test(frame.url()) ||
+        urlPattern.test(frameUrlContext) ||
         (await frame
-          .evaluate(() => {
-            if (
-              document.querySelector(
-                'iframe[name*="challenge" i],iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
-              ) !== null
-            )
-              return true;
-            return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
-              document.body?.innerText ?? "",
-            );
-          })
+          .evaluate(
+            ({ externalContext, shopifyPciFrame }) => {
+              const visualHitAtPoint = (x: number, y: number): Element | null => {
+                const restored: Array<{
+                  element: HTMLElement;
+                  priority: string;
+                  value: string;
+                }> = [];
+                for (const candidate of Array.from(
+                  document.querySelectorAll<HTMLElement>("body *"),
+                )) {
+                  const style = getComputedStyle(candidate);
+                  if (
+                    style.pointerEvents !== "none" ||
+                    style.display === "none" ||
+                    style.visibility === "hidden" ||
+                    Number.parseFloat(style.opacity) <= 0 ||
+                    !Array.from(candidate.getClientRects()).some(
+                      (rect) =>
+                        x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
+                    )
+                  ) {
+                    continue;
+                  }
+                  restored.push({
+                    element: candidate,
+                    priority: candidate.style.getPropertyPriority("pointer-events"),
+                    value: candidate.style.getPropertyValue("pointer-events"),
+                  });
+                  candidate.style.setProperty("pointer-events", "auto", "important");
+                }
+                const hit = document.elementFromPoint(x, y);
+                for (const original of restored) {
+                  if (original.value.length === 0) {
+                    original.element.style.removeProperty("pointer-events");
+                  } else {
+                    original.element.style.setProperty(
+                      "pointer-events",
+                      original.value,
+                      original.priority,
+                    );
+                  }
+                }
+                return hit;
+              };
+              const visibleAndTopmost = (element: Element): boolean => {
+                if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) {
+                  return false;
+                }
+                let current: HTMLElement | null = element;
+                while (current !== null) {
+                  const style = getComputedStyle(current);
+                  if (
+                    style.display === "none" ||
+                    style.visibility === "hidden" ||
+                    style.visibility === "collapse" ||
+                    Number.parseFloat(style.opacity) <= 0
+                  ) {
+                    return false;
+                  }
+                  current = current.parentElement;
+                }
+                return Array.from(element.getClientRects()).some((rect) => {
+                  const left = Math.max(0, rect.left);
+                  const right = Math.min(window.innerWidth, rect.right);
+                  const top = Math.max(0, rect.top);
+                  const bottom = Math.min(window.innerHeight, rect.bottom);
+                  if (right <= left || bottom <= top) return false;
+                  const x = left + (right - left) / 2;
+                  const y = top + (bottom - top) / 2;
+                  return visualHitAtPoint(x, y) === element;
+                });
+              };
+              const visibleTextAndTopmost = (node: Text): boolean => {
+                const element = node.parentElement;
+                if (element === null) return false;
+                let current: HTMLElement | null = element;
+                while (current !== null) {
+                  const style = getComputedStyle(current);
+                  if (
+                    style.display === "none" ||
+                    style.visibility === "hidden" ||
+                    style.visibility === "collapse" ||
+                    Number.parseFloat(style.opacity) <= 0
+                  ) {
+                    return false;
+                  }
+                  current = current.parentElement;
+                }
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                return Array.from(range.getClientRects()).some((rect) => {
+                  const left = Math.max(0, rect.left);
+                  const right = Math.min(window.innerWidth, rect.right);
+                  const top = Math.max(0, rect.top);
+                  const bottom = Math.min(window.innerHeight, rect.bottom);
+                  if (right <= left || bottom <= top) return false;
+                  const x = left + (right - left) / 2;
+                  const y = top + (bottom - top) / 2;
+                  return visualHitAtPoint(x, y) === element;
+                });
+              };
+              const structural = Array.from(
+                document.querySelectorAll(
+                  'iframe[title*="3d secure" i],form:has(input[name="creq" i]),form[action*="acs" i]',
+                ),
+              ).some(
+                (element) =>
+                  visibleAndTopmost(element) ||
+                  Array.from(element.querySelectorAll("button,input,select,textarea")).some(
+                    visibleAndTopmost,
+                  ),
+              );
+              if (structural) return true;
+              const hasKnownChallengeContext = (context: string): boolean => {
+                const explicitThreeDs =
+                  /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
+                const shopifyChallenge =
+                  /(?:shopify|shopifyinc)/i.test(context) &&
+                  /(?:authentication|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
+                const dbsChallenge =
+                  /\bdbs\b/i.test(context) &&
+                  /(?:bank(?:ing)?\s+app|authentication|challenge|approval|3d[-_ ]?secure|\b3ds2?\b)/i.test(
+                    context,
+                  );
+                const issuerAuthentication =
+                  /\bissuer\b/i.test(context) &&
+                  /(?:authentication|challenge|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
+                return explicitThreeDs || shopifyChallenge || dbsChallenge || issuerAuthentication;
+              };
+              const explicitText =
+                /\b(?:3d secure|authenticate (?:this )?payment|security code sent to)\b/i;
+              const contextualText = /\bverify (?:your )?identity\b/i;
+              const countdownText = /\b\d{1,3}\s+seconds?\s+to\s+confirm\b/i;
+              const bankAppText =
+                /\b(?:confirm|approve)\b.{0,80}\b(?:bank|banking|issuer)\s+app\b/i;
+              const dbsBankAppText =
+                /\b(?:confirm|approve)\b.{0,80}\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b|\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b.{0,80}\b(?:confirm|approve)\b/i;
+              const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+              let node = walker.nextNode();
+              while (node !== null) {
+                const text = (node.nodeValue ?? "").replace(/\s+/g, " ").trim();
+                const element = node.parentElement;
+                if (text.length > 0 && element !== null) {
+                  const explicitMatch = explicitText.test(text);
+                  const dbsBankAppMatch = dbsBankAppText.test(text);
+                  const countdownMatch = countdownText.test(text);
+                  const bankAppMatch = bankAppText.test(text);
+                  const contextualMatch = contextualText.test(text);
+                  if (
+                    (explicitMatch ||
+                      dbsBankAppMatch ||
+                      countdownMatch ||
+                      bankAppMatch ||
+                      contextualMatch) &&
+                    visibleTextAndTopmost(node as Text)
+                  ) {
+                    if (explicitMatch) return true;
+                    if (dbsBankAppMatch || (shopifyPciFrame && (countdownMatch || bankAppMatch))) {
+                      return true;
+                    }
+                    const context: string[] = [externalContext];
+                    let ancestor: Element | null = element;
+                    for (let depth = 0; ancestor !== null && depth < 8; depth += 1) {
+                      context.push(
+                        [
+                          ancestor.id,
+                          ancestor.className,
+                          ancestor.getAttribute("name"),
+                          ancestor.getAttribute("title"),
+                          ancestor.getAttribute("aria-label"),
+                          ancestor.getAttribute("data-testid"),
+                        ]
+                          .filter((value): value is string => typeof value === "string")
+                          .join(" "),
+                      );
+                      ancestor = ancestor.parentElement;
+                    }
+                    if (hasKnownChallengeContext(context.join(" "))) return true;
+                  }
+                }
+                node = walker.nextNode();
+              }
+              return false;
+            },
+            { externalContext: frameContext, shopifyPciFrame },
+          )
           .catch(() => false));
       if (detected) {
         return {
           three_ds_required: true,
+          order_confirmed: false,
           challenge_url: frame.url() || this.page.url(),
         };
       }
     }
-    return { three_ds_required: false };
+    return { three_ds_required: false, order_confirmed: false };
   }
 
-  async waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout"> {
-    if (!this.page) throw new Error("Browser not started");
-    const startUrl = this.page.url();
-    const deadline = Date.now() + timeoutMs;
-    const successUrl =
-      /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|\/paid\b|payment_intent=.*succe/i;
-    const successText =
-      /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
+  private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
+    if (!this.page) return { url: "", orderUrlIdentities: [], terminalUrlIdentity: null };
+    const url = this.page.url();
+    return checkoutOutcomeBaselineFromDispatchSnapshot({
+      url,
+      urls: this.page.frames().map((frame) => frame.url()),
+    });
+  }
+
+  private async hasConfirmedCheckoutOutcome(baseline: CheckoutOutcomeBaseline): Promise<boolean> {
+    if (!this.page) return false;
+    const current = await this.captureCheckoutOutcomeBaseline();
+    let sameCheckoutOrigin = false;
+    try {
+      const currentUrl = new URL(current.url);
+      sameCheckoutOrigin = currentUrl.origin === new URL(baseline.url).origin;
+    } catch {
+      sameCheckoutOrigin = current.url === baseline.url;
+    }
+    return (
+      sameCheckoutOrigin &&
+      current.terminalUrlIdentity !== null &&
+      !baseline.orderUrlIdentities.includes(current.terminalUrlIdentity)
+    );
+  }
+
+  private async captureVisibleCheckoutFailureSignals(): Promise<CheckoutFailureBaseline> {
+    if (!this.page) return null;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
+    const frameSignals = await Promise.all(
+      this.page.frames().map(async (frame) => {
+        if (!(await this.isFrameSurfaceTopmost(frame))) return {};
+        const signals = await frame
+          .evaluate(extractVisibleTopmostTextSignals, {
+            source: failureText.source,
+            flags: failureText.flags,
+          })
+          .catch(() => null);
+        if (signals === null) return null;
+        return signals;
+      }),
+    );
+    const combined: Record<string, number> = {};
+    for (const signals of frameSignals) {
+      if (signals === null) return null;
+      for (const [signal, count] of Object.entries(signals)) {
+        combined[signal] = (combined[signal] ?? 0) + count;
+      }
+    }
+    return combined;
+  }
+
+  private async hasNewVisibleCheckoutFailure(baseline: CheckoutFailureBaseline): Promise<boolean> {
+    if (baseline === null) return false;
+    const current = await this.captureVisibleCheckoutFailureSignals();
+    if (current === null) return false;
+    return Object.entries(current).some(([signal, count]) => count > (baseline[signal] ?? 0));
+  }
+
+  async waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution> {
+    if (!this.page) throw new Error("Browser not started");
+    const outcomeBaseline =
+      this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
+    const failureBaseline =
+      this.checkoutFailureBaseline ?? (await this.captureVisibleCheckoutFailureSignals());
+    const deadline = Date.now() + timeoutMs;
+    let challengeWasActive = this.checkoutThreeDsPending;
+    let challengeAbsentSince: number | undefined;
     do {
-      const texts = await Promise.all(
-        this.page
-          .frames()
-          .map(
-            async (frame) =>
-              await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-          ),
-      );
-      if (texts.some((text) => failureText.test(text))) return "failed";
-      const challenge = await this.detectThreeDsChallenge();
-      const currentUrl = this.page.url();
-      if (
-        !challenge.three_ds_required &&
-        (texts.some((text) => successText.test(text)) ||
-          (currentUrl !== startUrl && successUrl.test(currentUrl)))
-      ) {
+      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
+        this.checkoutThreeDsPending = false;
         return "succeeded";
+      }
+      if (await this.hasNewVisibleCheckoutFailure(failureBaseline)) {
+        this.checkoutThreeDsPending = false;
+        return "failed";
+      }
+      const challenge = await this.detectThreeDsChallenge();
+      if (challenge.three_ds_required) {
+        challengeWasActive = true;
+        challengeAbsentSince = undefined;
+      }
+      if (!challenge.three_ds_required && challengeWasActive) {
+        challengeAbsentSince ??= Date.now();
+        if (Date.now() - challengeAbsentSince >= THREE_DS_RESOLUTION_GRACE_MS) {
+          this.checkoutThreeDsPending = false;
+          return "unconfirmed";
+        }
       }
       await this.page.waitForTimeout(1_000).catch(() => undefined);
     } while (Date.now() <= deadline);
+    if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
+      this.checkoutThreeDsPending = false;
+      return "succeeded";
+    }
+    if (await this.hasNewVisibleCheckoutFailure(failureBaseline)) {
+      this.checkoutThreeDsPending = false;
+      return "failed";
+    }
+    if (challengeWasActive && !(await this.detectThreeDsChallenge()).three_ds_required) {
+      this.checkoutThreeDsPending = false;
+      return "unconfirmed";
+    }
     return "timeout";
   }
 

@@ -331,9 +331,13 @@ function stubBrowser(): PaymentBrowser {
       amount_cents: 100,
       currency: "USD",
     }),
-    fillAndSubmitCheckout: vi.fn().mockResolvedValue({ three_ds_required: false }),
+    fillAndSubmitCheckout: vi
+      .fn()
+      .mockResolvedValue({ three_ds_required: false, order_confirmed: true }),
     fillCheckoutCardFields: vi.fn().mockResolvedValue(undefined),
-    submitFilledCheckout: vi.fn().mockResolvedValue({ three_ds_required: false }),
+    submitFilledCheckout: vi
+      .fn()
+      .mockResolvedValue({ three_ds_required: false, order_confirmed: true }),
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
     waitForThreeDsResolution: vi.fn().mockResolvedValue("timeout"),
     currentUrl: vi.fn().mockReturnValue("https://m.test/checkout"),
@@ -1384,7 +1388,7 @@ describe("operate_pay split checkout phases", () => {
 
   it("atomically reserves a pending fill across overlapping confirms", async () => {
     mockPending = { ...PENDING };
-    let releaseSubmit!: (value: { three_ds_required: false }) => void;
+    let releaseSubmit!: (value: { three_ds_required: false; order_confirmed: true }) => void;
     vi.mocked(mockBrowser.submitFilledCheckout).mockImplementation(
       () =>
         new Promise((resolve) => {
@@ -1399,7 +1403,7 @@ describe("operate_pay split checkout phases", () => {
     await expect(operatePayTool.handler(args, api)).rejects.toThrow(
       /another payment confirmation is already in progress/,
     );
-    releaseSubmit({ three_ds_required: false });
+    releaseSubmit({ three_ds_required: false, order_confirmed: true });
     await expect(first).resolves.toMatchObject({ status: "payment_submitted" });
     expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
   });
@@ -1495,7 +1499,10 @@ describe("operate_pay split checkout phases", () => {
 
   it("does not restore the pending fill when confirm throws after submission starts", async () => {
     mockPending = { ...PENDING };
-    vi.mocked(mockBrowser.submitFilledCheckout).mockResolvedValue({ three_ds_required: true });
+    vi.mocked(mockBrowser.submitFilledCheckout).mockResolvedValue({
+      three_ds_required: true,
+      order_confirmed: false,
+    });
     vi.mocked(mockBrowser.waitForThreeDsResolution).mockRejectedValue(
       new Error("Execution context was destroyed"),
     );

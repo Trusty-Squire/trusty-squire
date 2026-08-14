@@ -69,7 +69,13 @@ payment values. You also see the requesting MCP client (for example, Hermes) and
 that a saved card will be used before clicking **Approve payment** to relay the
 operator-sealed final authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
-between approval and submission.
+between approval and submission. Card entry, sealing, and cleanup touch only the
+selected card controls and explicitly labeled billing controls inside that payment
+context; merchant shipping address and country controls remain untouched. A submit
+is reported as `payment_submitted` only after the checkout reaches a new merchant
+order-confirmation URL. A bare click, or a 3-D Secure prompt that disappears without
+that confirmation, returns `payment_outcome_unknown` instead of guessing that the
+charge succeeded.
 
 Every payment response includes its `session_id`. Pass that same ID to every
 follow-up `operate_pay`, `operate_payment_status`, and `operate_payment_await`
@@ -104,8 +110,10 @@ PayPal or Braintree. A separate PayPal express button does not block fillable me
 or Shopify PCI card fields. Trusty Squire does not sign in to PayPal or use vaulted
 PayPal credentials. If the issuer requires 3-D Secure, Trusty Squire notifies
 your linked Telegram chat and waits 180 seconds by default for you to complete
-the challenge in the open checkout instead of automating it. It reports a
-visible success or decline and hands an unresolved challenge back on timeout.
+the challenge in the open checkout instead of automating it. Visible Shopify and
+DBS bank-app approval prompts, including a visible “60 seconds to confirm” countdown,
+activate that wait; the ordinary Shopify PCI card-field host alone does not. It reports
+a visible decline and hands an unresolved challenge back on timeout.
 `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to `0` on
 `operate_pay` to skip the notification and waiting and receive the handoff
 immediately.

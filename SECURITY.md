@@ -125,11 +125,14 @@ After approval it requires the live page origin to equal the mandate's checkout
 origin, fills no submit control, and permits card data only in the main frame,
 same-registrable-domain HTTPS frames, or curated HTTPS payment-provider frames. A
 failed or unrecognized-frame fill clears partial card data; if cleanup itself cannot
-be confirmed, the session keeps the payment-field seal active. On success the raw
-card is zeroed in the operator, while the page fields remain sealed and
-observation-masked for the checkout's review step; session state retains only
-approval and mandate metadata, the checkout binding, card reference, and last four
-digits.
+be confirmed, the session keeps the payment-field seal active. Both fill and cleanup
+are limited to the selected card controls and explicitly labeled billing controls
+inside a positively identified payment context. Generic merchant address and country
+controls are treated as shipping controls and are never sealed or cleared by this
+payment path. On success the raw card is zeroed in the operator, while the eligible
+page fields remain sealed and observation-masked for the checkout's review step;
+session state retains only approval and mandate metadata, the checkout binding, card
+reference, and last four digits.
 
 Unsupported-wallet detection follows the frame containing the actual visible PAN
 field. PayPal and Braintree hosted card fields fail closed, while an unrelated PayPal
@@ -156,8 +159,14 @@ steps; origin is the recipient trust anchor. While a split card fill is pending,
 ordinary browser actions cannot click charge-labeled controls or press Enter, so only
 `confirm` can cross that boundary. If no submit control is found, the sealed page
 fields and pending metadata remain
-available for a safe retry; they are cleared after a terminal outcome when cleanup
-can be confirmed. Every payment entry is claimed before asynchronous work begins,
+available for a safe retry. Once submission starts and serializes their values, the
+eligible sealed fields are cleared when cleanup can be confirmed, even while 3-D Secure
+or outcome verification continues. Dispatching the charge control is not itself a
+successful outcome: the operator requires a new merchant terminal route with a
+substantive order identity that was absent before dispatch. A bare click or a vanished
+3-D Secure prompt without that evidence is recorded as `payment_outcome_unknown`,
+including after the configured 3-D Secure wait, so it cannot be mistaken for
+`payment_submitted`. Every payment entry is claimed before asynchronous work begins,
 and a pending confirmation is claimed atomically, so overlapping `operate_pay` calls
 cannot race toward the same submission. A failed confirmation becomes retryable only
 if submission has not started. If field cleanup cannot be confirmed, pending metadata

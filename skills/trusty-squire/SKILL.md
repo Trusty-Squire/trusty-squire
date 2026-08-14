@@ -105,6 +105,9 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   follow-up `operate_pay`, `operate_payment_status`, and `operate_payment_await`
   call. Omit it only when this MCP process has exactly one live session; the
   compatibility path never guesses the newest checkout.
+- Treat `payment_outcome_unknown` as unconfirmed: do not claim success or submit
+  again blindly, because the click may already have charged the card. Re-observe
+  and verify the merchant's order state.
 - On a split checkout whose card-entry step shows no total (or only a subtotal),
   call `operate_pay` with `phase: "fill_card"`. It approves the live card-entry
   total when readable; a subtotal qualifies only when the same order summary says

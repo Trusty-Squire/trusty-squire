@@ -8,8 +8,17 @@ import canonicalize from "canonicalize";
 import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
 import { ApiCallError, type ApiClient, type PaymentApproval } from "../api-client.js";
-import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
-import { PaymentCardFillCleanupError, UnrecognizedPaymentFrameError } from "./browser.js";
+import type {
+  CheckoutCard,
+  CheckoutSubmitResult,
+  CheckoutSummary,
+  ThreeDsResolution,
+} from "./browser.js";
+import {
+  PaymentCardFillCleanupError,
+  PaymentSubmitOutcomeUnknownError,
+  UnrecognizedPaymentFrameError,
+} from "./browser.js";
 import { generateOperatorKeypair, openSealed, type OperatorKeypair } from "./payment-hpke.js";
 
 export interface OperatePayArgs {
@@ -42,7 +51,7 @@ export interface PaymentBrowser {
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
   clearSealedPaymentFields(): Promise<void>;
   clearCheckoutCardFields?(): Promise<void>;
-  waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout">;
+  waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution>;
   currentUrl(): string;
 }
 
@@ -1189,12 +1198,14 @@ export async function executeOperatePay(
     }
 
     let paymentStatus = "payment_submitted";
-    let submitResult: CheckoutSubmitResult = { three_ds_required: false };
+    let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
     try {
       submitResult = await browser.fillAndSubmitCheckout(card);
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
+      else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
     } catch (error) {
-      paymentStatus = "payment_checkout_failed";
+      const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
+      paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
       let audit_recorded = true;
       try {
         await api.auditPayment({
@@ -1209,8 +1220,9 @@ export async function executeOperatePay(
       return {
         status: paymentStatus,
         audit_recorded,
-        reason:
-          error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
+        reason: outcomeUnknown
+          ? "payment_submit_outcome_unknown"
+          : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
             ? error.message
             : "payment_checkout_failed",
         approval_url: approvalUrl,
@@ -1226,6 +1238,7 @@ export async function executeOperatePay(
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
       if (resolution === "succeeded") paymentStatus = "payment_submitted";
       if (resolution === "failed") paymentStatus = "payment_declined";
+      if (resolution === "unconfirmed") paymentStatus = "payment_outcome_unknown";
     }
 
     let auditRecorded = true;
@@ -1380,7 +1393,7 @@ export async function executeOperatePayConfirm(
   }
 
   let paymentStatus = "payment_submitted";
-  let submitResult: CheckoutSubmitResult = { three_ds_required: false };
+  let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
   const clearPaymentFields = async (): Promise<boolean> => {
     try {
       if (browser.clearCheckoutCardFields !== undefined) {
@@ -1397,6 +1410,7 @@ export async function executeOperatePayConfirm(
     overrides.onSubmitStarted?.();
     submitResult = await browser.submitFilledCheckout();
     if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
+    else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
   } catch (error) {
     const submitNotFound = error instanceof Error && error.message === "payment_submit_not_found";
     paymentStatus = submitNotFound ? "payment_checkout_failed" : "payment_outcome_unknown";
@@ -1431,6 +1445,7 @@ export async function executeOperatePayConfirm(
     const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
     if (resolution === "succeeded") paymentStatus = "payment_submitted";
     if (resolution === "failed") paymentStatus = "payment_declined";
+    if (resolution === "unconfirmed") paymentStatus = "payment_outcome_unknown";
   }
 
   let auditRecorded = true;
