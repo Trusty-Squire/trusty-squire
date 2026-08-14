@@ -223,6 +223,11 @@ export interface CheckoutCard {
   };
 }
 
+interface CheckoutCardGroupScope {
+  frame: Frame;
+  root: Locator;
+}
+
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
   challenge_url?: string;
@@ -7460,7 +7465,7 @@ export class BrowserController {
     card: CheckoutCard,
     billingOnly = false,
     assertFrameEgress?: (frame: Frame, resolvedOrigin?: string) => void,
-  ): Promise<void> {
+  ): Promise<CheckoutCardGroupScope | undefined> {
     const filled = new Set<string>();
     const expiryMonthSelectors =
       '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i]';
@@ -7834,14 +7839,15 @@ export class BrowserController {
       if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
       if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
     }
+    return cardGroup;
   }
 
   async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     try {
       await this.waitForPanField(10_000);
-      await this.fillCheckoutCardIntoFrames(this.page.frames(), card);
-      return await this.submitFilledCheckout();
+      const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card);
+      return await this.submitFilledCheckoutInScope(cardGroup);
     } finally {
       await this.clearSealedPaymentFields();
     }
@@ -7938,10 +7944,20 @@ export class BrowserController {
   // The charge: find and click the pay/place-order control, then poll for a
   // 3-D Secure challenge. Callers gate this on a verified visible total.
   async submitFilledCheckout(): Promise<CheckoutSubmitResult> {
+    return await this.submitFilledCheckoutInScope();
+  }
+
+  private async submitFilledCheckoutInScope(
+    cardGroup?: CheckoutCardGroupScope,
+  ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     let submitted = false;
-    for (const frame of this.page.frames()) {
-      const matches = frame.locator('button,input[type="submit"],[role="button"]');
+    const candidateFrames = cardGroup === undefined ? this.page.frames() : [cardGroup.frame];
+    for (const frame of candidateFrames) {
+      const matches =
+        cardGroup === undefined
+          ? frame.locator('button,input[type="submit"],[role="button"]')
+          : cardGroup.root.locator('button,input[type="submit"],[role="button"]');
       const count = Math.min(await matches.count().catch(() => 0), 100);
       for (let i = 0; i < count; i += 1) {
         const candidate = matches.nth(i);
