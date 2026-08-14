@@ -48,6 +48,7 @@ import {
   currentProfileHolderPid,
   launchWithProfileGate,
   profileProcessIdentity,
+  profileProcessIdentityState,
   profileProcessMatches,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
@@ -1545,14 +1546,35 @@ export function selfLaunchEnabled(): boolean {
   return v !== "0" && v !== "false" && v !== "off";
 }
 
-export async function raceCancellableLaunch<T>(
-  launch: Promise<T>,
-  cancellation: Promise<void>,
-): Promise<{ status: "launched"; value: T } | { status: "cancelled" }> {
-  return await Promise.race([
+const PERSISTENT_CONTEXT_LAUNCH_TIMEOUT_MS = 30_000;
+
+export async function launchCancellablePersistentContext<T, O extends object>(opts: {
+  launch: (options: O & { timeout: number }) => Promise<T>;
+  options: O;
+  cancellation: Promise<void>;
+  cleanupCancelled: (value: T) => Promise<ProfileCloseState>;
+  cleanupRejected: () => Promise<ProfileCloseState>;
+}): Promise<
+  { status: "launched"; value: T } | { status: "cancelled"; closeState: ProfileCloseState }
+> {
+  const launch = Promise.resolve().then(() =>
+    opts.launch({ ...opts.options, timeout: PERSISTENT_CONTEXT_LAUNCH_TIMEOUT_MS }),
+  );
+  const outcome = await Promise.race([
     launch.then((value) => ({ status: "launched" as const, value })),
-    cancellation.then(() => ({ status: "cancelled" as const })),
+    opts.cancellation.then(() => ({ status: "cancelled" as const })),
   ]);
+  if (outcome.status === "launched") return outcome;
+  try {
+    const value = await launch;
+    return { status: "cancelled", closeState: await opts.cleanupCancelled(value) };
+  } catch {
+    try {
+      return { status: "cancelled", closeState: await opts.cleanupRejected() };
+    } catch {
+      return { status: "cancelled", closeState: "unknown" };
+    }
+  }
 }
 
 // Find an ephemeral TCP port for Chrome's --remote-debugging-port.
@@ -2226,7 +2248,8 @@ export class BrowserController {
   private startCancellationRequested = false;
   private startLaunchCommitted = false;
   private startSettled = false;
-  private persistentFallbackCancellationUnproven = false;
+  private persistentFallbackLaunchInFlight = false;
+  private persistentFallbackCancellationState: ProfileCloseState | null = null;
   private profilePoolReusable = true;
   private resolveStartCancellation: (() => void) | null = null;
   private readonly startCancellation = new Promise<void>((resolveCancellation) => {
@@ -2645,10 +2668,13 @@ export class BrowserController {
         throw new Error("BrowserController start cancelled");
       }
     } catch (err) {
-      if (this.startCancellationRequested) {
+      if (this.startCancellationRequested && this.persistentFallbackCancellationState === null) {
         await this.closeWithProfileGuard().catch(() => undefined);
       }
-      if (!this.persistentFallbackCancellationUnproven) {
+      if (
+        this.persistentFallbackCancellationState === null ||
+        this.persistentFallbackCancellationState === "closed"
+      ) {
         this.profileOperationLease = null;
         lease?.release();
       }
@@ -2879,56 +2905,91 @@ export class BrowserController {
       }
     } else {
       this.profilePoolReusable = false;
-      const persistentLaunch = launchWithProfileGate(
-        this.profileDir,
-        () =>
-          launcher.launchPersistentContext(this.profileDir, {
-            headless: chromeHeadless,
-            ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
-            ...(channel !== null ? { channel } : {}),
-            ...(proxy !== null ? { proxy } : {}),
-            args: [...launchArgs],
-            viewport: null,
-            locale: "en-US",
-            timezoneId: geo?.timezoneId ?? "America/New_York",
-            permissions: grantedPermissions,
-            ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-          }),
-        { failFast: true },
-      );
-      const cleanupLateLaunch = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
-        const holderPid = currentProfileHolderPid(this.profileDir);
-        const identity =
-          holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
-        return await closeProfileWithProof({
+      this.persistentFallbackLaunchInFlight = true;
+      const cleanupProfileHolder = async (): Promise<ProfileCloseState> => {
+        const identity = await this.waitForPersistentFallbackIdentity();
+        if (identity === null) return process.platform === "linux" ? "closed" : "unknown";
+        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        if (process.platform !== "linux") return "unknown";
+        await this.waitForOwnedProfileExit(identity);
+        return "closed";
+      };
+      const cleanupCancelled = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
+        const identity = await this.waitForPersistentFallbackIdentity();
+        if (identity === null) {
+          await lateContext.close().catch(() => undefined);
+          return process.platform === "linux" ? "closed" : "unknown";
+        }
+        const closeState = await closeProfileWithProof({
           profileDir: this.profileDir,
           identity,
           close: () => lateContext.close(),
           forceClose: () => {
-            if (identity !== null) signalProfileProcess(identity, this.profileDir, "SIGKILL");
+            signalProfileProcess(identity, this.profileDir, "SIGKILL");
             reapProfileHolderIfOwned(this.profileDir, identity);
           },
         });
+        if (closeState === "closed" || process.platform !== "linux") return closeState;
+        await this.waitForOwnedProfileExit(identity);
+        return "closed";
       };
-      const detachLateLaunch = (): void => {
-        void persistentLaunch
-          .then(cleanupLateLaunch)
-          .then((closeState) => {
-            if (closeState !== "closed") return;
-            const lease = this.profileOperationLease;
-            this.profileOperationLease = null;
-            lease?.release();
-          })
-          .catch(() => undefined)
-      };
-      const outcome = await raceCancellableLaunch(persistentLaunch, this.startCancellation);
-      if (outcome.status === "cancelled" || this.startCancellationRequested) {
-        this.persistentFallbackCancellationUnproven = true;
-        detachLateLaunch();
+      const outcome = await (async () => {
+        try {
+          return await launchCancellablePersistentContext({
+            launch: (options) =>
+              launchWithProfileGate(
+                this.profileDir,
+                () => launcher.launchPersistentContext(this.profileDir, options),
+                { failFast: true },
+              ),
+            options: {
+              headless: chromeHeadless,
+              ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
+              ...(channel !== null ? { channel } : {}),
+              ...(proxy !== null ? { proxy } : {}),
+              args: [...launchArgs],
+              viewport: null,
+              locale: "en-US",
+              timezoneId: geo?.timezoneId ?? "America/New_York",
+              permissions: grantedPermissions,
+              ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
+            },
+            cancellation: this.startCancellation,
+            cleanupCancelled,
+            cleanupRejected: cleanupProfileHolder,
+          });
+        } catch (error) {
+          if (!this.startCancellationRequested) {
+            this.persistentFallbackLaunchInFlight = false;
+            throw error;
+          }
+          this.persistentFallbackCancellationState = await cleanupProfileHolder().catch(
+            () => "unknown" as const,
+          );
+          this.persistentFallbackLaunchInFlight = false;
+          throw new Error("BrowserController start cancelled");
+        }
+      })();
+      if (outcome.status === "cancelled") {
+        this.persistentFallbackCancellationState = outcome.closeState;
+        this.persistentFallbackLaunchInFlight = false;
         throw new Error("BrowserController start cancelled");
       }
       context = outcome.value;
+      if (this.startCancellationRequested) {
+        this.persistentFallbackCancellationState = await cleanupCancelled(context).catch(
+          () => "unknown" as const,
+        );
+        this.persistentFallbackLaunchInFlight = false;
+        throw new Error("BrowserController start cancelled");
+      }
+      this.context = context;
+      this.launchedContext = true;
+      const holderPid = currentProfileHolderPid(this.profileDir);
+      this.launchedProfileHolderIdentity =
+        holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
       this.commitProfileLaunch();
+      this.persistentFallbackLaunchInFlight = false;
     }
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
@@ -12075,9 +12136,17 @@ export class BrowserController {
   }
 
   private async closeCancelledStart(): Promise<ProfileCloseState> {
-    if (this.persistentFallbackCancellationUnproven) {
-      await this.closeWithProfileGuard();
-      return "unknown";
+    if (this.persistentFallbackLaunchInFlight) {
+      await this.startPromise?.catch(() => undefined);
+    }
+    if (this.persistentFallbackCancellationState !== null) {
+      const closeState = this.persistentFallbackCancellationState;
+      if (closeState === "closed") {
+        const lease = this.profileOperationLease;
+        this.profileOperationLease = null;
+        lease?.release();
+      }
+      return closeState;
     }
     if (!this.startLaunchCommitted) {
       await this.closeWithProfileGuard();
@@ -12121,6 +12190,33 @@ export class BrowserController {
     if (known !== null) return known;
     const holderPid = currentProfileHolderPid(this.profileDir);
     return holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
+  }
+
+  private async waitForPersistentFallbackIdentity(): Promise<ProfileProcessIdentity | null> {
+    if (process.platform !== "linux") return null;
+    let absentSince = Date.now();
+    while (true) {
+      const holderPid = currentProfileHolderPid(this.profileDir);
+      if (holderPid === null) {
+        if (Date.now() - absentSince >= 100) return null;
+      } else {
+        absentSince = Date.now();
+        const identity = profileProcessIdentity(holderPid, this.profileDir);
+        if (identity !== null) return identity;
+        if (clearStaleSingletonLock(this.profileDir)) return null;
+      }
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+    }
+  }
+
+  private async waitForOwnedProfileExit(identity: ProfileProcessIdentity): Promise<void> {
+    while (profileProcessIdentityState(identity, this.profileDir) !== "stale") {
+      if (profileProcessMatches(identity, this.profileDir)) {
+        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+      }
+      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    reapProfileHolderIfOwned(this.profileDir, identity);
   }
 
   private async closeAfterStart(): Promise<ProfileCloseState> {

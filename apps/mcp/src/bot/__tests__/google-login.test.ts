@@ -15,7 +15,7 @@ import {
   attachSelfManagedLoginContext,
   BrowserController,
   childProcessIsRunning,
-  raceCancellableLaunch,
+  launchCancellablePersistentContext,
   resolveAttachedProfileChildIdentity,
   terminateTrackedProfileChild,
   withChromeStartupLock,
@@ -245,7 +245,7 @@ describe("headless login VNC lifecycle", () => {
 });
 
 describe("login browser lifecycle guards", () => {
-  it("cancels an opaque launch without waiting for its promise", async () => {
+  it("settles and closes a cancelled persistent launch before returning", async () => {
     let cancel: (() => void) | undefined;
     let finishLaunch: ((value: string) => void) | undefined;
     const cancellation = new Promise<void>((resolve) => {
@@ -255,10 +255,33 @@ describe("login browser lifecycle guards", () => {
       finishLaunch = resolve;
     });
 
-    const result = raceCancellableLaunch(launch, cancellation);
+    const cleanupCancelled = vi.fn(async () => "closed" as const);
+    const cleanupRejected = vi.fn(async () => "closed" as const);
+    let settled = false;
+    const launchImpl = vi.fn(
+      (options: { headless: boolean; timeout: number }): Promise<string> => {
+        expect(options).toEqual({ headless: true, timeout: 30_000 });
+        return launch;
+      },
+    );
+    const result = launchCancellablePersistentContext({
+      launch: launchImpl,
+      options: { headless: true },
+      cancellation,
+      cleanupCancelled,
+      cleanupRejected,
+    }).then((outcome) => {
+      settled = true;
+      return outcome;
+    });
+    await Promise.resolve();
     cancel?.();
-    await expect(result).resolves.toEqual({ status: "cancelled" });
+    await Promise.resolve();
+    expect(settled).toBe(false);
     finishLaunch?.("late browser");
+    await expect(result).resolves.toEqual({ status: "cancelled", closeState: "closed" });
+    expect(cleanupCancelled).toHaveBeenCalledWith("late browser");
+    expect(cleanupRejected).not.toHaveBeenCalled();
   });
 
   it("cancels a wedged pre-launch stage without awaiting its settlement", async () => {
