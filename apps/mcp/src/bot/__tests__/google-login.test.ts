@@ -11,7 +11,12 @@ import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
 import { shortenVncUrl } from "../../api-client.js";
-import { BrowserController, childProcessIsRunning, withChromeStartupLock } from "../browser.js";
+import {
+  BrowserController,
+  childProcessIsRunning,
+  terminateTrackedProfileChild,
+  withChromeStartupLock,
+} from "../browser.js";
 import {
   acquireProfileOperationGuard,
   launchWithProfileGate,
@@ -599,7 +604,6 @@ describe("confirmed login finalization", () => {
 describe("cancelled self-managed Chrome launch", () => {
   it("retains the child until exact profile identity becomes observable", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-cancelled-chrome-"));
-    const controller = new BrowserController({ profileDir });
     const child = fakeProcess("chrome");
     Object.assign(child, { pid: 424_242 });
     const identity = {
@@ -611,20 +615,13 @@ describe("cancelled self-managed Chrome launch", () => {
     let probes = 0;
     const terminate = vi.fn(() => {
       Object.assign(child, { exitCode: 0 });
+      return true;
     });
-    const internals = controller as unknown as {
-      cancelSpawnedSelfManagedChrome(
-        target: ChildProcess,
-        readIdentity: () => typeof identity | null,
-        terminate: (targetIdentity: typeof identity, targetProfileDir: string) => void,
-      ): Promise<void>;
-    };
     try {
-      await internals.cancelSpawnedSelfManagedChrome(
-        child,
-        () => (++probes === 1 ? null : identity),
+      await terminateTrackedProfileChild(child, profileDir, {
+        readIdentity: () => (++probes === 1 ? null : identity),
         terminate,
-      );
+      });
 
       expect(probes).toBe(2);
       expect(terminate).toHaveBeenCalledWith(identity, profileDir);

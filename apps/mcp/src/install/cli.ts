@@ -66,6 +66,7 @@ import {
   CHROME_PROFILE_DIR,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
+  profilePathIdentity,
   withProfileOperationGuard,
 } from "../bot/profile.js";
 import { VERSION } from "../version.js";
@@ -486,7 +487,9 @@ async function settings(args: Argv): Promise<void> {
 
 async function connect(args: Argv): Promise<void> {
   try {
-    await withProfileOperationGuard(CHROME_PROFILE_DIR, () => connectWithProfileGuard(args));
+    await withConnectProfileGuard(CHROME_PROFILE_DIR, (profileDir) =>
+      connectWithProfileGuard(args, profileDir),
+    );
   } catch (err) {
     if (err instanceof ProfileBusyError) {
       ui.fail(PROFILE_BUSY_MESSAGE);
@@ -496,7 +499,15 @@ async function connect(args: Argv): Promise<void> {
   }
 }
 
-async function connectWithProfileGuard(args: Argv): Promise<void> {
+export async function withConnectProfileGuard<T>(
+  profileDir: string,
+  operation: (canonicalProfileDir: string) => Promise<T>,
+): Promise<T> {
+  const canonicalProfileDir = profilePathIdentity(profileDir);
+  return await withProfileOperationGuard(canonicalProfileDir, () => operation(canonicalProfileDir));
+}
+
+async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<void> {
   // Interactive picker (clack). Walks the user through agent + advanced setup
   // before the browser install ceremony fires. The picker fills in args so the
   // rest of this function is unchanged.
@@ -592,16 +603,16 @@ async function connectWithProfileGuard(args: Argv): Promise<void> {
   // account-switch escape hatch.
   if (args.forceRelogin) {
     if (args.forceReloginProvider !== undefined) {
-      clearProviderLoggedIn(args.forceReloginProvider);
+      clearProviderLoggedIn(args.forceReloginProvider, profileDir);
     } else {
-      clearAllProviderMarkers();
+      clearAllProviderMarkers(profileDir);
     }
     let cookiesCleared: boolean;
     if (args.forceReloginProvider !== undefined) {
-      cookiesCleared = await clearProviderCookies(undefined, args.forceReloginProvider);
+      cookiesCleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
     } else {
-      clearBrowserProfile();
-      cookiesCleared = await clearProviderCookies();
+      clearBrowserProfile(profileDir);
+      cookiesCleared = await clearProviderCookies(profileDir);
     }
     if (!cookiesCleared) {
       ui.fail(

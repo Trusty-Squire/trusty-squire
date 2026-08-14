@@ -9,7 +9,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -19,6 +19,7 @@ import {
   operatorProfilePoolTest,
   publishOperatorProfileSeed,
 } from "../operator-profile-pool.js";
+import { profilePathIdentity } from "../profile.js";
 
 const roots: string[] = [];
 const verifiedLoginProof = { loginStatus: "completed", closeState: "closed" } as const;
@@ -165,6 +166,62 @@ describe("operator profile pool migration stage", () => {
       acquireOperatorProfile("session-b", { rootDir: root, sourceProfileDir: source }),
     ).rejects.toThrow("capacity reached");
     await first.destroy();
+  });
+
+  it("binds a canonical worker identity through a symlinked pool root", async () => {
+    const { root, source } = fixture();
+    mkdirSync(root);
+    const alias = `${root}-alias`;
+    symlinkSync(root, alias, "dir");
+    await publishOperatorProfileSeed(source, { rootDir: alias, proof: verifiedLoginProof });
+    const lease = await acquireOperatorProfile("symlinked-pool", {
+      rootDir: alias,
+      sourceProfileDir: source,
+    });
+    expect(() =>
+      lease.bindWorker({
+        host: hostname(),
+        pid: process.pid,
+        start_time: "test-birth",
+        user_data_dir: profilePathIdentity(lease.profileDir),
+      }),
+    ).not.toThrow();
+    await lease.destroy();
+  });
+
+  it("retains destroy-required disposition until worker closure is proven", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const lease = await acquireOperatorProfile("payment-profile", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    lease.bindWorker({
+      host: hostname(),
+      pid: process.pid,
+      start_time: "test-birth",
+      user_data_dir: profilePathIdentity(lease.profileDir),
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    await lease.retain(true);
+    const tombstone = readdirSync(p.tombstones).find((entry) =>
+      entry.startsWith("destroy-required-"),
+    );
+    expect(tombstone).toBeDefined();
+    const descriptor = JSON.parse(
+      readFileSync(join(p.tombstones, tombstone!, "claim", "lease.json"), "utf8"),
+    ) as { disposition?: string };
+    expect(descriptor.disposition).toBe("destroy_required");
+
+    const signalWorker = vi.fn(() => true);
+    operatorProfilePoolTest.scavengeDestroyRequired(p, () => "matching", signalWorker);
+    expect(signalWorker).toHaveBeenCalledOnce();
+    expect(existsSync(lease.profileDir)).toBe(true);
+    expect(existsSync(join(p.tombstones, tombstone!))).toBe(true);
+
+    operatorProfilePoolTest.scavengeDestroyRequired(p, () => "stale", signalWorker);
+    expect(existsSync(lease.profileDir)).toBe(false);
+    expect(existsSync(join(p.tombstones, tombstone!))).toBe(false);
   });
 
   it("atomically returns one closed profile warm and reclaims that exact profile", async () => {

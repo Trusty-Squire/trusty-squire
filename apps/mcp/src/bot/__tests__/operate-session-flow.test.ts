@@ -64,6 +64,7 @@ const h = vi.hoisted(() => ({
   leaseReturnCalls: 0,
   leaseDestroyCalls: 0,
   leaseRetainCalls: 0,
+  leaseRetainDestroyRequired: [] as boolean[],
   currentUrl: "",
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
@@ -630,10 +631,11 @@ vi.mock("../operator-profile-pool.js", () => ({
         finished = true;
         h.leaseDestroyCalls += 1;
       },
-      retain: async () => {
+      retain: async (destroyRequired = false) => {
         if (finished) return;
         finished = true;
         h.leaseRetainCalls += 1;
+        h.leaseRetainDestroyRequired.push(destroyRequired);
       },
     };
   },
@@ -803,6 +805,7 @@ beforeEach(() => {
   h.leaseReturnCalls = 0;
   h.leaseDestroyCalls = 0;
   h.leaseRetainCalls = 0;
+  h.leaseRetainDestroyRequired = [];
   h.currentUrl = "";
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
@@ -3499,6 +3502,17 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
     expect(h.leaseDestroyCalls).toBe(1);
     await finishProvisionSession(second.session_id);
+  });
+
+  it("durably marks a sealed-payment profile when closure is unproven", async () => {
+    h.closeState = "unknown";
+    const session = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    retainActivePaymentFieldSeal();
+    await finishProvisionSession(session.session_id);
+
+    expect(h.leaseReturnCalls).toBe(0);
+    expect(h.leaseDestroyCalls).toBe(0);
+    expect(h.leaseRetainDestroyRequired).toEqual([true]);
   });
 
   it("uses the claimed worker's live email instead of seed-derived profile metadata", async () => {

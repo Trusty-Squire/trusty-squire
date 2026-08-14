@@ -80,6 +80,7 @@ interface ProfileLeaseDescriptor {
   returned_at?: number;
   reuse_count: number;
   worker?: OperatorWorkerIdentity;
+  disposition?: "destroy_required";
 }
 
 interface PoolPaths {
@@ -502,7 +503,8 @@ function readLease(claimDir: string): ProfileLeaseDescriptor | null {
     !/^[0-9a-f-]{36}$/.test(lease.profile_id) ||
     typeof lease.seed_generation !== "string" ||
     typeof lease.created_at !== "number" ||
-    typeof lease.reuse_count !== "number"
+    typeof lease.reuse_count !== "number" ||
+    (lease.disposition !== undefined && lease.disposition !== "destroy_required")
   ) {
     return null;
   }
@@ -569,9 +571,32 @@ function reapQuarantinedActive(p: PoolPaths, tombstone: string): void {
   if (workerState === "unknown") return;
   if (workerState === "matching") {
     if (!signalProfileProcess(worker, dir, "SIGKILL")) return;
+    return;
   }
   removeProfile(p, lease);
   rmSync(tombstone, { recursive: true, force: true });
+}
+
+function scavengeDestroyRequired(
+  p: PoolPaths,
+  workerState: typeof profileProcessIdentityState = profileProcessIdentityState,
+  signalWorker: typeof signalProfileProcess = signalProfileProcess,
+): void {
+  for (const entry of readdirSync(p.tombstones)) {
+    if (!entry.startsWith("destroy-required-")) continue;
+    const tombstone = join(p.tombstones, entry);
+    const lease = readLease(join(tombstone, "claim"));
+    if (lease?.disposition !== "destroy_required" || lease.worker === undefined) continue;
+    const dir = profileDir(p, lease.profile_id);
+    const state = workerState(lease.worker, dir);
+    if (state === "unknown") continue;
+    if (state === "matching") {
+      signalWorker(lease.worker, dir, "SIGKILL");
+      continue;
+    }
+    removeProfile(p, lease);
+    rmSync(tombstone, { recursive: true, force: true });
+  }
 }
 
 function scavengeActiveSlots(p: PoolPaths, now: number): void {
@@ -632,7 +657,10 @@ export class OperatorProfileLease {
 
   bindWorker(worker: OperatorWorkerIdentity): void {
     if (this.finished) throw new Error("operator profile lease is already released");
-    if (worker.host !== hostname() || resolve(worker.user_data_dir) !== resolve(this.profileDir)) {
+    if (
+      worker.host !== hostname() ||
+      profilePathIdentity(worker.user_data_dir) !== profilePathIdentity(this.profileDir)
+    ) {
       throw new Error("operator worker identity does not match its leased profile");
     }
     this.descriptor = { ...this.descriptor, worker };
@@ -641,6 +669,11 @@ export class OperatorProfileLease {
 
   async returnWarm(closeState: ProfileCloseState): Promise<void> {
     if (this.finished) return;
+    if (this.descriptor.disposition === "destroy_required") {
+      if (closeState === "closed") await this.destroy();
+      else await this.retain(true);
+      return;
+    }
     if (closeState !== "closed") {
       await this.retain();
       return;
@@ -678,9 +711,18 @@ export class OperatorProfileLease {
     this.finished = true;
   }
 
-  async retain(): Promise<void> {
+  async retain(destroyRequired = false): Promise<void> {
     if (this.finished) return;
-    quarantineOwnedActiveSlot(this.p, this.slotDir, this.ownerToken, "unverified-close");
+    if (destroyRequired || this.descriptor.disposition === "destroy_required") {
+      this.descriptor = { ...this.descriptor, disposition: "destroy_required" };
+      writePrivateJson(join(this.claimDir, "lease.json"), this.descriptor);
+    }
+    quarantineOwnedActiveSlot(
+      this.p,
+      this.slotDir,
+      this.ownerToken,
+      this.descriptor.disposition === "destroy_required" ? "destroy-required" : "unverified-close",
+    );
     this.finished = true;
   }
 
@@ -717,6 +759,7 @@ export async function acquireOperatorProfile(
   const p = paths(poolRootForSource(sourceProfileDir, opts.rootDir));
   const now = opts.now ?? Date.now;
   initializePool(p);
+  scavengeDestroyRequired(p);
   scavengeActiveSlots(p, now());
 
   let slotDir: string | null = null;
@@ -834,5 +877,6 @@ export const operatorProfilePoolTest = {
   poolRootForSource,
   currentGeneration,
   withSeedLock,
+  scavengeDestroyRequired,
   resetDefaultPool: (): void => rmSync(defaultPoolRoot(), { recursive: true, force: true }),
 };

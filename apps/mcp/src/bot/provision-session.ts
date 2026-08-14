@@ -677,7 +677,7 @@ async function closeLeasedBrowser(
 ): Promise<void> {
   const closeState = await browser.close().catch(() => "unknown" as const);
   if (closeState !== "closed") {
-    await lease.retain();
+    await lease.retain(!reusable);
     return;
   }
   if (reusable) await lease.returnWarm(closeState);

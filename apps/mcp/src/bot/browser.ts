@@ -1681,6 +1681,63 @@ function registerSelfManagedChrome(
   return identity;
 }
 
+async function waitForTrackedProfileChildIdentity(
+  child: ChildProcess,
+  profileDir: string,
+  readIdentity: (pid: number, profileDir: string) => ProfileProcessIdentity | null,
+): Promise<ProfileProcessIdentity | null> {
+  while (childProcessIsRunning(child)) {
+    const identity = child.pid === undefined ? null : readIdentity(child.pid, profileDir);
+    if (identity !== null) {
+      selfManagedChromes.set(identity.pid, identity);
+      return identity;
+    }
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, 25);
+      timer.unref();
+    });
+  }
+  return null;
+}
+
+export async function terminateTrackedProfileChild(
+  child: ChildProcess,
+  profileDir: string,
+  options: {
+    identity?: ProfileProcessIdentity | null;
+    readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
+    terminate?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
+  } = {},
+): Promise<ProfileProcessIdentity | null> {
+  const readIdentity = options.readIdentity ?? profileProcessIdentity;
+  const terminate =
+    options.terminate ??
+    ((ownedIdentity: ProfileProcessIdentity, ownedProfileDir: string): boolean => {
+      const signalled = signalProfileProcess(ownedIdentity, ownedProfileDir, "SIGKILL");
+      reapProfileHolderIfOwned(ownedProfileDir, ownedIdentity);
+      return signalled;
+    });
+  let identity = options.identity ?? null;
+  while (childProcessIsRunning(child)) {
+    identity ??= await waitForTrackedProfileChildIdentity(child, profileDir, readIdentity);
+    if (identity === null) break;
+    selfManagedChromes.set(identity.pid, identity);
+    const terminated = terminate(identity, profileDir);
+    if (!terminated) {
+      identity = null;
+      continue;
+    }
+    while (childProcessIsRunning(child)) {
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, 25);
+        timer.unref();
+      });
+    }
+  }
+  if (child.pid !== undefined) selfManagedChromes.delete(child.pid);
+  return identity;
+}
+
 // Stale verifier/operator browsers are the expensive leak mode: if the MCP process dies
 // mid-verify, self-launched Chrome survives as PPID=1 with a
 // ~/.trusty-squire/profiles/verify-* or ~/.trusty-squire/chrome-profile
@@ -1898,15 +1955,19 @@ export async function launchSelfManagedLoginContext(params: {
       });
       try {
         const endpoint = await waitForDevtools(port, 30_000, spawned);
-        childIdentity ??=
-          spawned.pid === undefined ? null : profileProcessIdentity(spawned.pid, params.profileDir);
-        if (childIdentity !== null) selfManagedChromes.set(childIdentity.pid, childIdentity);
+        childIdentity ??= await waitForTrackedProfileChildIdentity(
+          spawned,
+          params.profileDir,
+          profileProcessIdentity,
+        );
+        if (childIdentity === null) {
+          throw new Error("self-launched login Chrome exited before identity was proven");
+        }
         return endpoint;
       } catch (err) {
-        if (childIdentity !== null) {
-          signalProfileProcess(childIdentity, params.profileDir, "SIGKILL");
-        }
-        reapProfileHolderIfOwned(params.profileDir, childIdentity);
+        childIdentity = await terminateTrackedProfileChild(spawned, params.profileDir, {
+          identity: childIdentity,
+        });
         const detail = chromeStderr.trim();
         const collision = profileCollisionFromStderr(detail);
         if (collision !== null) throw collision;
@@ -2369,20 +2430,22 @@ export class BrowserController {
         }
         try {
           const endpoint = await waitForDevtools(port, 30_000);
-          this.childChromeIdentity ??=
-            child.pid === undefined ? null : profileProcessIdentity(child.pid, this.profileDir);
-          if (this.childChromeIdentity !== null) {
-            selfManagedChromes.set(this.childChromeIdentity.pid, this.childChromeIdentity);
+          this.childChromeIdentity ??= await waitForTrackedProfileChildIdentity(
+            child,
+            this.profileDir,
+            profileProcessIdentity,
+          );
+          if (this.childChromeIdentity === null) {
+            throw new Error("self-launched Chrome exited before identity was proven");
           }
           return endpoint;
         } catch (err) {
           const alive =
             this.childChromeIdentity !== null &&
             profileProcessMatches(this.childChromeIdentity, this.profileDir);
-          if (this.childChromeIdentity !== null) {
-            signalProfileProcess(this.childChromeIdentity, this.profileDir, "SIGKILL");
-          }
-          reapProfileHolderIfOwned(this.profileDir, this.childChromeIdentity);
+          this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
+            identity: this.childChromeIdentity,
+          });
           this.childChrome = null;
           this.childChromeIdentity = null;
           const detail = chromeStderr.trim();
@@ -2408,41 +2471,11 @@ export class BrowserController {
     return ctx;
   }
 
-  private async cancelSpawnedSelfManagedChrome(
-    child: ChildProcess,
-    readIdentity: (
-      pid: number,
-      profileDir: string,
-    ) => ProfileProcessIdentity | null = profileProcessIdentity,
-    terminate: (identity: ProfileProcessIdentity, profileDir: string) => void = (
-      identity,
-      profileDir,
-    ) => {
-      signalProfileProcess(identity, profileDir, "SIGKILL");
-      reapProfileHolderIfOwned(profileDir, identity);
-    },
-  ): Promise<void> {
-    while (childProcessIsRunning(child)) {
-      const identity = child.pid === undefined ? null : readIdentity(child.pid, this.profileDir);
-      if (identity !== null) {
-        this.childChromeIdentity = identity;
-        selfManagedChromes.set(identity.pid, identity);
-        terminate(identity, this.profileDir);
-        while (childProcessIsRunning(child)) {
-          await new Promise<void>((resolveWait) => {
-            const timer = setTimeout(resolveWait, 25);
-            timer.unref();
-          });
-        }
-        break;
-      }
-      await new Promise<void>((resolveWait) => {
-        const timer = setTimeout(resolveWait, 25);
-        timer.unref();
-      });
-    }
+  private async cancelSpawnedSelfManagedChrome(child: ChildProcess): Promise<void> {
+    this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
+      identity: this.childChromeIdentity,
+    });
     if (this.childChrome === child) this.childChrome = null;
-    if (child.pid !== undefined) selfManagedChromes.delete(child.pid);
     this.childChromeIdentity = null;
   }
 

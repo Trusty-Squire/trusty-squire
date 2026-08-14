@@ -5,7 +5,9 @@
 //  #3 — the confirm browser / headless noVNC tunnel must stay open until
 //       explicit Finish during normal onboarding.
 
-import { readFileSync } from "node:fs";
+import { lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
@@ -13,7 +15,10 @@ import {
   claimHeartbeatMessage,
   decideProvisioned,
   shouldCompleteInstallClaim,
+  withConnectProfileGuard,
 } from "../install/cli.js";
+import { clearBrowserProfile } from "../bot/login-state.js";
+import { withProfileOperationGuard } from "../bot/profile.js";
 import type { SessionData } from "../session.js";
 
 function fakeFetch(status: number): typeof fetch {
@@ -103,17 +108,22 @@ describe("decideProvisioned (fast-path gate: write config without a re-claim)", 
 });
 
 describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
-  it("holds the fail-fast profile guard across every connect path", () => {
-    const cliSource = readFileSync(
-      fileURLToPath(new URL("../install/cli.ts", import.meta.url)),
-      "utf8",
-    );
-    expect(cliSource).toMatch(
-      /async function connect[\s\S]{0,250}withProfileOperationGuard\(CHROME_PROFILE_DIR, \(\) => connectWithProfileGuard\(args\)\)/,
-    );
-    expect(cliSource).toMatch(
-      /err instanceof ProfileBusyError[\s\S]{0,100}ui\.fail\(PROFILE_BUSY_MESSAGE\)[\s\S]{0,100}process\.exit\(1\)/,
-    );
+  it("keeps one canonical guard while a symlinked profile is reset", async () => {
+    const base = mkdtempSync(join(tmpdir(), "ts-connect-profile-"));
+    const target = join(base, "profile");
+    const alias = join(base, "profile-alias");
+    mkdirSync(target);
+    symlinkSync(target, alias, "dir");
+    try {
+      await withConnectProfileGuard(alias, async (canonicalProfileDir) => {
+        expect(canonicalProfileDir).toBe(target);
+        clearBrowserProfile(canonicalProfileDir);
+        await withProfileOperationGuard(canonicalProfileDir, async () => undefined);
+      });
+      expect(lstatSync(alias).isSymbolicLink()).toBe(true);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
   });
 
   it("completes force-relogin once the provider session has seeded", () => {
