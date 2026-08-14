@@ -397,8 +397,9 @@ const CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS = new Set([
 ]);
 
 function isSubstantiveCheckoutIdentity(identity: string): boolean {
-  const normalizedIdentity = identity
-    .normalize("NFKC")
+  const rawIdentity = identity.normalize("NFKC").trim();
+  if (/(?:x{2,}|[*•●◦▪■□×])/iu.test(rawIdentity)) return false;
+  const normalizedIdentity = rawIdentity
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "");

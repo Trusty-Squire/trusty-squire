@@ -1076,12 +1076,14 @@ describe("checkout payment parsing", () => {
           'history.pushState({}, "", "/thank-you/loading")',
           'history.pushState({}, "", "/receipt/0")',
           'history.pushState({}, "", "/receipt/payment-pending")',
+          'history.pushState({}, "", "/receipt/****1234")',
           'history.pushState({}, "", "/orders/pending-123/confirmation")',
           'history.pushState({}, "", "/blank/receipt/123")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number:</p>")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt # 0</p>")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: processing</p>")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: xxxx1234</p>")',
+          'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: ORD-XXXX1234</p>")',
         ]) {
           const now = vi
             .spyOn(Date, "now")
