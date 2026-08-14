@@ -2079,6 +2079,8 @@ export class BrowserController {
   private launchedContext = false;
   private launchedProfileHolderIdentity: ProfileProcessIdentity | null = null;
   private profileOperationLease: ProfileOperationLease | null = null;
+  private startPromise: Promise<void> | null = null;
+  private closePromise: Promise<ProfileCloseState> | null = null;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
@@ -2458,6 +2460,12 @@ export class BrowserController {
   }
 
   async start(): Promise<void> {
+    if (this.closePromise !== null) throw new Error("BrowserController is already closing");
+    this.startPromise ??= this.startOnce();
+    await this.startPromise;
+  }
+
+  private async startOnce(): Promise<void> {
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
     const lease = remoteMode ? null : await acquireFreeProfileOperationGuard(this.profileDir);
     this.profileOperationLease = lease;
@@ -11802,6 +11810,12 @@ export class BrowserController {
   }
 
   async close(): Promise<ProfileCloseState> {
+    this.closePromise ??= this.closeAfterStart();
+    return await this.closePromise;
+  }
+
+  private async closeAfterStart(): Promise<ProfileCloseState> {
+    await this.startPromise?.catch(() => undefined);
     try {
       return await this.closeWithProfileGuard();
     } finally {

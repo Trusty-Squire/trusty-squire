@@ -71,7 +71,7 @@ import { randomBytes } from "node:crypto";
 import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
-  assertOperatorProfileRuntimeSupported,
+  canPublishOperatorProfileSeed,
   OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
   publishOperatorProfileSeed,
 } from "./operator-profile-pool.js";
@@ -978,16 +978,12 @@ const LOGIN_STATUS_CHECK_STALLED_ERROR =
 export async function runInBotChrome(
   opts: RunInBotChromeOpts,
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
-  assertOperatorProfileRuntimeSupported();
   return await withProfileOperationGuard(opts.profileDir, async () => {
     const result = await runInBotChromeWithProfileGuard(opts);
-    // The browser is closed by runInBotChromeWithProfileGuard before it
-    // returns, while this canonical-profile operation guard is still held.
-    // Publish a fully-built immutable seed under the seed lock. The publisher
-    // namespaces every source profile, including environment and CLI overrides.
-    if (result.status !== "timeout" && result.closeState === "closed") {
+    const proof = { loginStatus: result.status, closeState: result.closeState };
+    if (canPublishOperatorProfileSeed(proof)) {
       await opts.beforeSeedPublish?.();
-      await publishOperatorProfileSeed(opts.profileDir, { closeState: result.closeState });
+      await publishOperatorProfileSeed(opts.profileDir, { proof });
     }
     return { status: result.status };
   });

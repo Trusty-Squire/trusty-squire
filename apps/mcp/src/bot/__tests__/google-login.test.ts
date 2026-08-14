@@ -12,7 +12,7 @@ import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
 import { shortenVncUrl } from "../../api-client.js";
-import { childProcessIsRunning, withChromeStartupLock } from "../browser.js";
+import { BrowserController, childProcessIsRunning, withChromeStartupLock } from "../browser.js";
 import {
   acquireProfileOperationGuard,
   launchWithProfileGate,
@@ -38,7 +38,6 @@ import {
   teardownHeadlessRig,
   teardownLoginBrowser,
   ensureOAuthSession,
-  runInBotChrome,
   type HeadlessRig,
 } from "../google-login.js";
 
@@ -217,6 +216,40 @@ describe("headless login VNC lifecycle", () => {
 });
 
 describe("login browser lifecycle guards", () => {
+  it("settles an in-flight start once and caches the verified close result", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-close-"));
+    let releaseStart: (() => void) | undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const controller = new BrowserController({ profileDir });
+    const internals = controller as unknown as {
+      startWithProfileGuard: () => Promise<void>;
+      closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+    };
+    const startImpl = vi.fn(() => startGate);
+    const closeImpl = vi.fn(async () => "closed" as const);
+    internals.startWithProfileGuard = startImpl;
+    internals.closeWithProfileGuard = closeImpl;
+
+    try {
+      const starting = controller.start();
+      await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
+      const firstClose = controller.close();
+      const secondClose = controller.close();
+      await Promise.resolve();
+      expect(closeImpl).not.toHaveBeenCalled();
+
+      releaseStart?.();
+      await starting;
+      await expect(Promise.all([firstClose, secondClose])).resolves.toEqual(["closed", "closed"]);
+      await expect(controller.close()).resolves.toBe("closed");
+      expect(closeImpl).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
   it("treats signal-terminated Chrome as closed", () => {
     const child = fakeProcess("chrome");
     expect(childProcessIsRunning(child)).toBe(true);
@@ -268,22 +301,6 @@ describe("headless login profile contention", () => {
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
-  });
-});
-
-describe("login seed publication platform gate", () => {
-  it("refuses login before Chrome opens when process closure cannot be proven", async () => {
-    vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
-
-    await expect(
-      runInBotChrome({
-        profileDir: "/unused/nonlinux-profile",
-        url: "https://accounts.google.com/",
-        deadline: Date.now() + 1_000,
-        bannerLabel: "unused",
-        pollUntilDone: async () => false,
-      }),
-    ).rejects.toThrow("operator profile seed publication requires Linux process identity");
   });
 });
 

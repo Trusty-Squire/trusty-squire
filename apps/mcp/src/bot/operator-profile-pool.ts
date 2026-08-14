@@ -27,10 +27,10 @@ import {
   signalProfileProcess,
   type ProfileCloseState,
   type ProfileProcessIdentity,
-  withProfileOperationGuard,
 } from "./profile.js";
 
 const ACTIVE_SLOT_COUNT = 1;
+const UNPUBLISHED_SEED_GENERATION = "unpublished";
 const STARTUP_GRACE_MS = 30_000;
 const WARM_IDLE_TTL_MS = 6 * 60 * 60 * 1_000;
 const WARM_MAX_REUSES = 50;
@@ -397,41 +397,35 @@ export function assertOperatorProfileRuntimeSupported(
   platform: NodeJS.Platform = process.platform,
 ): void {
   if (platform !== "linux") {
-    throw new Error("operator profile seed publication requires Linux process identity");
+    throw new Error("operator profile leases require Linux process identity");
   }
+}
+
+export interface OperatorSeedPublicationProof {
+  loginStatus: "completed" | "preflight_satisfied" | "timeout";
+  closeState: ProfileCloseState;
+}
+
+export function canPublishOperatorProfileSeed(
+  proof: OperatorSeedPublicationProof,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return platform === "linux" && proof.loginStatus === "completed" && proof.closeState === "closed";
 }
 
 export async function publishOperatorProfileSeed(
   sourceProfileDir: string = CHROME_PROFILE_DIR,
-  opts: Pick<OperatorProfilePoolOptions, "rootDir"> & { closeState: ProfileCloseState },
+  opts: Pick<OperatorProfilePoolOptions, "rootDir"> & { proof: OperatorSeedPublicationProof },
 ): Promise<string> {
-  if (opts.closeState !== "closed") {
-    throw new Error("operator profile seed publication requires verified Chrome closure");
+  if (!canPublishOperatorProfileSeed(opts.proof)) {
+    throw new Error(
+      "operator profile seed publication requires a completed Linux login and verified Chrome closure",
+    );
   }
-  assertOperatorProfileRuntimeSupported();
   const resolvedSource = resolve(sourceProfileDir);
   const p = paths(poolRootForSource(resolvedSource, opts.rootDir));
   initializePool(p);
   return await withSeedLock(p, () => publishSeedLocked(p, resolvedSource));
-}
-
-async function ensureSeed(p: PoolPaths, sourceProfileDir: string): Promise<string> {
-  const resolveOrPublish = (): string => {
-    const existing = currentGeneration(p);
-    if (existing !== null) return existing;
-    return publishSeedLocked(p, sourceProfileDir);
-  };
-  const existing = await withSeedLock(p, () => currentGeneration(p));
-  if (existing !== null) return existing;
-  // Login publication already holds the canonical profile guard before taking
-  // the seed lock. Initial publication uses the same order, then rechecks the
-  // generation under the lock so two cold starters cannot both publish.
-  // Vitest workers use isolated roots and mocked browsers, so the canonical
-  // profile guard would only serialize unrelated fixtures.
-  if (process.env.VITEST === "true") return await withSeedLock(p, resolveOrPublish);
-  return await withProfileOperationGuard(sourceProfileDir, async () =>
-    withSeedLock(p, resolveOrPublish),
-  );
 }
 
 function profileDir(p: PoolPaths, profileId: string): string {
@@ -489,10 +483,7 @@ function quarantineOwnedActiveSlot(
 
 function reapQuarantinedActive(p: PoolPaths, tombstone: string): void {
   const owner = readJson<ActiveOwner>(join(tombstone, "owner.json"));
-  if (
-    owner !== null &&
-    (owner.host !== hostname() || processState(owner) !== "stale")
-  ) {
+  if (owner !== null && (owner.host !== hostname() || processState(owner) !== "stale")) {
     // A transient identity read failed before quarantine. Restore the lease if
     // its public slot is still free; never inspect or signal the worker.
     const publicSlot = join(p.active, "slot-0");
@@ -665,7 +656,6 @@ export async function acquireOperatorProfile(
   const p = paths(poolRootForSource(sourceProfileDir, opts.rootDir));
   const now = opts.now ?? Date.now;
   initializePool(p);
-  await ensureSeed(p, sourceProfileDir);
   scavengeActiveSlots(p, now());
 
   let slotDir: string | null = null;
@@ -709,8 +699,7 @@ export async function acquireOperatorProfile(
   try {
     const acquiredDescriptor = await withSeedLock(p, () => {
       const generation = currentGeneration(p);
-      if (generation === null) throw new Error("operator login seed is unavailable");
-      scavengeWarm(p, generation, now());
+      scavengeWarm(p, generation ?? UNPUBLISHED_SEED_GENERATION, now());
       const warm = join(p.warm, "slot-0");
       let descriptor: ProfileLeaseDescriptor | null = null;
       try {
@@ -730,18 +719,23 @@ export async function acquireOperatorProfile(
       allocatedProfileId = profileId;
       const profileRoot = join(p.profiles, profileId);
       ensurePrivateDir(profileRoot);
-      cpSync(join(p.generations, generation, "user-data"), join(profileRoot, "user-data"), {
-        recursive: true,
-        force: false,
-        errorOnExist: true,
-      });
-      stripTransientProfileState(join(profileRoot, "user-data"));
+      const userDataDir = join(profileRoot, "user-data");
+      if (generation === null) {
+        ensurePrivateDir(userDataDir);
+      } else {
+        cpSync(join(p.generations, generation, "user-data"), userDataDir, {
+          recursive: true,
+          force: false,
+          errorOnExist: true,
+        });
+        stripTransientProfileState(userDataDir);
+      }
       ensurePrivateDir(claimDir);
       const coldDescriptor: ProfileLeaseDescriptor = {
         version: 1,
         lease_token: randomUUID(),
         profile_id: profileId,
-        seed_generation: generation,
+        seed_generation: generation ?? UNPUBLISHED_SEED_GENERATION,
         created_at: now(),
         reuse_count: 0,
       };

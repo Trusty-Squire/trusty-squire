@@ -13,11 +13,13 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   acquireOperatorProfile,
+  canPublishOperatorProfileSeed,
   operatorProfilePoolTest,
   publishOperatorProfileSeed,
 } from "../operator-profile-pool.js";
 
 const roots: string[] = [];
+const verifiedLoginProof = { loginStatus: "completed", closeState: "closed" } as const;
 
 function writeCookies(
   source: string,
@@ -79,7 +81,10 @@ afterEach(() => {
 describe("operator profile pool migration stage", () => {
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
     const { root, source } = fixture();
-    const first = await publishOperatorProfileSeed(source, { rootDir: root, closeState: "closed" });
+    const first = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
     const p = operatorProfilePoolTest.paths(root);
     const firstSeed = join(p.generations, first, "user-data");
     expect(cookieValues(firstSeed)).toEqual(["identity-cookie"]);
@@ -97,10 +102,11 @@ describe("operator profile pool migration stage", () => {
       readFileSync(join(p.generations, first, "user-data", "Default", "Cache", "discard")),
     ).toThrow();
 
-    writeCookies(source, [
-      { host: ".google.com", name: "SID", value: "new-identity-cookie" },
-    ]);
-    const second = await publishOperatorProfileSeed(source, { rootDir: root, closeState: "closed" });
+    writeCookies(source, [{ host: ".google.com", name: "SID", value: "new-identity-cookie" }]);
+    const second = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
     expect(second).not.toBe(first);
     expect(readdirSync(p.generations)).toEqual([second]);
     expect(operatorProfilePoolTest.currentGeneration(p)).toBe(second);
@@ -108,7 +114,7 @@ describe("operator profile pool migration stage", () => {
 
   it("admits one active lease and never launches from the login-authoring profile", async () => {
     const { root, source } = fixture();
-    await publishOperatorProfileSeed(source, { rootDir: root, closeState: "closed" });
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
     const first = await acquireOperatorProfile("session-a", {
       rootDir: root,
       sourceProfileDir: source,
@@ -124,7 +130,7 @@ describe("operator profile pool migration stage", () => {
 
   it("atomically returns one closed profile warm and reclaims that exact profile", async () => {
     const { root, source } = fixture();
-    await publishOperatorProfileSeed(source, { rootDir: root, closeState: "closed" });
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
     const first = await acquireOperatorProfile("session-a", {
       rootDir: root,
       sourceProfileDir: source,
@@ -143,7 +149,7 @@ describe("operator profile pool migration stage", () => {
 
   it("invalidates a warm profile when login publishes a new seed generation", async () => {
     const { root, source } = fixture();
-    await publishOperatorProfileSeed(source, { rootDir: root, closeState: "closed" });
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
     const first = await acquireOperatorProfile("session-a", {
       rootDir: root,
       sourceProfileDir: source,
@@ -151,7 +157,7 @@ describe("operator profile pool migration stage", () => {
     const staleProfile = first.profileDir;
     await first.returnWarm("closed");
     writeCookies(source, [{ host: ".google.com", name: "SID", value: "replacement" }]);
-    await publishOperatorProfileSeed(source, { rootDir: root, closeState: "closed" });
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
 
     const second = await acquireOperatorProfile("session-b", {
       rootDir: root,
@@ -169,8 +175,8 @@ describe("operator profile pool migration stage", () => {
       join(secondFixture.source, "provider-emails.json"),
       JSON.stringify({ google: "second@example.com" }),
     );
-    await publishOperatorProfileSeed(firstFixture.source, { closeState: "closed" });
-    await publishOperatorProfileSeed(secondFixture.source, { closeState: "closed" });
+    await publishOperatorProfileSeed(firstFixture.source, { proof: verifiedLoginProof });
+    await publishOperatorProfileSeed(secondFixture.source, { proof: verifiedLoginProof });
 
     const first = await acquireOperatorProfile("source-a", {
       sourceProfileDir: firstFixture.source,
@@ -192,7 +198,7 @@ describe("operator profile pool migration stage", () => {
 
   it("retains an unbound dead lease while atomically freeing its active slot", async () => {
     const { root, source } = fixture();
-    await publishOperatorProfileSeed(source, { rootDir: root, closeState: "closed" });
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
     const abandoned = await acquireOperatorProfile("session-dead", {
       rootDir: root,
       sourceProfileDir: source,
@@ -222,7 +228,7 @@ describe("operator profile pool migration stage", () => {
 
   it("retains an active owner when its birth identity is unknown", async () => {
     const { root, source } = fixture();
-    await publishOperatorProfileSeed(source, { rootDir: root, closeState: "closed" });
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
     const active = await acquireOperatorProfile("session-unknown", {
       rootDir: root,
       sourceProfileDir: source,
@@ -247,26 +253,44 @@ describe("operator profile pool migration stage", () => {
     expect(existsSync(active.profileDir)).toBe(true);
   });
 
+  it("acquires an empty isolated profile without publishing canonical state", async () => {
+    const { root, source } = fixture();
+    const lease = await acquireOperatorProfile("session-cold", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+
+    expect(operatorProfilePoolTest.currentGeneration(p)).toBeNull();
+    expect(lease.seedGeneration).toBe("unpublished");
+    expect(readdirSync(lease.profileDir)).toEqual([]);
+    expect(existsSync(join(lease.profileDir, "provider-emails.json"))).toBe(false);
+    await lease.returnWarm("closed");
+    expect(existsSync(lease.profileDir)).toBe(false);
+  });
+
   it("refuses seed publication where process closure cannot be proven", async () => {
     const { root, source } = fixture();
     vi.spyOn(process, "platform", "get").mockReturnValue("darwin");
 
+    expect(canPublishOperatorProfileSeed(verifiedLoginProof, "darwin")).toBe(false);
     await expect(
-      publishOperatorProfileSeed(source, { rootDir: root, closeState: "closed" }),
-    ).rejects.toThrow(
-      "operator profile seed publication requires Linux process identity",
-    );
+      publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof }),
+    ).rejects.toThrow("requires a completed Linux login and verified Chrome closure");
     expect(existsSync(join(root, "seed"))).toBe(false);
   });
 
-  it.each(["force_closed_unproven", "unknown"] as const)(
-    "refuses seed publication after %s teardown",
-    async (closeState) => {
-      const { root, source } = fixture();
-      await expect(
-        publishOperatorProfileSeed(source, { rootDir: root, closeState }),
-      ).rejects.toThrow("operator profile seed publication requires verified Chrome closure");
-      expect(existsSync(join(root, "seed"))).toBe(false);
-    },
-  );
+  it.each([
+    { loginStatus: "completed", closeState: "force_closed_unproven" },
+    { loginStatus: "completed", closeState: "unknown" },
+    { loginStatus: "preflight_satisfied", closeState: "closed" },
+    { loginStatus: "timeout", closeState: "closed" },
+  ] as const)("refuses seed publication without completed-login closure proof", async (proof) => {
+    const { root, source } = fixture();
+    expect(canPublishOperatorProfileSeed(proof, "linux")).toBe(false);
+    await expect(publishOperatorProfileSeed(source, { rootDir: root, proof })).rejects.toThrow(
+      "requires a completed Linux login and verified Chrome closure",
+    );
+    expect(existsSync(join(root, "seed"))).toBe(false);
+  });
 });
