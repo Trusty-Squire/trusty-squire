@@ -1,7 +1,7 @@
 /* ------------------------------------------------------------------ */
 /* Trusty Squire — design system (see DESIGN.md)                        */
 /* Linear-leaning polished dark: layered near-blacks, hairline borders, */
-/* one indigo accent. Geist (UI) + JetBrains Mono (machine values)      */
+/* one indigo accent. Geist (UI) + Geist Mono (machine values)         */
 /* arrive via next/font (--font-sans, --font-mono).                     */
 /* Tailwind was dropped — no utilities were in use; this file is the    */
 /* one styling model now.                                               */
