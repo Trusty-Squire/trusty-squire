@@ -1539,10 +1539,20 @@ export function resolveChannelBinary(channel: string | null): string | null {
 // it is specifically the launch flags/instrumentation Playwright injects at
 // launchPersistentContext time. Self-launching the binary (no
 // --enable-automation et al.) and attaching with connectOverCDP avoids it.
-// Default-ON; BOT_SELF_LAUNCH=0 disables local operator browser launch. Exported for tests.
+// Default-ON; opt out with BOT_SELF_LAUNCH=0 for the persistent-context path. Exported for tests.
 export function selfLaunchEnabled(): boolean {
   const v = process.env.BOT_SELF_LAUNCH;
   return v !== "0" && v !== "false" && v !== "off";
+}
+
+export async function raceCancellableLaunch<T>(
+  launch: Promise<T>,
+  cancellation: Promise<void>,
+): Promise<{ status: "launched"; value: T } | { status: "cancelled" }> {
+  return await Promise.race([
+    launch.then((value) => ({ status: "launched" as const, value })),
+    cancellation.then(() => ({ status: "cancelled" as const })),
+  ]);
 }
 
 // Find an ephemeral TCP port for Chrome's --remote-debugging-port.
@@ -2216,6 +2226,8 @@ export class BrowserController {
   private startCancellationRequested = false;
   private startLaunchCommitted = false;
   private startSettled = false;
+  private persistentFallbackCancellationUnproven = false;
+  private profilePoolReusable = true;
   private resolveStartCancellation: (() => void) | null = null;
   private readonly startCancellation = new Promise<void>((resolveCancellation) => {
     this.resolveStartCancellation = resolveCancellation;
@@ -2636,8 +2648,10 @@ export class BrowserController {
       if (this.startCancellationRequested) {
         await this.closeWithProfileGuard().catch(() => undefined);
       }
-      this.profileOperationLease = null;
-      lease?.release();
+      if (!this.persistentFallbackCancellationUnproven) {
+        this.profileOperationLease = null;
+        lease?.release();
+      }
       throw err;
     } finally {
       this.startSettled = true;
@@ -2817,55 +2831,104 @@ export class BrowserController {
     const selfLaunchBinary = selfLaunchEnabled()
       ? (resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null))
       : null;
-    if (selfLaunchBinary === null || !existsSync(selfLaunchBinary)) {
-      throw new Error("isolated operator profiles require a self-managed local Chromium binary");
-    }
+    const proxyHasAuth =
+      proxy !== null && typeof proxy.username === "string" && proxy.username.length > 0;
+    const useSelfLaunch =
+      selfLaunchBinary !== null && existsSync(selfLaunchBinary) && !proxyHasAuth;
 
     let context: BrowserContext;
     this.throwIfStartCancelled();
-    console.error(
-      `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
-    );
-    const window =
-      this.launchedMode === "xvfb"
-        ? { width: 1920, height: 1080 }
-        : { width: 1280, height: 1024 };
-    const selfEnv: NodeJS.ProcessEnv = {
-      ...(chromeEnv ?? process.env),
-      TZ: geo?.timezoneId ?? "America/New_York",
-    };
-    context = await launchWithProfileGate(
-      this.profileDir,
-      () => {
-        this.throwIfStartCancelled();
-        return this.launchSelfManagedContext({
-          binary: selfLaunchBinary,
-          headless: chromeHeadless,
-          args: launchArgs,
-          proxy,
-          env: selfEnv,
-          window,
-        });
-      },
-      { failFast: true },
-    );
-    try {
-      if (proxy?.username !== undefined) {
-        await context.setHTTPCredentials({
-          username: proxy.username,
-          password: proxy.password ?? "",
-        });
-      }
-      await context.grantPermissions(grantedPermissions);
-      if (geo?.geolocation !== undefined) {
-        await context.setGeolocation(geo.geolocation);
-      }
-    } catch (err) {
+    if (useSelfLaunch && selfLaunchBinary !== null) {
       console.error(
-        `[operator] post-connect context setup partial: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
       );
+      const window =
+        this.launchedMode === "xvfb"
+          ? { width: 1920, height: 1080 }
+          : { width: 1280, height: 1024 };
+      const selfEnv: NodeJS.ProcessEnv = {
+        ...(chromeEnv ?? process.env),
+        TZ: geo?.timezoneId ?? "America/New_York",
+      };
+      context = await launchWithProfileGate(
+        this.profileDir,
+        () => {
+          this.throwIfStartCancelled();
+          return this.launchSelfManagedContext({
+            binary: selfLaunchBinary,
+            headless: chromeHeadless,
+            args: launchArgs,
+            proxy,
+            env: selfEnv,
+            window,
+          });
+        },
+        { failFast: true },
+      );
+      try {
+        await context.grantPermissions(grantedPermissions);
+        if (geo?.geolocation !== undefined) {
+          await context.setGeolocation(geo.geolocation);
+        }
+      } catch (err) {
+        console.error(
+          `[operator] post-connect context setup partial: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    } else {
+      this.profilePoolReusable = false;
+      const persistentLaunch = launchWithProfileGate(
+        this.profileDir,
+        () =>
+          launcher.launchPersistentContext(this.profileDir, {
+            headless: chromeHeadless,
+            ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
+            ...(channel !== null ? { channel } : {}),
+            ...(proxy !== null ? { proxy } : {}),
+            args: [...launchArgs],
+            viewport: null,
+            locale: "en-US",
+            timezoneId: geo?.timezoneId ?? "America/New_York",
+            permissions: grantedPermissions,
+            ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
+          }),
+        { failFast: true },
+      );
+      const cleanupLateLaunch = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
+        const holderPid = currentProfileHolderPid(this.profileDir);
+        const identity =
+          holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
+        return await closeProfileWithProof({
+          profileDir: this.profileDir,
+          identity,
+          close: () => lateContext.close(),
+          forceClose: () => {
+            if (identity !== null) signalProfileProcess(identity, this.profileDir, "SIGKILL");
+            reapProfileHolderIfOwned(this.profileDir, identity);
+          },
+        });
+      };
+      const detachLateLaunch = (): void => {
+        void persistentLaunch
+          .then(cleanupLateLaunch)
+          .then((closeState) => {
+            if (closeState !== "closed") return;
+            const lease = this.profileOperationLease;
+            this.profileOperationLease = null;
+            lease?.release();
+          })
+          .catch(() => undefined)
+      };
+      const outcome = await raceCancellableLaunch(persistentLaunch, this.startCancellation);
+      if (outcome.status === "cancelled" || this.startCancellationRequested) {
+        this.persistentFallbackCancellationUnproven = true;
+        detachLateLaunch();
+        throw new Error("BrowserController start cancelled");
+      }
+      context = outcome.value;
+      this.commitProfileLaunch();
     }
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
@@ -11958,6 +12021,7 @@ export class BrowserController {
   // closed. about:blank replaces the task document while the persistent profile
   // (cookies, OAuth identity, local profile data) intentionally remains intact.
   async resetPageForReuse(): Promise<void> {
+    if (!this.profilePoolReusable) throw new Error("browser profile is not pool-reusable");
     const context = this.context;
     const primaryPage = this.primaryPage;
     if (!this.isConnected() || context === null || primaryPage === null || primaryPage.isClosed()) {
@@ -12011,6 +12075,10 @@ export class BrowserController {
   }
 
   private async closeCancelledStart(): Promise<ProfileCloseState> {
+    if (this.persistentFallbackCancellationUnproven) {
+      await this.closeWithProfileGuard();
+      return "unknown";
+    }
     if (!this.startLaunchCommitted) {
       await this.closeWithProfileGuard();
       const lease = this.profileOperationLease;

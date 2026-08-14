@@ -1624,12 +1624,15 @@ export async function ensureOAuthSession(opts?: {
 // "log into Google for the bot" step after install.
 export async function openInstallConfirmInBotChrome(opts: {
   confirmUrl: string;
-  // Returns true when the install ceremony is done. The login browser runs
-  // PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
+  // Returns claimed only after the install ceremony succeeds. The login browser
+  // runs PLAIN (no CDP — Google's OAuth "secure browser" check rejects a CDP
   // attach), so the predicate gets the profileDir, NOT a live context: it
   // composes the API claim with either the normal wizard's per-run loopback
   // Finish callback or forced re-login's on-disk provider-session seed.
-  pollUntilClaimed: (profileDir: string, wizardCompleted: boolean) => Promise<boolean>;
+  pollUntilClaimed: (
+    profileDir: string,
+    wizardCompleted: boolean,
+  ) => Promise<InstallClaimPollResult>;
   profileDir?: string;
   timeoutMinutes?: number;
   // G15: API base URL used to shorten the headless cloudflared
@@ -1661,7 +1664,10 @@ export async function openInstallConfirmInBotChrome(opts: {
       // stub to satisfy the (CDP-path) type.
       plainProfileLogin: true,
       pollUntilDone: () => Promise.resolve(false),
-      plainPollUntilDone: (dir) => opts.pollUntilClaimed(dir, completion?.isCompleted() === true),
+      plainPollUntilDone: async (dir) =>
+        installClaimPollCompleted(
+          await opts.pollUntilClaimed(dir, completion?.isCompleted() === true),
+        ),
       ...(opts.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
       ...(opts.heartbeatMessage !== undefined ? { heartbeatMessage: opts.heartbeatMessage } : {}),
       // The user's sign-in inside this Chrome leaves a provider session in the
@@ -1691,4 +1697,13 @@ export async function openInstallConfirmInBotChrome(opts: {
   } finally {
     await completion?.close().catch(() => undefined);
   }
+}
+
+export type InstallClaimPollResult = "pending" | "claimed" | "expired";
+
+export function installClaimPollCompleted(result: InstallClaimPollResult): boolean {
+  if (result === "expired") {
+    throw new Error("the install claim expired before sign-in completed");
+  }
+  return result === "claimed";
 }

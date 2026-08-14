@@ -52,6 +52,7 @@ import {
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
   profileHasProviderCookies,
+  type InstallClaimPollResult,
 } from "../bot/google-login.js";
 import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
@@ -1191,7 +1192,10 @@ async function runInstallClaim(
   // account claim, the SQLite cookie store proves a forced re-login landed,
   // and a per-run loopback callback carries the normal wizard's explicit
   // Finish signal.
-  const pollOnce = async (profileDir: string, wizardCompleted: boolean): Promise<boolean> => {
+  const pollOnce = async (
+    profileDir: string,
+    wizardCompleted: boolean,
+  ): Promise<InstallClaimPollResult> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
     // user finishes signing in.
@@ -1207,9 +1211,7 @@ async function runInstallClaim(
         };
         claimedThisPoll = true;
       } else if (status.status === "expired") {
-        // Bail loudly: state.value stays null and the caller
-        // reports the install never completed.
-        return true;
+        return "expired";
       }
     }
     // Tear down once the account is claimed AND the provider session has
@@ -1230,12 +1232,12 @@ async function runInstallClaim(
       wizardCompleted,
     );
     if (tearDown) {
-      return true;
+      return "claimed";
     }
     if (claimedThisPoll) {
       console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
     }
-    return false;
+    return "pending";
   };
 
   if (skipBrowser) {

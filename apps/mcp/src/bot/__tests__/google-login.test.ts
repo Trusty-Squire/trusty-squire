@@ -15,6 +15,7 @@ import {
   attachSelfManagedLoginContext,
   BrowserController,
   childProcessIsRunning,
+  raceCancellableLaunch,
   resolveAttachedProfileChildIdentity,
   terminateTrackedProfileChild,
   withChromeStartupLock,
@@ -28,6 +29,7 @@ import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
 import {
   binaryOnPath,
   installHint,
+  installClaimPollCompleted,
   classifyGoogleAuthState,
   checkLoginStatusWithin,
   detectActiveProviderSessions,
@@ -243,6 +245,22 @@ describe("headless login VNC lifecycle", () => {
 });
 
 describe("login browser lifecycle guards", () => {
+  it("cancels an opaque launch without waiting for its promise", async () => {
+    let cancel: (() => void) | undefined;
+    let finishLaunch: ((value: string) => void) | undefined;
+    const cancellation = new Promise<void>((resolve) => {
+      cancel = resolve;
+    });
+    const launch = new Promise<string>((resolve) => {
+      finishLaunch = resolve;
+    });
+
+    const result = raceCancellableLaunch(launch, cancellation);
+    cancel?.();
+    await expect(result).resolves.toEqual({ status: "cancelled" });
+    finishLaunch?.("late browser");
+  });
+
   it("cancels a wedged pre-launch stage without awaiting its settlement", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
     const controller = new BrowserController({ profileDir });
@@ -604,6 +622,12 @@ describe("bot Chrome launch consistency", () => {
 });
 
 describe("confirmed login finalization", () => {
+  it("distinguishes a claimed install from pending and expired polls", () => {
+    expect(installClaimPollCompleted("pending")).toBe(false);
+    expect(installClaimPollCompleted("claimed")).toBe(true);
+    expect(() => installClaimPollCompleted("expired")).toThrow(/expired/);
+  });
+
   it("records a confirmed login even when closure cannot publish a seed", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
     const publishSeed = vi.fn();
