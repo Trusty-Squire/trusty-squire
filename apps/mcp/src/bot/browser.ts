@@ -349,13 +349,73 @@ export class PaymentSubmitOutcomeUnknownError extends Error {
   }
 }
 
-const CHECKOUT_TERMINAL_URL_PATH_RE =
-  /\/(?:receipts?)\/[^/?#]+\/?$|\/(?:orders?)\/[^/?#]+\/(?:confirmation|confirmed|thank[_-]?you)\/?$|\/(?:order[_-]?(?:confirmation|confirmed|complete)|thank[_-]?you)\/[^/?#]+\/?$|\/checkouts?\/[^/?#]+\/thank[_-]?you\/?$/i;
+const CHECKOUT_TERMINAL_RESERVED_SEGMENTS = new Set([
+  "about_blank",
+  "blank",
+  "checkout",
+  "checkouts",
+  "complete",
+  "confirmation",
+  "confirmed",
+  "loading",
+  "lookup",
+  "new",
+  "null",
+  "order",
+  "orders",
+  "pending",
+  "preview",
+  "processing",
+  "receipt",
+  "receipts",
+  "success",
+  "thank_you",
+  "undefined",
+  "unknown",
+]);
 
 function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
   try {
     const url = new URL(rawUrl);
-    if (!CHECKOUT_TERMINAL_URL_PATH_RE.test(url.pathname)) return null;
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    const segments = url.pathname
+      .split("/")
+      .filter((segment) => segment.length > 0)
+      .map((segment) => {
+        try {
+          return decodeURIComponent(segment);
+        } catch {
+          return segment;
+        }
+      });
+    const routeSegment = (offset: number): string =>
+      (segments.at(offset) ?? "").toLowerCase().replace(/-/g, "_");
+    let identity: string | undefined;
+    if (["receipt", "receipts"].includes(routeSegment(-2))) {
+      identity = segments.at(-1);
+    } else if (
+      ["order", "orders"].includes(routeSegment(-3)) &&
+      ["confirmation", "confirmed", "thank_you"].includes(routeSegment(-1))
+    ) {
+      identity = segments.at(-2);
+    } else if (
+      ["order_confirmation", "order_confirmed", "order_complete", "thank_you"].includes(
+        routeSegment(-2),
+      )
+    ) {
+      identity = segments.at(-1);
+    } else if (
+      ["checkout", "checkouts"].includes(routeSegment(-3)) &&
+      routeSegment(-1) === "thank_you"
+    ) {
+      identity = segments.at(-2);
+    }
+    if (identity === undefined || !/[a-z0-9]/i.test(identity)) return null;
+    const normalizedIdentity = identity.toLowerCase().replace(/-/g, "_");
+    if (CHECKOUT_TERMINAL_RESERVED_SEGMENTS.has(normalizedIdentity)) return null;
+    if (segments.some((segment) => ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")))) {
+      return null;
+    }
     const path = url.pathname.replace(/\/+$/, "") || "/";
     return `${url.origin}${path}`;
   } catch {
@@ -1248,6 +1308,42 @@ function extractVisibleTopmostTextSignals({
   const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
   const canonicalize = (text: string): string =>
     text.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const visuallyTopmostAtPoint = (element: Element, x: number, y: number): boolean => {
+    const restored: Array<{
+      element: HTMLElement;
+      priority: string;
+      value: string;
+    }> = [];
+    for (const candidate of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
+      const style = getComputedStyle(candidate);
+      if (
+        style.pointerEvents !== "none" ||
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        Number.parseFloat(style.opacity) <= 0 ||
+        !Array.from(candidate.getClientRects()).some(
+          (rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
+        )
+      ) {
+        continue;
+      }
+      restored.push({
+        element: candidate,
+        priority: candidate.style.getPropertyPriority("pointer-events"),
+        value: candidate.style.getPropertyValue("pointer-events"),
+      });
+      candidate.style.setProperty("pointer-events", "auto", "important");
+    }
+    const hit = document.elementFromPoint(x, y);
+    for (const original of restored) {
+      if (original.value.length === 0) {
+        original.element.style.removeProperty("pointer-events");
+      } else {
+        original.element.style.setProperty("pointer-events", original.value, original.priority);
+      }
+    }
+    return hit === element;
+  };
   const visibleAndTopmost = (node: Text): boolean => {
     const element = node.parentElement;
     if (element === null) return false;
@@ -1275,8 +1371,7 @@ function extractVisibleTopmostTextSignals({
       if (right <= left || bottom <= top) continue;
       const x = left + (right - left) / 2;
       const y = top + (bottom - top) / 2;
-      const hit = document.elementFromPoint(x, y);
-      if (hit === element) return true;
+      if (visuallyTopmostAtPoint(element, x, y)) return true;
     }
     return false;
   };
@@ -1284,6 +1379,7 @@ function extractVisibleTopmostTextSignals({
   const body = document.body;
   if (body === null) return signals;
   const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  const splitCandidates = new Set<Element>();
   let node = walker.nextNode();
   while (node !== null) {
     const text = normalize(node.textContent ?? "");
@@ -1293,8 +1389,39 @@ function extractVisibleTopmostTextSignals({
     if (match !== null && visibleAndTopmost(node as Text)) {
       const signal = canonicalize(match[0]);
       if (signal.length > 0) signals[signal] = (signals[signal] ?? 0) + 1;
+    } else if (match === null && text.length > 0) {
+      let container = node.parentElement;
+      for (let depth = 0; container !== null && depth < 4; depth += 1) {
+        const combined = normalize(container.textContent ?? "");
+        pattern.lastIndex = 0;
+        const combinedMatch =
+          combined.length > 0 && combined.length <= 500 ? pattern.exec(combined) : null;
+        pattern.lastIndex = 0;
+        if (combinedMatch !== null) {
+          splitCandidates.add(container);
+          break;
+        }
+        container = container.parentElement;
+      }
     }
     node = walker.nextNode();
+  }
+  for (const container of splitCandidates) {
+    const combined = normalize(container.textContent ?? "");
+    pattern.lastIndex = 0;
+    const match = pattern.exec(combined);
+    pattern.lastIndex = 0;
+    if (match === null) continue;
+    const textNodes: Text[] = [];
+    const containerWalker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let textNode = containerWalker.nextNode();
+    while (textNode !== null) {
+      if (normalize(textNode.textContent ?? "").length > 0) textNodes.push(textNode as Text);
+      textNode = containerWalker.nextNode();
+    }
+    if (textNodes.length < 2 || !textNodes.every(visibleAndTopmost)) continue;
+    const signal = canonicalize(match[0]);
+    if (signal.length > 0) signals[signal] = (signals[signal] ?? 0) + 1;
   }
   return signals;
 }
@@ -8287,12 +8414,12 @@ export class BrowserController {
               }
               const anchorBranch = branchUnder(candidate, element);
               const selectedLeafBoundary =
-                anchorBranch === element &&
                 frameOwners.length === 1 &&
                 frameOwners[0] === element &&
                 !Array.from(candidate.querySelectorAll("*")).some(
                   (descendant) =>
                     descendant !== element &&
+                    !descendant.contains(element) &&
                     !isExplicitBillingControl(descendant) &&
                     isPaymentMethodBoundary(descendant),
                 );
@@ -9074,6 +9201,49 @@ export class BrowserController {
       if (owner === null) return false;
       const topmost = await owner
         .evaluate((element) => {
+          const visualHitAtPoint = (x: number, y: number): Element | null => {
+            const restored: Array<{
+              element: HTMLElement;
+              priority: string;
+              value: string;
+            }> = [];
+            for (const candidate of Array.from(
+              document.querySelectorAll<HTMLElement>("body *"),
+            )) {
+              const style = getComputedStyle(candidate);
+              if (
+                style.pointerEvents !== "none" ||
+                style.display === "none" ||
+                style.visibility === "hidden" ||
+                Number.parseFloat(style.opacity) <= 0 ||
+                !Array.from(candidate.getClientRects()).some(
+                  (rect) =>
+                    x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
+                )
+              ) {
+                continue;
+              }
+              restored.push({
+                element: candidate,
+                priority: candidate.style.getPropertyPriority("pointer-events"),
+                value: candidate.style.getPropertyValue("pointer-events"),
+              });
+              candidate.style.setProperty("pointer-events", "auto", "important");
+            }
+            const hit = document.elementFromPoint(x, y);
+            for (const original of restored) {
+              if (original.value.length === 0) {
+                original.element.style.removeProperty("pointer-events");
+              } else {
+                original.element.style.setProperty(
+                  "pointer-events",
+                  original.value,
+                  original.priority,
+                );
+              }
+            }
+            return hit;
+          };
           if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) {
             return false;
           }
@@ -9094,7 +9264,7 @@ export class BrowserController {
           if (rect.width < 1 || rect.height < 1) return false;
           const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
           const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
-          const hit = document.elementFromPoint(x, y);
+          const hit = visualHitAtPoint(x, y);
           return hit !== null && (hit === element || element.contains(hit));
         })
         .catch(() => false);
@@ -9147,6 +9317,49 @@ export class BrowserController {
         urlPattern.test(frameUrlContext) ||
         (await frame
           .evaluate(({ externalContext, shopifyPciFrame }) => {
+            const visualHitAtPoint = (x: number, y: number): Element | null => {
+              const restored: Array<{
+                element: HTMLElement;
+                priority: string;
+                value: string;
+              }> = [];
+              for (const candidate of Array.from(
+                document.querySelectorAll<HTMLElement>("body *"),
+              )) {
+                const style = getComputedStyle(candidate);
+                if (
+                  style.pointerEvents !== "none" ||
+                  style.display === "none" ||
+                  style.visibility === "hidden" ||
+                  Number.parseFloat(style.opacity) <= 0 ||
+                  !Array.from(candidate.getClientRects()).some(
+                    (rect) =>
+                      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
+                  )
+                ) {
+                  continue;
+                }
+                restored.push({
+                  element: candidate,
+                  priority: candidate.style.getPropertyPriority("pointer-events"),
+                  value: candidate.style.getPropertyValue("pointer-events"),
+                });
+                candidate.style.setProperty("pointer-events", "auto", "important");
+              }
+              const hit = document.elementFromPoint(x, y);
+              for (const original of restored) {
+                if (original.value.length === 0) {
+                  original.element.style.removeProperty("pointer-events");
+                } else {
+                  original.element.style.setProperty(
+                    "pointer-events",
+                    original.value,
+                    original.priority,
+                  );
+                }
+              }
+              return hit;
+            };
             const visibleAndTopmost = (element: Element): boolean => {
               if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) {
                 return false;
@@ -9172,7 +9385,7 @@ export class BrowserController {
                 if (right <= left || bottom <= top) return false;
                 const x = left + (right - left) / 2;
                 const y = top + (bottom - top) / 2;
-                return document.elementFromPoint(x, y) === element;
+                return visualHitAtPoint(x, y) === element;
               });
             };
             const visibleTextAndTopmost = (node: Text): boolean => {
@@ -9201,7 +9414,7 @@ export class BrowserController {
                 if (right <= left || bottom <= top) return false;
                 const x = left + (right - left) / 2;
                 const y = top + (bottom - top) / 2;
-                return document.elementFromPoint(x, y) === element;
+                return visualHitAtPoint(x, y) === element;
               });
             };
             const structural = Array.from(
@@ -9340,7 +9553,6 @@ export class BrowserController {
     if (!this.page) return null;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
-    const mainFrame = this.page.mainFrame();
     const frameSignals = await Promise.all(
       this.page.frames().map(async (frame) => {
         if (!(await this.isFrameSurfaceTopmost(frame))) return {};
@@ -9351,10 +9563,7 @@ export class BrowserController {
           })
           .catch(() => null);
         if (signals === null) return null;
-        const frameKey = frame === mainFrame ? "main" : `${frame.name()} ${frame.url()}`;
-        return Object.fromEntries(
-          Object.entries(signals).map(([signal, count]) => [`${frameKey}\n${signal}`, count]),
-        );
+        return signals;
       }),
     );
     const combined: Record<string, number> = {};
@@ -9410,6 +9619,18 @@ export class BrowserController {
       }
       await this.page.waitForTimeout(1_000).catch(() => undefined);
     } while (Date.now() <= deadline);
+    if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
+      this.checkoutThreeDsPending = false;
+      return "succeeded";
+    }
+    if (await this.hasNewVisibleCheckoutFailure(failureBaseline)) {
+      this.checkoutThreeDsPending = false;
+      return "failed";
+    }
+    if (challengeWasActive && !(await this.detectThreeDsChallenge()).three_ds_required) {
+      this.checkoutThreeDsPending = false;
+      return "unconfirmed";
+    }
     return "timeout";
   }
 

@@ -723,7 +723,9 @@ describe("checkout payment parsing", () => {
         );
         await page.setContent(`
           <section id="payment-method">
-            <iframe src="${pciUrl}"></iframe>
+            <div class="card-fields">
+              <iframe src="${pciUrl}"></iframe>
+            </div>
             <div class="billing-address">
               <input id="leaf-billing-city" name="billing_city">
             </div>
@@ -954,7 +956,7 @@ describe("checkout payment parsing", () => {
         await page.setContent(`
           <style>
             #covered-countdown { position: relative; }
-            #countdown-cover { background: white; inset: 0; position: absolute; z-index: 2; }
+            #countdown-cover { background: white; inset: 0; pointer-events: none; position: absolute; z-index: 2; }
             #offscreen-authentication-challenge {
               align-items: flex-end;
               display: flex;
@@ -1056,6 +1058,10 @@ describe("checkout payment parsing", () => {
           'history.pushState({}, "", "/receipt")',
           'history.pushState({}, "", "/orders/confirmation")',
           'history.pushState({}, "", "/thank_you")',
+          'history.pushState({}, "", "/orders/pending/confirmation")',
+          'history.pushState({}, "", "/orders/confirmation/thank-you")',
+          'history.pushState({}, "", "/thank-you/loading")',
+          'history.pushState({}, "", "/blank/receipt/123")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number:</p>")',
         ]) {
           const now = vi
@@ -1095,6 +1101,7 @@ describe("checkout payment parsing", () => {
         await browser.close();
       }
     },
+    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -1322,7 +1329,7 @@ describe("checkout payment parsing", () => {
         await page.setContent(`
           <style>
             #covered-confirmation { display: block; position: relative; }
-            #confirmation-cover { background: white; inset: 0; position: absolute; z-index: 2; }
+            #confirmation-cover { background: white; inset: 0; pointer-events: none; position: absolute; z-index: 2; }
             #offscreen-confirmation {
               align-items: flex-end;
               display: flex;
@@ -1944,6 +1951,9 @@ describe("3-D Secure resolution", () => {
   }> => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
+    await page.route("https://issuer.test/**", async (route) =>
+      route.fulfill({ contentType: "text/html", body: "<p>Payment declined</p>" }),
+    );
     await page.route("https://merchant.test/**", async (route) =>
       route.fulfill({
         contentType: "text/html",
@@ -1991,7 +2001,7 @@ describe("3-D Secure resolution", () => {
     try {
       await page.locator("#bank-approval").evaluate((element) => element.remove());
       await page.locator("body").evaluate((body) => {
-        body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
+        body.insertAdjacentHTML("beforeend", "<p>Thank you <strong>for your order</strong></p>");
       });
       await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
     } finally {
@@ -2115,6 +2125,47 @@ describe("3-D Secure resolution", () => {
       await browser.close();
     }
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "returns unconfirmed when a short 3DS wait ends after challenge resolution",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      let clock = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+      });
+      try {
+        await page.locator("#bank-approval").evaluate((element) => element.remove());
+        await expect(controller.waitForThreeDsResolution(500)).resolves.toBe("unconfirmed");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps a pre-submit issuer failure stable across URL query and hash changes",
+    async () => {
+      const { browser, page, controller } = await setupChallenge(
+        '<iframe id="issuer-error" src="https://issuer.test/error?attempt=1"></iframe>',
+      );
+      try {
+        const issuerFrame = page
+          .frames()
+          .find((frame) => frame.url().startsWith("https://issuer.test/error"))!;
+        await issuerFrame.evaluate(() => {
+          history.replaceState({}, "", "/error?attempt=2#retry");
+        });
+        await page.locator("#bank-approval").evaluate((element) => element.remove());
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("unconfirmed");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)("returns failed for new visible payment failure text", async () => {
     const { browser, page, controller } = await setupChallenge();
