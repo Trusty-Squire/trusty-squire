@@ -2102,6 +2102,11 @@ export async function launchPlainLoginBrowser(params: {
       await new Promise((r) => setTimeout(r, 1_200));
       childIdentity ??=
         spawned.pid === undefined ? null : profileProcessIdentity(spawned.pid, params.profileDir);
+      childIdentity = await resolveAttachedProfileChildIdentity(
+        spawned,
+        params.profileDir,
+        childIdentity,
+      );
       if (childIdentity !== null) selfManagedChromes.set(childIdentity.pid, childIdentity);
       if (!childProcessIsRunning(spawned)) {
         reapProfileHolderIfOwned(params.profileDir, childIdentity);
@@ -11996,13 +12001,7 @@ export class BrowserController {
 
   private async reapCancelledStartProcess(): Promise<void> {
     this.cancelledStartReaper ??= this.monitorCancelledStartProcess();
-    const deadline = Date.now() + 2_000;
-    while (!this.startSettled && Date.now() < deadline) {
-      await new Promise<void>((resolveWait) => {
-        const timer = setTimeout(resolveWait, 25);
-        timer.unref();
-      });
-    }
+    await this.cancelledStartReaper;
   }
 
   private async monitorCancelledStartProcess(): Promise<void> {
@@ -12013,8 +12012,7 @@ export class BrowserController {
         reapProfileHolderIfOwned(this.profileDir, identity);
       }
       await new Promise<void>((resolveWait) => {
-        const timer = setTimeout(resolveWait, 25);
-        timer.unref();
+        setTimeout(resolveWait, 25);
       });
     }
   }

@@ -242,26 +242,41 @@ describe("headless login VNC lifecycle", () => {
 });
 
 describe("login browser lifecycle guards", () => {
-  it("cancels a wedged start without waiting for launch settlement", async () => {
+  it("waits for a cancelled start to reach terminal settlement", async () => {
+    vi.useFakeTimers();
     const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
+    let releaseStart: (() => void) | undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
     const controller = new BrowserController({ profileDir });
     const internals = controller as unknown as {
       startWithProfileGuard: () => Promise<void>;
       closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
-      reapCancelledStartProcess: () => Promise<void>;
     };
-    const startImpl = vi.fn(() => new Promise<void>(() => undefined));
+    const startImpl = vi.fn(() => startGate);
     const closeImpl = vi.fn(async () => "closed" as const);
     internals.startWithProfileGuard = startImpl;
     internals.closeWithProfileGuard = closeImpl;
-    internals.reapCancelledStartProcess = vi.fn(async () => undefined);
 
     try {
-      void controller.start().catch(() => undefined);
+      const starting = controller.start().catch((error: unknown) => error);
       await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
-      await expect(controller.close({ cancelStart: true })).resolves.toBe("unknown");
-      await expect(controller.close()).resolves.toBe("unknown");
-      expect(closeImpl).toHaveBeenCalledOnce();
+      let closeSettled = false;
+      const closing = controller.close({ cancelStart: true }).then((state) => {
+        closeSettled = true;
+        return state;
+      });
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(closeSettled).toBe(false);
+
+      releaseStart?.();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(starting).resolves.toEqual(
+        expect.objectContaining({ message: "BrowserController start cancelled" }),
+      );
+      await expect(closing).resolves.toBe("closed");
+      await expect(controller.close()).resolves.toBe("closed");
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }
@@ -657,6 +672,32 @@ describe("cancelled self-managed Chrome launch", () => {
       expect(terminate).toHaveBeenCalledWith(identity, profileDir);
       expect(childProcessIsRunning(child)).toBe(false);
     } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for exact Linux login-child identity before attachment", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-chrome-identity-"));
+    const child = fakeProcess("chrome");
+    Object.assign(child, { pid: 424_243 });
+    const identity = {
+      host: hostname(),
+      pid: 424_243,
+      start_time: "birth",
+      user_data_dir: profileDir,
+    };
+    let probes = 0;
+    try {
+      await expect(
+        resolveAttachedProfileChildIdentity(child, profileDir, null, {
+          platform: "linux",
+          readIdentity: () => (++probes === 1 ? null : identity),
+        }),
+      ).resolves.toEqual(identity);
+      expect(probes).toBe(2);
+      expect(childProcessIsRunning(child)).toBe(true);
+    } finally {
+      Object.assign(child, { exitCode: 0 });
       rmSync(profileDir, { recursive: true, force: true });
     }
   });
