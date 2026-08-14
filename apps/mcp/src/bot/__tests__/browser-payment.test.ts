@@ -625,6 +625,9 @@ describe("checkout payment parsing", () => {
                 <input id="active-billing-city" name="billing_city">
               </div>
             </div>
+            <section id="paypal-payment-panel">
+              <input id="alternate-payment-billing-city" name="billing_city" value="Alternate Payment Billing">
+            </section>
           </section>
           <button id="pay-now">Pay now</button>
           <script>
@@ -663,6 +666,9 @@ describe("checkout payment parsing", () => {
         expect(await page.locator("#hidden-billing-postal").inputValue()).toBe("Hidden Billing");
         expect(await page.locator("#covered-merchant-billing").inputValue()).toBe(
           "Covered Merchant Billing",
+        );
+        expect(await page.locator("#alternate-payment-billing-city").inputValue()).toBe(
+          "Alternate Payment Billing",
         );
         expect(await page.locator("body").getAttribute("data-active-billing-city")).toBe(
           "Billingville",
@@ -1456,7 +1462,7 @@ describe("structured-data checkout totals", () => {
 });
 
 describe("3-D Secure resolution", () => {
-  const setupChallenge = async (): Promise<{
+  const setupChallenge = async (initialMerchantHtml = ""): Promise<{
     browser: Browser;
     page: Page;
     controller: BrowserController;
@@ -1467,6 +1473,7 @@ describe("3-D Secure resolution", () => {
       route.fulfill({
         contentType: "text/html",
         body: `
+          ${initialMerchantHtml}
           <button id="pay">Pay now</button>
           <script>
             document.querySelector("#pay").addEventListener("click", () => {
@@ -1594,19 +1601,72 @@ describe("3-D Secure resolution", () => {
     },
   );
 
-  it.skipIf(!chromiumAvailable)("prioritizes failure text over order confirmation", async () => {
+  it.skipIf(!chromiumAvailable)(
+    "lets a new merchant order confirmation win over simultaneous failure text",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      try {
+        await page.locator("#bank-approval").evaluate((element) => element.remove());
+        await page.evaluate(() => {
+          history.pushState({}, "", "/receipt/123");
+          document.body.insertAdjacentHTML(
+            "beforeend",
+            "<p>Order confirmed</p><p>Payment declined</p>",
+          );
+        });
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)("ignores pre-submit visible payment failure text", async () => {
+    const { browser, page, controller } = await setupChallenge("<p>Payment declined</p>");
+    let clock = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+      clock += timeout;
+    });
+    try {
+      await page.locator("#bank-approval").evaluate((element) => element.remove());
+      await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
+    } finally {
+      wait.mockRestore();
+      now.mockRestore();
+      await browser.close();
+    }
+  });
+
+  it.skipIf(!chromiumAvailable)("returns failed for new visible payment failure text", async () => {
     const { browser, page, controller } = await setupChallenge();
     try {
       await page.locator("#bank-approval").evaluate((element) => element.remove());
-      await page.evaluate(() => {
-        history.pushState({}, "", "/receipt/123");
-        document.body.insertAdjacentHTML(
-          "beforeend",
-          "<p>Order confirmed</p><p>Payment declined</p>",
-        );
+      await page.locator("body").evaluate((body) => {
+        body.insertAdjacentHTML("beforeend", "<p>Payment declined</p>");
       });
       await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
     } finally {
+      await browser.close();
+    }
+  });
+
+  it.skipIf(!chromiumAvailable)("ignores new hidden payment failure text", async () => {
+    const { browser, page, controller } = await setupChallenge();
+    let clock = 0;
+    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+      clock += timeout;
+    });
+    try {
+      await page.locator("#bank-approval").evaluate((element) => element.remove());
+      await page.locator("body").evaluate((body) => {
+        body.insertAdjacentHTML("beforeend", '<p style="display:none">Payment declined</p>');
+      });
+      await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
+    } finally {
+      wait.mockRestore();
+      now.mockRestore();
       await browser.close();
     }
   });

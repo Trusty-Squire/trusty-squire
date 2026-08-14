@@ -256,6 +256,8 @@ interface CheckoutOutcomeBaseline {
   domSignals: Readonly<Record<string, number>>;
 }
 
+type CheckoutFailureBaseline = Readonly<Record<string, number>>;
+
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
   // A dispatched click is not a payment outcome. The submit path sets this
@@ -2383,6 +2385,7 @@ export class BrowserController {
   private page: Page | null = null;
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
+  private checkoutFailureBaseline: CheckoutFailureBaseline | undefined;
   private checkoutThreeDsPending = false;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
@@ -8202,11 +8205,7 @@ export class BrowserController {
                   continue;
                 }
                 const controlBranch = branchUnder(candidate, control);
-                if (
-                  controlBranch !== anchorBranch &&
-                  control.parentElement !== candidate &&
-                  !isPaymentBoundary(controlBranch)
-                ) {
+                if (controlBranch !== anchorBranch && control.parentElement !== candidate) {
                   continue;
                 }
                 control.setAttribute("data-ts-payment-billing-owner", candidateToken);
@@ -8677,8 +8676,12 @@ export class BrowserController {
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutThreeDsPending = false;
-    const outcomeBaseline = await this.captureCheckoutOutcomeBaseline();
+    const [outcomeBaseline, failureBaseline] = await Promise.all([
+      this.captureCheckoutOutcomeBaseline(),
+      this.captureVisibleCheckoutFailureSignals(),
+    ]);
     this.checkoutOutcomeBaseline = outcomeBaseline;
+    this.checkoutFailureBaseline = failureBaseline;
     let submitted = false;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
@@ -9075,25 +9078,113 @@ export class BrowserController {
     );
   }
 
+  private async captureVisibleCheckoutFailureSignals(): Promise<CheckoutFailureBaseline> {
+    if (!this.page) return {};
+    const failureText =
+      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
+    const mainFrame = this.page.mainFrame();
+    const frameSignals = await Promise.all(
+      this.page.frames().map(async (frame) => {
+        if (!(await this.isFrameSurfaceTopmost(frame))) return {};
+        const signals = await frame
+          .evaluate(
+            ({ source, flags }) => {
+              const pattern = new RegExp(source, flags);
+              const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
+              const visibleAndTopmost = (node: Text): boolean => {
+                const element = node.parentElement;
+                if (element === null) return false;
+                let ancestor: HTMLElement | null = element as HTMLElement;
+                while (ancestor !== null) {
+                  const style = getComputedStyle(ancestor);
+                  if (
+                    style.display === "none" ||
+                    style.visibility === "hidden" ||
+                    style.visibility === "collapse" ||
+                    Number.parseFloat(style.opacity) <= 0
+                  ) {
+                    return false;
+                  }
+                  ancestor = ancestor.parentElement;
+                }
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                for (const rect of Array.from(range.getClientRects())) {
+                  if (rect.width < 1 || rect.height < 1) continue;
+                  const x = Math.min(
+                    window.innerWidth - 1,
+                    Math.max(0, rect.left + rect.width / 2),
+                  );
+                  const y = Math.min(
+                    window.innerHeight - 1,
+                    Math.max(0, rect.top + rect.height / 2),
+                  );
+                  const hit = document.elementFromPoint(x, y);
+                  if (hit !== null && (hit === element || element.contains(hit))) return true;
+                }
+                return false;
+              };
+              const signals: Record<string, number> = {};
+              const body = document.body;
+              if (body === null) return signals;
+              const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+              let node = walker.nextNode();
+              while (node !== null) {
+                const signal = normalize(node.textContent ?? "");
+                if (
+                  signal.length > 0 &&
+                  signal.length <= 500 &&
+                  pattern.test(signal) &&
+                  visibleAndTopmost(node as Text)
+                ) {
+                  signals[signal] = (signals[signal] ?? 0) + 1;
+                }
+                node = walker.nextNode();
+              }
+              return signals;
+            },
+            { source: failureText.source, flags: failureText.flags },
+          )
+          .catch(() => ({}));
+        const frameKey = frame === mainFrame ? "main" : `${frame.name()} ${frame.url()}`;
+        return Object.fromEntries(
+          Object.entries(signals).map(([signal, count]) => [`${frameKey}\n${signal}`, count]),
+        );
+      }),
+    );
+    const combined: Record<string, number> = {};
+    for (const signals of frameSignals) {
+      for (const [signal, count] of Object.entries(signals)) {
+        combined[signal] = (combined[signal] ?? 0) + count;
+      }
+    }
+    return combined;
+  }
+
+  private async hasNewVisibleCheckoutFailure(
+    baseline: CheckoutFailureBaseline,
+  ): Promise<boolean> {
+    const current = await this.captureVisibleCheckoutFailureSignals();
+    return Object.entries(current).some(
+      ([signal, count]) => count > (baseline[signal] ?? 0),
+    );
+  }
+
   async waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution> {
     if (!this.page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
+    const failureBaseline =
+      this.checkoutFailureBaseline ?? (await this.captureVisibleCheckoutFailureSignals());
     const deadline = Date.now() + timeoutMs;
     let challengeWasActive = this.checkoutThreeDsPending;
     let challengeAbsentSince: number | undefined;
-    const failureText =
-      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     do {
-      const texts = await Promise.all(
-        this.page
-          .frames()
-          .map(
-            async (frame) =>
-              await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-          ),
-      );
-      if (texts.some((text) => failureText.test(text))) {
+      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
+        this.checkoutThreeDsPending = false;
+        return "succeeded";
+      }
+      if (await this.hasNewVisibleCheckoutFailure(failureBaseline)) {
         this.checkoutThreeDsPending = false;
         return "failed";
       }
@@ -9101,10 +9192,6 @@ export class BrowserController {
       if (challenge.three_ds_required) {
         challengeWasActive = true;
         challengeAbsentSince = undefined;
-      }
-      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
-        this.checkoutThreeDsPending = false;
-        return "succeeded";
       }
       if (!challenge.three_ds_required && challengeWasActive) {
         challengeAbsentSince ??= Date.now();
