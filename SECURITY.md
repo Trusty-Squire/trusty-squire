@@ -140,9 +140,9 @@ viable groups by active or selected state and field completeness, uses the uniqu
 highest-ranked group, and otherwise fails with `payment_card_form_ambiguous`. Card
 filling stays inside that selected group. Charge controls inside a card group are
 eligible only for the selected group in both same-step and later confirmation,
-including controls associated through the HTML `form` relationship but mounted
-elsewhere in the DOM; a merchant checkout control outside every card group remains
-eligible.
+and both card fields and charge controls follow their HTML `form` relationship when
+mounted elsewhere in the DOM; a merchant checkout control outside every card group
+remains eligible.
 
 The later `confirm` phase is the charge boundary. Its strict reader requires a final
 payable total from the main frame or a visible trusted payment frame, with no

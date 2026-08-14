@@ -7494,9 +7494,12 @@ export class BrowserController {
     await Promise.all(
       frames.map((frame) =>
         frame
-          .locator("[data-ts-payment-card-group]")
+          .locator("[data-ts-payment-card-group],[data-ts-payment-card-control-group]")
           .evaluateAll((elements) => {
-            for (const element of elements) element.removeAttribute("data-ts-payment-card-group");
+            for (const element of elements) {
+              element.removeAttribute("data-ts-payment-card-group");
+              element.removeAttribute("data-ts-payment-card-control-group");
+            }
           })
           .catch(() => undefined),
       ),
@@ -7534,9 +7537,15 @@ export class BrowserController {
                 }
                 return true;
               };
+              const ownedControls = (root: Element): Element[] =>
+                root instanceof HTMLFormElement
+                  ? Array.from(root.elements)
+                  : Array.from(root.querySelectorAll("input,select,textarea,button"));
               const has = (root: Element, selector: string): boolean =>
-                Array.from(root.querySelectorAll(selector)).some(isFillable);
-              const form = input.closest("form");
+                ownedControls(root).some(
+                  (element) => element.matches(selector) && isFillable(element),
+                );
+              const form = input instanceof HTMLInputElement ? input.form : input.closest("form");
               let root: Element | null = form ?? input.parentElement;
               while (root !== null && root !== document.body && root !== document.documentElement) {
                 const hasCombinedExpiry = has(root, selectors.combinedExpiry);
@@ -7551,14 +7560,24 @@ export class BrowserController {
                   const existing = root.getAttribute("data-ts-payment-card-group");
                   const token = existing ?? selectors.token;
                   if (existing === null) root.setAttribute("data-ts-payment-card-group", token);
+                  const controls = ownedControls(root);
+                  for (const control of controls) {
+                    control.setAttribute("data-ts-payment-card-control-group", token);
+                  }
                   const active =
                     root.contains(document.activeElement) ||
+                    controls.includes(document.activeElement as Element) ||
                     root.matches(
                       '[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
                     ) ||
                     root.querySelector(
                       'input[type="radio"]:checked,[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
-                    ) !== null;
+                    ) !== null ||
+                    controls.some((control) =>
+                      control.matches(
+                        'input[type="radio"]:checked,[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
+                      ),
+                    );
                   return {
                     token,
                     active,
@@ -7631,7 +7650,13 @@ export class BrowserController {
       for (const frame of candidateFrames) {
         const matches =
           withinCardGroup && cardGroup !== undefined
-            ? cardGroup.root.locator(selectors)
+            ? frame
+                .locator(selectors)
+                .and(
+                  frame.locator(
+                    `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
+                  ),
+                )
             : frame.locator(selectors);
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
@@ -7747,7 +7772,13 @@ export class BrowserController {
       for (const frame of candidateFrames) {
         const matches =
           withinCardGroup && cardGroup !== undefined
-            ? cardGroup.root.locator(selectors)
+            ? frame
+                .locator(selectors)
+                .and(
+                  frame.locator(
+                    `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
+                  ),
+                )
             : frame.locator(selectors);
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
@@ -7990,7 +8021,10 @@ export class BrowserController {
                 return {
                   ownerToken: owner?.getAttribute("data-ts-payment-card-group") ?? null,
                   formOwnsCardFields:
-                    form !== null && form.querySelector(cardFieldSelectors) !== null,
+                    form !== null &&
+                    Array.from(form.elements).some((control) =>
+                      control.matches(cardFieldSelectors),
+                    ),
                 };
               },
               CHECKOUT_CARD_VALUE_FIELD_SELECTORS,

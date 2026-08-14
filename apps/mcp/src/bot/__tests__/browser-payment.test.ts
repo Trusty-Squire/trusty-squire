@@ -1616,24 +1616,22 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "excludes a DOM-external submit control owned by the sibling card form",
+    "keeps externally associated card fields and submit controls in their owning form",
     async () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
       const { page, browser } = await servePages({
         [pageUrl]: `
-          <form id="combined">
-            <input autocomplete="cc-number">
-            <input autocomplete="cc-name">
-            <input autocomplete="cc-exp" placeholder="MM/YY">
-            <input autocomplete="cc-csc">
-          </form>
-          <form id="split">
-            <input autocomplete="cc-number">
-            <input autocomplete="cc-name">
-            <input autocomplete="cc-exp-month">
-            <input autocomplete="cc-exp-year">
-            <input autocomplete="cc-csc">
-          </form>
+          <form id="combined"></form>
+          <form id="split"></form>
+          <input form="combined" autocomplete="cc-number">
+          <input form="combined" autocomplete="cc-name">
+          <input form="combined" autocomplete="cc-exp" placeholder="MM/YY">
+          <input form="combined" autocomplete="cc-csc">
+          <input form="split" autocomplete="cc-number">
+          <input form="split" autocomplete="cc-name">
+          <input form="split" autocomplete="cc-exp-month">
+          <input form="split" autocomplete="cc-exp-year">
+          <input form="split" autocomplete="cc-csc">
           <button type="submit" form="combined">Pay now</button>
           <button type="submit" form="split">Pay now</button>
           <script>
@@ -1642,7 +1640,12 @@ describe("split-checkout card fill (real browser)", () => {
                 event.preventDefault();
                 document.body.dataset.submittedForm = form.id;
                 document.body.dataset.submittedValues = JSON.stringify(
-                  Array.from(form.querySelectorAll("input"), (input) => input.value),
+                  Array.from(form.elements)
+                    .filter(
+                      (element) =>
+                        element instanceof HTMLInputElement && element.type !== "submit",
+                    )
+                    .map((input) => input.value),
                 );
                 const challenge = document.createElement("iframe");
                 challenge.title = "3D Secure";
