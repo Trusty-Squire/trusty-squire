@@ -32,10 +32,10 @@ import {
   type ProfileProcessIdentity,
 } from "./profile.js";
 
-// Fixed global admission bound.  These directories, rather than an in-memory
-// counter, are the authority across MCP processes.  A third operator start is
-// allowed to wait at the provision seam, but can never create a third active
-// profile while both slots are claimed.
+// Fixed per-namespace admission bound. These directories, rather than an
+// in-memory counter, are the authority across MCP processes. A third operator
+// start in the same namespace may wait at the provision seam, but can never
+// create a third active profile while both slots are claimed.
 const ACTIVE_SLOT_COUNT = 2;
 const UNPUBLISHED_SEED_GENERATION = "unpublished";
 const STARTUP_GRACE_MS = 30_000;
@@ -140,10 +140,7 @@ export class OperatorProfileAcquisitionInterruptedError extends Error {
   }
 }
 
-type OperatorProfileAcquisitionControl = Pick<
-  OperatorProfilePoolOptions,
-  "deadline" | "signal"
->;
+type OperatorProfileAcquisitionControl = Pick<OperatorProfilePoolOptions, "deadline" | "signal">;
 
 function defaultPoolRoot(): string {
   return process.env.VITEST === "true"
@@ -444,9 +441,7 @@ function assertProfileAcquisitionActive(
 async function waitForSeedLockRetry(control: OperatorProfileAcquisitionControl): Promise<void> {
   assertProfileAcquisitionActive(control, "seed_lock");
   const delay =
-    control.deadline === undefined
-      ? 25
-      : Math.max(0, Math.min(25, control.deadline - Date.now()));
+    control.deadline === undefined ? 25 : Math.max(0, Math.min(25, control.deadline - Date.now()));
   await new Promise<void>((resolveWait) => {
     let settled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;

@@ -14,14 +14,14 @@ from that seed or reclaimed from one closed warm-profile slot.
 Stage 3 retains the session-addressed payment and drain-before-finish gates while widening the
 fixed pool for concurrent execution:
 
-- two in-process starts or active tasks at a time;
-- two filesystem active slots per profile-pool namespace;
+- two starts or active tasks at a time per profile-pool namespace;
+- two filesystem active slots implement that bound;
 - one closed warm-profile slot;
 - one page within the leased worker profile.
 
-A third `operate_start` waits at the provision seam for up to 30 seconds, retrying the fixed slots
-without creating another profile or browser. Shutdown cancels starts waiting for capacity before it
-releases active slots.
+A third `operate_start` in the same namespace waits at the provision seam for up to 30 seconds,
+retrying the fixed slots without creating another profile or browser. Shutdown cancels starts
+waiting for capacity before it releases active slots.
 
 There is no warm Chrome process between sessions. `operate_finish` closes Chrome before its profile
 can enter the warm slot.
@@ -111,10 +111,10 @@ Under the seed lock, acquisition:
 3. claims the closed warm profile when it belongs to `seed/current` and is within its bounds; or
 4. copies the current immutable seed into a new worker profile.
 
-Capacity remains fixed at two active leases. A third start retries acquisition for at most 30
-seconds, including time spent behind seed publication on the shared seed lock, and launches only
-after one of those leases is released. Teardown cancels registered capacity waiters and each start
-rechecks the shutdown generation after acquisition before launch.
+Capacity remains fixed at two active leases per namespace. A third start in that namespace retries
+acquisition for at most 30 seconds, including time spent behind seed publication on the shared seed
+lock, and launches only after one of those leases is released. Teardown cancels registered capacity
+waiters and each start rechecks the shutdown generation after acquisition before launch.
 
 Before the first seed exists, acquisition creates an empty worker profile; a caller that requires a
 live identity then fails closed at the existing Google-session gate. Identity and email checks run

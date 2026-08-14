@@ -621,10 +621,7 @@ vi.mock("../operator-profile-pool.js", () => {
   class OperatorProfileAcquisitionInterruptedError extends Error {
     readonly reason: "timeout" | "cancelled";
     readonly phase: "profile" | "seed_lock";
-    constructor(
-      reason: "timeout" | "cancelled",
-      phase: "profile" | "seed_lock" = "profile",
-    ) {
+    constructor(reason: "timeout" | "cancelled", phase: "profile" | "seed_lock" = "profile") {
       super(`operator profile acquisition ${reason}`);
       this.reason = reason;
       this.phase = phase;
@@ -709,6 +706,7 @@ import {
   captchaGate,
   finishProvisionSession,
   withProvisionSessionCall,
+  paymentSession,
   closeAllProvisionSessions,
   activeSessionCount,
   getSessionUserEmail,
@@ -3722,6 +3720,65 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
+  it("never lets one session's approval authorize another session's charge", async () => {
+    const [first, second] = await Promise.all([
+      startProvisionSession({ serviceUrl: "https://shop.example.com/first" }),
+      startProvisionSession({ serviceUrl: "https://shop.example.com/second" }),
+    ]);
+    const firstPaymentSession = paymentSession(first.session_id);
+    const secondPaymentSession = paymentSession(second.session_id);
+    const firstClaim = claimActivePaymentForOperatePay(undefined, firstPaymentSession);
+    if (firstClaim.kind !== "lease") throw new Error("expected first payment lease");
+    const firstApproval = {
+      approval_id: "appr_first_session_only",
+      approval_url: "https://web.test/vault/pay/appr_first_session_only",
+      nonce: "nonce_first_session_only",
+      agent: "agent_first_session_only",
+      checkout: {
+        merchant: "First shop",
+        checkout_origin: "https://shop.example.com",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      jit: false,
+      boundCardRef: "card_first_session_only",
+      deadline: Date.now() + 60_000,
+      rejectedCandidates: [],
+      keypair: { publicKey: "public-first", privateKey: "private-first" },
+      item: "First widget",
+      reason: "First session purchase",
+      cardRef: "card_first_session_only",
+    };
+    completeActivePaymentLeaseWithPendingApproval(
+      firstClaim.lease,
+      firstApproval,
+      firstPaymentSession,
+    );
+
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/requires session_id/);
+    expect(getActivePendingApproval(firstPaymentSession)).toBe(firstApproval);
+    expect(getActivePendingApproval(secondPaymentSession)).toBeNull();
+
+    const secondClaim = claimActivePaymentForOperatePay(undefined, secondPaymentSession);
+    if (secondClaim.kind !== "lease") throw new Error("expected second payment lease");
+    expect(secondClaim.resumeApproval).toBeUndefined();
+    expect(() =>
+      completeActivePaymentLeaseWithPendingApproval(
+        firstClaim.lease,
+        firstApproval,
+        secondPaymentSession,
+      ),
+    ).toThrow(/without ownership/);
+    expect(releaseActivePaymentLease(secondClaim.lease, true, secondPaymentSession)).toBe(true);
+
+    const resumedFirst = claimActivePaymentForOperatePay(undefined, firstPaymentSession);
+    if (resumedFirst.kind !== "lease") throw new Error("expected resumed first payment lease");
+    expect(resumedFirst.resumeApproval).toBe(firstApproval);
+    expect(releaseActivePaymentLease(resumedFirst.lease, true, firstPaymentSession)).toBe(true);
+    await finishProvisionSession(first.session_id);
+    await finishProvisionSession(second.session_id);
+  });
+
   it("starts the same pending third task after one active lease finishes", async () => {
     vi.useFakeTimers();
     try {
@@ -3775,9 +3832,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       phase: "seed_lock",
     };
 
-    await expect(
-      startProvisionSession({ serviceUrl: "https://app.example.com/" }),
-    ).rejects.toThrow(
+    await expect(startProvisionSession({ serviceUrl: "https://app.example.com/" })).rejects.toThrow(
       "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
     );
     expect(h.startCalls).toBe(0);
