@@ -14,7 +14,11 @@ import type {
   CheckoutSummary,
   ThreeDsResolution,
 } from "./browser.js";
-import { PaymentCardFillCleanupError, UnrecognizedPaymentFrameError } from "./browser.js";
+import {
+  PaymentCardFillCleanupError,
+  PaymentSubmitOutcomeUnknownError,
+  UnrecognizedPaymentFrameError,
+} from "./browser.js";
 import { generateOperatorKeypair, openSealed, type OperatorKeypair } from "./payment-hpke.js";
 
 export interface OperatePayArgs {
@@ -1200,7 +1204,8 @@ export async function executeOperatePay(
       if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
       else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
     } catch (error) {
-      paymentStatus = "payment_checkout_failed";
+      const outcomeUnknown = error instanceof PaymentSubmitOutcomeUnknownError;
+      paymentStatus = outcomeUnknown ? "payment_outcome_unknown" : "payment_checkout_failed";
       let audit_recorded = true;
       try {
         await api.auditPayment({
@@ -1216,7 +1221,9 @@ export async function executeOperatePay(
         status: paymentStatus,
         audit_recorded,
         reason:
-          error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
+          outcomeUnknown
+            ? "payment_submit_outcome_unknown"
+            : error instanceof Error && /^payment_[a-z_]+(?::[a-z_]+)?$/.test(error.message)
             ? error.message
             : "payment_checkout_failed",
         approval_url: approvalUrl,

@@ -702,6 +702,66 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "fills billing controls owned by a unique leaf cross-frame payment boundary",
+    async () => {
+      const pciUrl = "https://checkout.pci.shopifyinc.test/leaf-card-fields";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.route(pciUrl, async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <form>
+                <input autocomplete="cc-number">
+                <input autocomplete="cc-exp">
+                <input autocomplete="cc-csc">
+                <input autocomplete="cc-name">
+              </form>`,
+          }),
+        );
+        await page.setContent(`
+          <section id="payment-method">
+            <iframe src="${pciUrl}"></iframe>
+            <input id="leaf-billing-city" name="billing_city">
+          </section>
+          <button id="pay-now">Pay now</button>
+          <script>
+            document.querySelector("#leaf-billing-city").addEventListener("input", (event) => {
+              document.body.dataset.leafBillingCity = event.target.value;
+            });
+            document.querySelector("#pay-now").addEventListener("click", () => {
+              document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(
+          controller.fillAndSubmitCheckout({
+            pan: "4242424242424242",
+            exp_month: "12",
+            exp_year: "30",
+            cvv: "123",
+            name: "Synthetic Cardholder",
+            billing: { city: "Billingville" },
+          }),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: true });
+
+        expect(await page.locator("body").getAttribute("data-leaf-billing-city")).toBe(
+          "Billingville",
+        );
+        expect(await page.locator("#leaf-billing-city").inputValue()).toBe("");
+        expect(await page.locator('[data-ts-sealed-payment="1"]').count()).toBe(0);
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "recognizes a plain visible countdown in Shopify's PCI frame",
     async () => {
       const pciUrl = "https://checkout.pci.shopifyinc.com/plain-countdown";
@@ -861,6 +921,15 @@ describe("checkout payment parsing", () => {
           <style>
             #covered-countdown { position: relative; }
             #countdown-cover { background: white; inset: 0; position: absolute; z-index: 2; }
+            #offscreen-authentication-challenge {
+              align-items: flex-end;
+              display: flex;
+              height: 300vh;
+              left: 500px;
+              position: absolute;
+              top: 0;
+              width: 180px;
+            }
           </style>
           <div>60 seconds to confirm</div>
           <section id="bank-transfer-approval"><div>60 seconds to confirm</div></section>
@@ -869,6 +938,7 @@ describe("checkout payment parsing", () => {
           <section id="covered-countdown">
             <div id="shopify-bank-app-challenge">60 seconds to confirm<div id="countdown-cover">Merchant offer</div></div>
           </section>
+          <div id="offscreen-authentication-challenge">60 seconds to confirm</div>
           <form id="checkout">
             <input autocomplete="cc-number"><input autocomplete="cc-exp">
             <input autocomplete="cc-csc"><input autocomplete="cc-name">
@@ -936,6 +1006,45 @@ describe("checkout payment parsing", () => {
       }
     },
     30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not confirm an order when only a terminal URL query or hash changes",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay-now">Pay now</button>
+              <script>
+                document.querySelector("#pay-now").addEventListener("click", () => {
+                  history.replaceState({}, "", "/receipt/123?attempt=2#retry");
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/receipt/123?attempt=1");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -1095,6 +1204,15 @@ describe("checkout payment parsing", () => {
           <style>
             #covered-confirmation { display: block; position: relative; }
             #confirmation-cover { background: white; inset: 0; position: absolute; z-index: 2; }
+            #offscreen-confirmation {
+              align-items: flex-end;
+              display: flex;
+              height: 300vh;
+              left: 500px;
+              position: absolute;
+              top: 0;
+              width: 180px;
+            }
           </style>
           <form id="checkout">
             <input autocomplete="cc-number"><input autocomplete="cc-exp">
@@ -1108,7 +1226,8 @@ describe("checkout payment parsing", () => {
                 "beforeend",
                 '<p style="display:none">Order confirmed</p>' +
                   '<p style="opacity:0">Order confirmed</p>' +
-                  '<p id="covered-confirmation">Order confirmed<span id="confirmation-cover">Still processing</span></p>',
+                  '<p id="covered-confirmation">Order confirmed<span id="confirmation-cover">Still processing</span></p>' +
+                  '<p id="offscreen-confirmation">Order confirmed</p>',
               );
             });
           </script>

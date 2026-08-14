@@ -16,6 +16,7 @@ import { manualCardEntryBlockReason } from "../provision-session.js";
 import {
   BrowserController,
   PaymentCardFillCleanupError,
+  PaymentSubmitOutcomeUnknownError,
   UnrecognizedPaymentFrameError,
   type CheckoutCard,
   type CheckoutSubmitResult,
@@ -72,6 +73,7 @@ async function harness(
   checkoutOptions: {
     checkout?: CheckoutSummary;
     readCheckoutSummary?: () => Promise<CheckoutSummary>;
+    fillAndSubmitCheckout?: (card: CheckoutCard) => Promise<CheckoutSubmitResult>;
   } = {},
 ) {
   const checkout = checkoutOptions.checkout ?? CHECKOUT;
@@ -251,16 +253,19 @@ async function harness(
     fillCheckoutCardFields: vi.fn(),
     submitFilledCheckout: vi.fn(),
     clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
-    fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
-      filledCards.push(card);
-      return threeDs === undefined
-        ? { three_ds_required: false, order_confirmed: true }
-        : {
-            three_ds_required: true,
-            order_confirmed: false,
-            challenge_url: "https://issuer.synthetic.test/challenge",
-          };
-    }),
+    fillAndSubmitCheckout: vi.fn(
+      checkoutOptions.fillAndSubmitCheckout ??
+        (async (card: CheckoutCard) => {
+          filledCards.push(card);
+          return threeDs === undefined
+            ? { three_ds_required: false, order_confirmed: true }
+            : {
+                three_ds_required: true,
+                order_confirmed: false,
+                challenge_url: "https://issuer.synthetic.test/challenge",
+              };
+        }),
+    ),
     waitForThreeDsResolution: vi.fn().mockResolvedValue(threeDs?.resolution ?? "timeout"),
   };
   const api = new ApiClient({
@@ -659,6 +664,20 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_outcome_unknown" });
     expect(notifyCalls).toHaveLength(1);
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+  });
+
+  it("records unknown when single-page submission fails after dispatch", async () => {
+    const { result, auditBodies } = await harness("happy", "customer_test", undefined, undefined, {
+      fillAndSubmitCheckout: async () => {
+        throw new PaymentSubmitOutcomeUnknownError();
+      },
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      reason: "payment_submit_outcome_unknown",
+    });
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
   });
 

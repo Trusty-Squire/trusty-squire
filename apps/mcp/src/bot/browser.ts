@@ -253,6 +253,7 @@ interface CheckoutPaymentFieldRoot {
 
 interface CheckoutOutcomeBaseline {
   url: string;
+  terminalUrlIdentity: string | null;
   domSignals: Readonly<Record<string, number>> | null;
 }
 
@@ -338,6 +339,27 @@ export class PaymentCardFillCleanupError extends Error {
     super(source.message);
     this.name = "PaymentCardFillCleanupError";
     if (source instanceof UnrecognizedPaymentFrameError) this.frameOrigin = source.frameOrigin;
+  }
+}
+
+export class PaymentSubmitOutcomeUnknownError extends Error {
+  constructor() {
+    super("payment_submit_outcome_unknown");
+    this.name = "PaymentSubmitOutcomeUnknownError";
+  }
+}
+
+const CHECKOUT_TERMINAL_URL_PATH_RE =
+  /\/(?:receipts?)(?:\/[^/?#]+)?\/?$|\/(?:orders?)(?:\/[^/?#]+)?\/(?:confirmation|confirmed|thank[_-]?you)\/?$|\/(?:order[_-]?(?:confirmation|confirmed|complete)|thank[_-]?you)\/?$|\/checkouts?\/[^/?#]+\/thank[_-]?you\/?$/i;
+
+function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
+  try {
+    const url = new URL(rawUrl);
+    if (!CHECKOUT_TERMINAL_URL_PATH_RE.test(url.pathname)) return null;
+    const path = url.pathname.replace(/\/+$/, "") || "/";
+    return `${url.origin}${path}`;
+  } catch {
+    return null;
   }
 }
 
@@ -1244,8 +1266,13 @@ function extractVisibleTopmostTextSignals({
     range.selectNodeContents(node);
     for (const rect of Array.from(range.getClientRects())) {
       if (rect.width < 1 || rect.height < 1) continue;
-      const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
-      const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
+      const left = Math.max(0, rect.left);
+      const right = Math.min(window.innerWidth, rect.right);
+      const top = Math.max(0, rect.top);
+      const bottom = Math.min(window.innerHeight, rect.bottom);
+      if (right <= left || bottom <= top) continue;
+      const x = left + (right - left) / 2;
+      const y = top + (bottom - top) / 2;
       const hit = document.elementFromPoint(x, y);
       if (hit === element) return true;
     }
@@ -8237,6 +8264,16 @@ export class BrowserController {
                 return null;
               }
               const anchorBranch = branchUnder(candidate, element);
+              const selectedLeafBoundary =
+                anchorBranch === element &&
+                frameOwners.length === 1 &&
+                frameOwners[0] === element &&
+                !Array.from(candidate.querySelectorAll("*")).some(
+                  (descendant) =>
+                    descendant !== element &&
+                    !isExplicitBillingControl(descendant) &&
+                    isPaymentBoundary(descendant),
+                );
               let marked = 0;
               for (const control of Array.from(
                 candidate.querySelectorAll("input,select,textarea"),
@@ -8268,7 +8305,8 @@ export class BrowserController {
                 if (
                   controlBranch !== anchorBranch &&
                   !sharesSelectedForm &&
-                  !hasSelectedOwner
+                  !hasSelectedOwner &&
+                  !selectedLeafBoundary
                 ) {
                   continue;
                 }
@@ -8798,27 +8836,36 @@ export class BrowserController {
           )
           .catch(() => "");
         if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
-        await candidate.click();
+        try {
+          await candidate.click();
+        } catch {
+          throw new PaymentSubmitOutcomeUnknownError();
+        }
         submitted = true;
         break;
       }
       if (submitted) break;
     }
     if (!submitted) throw new Error("payment_submit_not_found");
-    const challengeDeadline = Date.now() + 15_000;
-    while (Date.now() < challengeDeadline) {
-      const challenge = await this.detectThreeDsChallenge();
-      if (challenge.three_ds_required) {
-        this.checkoutThreeDsPending = true;
-        return challenge;
+    try {
+      const challengeDeadline = Date.now() + 15_000;
+      while (Date.now() < challengeDeadline) {
+        const challenge = await this.detectThreeDsChallenge();
+        if (challenge.three_ds_required) {
+          this.checkoutThreeDsPending = true;
+          return challenge;
+        }
+        if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
+          this.checkoutThreeDsPending = false;
+          return { three_ds_required: false, order_confirmed: true };
+        }
+        await this.page.waitForTimeout(250).catch(() => undefined);
       }
-      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
-        this.checkoutThreeDsPending = false;
-        return { three_ds_required: false, order_confirmed: true };
-      }
-      await this.page.waitForTimeout(250).catch(() => undefined);
+      return { three_ds_required: false, order_confirmed: false };
+    } catch (error) {
+      if (error instanceof PaymentSubmitOutcomeUnknownError) throw error;
+      throw new PaymentSubmitOutcomeUnknownError();
     }
-    return { three_ds_required: false, order_confirmed: false };
   }
 
   async clearSealedPaymentFields(): Promise<void> {
@@ -9014,12 +9061,45 @@ export class BrowserController {
                 }
                 current = current.parentElement;
               }
-              const rect = element.getBoundingClientRect();
-              if (rect.width < 1 || rect.height < 1) return false;
-              const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
-              const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
-              const hit = document.elementFromPoint(x, y);
-              return hit === element;
+              return Array.from(element.getClientRects()).some((rect) => {
+                const left = Math.max(0, rect.left);
+                const right = Math.min(window.innerWidth, rect.right);
+                const top = Math.max(0, rect.top);
+                const bottom = Math.min(window.innerHeight, rect.bottom);
+                if (right <= left || bottom <= top) return false;
+                const x = left + (right - left) / 2;
+                const y = top + (bottom - top) / 2;
+                return document.elementFromPoint(x, y) === element;
+              });
+            };
+            const visibleTextAndTopmost = (node: Text): boolean => {
+              const element = node.parentElement;
+              if (element === null) return false;
+              let current: HTMLElement | null = element;
+              while (current !== null) {
+                const style = getComputedStyle(current);
+                if (
+                  style.display === "none" ||
+                  style.visibility === "hidden" ||
+                  style.visibility === "collapse" ||
+                  Number.parseFloat(style.opacity) <= 0
+                ) {
+                  return false;
+                }
+                current = current.parentElement;
+              }
+              const range = document.createRange();
+              range.selectNodeContents(node);
+              return Array.from(range.getClientRects()).some((rect) => {
+                const left = Math.max(0, rect.left);
+                const right = Math.min(window.innerWidth, rect.right);
+                const top = Math.max(0, rect.top);
+                const bottom = Math.min(window.innerHeight, rect.bottom);
+                if (right <= left || bottom <= top) return false;
+                const x = left + (right - left) / 2;
+                const y = top + (bottom - top) / 2;
+                return document.elementFromPoint(x, y) === element;
+              });
             };
             const structural = Array.from(
               document.querySelectorAll(
@@ -9074,7 +9154,7 @@ export class BrowserController {
                     countdownMatch ||
                     bankAppMatch ||
                     contextualMatch) &&
-                  visibleAndTopmost(element)
+                  visibleTextAndTopmost(node as Text)
                 ) {
                   if (explicitMatch) return true;
                   if (dbsBankAppMatch || (shopifyPciFrame && (countdownMatch || bankAppMatch))) {
@@ -9117,7 +9197,7 @@ export class BrowserController {
   }
 
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
-    if (!this.page) return { url: "", domSignals: null };
+    if (!this.page) return { url: "", terminalUrlIdentity: null, domSignals: null };
     const successText =
       /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt (?:number|#)/i;
     const domSignals = await this.page
@@ -9127,26 +9207,24 @@ export class BrowserController {
         flags: successText.flags,
       })
       .catch(() => null);
-    return { url: this.page.url(), domSignals };
+    const url = this.page.url();
+    return { url, terminalUrlIdentity: checkoutTerminalUrlIdentity(url), domSignals };
   }
 
   private async hasConfirmedCheckoutOutcome(baseline: CheckoutOutcomeBaseline): Promise<boolean> {
     if (!this.page) return false;
-    const successUrl =
-      /\/(?:receipts?)(?:\/[^/?#]+)?\/?$|\/(?:orders?)(?:\/[^/?#]+)?\/(?:confirmation|confirmed|thank[_-]?you)\/?$|\/(?:order[_-]?(?:confirmation|confirmed|complete)|thank[_-]?you)\/?$|\/checkouts?\/[^/?#]+\/thank[_-]?you\/?$/i;
     const current = await this.captureCheckoutOutcomeBaseline();
     let sameCheckoutOrigin = false;
-    let terminalMerchantPath = false;
     try {
       const currentUrl = new URL(current.url);
       sameCheckoutOrigin = currentUrl.origin === new URL(baseline.url).origin;
-      terminalMerchantPath = successUrl.test(currentUrl.pathname);
     } catch {
       sameCheckoutOrigin = current.url === baseline.url;
     }
     return (
       sameCheckoutOrigin &&
-      ((current.url !== baseline.url && terminalMerchantPath) ||
+      ((current.terminalUrlIdentity !== null &&
+        current.terminalUrlIdentity !== baseline.terminalUrlIdentity) ||
         (baseline.domSignals !== null &&
           current.domSignals !== null &&
           Object.entries(current.domSignals).some(
