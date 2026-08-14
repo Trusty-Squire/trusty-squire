@@ -627,7 +627,7 @@ describe("checkout payment parsing", () => {
               </div>
             </div>
             <input id="direct-sibling-alternate-postal" name="billing_postal">
-            <section id="paypal-payment-panel">
+            <section data-payment-method="paypal">
               <input id="alternate-payment-billing-city" name="billing_city" value="Alternate Payment Billing">
             </section>
           </section>
@@ -1008,13 +1008,18 @@ describe("checkout payment parsing", () => {
       try {
         const page = await browser.newPage();
         await page.setContent(`
-          <p>Order confirmed</p>
+          <p id="existing-confirmation">Order confirmed</p>
           <form id="checkout">
             <input autocomplete="cc-number"><input autocomplete="cc-exp">
             <input autocomplete="cc-csc"><input autocomplete="cc-name">
             <button type="submit">Pay now</button>
           </form>
-          <script>document.querySelector("#checkout").addEventListener("submit", (event) => event.preventDefault());</script>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.querySelector("#existing-confirmation").textContent = "Order   confirmed.";
+            });
+          </script>
         `);
         const controller = new BrowserController({ humanize: false });
         (controller as unknown as { page: Page }).page = page;
@@ -1043,39 +1048,50 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "does not treat a bare receipt route as a placed order",
+    "does not treat generic terminal-shaped evidence as a placed order",
     async () => {
       const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
       try {
-        const page = await browser.newPage();
-        await page.route("https://merchant.test/**", async (route) =>
-          route.fulfill({
-            contentType: "text/html",
-            body: `
-              <button id="pay-now">Pay now</button>
-              <script>
-                document.querySelector("#pay-now").addEventListener("click", () => {
-                  history.pushState({}, "", "/receipt");
-                });
-              </script>`,
-          }),
-        );
-        await page.goto("https://merchant.test/checkout");
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
+        for (const clickAction of [
+          'history.pushState({}, "", "/receipt")',
+          'history.pushState({}, "", "/orders/confirmation")',
+          'history.pushState({}, "", "/thank_you")',
+          'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number:</p>")',
+        ]) {
+          const now = vi
+            .spyOn(Date, "now")
+            .mockReturnValueOnce(0)
+            .mockReturnValueOnce(0)
+            .mockReturnValueOnce(1)
+            .mockReturnValue(15_000);
+          const page = await browser.newPage();
+          try {
+            await page.route("https://merchant.test/**", async (route) =>
+              route.fulfill({
+                contentType: "text/html",
+                body: `
+                  <button id="pay-now">Pay now</button>
+                  <script>
+                    document.querySelector("#pay-now").addEventListener("click", () => {
+                      ${clickAction};
+                    });
+                  </script>`,
+              }),
+            );
+            await page.goto("https://merchant.test/checkout");
+            const controller = new BrowserController({ humanize: false });
+            (controller as unknown as { page: Page }).page = page;
 
-        await expect(controller.submitFilledCheckout()).resolves.toEqual({
-          three_ds_required: false,
-          order_confirmed: false,
-        });
+            await expect(controller.submitFilledCheckout()).resolves.toEqual({
+              three_ds_required: false,
+              order_confirmed: false,
+            });
+          } finally {
+            now.mockRestore();
+            await page.close();
+          }
+        }
       } finally {
-        now.mockRestore();
         await browser.close();
       }
     },
@@ -2089,6 +2105,9 @@ describe("3-D Secure resolution", () => {
     });
     try {
       await page.locator("#bank-approval").evaluate((element) => element.remove());
+      await page.getByText("Payment declined", { exact: true }).evaluate((element) => {
+        element.textContent = "Payment   declined.";
+      });
       await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
     } finally {
       wait.mockRestore();

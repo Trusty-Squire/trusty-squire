@@ -350,7 +350,7 @@ export class PaymentSubmitOutcomeUnknownError extends Error {
 }
 
 const CHECKOUT_TERMINAL_URL_PATH_RE =
-  /\/(?:receipts?)\/[^/?#]+\/?$|\/(?:orders?)(?:\/[^/?#]+)?\/(?:confirmation|confirmed|thank[_-]?you)\/?$|\/(?:order[_-]?(?:confirmation|confirmed|complete)|thank[_-]?you)\/?$|\/checkouts?\/[^/?#]+\/thank[_-]?you\/?$/i;
+  /\/(?:receipts?)\/[^/?#]+\/?$|\/(?:orders?)\/[^/?#]+\/(?:confirmation|confirmed|thank[_-]?you)\/?$|\/(?:order[_-]?(?:confirmation|confirmed|complete)|thank[_-]?you)\/[^/?#]+\/?$|\/checkouts?\/[^/?#]+\/thank[_-]?you\/?$/i;
 
 function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
   try {
@@ -1246,6 +1246,8 @@ function extractVisibleTopmostTextSignals({
 }): Record<string, number> {
   const pattern = new RegExp(source, flags);
   const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
+  const canonicalize = (text: string): string =>
+    text.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   const visibleAndTopmost = (node: Text): boolean => {
     const element = node.parentElement;
     if (element === null) return false;
@@ -1284,14 +1286,13 @@ function extractVisibleTopmostTextSignals({
   const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
   let node = walker.nextNode();
   while (node !== null) {
-    const signal = normalize(node.textContent ?? "");
-    if (
-      signal.length > 0 &&
-      signal.length <= 500 &&
-      pattern.test(signal) &&
-      visibleAndTopmost(node as Text)
-    ) {
-      signals[signal] = (signals[signal] ?? 0) + 1;
+    const text = normalize(node.textContent ?? "");
+    pattern.lastIndex = 0;
+    const match = text.length > 0 && text.length <= 500 ? pattern.exec(text) : null;
+    pattern.lastIndex = 0;
+    if (match !== null && visibleAndTopmost(node as Text)) {
+      const signal = canonicalize(match[0]);
+      if (signal.length > 0) signals[signal] = (signals[signal] ?? 0) + 1;
     }
     node = walker.nextNode();
   }
@@ -8213,6 +8214,12 @@ export class BrowserController {
               candidate.getAttribute("data-step"),
               candidate.getAttribute("data-section"),
               candidate.getAttribute("data-testid"),
+              candidate.getAttribute("data-payment-method"),
+              candidate.getAttribute("data-payment-method-type"),
+              candidate.getAttribute("data-payment-gateway"),
+              candidate.getAttribute("data-gateway"),
+              candidate.getAttribute("data-method"),
+              candidate.getAttribute("data-provider"),
             ]
               .filter((value): value is string => typeof value === "string")
               .join(" ");
@@ -8223,6 +8230,12 @@ export class BrowserController {
           const isPaymentMethodBoundary = (candidate: Element): boolean =>
             candidate.hasAttribute("data-ts-payment-frame-owner") ||
             candidate.hasAttribute("data-ts-payment-card-group") ||
+            candidate.hasAttribute("data-payment-method") ||
+            candidate.hasAttribute("data-payment-method-type") ||
+            candidate.hasAttribute("data-payment-gateway") ||
+            candidate.hasAttribute("data-gateway") ||
+            candidate.hasAttribute("data-method") ||
+            candidate.hasAttribute("data-provider") ||
             /(?:^|[^a-z])(?:payment|credit.?card|paypal|klarna|afterpay|shop.?pay|apple.?pay|google.?pay|bank.?transfer)(?:[^a-z]|$)/i.test(
               paymentBoundaryIdentity(candidate),
             );
@@ -9289,7 +9302,7 @@ export class BrowserController {
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
     if (!this.page) return { url: "", terminalUrlIdentity: null, domSignals: null };
     const successText =
-      /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt (?:number|#)/i;
+      /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt\s*(?:number|#)\s*[:#-]?\s*(?!(?:pending|loading|unknown|n\/a)\b)[a-z0-9][a-z0-9_-]*/i;
     const domSignals = await this.page
       .mainFrame()
       .evaluate(extractVisibleTopmostTextSignals, {
