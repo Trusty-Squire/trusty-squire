@@ -1241,6 +1241,45 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "does not confirm an existing order when only its terminal route shape changes",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay-now">Pay now</button>
+              <script>
+                document.querySelector("#pay-now").addEventListener("click", () => {
+                  history.replaceState({}, "", "/orders/ORD-123/confirmation");
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/receipt/ORD-123");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "keeps a click failure pre-dispatch when no charge event fired",
     async () => {
       const browser = await chromium.launch({ headless: true });

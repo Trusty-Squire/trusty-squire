@@ -469,8 +469,8 @@ function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
     if (segments.some((segment) => ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")))) {
       return null;
     }
-    const path = url.pathname.replace(/\/+$/, "") || "/";
-    return `${url.origin}${path}`;
+    const normalizedIdentity = identity.normalize("NFKC").trim().toLowerCase();
+    return `${url.origin}/order/${encodeURIComponent(normalizedIdentity)}`;
   } catch {
     return null;
   }
