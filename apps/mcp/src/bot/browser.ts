@@ -35,7 +35,6 @@ import type {
 } from "playwright";
 import { createRequire } from "node:module";
 import { Socket, createServer } from "node:net";
-import { resolve } from "node:path";
 import { existsSync, mkdirSync, rmSync, statSync } from "node:fs";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { isSameRecipeDomain } from "@trusty-squire/recipe-schema";
@@ -47,6 +46,7 @@ import {
   closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
+  profilePathIdentity,
   profileProcessIdentity,
   profileProcessIdentityState,
   profileProcessMatches,
@@ -1912,14 +1912,36 @@ function reapableBrowserProfile(
   includeVerifier: boolean,
 ): string | null {
   if (!/(?:chrome|chromium)/i.test(args)) return null;
+  const configuredProfiles = new Map(
+    profileDirs.map((profileDir) => [profileDir, profilePathIdentity(profileDir)]),
+  );
   const match = /--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))(?=\s|$)/.exec(args);
   const candidate = match?.[1] ?? match?.[2] ?? match?.[3];
-  if (candidate === undefined) return null;
-  const resolved = resolve(candidate);
-  if (profileDirs.some((profileDir) => resolve(profileDir) === resolved)) return resolved;
-  return includeVerifier && /[/\\]\.trusty-squire[/\\]profiles[/\\]verify-[^/\\]+$/.test(resolved)
-    ? resolved
-    : null;
+  if (candidate !== undefined) {
+    const identity = profilePathIdentity(candidate);
+    if ([...configuredProfiles.values()].includes(identity)) return identity;
+    if (includeVerifier && /[/\\]\.trusty-squire[/\\]profiles[/\\]verify-[^/\\]+$/.test(identity)) {
+      return identity;
+    }
+  }
+  for (const [profileDir, identity] of configuredProfiles) {
+    for (const exactPath of new Set([profileDir, identity])) {
+      const variants = [exactPath, `"${exactPath}"`, `'${exactPath}'`];
+      if (
+        variants.some((variant) => {
+          const option = `--user-data-dir=${variant}`;
+          const offset = args.indexOf(option);
+          return (
+            offset >= 0 &&
+            /\s|$/.test(args.slice(offset + option.length, offset + option.length + 1))
+          );
+        })
+      ) {
+        return identity;
+      }
+    }
+  }
+  return null;
 }
 
 export function claimOrphanBrowserReapScope(profileDir: string): {

@@ -329,7 +329,7 @@ function profileOperationArtifactState(path: string): ProcessIdentityState {
     if (owner.start_time === null) {
       return processExistenceState(owner.pid).state === "missing" ? "stale" : "unknown";
     }
-    return processBirthIdentityState(owner);
+    return processBirthIdentityState({ pid: owner.pid, start_time: owner.start_time });
   }
   try {
     return Date.now() - lstatSync(path).mtimeMs >= PROFILE_OPERATION_ORPHAN_GRACE_MS
