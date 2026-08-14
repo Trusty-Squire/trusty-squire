@@ -1038,7 +1038,8 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
-              document.querySelector("#existing-confirmation").textContent = "Order   confirmed.";
+              document.querySelector("#existing-confirmation").innerHTML =
+                "<span>Order confirmed</span><span>.</span>";
             });
           </script>
         `);
@@ -1090,6 +1091,7 @@ describe("checkout payment parsing", () => {
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: processing</p>")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: xxxx1234</p>")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: ORD-XXXX1234</p>")',
+          'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: 1234****</p>")',
         ]) {
           const now = vi
             .spyOn(Date, "now")

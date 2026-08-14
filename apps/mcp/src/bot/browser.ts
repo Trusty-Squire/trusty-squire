@@ -1348,7 +1348,12 @@ function extractVisibleTopmostTextSignals({
   const pattern = new RegExp(source, flags);
   const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
   const canonicalize = (text: string): string =>
-    text.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    text
+      .normalize("NFKC")
+      .toLowerCase()
+      .replace(/[*•●◦▪■□×]+/g, " masked ")
+      .replace(/[^a-z0-9]+/g, " ")
+      .trim();
   const visuallyTopmostAtPoint = (element: Element, x: number, y: number): boolean => {
     const restored: Array<{
       element: HTMLElement;
@@ -1430,7 +1435,7 @@ function extractVisibleTopmostTextSignals({
     pattern.lastIndex = 0;
     if (match !== null && visibleAndTopmost(node as Text)) {
       const signal = canonicalize(match[0]);
-      if (signal.length > 0) signals[signal] = (signals[signal] ?? 0) + 1;
+      if (signal.length > 0) signals[signal] = 1;
     } else if (match === null && text.length > 0) {
       let container = node.parentElement;
       for (let depth = 0; container !== null && depth < 4; depth += 1) {
@@ -1465,7 +1470,7 @@ function extractVisibleTopmostTextSignals({
     }
     if (textNodes.length < 2 || !textNodes.every(visibleAndTopmost)) continue;
     const signal = canonicalize(match);
-    if (signal.length > 0) signals[signal] = (signals[signal] ?? 0) + 1;
+    if (signal.length > 0) signals[signal] = 1;
   }
   return signals;
 }
@@ -9660,7 +9665,7 @@ export class BrowserController {
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
     if (!this.page) return { url: "", terminalUrlIdentity: null, domSignals: null };
     const successText =
-      /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt\s*(?:number|#)\s*[:#-]?\s*[a-z0-9][a-z0-9_\/-]*/i;
+      /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt\s*(?:number|#)\s*[:#-]?\s*[a-z0-9*•●◦▪■□×][a-z0-9_\/*•●◦▪■□×-]*/i;
     const capturedDomSignals = await this.page
       .mainFrame()
       .evaluate(extractVisibleTopmostTextSignals, {
