@@ -1661,8 +1661,7 @@ function registerSelfManagedChrome(
   profileDir: string,
 ): ProfileProcessIdentity | null {
   installSelfManagedChromeCleanup();
-  const identity =
-    child.pid === undefined ? null : profileProcessIdentity(child.pid, profileDir);
+  const identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, profileDir);
   if (identity !== null) selfManagedChromes.set(identity.pid, identity);
   child.once("exit", () => {
     if (child.pid !== undefined) selfManagedChromes.delete(child.pid);
@@ -1734,11 +1733,7 @@ function reapOrphanedBrowsersOnce(profileDir: string): void {
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
     const args = match[3] ?? "";
-    const expectedProfile = reapableBrowserProfile(
-      args,
-      scope.profileDirs,
-      scope.includeVerifier,
-    );
+    const expectedProfile = reapableBrowserProfile(args, scope.profileDirs, scope.includeVerifier);
     if (Number.isFinite(pid) && ppid === 1 && expectedProfile !== null) {
       const identity = profileProcessIdentity(pid, expectedProfile);
       if (identity !== null) identities.push(identity);
@@ -2081,6 +2076,13 @@ export class BrowserController {
   private profileOperationLease: ProfileOperationLease | null = null;
   private startPromise: Promise<void> | null = null;
   private closePromise: Promise<ProfileCloseState> | null = null;
+  private startCancellationRequested = false;
+  private startSettled = false;
+  private resolveStartCancellation: (() => void) | null = null;
+  private readonly startCancellation = new Promise<void>((resolveCancellation) => {
+    this.resolveStartCancellation = resolveCancellation;
+  });
+  private cancelledStartReaper: Promise<void> | null = null;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
@@ -2292,6 +2294,7 @@ export class BrowserController {
     env: NodeJS.ProcessEnv;
     window: { width: number; height: number };
   }): Promise<BrowserContext> {
+    this.throwIfStartCancelled();
     // Remote-CDP attach: BOT_CDP_ENDPOINT points at a Chrome already running on
     // another host (e.g. a real-GPU Mac), reachable over Tailscale. We do NOT
     // spawn or own the binary — the remote host launched it with its own
@@ -2315,7 +2318,9 @@ export class BrowserController {
     }
     const endpoint = await withChromeStartupLock(
       async () => {
+        this.throwIfStartCancelled();
         const port = await findFreePort();
+        this.throwIfStartCancelled();
         clearStaleSingletonLock(this.profileDir);
         const argv = [
           `--remote-debugging-port=${port}`,
@@ -2338,6 +2343,15 @@ export class BrowserController {
         });
         this.childChrome = child;
         this.childChromeIdentity = registerSelfManagedChrome(child, this.profileDir);
+        if (this.startCancellationRequested) {
+          if (this.childChromeIdentity !== null) {
+            signalProfileProcess(this.childChromeIdentity, this.profileDir, "SIGKILL");
+          }
+          reapProfileHolderIfOwned(this.profileDir, this.childChromeIdentity);
+          this.childChrome = null;
+          this.childChromeIdentity = null;
+          throw new Error("BrowserController start cancelled");
+        }
         let chromeStderr = "";
         let chromeExit = "";
         child.stderr?.on("data", (chunk: Buffer) => {
@@ -2471,16 +2485,31 @@ export class BrowserController {
     this.profileOperationLease = lease;
     try {
       await this.startWithProfileGuard();
+      if (this.startCancellationRequested) {
+        await this.closeWithProfileGuard();
+        throw new Error("BrowserController start cancelled");
+      }
     } catch (err) {
+      if (this.startCancellationRequested) {
+        await this.closeWithProfileGuard().catch(() => undefined);
+      }
       this.profileOperationLease = null;
       lease?.release();
       throw err;
+    } finally {
+      this.startSettled = true;
     }
   }
 
+  private throwIfStartCancelled(): void {
+    if (this.startCancellationRequested) throw new Error("BrowserController start cancelled");
+  }
+
   private async startWithProfileGuard(): Promise<void> {
+    this.throwIfStartCancelled();
     reapOrphanedBrowsersOnce(this.profileDir);
     const channel = await detectChromiumChannel();
+    this.throwIfStartCancelled();
     this.launchedChannel = channel;
     const proxy = await this.resolveProxy();
     this.proxyServer = proxy?.server ?? null;
@@ -2639,6 +2668,7 @@ export class BrowserController {
     const useSelfLaunch = selfLaunchBinary !== null && !proxyHasAuth;
 
     let context: BrowserContext;
+    this.throwIfStartCancelled();
     if (useSelfLaunch && selfLaunchBinary !== null) {
       console.error(
         `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
@@ -2656,15 +2686,17 @@ export class BrowserController {
       };
       context = await launchWithProfileGate(
         this.profileDir,
-        () =>
-          this.launchSelfManagedContext({
+        () => {
+          this.throwIfStartCancelled();
+          return this.launchSelfManagedContext({
             binary: selfLaunchBinary,
             headless: chromeHeadless,
             args: launchArgs,
             proxy,
             env: selfEnv,
             window,
-          }),
+          });
+        },
         { failFast: true },
       );
       // Options the default (connectOverCDP) context can't take at creation —
@@ -2692,8 +2724,9 @@ export class BrowserController {
       // user's Google session so the OAuth-first path reuses it.
       context = await launchWithProfileGate(
         this.profileDir,
-        () =>
-          launcher.launchPersistentContext(this.profileDir, {
+        () => {
+          this.throwIfStartCancelled();
+          return launcher.launchPersistentContext(this.profileDir, {
             headless: chromeHeadless,
             ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
             ...(channel !== null ? { channel } : {}),
@@ -2704,7 +2737,8 @@ export class BrowserController {
             timezoneId: geo?.timezoneId ?? "America/New_York",
             permissions: grantedPermissions,
             ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-          }),
+          });
+        },
         { failFast: true },
       );
     }
@@ -2716,6 +2750,10 @@ export class BrowserController {
       this.launchedProfileHolderIdentity =
         this.childChromeIdentity ??
         (holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir));
+    }
+    if (this.startCancellationRequested) {
+      await this.closeWithProfileGuard();
+      throw new Error("BrowserController start cancelled");
     }
     // Speed: optionally abort heavy/irrelevant requests before any navigation.
     await this.installResourceBlocking();
@@ -11809,13 +11847,66 @@ export class BrowserController {
     });
   }
 
-  async close(): Promise<ProfileCloseState> {
+  async close(options: { cancelStart?: boolean } = {}): Promise<ProfileCloseState> {
+    if (options.cancelStart === true) {
+      this.startCancellationRequested = true;
+      this.resolveStartCancellation?.();
+      this.resolveStartCancellation = null;
+    }
     this.closePromise ??= this.closeAfterStart();
     return await this.closePromise;
   }
 
+  private async closeCancelledStart(): Promise<ProfileCloseState> {
+    const [closeState] = await Promise.all([
+      this.closeWithProfileGuard(),
+      this.reapCancelledStartProcess(),
+    ]);
+    if (this.startSettled) {
+      const lease = this.profileOperationLease;
+      this.profileOperationLease = null;
+      lease?.release();
+    }
+    return !this.startSettled && closeState === "closed" ? "unknown" : closeState;
+  }
+
+  private async reapCancelledStartProcess(): Promise<void> {
+    this.cancelledStartReaper ??= this.monitorCancelledStartProcess();
+    const deadline = Date.now() + 2_000;
+    while (!this.startSettled && Date.now() < deadline) {
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, 25);
+        timer.unref();
+      });
+    }
+  }
+
+  private async monitorCancelledStartProcess(): Promise<void> {
+    while (!this.startSettled) {
+      const identity = this.currentOwnedProfileIdentity();
+      if (identity !== null) {
+        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        reapProfileHolderIfOwned(this.profileDir, identity);
+      }
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, 25);
+        timer.unref();
+      });
+    }
+  }
+
+  private currentOwnedProfileIdentity(): ProfileProcessIdentity | null {
+    const known = this.childChromeIdentity ?? this.launchedProfileHolderIdentity;
+    if (known !== null) return known;
+    const holderPid = currentProfileHolderPid(this.profileDir);
+    return holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
+  }
+
   private async closeAfterStart(): Promise<ProfileCloseState> {
-    await this.startPromise?.catch(() => undefined);
+    if (this.startPromise !== null && !this.startSettled) {
+      await Promise.race([this.startPromise.catch(() => undefined), this.startCancellation]);
+    }
+    if (this.startCancellationRequested) return await this.closeCancelledStart();
     try {
       return await this.closeWithProfileGuard();
     } finally {
@@ -11853,7 +11944,7 @@ export class BrowserController {
     const context = this.context;
     const cdpBrowser = this.cdpBrowser;
     const childIdentity = this.childChromeIdentity;
-    const holderIdentity = this.launchedProfileHolderIdentity;
+    const holderIdentity = this.launchedProfileHolderIdentity ?? this.currentOwnedProfileIdentity();
     const identity = childIdentity ?? holderIdentity;
     this.page = null;
     this.primaryPage = null;

@@ -8,9 +8,18 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import {
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 export const CHROME_PROFILE_DIR =
   process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? join(homedir(), ".trusty-squire", "chrome-profile");
@@ -206,6 +215,7 @@ export async function closeProfileWithProof(opts: {
 interface ProfileOperationOwner {
   host: string;
   pid: number;
+  start_time: string;
   token: string;
 }
 
@@ -224,13 +234,60 @@ function readProfileOperationOwner(lockDir: string): ProfileOperationOwner | nul
     if (
       typeof owner.host !== "string" ||
       typeof owner.pid !== "number" ||
+      typeof owner.start_time !== "string" ||
       typeof owner.token !== "string"
     ) {
       return null;
     }
-    return { host: owner.host, pid: owner.pid, token: owner.token };
+    return {
+      host: owner.host,
+      pid: owner.pid,
+      start_time: owner.start_time,
+      token: owner.token,
+    };
   } catch {
     return null;
+  }
+}
+
+function quarantineStaleProfileOperationLock(
+  lockDir: string,
+  observedOwner: ProfileOperationOwner,
+): boolean {
+  const tombstone = `${lockDir}.stale-${randomUUID()}`;
+  try {
+    renameSync(lockDir, tombstone);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
+    return false;
+  }
+  const quarantinedOwner = readProfileOperationOwner(tombstone);
+  const exactOwner =
+    quarantinedOwner !== null &&
+    quarantinedOwner.host === observedOwner.host &&
+    quarantinedOwner.pid === observedOwner.pid &&
+    quarantinedOwner.start_time === observedOwner.start_time &&
+    quarantinedOwner.token === observedOwner.token;
+  if (exactOwner && processBirthIdentityState(quarantinedOwner) === "stale") {
+    rmSync(tombstone, { recursive: true, force: true });
+    return true;
+  }
+  try {
+    renameSync(tombstone, lockDir);
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+function profileOperationTombstones(lockDir: string, lockRoot: string): string[] {
+  const prefix = `${basename(lockDir)}.stale-`;
+  try {
+    return readdirSync(lockRoot)
+      .filter((name) => name.startsWith(prefix))
+      .map((name) => join(lockRoot, name));
+  } catch {
+    return [];
   }
 }
 
@@ -240,14 +297,20 @@ export function acquireProfileOperationGuard(
 ): ProfileOperationLease {
   const lockDir = profileOperationLockDir(profileDir, lockRoot);
   const token = randomUUID();
+  const birth = processBirthIdentity(process.pid);
+  const startTime = birth?.start_time ?? "unknown";
   for (;;) {
     try {
       mkdirSync(lockDir, { mode: 0o700 });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       const owner = readProfileOperationOwner(lockDir);
-      if (owner !== null && owner.host === hostname() && !isPidAlive(owner.pid)) {
-        rmSync(lockDir, { recursive: true, force: true });
+      if (
+        owner !== null &&
+        owner.host === hostname() &&
+        processBirthIdentityState(owner) === "stale" &&
+        quarantineStaleProfileOperationLock(lockDir, owner)
+      ) {
         continue;
       }
       throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
@@ -255,11 +318,17 @@ export function acquireProfileOperationGuard(
     try {
       writeFileSync(
         join(lockDir, "owner.json"),
-        JSON.stringify({ host: hostname(), pid: process.pid, token }),
+        JSON.stringify({ host: hostname(), pid: process.pid, start_time: startTime, token }),
         { mode: 0o600 },
       );
+      if (profileOperationTombstones(lockDir, lockRoot).length > 0) {
+        rmSync(lockDir, { recursive: true, force: true });
+        throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+      }
     } catch (err) {
-      rmSync(lockDir, { recursive: true, force: true });
+      if (readProfileOperationOwner(lockDir)?.token === token) {
+        rmSync(lockDir, { recursive: true, force: true });
+      }
       throw err;
     }
     let released = false;
@@ -269,6 +338,13 @@ export function acquireProfileOperationGuard(
         released = true;
         if (readProfileOperationOwner(lockDir)?.token === token) {
           rmSync(lockDir, { recursive: true, force: true });
+          return;
+        }
+        for (const tombstone of profileOperationTombstones(lockDir, lockRoot)) {
+          if (readProfileOperationOwner(tombstone)?.token === token) {
+            rmSync(tombstone, { recursive: true, force: true });
+            return;
+          }
         }
       },
     };

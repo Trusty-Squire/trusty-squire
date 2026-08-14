@@ -9,7 +9,18 @@
 // NEVER yanks a lock held by a live process.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { createHash } from "node:crypto";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -250,6 +261,43 @@ describe("profile operation guard", () => {
     first.release();
     const second = await acquireFreeProfileOperationGuard(dir, lockRoot);
     second.release();
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "quarantines only the exact stale process birth before reclaiming",
+    () => {
+      const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+      const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+      mkdirSync(lockDir);
+      writeFileSync(
+        join(lockDir, "owner.json"),
+        JSON.stringify({
+          host: hostname(),
+          pid: process.pid,
+          start_time: "not-this-process",
+          token: "stale-token",
+        }),
+      );
+
+      const lease = acquireProfileOperationGuard(dir, lockRoot);
+      expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+      expect(readdirSync(lockRoot).filter((name) => name.includes(".stale-"))).toEqual([]);
+      lease.release();
+    },
+  );
+
+  it("keeps a quarantined live owner exclusive until that owner releases", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    const tombstone = `${lockDir}.stale-race`;
+    const lease = acquireProfileOperationGuard(dir, lockRoot);
+    renameSync(lockDir, tombstone);
+
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+    lease.release();
+    expect(existsSync(tombstone)).toBe(false);
+    const next = acquireProfileOperationGuard(dir, lockRoot);
+    next.release();
   });
 
   it("releases the operation lock when Chrome already owns the profile", async () => {

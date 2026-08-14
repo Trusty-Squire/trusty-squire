@@ -216,6 +216,31 @@ describe("headless login VNC lifecycle", () => {
 });
 
 describe("login browser lifecycle guards", () => {
+  it("cancels a wedged start without waiting for launch settlement", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
+    const controller = new BrowserController({ profileDir });
+    const internals = controller as unknown as {
+      startWithProfileGuard: () => Promise<void>;
+      closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+      reapCancelledStartProcess: () => Promise<void>;
+    };
+    const startImpl = vi.fn(() => new Promise<void>(() => undefined));
+    const closeImpl = vi.fn(async () => "closed" as const);
+    internals.startWithProfileGuard = startImpl;
+    internals.closeWithProfileGuard = closeImpl;
+    internals.reapCancelledStartProcess = vi.fn(async () => undefined);
+
+    try {
+      void controller.start().catch(() => undefined);
+      await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
+      await expect(controller.close({ cancelStart: true })).resolves.toBe("unknown");
+      await expect(controller.close()).resolves.toBe("unknown");
+      expect(closeImpl).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
   it("settles an in-flight start once and caches the verified close result", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-close-"));
     let releaseStart: (() => void) | undefined;

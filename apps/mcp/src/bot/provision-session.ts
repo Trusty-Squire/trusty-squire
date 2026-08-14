@@ -611,10 +611,7 @@ let startingBrowser: StartingBrowser | null = null;
 let starting = false;
 let inFlight = false;
 
-async function acquireWarmBrowser(
-  opts: StartOptions,
-  sessionId: string,
-): Promise<AcquiredBrowser> {
+async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
   if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
     throw new Error("operate_start does not support remote CDP with isolated profile leases");
   }
@@ -731,7 +728,7 @@ async function startBrowserBounded(browser: BrowserController, sessionId: string
   } catch (err) {
     if (err instanceof Error && err.message === "__browser_start_timeout__") {
       // Release the wedged Chrome/profile lock so the next operate_start isn't bricked.
-      await browser.close().catch(() => undefined);
+      await browser.close({ cancelStart: true }).catch(() => undefined);
       throw new Error(
         `operate_start: browser did not launch within ${Math.round(START_TIMEOUT_MS / 1000)}s. ` +
           "On a fresh machine the first launch downloads Chromium and starts a virtual display " +
@@ -7360,8 +7357,8 @@ export async function closeAllProvisionSessions(): Promise<void> {
   const pending = startingBrowser;
   if (pending !== null) {
     pending.cancelRequested = true;
-    await pending.controller.close().catch(() => undefined);
-    await pending.launch.catch(() => undefined);
+    await pending.controller.close({ cancelStart: true }).catch(() => undefined);
+    void pending.launch.catch(() => undefined);
     await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
   }
   for (const [id, session] of [...sessions.entries()]) {
