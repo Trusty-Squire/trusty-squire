@@ -555,9 +555,9 @@ describe("checkout payment parsing", () => {
         expect(await page.locator("body").getAttribute("data-dob-at-submit")).toBe("");
         expect(await page.locator("body").getAttribute("data-expiry-at-submit")).toBe("12/30");
         expect(await page.locator("body").getAttribute("data-expiry-keys")).toBe("1230");
-        expect(
-          await page.locator("body").getAttribute("data-selected-billing-at-submit"),
-        ).toBe("Testville");
+        expect(await page.locator("body").getAttribute("data-selected-billing-at-submit")).toBe(
+          "Testville",
+        );
         expect(result.three_ds_required).toBe(true);
         expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
         expect(await page.locator("#alternate-billing-city").inputValue()).toBe(
@@ -1265,6 +1265,129 @@ describe("checkout payment parsing", () => {
           }),
         );
         await page.goto("https://merchant.test/orders/ORD-123");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not confirm an order token already present in the checkout query",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay-now">Pay now</button>
+              <script>
+                document.querySelector("#pay-now").addEventListener("click", () => {
+                  history.replaceState({}, "", "/orders/ORD-123/confirmation");
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/checkout?order_id=ORD-123");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not confirm an order token already present in a hash route",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay-now">Pay now</button>
+              <script>
+                document.querySelector("#pay-now").addEventListener("click", () => {
+                  history.replaceState({}, "", "/orders/ORD-123/confirmation");
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/checkout#/payment?receipt_token=ORD-123");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not confirm an order token already present in a merchant frame",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) => {
+          const pathname = new URL(route.request().url()).pathname;
+          await route.fulfill({
+            contentType: "text/html",
+            body:
+              pathname === "/order-context"
+                ? "<p>Checkout context</p>"
+                : `
+                    <iframe src="/order-context?receipt_id=ORD-123"></iframe>
+                    <button id="pay-now">Pay now</button>
+                    <script>
+                      document.querySelector("#pay-now").addEventListener("click", () => {
+                        history.replaceState({}, "", "/orders/ORD-123/confirmation");
+                      });
+                    </script>`,
+          });
+        });
+        await page.goto("https://merchant.test/checkout");
+        await page.locator("iframe").contentFrame().locator("body").waitFor();
         const controller = new BrowserController({ humanize: false });
         (controller as unknown as { page: Page }).page = page;
 
@@ -2151,7 +2274,9 @@ describe("structured-data checkout totals", () => {
 });
 
 describe("3-D Secure resolution", () => {
-  const setupChallenge = async (initialMerchantHtml = ""): Promise<{
+  const setupChallenge = async (
+    initialMerchantHtml = "",
+  ): Promise<{
     browser: Browser;
     page: Page;
     controller: BrowserController;
@@ -2210,10 +2335,7 @@ describe("3-D Secure resolution", () => {
       try {
         await page.locator("#bank-approval").evaluate((element) => element.remove());
         await page.locator("body").evaluate((body) => {
-          body.insertAdjacentHTML(
-            "beforeend",
-            "<p>Thank you <strong>for your order</strong></p>",
-          );
+          body.insertAdjacentHTML("beforeend", "<p>Thank you <strong>for your order</strong></p>");
         });
         await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("unconfirmed");
       } finally {

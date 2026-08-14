@@ -259,6 +259,7 @@ interface CheckoutOutcomeBaseline {
 
 interface CheckoutOutcomeDispatchSnapshot {
   url: string;
+  urls: readonly string[];
 }
 
 type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
@@ -425,9 +426,15 @@ function checkoutOutcomeBaselineFromDispatchSnapshot(
   snapshot: CheckoutOutcomeDispatchSnapshot,
 ): CheckoutOutcomeBaseline {
   const identities = checkoutUrlOrderIdentities(snapshot.url);
+  const orderUrlIdentities = new Set<string>();
+  for (const url of [snapshot.url, ...snapshot.urls]) {
+    for (const identity of checkoutUrlOrderIdentities(url)?.orders ?? []) {
+      orderUrlIdentities.add(identity);
+    }
+  }
   return {
     url: snapshot.url,
-    orderUrlIdentities: identities?.orders ?? [],
+    orderUrlIdentities: [...orderUrlIdentities],
     terminalUrlIdentity: identities?.terminal ?? null,
   };
 }
@@ -438,65 +445,115 @@ function checkoutUrlOrderIdentities(
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
-    const segments = url.pathname
-      .split("/")
-      .filter((segment) => segment.length > 0)
-      .map((segment) => {
-        try {
-          return decodeURIComponent(segment);
-        } catch {
-          return segment;
-        }
-      });
-    const routeSegment = (offset: number): string =>
-      (segments.at(offset) ?? "").toLowerCase().replace(/-/g, "_");
-    if (
-      segments.some((segment) =>
-        ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")),
-      )
-    ) {
-      return null;
-    }
     const canonicalIdentity = (identity: string | undefined): string | null => {
       if (identity === undefined || !isSubstantiveCheckoutIdentity(identity)) return null;
       const normalizedIdentity = identity.normalize("NFKC").trim().toLowerCase();
       return `${url.origin}/order/${encodeURIComponent(normalizedIdentity)}`;
     };
+    const surfaces: Array<{ pathname: string; searchParams: URLSearchParams }> = [
+      { pathname: url.pathname, searchParams: url.searchParams },
+    ];
+    const fragment = url.hash.slice(1).replace(/^!/, "");
+    if (fragment.length > 0) {
+      let decodedFragment = fragment;
+      try {
+        decodedFragment = decodeURIComponent(fragment);
+      } catch {
+        decodedFragment = fragment;
+      }
+      if (/^[^/?#]+=[^#]*$/.test(decodedFragment)) {
+        surfaces.push({ pathname: "", searchParams: new URLSearchParams(decodedFragment) });
+      } else {
+        try {
+          const fragmentUrl = new URL(
+            /^[a-z][a-z\d+.-]*:/i.test(decodedFragment)
+              ? decodedFragment
+              : decodedFragment.startsWith("/")
+                ? `${url.origin}${decodedFragment}`
+                : `${url.origin}/${decodedFragment}`,
+          );
+          surfaces.push({
+            pathname: fragmentUrl.pathname,
+            searchParams: fragmentUrl.searchParams,
+          });
+        } catch {
+          surfaces.push({ pathname: decodedFragment, searchParams: new URLSearchParams() });
+        }
+      }
+    }
     const orders = new Set<string>();
-    for (let index = 0; index < segments.length - 1; index += 1) {
-      const marker = segments[index]?.toLowerCase().replace(/-/g, "_");
+    let terminal: string | null = null;
+    for (const surface of surfaces) {
+      const segments = surface.pathname
+        .split("/")
+        .filter((segment) => segment.length > 0)
+        .map((segment) => {
+          try {
+            return decodeURIComponent(segment);
+          } catch {
+            return segment;
+          }
+        });
+      const routeSegment = (offset: number): string =>
+        (segments.at(offset) ?? "").toLowerCase().replace(/-/g, "_");
       if (
-        !["checkout", "checkouts", "order", "orders", "receipt", "receipts"].includes(
-          marker ?? "",
+        segments.some((segment) =>
+          ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")),
         )
       ) {
         continue;
       }
-      const order = canonicalIdentity(segments[index + 1]);
-      if (order !== null) orders.add(order);
+      for (let index = 0; index < segments.length - 1; index += 1) {
+        const marker = segments[index]?.toLowerCase().replace(/-/g, "_");
+        if (
+          !["checkout", "checkouts", "order", "orders", "receipt", "receipts"].includes(
+            marker ?? "",
+          )
+        ) {
+          continue;
+        }
+        const order = canonicalIdentity(segments[index + 1]);
+        if (order !== null) orders.add(order);
+      }
+      for (const [key, value] of surface.searchParams) {
+        const normalizedKey = key
+          .normalize("NFKC")
+          .replace(/([a-z\d])([A-Z])/g, "$1_$2")
+          .toLowerCase()
+          .replace(/[^a-z\d]+/g, "_")
+          .replace(/^_+|_+$/g, "");
+        if (!/(?:^|_)(?:order|receipt)(?:_(?:id|number|token))?(?:_|$)/.test(normalizedKey)) {
+          continue;
+        }
+        const order = canonicalIdentity(value);
+        if (order !== null) orders.add(order);
+      }
+      let terminalIdentity: string | undefined;
+      if (["receipt", "receipts"].includes(routeSegment(-2))) {
+        terminalIdentity = segments.at(-1);
+      } else if (
+        ["order", "orders"].includes(routeSegment(-3)) &&
+        ["confirmation", "confirmed", "thank_you"].includes(routeSegment(-1))
+      ) {
+        terminalIdentity = segments.at(-2);
+      } else if (
+        ["order_confirmation", "order_confirmed", "order_complete", "thank_you"].includes(
+          routeSegment(-2),
+        )
+      ) {
+        terminalIdentity = segments.at(-1);
+      } else if (
+        ["checkout", "checkouts"].includes(routeSegment(-3)) &&
+        routeSegment(-1) === "thank_you"
+      ) {
+        terminalIdentity = segments.at(-2);
+      }
+      const surfaceTerminal = canonicalIdentity(terminalIdentity);
+      if (surfaceTerminal !== null) {
+        orders.add(surfaceTerminal);
+        terminal ??= surfaceTerminal;
+      }
     }
-    let terminalIdentity: string | undefined;
-    if (["receipt", "receipts"].includes(routeSegment(-2))) {
-      terminalIdentity = segments.at(-1);
-    } else if (
-      ["order", "orders"].includes(routeSegment(-3)) &&
-      ["confirmation", "confirmed", "thank_you"].includes(routeSegment(-1))
-    ) {
-      terminalIdentity = segments.at(-2);
-    } else if (
-      ["order_confirmation", "order_confirmed", "order_complete", "thank_you"].includes(
-        routeSegment(-2),
-      )
-    ) {
-      terminalIdentity = segments.at(-1);
-    } else if (
-      ["checkout", "checkouts"].includes(routeSegment(-3)) &&
-      routeSegment(-1) === "thank_you"
-    ) {
-      terminalIdentity = segments.at(-2);
-    }
-    const terminal = canonicalIdentity(terminalIdentity);
-    if (terminal !== null) orders.add(terminal);
     return { orders: [...orders], terminal };
   } catch {
     return null;
@@ -8522,8 +8579,7 @@ export class BrowserController {
                 const selectedOwner = element.getAttribute("data-ts-payment-card-group");
                 if (owner !== null && owner !== selectedOwner) continue;
                 const controlForm = control.closest("form");
-                const sharesSelectedForm =
-                  controlForm !== null && controlForm.contains(element);
+                const sharesSelectedForm = controlForm !== null && controlForm.contains(element);
                 if (controlForm !== null && !sharesSelectedForm) continue;
                 const hasSelectedOwner =
                   owner !== null && selectedOwner !== null && owner === selectedOwner;
@@ -9174,102 +9230,125 @@ export class BrowserController {
         if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
         const dispatchToken = `ts-payment-submit-${this.checkoutSubmitSequence++}`;
         const dispatchBaselineStorageKey = `__trusty_squire_payment_baseline_${dispatchToken}`;
+        const preDispatchFrameUrls = this.page.frames().map((pageFrame) => pageFrame.url());
         const dispatchTrackingInstalled = await candidate
-          .evaluate((element, options) => {
-            const { baselineStorageKey, token } = options;
-            const stateWindow = window as Window & {
-              __trustySquirePaymentSubmitDispatch?: {
-                token: string;
-                dispatched: boolean;
-              };
-            };
-            const tracked = element as Element & {
-              __tsPaymentSubmitDispatchListener?: EventListener;
-            };
-            if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
-              element.removeEventListener(
-                "click",
-                tracked.__tsPaymentSubmitDispatchListener,
-                true,
-              );
-            }
-            stateWindow.__trustySquirePaymentSubmitDispatch = {
-              token,
-              dispatched: false,
-            };
-            const listener: EventListener = () => {
-              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-              if (state?.token !== token) return;
-              try {
-                const merchantWindow = window.top;
-                if (merchantWindow === null) return;
-                const snapshot: CheckoutOutcomeDispatchSnapshot = {
-                  url: merchantWindow.location.href,
+          .evaluate(
+            (element, options) => {
+              const { baselineStorageKey, frameUrls, token } = options;
+              const stateWindow = window as Window & {
+                __trustySquirePaymentSubmitDispatch?: {
+                  token: string;
+                  dispatched: boolean;
                 };
-                const baselineWindow = merchantWindow as Window & {
+              };
+              const tracked = element as Element & {
+                __tsPaymentSubmitDispatchListener?: EventListener;
+              };
+              if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
+                element.removeEventListener(
+                  "click",
+                  tracked.__tsPaymentSubmitDispatchListener,
+                  true,
+                );
+              }
+              stateWindow.__trustySquirePaymentSubmitDispatch = {
+                token,
+                dispatched: false,
+              };
+              const listener: EventListener = () => {
+                const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+                if (state?.token !== token) return;
+                try {
+                  const merchantWindow = window.top;
+                  if (merchantWindow === null) return;
+                  const urls = new Set(frameUrls);
+                  const collectFrameUrls = (currentWindow: Window): void => {
+                    try {
+                      urls.add(currentWindow.location.href);
+                      for (let index = 0; index < currentWindow.frames.length; index += 1) {
+                        collectFrameUrls(currentWindow.frames[index]!);
+                      }
+                    } catch (error) {
+                      void error;
+                    }
+                  };
+                  collectFrameUrls(merchantWindow);
+                  const snapshot: CheckoutOutcomeDispatchSnapshot = {
+                    url: merchantWindow.location.href,
+                    urls: [...urls],
+                  };
+                  const baselineWindow = merchantWindow as Window & {
+                    __trustySquirePaymentDispatchBaselines?: Record<
+                      string,
+                      CheckoutOutcomeDispatchSnapshot
+                    >;
+                  };
+                  baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
+                  baselineWindow.__trustySquirePaymentDispatchBaselines[token] = snapshot;
+                  try {
+                    merchantWindow.sessionStorage.setItem(
+                      baselineStorageKey,
+                      JSON.stringify(snapshot),
+                    );
+                  } catch (error) {
+                    void error;
+                  }
+                } finally {
+                  state.dispatched = true;
+                }
+              };
+              tracked.__tsPaymentSubmitDispatchListener = listener;
+              element.addEventListener("click", listener, { capture: true, once: true });
+            },
+            {
+              baselineStorageKey: dispatchBaselineStorageKey,
+              frameUrls: preDispatchFrameUrls,
+              token: dispatchToken,
+            },
+          )
+          .then(() => true)
+          .catch(() => false);
+        if (!dispatchTrackingInstalled) continue;
+        const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
+          const snapshot = await this.page!.mainFrame()
+            .evaluate(
+              ({ baselineStorageKey, token }) => {
+                const baselineWindow = window as Window & {
                   __trustySquirePaymentDispatchBaselines?: Record<
                     string,
                     CheckoutOutcomeDispatchSnapshot
                   >;
                 };
-                baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
-                baselineWindow.__trustySquirePaymentDispatchBaselines[token] = snapshot;
+                let captured =
+                  baselineWindow.__trustySquirePaymentDispatchBaselines?.[token] ?? null;
+                if (captured !== null) {
+                  delete baselineWindow.__trustySquirePaymentDispatchBaselines?.[token];
+                }
+                if (captured === null) {
+                  try {
+                    const stored = sessionStorage.getItem(baselineStorageKey);
+                    if (stored !== null) {
+                      captured = JSON.parse(stored) as CheckoutOutcomeDispatchSnapshot;
+                    }
+                  } catch {
+                    captured = null;
+                  }
+                }
                 try {
-                  merchantWindow.sessionStorage.setItem(
-                    baselineStorageKey,
-                    JSON.stringify(snapshot),
-                  );
+                  sessionStorage.removeItem(baselineStorageKey);
                 } catch (error) {
                   void error;
                 }
-              } finally {
-                state.dispatched = true;
-              }
-            };
-            tracked.__tsPaymentSubmitDispatchListener = listener;
-            element.addEventListener("click", listener, { capture: true, once: true });
-          }, {
-            baselineStorageKey: dispatchBaselineStorageKey,
-            token: dispatchToken,
-          })
-          .then(() => true)
-          .catch(() => false);
-        if (!dispatchTrackingInstalled) continue;
-        const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
-          const snapshot = await this.page!
-            .mainFrame()
-            .evaluate(({ baselineStorageKey, token }) => {
-              const baselineWindow = window as Window & {
-                __trustySquirePaymentDispatchBaselines?: Record<
-                  string,
-                  CheckoutOutcomeDispatchSnapshot
-                >;
-              };
-              let captured = baselineWindow.__trustySquirePaymentDispatchBaselines?.[token] ?? null;
-              if (captured !== null) {
-                delete baselineWindow.__trustySquirePaymentDispatchBaselines?.[token];
-              }
-              if (captured === null) {
-                try {
-                  const stored = sessionStorage.getItem(baselineStorageKey);
-                  if (stored !== null) {
-                    captured = JSON.parse(stored) as CheckoutOutcomeDispatchSnapshot;
-                  }
-                } catch {
-                  captured = null;
-                }
-              }
-              try {
-                sessionStorage.removeItem(baselineStorageKey);
-              } catch (error) {
-                void error;
-              }
-              return captured;
-            }, { baselineStorageKey: dispatchBaselineStorageKey, token: dispatchToken })
+                return captured;
+              },
+              { baselineStorageKey: dispatchBaselineStorageKey, token: dispatchToken },
+            )
             .catch(() => null);
           if (
             snapshot === null ||
-            typeof snapshot.url !== "string"
+            typeof snapshot.url !== "string" ||
+            !Array.isArray(snapshot.urls) ||
+            !snapshot.urls.every((url) => typeof url === "string")
           ) {
             return null;
           }
@@ -9468,9 +9547,7 @@ export class BrowserController {
               priority: string;
               value: string;
             }> = [];
-            for (const candidate of Array.from(
-              document.querySelectorAll<HTMLElement>("body *"),
-            )) {
+            for (const candidate of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
               const style = getComputedStyle(candidate);
               if (
                 style.pointerEvents !== "none" ||
@@ -9478,8 +9555,7 @@ export class BrowserController {
                 style.visibility === "hidden" ||
                 Number.parseFloat(style.opacity) <= 0 ||
                 !Array.from(candidate.getClientRects()).some(
-                  (rect) =>
-                    x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
+                  (rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
                 )
               ) {
                 continue;
@@ -9577,190 +9653,193 @@ export class BrowserController {
       const detected =
         urlPattern.test(frameUrlContext) ||
         (await frame
-          .evaluate(({ externalContext, shopifyPciFrame }) => {
-            const visualHitAtPoint = (x: number, y: number): Element | null => {
-              const restored: Array<{
-                element: HTMLElement;
-                priority: string;
-                value: string;
-              }> = [];
-              for (const candidate of Array.from(
-                document.querySelectorAll<HTMLElement>("body *"),
-              )) {
-                const style = getComputedStyle(candidate);
-                if (
-                  style.pointerEvents !== "none" ||
-                  style.display === "none" ||
-                  style.visibility === "hidden" ||
-                  Number.parseFloat(style.opacity) <= 0 ||
-                  !Array.from(candidate.getClientRects()).some(
-                    (rect) =>
-                      x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
-                  )
-                ) {
-                  continue;
-                }
-                restored.push({
-                  element: candidate,
-                  priority: candidate.style.getPropertyPriority("pointer-events"),
-                  value: candidate.style.getPropertyValue("pointer-events"),
-                });
-                candidate.style.setProperty("pointer-events", "auto", "important");
-              }
-              const hit = document.elementFromPoint(x, y);
-              for (const original of restored) {
-                if (original.value.length === 0) {
-                  original.element.style.removeProperty("pointer-events");
-                } else {
-                  original.element.style.setProperty(
-                    "pointer-events",
-                    original.value,
-                    original.priority,
-                  );
-                }
-              }
-              return hit;
-            };
-            const visibleAndTopmost = (element: Element): boolean => {
-              if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) {
-                return false;
-              }
-              let current: HTMLElement | null = element;
-              while (current !== null) {
-                const style = getComputedStyle(current);
-                if (
-                  style.display === "none" ||
-                  style.visibility === "hidden" ||
-                  style.visibility === "collapse" ||
-                  Number.parseFloat(style.opacity) <= 0
-                ) {
-                  return false;
-                }
-                current = current.parentElement;
-              }
-              return Array.from(element.getClientRects()).some((rect) => {
-                const left = Math.max(0, rect.left);
-                const right = Math.min(window.innerWidth, rect.right);
-                const top = Math.max(0, rect.top);
-                const bottom = Math.min(window.innerHeight, rect.bottom);
-                if (right <= left || bottom <= top) return false;
-                const x = left + (right - left) / 2;
-                const y = top + (bottom - top) / 2;
-                return visualHitAtPoint(x, y) === element;
-              });
-            };
-            const visibleTextAndTopmost = (node: Text): boolean => {
-              const element = node.parentElement;
-              if (element === null) return false;
-              let current: HTMLElement | null = element;
-              while (current !== null) {
-                const style = getComputedStyle(current);
-                if (
-                  style.display === "none" ||
-                  style.visibility === "hidden" ||
-                  style.visibility === "collapse" ||
-                  Number.parseFloat(style.opacity) <= 0
-                ) {
-                  return false;
-                }
-                current = current.parentElement;
-              }
-              const range = document.createRange();
-              range.selectNodeContents(node);
-              return Array.from(range.getClientRects()).some((rect) => {
-                const left = Math.max(0, rect.left);
-                const right = Math.min(window.innerWidth, rect.right);
-                const top = Math.max(0, rect.top);
-                const bottom = Math.min(window.innerHeight, rect.bottom);
-                if (right <= left || bottom <= top) return false;
-                const x = left + (right - left) / 2;
-                const y = top + (bottom - top) / 2;
-                return visualHitAtPoint(x, y) === element;
-              });
-            };
-            const structural = Array.from(
-              document.querySelectorAll(
-                'iframe[title*="3d secure" i],form:has(input[name="creq" i]),form[action*="acs" i]',
-              ),
-            ).some(
-              (element) =>
-                visibleAndTopmost(element) ||
-                Array.from(element.querySelectorAll("button,input,select,textarea")).some(
-                  visibleAndTopmost,
-                ),
-            );
-            if (structural) return true;
-            const hasKnownChallengeContext = (context: string): boolean => {
-              const explicitThreeDs =
-                /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
-              const shopifyChallenge =
-                /(?:shopify|shopifyinc)/i.test(context) &&
-                /(?:authentication|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
-              const dbsChallenge =
-                /\bdbs\b/i.test(context) &&
-                /(?:bank(?:ing)?\s+app|authentication|challenge|approval|3d[-_ ]?secure|\b3ds2?\b)/i.test(
-                  context,
-                );
-              const issuerAuthentication =
-                /\bissuer\b/i.test(context) &&
-                /(?:authentication|challenge|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
-              return explicitThreeDs || shopifyChallenge || dbsChallenge || issuerAuthentication;
-            };
-            const explicitText =
-              /\b(?:3d secure|authenticate (?:this )?payment|security code sent to)\b/i;
-            const contextualText = /\bverify (?:your )?identity\b/i;
-            const countdownText = /\b\d{1,3}\s+seconds?\s+to\s+confirm\b/i;
-            const bankAppText =
-              /\b(?:confirm|approve)\b.{0,80}\b(?:bank|banking|issuer)\s+app\b/i;
-            const dbsBankAppText =
-              /\b(?:confirm|approve)\b.{0,80}\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b|\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b.{0,80}\b(?:confirm|approve)\b/i;
-            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-            let node = walker.nextNode();
-            while (node !== null) {
-              const text = (node.nodeValue ?? "").replace(/\s+/g, " ").trim();
-              const element = node.parentElement;
-              if (text.length > 0 && element !== null) {
-                const explicitMatch = explicitText.test(text);
-                const dbsBankAppMatch = dbsBankAppText.test(text);
-                const countdownMatch = countdownText.test(text);
-                const bankAppMatch = bankAppText.test(text);
-                const contextualMatch = contextualText.test(text);
-                if (
-                  (explicitMatch ||
-                    dbsBankAppMatch ||
-                    countdownMatch ||
-                    bankAppMatch ||
-                    contextualMatch) &&
-                  visibleTextAndTopmost(node as Text)
-                ) {
-                  if (explicitMatch) return true;
-                  if (dbsBankAppMatch || (shopifyPciFrame && (countdownMatch || bankAppMatch))) {
-                    return true;
+          .evaluate(
+            ({ externalContext, shopifyPciFrame }) => {
+              const visualHitAtPoint = (x: number, y: number): Element | null => {
+                const restored: Array<{
+                  element: HTMLElement;
+                  priority: string;
+                  value: string;
+                }> = [];
+                for (const candidate of Array.from(
+                  document.querySelectorAll<HTMLElement>("body *"),
+                )) {
+                  const style = getComputedStyle(candidate);
+                  if (
+                    style.pointerEvents !== "none" ||
+                    style.display === "none" ||
+                    style.visibility === "hidden" ||
+                    Number.parseFloat(style.opacity) <= 0 ||
+                    !Array.from(candidate.getClientRects()).some(
+                      (rect) =>
+                        x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
+                    )
+                  ) {
+                    continue;
                   }
-                  const context: string[] = [externalContext];
-                  let ancestor: Element | null = element;
-                  for (let depth = 0; ancestor !== null && depth < 8; depth += 1) {
-                    context.push(
-                      [
-                        ancestor.id,
-                        ancestor.className,
-                        ancestor.getAttribute("name"),
-                        ancestor.getAttribute("title"),
-                        ancestor.getAttribute("aria-label"),
-                        ancestor.getAttribute("data-testid"),
-                      ]
-                        .filter((value): value is string => typeof value === "string")
-                        .join(" "),
+                  restored.push({
+                    element: candidate,
+                    priority: candidate.style.getPropertyPriority("pointer-events"),
+                    value: candidate.style.getPropertyValue("pointer-events"),
+                  });
+                  candidate.style.setProperty("pointer-events", "auto", "important");
+                }
+                const hit = document.elementFromPoint(x, y);
+                for (const original of restored) {
+                  if (original.value.length === 0) {
+                    original.element.style.removeProperty("pointer-events");
+                  } else {
+                    original.element.style.setProperty(
+                      "pointer-events",
+                      original.value,
+                      original.priority,
                     );
-                    ancestor = ancestor.parentElement;
                   }
-                  if (hasKnownChallengeContext(context.join(" "))) return true;
                 }
+                return hit;
+              };
+              const visibleAndTopmost = (element: Element): boolean => {
+                if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) {
+                  return false;
+                }
+                let current: HTMLElement | null = element;
+                while (current !== null) {
+                  const style = getComputedStyle(current);
+                  if (
+                    style.display === "none" ||
+                    style.visibility === "hidden" ||
+                    style.visibility === "collapse" ||
+                    Number.parseFloat(style.opacity) <= 0
+                  ) {
+                    return false;
+                  }
+                  current = current.parentElement;
+                }
+                return Array.from(element.getClientRects()).some((rect) => {
+                  const left = Math.max(0, rect.left);
+                  const right = Math.min(window.innerWidth, rect.right);
+                  const top = Math.max(0, rect.top);
+                  const bottom = Math.min(window.innerHeight, rect.bottom);
+                  if (right <= left || bottom <= top) return false;
+                  const x = left + (right - left) / 2;
+                  const y = top + (bottom - top) / 2;
+                  return visualHitAtPoint(x, y) === element;
+                });
+              };
+              const visibleTextAndTopmost = (node: Text): boolean => {
+                const element = node.parentElement;
+                if (element === null) return false;
+                let current: HTMLElement | null = element;
+                while (current !== null) {
+                  const style = getComputedStyle(current);
+                  if (
+                    style.display === "none" ||
+                    style.visibility === "hidden" ||
+                    style.visibility === "collapse" ||
+                    Number.parseFloat(style.opacity) <= 0
+                  ) {
+                    return false;
+                  }
+                  current = current.parentElement;
+                }
+                const range = document.createRange();
+                range.selectNodeContents(node);
+                return Array.from(range.getClientRects()).some((rect) => {
+                  const left = Math.max(0, rect.left);
+                  const right = Math.min(window.innerWidth, rect.right);
+                  const top = Math.max(0, rect.top);
+                  const bottom = Math.min(window.innerHeight, rect.bottom);
+                  if (right <= left || bottom <= top) return false;
+                  const x = left + (right - left) / 2;
+                  const y = top + (bottom - top) / 2;
+                  return visualHitAtPoint(x, y) === element;
+                });
+              };
+              const structural = Array.from(
+                document.querySelectorAll(
+                  'iframe[title*="3d secure" i],form:has(input[name="creq" i]),form[action*="acs" i]',
+                ),
+              ).some(
+                (element) =>
+                  visibleAndTopmost(element) ||
+                  Array.from(element.querySelectorAll("button,input,select,textarea")).some(
+                    visibleAndTopmost,
+                  ),
+              );
+              if (structural) return true;
+              const hasKnownChallengeContext = (context: string): boolean => {
+                const explicitThreeDs =
+                  /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
+                const shopifyChallenge =
+                  /(?:shopify|shopifyinc)/i.test(context) &&
+                  /(?:authentication|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
+                const dbsChallenge =
+                  /\bdbs\b/i.test(context) &&
+                  /(?:bank(?:ing)?\s+app|authentication|challenge|approval|3d[-_ ]?secure|\b3ds2?\b)/i.test(
+                    context,
+                  );
+                const issuerAuthentication =
+                  /\bissuer\b/i.test(context) &&
+                  /(?:authentication|challenge|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
+                return explicitThreeDs || shopifyChallenge || dbsChallenge || issuerAuthentication;
+              };
+              const explicitText =
+                /\b(?:3d secure|authenticate (?:this )?payment|security code sent to)\b/i;
+              const contextualText = /\bverify (?:your )?identity\b/i;
+              const countdownText = /\b\d{1,3}\s+seconds?\s+to\s+confirm\b/i;
+              const bankAppText =
+                /\b(?:confirm|approve)\b.{0,80}\b(?:bank|banking|issuer)\s+app\b/i;
+              const dbsBankAppText =
+                /\b(?:confirm|approve)\b.{0,80}\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b|\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b.{0,80}\b(?:confirm|approve)\b/i;
+              const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+              let node = walker.nextNode();
+              while (node !== null) {
+                const text = (node.nodeValue ?? "").replace(/\s+/g, " ").trim();
+                const element = node.parentElement;
+                if (text.length > 0 && element !== null) {
+                  const explicitMatch = explicitText.test(text);
+                  const dbsBankAppMatch = dbsBankAppText.test(text);
+                  const countdownMatch = countdownText.test(text);
+                  const bankAppMatch = bankAppText.test(text);
+                  const contextualMatch = contextualText.test(text);
+                  if (
+                    (explicitMatch ||
+                      dbsBankAppMatch ||
+                      countdownMatch ||
+                      bankAppMatch ||
+                      contextualMatch) &&
+                    visibleTextAndTopmost(node as Text)
+                  ) {
+                    if (explicitMatch) return true;
+                    if (dbsBankAppMatch || (shopifyPciFrame && (countdownMatch || bankAppMatch))) {
+                      return true;
+                    }
+                    const context: string[] = [externalContext];
+                    let ancestor: Element | null = element;
+                    for (let depth = 0; ancestor !== null && depth < 8; depth += 1) {
+                      context.push(
+                        [
+                          ancestor.id,
+                          ancestor.className,
+                          ancestor.getAttribute("name"),
+                          ancestor.getAttribute("title"),
+                          ancestor.getAttribute("aria-label"),
+                          ancestor.getAttribute("data-testid"),
+                        ]
+                          .filter((value): value is string => typeof value === "string")
+                          .join(" "),
+                      );
+                      ancestor = ancestor.parentElement;
+                    }
+                    if (hasKnownChallengeContext(context.join(" "))) return true;
+                  }
+                }
+                node = walker.nextNode();
               }
-              node = walker.nextNode();
-            }
-            return false;
-          }, { externalContext: frameContext, shopifyPciFrame })
+              return false;
+            },
+            { externalContext: frameContext, shopifyPciFrame },
+          )
           .catch(() => false));
       if (detected) {
         return {
@@ -9776,12 +9855,10 @@ export class BrowserController {
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
     if (!this.page) return { url: "", orderUrlIdentities: [], terminalUrlIdentity: null };
     const url = this.page.url();
-    const identities = checkoutUrlOrderIdentities(url);
-    return {
+    return checkoutOutcomeBaselineFromDispatchSnapshot({
       url,
-      orderUrlIdentities: identities?.orders ?? [],
-      terminalUrlIdentity: identities?.terminal ?? null,
-    };
+      urls: this.page.frames().map((frame) => frame.url()),
+    });
   }
 
   private async hasConfirmedCheckoutOutcome(baseline: CheckoutOutcomeBaseline): Promise<boolean> {
@@ -9828,15 +9905,11 @@ export class BrowserController {
     return combined;
   }
 
-  private async hasNewVisibleCheckoutFailure(
-    baseline: CheckoutFailureBaseline,
-  ): Promise<boolean> {
+  private async hasNewVisibleCheckoutFailure(baseline: CheckoutFailureBaseline): Promise<boolean> {
     if (baseline === null) return false;
     const current = await this.captureVisibleCheckoutFailureSignals();
     if (current === null) return false;
-    return Object.entries(current).some(
-      ([signal, count]) => count > (baseline[signal] ?? 0),
-    );
+    return Object.entries(current).some(([signal, count]) => count > (baseline[signal] ?? 0));
   }
 
   async waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution> {
