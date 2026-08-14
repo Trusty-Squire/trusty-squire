@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clearInstallCompletionUrl,
   installCompletionAcknowledgementUrl,
+  installCompletionProviderUrl,
   normalizeInstallCompletionUrl,
+  readInstallCompletionProviders,
   readInstallCompletionUrl,
+  recordInstallCompletionProvider,
 } from "./completion";
 
 describe("install completion callback validation", () => {
@@ -18,6 +21,16 @@ describe("install completion callback validation", () => {
     const callback =
       "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "a".repeat(48);
     expect(normalizeInstallCompletionUrl(callback)).toBe(callback);
+  });
+
+  it("adds only providers completed in this install ceremony", () => {
+    const callback =
+      "http://127.0.0.1:49152/.well-known/trusty-squire/install-complete/" + "e".repeat(48);
+    const completed = installCompletionProviderUrl(callback, ["google", "github"]);
+    const url = new URL(completed!);
+
+    expect(url.searchParams.getAll("provider")).toEqual(["google", "github"]);
+    expect(url.pathname).toBe(new URL(callback).pathname);
   });
 
   it.each([
@@ -49,6 +62,20 @@ describe("install completion callback validation", () => {
 
     clearInstallCompletionUrl("setup");
     expect(readInstallCompletionUrl("setup")).toBeNull();
+  });
+
+  it("retains earned Google completion across a later GitHub OAuth return", () => {
+    recordInstallCompletionProvider("setup", "google");
+
+    window.history.replaceState({}, "", "/install?token=setup&gh=1");
+    expect(readInstallCompletionProviders("setup")).toEqual(["google"]);
+
+    recordInstallCompletionProvider("setup", "github");
+    expect(readInstallCompletionProviders("setup")).toEqual(["google", "github"]);
+    expect(readInstallCompletionProviders("different-install")).toEqual([]);
+
+    clearInstallCompletionUrl("setup");
+    expect(readInstallCompletionProviders("setup")).toEqual([]);
   });
 
   it("does not advertise callback support when the callback cannot survive OAuth", () => {

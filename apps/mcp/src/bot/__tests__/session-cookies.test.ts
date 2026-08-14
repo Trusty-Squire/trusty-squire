@@ -14,24 +14,35 @@ const c = (name: string, domain: string, value = "x".repeat(40)) => ({
 describe("sessionProvidersFromCookies", () => {
   it("detects a live GitHub session from user_session", () => {
     expect(
-      sessionProvidersFromCookies([c("user_session", ".github.com"), c("logged_in", "github.com", "yes")]),
+      sessionProvidersFromCookies([
+        c("user_session", ".github.com"),
+        c("logged_in", "github.com", "yes"),
+      ]),
     ).toEqual(["github"]);
   });
 
   it("detects a live Google session from a *SID cookie", () => {
     expect(sessionProvidersFromCookies([c("__Secure-1PSID", ".google.com")])).toEqual(["google"]);
+    expect(sessionProvidersFromCookies([c("SAPISID", ".google.com")])).toEqual(["google"]);
     expect(sessionProvidersFromCookies([c("SID", "accounts.google.com")])).toEqual(["google"]);
   });
 
   it("reports BOTH when both sessions are live", () => {
     expect(
-      sessionProvidersFromCookies([c("user_session", ".github.com"), c("SID", ".google.com")]).sort(),
+      sessionProvidersFromCookies([
+        c("user_session", ".github.com"),
+        c("SID", ".google.com"),
+      ]).sort(),
     ).toEqual(["github", "google"]);
   });
 
   it("does NOT count logged-out Google cookies (NID / CONSENT / 1P_JAR)", () => {
     expect(
-      sessionProvidersFromCookies([c("NID", ".google.com"), c("CONSENT", ".google.com"), c("1P_JAR", ".google.com")]),
+      sessionProvidersFromCookies([
+        c("NID", ".google.com"),
+        c("CONSENT", ".google.com"),
+        c("1P_JAR", ".google.com"),
+      ]),
     ).toEqual([]);
   });
 
@@ -41,7 +52,9 @@ describe("sessionProvidersFromCookies", () => {
   });
 
   it("is host-scoped — a google.com cookie can't pass as github", () => {
-    expect(sessionProvidersFromCookies([c("user_session", ".evil-github.com.attacker.net")])).toEqual([]);
+    expect(
+      sessionProvidersFromCookies([c("user_session", ".evil-github.com.attacker.net")]),
+    ).toEqual([]);
     expect(sessionProvidersFromCookies([c("SID", ".notgoogle.com")])).toEqual([]);
   });
 

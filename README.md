@@ -126,10 +126,13 @@ npx @trusty-squire/mcp connect --target=codex
 
 Supported targets: `claude-code`, `cursor`, `codex`, `opencode`, `goose`, `cline`, `continue`, and `hermes`.
 
+The isolated `operate_*` browser runtime currently requires Linux and a local Chrome connection;
+remote CDP, macOS, and Windows operator sessions are not supported in this migration stage.
+
 ## What happens
 
 1. Your coding agent names the website and the account, setup, or credential it needs.
-2. Trusty Squire opens a real browser and works through the service flow one step at a time. It can use a Google or GitHub session that you explicitly connect.
+2. Trusty Squire opens an isolated browser profile and works through the service flow one step at a time. It can use the Google identity you explicitly connected without opening the canonical login profile during the task.
 3. When the site reveals an API key or client secret, Trusty Squire captures it into the vault without returning the raw value through its credential tools.
 4. The agent can make an authenticated request through Trusty Squire or create a host-scoped, rate-limited app grant.
 5. Eligible successful flows can become signed registry skills, so later runs can replay verified steps instead of rediscovering every click.

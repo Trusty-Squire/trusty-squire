@@ -8,23 +8,142 @@
 // removes the lock iff its holder pid is provably dead on this host, and
 // NEVER yanks a lock held by a live process.
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { createHash } from "node:crypto";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   acquireFreeProfileOperationGuard,
   acquireProfileOperationGuard,
   clearStaleSingletonLock,
+  closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
+  profileProcessIdentity,
+  processBirthIdentityState,
   ProfileBusyError,
   reapLeakedProfileHolder,
   reapProfileHolderIfOwned,
+  signalProfileProcess,
   waitForProfileFree,
   withProfileOperationGuard,
 } from "../profile.js";
+
+describe("profile process identity", () => {
+  it("treats a reused current pid as stale when its birth time differs", () => {
+    expect(processBirthIdentityState({ pid: process.pid, start_time: "not-this-process" })).toBe(
+      "stale",
+    );
+  });
+
+  it("retains an identity when its birth time cannot be read", () => {
+    expect(
+      processBirthIdentityState({ pid: process.pid, start_time: "1" }, () => ({
+        state: "unknown",
+      })),
+    ).toBe("unknown");
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "signals only the same process birth and user-data directory",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "ts-profile-worker-"));
+      const child = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => undefined, 1000)", "--", `--user-data-dir=${dir}`],
+        { stdio: "ignore" },
+      );
+      try {
+        let identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+        await vi.waitFor(() => {
+          identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+          expect(identity).not.toBeNull();
+        });
+        const killed: number[] = [];
+        expect(
+          signalProfileProcess(identity!, `${dir}-other`, "SIGKILL", (pid) => killed.push(pid)),
+        ).toBe(false);
+        expect(signalProfileProcess(identity!, dir, "SIGKILL", (pid) => killed.push(pid))).toBe(
+          true,
+        );
+        expect(killed).toEqual([child.pid]);
+      } finally {
+        child.kill("SIGKILL");
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe("profile close proof", () => {
+  it("returns closed only after exact identity disappearance is observed", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-profile-close-proof-"));
+    const pid = deadPid();
+    writeSingletons(profileDir, `${hostname()}-${pid}`);
+    const states: Array<"matching" | "stale"> = ["matching", "stale"];
+    try {
+      await expect(
+        closeProfileWithProof({
+          profileDir,
+          identity: {
+            host: hostname(),
+            pid,
+            start_time: "1",
+            user_data_dir: profileDir,
+          },
+          close: async () => undefined,
+          forceClose: vi.fn(),
+          pollMs: 0,
+          identityState: () => states.shift() ?? "stale",
+        }),
+      ).resolves.toBe("closed");
+      expect(lockPresent(profileDir)).toBe(false);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns unknown when closure identity cannot be proven", async () => {
+    await expect(
+      closeProfileWithProof({
+        profileDir: "/unused/profile",
+        identity: null,
+        close: async () => undefined,
+        forceClose: vi.fn(),
+      }),
+    ).resolves.toBe("unknown");
+  });
+
+  it("returns force_closed_unproven when graceful close stalls", async () => {
+    vi.useFakeTimers();
+    const forceClose = vi.fn();
+    const closing = closeProfileWithProof({
+      profileDir: "/unused/profile",
+      identity: null,
+      close: () => new Promise<void>(() => undefined),
+      forceClose,
+      closeTimeoutMs: 100,
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(closing).resolves.toBe("force_closed_unproven");
+    expect(forceClose).toHaveBeenCalledOnce();
+    vi.useRealTimers();
+  });
+});
 
 // existsSync follows symlinks, and SingletonLock's target ("host-pid") is
 // a label, not a real file — so it always reports "missing". Probe the
@@ -152,6 +271,106 @@ describe("profile operation guard", () => {
     const second = await acquireFreeProfileOperationGuard(dir, lockRoot);
     second.release();
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "quarantines only the exact stale process birth before reclaiming",
+    () => {
+      const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+      const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+      mkdirSync(lockDir);
+      writeFileSync(
+        join(lockDir, "owner.json"),
+        JSON.stringify({
+          host: hostname(),
+          pid: process.pid,
+          start_time: "not-this-process",
+          token: "stale-token",
+        }),
+      );
+
+      const lease = acquireProfileOperationGuard(dir, lockRoot);
+      expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+      expect(readdirSync(lockRoot).filter((name) => name.includes(".stale-"))).toEqual([]);
+      lease.release();
+    },
+  );
+
+  it("keeps a quarantined live owner exclusive until that owner releases", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    const tombstone = `${lockDir}.stale-race`;
+    const lease = acquireProfileOperationGuard(dir, lockRoot);
+    renameSync(lockDir, tombstone);
+
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+    lease.release();
+    expect(existsSync(tombstone)).toBe(false);
+    const next = acquireProfileOperationGuard(dir, lockRoot);
+    next.release();
+  });
+
+  it("reclaims an aged ownerless public lock without reclaiming a fresh one", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockDir, old, old);
+    const lease = acquireProfileOperationGuard(dir, lockRoot);
+    lease.release();
+  });
+
+  it("retains an aged legacy guard while its same-host process is alive", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ host: hostname(), pid: process.pid, token: "legacy-token" }),
+    );
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockDir, old, old);
+
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+  });
+
+  it("reclaims an aged legacy guard after its same-host process exits", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ host: hostname(), pid: deadPid(), token: "legacy-token" }),
+    );
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockDir, old, old);
+
+    const lease = acquireProfileOperationGuard(dir, lockRoot);
+    lease.release();
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "scavenges a stale private tombstone left by a crashed reclaimer",
+    () => {
+      const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+      const tombstone = join(lockRoot, `trusty-squire-profile-${digest}.lock.stale-crashed`);
+      mkdirSync(tombstone);
+      writeFileSync(
+        join(tombstone, "owner.json"),
+        JSON.stringify({
+          host: hostname(),
+          pid: process.pid,
+          start_time: "not-this-process",
+          token: "stale-token",
+        }),
+      );
+
+      const lease = acquireProfileOperationGuard(dir, lockRoot);
+      expect(existsSync(tombstone)).toBe(false);
+      lease.release();
+    },
+  );
 
   it("releases the operation lock when Chrome already owns the profile", async () => {
     writeSingletons(dir, `${hostname()}-${process.pid}`);
@@ -307,23 +526,66 @@ describe("reapProfileHolderIfOwned", () => {
     writeSingletons(dir, `${hostname()}-${process.pid}`);
     const killed: number[] = [];
     expect(
-      reapProfileHolderIfOwned(dir, process.pid + 1, (pid) => {
-        killed.push(pid);
-      }),
+      reapProfileHolderIfOwned(
+        dir,
+        {
+          host: hostname(),
+          pid: process.pid + 1,
+          start_time: "different",
+          user_data_dir: dir,
+        },
+        (pid) => {
+          killed.push(pid);
+        },
+      ),
     ).toBe(false);
     expect(killed).toEqual([]);
     expect(lockPresent(dir)).toBe(true);
   });
 
-  it("kills and clears only the captured holder", () => {
-    writeSingletons(dir, `${hostname()}-${process.pid}`);
+  it.skipIf(process.platform !== "linux")(
+    "retains a live holder singleton after requesting exact termination",
+    async () => {
+      const child = spawn(
+        process.execPath,
+        ["-e", "setInterval(() => undefined, 1000)", "--", `--user-data-dir=${dir}`],
+        { stdio: "ignore" },
+      );
+      try {
+        let identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+        await vi.waitFor(() => {
+          identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+          expect(identity).not.toBeNull();
+        });
+        writeSingletons(dir, `${hostname()}-${child.pid}`);
+        const killed: number[] = [];
+        expect(
+          reapProfileHolderIfOwned(dir, identity, (pid) => {
+            killed.push(pid);
+          }),
+        ).toBe(false);
+        expect(killed).toEqual([child.pid]);
+        expect(lockPresent(dir)).toBe(true);
+      } finally {
+        child.kill("SIGKILL");
+      }
+    },
+  );
+
+  it("clears a dead captured holder without signaling a recycled pid", () => {
+    const pid = deadPid();
+    writeSingletons(dir, `${hostname()}-${pid}`);
     const killed: number[] = [];
     expect(
-      reapProfileHolderIfOwned(dir, process.pid, (pid) => {
-        killed.push(pid);
-      }),
+      reapProfileHolderIfOwned(
+        dir,
+        { host: hostname(), pid, start_time: "dead", user_data_dir: dir },
+        (signaledPid) => {
+          killed.push(signaledPid);
+        },
+      ),
     ).toBe(true);
-    expect(killed).toEqual([process.pid]);
+    expect(killed).toEqual([]);
     expect(lockPresent(dir)).toBe(false);
   });
 });

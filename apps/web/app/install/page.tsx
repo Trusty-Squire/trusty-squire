@@ -22,7 +22,10 @@ import { Shield } from "../components/Shield";
 import {
   clearInstallCompletionUrl,
   installCompletionAcknowledgementUrl,
+  installCompletionProviderUrl,
+  readInstallCompletionProviders,
   readInstallCompletionUrl,
+  recordInstallCompletionProvider,
 } from "./completion";
 
 type Provider = "google" | "github";
@@ -115,7 +118,22 @@ export default function InstallPage() {
   // as done when the OAuth ran here this session, which is what actually
   // (re)establishes the bot's github.com login.
   const returnedFromGithub = useQueryParam("gh") === "1";
+  const [googleSessionFresh, setGoogleSessionFresh] = useState(false);
   const [githubSessionFresh, setGithubSessionFresh] = useState(false);
+
+  useEffect(() => {
+    if (token === null) return;
+    const completedProviders = readInstallCompletionProviders(token);
+    if (completedProviders.includes("google")) setGoogleSessionFresh(true);
+    if (completedProviders.includes("github")) setGithubSessionFresh(true);
+  }, [token]);
+
+  useEffect(() => {
+    if (token !== null && returnedFromAuth && identities.includes("google")) {
+      recordInstallCompletionProvider(token, "google");
+      void Promise.resolve().then(() => setGoogleSessionFresh(true));
+    }
+  }, [token, returnedFromAuth, identities]);
 
   // Initial load: fetch state + whoami in parallel. A missing token is
   // handled at render (see below), so just bail here without touching state.
@@ -275,16 +293,29 @@ export default function InstallPage() {
   }, [token]);
 
   useEffect(() => {
-    if (returnedFromGithub && identities.includes("github")) {
+    if (token !== null && returnedFromGithub && identities.includes("github")) {
+      recordInstallCompletionProvider(token, "github");
       void Promise.resolve().then(() => setGithubSessionFresh(true));
     }
-  }, [returnedFromGithub, identities]);
+  }, [token, returnedFromGithub, identities]);
 
   const skipGithub = useCallback(() => {
     setSkippedGithub(true);
   }, []);
 
   const finish = useCallback(() => {
+    const persistedProviders = token === null ? [] : readInstallCompletionProviders(token);
+    const callback =
+      completionUrl === null
+        ? null
+        : installCompletionProviderUrl(completionUrl, [
+            ...(googleSessionFresh || persistedProviders.includes("google")
+              ? (["google"] as const)
+              : []),
+            ...(githubSessionFresh || persistedProviders.includes("github")
+              ? (["github"] as const)
+              : []),
+          ]);
     if (token !== null) {
       try {
         window.localStorage.removeItem(`ts-install-prefs:${token}`);
@@ -293,12 +324,12 @@ export default function InstallPage() {
       }
       clearInstallCompletionUrl(token);
     }
-    if (completionUrl !== null) {
-      window.location.assign(completionUrl);
+    if (callback !== null) {
+      window.location.assign(callback);
       return;
     }
     router.push("/install/done");
-  }, [completionUrl, router, token]);
+  }, [completionUrl, githubSessionFresh, googleSessionFresh, router, token]);
 
   // ---- Render branches -----------------------------------------------
 

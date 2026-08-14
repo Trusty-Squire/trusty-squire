@@ -49,11 +49,22 @@ const h = vi.hoisted(() => ({
   startCalls: 0,
   startGate: null as Promise<void> | null,
   closeCalls: 0,
+  closeState: "closed" as "closed" | "force_closed_unproven" | "unknown",
   resetCalls: 0,
   resetFailuresRemaining: 0,
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
+  workerEmail: null as string | null,
   connections: [] as boolean[],
+  profileDirs: [] as Array<string | undefined>,
+  leaseSerial: 0,
+  warmLeaseProfileDir: null as string | null,
+  nextLeaseProfileDir: null as string | null,
+  leaseAcquireCalls: 0,
+  leaseReturnCalls: 0,
+  leaseDestroyCalls: 0,
+  leaseRetainCalls: 0,
+  leaseRetainDestroyRequired: [] as boolean[],
   currentUrl: "",
   elements: [] as unknown[],
   extractInteractiveElementsCalls: 0,
@@ -146,6 +157,7 @@ vi.mock("../browser.js", () => ({
       this.index = h.connections.length;
       this.opts = opts;
       h.connections.push(true);
+      h.profileDirs.push(opts.profileDir);
     }
     async start(): Promise<void> {
       h.started += 1;
@@ -173,6 +185,9 @@ vi.mock("../browser.js", () => ({
     async detectSessionProviders(): Promise<string[]> {
       h.controllerProviderProbeCalls += 1;
       return h.providers;
+    }
+    async detectGoogleAccountEmail(): Promise<string | null> {
+      return h.workerEmail;
     }
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
@@ -523,10 +538,11 @@ vi.mock("../browser.js", () => ({
     async waitForThreeDsResolution(): Promise<"succeeded" | "failed" | "timeout"> {
       return h.waitForThreeDsResult;
     }
-    async close(): Promise<void> {
+    async close(): Promise<"closed" | "force_closed_unproven" | "unknown"> {
       h.closeCalls += 1;
       if (h.connections[this.index] === true) h.started -= 1;
       h.connections[this.index] = false;
+      return h.closeState;
     }
   },
   // Mirrors the real export — the pending-card-fill charge guard reads it.
@@ -586,6 +602,45 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
+vi.mock("../operator-profile-pool.js", () => ({
+  OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
+  acquireOperatorProfile: async (_sessionId: string, opts: { sourceProfileDir?: string } = {}) => {
+    h.leaseAcquireCalls += 1;
+    const warm = h.warmLeaseProfileDir;
+    h.warmLeaseProfileDir = null;
+    const profileDir =
+      h.nextLeaseProfileDir ??
+      opts.sourceProfileDir ??
+      warm ??
+      `/tmp/trusty-squire-unit-profile-${process.pid}-${++h.leaseSerial}`;
+    h.nextLeaseProfileDir = null;
+    let finished = false;
+    return {
+      profileDir,
+      profileId: `unit-${h.leaseSerial}`,
+      seedGeneration: "unit-seed",
+      bindWorker: () => undefined,
+      returnWarm: async () => {
+        if (finished) return;
+        finished = true;
+        h.leaseReturnCalls += 1;
+        h.warmLeaseProfileDir = profileDir;
+      },
+      destroy: async () => {
+        if (finished) return;
+        finished = true;
+        h.leaseDestroyCalls += 1;
+      },
+      retain: async (destroyRequired = false) => {
+        if (finished) return;
+        finished = true;
+        h.leaseRetainCalls += 1;
+        h.leaseRetainDestroyRequired.push(destroyRequired);
+      },
+    };
+  },
+}));
+
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -607,6 +662,7 @@ import {
   finishProvisionSession,
   closeAllProvisionSessions,
   activeSessionCount,
+  getSessionUserEmail,
   parseElementsTable,
   replayOperatorRecipe,
   activeProvisionBrowser,
@@ -734,11 +790,22 @@ beforeEach(() => {
   h.startCalls = 0;
   h.startGate = null;
   h.closeCalls = 0;
+  h.closeState = "closed";
   h.resetCalls = 0;
   h.resetFailuresRemaining = 0;
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
+  h.workerEmail = null;
   h.connections = [];
+  h.profileDirs = [];
+  h.leaseSerial = 0;
+  h.warmLeaseProfileDir = null;
+  h.nextLeaseProfileDir = null;
+  h.leaseAcquireCalls = 0;
+  h.leaseReturnCalls = 0;
+  h.leaseDestroyCalls = 0;
+  h.leaseRetainCalls = 0;
+  h.leaseRetainDestroyRequired = [];
   h.currentUrl = "";
   h.elements = [];
   h.extractInteractiveElementsCalls = 0;
@@ -914,6 +981,9 @@ describe("prepared-statement replay", () => {
     await expect(replayOperatorRecipe(started.session_id, recipe, {}, 1)).rejects.toThrow(
       /invalid replay continuation/i,
     );
+    await finishProvisionSession(started.session_id);
+    expect(h.leaseReturnCalls).toBe(0);
+    expect(h.leaseDestroyCalls).toBe(1);
   });
 
   it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
@@ -1004,6 +1074,9 @@ describe("prepared-statement replay", () => {
     await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
       /verification is not satisfied/i,
     );
+    await finishProvisionSession(started.session_id);
+    expect(h.leaseReturnCalls).toBe(0);
+    expect(h.leaseDestroyCalls).toBe(1);
   });
 
   it("rejects unclassified legacy recipes from deterministic replay", async () => {
@@ -2037,10 +2110,7 @@ describe("verified recipe recording", () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-known-email-"));
     const profileDir = mkdtempSync(join(tmpdir(), "verified-recipe-known-email-profile-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    writeFileSync(
-      join(profileDir, "provider-emails.json"),
-      JSON.stringify({ google: "buyer@example.com" }),
-    );
+    h.workerEmail = "buyer@example.com";
     h.elements = [
       elem({
         testId: "email-buyer@example.com",
@@ -2095,10 +2165,7 @@ describe("verified recipe recording", () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-credential-email-"));
     const profileDir = mkdtempSync(join(tmpdir(), "verified-recipe-credential-profile-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    writeFileSync(
-      join(profileDir, "provider-emails.json"),
-      JSON.stringify({ google: "buyer@example.com" }),
-    );
+    h.workerEmail = "buyer@example.com";
     h.elements = [
       elem({
         testId: "email-buyer@example.com",
@@ -2151,10 +2218,7 @@ describe("verified recipe recording", () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-email-url-"));
     const profileDir = mkdtempSync(join(tmpdir(), "verified-recipe-email-url-profile-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    writeFileSync(
-      join(profileDir, "provider-emails.json"),
-      JSON.stringify({ google: "buyer@example.com" }),
-    );
+    h.workerEmail = "buyer@example.com";
     h.elements = [elem({ testId: "email", labelText: "Email", selector: "#email", value: "" })];
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/cart?email=buyer%40example%2Ecom",
@@ -3346,7 +3410,7 @@ describe("operate_extract — vault-store response", () => {
 });
 
 describe("operate session — Change 5 precondition gate", () => {
-  it("fails closed (needs_user) without starting the browser when no live Google session", async () => {
+  it("fails closed after probing the isolated worker when no live Google session exists", async () => {
     h.providers = []; // no live session
     h.oauthStatus = "failed"; // and we cannot establish one
     const obs = await startProvisionSession({
@@ -3355,7 +3419,8 @@ describe("operate session — Change 5 precondition gate", () => {
     });
     expect(obs.needs_user).toBeDefined();
     expect(obs.needs_user?.wall).toBe("google_session");
-    expect(h.started).toBe(0); // the browser was NEVER started — task did not begin
+    expect(h.startCalls).toBe(1); // the isolated worker, never the seed/canonical profile, was probed
+    expect(h.started).toBe(0); // the rejected worker was closed before returning the handoff
     expect(h.gotos).toHaveLength(0);
   });
 
@@ -3371,48 +3436,37 @@ describe("operate session — Change 5 precondition gate", () => {
   });
 });
 
-describe("operate session — warm browser lifecycle", () => {
-  it("reuses the warm browser for the same profile and proxy without a second boot", async () => {
+describe("operate session — isolated profile-pool lifecycle", () => {
+  it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
-      profileDir: "/tmp/operator-a",
       proxyUrl: "http://proxy-a.test:8080",
     });
     await finishProvisionSession(first.session_id);
 
     const second = await startProvisionSession({
       serviceUrl: "https://app.example.com/two",
-      profileDir: "/tmp/operator-a",
       proxyUrl: "http://proxy-a.test:8080",
     });
 
-    expect(h.startCalls).toBe(1);
-    expect(h.resetCalls).toBeGreaterThanOrEqual(2);
-    expect(h.profileProbeCalls).toBe(1);
-    expect(h.controllerProviderProbeCalls).toBe(1);
+    expect(h.startCalls).toBe(2);
+    expect(h.resetCalls).toBeGreaterThanOrEqual(1);
+    expect(h.profileProbeCalls).toBe(0);
+    expect(h.controllerProviderProbeCalls).toBe(2);
+    expect(h.profileDirs[1]).toBe(h.profileDirs[0]);
     await finishProvisionSession(second.session_id);
   });
 
-  it.each([
-    {
-      label: "profile",
-      second: { profileDir: "/tmp/operator-b", proxyUrl: "http://proxy-a.test:8080" },
-    },
-    {
-      label: "proxy",
-      second: { profileDir: "/tmp/operator-a", proxyUrl: "http://proxy-b.test:8080" },
-    },
-  ])("cold-boots on a $label mismatch", async ({ second }) => {
+  it("cold-boots a new controller with the requested proxy", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",
-      profileDir: "/tmp/operator-a",
       proxyUrl: "http://proxy-a.test:8080",
     });
     await finishProvisionSession(first.session_id);
 
     const next = await startProvisionSession({
       serviceUrl: "https://app.example.com/two",
-      ...second,
+      proxyUrl: "http://proxy-b.test:8080",
     });
 
     expect(h.startCalls).toBe(2);
@@ -3420,7 +3474,7 @@ describe("operate session — warm browser lifecycle", () => {
     await finishProvisionSession(next.session_id);
   });
 
-  it("discards a disconnected warm browser and cold-boots", async () => {
+  it("never reuses the prior closed controller", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
     await finishProvisionSession(first.session_id);
     h.connections[0] = false;
@@ -3432,16 +3486,77 @@ describe("operate session — warm browser lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
-  it("discards a warm browser and cold-boots when page reset fails", async () => {
+  it("discards the isolated profile when its pre-close reset fails", async () => {
     const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    await finishProvisionSession(first.session_id);
     h.resetFailuresRemaining = 1;
+    await finishProvisionSession(first.session_id);
 
     const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
 
     expect(h.startCalls).toBe(2);
     expect(h.closeCalls).toBe(1);
+    expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
     await finishProvisionSession(second.session_id);
+  });
+
+  it("never pools a profile whose payment fields remain sealed", async () => {
+    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    retainActivePaymentFieldSeal();
+    await finishProvisionSession(first.session_id);
+
+    const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+    expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
+    expect(h.leaseDestroyCalls).toBe(1);
+    await finishProvisionSession(second.session_id);
+  });
+
+  it("durably marks a sealed-payment profile when closure is unproven", async () => {
+    h.closeState = "unknown";
+    const session = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    retainActivePaymentFieldSeal();
+    await finishProvisionSession(session.session_id);
+
+    expect(h.leaseReturnCalls).toBe(0);
+    expect(h.leaseDestroyCalls).toBe(0);
+    expect(h.leaseRetainDestroyRequired).toEqual([true]);
+  });
+
+  it("uses the claimed worker's live email instead of seed-derived profile metadata", async () => {
+    const canonical = mkdtempSync(join(tmpdir(), "operator-canonical-email-"));
+    const worker = mkdtempSync(join(tmpdir(), "operator-worker-email-"));
+    writeFileSync(
+      join(canonical, "provider-emails.json"),
+      JSON.stringify({ google: "canonical@example.com" }),
+    );
+    writeFileSync(
+      join(worker, "provider-emails.json"),
+      JSON.stringify({ google: "seed@example.com" }),
+    );
+    h.nextLeaseProfileDir = worker;
+    h.workerEmail = "live-worker@example.com";
+    try {
+      const session = await startProvisionSession({
+        serviceUrl: "https://app.example.com/",
+        profileDir: canonical,
+      });
+      expect(getSessionUserEmail(session.session_id)).toBe("live-worker@example.com");
+      await finishProvisionSession(session.session_id);
+    } finally {
+      rmSync(canonical, { recursive: true, force: true });
+      rmSync(worker, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects remote CDP before acquiring an isolated profile", async () => {
+    vi.stubEnv("BOT_CDP_ENDPOINT", "http://remote.example.test:9222");
+    try {
+      await expect(
+        startProvisionSession({ serviceUrl: "https://app.example.com/" }),
+      ).rejects.toThrow("does not support remote CDP");
+      expect(h.leaseAcquireCalls).toBe(0);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("refuses a second task while the single shared page is in flight", async () => {
@@ -3508,7 +3623,7 @@ describe("operate session — warm browser lifecycle", () => {
     expect(h.closeCalls).toBe(2);
   });
 
-  it("defers max-age recycling until the in-flight task reaches finish", async () => {
+  it("does not age-reap an active task", async () => {
     vi.useFakeTimers();
     try {
       const session = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
@@ -3523,21 +3638,33 @@ describe("operate session — warm browser lifecycle", () => {
     }
   });
 
-  it("recycles at the configured default reuse-count boundary", async () => {
-    for (let index = 0; index <= 50; index += 1) {
+  it("returns each clean closed profile through the lease boundary", async () => {
+    for (let index = 0; index < 3; index += 1) {
       const session = await startProvisionSession({
         serviceUrl: `https://app.example.com/task-${index}`,
       });
       await finishProvisionSession(session.session_id);
     }
 
-    expect(h.startCalls).toBe(1);
-    expect(h.closeCalls).toBe(1);
-
-    const next = await startProvisionSession({ serviceUrl: "https://app.example.com/task-51" });
-    expect(h.startCalls).toBe(2);
-    await finishProvisionSession(next.session_id);
+    expect(h.leaseAcquireCalls).toBe(3);
+    expect(h.leaseReturnCalls).toBe(3);
+    expect(h.leaseDestroyCalls).toBe(0);
   });
+
+  it.each(["force_closed_unproven", "unknown"] as const)(
+    "quarantines a %s profile instead of warming it",
+    async (closeState) => {
+      h.closeState = closeState;
+      const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+      await finishProvisionSession(first.session_id);
+
+      const second = await startProvisionSession({ serviceUrl: "https://app.example.com/two" });
+      expect(h.profileDirs[1]).not.toBe(h.profileDirs[0]);
+      expect(h.leaseReturnCalls).toBe(0);
+      expect(h.leaseRetainCalls).toBe(1);
+      await finishProvisionSession(second.session_id);
+    },
+  );
 });
 
 describe("operate session — await_verification into_slot (T3 fix: OTP never round-trips)", () => {
@@ -3856,7 +3983,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   });
 
   function withEmail(email: string): void {
-    writeFileSync(join(profileDir, "provider-emails.json"), JSON.stringify({ google: email }));
+    h.workerEmail = email;
   }
 
   it("prepare_login seals the captured user email + a generated password (masked handles only)", async () => {

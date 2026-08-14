@@ -52,6 +52,7 @@ import {
   ensureOAuthSession,
   openInstallConfirmInBotChrome,
   profileHasProviderCookies,
+  type InstallClaimPollResult,
 } from "../bot/google-login.js";
 import { isOAuthProviderId, type OAuthProviderId } from "../bot/oauth-providers.js";
 import {
@@ -66,6 +67,7 @@ import {
   CHROME_PROFILE_DIR,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
+  profilePathIdentity,
   withProfileOperationGuard,
 } from "../bot/profile.js";
 import { VERSION } from "../version.js";
@@ -486,7 +488,9 @@ async function settings(args: Argv): Promise<void> {
 
 async function connect(args: Argv): Promise<void> {
   try {
-    await withProfileOperationGuard(CHROME_PROFILE_DIR, () => connectWithProfileGuard(args));
+    await withConnectProfileGuard(CHROME_PROFILE_DIR, (profileDir) =>
+      connectWithProfileGuard(args, profileDir),
+    );
   } catch (err) {
     if (err instanceof ProfileBusyError) {
       ui.fail(PROFILE_BUSY_MESSAGE);
@@ -496,7 +500,15 @@ async function connect(args: Argv): Promise<void> {
   }
 }
 
-async function connectWithProfileGuard(args: Argv): Promise<void> {
+export async function withConnectProfileGuard<T>(
+  profileDir: string,
+  operation: (canonicalProfileDir: string) => Promise<T>,
+): Promise<T> {
+  const canonicalProfileDir = profilePathIdentity(profileDir);
+  return await withProfileOperationGuard(canonicalProfileDir, () => operation(canonicalProfileDir));
+}
+
+async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<void> {
   // Interactive picker (clack). Walks the user through agent + advanced setup
   // before the browser install ceremony fires. The picker fills in args so the
   // rest of this function is unchanged.
@@ -592,16 +604,16 @@ async function connectWithProfileGuard(args: Argv): Promise<void> {
   // account-switch escape hatch.
   if (args.forceRelogin) {
     if (args.forceReloginProvider !== undefined) {
-      clearProviderLoggedIn(args.forceReloginProvider);
+      clearProviderLoggedIn(args.forceReloginProvider, profileDir);
     } else {
-      clearAllProviderMarkers();
+      clearAllProviderMarkers(profileDir);
     }
     let cookiesCleared: boolean;
     if (args.forceReloginProvider !== undefined) {
-      cookiesCleared = await clearProviderCookies(undefined, args.forceReloginProvider);
+      cookiesCleared = await clearProviderCookies(profileDir, args.forceReloginProvider);
     } else {
-      clearBrowserProfile();
-      cookiesCleared = await clearProviderCookies();
+      clearBrowserProfile(profileDir);
+      cookiesCleared = await clearProviderCookies(profileDir);
     }
     if (!cookiesCleared) {
       ui.fail(
@@ -673,8 +685,7 @@ async function connectWithProfileGuard(args: Argv): Promise<void> {
   };
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
-    completeOnClaim: args.forceRelogin,
-    completionProvider: args.forceReloginProvider ?? "google",
+    ...connectCompletionOptions(args),
   });
   if (session === null) {
     ui.fail(
@@ -1126,6 +1137,15 @@ export function shouldCompleteInstallClaim(
   return wizardCompleted;
 }
 
+export function connectCompletionOptions(
+  args: Pick<Argv, "forceRelogin" | "forceReloginProvider">,
+): { completeOnClaim: boolean; completionProvider: OAuthProviderId } {
+  return {
+    completeOnClaim: args.forceRelogin,
+    completionProvider: args.forceReloginProvider ?? "google",
+  };
+}
+
 // During normal onboarding, claim happens before the browser's Finish step.
 // Keep the terminal message aligned with that two-phase flow.
 export function claimHeartbeatMessage(claimed: boolean): string {
@@ -1172,7 +1192,10 @@ async function runInstallClaim(
   // account claim, the SQLite cookie store proves a forced re-login landed,
   // and a per-run loopback callback carries the normal wizard's explicit
   // Finish signal.
-  const pollOnce = async (profileDir: string, wizardCompleted: boolean): Promise<boolean> => {
+  const pollOnce = async (
+    profileDir: string,
+    wizardCompleted: boolean,
+  ): Promise<InstallClaimPollResult> => {
     let claimedThisPoll = false;
     // Keep state.value warm — the install moves to "claimed" the instant the
     // user finishes signing in.
@@ -1188,9 +1211,7 @@ async function runInstallClaim(
         };
         claimedThisPoll = true;
       } else if (status.status === "expired") {
-        // Bail loudly: state.value stays null and the caller
-        // reports the install never completed.
-        return true;
+        return "expired";
       }
     }
     // Tear down once the account is claimed AND the provider session has
@@ -1211,12 +1232,15 @@ async function runInstallClaim(
       wizardCompleted,
     );
     if (tearDown) {
-      return true;
+      return {
+        status: "claimed",
+        provider: options.completeOnClaim ? options.completionProvider : null,
+      };
     }
     if (claimedThisPoll) {
       console.error(chalk.dim(`   ✓ ${claimHeartbeatMessage(true)}`));
     }
-    return false;
+    return "pending";
   };
 
   if (skipBrowser) {
@@ -1338,6 +1362,19 @@ async function logout(): Promise<void> {
 // Unlike the login stage inside `install`, this command fails loud on
 // timeout/error — it's the explicit retry path.
 async function login(args: Argv): Promise<void> {
+  const profileDir = args.profileDir ?? CHROME_PROFILE_DIR;
+  try {
+    await withProfileOperationGuard(profileDir, () => loginWithProfileGuard(args, profileDir));
+  } catch (err) {
+    if (err instanceof ProfileBusyError) {
+      ui.fail(PROFILE_BUSY_MESSAGE);
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+async function loginWithProfileGuard(args: Argv, profileDir: string): Promise<void> {
   const provider: OAuthProviderId = args.providerArg ?? args.forceReloginProvider ?? "google";
   const label = provider === "github" ? "GitHub" : "Google";
   ui.heading(`Sign in to ${label}`);
@@ -1348,7 +1385,7 @@ async function login(args: Argv): Promise<void> {
   // leaving logged-in-providers.json claiming a session whose auth cookie
   // (user_session) no longer exists. ensureOAuthSession re-adds the marker
   // only when it confirms a live cookie, so success still records it.
-  if (args.forceRelogin) clearProviderLoggedIn(provider);
+  if (args.forceRelogin) clearProviderLoggedIn(provider, profileDir);
   const result = await ensureOAuthSession({
     provider,
     apiBaseUrl: args.apiBase,

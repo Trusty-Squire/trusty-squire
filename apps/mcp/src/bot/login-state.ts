@@ -4,9 +4,14 @@
 // expensive provider round-trip — which providers it can auto-prefer
 // for OAuth-first signup.
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHROME_PROFILE_DIR, launchWithProfileGate, ProfileBusyError } from "./profile.js";
+import {
+  CHROME_PROFILE_DIR,
+  launchWithProfileGate,
+  ProfileBusyError,
+  withProfileOperationGuard,
+} from "./profile.js";
 import { isOAuthProviderId, type OAuthProviderId } from "./oauth-providers.js";
 
 interface ProviderCookieContext {
@@ -161,25 +166,27 @@ export async function clearProviderCookies(
   profileDir: string = CHROME_PROFILE_DIR,
   provider?: OAuthProviderId,
 ): Promise<boolean> {
-  let context: ProviderCookieContext | null = null;
-  try {
-    const { chromium } = await import("patchright");
-    context = await launchWithProfileGate(
-      profileDir,
-      () =>
-        chromium.launchPersistentContext(profileDir, {
-          channel: "chrome",
-          headless: true,
-        }),
-      { failFast: true },
-    );
-    return await clearProviderCookiesFromContext(context, provider);
-  } catch (err) {
-    if (err instanceof ProfileBusyError) throw err;
-    return false;
-  } finally {
-    await context?.close().catch(() => undefined);
-  }
+  return await withProfileOperationGuard(profileDir, async () => {
+    let context: ProviderCookieContext | null = null;
+    try {
+      const { chromium } = await import("patchright");
+      context = await launchWithProfileGate(
+        profileDir,
+        () =>
+          chromium.launchPersistentContext(profileDir, {
+            channel: "chrome",
+            headless: true,
+          }),
+        { failFast: true },
+      );
+      return await clearProviderCookiesFromContext(context, provider);
+    } catch (err) {
+      if (err instanceof ProfileBusyError) throw err;
+      return false;
+    } finally {
+      await context?.close().catch(() => undefined);
+    }
+  });
 }
 
 // Wipe the whole bot Chrome profile. Used only for `connect --force-relogin`:
@@ -188,7 +195,10 @@ export async function clearProviderCookies(
 // Google credential prompt.
 export function clearBrowserProfile(profileDir: string = CHROME_PROFILE_DIR): void {
   try {
-    rmSync(profileDir, { recursive: true, force: true });
+    mkdirSync(profileDir, { recursive: true });
+    for (const entry of readdirSync(profileDir)) {
+      rmSync(join(profileDir, entry), { recursive: true, force: true });
+    }
   } catch {
     /* best-effort */
   }

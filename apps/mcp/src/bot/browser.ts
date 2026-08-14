@@ -43,16 +43,28 @@ import {
   acquireFreeProfileOperationGuard,
   CHROME_PROFILE_DIR,
   clearStaleSingletonLock,
+  closeProfileWithProof,
   currentProfileHolderPid,
   launchWithProfileGate,
+  profilePathIdentity,
+  profileProcessIdentity,
+  profileProcessIdentityState,
+  profileProcessMatches,
   PROFILE_BUSY_MESSAGE,
   ProfileBusyError,
   reapProfileHolderIfOwned,
+  signalProfileProcess,
+  type ProfileProcessIdentity,
   type ProfileOperationLease,
+  type ProfileCloseState,
   waitForProfileFree,
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
+import {
+  GOOGLE_LOGIN_COOKIE_MARKERS,
+  type OperatorWorkerIdentity,
+} from "./operator-profile-pool.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
@@ -1325,6 +1337,17 @@ const CAPTCHA_FRAME_HOST_RE =
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
+const GOOGLE_ACCOUNT_EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
+
+export function extractGoogleAccountEmail(pageText: string): string | null {
+  const chip = /Google Account:[^()]*\(([^)]+)\)/i.exec(pageText);
+  if (chip?.[1] !== undefined) {
+    const match = GOOGLE_ACCOUNT_EMAIL_RE.exec(chip[1]);
+    if (match !== null) return match[0].trim();
+  }
+  return null;
+}
+
 // Map a cookie jar to the OAuth providers that have a LIVE logged-in session.
 // The auth cookies that mean "signed in": GitHub → `user_session`; Google →
 // any of the *SID session cookies (NID / CONSENT / 1P_JAR are set even when
@@ -1343,7 +1366,7 @@ export function sessionProvidersFromCookies(
     {
       provider: "google",
       host: /(^|\.)google\.com$/i,
-      names: ["SID", "__Secure-1PSID", "__Secure-3PSID"],
+      names: GOOGLE_LOGIN_COOKIE_MARKERS,
     },
   ];
   const live: OAuthProviderId[] = [];
@@ -1528,10 +1551,125 @@ export function resolveChannelBinary(channel: string | null): string | null {
 // it is specifically the launch flags/instrumentation Playwright injects at
 // launchPersistentContext time. Self-launching the binary (no
 // --enable-automation et al.) and attaching with connectOverCDP avoids it.
-// Default-ON; opt out with BOT_SELF_LAUNCH=0 for the old path. Exported for tests.
+// Default-ON; opt out with BOT_SELF_LAUNCH=0 for the persistent-context path. Exported for tests.
 export function selfLaunchEnabled(): boolean {
   const v = process.env.BOT_SELF_LAUNCH;
   return v !== "0" && v !== "false" && v !== "off";
+}
+
+const PERSISTENT_CONTEXT_LAUNCH_TIMEOUT_MS = 30_000;
+const PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS = 2_000;
+const PERSISTENT_CONTEXT_CANCELLATION_POLL_MS = 25;
+const PROFILE_IDENTITY_PROOF_TIMEOUT_MS = 2_000;
+const PROFILE_IDENTITY_POLL_MS = 25;
+const PROFILE_HOLDER_ABSENCE_GRACE_MS = 100;
+
+export type PersistentFallbackIdentityProof =
+  | { state: "owned"; identity: ProfileProcessIdentity }
+  | { state: "absent" }
+  | { state: "unknown" };
+
+export async function resolvePersistentFallbackIdentity(opts: {
+  profileDir: string;
+  platform?: NodeJS.Platform;
+  timeoutMs?: number;
+  pollMs?: number;
+  absenceGraceMs?: number;
+  currentHolderPid?: (profileDir: string) => number | null;
+  readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
+  clearStaleLock?: (profileDir: string) => boolean;
+}): Promise<PersistentFallbackIdentityProof> {
+  if ((opts.platform ?? process.platform) !== "linux") return { state: "unknown" };
+  const timeoutMs = opts.timeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS;
+  const pollMs = opts.pollMs ?? PROFILE_IDENTITY_POLL_MS;
+  const absenceGraceMs = opts.absenceGraceMs ?? PROFILE_HOLDER_ABSENCE_GRACE_MS;
+  const readHolder = opts.currentHolderPid ?? currentProfileHolderPid;
+  const readIdentity = opts.readIdentity ?? profileProcessIdentity;
+  const clearStaleLock = opts.clearStaleLock ?? clearStaleSingletonLock;
+  const deadline = Date.now() + timeoutMs;
+  let absentSince: number | null = null;
+  for (;;) {
+    const holderPid = readHolder(opts.profileDir);
+    if (holderPid === null) {
+      absentSince ??= Date.now();
+      if (Date.now() - absentSince >= absenceGraceMs) return { state: "absent" };
+    } else {
+      absentSince = null;
+      const identity = readIdentity(holderPid, opts.profileDir);
+      if (identity !== null) return { state: "owned", identity };
+      if (clearStaleLock(opts.profileDir)) return { state: "absent" };
+    }
+    if (Date.now() >= deadline) return { state: "unknown" };
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, Math.min(pollMs, Math.max(1, deadline - Date.now())));
+      timer.unref();
+    });
+  }
+}
+
+export async function launchCancellablePersistentContext<T, O extends object>(opts: {
+  launch: (options: O & { timeout: number }) => Promise<T>;
+  options: O;
+  cancellation: Promise<void>;
+  cleanupCancelled: (value: T) => Promise<ProfileCloseState>;
+  cleanupRejected: () => Promise<ProfileCloseState>;
+  launchTimeoutMs?: number;
+  cancellationSettleMs?: number;
+  cancellationPollMs?: number;
+}): Promise<
+  { status: "launched"; value: T } | { status: "cancelled"; closeState: ProfileCloseState }
+> {
+  const launchTimeoutMs = opts.launchTimeoutMs ?? PERSISTENT_CONTEXT_LAUNCH_TIMEOUT_MS;
+  const launchDeadline = Date.now() + launchTimeoutMs;
+  const launch = Promise.resolve().then(() =>
+    opts.launch({ ...opts.options, timeout: launchTimeoutMs }),
+  );
+  const outcome = await Promise.race([
+    launch.then((value) => ({ status: "launched" as const, value })),
+    opts.cancellation.then(() => ({ status: "cancelled" as const })),
+  ]);
+  if (outcome.status === "launched") return outcome;
+  let rejectedCleanup: Promise<ProfileCloseState> | null = null;
+  const cleanupRejected = (): Promise<ProfileCloseState> => {
+    if (rejectedCleanup !== null) return rejectedCleanup;
+    const cleanup = Promise.resolve()
+      .then(opts.cleanupRejected)
+      .catch(() => "unknown" as const)
+      .finally(() => {
+        if (rejectedCleanup === cleanup) rejectedCleanup = null;
+      });
+    rejectedCleanup = cleanup;
+    return cleanup;
+  };
+  const lateCleanup = launch
+    .then(opts.cleanupCancelled, cleanupRejected)
+    .catch(() => "unknown" as const);
+  const settleMs = opts.cancellationSettleMs ?? PERSISTENT_CONTEXT_CANCELLATION_SETTLE_MS;
+  const pollMs = opts.cancellationPollMs ?? PERSISTENT_CONTEXT_CANCELLATION_POLL_MS;
+  const cancellationDeadline = Math.max(Date.now(), launchDeadline) + settleMs;
+  let settledCloseState: ProfileCloseState | null = null;
+  void lateCleanup.then((closeState) => {
+    settledCloseState = closeState;
+  });
+  while (settledCloseState === null && Date.now() < cancellationDeadline) {
+    await cleanupRejected();
+    if (settledCloseState !== null) break;
+    const remaining = cancellationDeadline - Date.now();
+    if (remaining <= 0) break;
+    await Promise.race([
+      lateCleanup,
+      new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, Math.min(pollMs, remaining));
+        timer.unref();
+      }),
+    ]);
+  }
+  if (settledCloseState !== null) {
+    return { status: "cancelled", closeState: settledCloseState };
+  }
+  await cleanupRejected();
+  void lateCleanup;
+  return { status: "cancelled", closeState: "unknown" };
 }
 
 // Find an ephemeral TCP port for Chrome's --remote-debugging-port.
@@ -1614,23 +1752,17 @@ export async function withChromeStartupLock<T>(
   }
 }
 
-const selfManagedChromePids = new Set<number>();
+const selfManagedChromes = new Map<number, ProfileProcessIdentity>();
 let selfManagedCleanupInstalled = false;
 let selfManagedTerminationSignalExitEnabled = true;
 let orphanVerifierReapRan = false;
 const orphanOperatorProfilesReaped = new Set<string>();
 
-function killPid(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(pid, signal);
-  } catch {
-    // already gone / not ours
-  }
-}
-
 function cleanupSelfManagedChromes(): void {
-  for (const pid of selfManagedChromePids) killPid(pid, "SIGKILL");
-  selfManagedChromePids.clear();
+  for (const identity of selfManagedChromes.values()) {
+    signalProfileProcess(identity, identity.user_data_dir, "SIGKILL");
+  }
+  selfManagedChromes.clear();
 }
 
 const exitForSelfManagedSignal = (code: number): void => {
@@ -1665,12 +1797,109 @@ function installSelfManagedChromeCleanup(): void {
   process.once("SIGHUP", onSelfManagedSighup);
 }
 
-function registerSelfManagedChrome(child: ChildProcess): void {
+function registerSelfManagedChrome(
+  child: ChildProcess,
+  profileDir: string,
+): ProfileProcessIdentity | null {
   installSelfManagedChromeCleanup();
-  if (child.pid !== undefined) selfManagedChromePids.add(child.pid);
+  const identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, profileDir);
+  if (identity !== null) selfManagedChromes.set(identity.pid, identity);
   child.once("exit", () => {
-    if (child.pid !== undefined) selfManagedChromePids.delete(child.pid);
+    if (child.pid !== undefined) selfManagedChromes.delete(child.pid);
   });
+  return identity;
+}
+
+async function waitForTrackedProfileChildIdentity(
+  child: ChildProcess,
+  profileDir: string,
+  readIdentity: (pid: number, profileDir: string) => ProfileProcessIdentity | null,
+  timeoutMs: number,
+  pollMs: number,
+): Promise<ProfileProcessIdentity | null> {
+  const deadline = Date.now() + timeoutMs;
+  while (childProcessIsRunning(child)) {
+    const identity = child.pid === undefined ? null : readIdentity(child.pid, profileDir);
+    if (identity !== null) {
+      selfManagedChromes.set(identity.pid, identity);
+      return identity;
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, Math.min(pollMs, Math.max(1, deadline - Date.now())));
+      timer.unref();
+    });
+  }
+  return null;
+}
+
+export async function resolveAttachedProfileChildIdentity(
+  child: ChildProcess,
+  profileDir: string,
+  identity: ProfileProcessIdentity | null,
+  options: {
+    platform?: NodeJS.Platform;
+    readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
+    identityTimeoutMs?: number;
+    identityPollMs?: number;
+  } = {},
+): Promise<ProfileProcessIdentity | null> {
+  if (identity !== null || (options.platform ?? process.platform) !== "linux") return identity;
+  return await waitForTrackedProfileChildIdentity(
+    child,
+    profileDir,
+    options.readIdentity ?? profileProcessIdentity,
+    options.identityTimeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
+    options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
+  );
+}
+
+export async function terminateTrackedProfileChild(
+  child: ChildProcess,
+  profileDir: string,
+  options: {
+    identity?: ProfileProcessIdentity | null;
+    platform?: NodeJS.Platform;
+    readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
+    terminate?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
+    identityTimeoutMs?: number;
+    identityPollMs?: number;
+  } = {},
+): Promise<ProfileProcessIdentity | null> {
+  const readIdentity = options.readIdentity ?? profileProcessIdentity;
+  const terminate =
+    options.terminate ??
+    ((ownedIdentity: ProfileProcessIdentity, ownedProfileDir: string): boolean => {
+      const signalled = signalProfileProcess(ownedIdentity, ownedProfileDir, "SIGKILL");
+      reapProfileHolderIfOwned(ownedProfileDir, ownedIdentity);
+      return signalled;
+    });
+  let identity = options.identity ?? null;
+  if (identity === null && (options.platform ?? process.platform) !== "linux") return null;
+  while (childProcessIsRunning(child)) {
+    identity ??= await waitForTrackedProfileChildIdentity(
+      child,
+      profileDir,
+      readIdentity,
+      options.identityTimeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
+      options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
+    );
+    if (identity === null) break;
+    selfManagedChromes.set(identity.pid, identity);
+    const terminated = terminate(identity, profileDir);
+    if (!terminated) {
+      identity = null;
+      continue;
+    }
+    while (childProcessIsRunning(child)) {
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, 25);
+        timer.unref();
+      });
+    }
+  }
+  if (child.pid !== undefined) selfManagedChromes.delete(child.pid);
+  return identity;
 }
 
 // Stale verifier/operator browsers are the expensive leak mode: if the MCP process dies
@@ -1680,23 +1909,50 @@ function registerSelfManagedChrome(child: ChildProcess): void {
 // burns memory, and may leave defunct helper children. A live verifier should
 // never be parented to init, so these are safe to reap at the next browser
 // startup. Best-effort and Linux-only; failure must not block signups.
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 export function matchesReapableBrowserArgs(
   args: string,
   profileDirs: readonly string[],
   includeVerifier: boolean,
 ): boolean {
-  if (!/(?:chrome|chromium)/i.test(args)) return false;
-  const profiles = [...new Set(profileDirs)].map(escapeRegExp);
-  if (includeVerifier) {
-    profiles.unshift(String.raw`[^\s"']*\.trusty-squire\/profiles\/verify-[^\/\s"']+`);
+  return reapableBrowserProfile(args, profileDirs, includeVerifier) !== null;
+}
+
+function reapableBrowserProfile(
+  args: string,
+  profileDirs: readonly string[],
+  includeVerifier: boolean,
+): string | null {
+  if (!/(?:chrome|chromium)/i.test(args)) return null;
+  const configuredProfiles = new Map(
+    profileDirs.map((profileDir) => [profileDir, profilePathIdentity(profileDir)]),
+  );
+  const match = /--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))(?=\s|$)/.exec(args);
+  const candidate = match?.[1] ?? match?.[2] ?? match?.[3];
+  if (candidate !== undefined) {
+    const identity = profilePathIdentity(candidate);
+    if ([...configuredProfiles.values()].includes(identity)) return identity;
+    if (includeVerifier && /[/\\]\.trusty-squire[/\\]profiles[/\\]verify-[^/\\]+$/.test(identity)) {
+      return identity;
+    }
   }
-  if (profiles.length === 0) return false;
-  const profile = `(?:${profiles.join("|")})`;
-  return new RegExp(`--user-data-dir=(?:"${profile}"|'${profile}'|${profile})(?=\\s|$)`).test(args);
+  for (const [profileDir, identity] of configuredProfiles) {
+    for (const exactPath of new Set([profileDir, identity])) {
+      const variants = [exactPath, `"${exactPath}"`, `'${exactPath}'`];
+      if (
+        variants.some((variant) => {
+          const option = `--user-data-dir=${variant}`;
+          const offset = args.indexOf(option);
+          return (
+            offset >= 0 &&
+            /\s|$/.test(args.slice(offset + option.length, offset + option.length + 1))
+          );
+        })
+      ) {
+        return identity;
+      }
+    }
+  }
+  return null;
 }
 
 export function claimOrphanBrowserReapScope(profileDir: string): {
@@ -1725,26 +1981,28 @@ function reapOrphanedBrowsersOnce(profileDir: string): void {
   } catch {
     return;
   }
-  const pids: number[] = [];
+  const identities: ProfileProcessIdentity[] = [];
   for (const line of rows.split("\n")) {
     const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
     if (match === null) continue;
     const pid = Number(match[1]);
     const ppid = Number(match[2]);
     const args = match[3] ?? "";
-    if (
-      Number.isFinite(pid) &&
-      ppid === 1 &&
-      matchesReapableBrowserArgs(args, scope.profileDirs, scope.includeVerifier)
-    ) {
-      pids.push(pid);
+    const expectedProfile = reapableBrowserProfile(args, scope.profileDirs, scope.includeVerifier);
+    if (Number.isFinite(pid) && ppid === 1 && expectedProfile !== null) {
+      const identity = profileProcessIdentity(pid, expectedProfile);
+      if (identity !== null) identities.push(identity);
     }
   }
-  if (pids.length === 0) return;
-  console.error(`[operator] reaping ${pids.length} orphaned Chrome process(es)`);
-  for (const pid of pids) killPid(pid, "SIGTERM");
+  if (identities.length === 0) return;
+  console.error(`[operator] reaping ${identities.length} orphaned Chrome process(es)`);
+  for (const identity of identities) {
+    signalProfileProcess(identity, identity.user_data_dir, "SIGTERM");
+  }
   setTimeout(() => {
-    for (const pid of pids) killPid(pid, "SIGKILL");
+    for (const identity of identities) {
+      signalProfileProcess(identity, identity.user_data_dir, "SIGKILL");
+    }
   }, 2_000).unref();
 }
 
@@ -1808,10 +2066,46 @@ export interface SelfLaunchedLogin {
   // running — the zombie-chrome leak). Also reaps the profile lock.
   teardown: () => Promise<void>;
   forceTeardown: () => void;
+  identity: ProfileProcessIdentity | null;
 }
 
 export function childProcessIsRunning(child: ChildProcess | null): boolean {
   return child !== null && child.exitCode === null && child.signalCode === null;
+}
+
+export async function attachSelfManagedLoginContext(
+  endpoint: string,
+  child: ChildProcess,
+  profileDir: string,
+  identity: ProfileProcessIdentity | null,
+  options: {
+    launcher?: { connectOverCDP(endpoint: string): Promise<Browser> };
+    terminateChild?: (
+      child: ChildProcess,
+      profileDir: string,
+      identity: ProfileProcessIdentity | null,
+    ) => Promise<ProfileProcessIdentity | null>;
+  } = {},
+): Promise<{ browser: Browser; context: BrowserContext }> {
+  let browser: Browser | null = null;
+  try {
+    browser = await (options.launcher ?? getChromium()).connectOverCDP(endpoint);
+    const context = browser.contexts()[0];
+    if (context === undefined) {
+      throw new Error("self-launched login Chrome exposed no default browser context");
+    }
+    return { browser, context };
+  } catch (error) {
+    await browser?.close().catch(() => undefined);
+    const terminateChild =
+      options.terminateChild ??
+      ((ownedChild, ownedProfileDir, ownedIdentity) =>
+        terminateTrackedProfileChild(ownedChild, ownedProfileDir, {
+          identity: ownedIdentity,
+        }));
+    await terminateChild(child, profileDir, identity);
+    throw error;
+  }
 }
 
 function profileCollisionFromStderr(stderr: string): ProfileBusyError | null {
@@ -1848,6 +2142,7 @@ export async function launchSelfManagedLoginContext(params: {
   extraArgs?: readonly string[];
 }): Promise<SelfLaunchedLogin> {
   let child: ChildProcess | null = null;
+  let childIdentity: ProfileProcessIdentity | null = null;
   const endpoint = await withChromeStartupLock(
     async () => {
       const port = await findFreePort();
@@ -1874,20 +2169,26 @@ export async function launchSelfManagedLoginContext(params: {
         stdio: ["ignore", "ignore", "pipe"],
       });
       child = spawned;
-      registerSelfManagedChrome(spawned);
+      childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
       let chromeStderr = "";
       spawned.stderr?.on("data", (chunk: Buffer) => {
         chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
       });
       try {
-        return await waitForDevtools(port, 30_000, spawned);
-      } catch (err) {
-        try {
-          spawned.kill("SIGKILL");
-        } catch {
-          /* already gone */
+        const endpoint = await waitForDevtools(port, 30_000, spawned);
+        childIdentity = await resolveAttachedProfileChildIdentity(
+          spawned,
+          params.profileDir,
+          childIdentity,
+        );
+        if (process.platform === "linux" && childIdentity === null) {
+          throw new Error("self-launched login Chrome exited before identity was proven");
         }
-        reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
+        return endpoint;
+      } catch (err) {
+        childIdentity = await terminateTrackedProfileChild(spawned, params.profileDir, {
+          identity: childIdentity,
+        });
         const detail = chromeStderr.trim();
         const collision = profileCollisionFromStderr(detail);
         if (collision !== null) throw collision;
@@ -1899,13 +2200,16 @@ export async function launchSelfManagedLoginContext(params: {
     },
     { deadlineMs: 0 },
   );
-
-  const launcher = getChromium();
-  const browser = await launcher.connectOverCDP(endpoint);
-  const ctx = browser.contexts()[0];
-  if (ctx === undefined) {
-    throw new Error("self-launched login Chrome exposed no default browser context");
+  if (child === null) {
+    throw new Error("self-launched login Chrome lost its process handle");
   }
+
+  const { browser, context } = await attachSelfManagedLoginContext(
+    endpoint,
+    child,
+    params.profileDir,
+    childIdentity,
+  );
 
   let torn = false;
   const teardown = async (): Promise<void> => {
@@ -1914,40 +2218,21 @@ export async function launchSelfManagedLoginContext(params: {
     // Disconnect the CDP browser first; over connectOverCDP this leaves the
     // real Chrome running, so kill the child explicitly (SIGTERM, then a
     // hard SIGKILL after a short grace) to avoid the zombie-chrome leak.
-    try {
-      await browser.close();
-    } catch {
-      /* best-effort disconnect */
+    await browser.close();
+    if (child !== null && childIdentity !== null) {
+      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
     }
-    if (child !== null) {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        /* already gone */
-      }
-      await new Promise((r) => setTimeout(r, 1_500));
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-    }
-    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
   };
 
   const forceTeardown = (): void => {
-    if (child !== null) {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-      if (child.pid !== undefined) selfManagedChromePids.delete(child.pid);
+    if (childIdentity !== null) {
+      signalProfileProcess(childIdentity, params.profileDir, "SIGKILL");
+      selfManagedChromes.delete(childIdentity.pid);
     }
-    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
+    reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
 
-  return { context: ctx, teardown, forceTeardown };
+  return { context, teardown, forceTeardown, identity: childIdentity };
 }
 
 export interface PlainLoginBrowser {
@@ -1957,6 +2242,7 @@ export interface PlainLoginBrowser {
   // Plain login intentionally has no CDP attachment, so expose child liveness
   // for the polling loop to fail loudly if the visible browser disappears.
   isRunning: () => boolean;
+  identity: ProfileProcessIdentity | null;
 }
 
 // Launch a TRULY PLAIN Chrome for the interactive connect claim — NO
@@ -1989,6 +2275,7 @@ export async function launchPlainLoginBrowser(params: {
   extraArgs?: readonly string[];
 }): Promise<PlainLoginBrowser> {
   let child: ChildProcess | null = null;
+  let childIdentity: ProfileProcessIdentity | null = null;
   await withChromeStartupLock(
     async () => {
       clearStaleSingletonLock(params.profileDir);
@@ -2009,7 +2296,7 @@ export async function launchPlainLoginBrowser(params: {
         stdio: ["ignore", "ignore", "pipe"],
       });
       child = spawned;
-      registerSelfManagedChrome(spawned);
+      childIdentity = registerSelfManagedChrome(spawned, params.profileDir);
       let chromeStderr = "";
       spawned.stderr?.on("data", (chunk: Buffer) => {
         chromeStderr = (chromeStderr + chunk.toString("utf8")).slice(-4_000);
@@ -2019,8 +2306,16 @@ export async function launchPlainLoginBrowser(params: {
       // profile, missing lib) should surface here, not 15min later as a blank
       // noVNC. If the process is already dead, throw with its stderr.
       await new Promise((r) => setTimeout(r, 1_200));
+      childIdentity ??=
+        spawned.pid === undefined ? null : profileProcessIdentity(spawned.pid, params.profileDir);
+      childIdentity = await resolveAttachedProfileChildIdentity(
+        spawned,
+        params.profileDir,
+        childIdentity,
+      );
+      if (childIdentity !== null) selfManagedChromes.set(childIdentity.pid, childIdentity);
       if (!childProcessIsRunning(spawned)) {
-        reapProfileHolderIfOwned(params.profileDir, spawned.pid ?? null);
+        reapProfileHolderIfOwned(params.profileDir, childIdentity);
         const detail = chromeStderr.trim();
         const collision = profileCollisionFromStderr(detail);
         if (collision !== null) throw collision;
@@ -2033,44 +2328,33 @@ export async function launchPlainLoginBrowser(params: {
             `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
         );
       }
+      if (process.platform === "linux" && childIdentity === null) {
+        throw new Error("plain login Chrome identity could not be proven");
+      }
     },
     { deadlineMs: 0 },
   );
 
   let torn = false;
   const forceTeardown = (): void => {
-    if (child !== null) {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-      if (child.pid !== undefined) selfManagedChromePids.delete(child.pid);
+    if (childIdentity !== null) {
+      signalProfileProcess(childIdentity, params.profileDir, "SIGKILL");
+      selfManagedChromes.delete(childIdentity.pid);
     }
-    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
+    reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
   const teardown = async (): Promise<void> => {
     if (torn) return;
     torn = true;
-    if (child !== null) {
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        /* already gone */
-      }
-      await new Promise((r) => setTimeout(r, 1_500));
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
+    if (child !== null && childIdentity !== null) {
+      signalProfileProcess(childIdentity, params.profileDir, "SIGTERM");
     }
-    reapProfileHolderIfOwned(params.profileDir, child?.pid ?? null);
   };
   return {
     teardown,
     forceTeardown,
     isRunning: () => childProcessIsRunning(child),
+    identity: childIdentity,
   };
 }
 
@@ -2090,11 +2374,25 @@ export class BrowserController {
   // Chrome ourselves and attach over CDP, these hold the child process and
   // the connected Browser so close() can tear both down.
   private childChrome: ChildProcess | null = null;
+  private childChromeIdentity: ProfileProcessIdentity | null = null;
   private cdpBrowser: Browser | null = null;
-  // True once launchPersistentContext succeeded this session.
+  // True once a local browser context launched this session.
   private launchedContext = false;
-  private launchedProfileHolderPid: number | null = null;
+  private launchedProfileHolderIdentity: ProfileProcessIdentity | null = null;
   private profileOperationLease: ProfileOperationLease | null = null;
+  private startPromise: Promise<void> | null = null;
+  private closePromise: Promise<ProfileCloseState> | null = null;
+  private startCancellationRequested = false;
+  private startLaunchCommitted = false;
+  private startSettled = false;
+  private persistentFallbackLaunchInFlight = false;
+  private persistentFallbackCancellationState: ProfileCloseState | null = null;
+  private profilePoolReusable = true;
+  private resolveStartCancellation: (() => void) | null = null;
+  private readonly startCancellation = new Promise<void>((resolveCancellation) => {
+    this.resolveStartCancellation = resolveCancellation;
+  });
+  private cancelledStartReaper: Promise<void> | null = null;
   private readonly humanize: boolean;
   // Tracks the simulated mouse position so successive clicks can move
   // along a continuous path (humans don't teleport between clicks).
@@ -2242,6 +2540,11 @@ export class BrowserController {
     return this.profileDir === profileDir && this.proxyOverride === proxyUrl;
   }
 
+  /** Identity persisted by the operator profile lease for owner-safe crash recovery. */
+  operatorWorkerIdentity(): OperatorWorkerIdentity | null {
+    return this.childChromeIdentity ?? this.launchedProfileHolderIdentity;
+  }
+
   // Required health gate for a warm browser. BrowserContext alone is not a
   // sufficient signal: a dead CDP transport can leave stale JS objects behind.
   isConnected(): boolean {
@@ -2285,11 +2588,10 @@ export class BrowserController {
   // Launch Chrome ourselves and attach over CDP — the Turnstile-safe launch
   // (see selfLaunchEnabled for the proof). The profile dir is the SAME shared
   // profile launchPersistentContext would use, so the OAuth session carries
-  // over. Options that launchPersistentContext takes at creation but a default
-  // (connectOverCDP) context can't are applied differently:
+  // over. Options that a default connectOverCDP context can't take at creation
+  // are applied differently:
   //   • timezone  → TZ env on the child (more authentic than a CDP override)
-  //   • proxy     → --proxy-server flag (auth-less only; the caller routes
-  //                 credentialed proxies to the old path)
+  //   • proxy     → --proxy-server flag, with credentials applied post-connect
   //   • viewport  → --window-size (with viewport:null-equivalent: we never set
   //                 an emulated viewport on the connected context)
   //   • locale/geo/permissions → applied post-connect by start()
@@ -2301,6 +2603,7 @@ export class BrowserController {
     env: NodeJS.ProcessEnv;
     window: { width: number; height: number };
   }): Promise<BrowserContext> {
+    this.throwIfStartCancelled();
     // Remote-CDP attach: BOT_CDP_ENDPOINT points at a Chrome already running on
     // another host (e.g. a real-GPU Mac), reachable over Tailscale. We do NOT
     // spawn or own the binary — the remote host launched it with its own
@@ -2324,7 +2627,9 @@ export class BrowserController {
     }
     const endpoint = await withChromeStartupLock(
       async () => {
+        this.throwIfStartCancelled();
         const port = await findFreePort();
+        this.throwIfStartCancelled();
         clearStaleSingletonLock(this.profileDir);
         const argv = [
           `--remote-debugging-port=${port}`,
@@ -2341,12 +2646,13 @@ export class BrowserController {
           ...(params.headless ? ["--headless=new"] : []),
           "about:blank",
         ];
+        this.commitProfileLaunch();
         const child = spawn(params.binary, argv, {
           env: params.env,
           stdio: ["ignore", "ignore", "pipe"],
         });
         this.childChrome = child;
-        registerSelfManagedChrome(child);
+        this.childChromeIdentity = registerSelfManagedChrome(child, this.profileDir);
         let chromeStderr = "";
         let chromeExit = "";
         child.stderr?.on("data", (chunk: Buffer) => {
@@ -2355,27 +2661,30 @@ export class BrowserController {
         child.on("exit", (code, signal) => {
           chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
         });
+        if (this.startCancellationRequested) {
+          await this.cancelSpawnedSelfManagedChrome(child);
+          throw new Error("BrowserController start cancelled");
+        }
         try {
-          return await waitForDevtools(port, 30_000);
+          const endpoint = await waitForDevtools(port, 30_000);
+          this.childChromeIdentity = await resolveAttachedProfileChildIdentity(
+            child,
+            this.profileDir,
+            this.childChromeIdentity,
+          );
+          if (process.platform === "linux" && this.childChromeIdentity === null) {
+            throw new Error("self-launched Chrome exited before identity was proven");
+          }
+          return endpoint;
         } catch (err) {
           const alive =
-            child.pid !== undefined
-              ? (() => {
-                  try {
-                    process.kill(child.pid!, 0);
-                    return true;
-                  } catch {
-                    return false;
-                  }
-                })()
-              : false;
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            /* already gone */
-          }
-          reapProfileHolderIfOwned(this.profileDir, child.pid ?? null);
+            this.childChromeIdentity !== null &&
+            profileProcessMatches(this.childChromeIdentity, this.profileDir);
+          this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
+            identity: this.childChromeIdentity,
+          });
           this.childChrome = null;
+          this.childChromeIdentity = null;
           const detail = chromeStderr.trim();
           throw new Error(
             `${err instanceof Error ? err.message : String(err)}; Chrome pid=${child.pid ?? "unknown"} alive=${alive ? 1 : 0}` +
@@ -2397,6 +2706,14 @@ export class BrowserController {
       throw new Error("self-launched Chrome exposed no default browser context");
     }
     return ctx;
+  }
+
+  private async cancelSpawnedSelfManagedChrome(child: ChildProcess): Promise<void> {
+    this.childChromeIdentity = await terminateTrackedProfileChild(child, this.profileDir, {
+      identity: this.childChromeIdentity,
+    });
+    if (this.childChrome === child) this.childChrome = null;
+    this.childChromeIdentity = null;
   }
 
   // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts
@@ -2472,23 +2789,55 @@ export class BrowserController {
   }
 
   async start(): Promise<void> {
+    if (this.closePromise !== null) throw new Error("BrowserController is already closing");
+    this.startPromise ??= this.startOnce();
+    await this.startPromise;
+  }
+
+  private async startOnce(): Promise<void> {
     const remoteMode = (process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0;
     const lease = remoteMode ? null : await acquireFreeProfileOperationGuard(this.profileDir);
     this.profileOperationLease = lease;
     try {
       await this.startWithProfileGuard();
+      if (this.startCancellationRequested) {
+        await this.closeWithProfileGuard();
+        throw new Error("BrowserController start cancelled");
+      }
     } catch (err) {
-      this.profileOperationLease = null;
-      lease?.release();
+      if (this.startCancellationRequested && this.persistentFallbackCancellationState === null) {
+        await this.closeWithProfileGuard().catch(() => undefined);
+      }
+      if (
+        this.persistentFallbackCancellationState === null ||
+        this.persistentFallbackCancellationState === "closed"
+      ) {
+        this.profileOperationLease = null;
+        lease?.release();
+      }
       throw err;
+    } finally {
+      this.startSettled = true;
     }
   }
 
+  private throwIfStartCancelled(): void {
+    if (this.startCancellationRequested) throw new Error("BrowserController start cancelled");
+  }
+
+  private commitProfileLaunch(): void {
+    this.throwIfStartCancelled();
+    this.startLaunchCommitted = true;
+  }
+
   private async startWithProfileGuard(): Promise<void> {
+    this.throwIfStartCancelled();
     reapOrphanedBrowsersOnce(this.profileDir);
     const channel = await detectChromiumChannel();
+    this.throwIfStartCancelled();
     this.launchedChannel = channel;
     const proxy = await this.resolveProxy();
+    this.throwIfStartCancelled();
     this.proxyServer = proxy?.server ?? null;
     // Stderr so the MCP stdio transport's framing stays clean (the
     // module's existing logging convention).
@@ -2519,6 +2868,7 @@ export class BrowserController {
     // timezone in at creation, with no way to set it afterward. Skipped in
     // remote mode — the remote host's own clock/IP are the authentic truth.
     const geo = remoteMode ? null : await this.probeEgressGeo(channel, proxy);
+    this.throwIfStartCancelled();
     if (geo !== null) {
       console.error(
         `[operator] egress geo: timezone=${geo.timezoneId}` +
@@ -2569,8 +2919,13 @@ export class BrowserController {
         // and with viewport:null the page read it straight back. A 720p
         // screen whose availHeight==height (no taskbar) is a headless
         // signature strict Turnstiles (exa/cartesia) score against.
-        this.xvfb = await startXvfb({ width: 1920, height: 1080 });
-        chromeEnv = { ...process.env, DISPLAY: this.xvfb.display };
+        const xvfb = await startXvfb({ width: 1920, height: 1080 });
+        if (this.startCancellationRequested) {
+          xvfb.stop();
+          this.throwIfStartCancelled();
+        }
+        this.xvfb = xvfb;
+        chromeEnv = { ...process.env, DISPLAY: xvfb.display };
         chromeHeadless = false;
         this.launchedMode = "xvfb";
         console.error(
@@ -2594,6 +2949,7 @@ export class BrowserController {
     }
 
     const free = await waitForProfileFree(this.profileDir, { deadlineMs: 0 });
+    this.throwIfStartCancelled();
     if (!free) {
       throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
     }
@@ -2635,23 +2991,20 @@ export class BrowserController {
       "clipboard-read",
       "clipboard-write",
     ];
-    // Decide the launch path. Self-launch (Turnstile-safe) requires a real
-    // Chrome binary on disk AND an auth-less proxy (a credentialed proxy needs
-    // Playwright's native proxy auth, which only the launchPersistentContext
-    // path provides — so route those there).
-    const selfLaunchBinary = selfLaunchEnabled() ? resolveChannelBinary(channel) : null;
+    const selfLaunchBinary = selfLaunchEnabled()
+      ? (resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null))
+      : null;
     const proxyHasAuth =
       proxy !== null && typeof proxy.username === "string" && proxy.username.length > 0;
-    const useSelfLaunch = selfLaunchBinary !== null && !proxyHasAuth;
+    const useSelfLaunch =
+      selfLaunchBinary !== null && existsSync(selfLaunchBinary) && !proxyHasAuth;
 
     let context: BrowserContext;
+    this.throwIfStartCancelled();
     if (useSelfLaunch && selfLaunchBinary !== null) {
       console.error(
         `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
       );
-      // Window size matches the display surface so viewport reads as a real
-      // window (no emulated-viewport tell). TZ on the child makes Chrome
-      // report the egress timezone natively.
       const window =
         this.launchedMode === "xvfb"
           ? { width: 1920, height: 1080 }
@@ -2662,20 +3015,19 @@ export class BrowserController {
       };
       context = await launchWithProfileGate(
         this.profileDir,
-        () =>
-          this.launchSelfManagedContext({
+        () => {
+          this.throwIfStartCancelled();
+          return this.launchSelfManagedContext({
             binary: selfLaunchBinary,
             headless: chromeHeadless,
             args: launchArgs,
             proxy,
             env: selfEnv,
             window,
-          }),
+          });
+        },
         { failFast: true },
       );
-      // Options the default (connectOverCDP) context can't take at creation —
-      // applied post-connect. Best-effort: a failure here is non-fatal (the
-      // signup proceeds; only clipboard-key-extraction / geo degrade).
       try {
         await context.grantPermissions(grantedPermissions);
         if (geo?.geolocation !== undefined) {
@@ -2689,37 +3041,105 @@ export class BrowserController {
         );
       }
     } else {
-      if (selfLaunchEnabled() && selfLaunchBinary !== null && proxyHasAuth) {
-        console.error(
-          "[operator] credentialed proxy → launchPersistentContext (self-launch can't carry proxy auth)",
-        );
+      this.profilePoolReusable = false;
+      this.persistentFallbackLaunchInFlight = true;
+      const cleanupProfileHolder = async (): Promise<ProfileCloseState> => {
+        const proof = await this.waitForPersistentFallbackIdentity();
+        if (proof.state === "absent") return "closed";
+        if (proof.state === "unknown") return "unknown";
+        const { identity } = proof;
+        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        return (await this.waitForOwnedProfileExit(identity)) ? "closed" : "unknown";
+      };
+      const cleanupCancelled = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
+        const proof = await this.waitForPersistentFallbackIdentity();
+        if (proof.state !== "owned") {
+          await lateContext.close().catch(() => undefined);
+          return proof.state === "absent" ? "closed" : "unknown";
+        }
+        const { identity } = proof;
+        const closeState = await closeProfileWithProof({
+          profileDir: this.profileDir,
+          identity,
+          close: () => lateContext.close(),
+          forceClose: () => {
+            signalProfileProcess(identity, this.profileDir, "SIGKILL");
+            reapProfileHolderIfOwned(this.profileDir, identity);
+          },
+        });
+        if (closeState === "closed") return closeState;
+        return (await this.waitForOwnedProfileExit(identity)) ? "closed" : "unknown";
+      };
+      const outcome = await (async () => {
+        try {
+          return await launchCancellablePersistentContext({
+            launch: (options) =>
+              launchWithProfileGate(
+                this.profileDir,
+                () => launcher.launchPersistentContext(this.profileDir, options),
+                { failFast: true },
+              ),
+            options: {
+              headless: chromeHeadless,
+              ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
+              ...(channel !== null ? { channel } : {}),
+              ...(proxy !== null ? { proxy } : {}),
+              args: [...launchArgs],
+              viewport: null,
+              locale: "en-US",
+              timezoneId: geo?.timezoneId ?? "America/New_York",
+              permissions: grantedPermissions,
+              ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
+            },
+            cancellation: this.startCancellation,
+            cleanupCancelled,
+            cleanupRejected: cleanupProfileHolder,
+          });
+        } catch (error) {
+          if (!this.startCancellationRequested) {
+            this.persistentFallbackLaunchInFlight = false;
+            throw error;
+          }
+          this.persistentFallbackCancellationState = await cleanupProfileHolder().catch(
+            () => "unknown" as const,
+          );
+          this.persistentFallbackLaunchInFlight = false;
+          throw new Error("BrowserController start cancelled");
+        }
+      })();
+      if (outcome.status === "cancelled") {
+        this.persistentFallbackCancellationState = outcome.closeState;
+        this.persistentFallbackLaunchInFlight = false;
+        throw new Error("BrowserController start cancelled");
       }
-      // T3: a PERSISTENT context (the legacy path). The profile dir carries the
-      // user's Google session so the OAuth-first path reuses it.
-      context = await launchWithProfileGate(
-        this.profileDir,
-        () =>
-          launcher.launchPersistentContext(this.profileDir, {
-            headless: chromeHeadless,
-            ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
-            ...(channel !== null ? { channel } : {}),
-            ...(proxy !== null ? { proxy } : {}),
-            args: [...launchArgs],
-            viewport: null,
-            locale: "en-US",
-            timezoneId: geo?.timezoneId ?? "America/New_York",
-            permissions: grantedPermissions,
-            ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-          }),
-        { failFast: true },
-      );
+      context = outcome.value;
+      if (this.startCancellationRequested) {
+        this.persistentFallbackCancellationState = await cleanupCancelled(context).catch(
+          () => "unknown" as const,
+        );
+        this.persistentFallbackLaunchInFlight = false;
+        throw new Error("BrowserController start cancelled");
+      }
+      this.context = context;
+      this.launchedContext = true;
+      const holderPid = currentProfileHolderPid(this.profileDir);
+      this.launchedProfileHolderIdentity =
+        holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
+      this.commitProfileLaunch();
+      this.persistentFallbackLaunchInFlight = false;
     }
     this.context = context;
     // We own the profile now — close() may reap a leaked Chrome.
     this.launchedContext = true;
     if (!remoteMode) {
-      this.launchedProfileHolderPid =
-        this.childChrome?.pid ?? currentProfileHolderPid(this.profileDir);
+      const holderPid = this.childChrome?.pid ?? currentProfileHolderPid(this.profileDir);
+      this.launchedProfileHolderIdentity =
+        this.childChromeIdentity ??
+        (holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir));
+    }
+    if (this.startCancellationRequested) {
+      await this.closeWithProfileGuard();
+      throw new Error("BrowserController start cancelled");
     }
     // Speed: optionally abort heavy/irrelevant requests before any navigation.
     await this.installResourceBlocking();
@@ -11568,6 +11988,34 @@ export class BrowserController {
     }
   }
 
+  async detectGoogleAccountEmail(): Promise<string | null> {
+    if (this.context === null) return null;
+    let identityPage: Page | null = null;
+    try {
+      identityPage = await this.context.newPage();
+      await identityPage.goto("https://myaccount.google.com/", {
+        waitUntil: "domcontentloaded",
+        timeout: 20_000,
+      });
+      if (new URL(identityPage.url()).hostname !== "myaccount.google.com") return null;
+      const identityTokens = await identityPage
+        .locator("[aria-label]")
+        .evaluateAll((elements) =>
+          elements.map((element) => element.getAttribute("aria-label") ?? ""),
+        );
+      for (const token of identityTokens) {
+        const trimmed = token.trim();
+        const email = /^Google Account:/i.test(trimmed) ? extractGoogleAccountEmail(trimmed) : null;
+        if (email !== null) return email;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      await identityPage?.close().catch(() => undefined);
+    }
+  }
+
   // Advance a provider's consent / account-chooser screen by one click
   // — the scope-gated auto-approve (T7/T13). Returns false when no
   // approve control is present — the agent then aborts rather than
@@ -11859,6 +12307,7 @@ export class BrowserController {
   // closed. about:blank replaces the task document while the persistent profile
   // (cookies, OAuth identity, local profile data) intentionally remains intact.
   async resetPageForReuse(): Promise<void> {
+    if (!this.profilePoolReusable) throw new Error("browser profile is not pool-reusable");
     const context = this.context;
     const primaryPage = this.primaryPage;
     if (!this.isConnected() || context === null || primaryPage === null || primaryPage.isClosed()) {
@@ -11901,9 +12350,102 @@ export class BrowserController {
     });
   }
 
-  async close(): Promise<void> {
-    try {
+  async close(options: { cancelStart?: boolean } = {}): Promise<ProfileCloseState> {
+    if (options.cancelStart === true) {
+      this.startCancellationRequested = true;
+      this.resolveStartCancellation?.();
+      this.resolveStartCancellation = null;
+    }
+    this.closePromise ??= this.closeAfterStart();
+    return await this.closePromise;
+  }
+
+  private async closeCancelledStart(): Promise<ProfileCloseState> {
+    if (this.persistentFallbackLaunchInFlight) {
+      await this.startPromise?.catch(() => undefined);
+    }
+    if (this.persistentFallbackCancellationState !== null) {
+      const closeState = this.persistentFallbackCancellationState;
+      if (closeState === "closed") {
+        const lease = this.profileOperationLease;
+        this.profileOperationLease = null;
+        lease?.release();
+      }
+      return closeState;
+    }
+    if (!this.startLaunchCommitted) {
       await this.closeWithProfileGuard();
+      const lease = this.profileOperationLease;
+      this.profileOperationLease = null;
+      lease?.release();
+      return "closed";
+    }
+    const [closeState] = await Promise.all([
+      this.closeWithProfileGuard(),
+      this.reapCancelledStartProcess(),
+    ]);
+    if (this.startSettled) {
+      const lease = this.profileOperationLease;
+      this.profileOperationLease = null;
+      lease?.release();
+    }
+    return closeState;
+  }
+
+  private async reapCancelledStartProcess(): Promise<void> {
+    this.cancelledStartReaper ??= this.monitorCancelledStartProcess();
+    await this.cancelledStartReaper;
+  }
+
+  private async monitorCancelledStartProcess(): Promise<void> {
+    while (!this.startSettled) {
+      const identity = this.currentOwnedProfileIdentity();
+      if (identity !== null) {
+        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        reapProfileHolderIfOwned(this.profileDir, identity);
+      }
+      await new Promise<void>((resolveWait) => {
+        setTimeout(resolveWait, 25);
+      });
+    }
+  }
+
+  private currentOwnedProfileIdentity(): ProfileProcessIdentity | null {
+    const known = this.childChromeIdentity ?? this.launchedProfileHolderIdentity;
+    if (known !== null) return known;
+    const holderPid = currentProfileHolderPid(this.profileDir);
+    return holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
+  }
+
+  private async waitForPersistentFallbackIdentity(): Promise<PersistentFallbackIdentityProof> {
+    return await resolvePersistentFallbackIdentity({ profileDir: this.profileDir });
+  }
+
+  private async waitForOwnedProfileExit(identity: ProfileProcessIdentity): Promise<boolean> {
+    const deadline = Date.now() + PROFILE_IDENTITY_PROOF_TIMEOUT_MS;
+    let state = profileProcessIdentityState(identity, this.profileDir);
+    while (state !== "stale" && Date.now() < deadline) {
+      if (profileProcessMatches(identity, this.profileDir)) {
+        signalProfileProcess(identity, this.profileDir, "SIGKILL");
+      }
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, PROFILE_IDENTITY_POLL_MS);
+        timer.unref();
+      });
+      state = profileProcessIdentityState(identity, this.profileDir);
+    }
+    if (state !== "stale") return false;
+    reapProfileHolderIfOwned(this.profileDir, identity);
+    return true;
+  }
+
+  private async closeAfterStart(): Promise<ProfileCloseState> {
+    if (this.startPromise !== null && !this.startSettled) {
+      await Promise.race([this.startPromise.catch(() => undefined), this.startCancellation]);
+    }
+    if (this.startCancellationRequested) return await this.closeCancelledStart();
+    try {
+      return await this.closeWithProfileGuard();
     } finally {
       const lease = this.profileOperationLease;
       this.profileOperationLease = null;
@@ -11911,7 +12453,7 @@ export class BrowserController {
     }
   }
 
-  private async closeWithProfileGuard(): Promise<void> {
+  private async closeWithProfileGuard(): Promise<ProfileCloseState> {
     if (this.harnessAttachedPage) {
       this.page = null;
       this.primaryPage = null;
@@ -11920,7 +12462,7 @@ export class BrowserController {
       this.oauthProviderPageClosed = false;
       this.oauthNetLog = [];
       this.context = null;
-      return;
+      return "closed";
     }
     // Each step is best-effort and independent: a throw closing the page
     // or context must NOT skip the Xvfb teardown below, or the virtual
@@ -11935,49 +12477,46 @@ export class BrowserController {
     // minutes and bricked the next 3 services (MEASURED 2026-06-09: supabase
     // crash → cockroachdb/weaviate/honeycomb all "profile held"). The cap
     // guarantees we always reach the SIGKILL reap.
-    const capped = (p: Promise<unknown>, ms: number): Promise<void> =>
-      Promise.race([
-        Promise.resolve(p).then(
-          () => undefined,
-          () => undefined,
-        ),
-        new Promise<void>((r) => setTimeout(r, ms)),
-      ]);
-    if (this.page) await capped(this.page.close(), 5_000);
+    const page = this.page;
+    const context = this.context;
+    const cdpBrowser = this.cdpBrowser;
+    const childIdentity = this.childChromeIdentity;
+    const holderIdentity = this.launchedProfileHolderIdentity ?? this.currentOwnedProfileIdentity();
+    const identity = childIdentity ?? holderIdentity;
     this.page = null;
     this.primaryPage = null;
     this.oauthProductPage = null;
     this.oauthProviderPage = null;
     this.oauthProviderPageClosed = false;
     this.oauthNetLog = [];
-    if (this.context) await capped(this.context.close(), 10_000);
+    this.context = null;
+    this.cdpBrowser = null;
+    this.childChrome = null;
+    this.childChromeIdentity = null;
+    this.launchedContext = false;
+    this.launchedProfileHolderIdentity = null;
+    const closeState = await closeProfileWithProof({
+      profileDir: this.profileDir,
+      identity,
+      close: async () => {
+        if (page !== null) await page.close();
+        if (context !== null) await context.close();
+        if (cdpBrowser !== null) await cdpBrowser.close();
+        if (childIdentity !== null) {
+          signalProfileProcess(childIdentity, this.profileDir, "SIGTERM");
+        }
+      },
+      forceClose: () => {
+        if (identity !== null) signalProfileProcess(identity, this.profileDir, "SIGKILL");
+        reapProfileHolderIfOwned(this.profileDir, identity);
+      },
+    });
     // Self-launch path: disconnect the CDP browser and SIGKILL the Chrome we
     // spawned. context.close() on a connectOverCDP context only disconnects —
     // it does NOT necessarily exit the browser process, which would leak the
     // SingletonLock and brick the next run (the reap below is the backstop, but
     // killing our own child directly is cleaner and faster).
-    if (this.cdpBrowser) {
-      await capped(this.cdpBrowser.close(), 5_000);
-      this.cdpBrowser = null;
-    }
-    if (this.childChrome) {
-      try {
-        this.childChrome.kill("SIGKILL");
-      } catch {
-        /* already gone */
-      }
-      if (this.childChrome.pid !== undefined) selfManagedChromePids.delete(this.childChrome.pid);
-      this.childChrome = null;
-    }
-    if (this.launchedContext) {
-      try {
-        reapProfileHolderIfOwned(this.profileDir, this.launchedProfileHolderPid);
-      } catch {
-        /* best-effort */
-      }
-      this.launchedContext = false;
-      this.launchedProfileHolderPid = null;
-    }
+    if (childIdentity !== null) selfManagedChromes.delete(childIdentity.pid);
     // F13 — release the on-demand Xvfb if we spawned one. Order
     // matters: kill Chrome (context.close) first so it has its
     // display until it exits, THEN kill Xvfb.
@@ -11989,6 +12528,7 @@ export class BrowserController {
       }
       this.xvfb = null;
     }
+    return closeState;
   }
 }
 

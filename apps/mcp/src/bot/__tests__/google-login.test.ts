@@ -7,18 +7,34 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
 import { shortenVncUrl } from "../../api-client.js";
-import { childProcessIsRunning, withChromeStartupLock } from "../browser.js";
-import { launchWithProfileGate } from "../profile.js";
+import {
+  attachSelfManagedLoginContext,
+  BrowserController,
+  childProcessIsRunning,
+  launchCancellablePersistentContext,
+  resolvePersistentFallbackIdentity,
+  resolveAttachedProfileChildIdentity,
+  terminateTrackedProfileChild,
+  withChromeStartupLock,
+} from "../browser.js";
+import {
+  acquireProfileOperationGuard,
+  launchWithProfileGate,
+  ProfileBusyError,
+} from "../profile.js";
+import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
 import {
   binaryOnPath,
   installHint,
+  installClaimPollCompleted,
+  openInstallConfirmInBotChrome,
   classifyGoogleAuthState,
   checkLoginStatusWithin,
+  detectActiveProviderSessions,
   extractGoogleAccountEmail,
   extractGoogleNumberMatch,
   extractOAuthScopes,
@@ -33,8 +49,43 @@ import {
   teardownHeadlessRig,
   teardownLoginBrowser,
   ensureOAuthSession,
+  finalizeLoginRun,
+  launchPersistentLoginContext,
+  validateGoogleProfileSession,
   type HeadlessRig,
+  type PersistentLauncher,
+  type RunInBotChromeOpts,
 } from "../google-login.js";
+
+describe("canonical profile operation guard", () => {
+  it("treats symlink aliases for an absent profile as one guard", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-google-profile-alias-"));
+    const profiles = join(dir, "profiles");
+    const alias = join(dir, "profiles-alias");
+    mkdirSync(profiles);
+    symlinkSync(profiles, alias, "dir");
+    const lease = acquireProfileOperationGuard(join(profiles, "not-created"));
+    try {
+      expect(() => acquireProfileOperationGuard(join(alias, "not-created"))).toThrow(
+        ProfileBusyError,
+      );
+    } finally {
+      lease.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks provider-session probes while publication could own the profile", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-google-session-guard-"));
+    const lease = acquireProfileOperationGuard(dir);
+    try {
+      await expect(detectActiveProviderSessions(dir)).rejects.toBeInstanceOf(ProfileBusyError);
+    } finally {
+      lease.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -143,10 +194,16 @@ describe("headless login VNC lifecycle", () => {
   it("forces browser cleanup when graceful teardown stalls", async () => {
     vi.useFakeTimers();
     const forceClose = vi.fn();
-    const waiting = teardownLoginBrowser(() => new Promise<void>(() => undefined), forceClose, 100);
+    const waiting = teardownLoginBrowser({
+      profileDir: "/unused/profile",
+      identity: null,
+      closeBrowser: () => new Promise<void>(() => undefined),
+      forceClose,
+      timeoutMs: 100,
+    });
 
     await vi.advanceTimersByTimeAsync(100);
-    await waiting;
+    await expect(waiting).resolves.toBe("force_closed_unproven");
 
     expect(forceClose).toHaveBeenCalledOnce();
   });
@@ -192,6 +249,173 @@ describe("headless login VNC lifecycle", () => {
 });
 
 describe("login browser lifecycle guards", () => {
+  it("keeps cleaning a wedged persistent launch through its spawn window", async () => {
+    vi.useFakeTimers();
+    let cancel: (() => void) | undefined;
+    let finishLaunch: ((value: string) => void) | undefined;
+    const cancellation = new Promise<void>((resolve) => {
+      cancel = resolve;
+    });
+    const launch = new Promise<string>((resolve) => {
+      finishLaunch = resolve;
+    });
+
+    const cleanupCancelled = vi.fn(async () => "closed" as const);
+    let profileHolderPresent = false;
+    const cleanupRejected = vi.fn(async () => {
+      if (!profileHolderPresent) return "closed" as const;
+      profileHolderPresent = false;
+      return "closed" as const;
+    });
+    const launchImpl = vi.fn((options: { headless: boolean; timeout: number }): Promise<string> => {
+      expect(options).toEqual({ headless: true, timeout: 25 });
+      return launch;
+    });
+    const result = launchCancellablePersistentContext({
+      launch: launchImpl,
+      options: { headless: true },
+      cancellation,
+      cleanupCancelled,
+      cleanupRejected,
+      launchTimeoutMs: 25,
+      cancellationSettleMs: 25,
+      cancellationPollMs: 5,
+    });
+    await Promise.resolve();
+    cancel?.();
+    await vi.advanceTimersByTimeAsync(10);
+    profileHolderPresent = true;
+    await vi.advanceTimersByTimeAsync(40);
+    await expect(result).resolves.toEqual({ status: "cancelled", closeState: "unknown" });
+    expect(cleanupRejected.mock.calls.length).toBeGreaterThan(1);
+    expect(profileHolderPresent).toBe(false);
+
+    finishLaunch?.("late browser");
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(cleanupCancelled).toHaveBeenCalledWith("late browser");
+  });
+
+  it("bounds persistent fallback identity proof when a live holder stays unreadable", async () => {
+    vi.useFakeTimers();
+    const profileDir = "/unused/profile";
+    const readIdentity = vi.fn(() => null);
+    const clearStaleLock = vi.fn(() => false);
+    const resolving = resolvePersistentFallbackIdentity({
+      profileDir,
+      platform: "linux",
+      timeoutMs: 100,
+      pollMs: 25,
+      currentHolderPid: () => 424_244,
+      readIdentity,
+      clearStaleLock,
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(resolving).resolves.toEqual({ state: "unknown" });
+    expect(readIdentity).toHaveBeenCalled();
+    expect(clearStaleLock).toHaveBeenCalled();
+  });
+
+  it("cancels a wedged pre-launch stage without awaiting its settlement", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
+    const controller = new BrowserController({ profileDir });
+    const internals = controller as unknown as {
+      startWithProfileGuard: () => Promise<void>;
+      closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+    };
+    const startImpl = vi.fn(() => new Promise<void>(() => undefined));
+    const closeImpl = vi.fn(async () => "unknown" as const);
+    internals.startWithProfileGuard = startImpl;
+    internals.closeWithProfileGuard = closeImpl;
+
+    try {
+      void controller.start().catch(() => undefined);
+      await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
+      await expect(controller.close({ cancelStart: true })).resolves.toBe("closed");
+      await expect(controller.close()).resolves.toBe("closed");
+      expect(closeImpl).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for a committed launch to reach terminal settlement", async () => {
+    vi.useFakeTimers();
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-cancel-"));
+    let releaseStart: (() => void) | undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const controller = new BrowserController({ profileDir });
+    const internals = controller as unknown as {
+      startLaunchCommitted: boolean;
+      startWithProfileGuard: () => Promise<void>;
+      closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+    };
+    const startImpl = vi.fn(() => startGate);
+    const closeImpl = vi.fn(async () => "closed" as const);
+    internals.startWithProfileGuard = startImpl;
+    internals.closeWithProfileGuard = closeImpl;
+
+    try {
+      const starting = controller.start().catch((error: unknown) => error);
+      await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
+      internals.startLaunchCommitted = true;
+      let closeSettled = false;
+      const closing = controller.close({ cancelStart: true }).then((state) => {
+        closeSettled = true;
+        return state;
+      });
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(closeSettled).toBe(false);
+
+      releaseStart?.();
+      await vi.advanceTimersByTimeAsync(25);
+      await expect(starting).resolves.toEqual(
+        expect.objectContaining({ message: "BrowserController start cancelled" }),
+      );
+      await expect(closing).resolves.toBe("closed");
+      await expect(controller.close()).resolves.toBe("closed");
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("settles an in-flight start once and caches the verified close result", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-browser-close-"));
+    let releaseStart: (() => void) | undefined;
+    const startGate = new Promise<void>((resolve) => {
+      releaseStart = resolve;
+    });
+    const controller = new BrowserController({ profileDir });
+    const internals = controller as unknown as {
+      startWithProfileGuard: () => Promise<void>;
+      closeWithProfileGuard: () => Promise<"closed" | "force_closed_unproven" | "unknown">;
+    };
+    const startImpl = vi.fn(() => startGate);
+    const closeImpl = vi.fn(async () => "closed" as const);
+    internals.startWithProfileGuard = startImpl;
+    internals.closeWithProfileGuard = closeImpl;
+
+    try {
+      const starting = controller.start();
+      await vi.waitFor(() => expect(startImpl).toHaveBeenCalledOnce());
+      const firstClose = controller.close();
+      const secondClose = controller.close();
+      await Promise.resolve();
+      expect(closeImpl).not.toHaveBeenCalled();
+
+      releaseStart?.();
+      await starting;
+      await expect(Promise.all([firstClose, secondClose])).resolves.toEqual(["closed", "closed"]);
+      await expect(controller.close()).resolves.toBe("closed");
+      expect(closeImpl).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
   it("treats signal-terminated Chrome as closed", () => {
     const child = fakeProcess("chrome");
     expect(childProcessIsRunning(child)).toBe(true);
@@ -434,29 +658,435 @@ describe("pollUntil phase-aware heartbeat", () => {
   });
 });
 
-// Regression guard for the connect-flow "Provider session check failed
-// (continuing)" ✗. Every persistent-context launch in this module must pass
-// channel:"chrome" — the system Chrome the login flow signs in with. The
-// provider-session probe once omitted it, reaching for an absent bundled
-// Chromium and throwing on EVERY connect, while the stale on-disk marker still
-// printed "connected". A source-shape invariant is the cheapest durable guard:
-// the launches spawn real Chrome and can't be unit-exercised here.
 describe("bot Chrome launch consistency", () => {
-  const source = readFileSync(
-    fileURLToPath(new URL("../google-login.ts", import.meta.url)),
-    "utf8",
+  it("forces the system Chrome channel through the executable launcher", async () => {
+    const context = {};
+    const launchPersistentContext = vi.fn().mockResolvedValue(context);
+    const launcher = { launchPersistentContext } as unknown as PersistentLauncher;
+
+    await expect(
+      launchPersistentLoginContext(launcher, "/isolated-profile", {
+        headless: true,
+        channel: "bundled",
+      }),
+    ).resolves.toBe(context);
+    expect(launchPersistentContext).toHaveBeenCalledWith("/isolated-profile", {
+      headless: true,
+      channel: "chrome",
+    });
+  });
+});
+
+describe("confirmed login finalization", () => {
+  it("distinguishes a claimed install from pending and expired polls", () => {
+    expect(installClaimPollCompleted("pending")).toBe(false);
+    expect(installClaimPollCompleted({ status: "claimed", provider: "google" })).toBe(true);
+    expect(() => installClaimPollCompleted("expired")).toThrow(/expired/);
+  });
+
+  it("records a confirmed login even when closure cannot publish a seed", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const publishSeed = vi.fn();
+    try {
+      await finalizeLoginRun(
+        {
+          profileDir,
+          onConfirmedLogin: async () => markProviderLoggedIn("google", profileDir),
+        },
+        { status: "completed", closeState: "unknown" },
+        publishSeed,
+      );
+
+      expect(loggedInProviders(profileDir)).toEqual(["google"]);
+      expect(publishSeed).not.toHaveBeenCalled();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not record or publish a timed-out login", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const onConfirmedLogin = vi.fn();
+    const publishSeed = vi.fn();
+    try {
+      await finalizeLoginRun(
+        { profileDir, onConfirmedLogin },
+        { status: "timeout", closeState: "closed" },
+        publishSeed,
+      );
+
+      expect(onConfirmedLogin).not.toHaveBeenCalled();
+      expect(publishSeed).not.toHaveBeenCalled();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replace the Google seed after a completed GitHub login", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const validateGoogleSeed = vi.fn(async () => ({
+      googleSignedIn: true,
+      closeState: "closed" as const,
+    }));
+    const publishSeed = vi.fn();
+    try {
+      await finalizeLoginRun(
+        { profileDir, seedProvider: "github", validateGoogleSeed },
+        { status: "completed", closeState: "closed" },
+        publishSeed,
+      );
+
+      expect(validateGoogleSeed).not.toHaveBeenCalled();
+      expect(publishSeed).not.toHaveBeenCalled();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes only verified closed Google login provenance", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const validateGoogleSeed = vi.fn(async () => ({
+      googleSignedIn: true,
+      closeState: "closed" as const,
+    }));
+    const publishSeed = vi.fn(async () => "generation");
+    try {
+      await finalizeLoginRun(
+        { profileDir, seedProvider: "google", validateGoogleSeed },
+        { status: "completed", closeState: "closed" },
+        publishSeed,
+      );
+
+      expect(publishSeed).toHaveBeenCalledWith(profileDir, {
+        proof: { loginStatus: "completed", closeState: "closed", provider: "google" },
+        validateGoogleIdentity: validateGoogleSeed,
+      });
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("threads completed Google provenance and the actual direct proxy disposition", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-seed-"));
+    const previousProxy = process.env.UNIVERSAL_BOT_PROXY_URL;
+    process.env.UNIVERSAL_BOT_PROXY_URL = "http://agent:secret@proxy.example:8080";
+    mkdirSync(join(profileDir, "Default"));
+    const db = new Database(join(profileDir, "Default", "Cookies"));
+    db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
+    db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)").run(".google.com", "SID");
+    db.close();
+    const pollUntilClaimed = vi.fn(async () => ({ status: "claimed", provider: null }) as const);
+    const validateGoogleSeed = vi.fn(async () => ({
+      googleSignedIn: true,
+      closeState: "closed" as const,
+    }));
+    const runChrome = vi.fn(async (runOpts: RunInBotChromeOpts) => {
+      const callback = new URLSearchParams(new URL(runOpts.url).hash.slice(1)).get(
+        "ts_install_complete",
+      );
+      expect(callback).not.toBeNull();
+      await fetch(`${callback!}?provider=google`, { redirect: "manual" });
+      await expect(runOpts.plainPollUntilDone!(profileDir)).resolves.toBe(true);
+      await runOpts.plainOnSuccess!(profileDir);
+      runOpts.onProxyDisposition?.(null);
+      const provider =
+        typeof runOpts.seedProvider === "function"
+          ? runOpts.seedProvider()
+          : (runOpts.seedProvider ?? null);
+      expect(provider).toBe("google");
+      await expect(runOpts.validateGoogleSeed!("/validation-profile")).resolves.toEqual({
+        googleSignedIn: true,
+        closeState: "closed",
+      });
+      return { status: "completed" as const };
+    });
+
+    try {
+      await expect(
+        openInstallConfirmInBotChrome(
+          {
+            confirmUrl: "https://example.com/install",
+            profileDir,
+            pollUntilClaimed,
+          },
+          runChrome,
+          validateGoogleSeed,
+        ),
+      ).resolves.toEqual({ status: "claimed" });
+      expect(pollUntilClaimed).toHaveBeenCalledWith(profileDir, true);
+      expect(validateGoogleSeed).toHaveBeenCalledWith("/validation-profile", null);
+      expect(runChrome).toHaveBeenCalledOnce();
+    } finally {
+      if (previousProxy === undefined) delete process.env.UNIVERSAL_BOT_PROXY_URL;
+      else process.env.UNIVERSAL_BOT_PROXY_URL = previousProxy;
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not derive Google provenance from ambient cookies after GitHub completion", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-connect-seed-"));
+    mkdirSync(join(profileDir, "Default"));
+    const db = new Database(join(profileDir, "Default", "Cookies"));
+    db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
+    db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)").run(".google.com", "SID");
+    db.close();
+    const runChrome = vi.fn(async (runOpts: RunInBotChromeOpts) => {
+      const callback = new URLSearchParams(new URL(runOpts.url).hash.slice(1)).get(
+        "ts_install_complete",
+      );
+      await fetch(`${callback!}?provider=github`, { redirect: "manual" });
+      await expect(runOpts.plainPollUntilDone!(profileDir)).resolves.toBe(true);
+      await runOpts.plainOnSuccess!(profileDir);
+      const provider =
+        typeof runOpts.seedProvider === "function"
+          ? runOpts.seedProvider()
+          : (runOpts.seedProvider ?? null);
+      expect(provider).toBeNull();
+      return { status: "completed" as const };
+    });
+
+    try {
+      await expect(
+        openInstallConfirmInBotChrome(
+          {
+            confirmUrl: "https://example.com/install",
+            profileDir,
+            pollUntilClaimed: async () => ({ status: "claimed", provider: null }),
+          },
+          runChrome,
+        ),
+      ).resolves.toEqual({ status: "claimed" });
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Google seed validation", () => {
+  it.each([
+    ["https://myaccount.google.com/", true, "closed"],
+    ["https://accounts.google.com/v3/signin/identifier", false, "closed"],
+    ["https://myaccount.google.com/", true, "unknown"],
+  ] as const)(
+    "observes Google identity and proven closure at %s",
+    async (url, signedIn, closeState) => {
+      const profileDir = mkdtempSync(join(tmpdir(), "ts-google-seed-validation-"));
+      const proxyDisposition = {
+        server: "http://proxy.example:8080",
+        username: "agent",
+        password: "secret",
+      };
+      const close = vi.fn(async () => undefined);
+      const goto = vi.fn(async () => undefined);
+      const page = { goto, url: () => url };
+      const context = {
+        pages: () => [page],
+        newPage: vi.fn(async () => page),
+        close,
+      };
+      const launchPersistentContext = vi.fn(async () => context);
+      const launcher = { launchPersistentContext } as unknown as PersistentLauncher;
+      const closeValidationBrowser = vi.fn(
+        async (opts: Parameters<typeof teardownLoginBrowser>[0]) => {
+          await opts.closeBrowser();
+          return closeState;
+        },
+      );
+
+      try {
+        await expect(
+          validateGoogleProfileSession(
+            profileDir,
+            proxyDisposition,
+            launcher,
+            closeValidationBrowser,
+          ),
+        ).resolves.toEqual({ googleSignedIn: signedIn, closeState });
+        expect(goto).toHaveBeenCalledWith("https://myaccount.google.com/", {
+          waitUntil: "domcontentloaded",
+          timeout: 30_000,
+        });
+        expect(launchPersistentContext).toHaveBeenCalledWith(
+          profileDir,
+          expect.objectContaining({
+            channel: "chrome",
+            proxy: {
+              server: "http://proxy.example:8080",
+              username: "agent",
+              password: "secret",
+            },
+          }),
+        );
+        expect(closeValidationBrowser).toHaveBeenCalledWith(
+          expect.objectContaining({ profileDir, identity: null }),
+        );
+        expect(close).toHaveBeenCalledOnce();
+      } finally {
+        rmSync(profileDir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+describe("cancelled self-managed Chrome launch", () => {
+  it.each([
+    { failure: "attach", expectedCloseCalls: 0 },
+    { failure: "context", expectedCloseCalls: 1 },
+  ])(
+    "terminates an owned login child after $failure failure",
+    async ({ failure, expectedCloseCalls }) => {
+      const profileDir = mkdtempSync(join(tmpdir(), "ts-login-attach-failure-"));
+      const child = fakeProcess("chrome");
+      Object.assign(child, { pid: 424_240 });
+      const identity = {
+        host: hostname(),
+        pid: 424_240,
+        start_time: "birth",
+        user_data_dir: profileDir,
+      };
+      const close = vi.fn(async () => undefined);
+      const connectOverCDP =
+        failure === "attach"
+          ? vi.fn(async () => {
+              throw new Error("CDP attach failed");
+            })
+          : vi.fn(async () => ({ contexts: () => [], close }));
+      const terminateChild = vi.fn(async () => identity);
+      try {
+        await expect(
+          attachSelfManagedLoginContext("http://127.0.0.1:9222", child, profileDir, identity, {
+            launcher: { connectOverCDP } as never,
+            terminateChild,
+          }),
+        ).rejects.toThrow(
+          failure === "attach"
+            ? "CDP attach failed"
+            : "self-launched login Chrome exposed no default browser context",
+        );
+        expect(close).toHaveBeenCalledTimes(expectedCloseCalls);
+        expect(terminateChild).toHaveBeenCalledWith(child, profileDir, identity);
+      } finally {
+        Object.assign(child, { exitCode: 0 });
+        rmSync(profileDir, { recursive: true, force: true });
+      }
+    },
   );
 
-  it('every launchPersistentContext call sets channel:"chrome"', () => {
-    // `.launchPersistentContext(` matches real calls; the bare interface-method
-    // declaration (no leading dot) is intentionally excluded.
-    const calls = [...source.matchAll(/\.launchPersistentContext\(/g)];
-    expect(calls.length).toBeGreaterThan(0);
-    // For each call site, the option object (up to the closing of the call)
-    // must declare channel:"chrome". Scan the ~600 chars after each call open.
-    for (const m of calls) {
-      const window = source.slice(m.index, m.index + 600);
-      expect(window).toMatch(/channel:\s*"chrome"/);
+  it("allows a non-Linux attachment to continue with unknown identity", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-nonlinux-chrome-"));
+    const child = fakeProcess("chrome");
+    Object.assign(child, { pid: 424_241 });
+    const readIdentity = vi.fn(() => null);
+    const terminate = vi.fn(() => true);
+    try {
+      await expect(
+        resolveAttachedProfileChildIdentity(child, profileDir, null, {
+          platform: "darwin",
+          readIdentity,
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        terminateTrackedProfileChild(child, profileDir, {
+          platform: "darwin",
+          readIdentity,
+          terminate,
+        }),
+      ).resolves.toBeNull();
+      expect(readIdentity).not.toHaveBeenCalled();
+      expect(terminate).not.toHaveBeenCalled();
+      expect(childProcessIsRunning(child)).toBe(true);
+    } finally {
+      Object.assign(child, { exitCode: 0 });
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retains the child until exact profile identity becomes observable", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-cancelled-chrome-"));
+    const child = fakeProcess("chrome");
+    Object.assign(child, { pid: 424_242 });
+    const identity = {
+      host: hostname(),
+      pid: 424_242,
+      start_time: "birth",
+      user_data_dir: profileDir,
+    };
+    let probes = 0;
+    const terminate = vi.fn(() => {
+      Object.assign(child, { exitCode: 0 });
+      return true;
+    });
+    try {
+      await terminateTrackedProfileChild(child, profileDir, {
+        readIdentity: () => (++probes === 1 ? null : identity),
+        terminate,
+      });
+
+      expect(probes).toBe(2);
+      expect(terminate).toHaveBeenCalledWith(identity, profileDir);
+      expect(childProcessIsRunning(child)).toBe(false);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("waits for exact Linux login-child identity before attachment", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-chrome-identity-"));
+    const child = fakeProcess("chrome");
+    Object.assign(child, { pid: 424_243 });
+    const identity = {
+      host: hostname(),
+      pid: 424_243,
+      start_time: "birth",
+      user_data_dir: profileDir,
+    };
+    let probes = 0;
+    try {
+      await expect(
+        resolveAttachedProfileChildIdentity(child, profileDir, null, {
+          platform: "linux",
+          readIdentity: () => (++probes === 1 ? null : identity),
+        }),
+      ).resolves.toEqual(identity);
+      expect(probes).toBe(2);
+      expect(childProcessIsRunning(child)).toBe(true);
+    } finally {
+      Object.assign(child, { exitCode: 0 });
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds Linux login-child identity proof without signaling an unknown process", async () => {
+    vi.useFakeTimers();
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-chrome-unknown-"));
+    const child = fakeProcess("chrome");
+    Object.assign(child, { pid: 424_245 });
+    const readIdentity = vi.fn(() => null);
+    const terminate = vi.fn(() => true);
+    try {
+      const resolving = resolveAttachedProfileChildIdentity(child, profileDir, null, {
+        platform: "linux",
+        readIdentity,
+        identityTimeoutMs: 100,
+        identityPollMs: 25,
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(resolving).resolves.toBeNull();
+
+      const terminating = terminateTrackedProfileChild(child, profileDir, {
+        platform: "linux",
+        readIdentity,
+        terminate,
+        identityTimeoutMs: 100,
+        identityPollMs: 25,
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(terminating).resolves.toBeNull();
+      expect(terminate).not.toHaveBeenCalled();
+      expect(childProcessIsRunning(child)).toBe(true);
+    } finally {
+      Object.assign(child, { exitCode: 0 });
+      rmSync(profileDir, { recursive: true, force: true });
     }
   });
 });
@@ -467,14 +1097,59 @@ describe("extractGoogleAccountEmail (PR3 capture-at-login)", () => {
     expect(extractGoogleAccountEmail(text)).toBe("ada.lovelace@example.com");
   });
 
-  it("falls back to the first email token when no chip is present", () => {
-    expect(extractGoogleAccountEmail("Signed in as user@gmail.com — Manage")).toBe(
-      "user@gmail.com",
-    );
+  it("rejects email text outside the active account chip", () => {
+    expect(extractGoogleAccountEmail("Signed in as user@gmail.com — Manage")).toBeNull();
   });
 
   it("returns null when there is no email in the text", () => {
     expect(extractGoogleAccountEmail("My Account · Security · Privacy")).toBeNull();
+  });
+});
+
+describe("claimed worker Google identity", () => {
+  function controllerWithIdentityPage(finalUrl: string, identityTokens: string[]) {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn(() => finalUrl),
+      locator: vi.fn(() => ({
+        evaluateAll: vi.fn().mockResolvedValue(identityTokens),
+      })),
+      close,
+    };
+    const controller = new BrowserController({ humanize: false });
+    (controller as unknown as { context: { newPage(): Promise<typeof page> } }).context = {
+      newPage: vi.fn().mockResolvedValue(page),
+    };
+    return { close, controller };
+  }
+
+  it("reads the account email from the live worker context", async () => {
+    const { close, controller } = controllerWithIdentityPage("https://myaccount.google.com/", [
+      "inactive-account@example.com",
+      "Google Account: Ada Lovelace (live-worker@example.com)",
+    ]);
+
+    await expect(controller.detectGoogleAccountEmail()).resolves.toBe("live-worker@example.com");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("treats a sign-in redirect as unknown even when it remembers an email", async () => {
+    const { close, controller } = controllerWithIdentityPage(
+      "https://accounts.google.com/signin/v2/identifier",
+      ["remembered@example.com"],
+    );
+
+    await expect(controller.detectGoogleAccountEmail()).resolves.toBeNull();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("does not mistake unrelated account-page text for the worker identity", async () => {
+    const { controller } = controllerWithIdentityPage("https://myaccount.google.com/", [
+      "inactive-account@example.com",
+    ]);
+
+    await expect(controller.detectGoogleAccountEmail()).resolves.toBeNull();
   });
 });
 
