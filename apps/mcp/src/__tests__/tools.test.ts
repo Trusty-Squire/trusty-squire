@@ -35,40 +35,177 @@ let mockPaymentSealActive = false;
 // operate_payment_status/await, can be exercised against this fake session.
 let mockAwaitingApproval: PendingApprovalWait | null = null;
 let mockCartCheckout: CartCheckoutObservation | null = null;
+const PAYMENT_SESSION_A_ID = "00000000-0000-4000-8000-000000000001";
+const PAYMENT_SESSION_B_ID = "00000000-0000-4000-8000-000000000002";
+
+interface MockPaymentSessionState {
+  browser: PaymentBrowser;
+  pending: PendingCardFill | null;
+  pendingConfirming: boolean;
+  submitStarted: boolean;
+  paymentLease: { phase: "fill_card" | "single" } | null;
+  paymentSealed: boolean;
+  paymentSealActive: boolean;
+  awaitingApproval: PendingApprovalWait | null;
+  cartCheckout: CartCheckoutObservation | null;
+}
+
+const primaryPaymentState: MockPaymentSessionState = {
+  get browser() {
+    return mockBrowser;
+  },
+  set browser(value) {
+    mockBrowser = value;
+  },
+  get pending() {
+    return mockPending;
+  },
+  set pending(value) {
+    mockPending = value;
+  },
+  get pendingConfirming() {
+    return mockPendingConfirming;
+  },
+  set pendingConfirming(value) {
+    mockPendingConfirming = value;
+  },
+  get submitStarted() {
+    return mockSubmitStarted;
+  },
+  set submitStarted(value) {
+    mockSubmitStarted = value;
+  },
+  get paymentLease() {
+    return mockPaymentLease;
+  },
+  set paymentLease(value) {
+    mockPaymentLease = value;
+  },
+  get paymentSealed() {
+    return mockPaymentSealed;
+  },
+  set paymentSealed(value) {
+    mockPaymentSealed = value;
+  },
+  get paymentSealActive() {
+    return mockPaymentSealActive;
+  },
+  set paymentSealActive(value) {
+    mockPaymentSealActive = value;
+  },
+  get awaitingApproval() {
+    return mockAwaitingApproval;
+  },
+  set awaitingApproval(value) {
+    mockAwaitingApproval = value;
+  },
+  get cartCheckout() {
+    return mockCartCheckout;
+  },
+  set cartCheckout(value) {
+    mockCartCheckout = value;
+  },
+};
+
+const mockPaymentSessions = new Map<
+  string,
+  { session: ProvisionSession.Session; state: MockPaymentSessionState }
+>();
+
+function createPaymentSessionState(
+  overrides: Partial<MockPaymentSessionState> = {},
+): MockPaymentSessionState {
+  return {
+    browser: stubBrowser(),
+    pending: null,
+    pendingConfirming: false,
+    submitStarted: false,
+    paymentLease: null,
+    paymentSealed: false,
+    paymentSealActive: false,
+    awaitingApproval: null,
+    cartCheckout: null,
+    ...overrides,
+  };
+}
+
+function addPaymentSession(
+  id: string,
+  state: MockPaymentSessionState = createPaymentSessionState(),
+): MockPaymentSessionState {
+  mockPaymentSessions.set(id, {
+    session: { id } as ProvisionSession.Session,
+    state,
+  });
+  return state;
+}
+
+function paymentSessionState(session?: ProvisionSession.Session): MockPaymentSessionState {
+  const id = session?.id ?? PAYMENT_SESSION_A_ID;
+  const entry = mockPaymentSessions.get(id);
+  if (entry === undefined) throw new Error(`unknown provision session ${id}`);
+  return entry.state;
+}
+
 vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
-    activeProvisionBrowserForPayment: async () => mockBrowser,
-    activeCartCheckoutForOrigin: () => mockCartCheckout,
-    claimActivePaymentForOperatePay: (phase: "fill_card" | "confirm" | undefined) => {
-      if (mockPaymentLease !== null) {
+    withPaymentSessionCall: async (
+      sessionId: string | undefined,
+      fn: (session: ProvisionSession.Session) => Promise<unknown>,
+    ) => {
+      const entry =
+        sessionId === undefined
+          ? mockPaymentSessions.size === 1
+            ? mockPaymentSessions.values().next().value
+            : undefined
+          : mockPaymentSessions.get(sessionId);
+      if (entry === undefined) {
+        throw new Error(
+          sessionId === undefined
+            ? "operate_pay requires session_id when multiple operator sessions are active"
+            : `unknown provision session ${sessionId}`,
+        );
+      }
+      return await fn(entry.session);
+    },
+    activeProvisionBrowserForPayment: async (session?: ProvisionSession.Session) =>
+      paymentSessionState(session).browser,
+    activeCartCheckoutForOrigin: (_origin: string, session?: ProvisionSession.Session) =>
+      paymentSessionState(session).cartCheckout,
+    claimActivePaymentForOperatePay: (
+      phase: "fill_card" | "confirm" | undefined,
+      session?: ProvisionSession.Session,
+    ) => {
+      const state = paymentSessionState(session);
+      if (state.paymentLease !== null) {
         throw new Error("operate_pay refused: another payment operation is already in progress");
       }
-      if (mockPendingConfirming) {
+      if (state.pendingConfirming) {
         throw new Error("operate_pay refused: another payment confirmation is already in progress");
       }
-      if (mockPaymentSealed) {
+      if (state.paymentSealed) {
         throw new Error("operate_pay refused: payment field cleanup remains unverified");
       }
-      if (mockPending !== null) {
+      if (state.pending !== null) {
         if (phase !== "confirm") {
           throw new Error(
             'operate_pay refused: a vaulted card fill is pending; phase="confirm" is required next',
           );
         }
-        const pending = mockPending;
-        mockPending = null;
-        mockPendingConfirming = true;
-        mockSubmitStarted = false;
+        const pending = state.pending;
+        state.pending = null;
+        state.pendingConfirming = true;
+        state.submitStarted = false;
         return { kind: "confirm", pending };
       }
       if (phase === "confirm") return { kind: "missing_confirm" };
-      const resumeApproval = mockAwaitingApproval ?? undefined;
-      mockAwaitingApproval = null;
+      const resumeApproval = state.awaitingApproval ?? undefined;
+      state.awaitingApproval = null;
       const lease = { phase: phase === "fill_card" ? ("fill_card" as const) : ("single" as const) };
-      mockPaymentLease = lease;
-      if (lease.phase === "fill_card") mockPaymentSealActive = true;
+      state.paymentLease = lease;
+      if (lease.phase === "fill_card") state.paymentSealActive = true;
       return resumeApproval !== undefined
         ? { kind: "lease", lease, resumeApproval }
         : { kind: "lease", lease };
@@ -76,67 +213,85 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
     completeActivePaymentLeaseWithPendingFill: (
       lease: { phase: "fill_card" | "single" },
       pending: PendingCardFill,
+      session?: ProvisionSession.Session,
     ) => {
-      if (mockPaymentLease !== lease || lease.phase !== "fill_card") {
+      const state = paymentSessionState(session);
+      if (state.paymentLease !== lease || lease.phase !== "fill_card") {
         throw new Error(
           "operate_pay fill_card completed without ownership of the active payment lease",
         );
       }
-      mockPaymentLease = null;
-      mockPending = pending;
-      mockPaymentSealActive = true;
+      state.paymentLease = null;
+      state.pending = pending;
+      state.paymentSealActive = true;
     },
     completeActivePaymentLeaseWithPendingApproval: (
       lease: { phase: "fill_card" | "single" },
-      state: PendingApprovalWait,
+      approval: PendingApprovalWait,
+      session?: ProvisionSession.Session,
     ) => {
-      if (mockPaymentLease !== lease) {
+      const state = paymentSessionState(session);
+      if (state.paymentLease !== lease) {
         throw new Error(
           "operate_pay approval_pending completed without ownership of the active payment lease",
         );
       }
-      mockPaymentLease = null;
-      mockAwaitingApproval = state;
+      state.paymentLease = null;
+      state.awaitingApproval = approval;
     },
-    getActivePendingApproval: () => mockAwaitingApproval,
+    getActivePendingApproval: (session?: ProvisionSession.Session) =>
+      paymentSessionState(session).awaitingApproval,
+    recordActivePaymentProvenance: () => undefined,
     releaseActivePaymentLease: (
       lease: { phase: "fill_card" | "single" },
       paymentFieldsCleared = true,
+      session?: ProvisionSession.Session,
     ) => {
-      if (mockPaymentLease !== lease) return false;
-      mockPaymentLease = null;
-      mockPaymentSealed = !paymentFieldsCleared;
-      if (lease.phase === "fill_card") mockPaymentSealActive = !paymentFieldsCleared;
+      const state = paymentSessionState(session);
+      if (state.paymentLease !== lease) return false;
+      state.paymentLease = null;
+      state.paymentSealed = !paymentFieldsCleared;
+      if (lease.phase === "fill_card") state.paymentSealActive = !paymentFieldsCleared;
       return true;
     },
-    markActivePendingCardFillSubmitStarted: () => {
-      mockSubmitStarted = true;
+    markActivePendingCardFillSubmitStarted: (session?: ProvisionSession.Session) => {
+      paymentSessionState(session).submitStarted = true;
     },
-    restoreActivePendingCardFillAfterConfirmThrow: (pending: PendingCardFill) => {
-      if (!mockPendingConfirming || mockSubmitStarted) return false;
-      mockPending = pending;
-      mockPendingConfirming = false;
+    restoreActivePendingCardFillAfterConfirmThrow: (
+      pending: PendingCardFill,
+      session?: ProvisionSession.Session,
+    ) => {
+      const state = paymentSessionState(session);
+      if (!state.pendingConfirming || state.submitStarted) return false;
+      state.pending = pending;
+      state.pendingConfirming = false;
       return true;
     },
-    setActivePendingCardFill: (pending: PendingCardFill) => {
-      mockPending = pending;
-      mockPendingConfirming = false;
-      mockSubmitStarted = false;
-      mockPaymentLease = null;
-      mockPaymentSealed = false;
-      mockPaymentSealActive = true;
+    setActivePendingCardFill: (pending: PendingCardFill, session?: ProvisionSession.Session) => {
+      const state = paymentSessionState(session);
+      state.pending = pending;
+      state.pendingConfirming = false;
+      state.submitStarted = false;
+      state.paymentLease = null;
+      state.paymentSealed = false;
+      state.paymentSealActive = true;
     },
-    retainActivePaymentFieldSeal: () => {
-      if (mockPaymentLease === null) mockPaymentSealed = true;
-      mockPaymentSealActive = true;
+    retainActivePaymentFieldSeal: (session?: ProvisionSession.Session) => {
+      const state = paymentSessionState(session);
+      if (state.paymentLease === null) state.paymentSealed = true;
+      state.paymentSealActive = true;
     },
-    clearActivePendingCardFill: (paymentFieldsCleared = true) => {
-      mockPending = null;
-      mockPendingConfirming = false;
-      mockSubmitStarted = false;
-      mockPaymentLease = null;
-      mockPaymentSealed = !paymentFieldsCleared;
-      mockPaymentSealActive = !paymentFieldsCleared;
+    clearActivePendingCardFill: (
+      paymentFieldsCleared = true,
+      session?: ProvisionSession.Session,
+    ) => {
+      const state = paymentSessionState(session);
+      state.pending = null;
+      state.pendingConfirming = false;
+      state.submitStarted = false;
+      state.paymentLease = null;
+      state.paymentSealed = !paymentFieldsCleared;
+      state.paymentSealActive = !paymentFieldsCleared;
     },
   };
 });
@@ -197,6 +352,8 @@ beforeEach(() => {
   mockPaymentSealActive = false;
   mockAwaitingApproval = null;
   mockCartCheckout = null;
+  mockPaymentSessions.clear();
+  addPaymentSession(PAYMENT_SESSION_A_ID, primaryPaymentState);
 });
 
 function makeMockApi(overrides: Partial<ApiClient> = {}): ApiClient {
@@ -837,6 +994,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
 });
 
 describe("operate_payment_status / operate_payment_await [P0]", () => {
+  const paymentSessionId = PAYMENT_SESSION_A_ID;
   const operatorPublicKey = Buffer.from("status-operator-public-key").toString("base64url");
   const baseState = {
     approval_id: "appr_status",
@@ -894,11 +1052,110 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
   it("reports no_pending_payment when nothing is awaiting approval", async () => {
     const api = makeMockApi();
     await expect(operatePaymentStatusTool.handler({}, api)).resolves.toMatchObject({
+      session_id: paymentSessionId,
       status: "no_pending_payment",
     });
     await expect(operatePaymentAwaitTool.handler({}, api)).resolves.toMatchObject({
+      session_id: paymentSessionId,
       status: "no_pending_payment",
     });
+  });
+
+  it("routes every payment tool to only its addressed session", async () => {
+    const stateA: PendingApprovalWait = {
+      ...baseState,
+      approval_id: "appr_session_a",
+      approval_url: "https://web.test/vault/pay/appr_session_a",
+      nonce: "nonce_a",
+    };
+    const stateB: PendingApprovalWait = {
+      ...baseState,
+      approval_id: "appr_session_b",
+      approval_url: "https://web.test/vault/pay/appr_session_b",
+      nonce: "nonce_b",
+    };
+    mockAwaitingApproval = stateA;
+    const sessionB = addPaymentSession(
+      PAYMENT_SESSION_B_ID,
+      createPaymentSessionState({ awaitingApproval: stateB }),
+    );
+    const approvalRecord = (state: PendingApprovalWait) => ({
+      id: state.approval_id,
+      status: "pending" as const,
+      merchant: state.checkout.merchant,
+      checkout_origin: state.checkout.checkout_origin,
+      amount_cents: state.checkout.amount_cents,
+      currency: state.checkout.currency,
+      nonce: state.nonce,
+      card_ref: state.cardRef,
+      operator_pubkey: state.keypair.publicKey,
+      jws: null,
+      sealed_card: null,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const getStatusApproval = vi.fn().mockResolvedValue(approvalRecord(stateA));
+    await expect(
+      operatePaymentStatusTool.handler(
+        { session_id: PAYMENT_SESSION_A_ID },
+        makeMockApi({ getPaymentApproval: getStatusApproval } as unknown as ApiClient),
+      ),
+    ).resolves.toMatchObject({
+      session_id: PAYMENT_SESSION_A_ID,
+      approval_id: "appr_session_a",
+    });
+    expect(getStatusApproval).toHaveBeenCalledWith("appr_session_a", "peek");
+
+    const getAwaitApproval = vi.fn().mockResolvedValue(approvalRecord(stateB));
+    await expect(
+      operatePaymentAwaitTool.handler(
+        { session_id: PAYMENT_SESSION_B_ID },
+        makeMockApi({ getPaymentApproval: getAwaitApproval } as unknown as ApiClient),
+      ),
+    ).resolves.toMatchObject({
+      session_id: PAYMENT_SESSION_B_ID,
+      approval_id: "appr_session_b",
+    });
+    expect(getAwaitApproval).toHaveBeenCalledWith("appr_session_b", "wait-peek");
+
+    const getPayApproval = vi.fn().mockResolvedValue(approvalRecord(stateB));
+    const payApi = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: "card_1", label: "Personal" }]),
+      getPaymentApproval: getPayApproval,
+      getPaymentConfig: vi.fn().mockResolvedValue({ vouchflow_audience: "cust" }),
+    } as unknown as ApiClient);
+    await expect(
+      operatePayTool.handler(
+        operatePayTool.inputSchema.parse({
+          ...PAYMENT_DETAILS,
+          session_id: PAYMENT_SESSION_B_ID,
+        }),
+        payApi,
+      ),
+    ).resolves.toMatchObject({
+      session_id: PAYMENT_SESSION_B_ID,
+      status: "approval_pending",
+      approval_id: "appr_session_b",
+    });
+    expect(getPayApproval).toHaveBeenCalledWith("appr_session_b");
+    expect(getPayApproval).not.toHaveBeenCalledWith("appr_session_a");
+    expect(mockAwaitingApproval).toBe(stateA);
+    expect(sessionB.awaitingApproval).toMatchObject({ approval_id: "appr_session_b" });
+  });
+
+  it("rejects payment-tool session omission when two sessions are active", async () => {
+    addPaymentSession(PAYMENT_SESSION_B_ID);
+    const api = makeMockApi();
+
+    await expect(
+      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
+    ).rejects.toThrow(/requires session_id when multiple operator sessions are active/);
+    await expect(operatePaymentStatusTool.handler({}, api)).rejects.toThrow(
+      /requires session_id when multiple operator sessions are active/,
+    );
+    await expect(operatePaymentAwaitTool.handler({}, api)).rejects.toThrow(
+      /requires session_id when multiple operator sessions are active/,
+    );
   });
 
   it("rejects waits longer than the 15-second tool contract", () => {
@@ -927,10 +1184,11 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
 
     const result = await operatePaymentStatusTool.handler({}, api);
     expect(result).toMatchObject({
+      session_id: paymentSessionId,
       status: "pending",
       approval_id: "appr_status",
       candidate_submitted: false,
-      next: { tool: "operate_payment_await" },
+      next: { tool: "operate_payment_await", session_id: paymentSessionId },
     });
     expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "peek");
     expect(confirmPaymentApproval).not.toHaveBeenCalled();
@@ -954,11 +1212,12 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
 
     const result = await operatePaymentAwaitTool.handler({}, api);
     expect(result).toMatchObject({
+      session_id: paymentSessionId,
       status: "pending",
       candidate_submitted: true,
       candidate_kind: "approval",
       ready_to_charge: true,
-      next: { tool: "operate_pay" },
+      next: { tool: "operate_pay", session_id: paymentSessionId },
     });
     expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek");
   });

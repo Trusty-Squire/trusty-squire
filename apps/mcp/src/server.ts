@@ -16,7 +16,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { ApiClient } from "./api-client.js";
 import { setSelfManagedChromeTerminationSignalExitEnabled } from "./bot/browser.js";
-import { closeAllProvisionSessions } from "./bot/provision-session.js";
+import { closeAllProvisionSessions, withProvisionSessionCall } from "./bot/provision-session.js";
 import { buildToolRegistry, findTool } from "./tools/index.js";
 import { openSessionStorage } from "./session.js";
 import { VERSION } from "./version.js";
@@ -98,15 +98,25 @@ export async function buildServer(api: ApiClient | null): Promise<Server> {
     }
     try {
       api.setRequestingAgent(server.getClientVersion()?.name ?? "unknown-agent");
-      const result = await tool.handler(parsed.data, api, {
-        notifyUser: async (message, data) => {
-          await server.sendLoggingMessage({
-            level: "notice",
-            logger: "trusty-squire",
-            data: { message, ...data },
-          });
-        },
-      });
+      const invoke = async () =>
+        await tool.handler(parsed.data, api, {
+          notifyUser: async (message, data) => {
+            await server.sendLoggingMessage({
+              level: "notice",
+              logger: "trusty-squire",
+              data: { message, ...data },
+            });
+          },
+        });
+      // Tool handlers await independently.  A finish must therefore close the
+      // admission gate and drain calls that already entered before it resets or
+      // pools a browser.  `operate_finish*` owns that transition itself.
+      const sessionId =
+        typeof parsed.data.session_id === "string" ? parsed.data.session_id : undefined;
+      const result =
+        sessionId !== undefined && !/^operate_finish(?:_task)?$/.test(tool.name)
+          ? await withProvisionSessionCall(sessionId, async () => await invoke())
+          : await invoke();
       return {
         content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
       };

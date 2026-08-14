@@ -168,7 +168,9 @@ cart and checkout observations expose a best-effort checkout_state overlay with 
   -> checkout_state is informational only; it is never a charge input
   -> observed card controls direct the agent to operate_pay, while model-supplied
      PAN-shaped entry remains refused until operate_pay independently verifies the total
-agent starts operate_pay in the active checkout
+agent starts operate_pay in the addressed checkout session
+  -> operate_pay accepts that session_id; omission is compatible only when the
+     MCP process has exactly one session and never selects a newest session
   -> agent supplies a non-empty item and reason
   -> a single-page checkout reads merchant, origin, and payable total from the
      live page; an unreadable amount stops before approval with
@@ -196,6 +198,8 @@ agent starts operate_pay in the active checkout
      payload, unlocks the card, and seals it to the ephemeral operator
   -> the API stages that opaque candidate in an account-scoped Postgres relay with
      a 15-second TTL so another API worker can deliver it to the waiting operator
+  -> payment status and bounded-wait calls resolve the same session once at tool
+     entry and return its session_id in their result and every follow-up hint
   -> the operator verifies the final JWS, opens the card, and confirms the exact
      candidate fingerprint; successful confirmation clears the JWS and ciphertext
   -> single-page add-card re-reads every signed checkout field, then fills and
@@ -216,7 +220,8 @@ agent starts operate_pay in the active checkout
      currency matches and the final total is at or below the approved amount; a
      higher total fails closed with payment_amount_exceeds_approval and is never
      re-approved. Unresolved or conflicting totals also fail closed without charging
-  -> the active session serializes payment entry and confirmation; retry state is
+  -> the addressed session owns and serializes payment entry and confirmation;
+     another session cannot observe, resume, or submit that approval; retry state is
      restored only before submission starts, and unverified field cleanup seals the
      session against later payment operations (the contract lives in SECURITY.md)
   -> a missing submit control retains the pending fill for retry; terminal payment
@@ -225,6 +230,8 @@ agent starts operate_pay in the active checkout
      the operator waits for success or failure when waiting is enabled
   -> timeout, or a disabled wait, hands the unresolved challenge to the user
   -> the post-wait metadata-only payment status is audited
+  -> operate_finish closes that session's admission gate, drains calls that already
+     entered, and refuses teardown while a payment is active or resumable
 ```
 
 The detailed cryptographic checks and card-data boundary live in

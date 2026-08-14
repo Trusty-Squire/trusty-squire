@@ -1,8 +1,8 @@
 # DESIGN — isolated operator profile pool
 
-Status: migration stage 1 implemented (2026-08-14). This document owns the operator profile-pool
-and login-seed lifecycle. Payment authorization and secret-handling contracts remain owned by
-[`SECURITY.md`](../SECURITY.md).
+Status: migration stage 2 implemented (2026-08-14). This document owns the operator profile-pool,
+session lifecycle, and login-seed lifecycle. Payment authorization and secret-handling contracts
+remain owned by [`SECURITY.md`](../SECURITY.md).
 
 ## 1. Stage boundary
 
@@ -11,7 +11,8 @@ Each `operate_start` now leases an isolated Chrome profile. The canonical profil
 Google login can publish a filtered, immutable seed generation, and a new worker profile is cloned
 from that seed or reclaimed from one closed warm-profile slot.
 
-This stage deliberately preserves the existing concurrency behavior:
+Stage 2 session-addresses payment state and adds drain-before-finish without widening the profile
+pool. It deliberately preserves the existing concurrency behavior:
 
 - one in-process start or active task at a time;
 - one filesystem active slot per profile-pool namespace;
@@ -37,7 +38,9 @@ operate_start
   -> validate identity through that worker
 
 operate_finish
-  -> classify payment state
+  -> stop admitting calls to this session and drain calls that already entered
+  -> refuse teardown while payment is active, awaiting approval, or awaiting confirmation
+  -> classify the remaining payment fence state
   -> reset the page and close Chrome with proof
   -> return a safe profile to the one warm slot, otherwise destroy or quarantine it
 ```
@@ -134,6 +137,12 @@ A profile may return to the closed warm slot only after the page reset succeeds,
 proven, its seed generation is still current, and the session has no payment-sensitive state.
 Failure to prove closure quarantines the lease instead of pooling or deleting it.
 
+`operate_finish` and `operate_finish_task` first mark the addressed session closing. New calls for
+that session are rejected, calls that already acquired the session drain, and outcome preparation
+runs behind the same closed admission gate. Finish refuses while payment is operating or confirming,
+while approval is awaiting the user, or while a filled card awaits confirmation. Only then may page
+reset, Chrome closure, or profile disposition begin.
+
 The profile is destroy-required when any of these are true at finish:
 
 - an active payment object remains;
@@ -151,13 +160,13 @@ This stage does not add:
 
 - a second active slot or concurrent operator execution;
 - safe cross-process handoff of a live CDP browser;
-- session-addressed payment state, resolve-once semantics, or drain-before-finish gates;
 - remote-CDP generality, a CDP proxy, or an authentication service;
 - new v1 configuration, a scheduler, daemon, or control plane;
 - redundant public lease descriptors or previous-generation grace GC.
 
 Those changes require their own migration stages. In particular, the second active slot must remain
-disabled until browser handoff and payment ownership are session-safe.
+disabled until browser handoff is also session-safe; session-addressed payment ownership alone is
+not enough to widen the pool.
 
 ## 8. Code map
 
@@ -167,5 +176,5 @@ disabled until browser handoff and payment ownership are session-safe.
 | Process birth and profile-path identity            | `apps/mcp/src/bot/profile.ts`                                     |
 | Local Chrome lifecycle and closure proof           | `apps/mcp/src/bot/browser.ts`                                     |
 | Login teardown, seed publication, clone validation | `apps/mcp/src/bot/google-login.ts`                                |
-| Acquire seam, identity probe, finish disposition   | `apps/mcp/src/bot/provision-session.ts`                           |
+| Acquire seam, payment selection, call drain, finish disposition | `apps/mcp/src/bot/provision-session.ts`              |
 | Install provider-completion evidence               | `apps/mcp/src/bot/install-completion.ts`, `apps/web/app/install/` |

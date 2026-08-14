@@ -71,6 +71,11 @@ operator-sealed final authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission.
 
+Every payment response includes its `session_id`. Pass that same ID to every
+follow-up `operate_pay`, `operate_payment_status`, and `operate_payment_await`
+call. Omitting it remains compatible only while this MCP process has exactly one
+session; it never selects a newest or arbitrary checkout.
+
 Some split checkouts collect the card before the final order-confirmation step. On the
 card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
 subtotal qualifies as that payable amount only when the same order summary says
@@ -293,7 +298,10 @@ environment to opt into the 31-tool diagnostics profile.
   extraction, vault storage, and auto-promotion; `result` requires `summary` or
   `data` and can run `verify_recipe` before closing. `operate_finish_task`
   remains a delegating compatibility alias for the credential and result
-  outcomes.
+  outcomes. Finish first stops new calls and drains calls already using that
+  session. It refuses to close while a payment is in progress, awaiting approval,
+  or filled and awaiting confirmation, so the browser cannot be reset or pooled
+  out from under a resumable charge.
 - `operate_recipe_save` saves a postcondition-verified local recipe under a
   closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs
@@ -313,6 +321,8 @@ environment to opt into the 31-tool diagnostics profile.
   add-card approval, then fills the checkout and waits for the user to resolve
   3-D Secure before handing back unresolved challenges. It also supports the
   two-phase `fill_card` then `confirm` flow for split checkouts described above.
+  Payment status and await calls return the same session ID and include it in every
+  follow-up tool hint, so an approval is always resumed in its originating browser.
   Malformed calls return the same `error.guidance` repair fields as
   `operate_act`, including a safe resolution when `card_ref` and `card_label`
   conflict.

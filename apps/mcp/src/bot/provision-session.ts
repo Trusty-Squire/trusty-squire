@@ -469,7 +469,7 @@ interface CartIdentityContext {
   onActionReady?: () => void;
 }
 
-interface Session {
+export interface Session {
   id: string;
   browser: BrowserController;
   allowedHosts: AllowedHostEntry[];
@@ -564,6 +564,12 @@ interface Session {
   cartAddsByIdempotencyKey: Map<string, CartAddRecord>;
   cartUrls: Map<string, string>;
   lastCartMutation: CartMutation | null;
+  // A finish first flips this bit, then waits for outstanding call leases.  A
+  // session-addressed operation always captures the Session object before it
+  // awaits, so a later session can never be substituted into an old callback.
+  closing: boolean;
+  callCount: number;
+  callDrainWaiters: Set<() => void>;
 }
 
 // Plain host list for the pieces that only need the names (goto gate, audit,
@@ -686,6 +692,88 @@ async function closeLeasedBrowser(
 
 function sessionForCall(sessionId: string): Session | undefined {
   return sessions.get(sessionId);
+}
+
+function assertPaymentSessionAllowed(session: Session): void {
+  if (session.closing) {
+    throw new Error(`provision session ${session.id} is closing`);
+  }
+  if (session.replayState?.moneyPath === true && session.replayState.paymentGuard !== "verified") {
+    throw new Error(
+      "operate_pay refused: replay address/contact/quantity verification is not satisfied",
+    );
+  }
+}
+
+// Resolve the compatibility omission once, at tool entry.  In particular, do
+// not repeat this lookup in completion callbacks: after an await, a different
+// session could otherwise become the sole process-local session.
+export function paymentSession(sessionId?: string): Session {
+  let session: Session | undefined;
+  if (sessionId !== undefined) {
+    session = sessionForCall(sessionId);
+    if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  } else {
+    if (sessions.size !== 1) {
+      throw new Error(
+        sessions.size === 0
+          ? "operate_pay requires one active operate_start browser session"
+          : "operate_pay requires session_id when multiple operator sessions are active",
+      );
+    }
+    session = sessions.values().next().value!;
+  }
+  assertPaymentSessionAllowed(session);
+  return session;
+}
+
+function acquireSessionCallLease(session: Session): () => void {
+  if (session.closing) throw new Error(`provision session ${session.id} is closing`);
+  session.callCount += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    session.callCount -= 1;
+    if (session.callCount === 0) {
+      for (const wake of session.callDrainWaiters) wake();
+      session.callDrainWaiters.clear();
+    }
+  };
+}
+
+async function waitForSessionCallsToDrain(session: Session): Promise<void> {
+  if (session.callCount === 0) return;
+  await new Promise<void>((resolve) => session.callDrainWaiters.add(resolve));
+}
+
+async function withSelectedProvisionSessionCall<T>(
+  session: Session,
+  fn: (session: Session) => Promise<T>,
+): Promise<T> {
+  const release = acquireSessionCallLease(session);
+  try {
+    return await fn(session);
+  } finally {
+    release();
+  }
+}
+
+export async function withProvisionSessionCall<T>(
+  sessionId: string,
+  fn: (session: Session) => Promise<T>,
+): Promise<T> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  return await withSelectedProvisionSessionCall(session, fn);
+}
+
+export async function withPaymentSessionCall<T>(
+  sessionId: string | undefined,
+  fn: (session: Session) => Promise<T>,
+): Promise<T> {
+  const session = paymentSession(sessionId);
+  return await withSelectedProvisionSessionCall(session, fn);
 }
 
 const settle = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -2370,6 +2458,9 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     cartAddsByIdempotencyKey: new Map(),
     cartUrls: new Map(),
     lastCartMutation: null,
+    closing: false,
+    callCount: 0,
+    callDrainWaiters: new Set(),
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2474,6 +2565,9 @@ export async function startHarnessProvisionSession(
     cartAddsByIdempotencyKey: new Map(),
     cartUrls: new Map(),
     lastCartMutation: null,
+    closing: false,
+    callCount: 0,
+    callDrainWaiters: new Set(),
     startedAt: Date.now(),
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
@@ -2565,32 +2659,18 @@ export function currentProvisionUrl(sessionId: string): string {
   return session.browser.currentUrl();
 }
 
-// operate_pay has a deliberately small input contract with no session id: it
-// acts on the one live operator checkout. Fail closed rather than guessing if
-// zero or multiple browser sessions exist.
 function activeProvisionSession(): Session {
-  if (sessions.size !== 1) {
-    throw new Error(
-      sessions.size === 0
-        ? "operate_pay requires one active operate_start browser session"
-        : "operate_pay refused: multiple active browser sessions",
-    );
-  }
-  const session = sessions.values().next().value!;
-  if (session.replayState?.moneyPath === true && session.replayState.paymentGuard !== "verified") {
-    throw new Error(
-      "operate_pay refused: replay address/contact/quantity verification is not satisfied",
-    );
-  }
-  return session;
+  return paymentSession();
 }
 
 export function activeProvisionBrowser(): BrowserController {
   return activeProvisionSession().browser;
 }
 
-export async function activeProvisionBrowserForPayment(): Promise<BrowserController> {
-  const session = activeProvisionSession();
+export async function activeProvisionBrowserForPayment(
+  selectedSession?: Session,
+): Promise<BrowserController> {
+  const session = selectedSession ?? activeProvisionSession();
   const state = session.replayState;
   if (state?.moneyPath !== true) return session.browser;
   const fresh = await session.browser.extractInteractiveElements();
@@ -2614,30 +2694,33 @@ export async function activeProvisionBrowserForPayment(): Promise<BrowserControl
   return session.browser;
 }
 
-export function setActivePendingCardFill(pending: PendingCardFill): void {
-  const session = activeProvisionSession();
+export function setActivePendingCardFill(
+  pending: PendingCardFill,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
   session.activePayment = { status: "pending", pending };
   session.paymentFieldSealActive = true;
 }
 
-export function retainActivePaymentFieldSeal(): void {
-  const session = activeProvisionSession();
+export function retainActivePaymentFieldSeal(selectedSession?: Session): void {
+  const session = selectedSession ?? activeProvisionSession();
   if (session.activePayment?.status !== "operating") {
     session.activePayment = { status: "sealed" };
   }
   session.paymentFieldSealActive = true;
 }
 
-export function getActivePendingCardFill(): PendingCardFill | null {
-  const state = activeProvisionSession().activePayment;
+export function getActivePendingCardFill(selectedSession?: Session): PendingCardFill | null {
+  const state = (selectedSession ?? activeProvisionSession()).activePayment;
   return state?.status === "pending" ? state.pending : null;
 }
 
 // [P0] Read-only: the outstanding approval a prior operate_pay call left
 // waiting on the human, if any. Backs operate_payment_status/await — neither
 // tool touches session state, they just report on it.
-export function getActivePendingApproval(): PendingApprovalWait | null {
-  const state = activeProvisionSession().activePayment;
+export function getActivePendingApproval(selectedSession?: Session): PendingApprovalWait | null {
+  const state = (selectedSession ?? activeProvisionSession()).activePayment;
   return state?.status === "awaiting_approval" ? state.state : null;
 }
 
@@ -2652,8 +2735,9 @@ export type ActivePaymentClaim =
 
 export function claimActivePaymentForOperatePay(
   phase: "fill_card" | "confirm" | undefined,
+  selectedSession?: Session,
 ): ActivePaymentClaim {
-  const session = activeProvisionSession();
+  const session = selectedSession ?? activeProvisionSession();
   const state = session.activePayment;
   if (state?.status === "operating") {
     throw new Error("operate_pay refused: another payment operation is already in progress");
@@ -2694,8 +2778,9 @@ export function claimActivePaymentForOperatePay(
 export function completeActivePaymentLeaseWithPendingFill(
   lease: ActivePaymentLease,
   pending: PendingCardFill,
+  selectedSession?: Session,
 ): void {
-  const session = activeProvisionSession();
+  const session = selectedSession ?? activeProvisionSession();
   const state = session.activePayment;
   if (state?.status !== "operating" || state.lease !== lease || lease.phase !== "fill_card") {
     throw new Error(
@@ -2714,8 +2799,9 @@ export function completeActivePaymentLeaseWithPendingFill(
 export function completeActivePaymentLeaseWithPendingApproval(
   lease: ActivePaymentLease,
   state: PendingApprovalWait,
+  selectedSession?: Session,
 ): void {
-  const session = activeProvisionSession();
+  const session = selectedSession ?? activeProvisionSession();
   const current = session.activePayment;
   if (current?.status !== "operating" || current.lease !== lease) {
     throw new Error(
@@ -2728,8 +2814,9 @@ export function completeActivePaymentLeaseWithPendingApproval(
 export function releaseActivePaymentLease(
   lease: ActivePaymentLease,
   paymentFieldsCleared = true,
+  selectedSession?: Session,
 ): boolean {
-  const session = activeProvisionSession();
+  const session = selectedSession ?? activeProvisionSession();
   const state = session.activePayment;
   if (state?.status !== "operating" || state.lease !== lease) return false;
   session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
@@ -2737,28 +2824,33 @@ export function releaseActivePaymentLease(
   return true;
 }
 
-export function markActivePendingCardFillSubmitStarted(): void {
-  const state = activeProvisionSession().activePayment;
+export function markActivePendingCardFillSubmitStarted(selectedSession?: Session): void {
+  const state = (selectedSession ?? activeProvisionSession()).activePayment;
   if (state?.status === "confirming") state.submitStarted = true;
 }
 
-export function restoreActivePendingCardFillAfterConfirmThrow(pending: PendingCardFill): boolean {
-  const session = activeProvisionSession();
+export function restoreActivePendingCardFillAfterConfirmThrow(
+  pending: PendingCardFill,
+  selectedSession?: Session,
+): boolean {
+  const session = selectedSession ?? activeProvisionSession();
   const state = session.activePayment;
   if (state?.status !== "confirming" || state.submitStarted) return false;
   session.activePayment = { status: "pending", pending };
   return true;
 }
 
-export function clearActivePendingCardFill(paymentFieldsCleared = true): void {
-  const session = activeProvisionSession();
+export function clearActivePendingCardFill(
+  paymentFieldsCleared = true,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
   session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
   session.paymentFieldSealActive = !paymentFieldsCleared;
 }
 
-export function recordActivePaymentProvenance(cardRef: string): void {
-  if (sessions.size !== 1) return;
-  const session = sessions.values().next().value!;
+export function recordActivePaymentProvenance(cardRef: string, selectedSession?: Session): void {
+  const session = selectedSession ?? activeProvisionSession();
   const last = session.actionTrace.at(-1)?.action;
   if (last?.kind === "operate_pay") return;
   const traceIndex = session.actionTrace.length;
@@ -2769,8 +2861,11 @@ export function recordActivePaymentProvenance(cardRef: string): void {
 // operate_pay {phase:"fill_card"} fallback source (see Session.lastCartCheckout):
 // the most recent real total this SAME session actually read off a page,
 // returned only when it still matches the given (current, live) origin.
-export function activeCartCheckoutForOrigin(origin: string): CartCheckoutObservation | null {
-  const cached = activeProvisionSession().lastCartCheckout;
+export function activeCartCheckoutForOrigin(
+  origin: string,
+  selectedSession?: Session,
+): CartCheckoutObservation | null {
+  const cached = (selectedSession ?? activeProvisionSession()).lastCartCheckout;
   return cached !== null && cached.checkout.checkout_origin === origin ? cached : null;
 }
 
@@ -7339,6 +7434,11 @@ export interface FinishResult {
   closed: true;
 }
 
+export interface PreparedFinishResult<T> {
+  finish: FinishResult;
+  prepared: T;
+}
+
 function profileRequiresDestroy(session: Session): boolean {
   return (
     session.activePayment !== null ||
@@ -7347,9 +7447,26 @@ function profileRequiresDestroy(session: Session): boolean {
   );
 }
 
-export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
-  const session = sessionForCall(sessionId);
-  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+function assertFinishPaymentResolved(session: Session): void {
+  const status = session.activePayment?.status;
+  if (status === "operating" || status === "confirming") {
+    throw new Error("operate_finish retry: payment operation is still in progress");
+  }
+  if (status === "awaiting_approval") {
+    throw new Error(
+      "operate_finish refused: payment approval is still awaiting resolution; resolve it before finishing",
+    );
+  }
+  if (status === "pending") {
+    throw new Error(
+      "operate_finish refused: a filled payment is still awaiting confirmation; resolve it before finishing",
+    );
+  }
+}
+
+async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {
+  const sessionId = session.id;
+  assertFinishPaymentResolved(session);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
   sessions.delete(sessionId);
@@ -7359,6 +7476,30 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
     inFlight = false;
   }
   return { session_id: sessionId, url, closed: true };
+}
+
+export async function finishProvisionSessionWithPreparation<T>(
+  sessionId: string,
+  prepare: () => Promise<T>,
+): Promise<PreparedFinishResult<T>> {
+  const session = sessionForCall(sessionId);
+  if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
+  if (session.closing) throw new Error(`provision session ${sessionId} is already closing`);
+  session.closing = true;
+  try {
+    await waitForSessionCallsToDrain(session);
+    assertFinishPaymentResolved(session);
+    const prepared = await prepare();
+    const finish = await closeFinishingProvisionSession(session);
+    return { finish, prepared };
+  } catch (error) {
+    if (sessions.get(sessionId) === session) session.closing = false;
+    throw error;
+  }
+}
+
+export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
+  return (await finishProvisionSessionWithPreparation(sessionId, async () => undefined)).finish;
 }
 
 // Test/teardown helper — close every live session (used by the dev shim on exit).
