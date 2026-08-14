@@ -257,6 +257,11 @@ interface CheckoutOutcomeBaseline {
   domSignals: Readonly<Record<string, number>> | null;
 }
 
+interface CheckoutOutcomeDispatchSnapshot {
+  url: string;
+  domSignals: Record<string, number>;
+}
+
 type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
 
 export interface CheckoutSubmitResult {
@@ -270,6 +275,9 @@ export interface CheckoutSubmitResult {
 export type ThreeDsResolution = "succeeded" | "failed" | "timeout" | "unconfirmed";
 
 const THREE_DS_RESOLUTION_GRACE_MS = 5_000;
+
+const CHECKOUT_ORDER_CONFIRMATION_TEXT_RE =
+  /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt\s*(?:number|#)\s*[:#-]?\s*[a-z0-9*•●◦▪■□×][a-z0-9_\/*•●◦▪■□×-]*/i;
 
 interface CheckoutFrameDescriptor {
   url: string;
@@ -415,6 +423,28 @@ function isSubstantiveCheckoutIdentity(identity: string): boolean {
   }
   const compactIdentity = identityTokens.join("");
   return !/^x{2,}\d*$/i.test(compactIdentity);
+}
+
+function validatedCheckoutOutcomeDomSignals(
+  capturedDomSignals: Readonly<Record<string, number>> | null,
+): Readonly<Record<string, number>> | null {
+  if (capturedDomSignals === null) return null;
+  return Object.fromEntries(
+    Object.entries(capturedDomSignals).filter(([signal]) => {
+      const receipt = /^receipt(?: number)?\s+(.+)$/i.exec(signal);
+      return receipt === null || isSubstantiveCheckoutIdentity(receipt[1] ?? "");
+    }),
+  );
+}
+
+function checkoutOutcomeBaselineFromDispatchSnapshot(
+  snapshot: CheckoutOutcomeDispatchSnapshot,
+): CheckoutOutcomeBaseline {
+  return {
+    url: snapshot.url,
+    terminalUrlIdentity: checkoutTerminalUrlIdentity(snapshot.url),
+    domSignals: validatedCheckoutOutcomeDomSignals(snapshot.domSignals),
+  };
 }
 
 function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
@@ -9077,11 +9107,9 @@ export class BrowserController {
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     this.checkoutThreeDsPending = false;
-    const [outcomeBaseline, failureBaseline] = await Promise.all([
-      this.captureCheckoutOutcomeBaseline(),
-      this.captureVisibleCheckoutFailureSignals(),
-    ]);
-    this.checkoutOutcomeBaseline = outcomeBaseline;
+    const failureBaseline = await this.captureVisibleCheckoutFailureSignals();
+    let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
+    this.checkoutOutcomeBaseline = undefined;
     this.checkoutFailureBaseline = failureBaseline;
     let submitted = false;
     for (const frame of this.page.frames()) {
@@ -9136,8 +9164,10 @@ export class BrowserController {
           .catch(() => "");
         if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
         const dispatchToken = `ts-payment-submit-${this.checkoutSubmitSequence++}`;
+        const dispatchBaselineStorageKey = `__trusty_squire_payment_baseline_${dispatchToken}`;
         const dispatchTrackingInstalled = await candidate
-          .evaluate((element, token) => {
+          .evaluate((element, options) => {
+            const { baselineStorageKey, successFlags, successSource, token } = options;
             const stateWindow = window as Window & {
               __trustySquirePaymentSubmitDispatch?: {
                 token: string;
@@ -9160,14 +9190,105 @@ export class BrowserController {
             };
             const listener: EventListener = () => {
               const state = stateWindow.__trustySquirePaymentSubmitDispatch;
-              if (state?.token === token) state.dispatched = true;
+              if (state?.token !== token) return;
+              try {
+                const merchantWindow = window.top;
+                if (merchantWindow === null) return;
+                const text = (merchantWindow.document.body?.innerText ?? "")
+                  .replace(/\s+/g, " ")
+                  .trim();
+                const pattern = new RegExp(
+                  successSource,
+                  successFlags.includes("g") ? successFlags : `${successFlags}g`,
+                );
+                const domSignals: Record<string, number> = {};
+                for (const match of text.matchAll(pattern)) {
+                  const signal = (match[0] ?? "")
+                    .normalize("NFKC")
+                    .toLowerCase()
+                    .replace(/[*•●◦▪■□×]+/g, " masked ")
+                    .replace(/[^a-z0-9]+/g, " ")
+                    .trim();
+                  if (signal.length > 0) domSignals[signal] = 1;
+                }
+                const snapshot: CheckoutOutcomeDispatchSnapshot = {
+                  url: merchantWindow.location.href,
+                  domSignals,
+                };
+                const baselineWindow = merchantWindow as Window & {
+                  __trustySquirePaymentDispatchBaselines?: Record<
+                    string,
+                    CheckoutOutcomeDispatchSnapshot
+                  >;
+                };
+                baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
+                baselineWindow.__trustySquirePaymentDispatchBaselines[token] = snapshot;
+                try {
+                  merchantWindow.sessionStorage.setItem(
+                    baselineStorageKey,
+                    JSON.stringify(snapshot),
+                  );
+                } catch (error) {
+                  void error;
+                }
+              } finally {
+                state.dispatched = true;
+              }
             };
             tracked.__tsPaymentSubmitDispatchListener = listener;
             element.addEventListener("click", listener, { capture: true, once: true });
-          }, dispatchToken)
+          }, {
+            baselineStorageKey: dispatchBaselineStorageKey,
+            successFlags: CHECKOUT_ORDER_CONFIRMATION_TEXT_RE.flags,
+            successSource: CHECKOUT_ORDER_CONFIRMATION_TEXT_RE.source,
+            token: dispatchToken,
+          })
           .then(() => true)
           .catch(() => false);
         if (!dispatchTrackingInstalled) continue;
+        const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
+          const snapshot = await this.page!
+            .mainFrame()
+            .evaluate(({ baselineStorageKey, token }) => {
+              const baselineWindow = window as Window & {
+                __trustySquirePaymentDispatchBaselines?: Record<
+                  string,
+                  CheckoutOutcomeDispatchSnapshot
+                >;
+              };
+              let captured = baselineWindow.__trustySquirePaymentDispatchBaselines?.[token] ?? null;
+              if (captured !== null) {
+                delete baselineWindow.__trustySquirePaymentDispatchBaselines?.[token];
+              }
+              if (captured === null) {
+                try {
+                  const stored = sessionStorage.getItem(baselineStorageKey);
+                  if (stored !== null) {
+                    captured = JSON.parse(stored) as CheckoutOutcomeDispatchSnapshot;
+                  }
+                } catch {
+                  captured = null;
+                }
+              }
+              try {
+                sessionStorage.removeItem(baselineStorageKey);
+              } catch (error) {
+                void error;
+              }
+              return captured;
+            }, { baselineStorageKey: dispatchBaselineStorageKey, token: dispatchToken })
+            .catch(() => null);
+          if (
+            snapshot === null ||
+            typeof snapshot.url !== "string" ||
+            snapshot.domSignals === null ||
+            typeof snapshot.domSignals !== "object" ||
+            Object.values(snapshot.domSignals).some((count) => typeof count !== "number")
+          ) {
+            return null;
+          }
+          return checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
+        };
         const clearDispatchTracking = async (): Promise<void> => {
           await candidate
             .evaluate((element) => {
@@ -9197,6 +9318,7 @@ export class BrowserController {
               }
             }, dispatchToken)
             .catch(() => undefined);
+          await readDispatchOutcomeBaseline();
         };
         try {
           await candidate.click();
@@ -9220,13 +9342,16 @@ export class BrowserController {
           if (dispatchState?.sameDocument === true && !dispatchState.dispatched) throw error;
           throw new PaymentSubmitOutcomeUnknownError();
         }
+        outcomeBaseline =
+          (await readDispatchOutcomeBaseline()) ?? (await this.captureCheckoutOutcomeBaseline());
+        this.checkoutOutcomeBaseline = outcomeBaseline;
         await clearDispatchTracking();
         submitted = true;
         break;
       }
       if (submitted) break;
     }
-    if (!submitted) throw new Error("payment_submit_not_found");
+    if (!submitted || outcomeBaseline === undefined) throw new Error("payment_submit_not_found");
     try {
       const challengeDeadline = Date.now() + 15_000;
       while (Date.now() < challengeDeadline) {
@@ -9664,24 +9789,14 @@ export class BrowserController {
 
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
     if (!this.page) return { url: "", terminalUrlIdentity: null, domSignals: null };
-    const successText =
-      /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt\s*(?:number|#)\s*[:#-]?\s*[a-z0-9*•●◦▪■□×][a-z0-9_\/*•●◦▪■□×-]*/i;
     const capturedDomSignals = await this.page
       .mainFrame()
       .evaluate(extractVisibleTopmostTextSignals, {
-        source: successText.source,
-        flags: successText.flags,
+        source: CHECKOUT_ORDER_CONFIRMATION_TEXT_RE.source,
+        flags: CHECKOUT_ORDER_CONFIRMATION_TEXT_RE.flags,
       })
       .catch(() => null);
-    const domSignals =
-      capturedDomSignals === null
-        ? null
-        : Object.fromEntries(
-            Object.entries(capturedDomSignals).filter(([signal]) => {
-              const receipt = /^receipt(?: number)?\s+(.+)$/i.exec(signal);
-              return receipt === null || isSubstantiveCheckoutIdentity(receipt[1] ?? "");
-            }),
-          );
+    const domSignals = validatedCheckoutOutcomeDomSignals(capturedDomSignals);
     const url = this.page.url();
     return { url, terminalUrlIdentity: checkoutTerminalUrlIdentity(url), domSignals };
   }

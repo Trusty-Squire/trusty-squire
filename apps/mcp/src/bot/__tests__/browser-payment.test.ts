@@ -1070,6 +1070,58 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "ignores merchant confirmation evidence that appears before Pay dispatch",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <button id="decoy">Continue</button>
+          <button id="pay-now">Pay now</button>
+          <script>
+            const decoy = document.querySelector("#decoy");
+            const getAttribute = decoy.getAttribute.bind(decoy);
+            decoy.getAttribute = (name) => {
+              if (name === "aria-label" && !document.querySelector("#early-confirmation")) {
+                document.body.insertAdjacentHTML(
+                  "beforeend",
+                  '<p id="early-confirmation">Order confirmed</p>',
+                );
+              }
+              return getAttribute(name);
+            };
+            document.querySelector("#pay-now").addEventListener("click", () => {
+              document.body.dataset.earlyConfirmationAtPay = String(
+                document.querySelector("#early-confirmation") !== null,
+              );
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+        expect(await page.locator("body").getAttribute("data-early-confirmation-at-pay")).toBe(
+          "true",
+        );
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "does not treat generic terminal-shaped evidence as a placed order",
     async () => {
       const browser = await chromium.launch({ headless: true });
