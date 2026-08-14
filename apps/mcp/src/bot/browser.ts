@@ -2355,15 +2355,6 @@ export class BrowserController {
         });
         this.childChrome = child;
         this.childChromeIdentity = registerSelfManagedChrome(child, this.profileDir);
-        if (this.startCancellationRequested) {
-          if (this.childChromeIdentity !== null) {
-            signalProfileProcess(this.childChromeIdentity, this.profileDir, "SIGKILL");
-          }
-          reapProfileHolderIfOwned(this.profileDir, this.childChromeIdentity);
-          this.childChrome = null;
-          this.childChromeIdentity = null;
-          throw new Error("BrowserController start cancelled");
-        }
         let chromeStderr = "";
         let chromeExit = "";
         child.stderr?.on("data", (chunk: Buffer) => {
@@ -2372,6 +2363,10 @@ export class BrowserController {
         child.on("exit", (code, signal) => {
           chromeExit = ` exit=${code ?? "null"} signal=${signal ?? "none"}`;
         });
+        if (this.startCancellationRequested) {
+          await this.cancelSpawnedSelfManagedChrome(child);
+          throw new Error("BrowserController start cancelled");
+        }
         try {
           const endpoint = await waitForDevtools(port, 30_000);
           this.childChromeIdentity ??=
@@ -2411,6 +2406,44 @@ export class BrowserController {
       throw new Error("self-launched Chrome exposed no default browser context");
     }
     return ctx;
+  }
+
+  private async cancelSpawnedSelfManagedChrome(
+    child: ChildProcess,
+    readIdentity: (
+      pid: number,
+      profileDir: string,
+    ) => ProfileProcessIdentity | null = profileProcessIdentity,
+    terminate: (identity: ProfileProcessIdentity, profileDir: string) => void = (
+      identity,
+      profileDir,
+    ) => {
+      signalProfileProcess(identity, profileDir, "SIGKILL");
+      reapProfileHolderIfOwned(profileDir, identity);
+    },
+  ): Promise<void> {
+    while (childProcessIsRunning(child)) {
+      const identity = child.pid === undefined ? null : readIdentity(child.pid, this.profileDir);
+      if (identity !== null) {
+        this.childChromeIdentity = identity;
+        selfManagedChromes.set(identity.pid, identity);
+        terminate(identity, this.profileDir);
+        while (childProcessIsRunning(child)) {
+          await new Promise<void>((resolveWait) => {
+            const timer = setTimeout(resolveWait, 25);
+            timer.unref();
+          });
+        }
+        break;
+      }
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, 25);
+        timer.unref();
+      });
+    }
+    if (this.childChrome === child) this.childChrome = null;
+    if (child.pid !== undefined) selfManagedChromes.delete(child.pid);
+    this.childChromeIdentity = null;
   }
 
   // Resource blocking for speed (BOT_BLOCK_RESOURCES, default OFF). Aborts

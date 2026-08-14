@@ -105,11 +105,22 @@ function loginProxyOption(): { server: string; username?: string; password?: str
 }
 
 // --- stealth chromium (mirrors BrowserController) ----------------------
-interface PersistentLauncher {
+export interface PersistentLauncher {
   launchPersistentContext(
     userDataDir: string,
     options: Record<string, unknown>,
   ): Promise<BrowserContext>;
+}
+
+export async function launchPersistentLoginContext(
+  launcher: PersistentLauncher,
+  userDataDir: string,
+  options: Record<string, unknown>,
+): Promise<BrowserContext> {
+  return await launcher.launchPersistentContext(userDataDir, {
+    ...options,
+    channel: "chrome",
+  });
 }
 
 function resolveChromium(): PersistentLauncher {
@@ -284,17 +295,7 @@ export async function detectActiveProviderSessions(
     await waitForProfileFree(profileDir, { deadlineMs: 15_000, pollMs: 500 });
     const chromium = resolveChromium();
     const ctx = await launchWithProfileGate(profileDir, () =>
-      chromium.launchPersistentContext(profileDir, {
-        // channel:"chrome" — launch the SAME system Chrome the login flow
-        // (runDisplayedChrome / runHeadlessChrome) uses. Without it Playwright
-        // reaches for its bundled Chromium, which isn't installed on boxes that
-        // run Chrome via the system channel — so this probe was the ONE launch
-        // in the connect flow that threw "Executable doesn't exist", surfacing
-        // as the spurious "Provider session check failed (continuing)" ✗ on
-        // every connect while the markers it left behind still printed
-        // "connected". The session cookies live in the profile dir regardless of
-        // which Chromium reads them, so matching the login launcher is enough.
-        channel: "chrome",
+      launchPersistentLoginContext(chromium, profileDir, {
         headless: true,
         ignoreDefaultArgs: ["--enable-automation"],
         args: ["--no-sandbox", "--disable-dev-shm-usage"],
@@ -966,7 +967,7 @@ export interface RunInBotChromeOpts {
   // Plain-mode success hook, run after plainPollUntilDone returns true while the
   // browser is still open (read which provider cookies seeded, etc.).
   plainOnSuccess?: (profileDir: string) => Promise<void>;
-  beforeSeedPublish?: () => Promise<void>;
+  onConfirmedLogin?: () => Promise<void>;
 }
 
 const LOGIN_BROWSER_CLOSED_ERROR =
@@ -979,18 +980,28 @@ export async function runInBotChrome(
 ): Promise<{ status: "completed" | "preflight_satisfied" | "timeout" }> {
   return await withProfileOperationGuard(opts.profileDir, async () => {
     const result = await runInBotChromeWithProfileGuard(opts);
-    const proof = { loginStatus: result.status, closeState: result.closeState };
-    if (canPublishOperatorProfileSeed(proof)) {
-      await opts.beforeSeedPublish?.();
-      await publishOperatorProfileSeed(opts.profileDir, { proof });
-    }
+    await finalizeLoginRun(opts, result);
     return { status: result.status };
   });
 }
 
-interface LoginRunResult {
+export interface LoginRunResult {
   status: "completed" | "preflight_satisfied" | "timeout";
   closeState: ProfileCloseState;
+}
+
+export async function finalizeLoginRun(
+  opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin">,
+  result: LoginRunResult,
+  publishSeed: typeof publishOperatorProfileSeed = publishOperatorProfileSeed,
+): Promise<void> {
+  if (result.status === "completed" || result.status === "preflight_satisfied") {
+    await opts.onConfirmedLogin?.();
+  }
+  const proof = { loginStatus: result.status, closeState: result.closeState };
+  if (canPublishOperatorProfileSeed(proof)) {
+    await publishSeed(opts.profileDir, { proof });
+  }
 }
 
 async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
@@ -1070,8 +1081,7 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
   const context = await launchWithProfileGate(
     opts.profileDir,
     () =>
-      chromium.launchPersistentContext(opts.profileDir, {
-        channel: "chrome",
+      launchPersistentLoginContext(chromium, opts.profileDir, {
         headless: false,
         viewport: { width: 1280, height: 800 },
         // Drop Playwright's default --enable-automation switch: it paints the
@@ -1257,8 +1267,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
       const persistent = await launchWithProfileGate(
         opts.profileDir,
         () =>
-          chromium.launchPersistentContext(opts.profileDir, {
-            channel: "chrome",
+          launchPersistentLoginContext(chromium, opts.profileDir, {
             headless: false,
             viewport: null, // use the real window size
             env: { ...process.env, DISPLAY: display },
@@ -1588,7 +1597,7 @@ export async function ensureOAuthSession(opts?: {
         return hasProviderSession(ctx, target);
       },
       pollUntilDone: (ctx) => hasProviderSession(ctx, target),
-      beforeSeedPublish: async () => markProviderLoggedIn(provider, profileDir),
+      onConfirmedLogin: async () => markProviderLoggedIn(provider, profileDir),
       ...(opts?.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
     });
     // Map runInBotChrome's status set to ensureOAuthSession's contract.

@@ -1,5 +1,6 @@
 import {
   existsSync,
+  lstatSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -79,6 +80,27 @@ afterEach(() => {
 });
 
 describe("operator profile pool migration stage", () => {
+  it("publishes seed-lock ownership atomically as persisted state", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+
+    await operatorProfilePoolTest.withSeedLock(p, () => {
+      expect(lstatSync(p.seedLock).isFile()).toBe(true);
+      const owner = JSON.parse(readFileSync(p.seedLock, "utf8")) as {
+        pid: number;
+        token: string;
+      };
+      expect(owner.pid).toBe(process.pid);
+      expect(owner.token).toMatch(/^[0-9a-f-]{36}$/);
+    });
+
+    expect(existsSync(p.seedLock)).toBe(false);
+  });
+
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
     const { root, source } = fixture();
     const first = await publishOperatorProfileSeed(source, {

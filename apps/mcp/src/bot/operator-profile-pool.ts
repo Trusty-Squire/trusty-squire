@@ -4,6 +4,7 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -168,6 +169,71 @@ function processState(identity: ProcessIdentity): "matching" | "stale" | "unknow
   return processBirthIdentityState(identity);
 }
 
+function readSeedLockOwner(path: string): SeedLockOwner | null {
+  try {
+    return lstatSync(path).isDirectory()
+      ? readJson<SeedLockOwner>(join(path, "owner.json"))
+      : readJson<SeedLockOwner>(path);
+  } catch {
+    return null;
+  }
+}
+
+function seedLockState(path: string): "matching" | "stale" | "unknown" {
+  const owner = readSeedLockOwner(path);
+  if (owner !== null) {
+    if (owner.host !== hostname()) return "unknown";
+    return processState(owner);
+  }
+  try {
+    return Date.now() - lstatSync(path).mtimeMs >= STARTUP_GRACE_MS ? "stale" : "unknown";
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? "stale" : "unknown";
+  }
+}
+
+function seedLockArtifacts(p: PoolPaths, kind: "claim" | "stale"): string[] {
+  const dir = kind === "claim" ? p.seed : p.tombstones;
+  const prefix = kind === "claim" ? `${basename(p.seedLock)}.claim-` : "seed-lock-";
+  try {
+    return readdirSync(dir)
+      .filter((name) => name.startsWith(prefix))
+      .map((name) => join(dir, name));
+  } catch {
+    return [];
+  }
+}
+
+function scavengeSeedLockArtifacts(p: PoolPaths): boolean {
+  let retainedTombstone = false;
+  for (const tombstone of seedLockArtifacts(p, "stale")) {
+    if (seedLockState(tombstone) === "stale") {
+      rmSync(tombstone, { recursive: true, force: true });
+    } else {
+      retainedTombstone = true;
+    }
+  }
+  for (const claim of seedLockArtifacts(p, "claim")) {
+    if (seedLockState(claim) === "stale") rmSync(claim, { force: true });
+  }
+  return retainedTombstone;
+}
+
+function quarantineStaleSeedLock(p: PoolPaths): boolean {
+  if (seedLockState(p.seedLock) !== "stale") return false;
+  const tombstone = join(p.tombstones, `seed-lock-${randomUUID()}`);
+  try {
+    renameSync(p.seedLock, tombstone);
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT";
+  }
+  if (seedLockState(tombstone) === "stale") {
+    rmSync(tombstone, { recursive: true, force: true });
+    return true;
+  }
+  return false;
+}
+
 function stripTransientProfileState(root: string): void {
   const walk = (dir: string): void => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -309,53 +375,47 @@ function copyIdentitySeed(sourceProfileDir: string, destination: string): void {
 
 async function withSeedLock<T>(p: PoolPaths, fn: () => Promise<T> | T): Promise<T> {
   const token = randomUUID();
+  const owner = {
+    host: hostname(),
+    ...currentProcessIdentity(),
+    token,
+  } satisfies SeedLockOwner;
   for (;;) {
-    try {
-      mkdirSync(p.seedLock, { mode: 0o700 });
-      try {
-        writePrivateJson(join(p.seedLock, "owner.json"), {
-          host: hostname(),
-          ...currentProcessIdentity(),
-          token,
-        } satisfies SeedLockOwner);
-      } catch (err) {
-        rmSync(p.seedLock, { recursive: true, force: true });
-        throw err;
-      }
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      const owner = readJson<SeedLockOwner>(join(p.seedLock, "owner.json"));
-      const malformedAndOld =
-        owner === null &&
-        (() => {
-          try {
-            return Date.now() - statSync(p.seedLock).mtimeMs >= STARTUP_GRACE_MS;
-          } catch {
-            return false;
-          }
-        })();
-      if (
-        malformedAndOld ||
-        (owner !== null && owner.host === hostname() && processState(owner) === "stale")
-      ) {
-        const stale = join(p.tombstones, `seed-lock-${randomUUID()}`);
-        try {
-          renameSync(p.seedLock, stale);
-          rmSync(stale, { recursive: true, force: true });
-          continue;
-        } catch {
-          // Another publisher/clone won cleanup or replaced the lock.
-        }
-      }
+    if (scavengeSeedLockArtifacts(p)) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      continue;
     }
+    const claim = `${p.seedLock}.claim-${randomUUID()}`;
+    writeFileSync(claim, `${JSON.stringify(owner)}\n`, { mode: 0o600, flag: "wx" });
+    try {
+      linkSync(claim, p.seedLock);
+    } catch (err) {
+      rmSync(claim, { force: true });
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (quarantineStaleSeedLock(p)) continue;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      continue;
+    }
+    try {
+      rmSync(claim, { force: true });
+    } catch (err) {
+      if (readSeedLockOwner(p.seedLock)?.token === token) {
+        rmSync(p.seedLock, { recursive: true, force: true });
+      }
+      throw err;
+    }
+    break;
   }
   try {
     return await fn();
   } finally {
-    if (readJson<SeedLockOwner>(join(p.seedLock, "owner.json"))?.token === token) {
+    if (readSeedLockOwner(p.seedLock)?.token === token) {
       rmSync(p.seedLock, { recursive: true, force: true });
+    }
+    for (const tombstone of seedLockArtifacts(p, "stale")) {
+      if (readSeedLockOwner(tombstone)?.token === token) {
+        rmSync(tombstone, { recursive: true, force: true });
+      }
     }
   }
 }
@@ -772,5 +832,6 @@ export const operatorProfilePoolTest = {
   paths,
   poolRootForSource,
   currentGeneration,
+  withSeedLock,
   resetDefaultPool: (): void => rmSync(defaultPoolRoot(), { recursive: true, force: true }),
 };

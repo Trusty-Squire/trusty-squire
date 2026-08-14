@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { readFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
@@ -18,6 +17,7 @@ import {
   launchWithProfileGate,
   ProfileBusyError,
 } from "../profile.js";
+import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
 import {
   binaryOnPath,
   installHint,
@@ -38,7 +38,10 @@ import {
   teardownHeadlessRig,
   teardownLoginBrowser,
   ensureOAuthSession,
+  finalizeLoginRun,
+  launchPersistentLoginContext,
   type HeadlessRig,
+  type PersistentLauncher,
 } from "../google-login.js";
 
 describe("canonical profile operation guard", () => {
@@ -517,29 +520,100 @@ describe("pollUntil phase-aware heartbeat", () => {
   });
 });
 
-// Regression guard for the connect-flow "Provider session check failed
-// (continuing)" ✗. Every persistent-context launch in this module must pass
-// channel:"chrome" — the system Chrome the login flow signs in with. The
-// provider-session probe once omitted it, reaching for an absent bundled
-// Chromium and throwing on EVERY connect, while the stale on-disk marker still
-// printed "connected". A source-shape invariant is the cheapest durable guard:
-// the launches spawn real Chrome and can't be unit-exercised here.
 describe("bot Chrome launch consistency", () => {
-  const source = readFileSync(
-    fileURLToPath(new URL("../google-login.ts", import.meta.url)),
-    "utf8",
-  );
+  it("forces the system Chrome channel through the executable launcher", async () => {
+    const context = {};
+    const launchPersistentContext = vi.fn().mockResolvedValue(context);
+    const launcher = { launchPersistentContext } as unknown as PersistentLauncher;
 
-  it('every launchPersistentContext call sets channel:"chrome"', () => {
-    // `.launchPersistentContext(` matches real calls; the bare interface-method
-    // declaration (no leading dot) is intentionally excluded.
-    const calls = [...source.matchAll(/\.launchPersistentContext\(/g)];
-    expect(calls.length).toBeGreaterThan(0);
-    // For each call site, the option object (up to the closing of the call)
-    // must declare channel:"chrome". Scan the ~600 chars after each call open.
-    for (const m of calls) {
-      const window = source.slice(m.index, m.index + 600);
-      expect(window).toMatch(/channel:\s*"chrome"/);
+    await expect(
+      launchPersistentLoginContext(launcher, "/isolated-profile", {
+        headless: true,
+        channel: "bundled",
+      }),
+    ).resolves.toBe(context);
+    expect(launchPersistentContext).toHaveBeenCalledWith("/isolated-profile", {
+      headless: true,
+      channel: "chrome",
+    });
+  });
+});
+
+describe("confirmed login finalization", () => {
+  it("records a confirmed login even when closure cannot publish a seed", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const publishSeed = vi.fn();
+    try {
+      await finalizeLoginRun(
+        {
+          profileDir,
+          onConfirmedLogin: async () => markProviderLoggedIn("google", profileDir),
+        },
+        { status: "completed", closeState: "unknown" },
+        publishSeed,
+      );
+
+      expect(loggedInProviders(profileDir)).toEqual(["google"]);
+      expect(publishSeed).not.toHaveBeenCalled();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not record or publish a timed-out login", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const onConfirmedLogin = vi.fn();
+    const publishSeed = vi.fn();
+    try {
+      await finalizeLoginRun(
+        { profileDir, onConfirmedLogin },
+        { status: "timeout", closeState: "closed" },
+        publishSeed,
+      );
+
+      expect(onConfirmedLogin).not.toHaveBeenCalled();
+      expect(publishSeed).not.toHaveBeenCalled();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("cancelled self-managed Chrome launch", () => {
+  it("retains the child until exact profile identity becomes observable", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-cancelled-chrome-"));
+    const controller = new BrowserController({ profileDir });
+    const child = fakeProcess("chrome");
+    Object.assign(child, { pid: 424_242 });
+    const identity = {
+      host: hostname(),
+      pid: 424_242,
+      start_time: "birth",
+      user_data_dir: profileDir,
+    };
+    let probes = 0;
+    const terminate = vi.fn(() => {
+      Object.assign(child, { exitCode: 0 });
+    });
+    const internals = controller as unknown as {
+      cancelSpawnedSelfManagedChrome(
+        target: ChildProcess,
+        readIdentity: () => typeof identity | null,
+        terminate: (targetIdentity: typeof identity, targetProfileDir: string) => void,
+      ): Promise<void>;
+    };
+    try {
+      await internals.cancelSpawnedSelfManagedChrome(
+        child,
+        () => (++probes === 1 ? null : identity),
+        terminate,
+      );
+
+      expect(probes).toBe(2);
+      expect(terminate).toHaveBeenCalledWith(identity, profileDir);
+      expect(childProcessIsRunning(child)).toBe(false);
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
     }
   });
 });
