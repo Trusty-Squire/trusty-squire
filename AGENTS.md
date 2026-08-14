@@ -397,12 +397,6 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
-### 9. The 3DS Telegram-notify + wait/poll mechanism already exists — don't rebuild it
-
-`operate_pay`'s `three_ds_wait_seconds` path (`apps/mcp/src/bot/pay-operator.ts`) has fired a fire-and-forget `api.notifyThreeDs(...)` Telegram nudge and then polled `browser.waitForThreeDsResolution(...)` (`apps/mcp/src/bot/browser.ts`) since PR #395 — well before any app-push-specific work. A task framed as "build the 3DS notify + wait hand-off" is very likely asking for a **copy/behavior fix on top of this existing plumbing**, not new machinery; grep for `notifyThreeDs` and `waitForThreeDsResolution` before adding a second notification path or a second poll loop.
-
-The one thing that *was* wrong (fixed alongside `operator-3ds-handoff-decision.md`, 2026-08): the Telegram text and the `needs_user.message` on timeout used to say "complete the challenge in the open checkout browser" — correct for a browser-redirect/OTP 3DS flow, actively wrong for a bank that does 3DS via an **app-push approval in its own app** (nothing to do in the browser). `threeDsChallengeMessage()` in `pay-operator.ts` now also distinguishes "Telegram nudge sent" from "Telegram nudge failed to send" (missing bot token / unlinked account) using the `sent` boolean `POST /v1/pay/approvals/:id/notify-3ds` already returned but the caller used to discard — don't go back to a bare `void ... .catch(() => undefined)` there, and don't `await` that call inline (a hung/slow Telegram send must never block the wait loop — see the "does not wait for notification delivery" test in `pay-operator.test.ts`).
-
 ---
 
 ## Maintaining this file
