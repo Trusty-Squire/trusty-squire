@@ -414,6 +414,47 @@ function cardRequiredResult(
   };
 }
 
+// The captain's bank approves 3-D Secure via an app-push in their own bank
+// app, not in the browser — see operator-3ds-handoff-decision.md. Fires the
+// Telegram nudge WITHOUT awaiting it (a slow/unresolved Telegram call must
+// never delay the 3DS wait loop) while still tracking whether it actually
+// went out, so a timed-out challenge can tell the host whether the captain
+// was nudged or needs a direct check of the bank app.
+function trackThreeDsNotification(
+  sendPromise: Promise<{ sent: boolean }>,
+): () => boolean | undefined {
+  let sent: boolean | undefined;
+  void sendPromise.then(
+    (result) => {
+      sent = result.sent;
+    },
+    () => {
+      sent = false;
+    },
+  );
+  return () => sent;
+}
+
+// telegramSent is undefined when the nudge was never attempted (wait
+// skipped via three_ds_wait_seconds: 0) or hasn't settled yet — the neutral
+// wording covers both without claiming a delivery we can't confirm.
+function threeDsChallengeMessage(telegramSent: boolean | undefined): string {
+  if (telegramSent === false) {
+    return (
+      "The issuer requires 3-D Secure authentication, approved from the cardholder's bank app. " +
+      "The Telegram nudge could not be delivered — link Telegram under Vault Settings, or check " +
+      "the bank app directly."
+    );
+  }
+  if (telegramSent === true) {
+    return (
+      "The issuer requires 3-D Secure authentication. A Telegram nudge was sent — approve the " +
+      "charge in the bank app to continue."
+    );
+  }
+  return "The issuer requires 3-D Secure authentication, approved from the cardholder's bank app.";
+}
+
 // [P1] A bare payment_checkout_total_not_found left the host with no next
 // step (friction audit finding). Name the exact safe action instead — go
 // observe the page that shows the payable total — never a bare error string.
@@ -1233,8 +1274,9 @@ export async function executeOperatePay(
       card = undefined;
     }
 
+    let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
     if (submitResult.three_ds_required && threeDsWaitMs > 0) {
-      void api.notifyThreeDs(approvalId).catch(() => undefined);
+      getThreeDsTelegramSent = trackThreeDsNotification(api.notifyThreeDs(approvalId));
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
       if (resolution === "succeeded") paymentStatus = "payment_submitted";
       if (resolution === "failed") paymentStatus = "payment_declined";
@@ -1262,8 +1304,7 @@ export async function executeOperatePay(
           : {}),
         needs_user: {
           wall: "3ds",
-          message:
-            "The issuer requires 3-D Secure authentication. Complete it in the open checkout.",
+          message: threeDsChallengeMessage(getThreeDsTelegramSent()),
           resume: "checkout",
           ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
         },
@@ -1440,8 +1481,9 @@ export async function executeOperatePayConfirm(
   // same point the single-page flow clears them.
   const paymentFieldsCleared = await clearPaymentFields();
 
+  let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
   if (submitResult.three_ds_required && threeDsWaitMs > 0) {
-    void api.notifyThreeDs(pending.approval_id).catch(() => undefined);
+    getThreeDsTelegramSent = trackThreeDsNotification(api.notifyThreeDs(pending.approval_id));
     const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
     if (resolution === "succeeded") paymentStatus = "payment_submitted";
     if (resolution === "failed") paymentStatus = "payment_declined";
@@ -1472,7 +1514,7 @@ export async function executeOperatePayConfirm(
         : {}),
       needs_user: {
         wall: "3ds",
-        message: "The issuer requires 3-D Secure authentication. Complete it in the open checkout.",
+        message: threeDsChallengeMessage(getThreeDsTelegramSent()),
         resume: "checkout",
         ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
       },

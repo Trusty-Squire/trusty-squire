@@ -312,11 +312,11 @@ export const registerPayApprovalsRoute: FastifyPluginAsync<{
       let sent = false;
       if (account?.telegram_chat_id != null) {
         const text =
-          "🔐 3-D Secure required — complete the challenge in the open checkout browser to finish your " +
+          "🔐 3-D Secure required — approve the " +
           formatCurrencyAmount(record.amountCents, record.currency) +
           " payment to " +
           record.merchant +
-          ".";
+          " in your bank app to finish checkout.";
         sent = await sendTelegramMessage(account.telegram_chat_id, text);
       }
       return reply.code(200).send({ sent });
