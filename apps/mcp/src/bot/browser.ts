@@ -8436,10 +8436,11 @@ export class BrowserController {
     }
 
     const billingRoots: CheckoutPaymentFieldRoot[] = [];
-    const addBillingRoot = async (frame: Frame, anchor: ElementHandle<Element>): Promise<void> => {
+    const addBillingRoot = async (frame: Frame, anchor: ElementHandle): Promise<void> => {
       const proposedToken = `ts-billing-context-${groupSequence++}`;
       const token = await anchor
         .evaluate((element, candidateToken) => {
+          if (!(element instanceof Element)) return null;
           const isFillable = (control: Element): boolean => {
             if (!(control instanceof HTMLElement)) return false;
             if (control.matches(":disabled") || control.getClientRects().length === 0) {
@@ -8758,6 +8759,7 @@ export class BrowserController {
           if (frameElement === null) break;
           await frameElement
             .evaluate((element, selected) => {
+              if (!(element instanceof Element)) return;
               element.setAttribute("data-ts-payment-frame-owner", selected ? "selected" : "other");
             }, groupFrame === cardGroup.frame)
             .catch(() => undefined);
@@ -9623,8 +9625,9 @@ export class BrowserController {
         const owner = await frame.frameElement().catch(() => null);
         if (owner !== null) {
           frameContext += await owner
-            .evaluate((element) =>
-              [
+            .evaluate((element) => {
+              if (!(element instanceof Element)) return "";
+              return [
                 element.id,
                 element.className,
                 element.getAttribute("name"),
@@ -9633,8 +9636,8 @@ export class BrowserController {
                 element.getAttribute("data-testid"),
               ]
                 .filter((value): value is string => typeof value === "string")
-                .join(" "),
-            )
+                .join(" ");
+            })
             .catch(() => "");
           await owner.dispose().catch(() => undefined);
         }
