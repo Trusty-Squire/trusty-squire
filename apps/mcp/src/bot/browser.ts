@@ -1215,6 +1215,62 @@ function extractObservationVisibleText(): string {
   return text;
 }
 
+function extractVisibleTopmostTextSignals({
+  source,
+  flags,
+}: {
+  source: string;
+  flags: string;
+}): Record<string, number> {
+  const pattern = new RegExp(source, flags);
+  const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
+  const visibleAndTopmost = (node: Text): boolean => {
+    const element = node.parentElement;
+    if (element === null) return false;
+    let ancestor: HTMLElement | null = element as HTMLElement;
+    while (ancestor !== null) {
+      const style = getComputedStyle(ancestor);
+      if (
+        style.display === "none" ||
+        style.visibility === "hidden" ||
+        style.visibility === "collapse" ||
+        Number.parseFloat(style.opacity) <= 0
+      ) {
+        return false;
+      }
+      ancestor = ancestor.parentElement;
+    }
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    for (const rect of Array.from(range.getClientRects())) {
+      if (rect.width < 1 || rect.height < 1) continue;
+      const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
+      const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
+      const hit = document.elementFromPoint(x, y);
+      if (hit !== null && (hit === element || element.contains(hit))) return true;
+    }
+    return false;
+  };
+  const signals: Record<string, number> = {};
+  const body = document.body;
+  if (body === null) return signals;
+  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  let node = walker.nextNode();
+  while (node !== null) {
+    const signal = normalize(node.textContent ?? "");
+    if (
+      signal.length > 0 &&
+      signal.length <= 500 &&
+      pattern.test(signal) &&
+      visibleAndTopmost(node as Text)
+    ) {
+      signals[signal] = (signals[signal] ?? 0) + 1;
+    }
+    node = walker.nextNode();
+  }
+  return signals;
+}
+
 const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
 
 function passesPaymentLuhn(digits: string): boolean {
@@ -8191,7 +8247,11 @@ export class BrowserController {
                 const selectedOwner = element.getAttribute("data-ts-payment-card-group");
                 if (owner !== null && owner !== selectedOwner) continue;
                 const controlForm = control.closest("form");
-                if (controlForm !== null && !controlForm.contains(element)) continue;
+                const sharesSelectedForm =
+                  controlForm !== null && controlForm.contains(element);
+                if (controlForm !== null && !sharesSelectedForm) continue;
+                const hasSelectedOwner =
+                  owner !== null && selectedOwner !== null && owner === selectedOwner;
                 let nestedBoundary = control.parentElement;
                 while (nestedBoundary !== null && nestedBoundary !== candidate) {
                   if (isPaymentBoundary(nestedBoundary)) break;
@@ -8205,7 +8265,11 @@ export class BrowserController {
                   continue;
                 }
                 const controlBranch = branchUnder(candidate, control);
-                if (controlBranch !== anchorBranch && control.parentElement !== candidate) {
+                if (
+                  controlBranch !== anchorBranch &&
+                  !sharesSelectedForm &&
+                  !hasSelectedOwner
+                ) {
                   continue;
                 }
                 control.setAttribute("data-ts-payment-billing-owner", candidateToken);
@@ -9053,21 +9117,10 @@ export class BrowserController {
       /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt (?:number|#)/i;
     const domSignals = await this.page
       .mainFrame()
-      .evaluate(
-        ({ source, flags }) => {
-          const pattern = new RegExp(source, flags);
-          const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
-          const signals: Record<string, number> = {};
-          const lines = (document.body?.innerText ?? "").split(/\r?\n/);
-          for (const line of lines) {
-            const signal = normalize(line);
-            if (signal.length === 0 || signal.length > 500 || !pattern.test(signal)) continue;
-            signals[signal] = (signals[signal] ?? 0) + 1;
-          }
-          return signals;
-        },
-        { source: successText.source, flags: successText.flags },
-      )
+      .evaluate(extractVisibleTopmostTextSignals, {
+        source: successText.source,
+        flags: successText.flags,
+      })
       .catch(() => ({}));
     return { url: this.page.url(), domSignals };
   }
@@ -9104,64 +9157,10 @@ export class BrowserController {
       this.page.frames().map(async (frame) => {
         if (!(await this.isFrameSurfaceTopmost(frame))) return {};
         const signals = await frame
-          .evaluate(
-            ({ source, flags }) => {
-              const pattern = new RegExp(source, flags);
-              const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
-              const visibleAndTopmost = (node: Text): boolean => {
-                const element = node.parentElement;
-                if (element === null) return false;
-                let ancestor: HTMLElement | null = element as HTMLElement;
-                while (ancestor !== null) {
-                  const style = getComputedStyle(ancestor);
-                  if (
-                    style.display === "none" ||
-                    style.visibility === "hidden" ||
-                    style.visibility === "collapse" ||
-                    Number.parseFloat(style.opacity) <= 0
-                  ) {
-                    return false;
-                  }
-                  ancestor = ancestor.parentElement;
-                }
-                const range = document.createRange();
-                range.selectNodeContents(node);
-                for (const rect of Array.from(range.getClientRects())) {
-                  if (rect.width < 1 || rect.height < 1) continue;
-                  const x = Math.min(
-                    window.innerWidth - 1,
-                    Math.max(0, rect.left + rect.width / 2),
-                  );
-                  const y = Math.min(
-                    window.innerHeight - 1,
-                    Math.max(0, rect.top + rect.height / 2),
-                  );
-                  const hit = document.elementFromPoint(x, y);
-                  if (hit !== null && (hit === element || element.contains(hit))) return true;
-                }
-                return false;
-              };
-              const signals: Record<string, number> = {};
-              const body = document.body;
-              if (body === null) return signals;
-              const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-              let node = walker.nextNode();
-              while (node !== null) {
-                const signal = normalize(node.textContent ?? "");
-                if (
-                  signal.length > 0 &&
-                  signal.length <= 500 &&
-                  pattern.test(signal) &&
-                  visibleAndTopmost(node as Text)
-                ) {
-                  signals[signal] = (signals[signal] ?? 0) + 1;
-                }
-                node = walker.nextNode();
-              }
-              return signals;
-            },
-            { source: failureText.source, flags: failureText.flags },
-          )
+          .evaluate(extractVisibleTopmostTextSignals, {
+            source: failureText.source,
+            flags: failureText.flags,
+          })
           .catch(() => ({}));
         const frameKey = frame === mainFrame ? "main" : `${frame.name()} ${frame.url()}`;
         return Object.fromEntries(

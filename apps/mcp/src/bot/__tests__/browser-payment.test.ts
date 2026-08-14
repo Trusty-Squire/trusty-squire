@@ -625,6 +625,7 @@ describe("checkout payment parsing", () => {
                 <input id="active-billing-city" name="billing_city">
               </div>
             </div>
+            <input id="direct-sibling-alternate-postal" name="billing_postal">
             <section id="paypal-payment-panel">
               <input id="alternate-payment-billing-city" name="billing_city" value="Alternate Payment Billing">
             </section>
@@ -633,6 +634,9 @@ describe("checkout payment parsing", () => {
           <script>
             document.querySelector("#active-billing-city").addEventListener("input", (event) => {
               document.body.dataset.activeBillingCity = event.target.value;
+            });
+            document.querySelector("#direct-sibling-alternate-postal").addEventListener("input", (event) => {
+              document.body.dataset.directSiblingAlternatePostal = event.target.value;
             });
             document.querySelector("#pay-now").addEventListener("click", () => {
               document.body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
@@ -670,6 +674,10 @@ describe("checkout payment parsing", () => {
         expect(await page.locator("#alternate-payment-billing-city").inputValue()).toBe(
           "Alternate Payment Billing",
         );
+        expect(
+          await page.locator("body").getAttribute("data-direct-sibling-alternate-postal"),
+        ).toBeNull();
+        expect(await page.locator("#direct-sibling-alternate-postal").inputValue()).toBe("");
         expect(await page.locator("body").getAttribute("data-active-billing-city")).toBe(
           "Billingville",
         );
@@ -989,6 +997,66 @@ describe("checkout payment parsing", () => {
           now.mockRestore();
         }
       } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores newly mounted hidden and covered merchant confirmation copy",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <style>
+            #covered-confirmation { position: relative; }
+            #confirmation-cover { background: white; inset: 0; position: absolute; z-index: 2; }
+          </style>
+          <form id="checkout">
+            <input autocomplete="cc-number"><input autocomplete="cc-exp">
+            <input autocomplete="cc-csc"><input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              document.body.insertAdjacentHTML(
+                "beforeend",
+                '<p style="display:none">Order confirmed</p>' +
+                  '<p style="opacity:0">Order confirmed</p>' +
+                  '<section id="covered-confirmation"><p>Order confirmed</p><div id="confirmation-cover">Still processing</div></section>',
+              );
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(
+          controller.fillAndSubmitCheckout({
+            pan: "4242424242424242",
+            exp_month: "12",
+            exp_year: "30",
+            cvv: "123",
+            name: "Synthetic Cardholder",
+            billing: {
+              line1: "123 Billing Street",
+              city: "Billingville",
+              postal_code: "10001",
+              country: "US",
+            },
+          }),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: false });
+      } finally {
+        now.mockRestore();
         await browser.close();
       }
     },
@@ -2620,11 +2688,13 @@ describe("split-checkout card fill (real browser)", () => {
           <input id="shipping-line1" autocomplete="shipping address-line1" value="9 Delivery Road">
           <input id="ambiguous-city" autocomplete="address-level2" value="Delivery City">
           <section id="payment-method">
-            ${FRAME_FORM}
-            <input id="billing-line1" autocomplete="billing address-line1">
-            <input id="billing-city" name="billing_city">
-            <input id="billing-postal" autocomplete="billing postal-code">
-            <input id="billing-country" name="billing_country">
+            <div id="selected-card-surface">
+              ${FRAME_FORM}
+              <input id="billing-line1" autocomplete="billing address-line1">
+              <input id="billing-city" name="billing_city">
+              <input id="billing-postal" autocomplete="billing postal-code">
+              <input id="billing-country" name="billing_country">
+            </div>
           </section>`,
       });
       try {
