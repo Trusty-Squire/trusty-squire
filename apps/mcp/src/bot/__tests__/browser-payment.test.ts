@@ -6,6 +6,7 @@ import {
   CHECKOUT_SUBMIT_LABEL_RE,
   hasPayPalHostedCheckoutFrame,
   PaymentCardFillCleanupError,
+  PaymentSubmitOutcomeUnknownError,
   parseCheckoutAmount,
   parseCheckoutAmounts,
   parseStructuredCheckoutTotal,
@@ -723,7 +724,9 @@ describe("checkout payment parsing", () => {
         await page.setContent(`
           <section id="payment-method">
             <iframe src="${pciUrl}"></iframe>
-            <input id="leaf-billing-city" name="billing_city">
+            <div class="billing-address">
+              <input id="leaf-billing-city" name="billing_city">
+            </div>
           </section>
           <button id="pay-now">Pay now</button>
           <script>
@@ -754,6 +757,37 @@ describe("checkout payment parsing", () => {
         );
         expect(await page.locator("#leaf-billing-city").inputValue()).toBe("");
         expect(await page.locator('[data-ts-sealed-payment="1"]').count()).toBe(0);
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "prefers a new merchant order confirmation over a simultaneous 3DS signal",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <button id="pay">Pay now</button>
+          <script>
+            document.querySelector("#pay").addEventListener("click", () => {
+              document.body.insertAdjacentHTML(
+                "beforeend",
+                '<p>Order confirmed</p><iframe title="3D Secure"></iframe>',
+              );
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: true,
+        });
       } finally {
         await browser.close();
       }
@@ -1009,6 +1043,45 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "does not treat a bare receipt route as a placed order",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route("https://merchant.test/**", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay-now">Pay now</button>
+              <script>
+                document.querySelector("#pay-now").addEventListener("click", () => {
+                  history.pushState({}, "", "/receipt");
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/checkout");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "does not confirm an order when only a terminal URL query or hash changes",
     async () => {
       const browser = await chromium.launch({ headless: true });
@@ -1042,6 +1115,36 @@ describe("checkout payment parsing", () => {
         });
       } finally {
         now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps a click failure pre-dispatch when no charge event fired",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        page.setDefaultTimeout(250);
+        await page.setContent(`
+          <button id="pay-now">Pay now</button>
+          <script>
+            const button = document.querySelector("#pay-now");
+            const addEventListener = button.addEventListener.bind(button);
+            button.addEventListener = (type, listener, options) => {
+              addEventListener(type, listener, options);
+              if (type === "click") queueMicrotask(() => button.remove());
+            };
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const error = await controller.submitFilledCheckout().catch((caught) => caught);
+        expect(error).toBeInstanceOf(Error);
+        expect(error).not.toBeInstanceOf(PaymentSubmitOutcomeUnknownError);
+      } finally {
         await browser.close();
       }
     },

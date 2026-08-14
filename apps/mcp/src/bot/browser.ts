@@ -350,7 +350,7 @@ export class PaymentSubmitOutcomeUnknownError extends Error {
 }
 
 const CHECKOUT_TERMINAL_URL_PATH_RE =
-  /\/(?:receipts?)(?:\/[^/?#]+)?\/?$|\/(?:orders?)(?:\/[^/?#]+)?\/(?:confirmation|confirmed|thank[_-]?you)\/?$|\/(?:order[_-]?(?:confirmation|confirmed|complete)|thank[_-]?you)\/?$|\/checkouts?\/[^/?#]+\/thank[_-]?you\/?$/i;
+  /\/(?:receipts?)\/[^/?#]+\/?$|\/(?:orders?)(?:\/[^/?#]+)?\/(?:confirmation|confirmed|thank[_-]?you)\/?$|\/(?:order[_-]?(?:confirmation|confirmed|complete)|thank[_-]?you)\/?$|\/checkouts?\/[^/?#]+\/thank[_-]?you\/?$/i;
 
 function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
   try {
@@ -2470,6 +2470,7 @@ export class BrowserController {
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
   private checkoutFailureBaseline: CheckoutFailureBaseline | undefined;
   private checkoutThreeDsPending = false;
+  private checkoutSubmitSequence = 0;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
   // reuse must always restore this original page rather than adopting a popup
@@ -8203,8 +8204,8 @@ export class BrowserController {
               /billing/i.test(control.id)
             );
           };
-          const isPaymentBoundary = (candidate: Element): boolean => {
-            const identity = [
+          const paymentBoundaryIdentity = (candidate: Element): string =>
+            [
               candidate.id,
               candidate.className,
               candidate.getAttribute("name"),
@@ -8215,8 +8216,16 @@ export class BrowserController {
             ]
               .filter((value): value is string => typeof value === "string")
               .join(" ");
-            return /(?:^|[^a-z])(?:payment|billing|credit.?card)(?:[^a-z]|$)/i.test(identity);
-          };
+          const isPaymentBoundary = (candidate: Element): boolean =>
+            /(?:^|[^a-z])(?:payment|billing|credit.?card)(?:[^a-z]|$)/i.test(
+              paymentBoundaryIdentity(candidate),
+            );
+          const isPaymentMethodBoundary = (candidate: Element): boolean =>
+            candidate.hasAttribute("data-ts-payment-frame-owner") ||
+            candidate.hasAttribute("data-ts-payment-card-group") ||
+            /(?:^|[^a-z])(?:payment|credit.?card|paypal|klarna|afterpay|shop.?pay|apple.?pay|google.?pay|bank.?transfer)(?:[^a-z]|$)/i.test(
+              paymentBoundaryIdentity(candidate),
+            );
           const isTopmost = (control: Element): boolean => {
             if (!(control instanceof HTMLElement)) return false;
             const rect = control.getBoundingClientRect();
@@ -8272,7 +8281,7 @@ export class BrowserController {
                   (descendant) =>
                     descendant !== element &&
                     !isExplicitBillingControl(descendant) &&
-                    isPaymentBoundary(descendant),
+                    isPaymentMethodBoundary(descendant),
                 );
               let marked = 0;
               for (const control of Array.from(
@@ -8291,7 +8300,7 @@ export class BrowserController {
                   owner !== null && selectedOwner !== null && owner === selectedOwner;
                 let nestedBoundary = control.parentElement;
                 while (nestedBoundary !== null && nestedBoundary !== candidate) {
-                  if (isPaymentBoundary(nestedBoundary)) break;
+                  if (isPaymentMethodBoundary(nestedBoundary)) break;
                   nestedBoundary = nestedBoundary.parentElement;
                 }
                 if (
@@ -8836,11 +8845,92 @@ export class BrowserController {
           )
           .catch(() => "");
         if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
+        const dispatchToken = `ts-payment-submit-${this.checkoutSubmitSequence++}`;
+        const dispatchTrackingInstalled = await candidate
+          .evaluate((element, token) => {
+            const stateWindow = window as Window & {
+              __trustySquirePaymentSubmitDispatch?: {
+                token: string;
+                dispatched: boolean;
+              };
+            };
+            const tracked = element as Element & {
+              __tsPaymentSubmitDispatchListener?: EventListener;
+            };
+            if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
+              element.removeEventListener(
+                "click",
+                tracked.__tsPaymentSubmitDispatchListener,
+                true,
+              );
+            }
+            stateWindow.__trustySquirePaymentSubmitDispatch = {
+              token,
+              dispatched: false,
+            };
+            const listener: EventListener = () => {
+              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+              if (state?.token === token) state.dispatched = true;
+            };
+            tracked.__tsPaymentSubmitDispatchListener = listener;
+            element.addEventListener("click", listener, { capture: true, once: true });
+          }, dispatchToken)
+          .then(() => true)
+          .catch(() => false);
+        if (!dispatchTrackingInstalled) continue;
+        const clearDispatchTracking = async (): Promise<void> => {
+          await candidate
+            .evaluate((element) => {
+              const tracked = element as Element & {
+                __tsPaymentSubmitDispatchListener?: EventListener;
+              };
+              if (tracked.__tsPaymentSubmitDispatchListener !== undefined) {
+                element.removeEventListener(
+                  "click",
+                  tracked.__tsPaymentSubmitDispatchListener,
+                  true,
+                );
+                delete tracked.__tsPaymentSubmitDispatchListener;
+              }
+            })
+            .catch(() => undefined);
+          await frame
+            .evaluate((token) => {
+              const stateWindow = window as Window & {
+                __trustySquirePaymentSubmitDispatch?: {
+                  token: string;
+                  dispatched: boolean;
+                };
+              };
+              if (stateWindow.__trustySquirePaymentSubmitDispatch?.token === token) {
+                delete stateWindow.__trustySquirePaymentSubmitDispatch;
+              }
+            }, dispatchToken)
+            .catch(() => undefined);
+        };
         try {
           await candidate.click();
-        } catch {
+        } catch (error) {
+          const dispatchState = await frame
+            .evaluate((token) => {
+              const stateWindow = window as Window & {
+                __trustySquirePaymentSubmitDispatch?: {
+                  token: string;
+                  dispatched: boolean;
+                };
+              };
+              const state = stateWindow.__trustySquirePaymentSubmitDispatch;
+              return {
+                sameDocument: state?.token === token,
+                dispatched: state?.token === token && state.dispatched,
+              };
+            }, dispatchToken)
+            .catch(() => null);
+          await clearDispatchTracking();
+          if (dispatchState?.sameDocument === true && !dispatchState.dispatched) throw error;
           throw new PaymentSubmitOutcomeUnknownError();
         }
+        await clearDispatchTracking();
         submitted = true;
         break;
       }
@@ -8850,14 +8940,14 @@ export class BrowserController {
     try {
       const challengeDeadline = Date.now() + 15_000;
       while (Date.now() < challengeDeadline) {
+        if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
+          this.checkoutThreeDsPending = false;
+          return { three_ds_required: false, order_confirmed: true };
+        }
         const challenge = await this.detectThreeDsChallenge();
         if (challenge.three_ds_required) {
           this.checkoutThreeDsPending = true;
           return challenge;
-        }
-        if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
-          this.checkoutThreeDsPending = false;
-          return { three_ds_required: false, order_confirmed: true };
         }
         await this.page.waitForTimeout(250).catch(() => undefined);
       }
