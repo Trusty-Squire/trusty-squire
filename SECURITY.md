@@ -135,11 +135,12 @@ Unsupported-wallet detection follows the frame containing the actual visible PAN
 field. PayPal and Braintree hosted card fields fail closed, while an unrelated PayPal
 express-button frame does not disqualify a fillable merchant or recognized Shopify
 PCI card-field frame. When a checkout mounts multiple card forms, the operator fills
-one complete visible and enabled group containing PAN, name, expiry, and CVV. It ranks
-viable groups by active or selected state and field completeness, uses the unique
-highest-ranked group, and otherwise fails with `payment_card_form_ambiguous`. Card
-filling stays inside that selected group. Charge controls inside a card group are
-eligible only for the selected group in both same-step and later confirmation,
+one complete visible and enabled group containing PAN, name, expiry, and CVV. When
+multiple groups are complete, it uses the PAN's rendered center-point hit-test and
+selects only the unique topmost, non-occluded group; otherwise it fails with
+`payment_card_form_ambiguous`. Card filling stays inside that selected group. Charge
+controls inside a card group are eligible only for the selected group in both
+same-step and later confirmation,
 and both card fields and charge controls follow their HTML `form` relationship when
 mounted elsewhere in the DOM; a merchant checkout control outside every card group
 remains eligible.

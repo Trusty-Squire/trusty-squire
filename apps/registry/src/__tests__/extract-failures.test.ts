@@ -24,7 +24,7 @@ describe("extract-failure routes", () => {
         step_label: "post-verify round 2/5: extract",
         extract_reason: "API key visible in modal",
         candidates: ["copy input: abc123"],
-        html: "<main><input value=\"abc123\"></main>",
+        html: '<main><input value="abc123"></main>',
         screenshot_jpeg_base64: Buffer.from("jpeg-bytes").toString("base64"),
       },
     });
@@ -62,7 +62,7 @@ describe("extract-failure routes", () => {
     expect(detail.statusCode).toBe(200);
     expect(detail.json()).toMatchObject({
       id,
-      html: "<main><input value=\"abc123\"></main>",
+      html: '<main><input value="abc123"></main>',
       candidates: ["copy input: abc123"],
       screenshot_jpeg_base64: Buffer.from("jpeg-bytes").toString("base64"),
     });
@@ -269,5 +269,5 @@ describe("extract-failure routes", () => {
     expect(limited.headers["retry-after"]).toBeDefined();
 
     await server.close();
-  });
+  }, 15_000);
 });

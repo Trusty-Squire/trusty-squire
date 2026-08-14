@@ -7487,7 +7487,7 @@ export class BrowserController {
     const nameSelectors =
       'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]';
 
-    type CardGroup = CheckoutCardGroupRoot & { active: boolean; controlCount: number };
+    type CardGroup = CheckoutCardGroupRoot & { panTopmost: boolean };
     const groups = new Map<string, CardGroup>();
     let fillablePanCount = 0;
     let groupSequence = 0;
@@ -7545,6 +7545,23 @@ export class BrowserController {
                 ownedControls(root).some(
                   (element) => element.matches(selector) && isFillable(element),
                 );
+              // Match the operator observation's actual rendered hit-test, rather
+              // than trusting structural visibility. Shopify can mount two complete
+              // PCI forms at once while one is covered by the other.
+              const panTopmost = (): boolean => {
+                const rect = input.getBoundingClientRect();
+                if (rect.width < 1 || rect.height < 1) return false;
+                const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
+                const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
+                let hit = document.elementFromPoint(x, y);
+                if (hit === null) return false;
+                while (hit.shadowRoot !== null) {
+                  const deeper = hit.shadowRoot.elementFromPoint(x, y);
+                  if (deeper === null || deeper === hit) break;
+                  hit = deeper;
+                }
+                return hit === input || input.contains(hit);
+              };
               const form = input instanceof HTMLInputElement ? input.form : input.closest("form");
               let root: Element | null = form ?? input.parentElement;
               while (root !== null && root !== document.body && root !== document.documentElement) {
@@ -7564,26 +7581,9 @@ export class BrowserController {
                   for (const control of controls) {
                     control.setAttribute("data-ts-payment-card-control-group", token);
                   }
-                  const active =
-                    root.contains(document.activeElement) ||
-                    controls.includes(document.activeElement as Element) ||
-                    root.matches(
-                      '[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
-                    ) ||
-                    root.querySelector(
-                      'input[type="radio"]:checked,[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
-                    ) !== null ||
-                    controls.some((control) =>
-                      control.matches(
-                        'input[type="radio"]:checked,[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
-                      ),
-                    );
                   return {
                     token,
-                    active,
-                    // A split expiry contributes two independently fillable
-                    // controls, so it outranks an otherwise-equal fallback.
-                    controlCount: 3 + (hasCombinedExpiry ? 1 : 2),
+                    panTopmost: panTopmost(),
                   };
                 }
                 if (form !== null) break;
@@ -7607,8 +7607,7 @@ export class BrowserController {
             frame,
             root: frame.locator(`[data-ts-payment-card-group="${group.token}"]`),
             token: group.token,
-            active: group.active,
-            controlCount: group.controlCount,
+            panTopmost: group.panTopmost,
           });
         }
       }
@@ -7618,17 +7617,13 @@ export class BrowserController {
     if (groups.size === 1) {
       cardGroup = [...groups.values()][0];
     } else if (groups.size > 1) {
-      const ranked = [...groups.values()].sort(
-        (left, right) =>
-          Number(right.active) - Number(left.active) || right.controlCount - left.controlCount,
-      );
-      const selected = ranked[0]!;
-      const equallyRanked = ranked.filter(
-        (candidate) =>
-          candidate.active === selected.active && candidate.controlCount === selected.controlCount,
-      );
-      if (equallyRanked.length !== 1) throw new Error("payment_card_form_ambiguous");
-      cardGroup = selected;
+      // A structurally complete PCI form may still be a covered duplicate. The
+      // PAN's center-point hit-test is the decisive live signal: accept exactly
+      // one rendered, non-occluded PAN and otherwise retain the fail-closed
+      // ambiguity refusal. Do not rank by completeness or active state here.
+      const topmost = [...groups.values()].filter((group) => group.panTopmost);
+      if (topmost.length !== 1) throw new Error("payment_card_form_ambiguous");
+      cardGroup = topmost[0];
     } else if (fillablePanCount > 1) {
       // Multiple PAN anchors with no single complete container are not safe to
       // combine. A provider topology with one PAN and separate hosted-field
