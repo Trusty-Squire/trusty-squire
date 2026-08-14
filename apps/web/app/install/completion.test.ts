@@ -6,7 +6,9 @@ import {
   installCompletionAcknowledgementUrl,
   installCompletionProviderUrl,
   normalizeInstallCompletionUrl,
+  readInstallCompletionProviders,
   readInstallCompletionUrl,
+  recordInstallCompletionProvider,
 } from "./completion";
 
 describe("install completion callback validation", () => {
@@ -60,6 +62,20 @@ describe("install completion callback validation", () => {
 
     clearInstallCompletionUrl("setup");
     expect(readInstallCompletionUrl("setup")).toBeNull();
+  });
+
+  it("retains earned Google completion across a later GitHub OAuth return", () => {
+    recordInstallCompletionProvider("setup", "google");
+
+    window.history.replaceState({}, "", "/install?token=setup&gh=1");
+    expect(readInstallCompletionProviders("setup")).toEqual(["google"]);
+
+    recordInstallCompletionProvider("setup", "github");
+    expect(readInstallCompletionProviders("setup")).toEqual(["google", "github"]);
+    expect(readInstallCompletionProviders("different-install")).toEqual([]);
+
+    clearInstallCompletionUrl("setup");
+    expect(readInstallCompletionProviders("setup")).toEqual([]);
   });
 
   it("does not advertise callback support when the callback cannot survive OAuth", () => {

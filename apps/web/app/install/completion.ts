@@ -2,8 +2,10 @@ const COMPLETION_FRAGMENT_KEY = "ts_install_complete";
 const COMPLETION_ACK_FRAGMENT_KEY = "ts_install_complete_ack";
 const COMPLETION_STORAGE_PREFIX = "ts-install-completion:";
 const COMPLETION_ACK_STORAGE_PREFIX = "ts-install-completion-ack:";
+const COMPLETION_PROVIDER_STORAGE_PREFIX = "ts-install-completion-provider:";
 const COMPLETION_PATH = /^\/\.well-known\/trusty-squire\/install-complete\/[a-f0-9]{48}$/;
 type InstallCompletionProvider = "google" | "github";
+const INSTALL_COMPLETION_PROVIDERS: readonly InstallCompletionProvider[] = ["google", "github"];
 
 export function normalizeInstallCompletionUrl(raw: string | null): string | null {
   if (raw === null) return null;
@@ -88,8 +90,42 @@ export function clearInstallCompletionUrl(token: string): void {
   try {
     window.sessionStorage.removeItem(`${COMPLETION_STORAGE_PREFIX}${token}`);
     window.sessionStorage.removeItem(`${COMPLETION_ACK_STORAGE_PREFIX}${token}`);
+    for (const provider of INSTALL_COMPLETION_PROVIDERS) {
+      window.sessionStorage.removeItem(
+        `${COMPLETION_PROVIDER_STORAGE_PREFIX}${token}:${provider}`,
+      );
+    }
   } catch {
     // Best-effort cleanup after Finish.
+  }
+}
+
+export function recordInstallCompletionProvider(
+  token: string,
+  provider: InstallCompletionProvider,
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.sessionStorage.setItem(
+      `${COMPLETION_PROVIDER_STORAGE_PREFIX}${token}:${provider}`,
+      "1",
+    );
+  } catch {
+    // The current page can still report its in-memory completion state.
+  }
+}
+
+export function readInstallCompletionProviders(token: string): InstallCompletionProvider[] {
+  if (typeof window === "undefined") return [];
+  try {
+    return INSTALL_COMPLETION_PROVIDERS.filter(
+      (provider) =>
+        window.sessionStorage.getItem(
+          `${COMPLETION_PROVIDER_STORAGE_PREFIX}${token}:${provider}`,
+        ) === "1",
+    );
+  } catch {
+    return [];
   }
 }
 

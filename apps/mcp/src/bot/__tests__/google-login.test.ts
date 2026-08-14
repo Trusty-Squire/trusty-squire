@@ -249,7 +249,7 @@ describe("headless login VNC lifecycle", () => {
 });
 
 describe("login browser lifecycle guards", () => {
-  it("bounds cancellation without waiting for a wedged persistent launch", async () => {
+  it("keeps cleaning a wedged persistent launch through its spawn window", async () => {
     vi.useFakeTimers();
     let cancel: (() => void) | undefined;
     let finishLaunch: ((value: string) => void) | undefined;
@@ -261,10 +261,15 @@ describe("login browser lifecycle guards", () => {
     });
 
     const cleanupCancelled = vi.fn(async () => "closed" as const);
-    const cleanupRejected = vi.fn(async () => "closed" as const);
+    let profileHolderPresent = false;
+    const cleanupRejected = vi.fn(async () => {
+      if (!profileHolderPresent) return "closed" as const;
+      profileHolderPresent = false;
+      return "closed" as const;
+    });
     const launchImpl = vi.fn(
       (options: { headless: boolean; timeout: number }): Promise<string> => {
-        expect(options).toEqual({ headless: true, timeout: 30_000 });
+        expect(options).toEqual({ headless: true, timeout: 25 });
         return launch;
       },
     );
@@ -274,13 +279,18 @@ describe("login browser lifecycle guards", () => {
       cancellation,
       cleanupCancelled,
       cleanupRejected,
+      launchTimeoutMs: 25,
       cancellationSettleMs: 25,
+      cancellationPollMs: 5,
     });
     await Promise.resolve();
     cancel?.();
-    await vi.advanceTimersByTimeAsync(25);
+    await vi.advanceTimersByTimeAsync(10);
+    profileHolderPresent = true;
+    await vi.advanceTimersByTimeAsync(40);
     await expect(result).resolves.toEqual({ status: "cancelled", closeState: "unknown" });
-    expect(cleanupRejected).toHaveBeenCalledOnce();
+    expect(cleanupRejected.mock.calls.length).toBeGreaterThan(1);
+    expect(profileHolderPresent).toBe(false);
 
     finishLaunch?.("late browser");
     await Promise.resolve();
