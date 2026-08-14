@@ -615,6 +615,13 @@ vi.mock("../google-login.js", async (importOriginal) => {
 
 vi.mock("../operator-profile-pool.js", () => ({
   OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
+  OperatorProfileAcquisitionInterruptedError: class extends Error {
+    readonly reason: "timeout" | "cancelled";
+    constructor(reason: "timeout" | "cancelled") {
+      super(`operator profile acquisition ${reason}`);
+      this.reason = reason;
+    }
+  },
   acquireOperatorProfile: async (_sessionId: string, opts: { sourceProfileDir?: string } = {}) => {
     h.leaseAcquireCalls += 1;
     if (h.activeLeaseCount >= 2) {

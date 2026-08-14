@@ -148,6 +148,63 @@ describe("operator profile pool migration stage", () => {
     expect(existsSync(p.seedLock)).toBe(false);
   });
 
+  it("bounds a third acquisition while seed publication holds the shared lock", async () => {
+    vi.useFakeTimers();
+    let releaseValidation = (): void => undefined;
+    let publication: Promise<string> | undefined;
+    let first: Awaited<ReturnType<typeof acquireOperatorProfile>> | undefined;
+    let second: Awaited<ReturnType<typeof acquireOperatorProfile>> | undefined;
+    try {
+      const { root, source } = fixture();
+      await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+      first = await acquireOperatorProfile("session-a", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      second = await acquireOperatorProfile("session-b", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      let markValidationStarted = (): void => undefined;
+      const validationStarted = new Promise<void>((resolve) => {
+        markValidationStarted = resolve;
+      });
+      const validationGate = new Promise<void>((resolve) => {
+        releaseValidation = resolve;
+      });
+      publication = publishOperatorProfileSeed(source, {
+        rootDir: root,
+        proof: verifiedLoginProof,
+        validateGoogleIdentity: async () => {
+          markValidationStarted();
+          await validationGate;
+          return { googleSignedIn: true, closeState: "closed" };
+        },
+      });
+      await validationStarted;
+      const third = acquireOperatorProfile("session-c", {
+        rootDir: root,
+        sourceProfileDir: source,
+        deadline: Date.now() + 100,
+      });
+      const rejection = expect(third).rejects.toThrow("acquisition timed out");
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      await rejection;
+      expect(readdirSync(operatorProfilePoolTest.paths(root).active).sort()).toEqual([
+        "slot-0",
+        "slot-1",
+      ]);
+    } finally {
+      releaseValidation();
+      await publication;
+      await second?.destroy();
+      await first?.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
     const { root, source } = fixture();
     const first = await publishOperatorProfileSeed(source, {

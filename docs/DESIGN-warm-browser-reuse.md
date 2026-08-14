@@ -112,8 +112,9 @@ Under the seed lock, acquisition:
 4. copies the current immutable seed into a new worker profile.
 
 Capacity remains fixed at two active leases. A third start retries acquisition for at most 30
-seconds and launches only after one of those leases is released. Teardown cancels registered
-capacity waiters and each start rechecks the shutdown generation after acquisition before launch.
+seconds, including time spent behind seed publication on the shared seed lock, and launches only
+after one of those leases is released. Teardown cancels registered capacity waiters and each start
+rechecks the shutdown generation after acquisition before launch.
 
 Before the first seed exists, acquisition creates an empty worker profile; a caller that requires a
 live identity then fails closed at the existing Google-session gate. Identity and email checks run

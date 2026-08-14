@@ -39,7 +39,11 @@ import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2c
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
-import { acquireOperatorProfile, type OperatorProfileLease } from "./operator-profile-pool.js";
+import {
+  acquireOperatorProfile,
+  OperatorProfileAcquisitionInterruptedError,
+  type OperatorProfileLease,
+} from "./operator-profile-pool.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import {
   type OperatorRecipe,
@@ -612,6 +616,7 @@ interface StartingBrowser {
 interface CapacityWaiter {
   generation: number;
   cancelRequested: boolean;
+  abortController: AbortController;
   wake: () => void;
   settled: Promise<void>;
   resolveSettled: () => void;
@@ -642,6 +647,7 @@ async function acquireOperatorProfileBounded(
   const waiter: CapacityWaiter = {
     generation,
     cancelRequested: false,
+    abortController: new AbortController(),
     wake: () => wake(),
     settled: new Promise<void>((resolve) => {
       resolveSettled = resolve;
@@ -658,6 +664,8 @@ async function acquireOperatorProfileBounded(
       try {
         const lease = await acquireOperatorProfile(sessionId, {
           ...(opts.profileDir !== undefined ? { sourceProfileDir: opts.profileDir } : {}),
+          deadline,
+          signal: waiter.abortController.signal,
         });
         if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
           await lease.destroy();
@@ -668,12 +676,22 @@ async function acquireOperatorProfileBounded(
         if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
           throw new Error("operate_start cancelled: operator server is shutting down");
         }
-        if (!isOperatorCapacityError(error) || Date.now() >= deadline) {
-          if (isOperatorCapacityError(error)) {
-            throw new Error(
-              "operate_start capacity wait timed out: 2 operator sessions are active; finish one and retry",
-            );
-          }
+        if (
+          error instanceof OperatorProfileAcquisitionInterruptedError &&
+          error.reason === "cancelled"
+        ) {
+          throw new Error("operate_start cancelled: operator server is shutting down");
+        }
+        if (
+          (error instanceof OperatorProfileAcquisitionInterruptedError &&
+            error.reason === "timeout") ||
+          (isOperatorCapacityError(error) && Date.now() >= deadline)
+        ) {
+          throw new Error(
+            "operate_start capacity wait timed out: 2 operator sessions are active; finish one and retry",
+          );
+        }
+        if (!isOperatorCapacityError(error)) {
           throw error;
         }
         await new Promise<void>((resolve) => {
@@ -7568,6 +7586,7 @@ export async function closeAllProvisionSessions(): Promise<void> {
   const waiters = [...capacityWaiters];
   for (const waiter of waiters) {
     waiter.cancelRequested = true;
+    waiter.abortController.abort();
     waiter.wake();
   }
   await Promise.all(waiters.map((waiter) => waiter.settled));
