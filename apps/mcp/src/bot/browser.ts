@@ -7625,8 +7625,7 @@ export class BrowserController {
       const selected = ranked[0]!;
       const equallyRanked = ranked.filter(
         (candidate) =>
-          candidate.active === selected.active &&
-          candidate.controlCount === selected.controlCount,
+          candidate.active === selected.active && candidate.controlCount === selected.controlCount,
       );
       if (equallyRanked.length !== 1) throw new Error("payment_card_form_ambiguous");
       cardGroup = selected;
@@ -7652,11 +7651,7 @@ export class BrowserController {
           withinCardGroup && cardGroup !== undefined
             ? frame
                 .locator(selectors)
-                .and(
-                  frame.locator(
-                    `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
-                  ),
-                )
+                .and(frame.locator(`[data-ts-payment-card-control-group="${cardGroup.token}"]`))
             : frame.locator(selectors);
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
@@ -7774,11 +7769,7 @@ export class BrowserController {
           withinCardGroup && cardGroup !== undefined
             ? frame
                 .locator(selectors)
-                .and(
-                  frame.locator(
-                    `[data-ts-payment-card-control-group="${cardGroup.token}"]`,
-                  ),
-                )
+                .and(frame.locator(`[data-ts-payment-card-control-group="${cardGroup.token}"]`))
             : frame.locator(selectors);
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
@@ -8009,26 +8000,21 @@ export class BrowserController {
         if (!(await candidate.isEnabled().catch(() => false))) continue;
         if (cardGroup !== undefined) {
           const ownership = await candidate
-            .evaluate(
-              (element, cardFieldSelectors) => {
-                const form =
-                  element instanceof HTMLButtonElement || element instanceof HTMLInputElement
-                    ? element.form
-                    : null;
-                const owner =
-                  form?.closest("[data-ts-payment-card-group]") ??
-                  element.closest("[data-ts-payment-card-group]");
-                return {
-                  ownerToken: owner?.getAttribute("data-ts-payment-card-group") ?? null,
-                  formOwnsCardFields:
-                    form !== null &&
-                    Array.from(form.elements).some((control) =>
-                      control.matches(cardFieldSelectors),
-                    ),
-                };
-              },
-              CHECKOUT_CARD_VALUE_FIELD_SELECTORS,
-            )
+            .evaluate((element, cardFieldSelectors) => {
+              const form =
+                element instanceof HTMLButtonElement || element instanceof HTMLInputElement
+                  ? element.form
+                  : null;
+              const owner =
+                form?.closest("[data-ts-payment-card-group]") ??
+                element.closest("[data-ts-payment-card-group]");
+              return {
+                ownerToken: owner?.getAttribute("data-ts-payment-card-group") ?? null,
+                formOwnsCardFields:
+                  form !== null &&
+                  Array.from(form.elements).some((control) => control.matches(cardFieldSelectors)),
+              };
+            }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS)
             .catch(() => undefined);
           if (ownership === undefined) continue;
           if (ownership.ownerToken !== null) {

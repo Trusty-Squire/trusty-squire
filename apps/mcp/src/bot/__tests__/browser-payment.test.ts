@@ -1499,9 +1499,7 @@ describe("split-checkout card fill (real browser)", () => {
         expect(result.three_ds_required).toBe(true);
         expect(await page.locator("body").getAttribute("data-submitted-form")).toBe("split");
         expect(
-          JSON.parse(
-            (await page.locator("body").getAttribute("data-submitted-values")) ?? "null",
-          ),
+          JSON.parse((await page.locator("body").getAttribute("data-submitted-values")) ?? "null"),
         ).toEqual([CARD.pan, CARD.name, "12", "30", CARD.cvv]);
       } finally {
         await browser.close();
@@ -1605,9 +1603,7 @@ describe("split-checkout card fill (real browser)", () => {
         expect(result.three_ds_required).toBe(true);
         expect(await page.locator("body").getAttribute("data-submitted-form")).toBe("split");
         expect(
-          JSON.parse(
-            (await page.locator("body").getAttribute("data-submitted-values")) ?? "null",
-          ),
+          JSON.parse((await page.locator("body").getAttribute("data-submitted-values")) ?? "null"),
         ).toEqual([CARD.pan, CARD.name, "12", "30", CARD.cvv]);
       } finally {
         await browser.close();
@@ -1665,9 +1661,7 @@ describe("split-checkout card fill (real browser)", () => {
         expect(result.three_ds_required).toBe(true);
         expect(await page.locator("body").getAttribute("data-submitted-form")).toBe("split");
         expect(
-          JSON.parse(
-            (await page.locator("body").getAttribute("data-submitted-values")) ?? "null",
-          ),
+          JSON.parse((await page.locator("body").getAttribute("data-submitted-values")) ?? "null"),
         ).toEqual([CARD.pan, CARD.name, "12", "30", CARD.cvv]);
       } finally {
         await browser.close();
