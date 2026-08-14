@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.21 (2026-08-14)
+
+- fix(mcp): preserve merchant shipping controls on single-page Shopify checkout after "Pay now" by clearing only positively-owned card/billing fields; detect in-page Shopify/DBS 3DS challenges so the 3DS wait engages; and fail closed unless a structural order-confirmation URL is reached, returning `payment_outcome_unknown` for uncertain outcomes rather than a false success (#516)
+
 ## 1.1.9-rc.20 (2026-08-13)
 
 - fix(mcp): select the visible Shopify card form by its PAN field's rendered hit-test (`topmost`) so checkouts with two structurally-complete card forms, such as KobeeJapan where one is occluded, fill and complete instead of returning `payment_card_form_ambiguous` (#512)
