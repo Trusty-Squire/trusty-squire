@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.20 (2026-08-13)
+
+- fix(mcp): select the visible Shopify card form by its PAN field's rendered hit-test (`topmost`) so checkouts with two structurally-complete card forms, such as KobeeJapan where one is occluded, fill and complete instead of returning `payment_card_form_ambiguous` (#512)
+
 ## 1.1.9-rc.19 (2026-08-13)
 
 - fix(mcp): select coherent Shopify card forms — use each PAN's rendered hit-test to choose the unique topmost group, then fill and submit only within that form, so two-form checkouts such as KobeeJapan complete without touching an occluded duplicate (#510)
