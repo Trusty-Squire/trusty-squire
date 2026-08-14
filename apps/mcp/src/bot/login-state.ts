@@ -4,7 +4,7 @@
 // expensive provider round-trip — which providers it can auto-prefer
 // for OAuth-first signup.
 
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   CHROME_PROFILE_DIR,
@@ -195,7 +195,10 @@ export async function clearProviderCookies(
 // Google credential prompt.
 export function clearBrowserProfile(profileDir: string = CHROME_PROFILE_DIR): void {
   try {
-    rmSync(profileDir, { recursive: true, force: true });
+    mkdirSync(profileDir, { recursive: true });
+    for (const entry of readdirSync(profileDir)) {
+      rmSync(join(profileDir, entry), { recursive: true, force: true });
+    }
   } catch {
     /* best-effort */
   }

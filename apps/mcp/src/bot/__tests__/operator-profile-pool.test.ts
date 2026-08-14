@@ -372,10 +372,20 @@ describe("operator profile pool migration stage", () => {
       { mode: 0o600 },
     );
 
-    const replacement = await acquireOperatorProfile("session-new", {
-      rootDir: root,
-      sourceProfileDir: source,
+    let pendingReplacement: ReturnType<typeof acquireOperatorProfile> | undefined;
+    await operatorProfilePoolTest.withSeedLock(p, async () => {
+      pendingReplacement = acquireOperatorProfile("session-new", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+      const owner = JSON.parse(readFileSync(join(p.active, "slot-0", "owner.json"), "utf8")) as {
+        session_id: string;
+      };
+      expect(owner.session_id).toBe("session-dead");
+      expect(readdirSync(p.tombstones)).toEqual([]);
     });
+    const replacement = await pendingReplacement!;
     expect(replacement.profileId).not.toBe(abandoned.profileId);
     expect(readdirSync(p.tombstones)).toHaveLength(1);
     expect(existsSync(abandoned.profileDir)).toBe(true);

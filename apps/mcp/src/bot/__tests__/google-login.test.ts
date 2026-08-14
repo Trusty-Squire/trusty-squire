@@ -668,10 +668,8 @@ describe("extractGoogleAccountEmail (PR3 capture-at-login)", () => {
     expect(extractGoogleAccountEmail(text)).toBe("ada.lovelace@example.com");
   });
 
-  it("falls back to the first email token when no chip is present", () => {
-    expect(extractGoogleAccountEmail("Signed in as user@gmail.com — Manage")).toBe(
-      "user@gmail.com",
-    );
+  it("rejects email text outside the active account chip", () => {
+    expect(extractGoogleAccountEmail("Signed in as user@gmail.com — Manage")).toBeNull();
   });
 
   it("returns null when there is no email in the text", () => {
@@ -699,6 +697,7 @@ describe("claimed worker Google identity", () => {
 
   it("reads the account email from the live worker context", async () => {
     const { close, controller } = controllerWithIdentityPage("https://myaccount.google.com/", [
+      "inactive-account@example.com",
       "Google Account: Ada Lovelace (live-worker@example.com)",
     ]);
 
@@ -718,7 +717,7 @@ describe("claimed worker Google identity", () => {
 
   it("does not mistake unrelated account-page text for the worker identity", async () => {
     const { controller } = controllerWithIdentityPage("https://myaccount.google.com/", [
-      "Contact support@example.com",
+      "inactive-account@example.com",
     ]);
 
     await expect(controller.detectGoogleAccountEmail()).resolves.toBeNull();

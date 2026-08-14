@@ -5,7 +5,16 @@
 //  #3 — the confirm browser / headless noVNC tunnel must stay open until
 //       explicit Finish during normal onboarding.
 
-import { lstatSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -114,12 +123,15 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     const target = join(base, "profile");
     const alias = join(base, "profile-alias");
     mkdirSync(target);
+    writeFileSync(join(target, "stale-state"), "stale");
     symlinkSync(target, alias, "dir");
     try {
       await withConnectProfileGuard(alias, async (canonicalProfileDir) => {
         expect(canonicalProfileDir).toBe(target);
         clearBrowserProfile(canonicalProfileDir);
-        await withProfileOperationGuard(canonicalProfileDir, async () => undefined);
+        expect(realpathSync(alias)).toBe(target);
+        expect(existsSync(join(target, "stale-state"))).toBe(false);
+        await withProfileOperationGuard(alias, async () => undefined);
       });
       expect(lstatSync(alias).isSymbolicLink()).toBe(true);
     } finally {

@@ -838,24 +838,22 @@ export async function acquireOperatorProfile(
   const now = opts.now ?? Date.now;
   initializePool(p);
   scavengeDestroyRequired(p);
-  scavengeQuarantinedActive(p);
-  scavengeActiveSlots(p, now());
 
-  let slotDir: string | null = null;
-  let ownerToken = "";
-  for (let index = 0; index < ACTIVE_SLOT_COUNT; index += 1) {
-    const reservation = reserveActiveSlot(p, index, sessionId);
-    if (reservation !== null) {
-      slotDir = reservation.slotDir;
-      ownerToken = reservation.ownerToken;
-      break;
+  const reservation = await withSeedLock(p, () => {
+    scavengeQuarantinedActive(p);
+    scavengeActiveSlots(p, now());
+    for (let index = 0; index < ACTIVE_SLOT_COUNT; index += 1) {
+      const claimed = reserveActiveSlot(p, index, sessionId);
+      if (claimed !== null) return claimed;
     }
-  }
-  if (slotDir === null) {
+    return null;
+  });
+  if (reservation === null) {
     throw new Error(
       "operate_start capacity reached: 1 operator session is active; finish it and retry",
     );
   }
+  const { slotDir, ownerToken } = reservation;
 
   const claimDir = join(slotDir, "claim");
   let allocatedProfileId: string | null = null;

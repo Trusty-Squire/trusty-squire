@@ -1330,8 +1330,7 @@ export function extractGoogleAccountEmail(pageText: string): string | null {
     const match = GOOGLE_ACCOUNT_EMAIL_RE.exec(chip[1]);
     if (match !== null) return match[0].trim();
   }
-  const any = GOOGLE_ACCOUNT_EMAIL_RE.exec(pageText);
-  return any !== null ? any[0].trim() : null;
+  return null;
 }
 
 // Map a cookie jar to the OAuth providers that have a LIVE logged-in session.
@@ -11622,21 +11621,13 @@ export class BrowserController {
       });
       if (new URL(identityPage.url()).hostname !== "myaccount.google.com") return null;
       const identityTokens = await identityPage
-        .locator("[aria-label], [data-identifier]")
+        .locator("[aria-label]")
         .evaluateAll((elements) =>
-          elements.flatMap((element) => [
-            element.getAttribute("aria-label") ?? "",
-            element.getAttribute("data-identifier") ?? "",
-          ]),
+          elements.map((element) => element.getAttribute("aria-label") ?? ""),
         );
       for (const token of identityTokens) {
         const trimmed = token.trim();
-        const match = GOOGLE_ACCOUNT_EMAIL_RE.exec(trimmed);
-        const email = /^Google Account:/i.test(trimmed)
-          ? extractGoogleAccountEmail(trimmed)
-          : match?.[0] === trimmed
-            ? trimmed
-            : null;
+        const email = /^Google Account:/i.test(trimmed) ? extractGoogleAccountEmail(trimmed) : null;
         if (email !== null) return email;
       }
       return null;
