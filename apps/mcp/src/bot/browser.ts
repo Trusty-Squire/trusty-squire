@@ -62,7 +62,7 @@ import {
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
 import {
-  OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
+  GOOGLE_LOGIN_COOKIE_MARKERS,
   type OperatorWorkerIdentity,
 } from "./operator-profile-pool.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
@@ -1355,7 +1355,7 @@ export function sessionProvidersFromCookies(
     {
       provider: "google",
       host: /(^|\.)google\.com$/i,
-      names: OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
+      names: GOOGLE_LOGIN_COOKIE_MARKERS,
     },
   ];
   const live: OAuthProviderId[] = [];

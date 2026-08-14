@@ -50,6 +50,7 @@ import {
   ensureOAuthSession,
   finalizeLoginRun,
   launchPersistentLoginContext,
+  validateGoogleProfileSession,
   type HeadlessRig,
   type PersistentLauncher,
 } from "../google-login.js";
@@ -706,6 +707,75 @@ describe("confirmed login finalization", () => {
 
       expect(onConfirmedLogin).not.toHaveBeenCalled();
       expect(publishSeed).not.toHaveBeenCalled();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not replace the Google seed after a completed GitHub login", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const validateGoogleSeed = vi.fn(async () => true);
+    const publishSeed = vi.fn();
+    try {
+      await finalizeLoginRun(
+        { profileDir, seedProvider: "github", validateGoogleSeed },
+        { status: "completed", closeState: "closed" },
+        publishSeed,
+      );
+
+      expect(validateGoogleSeed).not.toHaveBeenCalled();
+      expect(publishSeed).not.toHaveBeenCalled();
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes only verified closed Google login provenance", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-finalize-"));
+    const validateGoogleSeed = vi.fn(async () => true);
+    const publishSeed = vi.fn(async () => "generation");
+    try {
+      await finalizeLoginRun(
+        { profileDir, seedProvider: "google", validateGoogleSeed },
+        { status: "completed", closeState: "closed" },
+        publishSeed,
+      );
+
+      expect(publishSeed).toHaveBeenCalledWith(profileDir, {
+        proof: { loginStatus: "completed", closeState: "closed", provider: "google" },
+        validateGoogleIdentity: validateGoogleSeed,
+      });
+    } finally {
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Google seed validation", () => {
+  it.each([
+    ["https://myaccount.google.com/", true],
+    ["https://accounts.google.com/v3/signin/identifier", false],
+  ] as const)("observes the final Google account navigation at %s", async (url, expected) => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-google-seed-validation-"));
+    const close = vi.fn(async () => undefined);
+    const goto = vi.fn(async () => undefined);
+    const page = { goto, url: () => url };
+    const context = {
+      pages: () => [page],
+      newPage: vi.fn(async () => page),
+      close,
+    };
+    const launcher = {
+      launchPersistentContext: vi.fn(async () => context),
+    } as unknown as PersistentLauncher;
+
+    try {
+      await expect(validateGoogleProfileSession(profileDir, launcher)).resolves.toBe(expected);
+      expect(goto).toHaveBeenCalledWith("https://myaccount.google.com/", {
+        waitUntil: "domcontentloaded",
+        timeout: 30_000,
+      });
+      expect(close).toHaveBeenCalledOnce();
     } finally {
       rmSync(profileDir, { recursive: true, force: true });
     }

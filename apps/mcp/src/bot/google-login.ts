@@ -73,7 +73,7 @@ import type { BrowserContext } from "playwright";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   canPublishOperatorProfileSeed,
-  OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
+  GOOGLE_LOGIN_COOKIE_MARKERS,
   publishOperatorProfileSeed,
 } from "./operator-profile-pool.js";
 
@@ -153,7 +153,7 @@ const LOGIN_TARGETS: Record<OAuthProviderId, LoginTarget> = {
     label: "Google",
     loginUrl: "https://accounts.google.com/",
     cookieOrigin: "https://www.google.com",
-    cookies: OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
+    cookies: GOOGLE_LOGIN_COOKIE_MARKERS,
   },
   github: {
     provider: "github",
@@ -209,7 +209,7 @@ export async function contextHasProviderSession(
 }
 
 const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
-  google: OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
+  google: GOOGLE_LOGIN_COOKIE_MARKERS,
   github: ["user_session"],
 };
 
@@ -968,6 +968,8 @@ export interface RunInBotChromeOpts {
   // browser is still open (read which provider cookies seeded, etc.).
   plainOnSuccess?: (profileDir: string) => Promise<void>;
   onConfirmedLogin?: () => Promise<void>;
+  seedProvider?: OAuthProviderId | (() => OAuthProviderId | null);
+  validateGoogleSeed?: (profileDir: string) => Promise<boolean>;
 }
 
 const LOGIN_BROWSER_CLOSED_ERROR =
@@ -991,16 +993,49 @@ export interface LoginRunResult {
 }
 
 export async function finalizeLoginRun(
-  opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin">,
+  opts: Pick<
+    RunInBotChromeOpts,
+    "profileDir" | "onConfirmedLogin" | "seedProvider" | "validateGoogleSeed"
+  >,
   result: LoginRunResult,
   publishSeed: typeof publishOperatorProfileSeed = publishOperatorProfileSeed,
 ): Promise<void> {
   if (result.status === "completed" || result.status === "preflight_satisfied") {
     await opts.onConfirmedLogin?.();
   }
-  const proof = { loginStatus: result.status, closeState: result.closeState };
-  if (canPublishOperatorProfileSeed(proof)) {
-    await publishSeed(opts.profileDir, { proof });
+  const provider =
+    typeof opts.seedProvider === "function" ? opts.seedProvider() : (opts.seedProvider ?? null);
+  const proof = { loginStatus: result.status, closeState: result.closeState, provider };
+  if (canPublishOperatorProfileSeed(proof) && opts.validateGoogleSeed !== undefined) {
+    await publishSeed(opts.profileDir, {
+      proof,
+      validateGoogleIdentity: opts.validateGoogleSeed,
+    });
+  }
+}
+
+export async function validateGoogleProfileSession(
+  profileDir: string,
+  launcher: PersistentLauncher = resolveChromium(),
+): Promise<boolean> {
+  const context = await launchWithProfileGate(profileDir, () =>
+    launchPersistentLoginContext(launcher, profileDir, {
+      headless: true,
+      ignoreDefaultArgs: ["--enable-automation"],
+      args: ["--no-sandbox", "--disable-dev-shm-usage"],
+    }),
+  );
+  try {
+    const page = context.pages()[0] ?? (await context.newPage());
+    await page.goto("https://myaccount.google.com/", {
+      waitUntil: "domcontentloaded",
+      timeout: 30_000,
+    });
+    return new URL(page.url()).hostname === "myaccount.google.com";
+  } catch {
+    return false;
+  } finally {
+    await context.close().catch(() => undefined);
   }
 }
 
@@ -1598,6 +1633,8 @@ export async function ensureOAuthSession(opts?: {
       },
       pollUntilDone: (ctx) => hasProviderSession(ctx, target),
       onConfirmedLogin: async () => markProviderLoggedIn(provider, profileDir),
+      seedProvider: provider,
+      validateGoogleSeed: validateGoogleProfileSession,
       ...(opts?.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
     });
     // Map runInBotChrome's status set to ensureOAuthSession's contract.

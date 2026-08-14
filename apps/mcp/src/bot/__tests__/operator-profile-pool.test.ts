@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -11,19 +12,36 @@ import {
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   acquireOperatorProfile,
   canPublishOperatorProfileSeed,
   operatorProfilePoolTest,
-  publishOperatorProfileSeed,
+  OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
+  publishOperatorProfileSeed as publishOperatorProfileSeedRaw,
 } from "../operator-profile-pool.js";
 import { profilePathIdentity } from "../profile.js";
 
 const roots: string[] = [];
-const verifiedLoginProof = { loginStatus: "completed", closeState: "closed" } as const;
+const verifiedLoginProof = {
+  loginStatus: "completed",
+  closeState: "closed",
+  provider: "google",
+} as const;
+
+function publishOperatorProfileSeed(
+  sourceProfileDir: string,
+  opts: Omit<Parameters<typeof publishOperatorProfileSeedRaw>[1], "validateGoogleIdentity"> & {
+    validateGoogleIdentity?: (profileDir: string) => Promise<boolean>;
+  },
+): ReturnType<typeof publishOperatorProfileSeedRaw> {
+  return publishOperatorProfileSeedRaw(sourceProfileDir, {
+    ...opts,
+    validateGoogleIdentity: opts.validateGoogleIdentity ?? (() => Promise.resolve(true)),
+  });
+}
 
 function writeCookies(
   source: string,
@@ -60,6 +78,11 @@ function fixture(): { root: string; source: string } {
   mkdirSync(join(source, "Default", "Cache"), { recursive: true });
   writeCookies(source, [
     { host: ".google.com", name: "SID", value: "identity-cookie" },
+    ...OPERATOR_SEED_GOOGLE_COOKIE_NAMES.filter((name) => name !== "SID").map((name) => ({
+      host: ".google.com",
+      name,
+      value: `identity-${name}`,
+    })),
     { host: ".google.com", name: "payment_approval", value: "google-payment-cookie" },
     { host: "checkout.example.com", name: "approval", value: "payment-approval-cookie" },
   ]);
@@ -128,7 +151,11 @@ describe("operator profile pool migration stage", () => {
     });
     const p = operatorProfilePoolTest.paths(root);
     const firstSeed = join(p.generations, first, "user-data");
-    expect(cookieValues(firstSeed)).toEqual(["identity-cookie"]);
+    expect(cookieValues(firstSeed)).toEqual(
+      OPERATOR_SEED_GOOGLE_COOKIE_NAMES.map((name) =>
+        name === "SID" ? "identity-cookie" : `identity-${name}`,
+      ).sort(),
+    );
     const cookieBytes = readFileSync(join(firstSeed, "Default", "Cookies"));
     expect(cookieBytes.includes(Buffer.from("google-payment-cookie"))).toBe(false);
     expect(cookieBytes.includes(Buffer.from("payment-approval-cookie"))).toBe(false);
@@ -153,6 +180,32 @@ describe("operator profile pool migration stage", () => {
     expect(operatorProfilePoolTest.currentGeneration(p)).toBe(second);
   });
 
+  it("keeps the current seed when observable Google validation fails", async () => {
+    const { root, source } = fixture();
+    const first = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    writeCookies(source, [{ host: ".google.com", name: "SID", value: "replacement" }]);
+
+    await expect(
+      publishOperatorProfileSeed(source, {
+        rootDir: root,
+        proof: verifiedLoginProof,
+        validateGoogleIdentity: async (profileDir) => {
+          expect(profileDir).not.toBe(source);
+          expect(cookieValues(profileDir)).toEqual(["replacement"]);
+          return false;
+        },
+      }),
+    ).rejects.toThrow("failed Google identity validation");
+
+    expect(operatorProfilePoolTest.currentGeneration(p)).toBe(first);
+    expect(readdirSync(p.generations)).toEqual([first]);
+    expect(readdirSync(p.tombstones)).toEqual([]);
+  });
+
   it("admits one active lease and never launches from the login-authoring profile", async () => {
     const { root, source } = fixture();
     await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
@@ -161,7 +214,11 @@ describe("operator profile pool migration stage", () => {
       sourceProfileDir: source,
     });
     expect(first.profileDir).not.toBe(source);
-    expect(cookieValues(first.profileDir)).toEqual(["identity-cookie"]);
+    expect(cookieValues(first.profileDir)).toEqual(
+      OPERATOR_SEED_GOOGLE_COOKIE_NAMES.map((name) =>
+        name === "SID" ? "identity-cookie" : `identity-${name}`,
+      ).sort(),
+    );
     expect(existsSync(join(first.profileDir, "Default", "Web Data"))).toBe(false);
     await expect(
       acquireOperatorProfile("session-b", { rootDir: root, sourceProfileDir: source }),
@@ -280,6 +337,44 @@ describe("operator profile pool migration stage", () => {
     expect(existsSync(join(p.tombstones, tombstone!))).toBe(true);
 
     operatorProfilePoolTest.scavengeDestroyRequired(p, () => "stale", signalWorker);
+    expect(existsSync(lease.profileDir)).toBe(false);
+    expect(existsSync(join(p.tombstones, tombstone!))).toBe(false);
+  });
+
+  it("leaves failed payment-profile deletion on the destroy-required scavenger path", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const lease = await acquireOperatorProfile("payment-delete-failure", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    lease.bindWorker({
+      host: hostname(),
+      pid: process.pid,
+      start_time: "test-birth",
+      user_data_dir: profilePathIdentity(lease.profileDir),
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const profileRoot = dirname(lease.profileDir);
+
+    chmodSync(profileRoot, 0o000);
+    try {
+      await expect(lease.destroy()).rejects.toThrow();
+    } finally {
+      chmodSync(profileRoot, 0o700);
+    }
+
+    const tombstone = readdirSync(p.tombstones).find((entry) =>
+      entry.startsWith("destroy-required-"),
+    );
+    expect(tombstone).toBeDefined();
+    const descriptor = JSON.parse(
+      readFileSync(join(p.tombstones, tombstone!, "claim", "lease.json"), "utf8"),
+    ) as { disposition?: string };
+    expect(descriptor.disposition).toBe("destroy_required");
+    expect(existsSync(lease.profileDir)).toBe(true);
+
+    operatorProfilePoolTest.scavengeDestroyRequired(p, () => "stale", vi.fn());
     expect(existsSync(lease.profileDir)).toBe(false);
     expect(existsSync(join(p.tombstones, tombstone!))).toBe(false);
   });
@@ -442,20 +537,22 @@ describe("operator profile pool migration stage", () => {
     expect(canPublishOperatorProfileSeed(verifiedLoginProof, "darwin")).toBe(false);
     await expect(
       publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof }),
-    ).rejects.toThrow("requires a completed Linux login and verified Chrome closure");
+    ).rejects.toThrow("requires explicit completed Google login provenance");
     expect(existsSync(join(root, "seed"))).toBe(false);
   });
 
   it.each([
-    { loginStatus: "completed", closeState: "force_closed_unproven" },
-    { loginStatus: "completed", closeState: "unknown" },
-    { loginStatus: "preflight_satisfied", closeState: "closed" },
-    { loginStatus: "timeout", closeState: "closed" },
+    { loginStatus: "completed", closeState: "force_closed_unproven", provider: "google" },
+    { loginStatus: "completed", closeState: "unknown", provider: "google" },
+    { loginStatus: "preflight_satisfied", closeState: "closed", provider: "google" },
+    { loginStatus: "timeout", closeState: "closed", provider: "google" },
+    { loginStatus: "completed", closeState: "closed", provider: "github" },
+    { loginStatus: "completed", closeState: "closed", provider: null },
   ] as const)("refuses seed publication without completed-login closure proof", async (proof) => {
     const { root, source } = fixture();
     expect(canPublishOperatorProfileSeed(proof, "linux")).toBe(false);
     await expect(publishOperatorProfileSeed(source, { rootDir: root, proof })).rejects.toThrow(
-      "requires a completed Linux login and verified Chrome closure",
+      "requires explicit completed Google login provenance",
     );
     expect(existsSync(join(root, "seed"))).toBe(false);
   });

@@ -19,6 +19,7 @@ import {
 import { homedir, hostname, tmpdir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import Database from "better-sqlite3";
+import type { OAuthProviderId } from "./oauth-providers.js";
 import {
   CHROME_PROFILE_DIR,
   processBirthIdentity,
@@ -51,7 +52,28 @@ const IDENTITY_SEED_FILES = [
   "provider-emails.json",
 ] as const;
 const IDENTITY_COOKIE_FILES = ["Default/Cookies", "Default/Network/Cookies"] as const;
-export const OPERATOR_SEED_GOOGLE_COOKIE_NAMES = ["__Secure-1PSID", "SAPISID", "SID"] as const;
+export const GOOGLE_LOGIN_COOKIE_MARKERS = ["__Secure-1PSID", "SAPISID", "SID"] as const;
+export const OPERATOR_SEED_GOOGLE_COOKIE_NAMES = [
+  "SID",
+  "HSID",
+  "SSID",
+  "APISID",
+  "SAPISID",
+  "LSID",
+  "OSID",
+  "__Secure-1PSID",
+  "__Secure-3PSID",
+  "__Secure-1PAPISID",
+  "__Secure-3PAPISID",
+  "SIDCC",
+  "__Secure-1PSIDCC",
+  "__Secure-3PSIDCC",
+  "__Secure-1PSIDTS",
+  "__Secure-3PSIDTS",
+  "AEC",
+  "ACCOUNT_CHOOSER",
+  "__Host-GAPS",
+] as const;
 
 interface ProcessIdentity {
   pid: number;
@@ -443,13 +465,27 @@ function currentGeneration(p: PoolPaths): string | null {
   }
 }
 
-function publishSeedLocked(p: PoolPaths, sourceProfileDir: string): string {
+async function publishSeedLocked(
+  p: PoolPaths,
+  sourceProfileDir: string,
+  validateGoogleIdentity: (profileDir: string) => Promise<boolean>,
+): Promise<string> {
   const generation = randomUUID();
   const staging = join(p.generations, `.${generation}.tmp`);
   const destination = join(p.generations, generation);
+  const validationProfile = join(p.tombstones, `seed-validation-${generation}`);
   try {
     ensurePrivateDir(staging);
     copyIdentitySeed(sourceProfileDir, join(staging, "user-data"));
+    cpSync(join(staging, "user-data"), validationProfile, {
+      recursive: true,
+      force: false,
+      errorOnExist: true,
+    });
+    if (!(await validateGoogleIdentity(validationProfile))) {
+      throw new Error("operator profile seed failed Google identity validation");
+    }
+    rmSync(validationProfile, { recursive: true, force: true });
     renameSync(staging, destination);
     const nextLink = join(p.seed, `.current-${generation}`);
     symlinkSync(join("generations", generation), nextLink, "dir");
@@ -461,6 +497,7 @@ function publishSeedLocked(p: PoolPaths, sourceProfileDir: string): string {
     }
     return generation;
   } catch (err) {
+    rmSync(validationProfile, { recursive: true, force: true });
     rmSync(staging, { recursive: true, force: true });
     throw err;
   }
@@ -477,28 +514,39 @@ export function assertOperatorProfileRuntimeSupported(
 export interface OperatorSeedPublicationProof {
   loginStatus: "completed" | "preflight_satisfied" | "timeout";
   closeState: ProfileCloseState;
+  provider: OAuthProviderId | null;
 }
 
 export function canPublishOperatorProfileSeed(
   proof: OperatorSeedPublicationProof,
   platform: NodeJS.Platform = process.platform,
 ): boolean {
-  return platform === "linux" && proof.loginStatus === "completed" && proof.closeState === "closed";
+  return (
+    platform === "linux" &&
+    proof.provider === "google" &&
+    proof.loginStatus === "completed" &&
+    proof.closeState === "closed"
+  );
 }
 
 export async function publishOperatorProfileSeed(
   sourceProfileDir: string = CHROME_PROFILE_DIR,
-  opts: Pick<OperatorProfilePoolOptions, "rootDir"> & { proof: OperatorSeedPublicationProof },
+  opts: Pick<OperatorProfilePoolOptions, "rootDir"> & {
+    proof: OperatorSeedPublicationProof;
+    validateGoogleIdentity: (profileDir: string) => Promise<boolean>;
+  },
 ): Promise<string> {
   if (!canPublishOperatorProfileSeed(opts.proof)) {
     throw new Error(
-      "operator profile seed publication requires a completed Linux login and verified Chrome closure",
+      "operator profile seed publication requires explicit completed Google login provenance and verified Linux Chrome closure",
     );
   }
   const resolvedSource = profilePathIdentity(sourceProfileDir);
   const p = paths(poolRootForSource(resolvedSource, opts.rootDir));
   initializePool(p);
-  return await withSeedLock(p, () => publishSeedLocked(p, resolvedSource));
+  return await withSeedLock(p, () =>
+    publishSeedLocked(p, resolvedSource, opts.validateGoogleIdentity),
+  );
 }
 
 function profileDir(p: PoolPaths, profileId: string): string {
@@ -785,7 +833,9 @@ export class OperatorProfileLease {
 
   async destroy(): Promise<void> {
     if (this.finished) return;
-    this.discardOwnedSlot();
+    this.descriptor = { ...this.descriptor, disposition: "destroy_required" };
+    writePrivateJson(join(this.claimDir, "lease.json"), this.descriptor);
+    this.discardOwnedSlot("destroy-required");
     this.finished = true;
   }
 
@@ -804,12 +854,12 @@ export class OperatorProfileLease {
     this.finished = true;
   }
 
-  private discardOwnedSlot(): void {
+  private discardOwnedSlot(label = "owned-active"): void {
     const tombstone = quarantineOwnedActiveSlot(
       this.p,
       this.slotDir,
       this.ownerToken,
-      "owned-active",
+      label,
     );
     if (tombstone === null) return;
     const quarantinedLease = readLease(join(tombstone, "claim"));
