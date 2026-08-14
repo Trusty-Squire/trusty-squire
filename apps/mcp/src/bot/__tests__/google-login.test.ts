@@ -14,6 +14,7 @@ import { shortenVncUrl } from "../../api-client.js";
 import {
   BrowserController,
   childProcessIsRunning,
+  resolveAttachedProfileChildIdentity,
   terminateTrackedProfileChild,
   withChromeStartupLock,
 } from "../browser.js";
@@ -602,6 +603,35 @@ describe("confirmed login finalization", () => {
 });
 
 describe("cancelled self-managed Chrome launch", () => {
+  it("allows a non-Linux attachment to continue with unknown identity", async () => {
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-nonlinux-chrome-"));
+    const child = fakeProcess("chrome");
+    Object.assign(child, { pid: 424_241 });
+    const readIdentity = vi.fn(() => null);
+    const terminate = vi.fn(() => true);
+    try {
+      await expect(
+        resolveAttachedProfileChildIdentity(child, profileDir, null, {
+          platform: "darwin",
+          readIdentity,
+        }),
+      ).resolves.toBeNull();
+      await expect(
+        terminateTrackedProfileChild(child, profileDir, {
+          platform: "darwin",
+          readIdentity,
+          terminate,
+        }),
+      ).resolves.toBeNull();
+      expect(readIdentity).not.toHaveBeenCalled();
+      expect(terminate).not.toHaveBeenCalled();
+      expect(childProcessIsRunning(child)).toBe(true);
+    } finally {
+      Object.assign(child, { exitCode: 0 });
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
   it("retains the child until exact profile identity becomes observable", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-cancelled-chrome-"));
     const child = fakeProcess("chrome");

@@ -1700,11 +1700,29 @@ async function waitForTrackedProfileChildIdentity(
   return null;
 }
 
+export async function resolveAttachedProfileChildIdentity(
+  child: ChildProcess,
+  profileDir: string,
+  identity: ProfileProcessIdentity | null,
+  options: {
+    platform?: NodeJS.Platform;
+    readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
+  } = {},
+): Promise<ProfileProcessIdentity | null> {
+  if (identity !== null || (options.platform ?? process.platform) !== "linux") return identity;
+  return await waitForTrackedProfileChildIdentity(
+    child,
+    profileDir,
+    options.readIdentity ?? profileProcessIdentity,
+  );
+}
+
 export async function terminateTrackedProfileChild(
   child: ChildProcess,
   profileDir: string,
   options: {
     identity?: ProfileProcessIdentity | null;
+    platform?: NodeJS.Platform;
     readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
     terminate?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
   } = {},
@@ -1718,6 +1736,7 @@ export async function terminateTrackedProfileChild(
       return signalled;
     });
   let identity = options.identity ?? null;
+  if (identity === null && (options.platform ?? process.platform) !== "linux") return null;
   while (childProcessIsRunning(child)) {
     identity ??= await waitForTrackedProfileChildIdentity(child, profileDir, readIdentity);
     if (identity === null) break;
@@ -1955,12 +1974,12 @@ export async function launchSelfManagedLoginContext(params: {
       });
       try {
         const endpoint = await waitForDevtools(port, 30_000, spawned);
-        childIdentity ??= await waitForTrackedProfileChildIdentity(
+        childIdentity = await resolveAttachedProfileChildIdentity(
           spawned,
           params.profileDir,
-          profileProcessIdentity,
+          childIdentity,
         );
-        if (childIdentity === null) {
+        if (process.platform === "linux" && childIdentity === null) {
           throw new Error("self-launched login Chrome exited before identity was proven");
         }
         return endpoint;
@@ -2430,12 +2449,12 @@ export class BrowserController {
         }
         try {
           const endpoint = await waitForDevtools(port, 30_000);
-          this.childChromeIdentity ??= await waitForTrackedProfileChildIdentity(
+          this.childChromeIdentity = await resolveAttachedProfileChildIdentity(
             child,
             this.profileDir,
-            profileProcessIdentity,
+            this.childChromeIdentity,
           );
-          if (this.childChromeIdentity === null) {
+          if (process.platform === "linux" && this.childChromeIdentity === null) {
             throw new Error("self-launched Chrome exited before identity was proven");
           }
           return endpoint;

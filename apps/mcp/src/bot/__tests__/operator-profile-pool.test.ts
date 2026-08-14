@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -166,6 +167,65 @@ describe("operator profile pool migration stage", () => {
       acquireOperatorProfile("session-b", { rootDir: root, sourceProfileDir: source }),
     ).rejects.toThrow("capacity reached");
     await first.destroy();
+  });
+
+  it("publishes a complete active owner without an ownerless public window", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    let winner: ReturnType<typeof operatorProfilePoolTest.reserveActiveSlot> = null;
+
+    const loser = operatorProfilePoolTest.reserveActiveSlot(p, 0, "loser", () => {
+      winner = operatorProfilePoolTest.reserveActiveSlot(p, 0, "winner");
+    });
+
+    expect(loser).toBeNull();
+    expect(winner).not.toBeNull();
+    const owner = JSON.parse(readFileSync(join(p.active, "slot-0", "owner.json"), "utf8")) as {
+      session_id: string;
+      token: string;
+    };
+    expect(owner.session_id).toBe("winner");
+    expect(owner.token).toBe(winner!.ownerToken);
+    expect(readdirSync(p.activeClaims)).toHaveLength(1);
+  });
+
+  it("revisits quarantined active profiles until exact worker closure", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const lease = await acquireOperatorProfile("crashed-session", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    lease.bindWorker({
+      host: hostname(),
+      pid: process.pid,
+      start_time: "worker-birth",
+      user_data_dir: profilePathIdentity(lease.profileDir),
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const slot = join(p.active, "slot-0");
+    const owner = JSON.parse(readFileSync(join(slot, "owner.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    writeFileSync(
+      join(slot, "owner.json"),
+      `${JSON.stringify({ ...owner, start_time: "stale-owner" })}\n`,
+    );
+    const tombstone = join(p.tombstones, "active-0-test");
+    renameSync(slot, tombstone);
+    const signalWorker = vi.fn(() => true);
+
+    operatorProfilePoolTest.scavengeQuarantinedActive(p, () => "matching", signalWorker);
+    expect(signalWorker).toHaveBeenCalledOnce();
+    expect(existsSync(lease.profileDir)).toBe(true);
+    expect(existsSync(tombstone)).toBe(true);
+
+    operatorProfilePoolTest.scavengeQuarantinedActive(p, () => "stale", signalWorker);
+    expect(existsSync(lease.profileDir)).toBe(false);
+    expect(existsSync(tombstone)).toBe(false);
+    expect(readdirSync(p.activeClaims)).toEqual([]);
   });
 
   it("binds a canonical worker identity through a symlinked pool root", async () => {

@@ -17,7 +17,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import Database from "better-sqlite3";
 import {
   CHROME_PROFILE_DIR,
@@ -91,6 +91,7 @@ interface PoolPaths {
   seedLock: string;
   profiles: string;
   active: string;
+  activeClaims: string;
   warm: string;
   tombstones: string;
 }
@@ -127,6 +128,7 @@ function paths(rootDir?: string): PoolPaths {
     seedLock: join(seed, ".lock"),
     profiles: join(root, "profiles"),
     active: join(root, "active"),
+    activeClaims: join(root, "active-claims"),
     warm: join(root, "warm"),
     tombstones: join(root, "tombstones"),
   };
@@ -138,7 +140,16 @@ function ensurePrivateDir(path: string): void {
 }
 
 function initializePool(p: PoolPaths): void {
-  for (const dir of [p.root, p.seed, p.generations, p.profiles, p.active, p.warm, p.tombstones]) {
+  for (const dir of [
+    p.root,
+    p.seed,
+    p.generations,
+    p.profiles,
+    p.active,
+    p.activeClaims,
+    p.warm,
+    p.tombstones,
+  ]) {
     ensurePrivateDir(dir);
   }
 }
@@ -528,6 +539,57 @@ function quarantine(p: PoolPaths, publicPath: string, label: string): string | n
   }
 }
 
+function removeSlotContainer(p: PoolPaths, path: string): void {
+  let privateClaim: string | null = null;
+  try {
+    if (lstatSync(path).isSymbolicLink()) {
+      privateClaim = resolve(dirname(path), readlinkSync(path));
+    }
+  } catch {
+    return;
+  }
+  rmSync(path, { recursive: true, force: true });
+  if (privateClaim !== null && dirname(privateClaim) === p.activeClaims) {
+    rmSync(privateClaim, { recursive: true, force: true });
+  }
+}
+
+function reserveActiveSlot(
+  p: PoolPaths,
+  index: number,
+  sessionId: string,
+  beforePublish?: () => void,
+): { slotDir: string; ownerToken: string } | null {
+  const ownerToken = randomUUID();
+  const privateClaim = join(p.activeClaims, randomUUID());
+  const candidate = join(p.active, `slot-${index}`);
+  ensurePrivateDir(privateClaim);
+  let published = false;
+  try {
+    const identity = currentProcessIdentity();
+    writePrivateJson(join(privateClaim, "owner.json"), {
+      host: hostname(),
+      ...identity,
+      token: ownerToken,
+      session_id: sessionId,
+    } satisfies ActiveOwner);
+    beforePublish?.();
+    try {
+      symlinkSync(relative(p.active, privateClaim), candidate, "dir");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return null;
+      throw err;
+    }
+    published = true;
+    if (readJson<ActiveOwner>(join(candidate, "owner.json"))?.token !== ownerToken) {
+      throw new Error("operator active-slot ownership was lost during reservation");
+    }
+    return { slotDir: candidate, ownerToken };
+  } finally {
+    if (!published) rmSync(privateClaim, { recursive: true, force: true });
+  }
+}
+
 function quarantineOwnedActiveSlot(
   p: PoolPaths,
   slotDir: string,
@@ -544,7 +606,12 @@ function quarantineOwnedActiveSlot(
   return tombstone;
 }
 
-function reapQuarantinedActive(p: PoolPaths, tombstone: string): void {
+function reapQuarantinedActive(
+  p: PoolPaths,
+  tombstone: string,
+  workerState: typeof profileProcessIdentityState = profileProcessIdentityState,
+  signalWorker: typeof signalProfileProcess = signalProfileProcess,
+): void {
   const owner = readJson<ActiveOwner>(join(tombstone, "owner.json"));
   if (owner !== null && (owner.host !== hostname() || processState(owner) !== "stale")) {
     // A transient identity read failed before quarantine. Restore the lease if
@@ -561,20 +628,20 @@ function reapQuarantinedActive(p: PoolPaths, tombstone: string): void {
   const claim = join(tombstone, "claim");
   const lease = readLease(claim);
   if (lease === null) {
-    rmSync(tombstone, { recursive: true, force: true });
+    removeSlotContainer(p, tombstone);
     return;
   }
   const dir = profileDir(p, lease.profile_id);
   const worker = lease.worker;
   if (worker === undefined) return;
-  const workerState = profileProcessIdentityState(worker, dir);
-  if (workerState === "unknown") return;
-  if (workerState === "matching") {
-    if (!signalProfileProcess(worker, dir, "SIGKILL")) return;
+  const state = workerState(worker, dir);
+  if (state === "unknown") return;
+  if (state === "matching") {
+    if (!signalWorker(worker, dir, "SIGKILL")) return;
     return;
   }
   removeProfile(p, lease);
-  rmSync(tombstone, { recursive: true, force: true });
+  removeSlotContainer(p, tombstone);
 }
 
 function scavengeDestroyRequired(
@@ -595,7 +662,18 @@ function scavengeDestroyRequired(
       continue;
     }
     removeProfile(p, lease);
-    rmSync(tombstone, { recursive: true, force: true });
+    removeSlotContainer(p, tombstone);
+  }
+}
+
+function scavengeQuarantinedActive(
+  p: PoolPaths,
+  workerState: typeof profileProcessIdentityState = profileProcessIdentityState,
+  signalWorker: typeof signalProfileProcess = signalProfileProcess,
+): void {
+  for (const entry of readdirSync(p.tombstones)) {
+    if (!/^active-\d+-/.test(entry)) continue;
+    reapQuarantinedActive(p, join(p.tombstones, entry), workerState, signalWorker);
   }
 }
 
@@ -741,12 +819,12 @@ export class OperatorProfileLease {
       return;
     }
     removeProfile(this.p, quarantinedLease);
-    rmSync(tombstone, { recursive: true, force: true });
+    removeSlotContainer(this.p, tombstone);
   }
 
   private releaseSlot(): void {
     const owner = readJson<ActiveOwner>(join(this.slotDir, "owner.json"));
-    if (owner?.token === this.ownerToken) rmSync(this.slotDir, { recursive: true, force: true });
+    if (owner?.token === this.ownerToken) removeSlotContainer(this.p, this.slotDir);
   }
 }
 
@@ -760,36 +838,17 @@ export async function acquireOperatorProfile(
   const now = opts.now ?? Date.now;
   initializePool(p);
   scavengeDestroyRequired(p);
+  scavengeQuarantinedActive(p);
   scavengeActiveSlots(p, now());
 
   let slotDir: string | null = null;
   let ownerToken = "";
   for (let index = 0; index < ACTIVE_SLOT_COUNT; index += 1) {
-    const candidate = join(p.active, `slot-${index}`);
-    try {
-      mkdirSync(candidate, { mode: 0o700 });
-      try {
-        ownerToken = randomUUID();
-        const identity = currentProcessIdentity();
-        writePrivateJson(join(candidate, "owner.json"), {
-          host: hostname(),
-          ...identity,
-          token: ownerToken,
-          session_id: sessionId,
-        } satisfies ActiveOwner);
-        if (readJson<ActiveOwner>(join(candidate, "owner.json"))?.token !== ownerToken) {
-          throw new Error("operator active-slot ownership was lost during reservation");
-        }
-      } catch (err) {
-        // The slot may already have been quarantined and its public name reused.
-        // Never clean a failed reservation by path; the grace-based scavenger
-        // will tombstone an owner-less slot if this directory is still ours.
-        throw err;
-      }
-      slotDir = candidate;
+    const reservation = reserveActiveSlot(p, index, sessionId);
+    if (reservation !== null) {
+      slotDir = reservation.slotDir;
+      ownerToken = reservation.ownerToken;
       break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
   }
   if (slotDir === null) {
@@ -859,7 +918,7 @@ export async function acquireOperatorProfile(
         rmSync(join(p.profiles, allocatedProfileId), { recursive: true, force: true });
         descriptorWasSafe = true;
       }
-      if (descriptorWasSafe) rmSync(tombstone, { recursive: true, force: true });
+      if (descriptorWasSafe) removeSlotContainer(p, tombstone);
     }
     throw err;
   }
@@ -877,6 +936,8 @@ export const operatorProfilePoolTest = {
   poolRootForSource,
   currentGeneration,
   withSeedLock,
+  reserveActiveSlot,
+  scavengeQuarantinedActive,
   scavengeDestroyRequired,
   resetDefaultPool: (): void => rmSync(defaultPoolRoot(), { recursive: true, force: true }),
 };

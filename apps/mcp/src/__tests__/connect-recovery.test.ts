@@ -5,15 +5,16 @@
 //  #3 — the confirm browser / headless noVNC tunnel must stay open until
 //       explicit Finish during normal onboarding.
 
-import { lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { lstatSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   agentTokenStillValid,
   claimHeartbeatMessage,
+  connectCompletionOptions,
   decideProvisioned,
+  parseArgs,
   shouldCompleteInstallClaim,
   withConnectProfileGuard,
 } from "../install/cli.js";
@@ -192,17 +193,19 @@ describe("shouldCompleteInstallClaim (force-relogin teardown)", () => {
     expect(shouldCompleteInstallClaim(false, true, true, true)).toBe(false);
   });
 
-  it("is wired to the parsed --force-relogin flag in connect", () => {
-    const cliSource = readFileSync(
-      fileURLToPath(new URL("../install/cli.ts", import.meta.url)),
-      "utf8",
-    );
-    expect(cliSource).toMatch(/completeOnClaim:\s*args\.forceRelogin/);
-    expect(cliSource).toMatch(/completionProvider:\s*args\.forceReloginProvider\s*\?\?\s*"google"/);
-    expect(cliSource).toMatch(
-      /profileHasProviderCookies\(profileDir,\s*options\.completionProvider\)/,
-    );
-    expect(cliSource).toMatch(/wizardCompleted/);
+  it("maps parsed force-relogin flags to connect completion behavior", () => {
+    expect(connectCompletionOptions(parseArgs(["connect"]))).toEqual({
+      completeOnClaim: false,
+      completionProvider: "google",
+    });
+    expect(connectCompletionOptions(parseArgs(["connect", "--force-relogin"]))).toEqual({
+      completeOnClaim: true,
+      completionProvider: "google",
+    });
+    expect(connectCompletionOptions(parseArgs(["connect", "--force-relogin=github"]))).toEqual({
+      completeOnClaim: true,
+      completionProvider: "github",
+    });
   });
 });
 

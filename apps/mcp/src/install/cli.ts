@@ -684,8 +684,7 @@ async function connectWithProfileGuard(args: Argv, profileDir: string): Promise<
   };
   const session = await runInstallClaim(args.apiBase, target, baseSession, args.skipBrowser, {
     applyServerPrefs: !wantInteractive,
-    completeOnClaim: args.forceRelogin,
-    completionProvider: args.forceReloginProvider ?? "google",
+    ...connectCompletionOptions(args),
   });
   if (session === null) {
     ui.fail(
@@ -1135,6 +1134,15 @@ export function shouldCompleteInstallClaim(
   // skip optional GitHub and still send the normal completion callback.
   if (completeOnClaim) return sessionSeeded;
   return wizardCompleted;
+}
+
+export function connectCompletionOptions(
+  args: Pick<Argv, "forceRelogin" | "forceReloginProvider">,
+): { completeOnClaim: boolean; completionProvider: OAuthProviderId } {
+  return {
+    completeOnClaim: args.forceRelogin,
+    completionProvider: args.forceReloginProvider ?? "google",
+  };
 }
 
 // During normal onboarding, claim happens before the browser's Finish step.
