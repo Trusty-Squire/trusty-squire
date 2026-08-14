@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -80,6 +81,22 @@ afterEach(() => {
 });
 
 describe("operator profile pool migration stage", () => {
+  it("shares publication and active capacity across source-profile aliases", async () => {
+    const { source } = fixture();
+    const alias = `${source}-alias`;
+    symlinkSync(source, alias, "dir");
+    const generation = await publishOperatorProfileSeed(alias, { proof: verifiedLoginProof });
+    const first = await acquireOperatorProfile("real-source", { sourceProfileDir: source });
+    try {
+      expect(first.seedGeneration).toBe(generation);
+      await expect(
+        acquireOperatorProfile("alias-source", { sourceProfileDir: alias }),
+      ).rejects.toThrow("capacity reached");
+    } finally {
+      await first.destroy();
+    }
+  });
+
   it("publishes seed-lock ownership atomically as persisted state", async () => {
     const { root, source } = fixture();
     await publishOperatorProfileSeed(source, {

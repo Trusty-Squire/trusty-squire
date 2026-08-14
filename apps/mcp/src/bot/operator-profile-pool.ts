@@ -23,6 +23,7 @@ import {
   CHROME_PROFILE_DIR,
   processBirthIdentity,
   processBirthIdentityState,
+  profilePathIdentity,
   profileProcessIdentity,
   profileProcessIdentityState,
   signalProfileProcess,
@@ -108,7 +109,7 @@ function defaultPoolRoot(): string {
 function poolRootForSource(sourceProfileDir: string, rootDir?: string): string {
   if (rootDir !== undefined) return resolve(rootDir);
   const namespace = createHash("sha256")
-    .update(resolve(sourceProfileDir))
+    .update(profilePathIdentity(sourceProfileDir))
     .digest("hex")
     .slice(0, 24);
   return join(defaultPoolRoot(), "namespaces", namespace);
@@ -482,7 +483,7 @@ export async function publishOperatorProfileSeed(
       "operator profile seed publication requires a completed Linux login and verified Chrome closure",
     );
   }
-  const resolvedSource = resolve(sourceProfileDir);
+  const resolvedSource = profilePathIdentity(sourceProfileDir);
   const p = paths(poolRootForSource(resolvedSource, opts.rootDir));
   initializePool(p);
   return await withSeedLock(p, () => publishSeedLocked(p, resolvedSource));
@@ -712,7 +713,7 @@ export async function acquireOperatorProfile(
   opts: OperatorProfilePoolOptions = {},
 ): Promise<OperatorProfileLease> {
   assertOperatorProfileRuntimeSupported();
-  const sourceProfileDir = resolve(opts.sourceProfileDir ?? CHROME_PROFILE_DIR);
+  const sourceProfileDir = profilePathIdentity(opts.sourceProfileDir ?? CHROME_PROFILE_DIR);
   const p = paths(poolRootForSource(sourceProfileDir, opts.rootDir));
   const now = opts.now ?? Date.now;
   initializePool(p);

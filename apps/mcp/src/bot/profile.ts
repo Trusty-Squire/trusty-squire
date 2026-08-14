@@ -15,16 +15,33 @@ import {
   mkdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   readdirSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, hostname, tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 export const CHROME_PROFILE_DIR =
   process.env.TRUSTY_SQUIRE_PROFILE_DIR ?? join(homedir(), ".trusty-squire", "chrome-profile");
+
+export function profilePathIdentity(profileDir: string): string {
+  const absolute = resolve(profileDir);
+  const suffix: string[] = [];
+  let candidate = absolute;
+  for (;;) {
+    try {
+      return join(realpathSync.native(candidate), ...suffix.reverse());
+    } catch {
+      const parent = dirname(candidate);
+      if (parent === candidate) return absolute;
+      suffix.push(basename(candidate));
+      candidate = parent;
+    }
+  }
+}
 
 // Chrome's single-instance trio. SingletonLock is a symlink whose target
 // is "<hostname>-<pid>"; the other two are sockets/cookies beside it.
@@ -140,13 +157,13 @@ export function processBirthIdentityState(
 function processProfileState(pid: number, profileDir: string): ProcessIdentityState {
   if (process.platform !== "linux") return "unknown";
   try {
-    const expected = resolve(profileDir);
+    const expected = profilePathIdentity(profileDir);
     const matches = readFileSync(`/proc/${pid}/cmdline`, "utf8")
       .split("\0")
       .some(
         (arg) =>
           arg.startsWith("--user-data-dir=") &&
-          resolve(arg.slice("--user-data-dir=".length)) === expected,
+          profilePathIdentity(arg.slice("--user-data-dir=".length)) === expected,
       );
     return matches ? "matching" : "stale";
   } catch (err) {
@@ -167,7 +184,7 @@ export function profileProcessIdentity(
     host: hostname(),
     pid,
     start_time: startTime.startTime,
-    user_data_dir: resolve(profileDir),
+    user_data_dir: profilePathIdentity(profileDir),
   };
 }
 
@@ -176,7 +193,9 @@ export function profileProcessIdentityState(
   profileDir: string,
 ): ProcessIdentityState {
   if (identity.host !== hostname()) return "unknown";
-  if (resolve(identity.user_data_dir) !== resolve(profileDir)) return "stale";
+  if (profilePathIdentity(identity.user_data_dir) !== profilePathIdentity(profileDir)) {
+    return "stale";
+  }
   const birth = processBirthIdentityState(identity);
   if (birth !== "matching") return birth;
   return processProfileState(identity.pid, profileDir);
@@ -268,7 +287,10 @@ const profileOperationContext = new AsyncLocalStorage<ReadonlySet<string>>();
 const PROFILE_OPERATION_ORPHAN_GRACE_MS = 30_000;
 
 function profileOperationLockDir(profileDir: string, lockRoot: string): string {
-  const digest = createHash("sha256").update(resolve(profileDir)).digest("hex").slice(0, 24);
+  const digest = createHash("sha256")
+    .update(profilePathIdentity(profileDir))
+    .digest("hex")
+    .slice(0, 24);
   return join(lockRoot, `trusty-squire-profile-${digest}.lock`);
 }
 
@@ -441,7 +463,7 @@ export async function withProfileOperationGuard<T>(
   fn: () => Promise<T>,
   lockRoot: string = tmpdir(),
 ): Promise<T> {
-  const key = resolve(profileDir);
+  const key = profilePathIdentity(profileDir);
   const active = profileOperationContext.getStore();
   if (active?.has(key) === true) return await fn();
   const lease = await acquireFreeProfileOperationGuard(profileDir, lockRoot);

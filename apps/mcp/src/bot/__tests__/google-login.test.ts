@@ -45,6 +45,23 @@ import {
 } from "../google-login.js";
 
 describe("canonical profile operation guard", () => {
+  it("treats symlink aliases for an absent profile as one guard", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ts-google-profile-alias-"));
+    const profiles = join(dir, "profiles");
+    const alias = join(dir, "profiles-alias");
+    mkdirSync(profiles);
+    symlinkSync(profiles, alias, "dir");
+    const lease = acquireProfileOperationGuard(join(profiles, "not-created"));
+    try {
+      expect(() => acquireProfileOperationGuard(join(alias, "not-created"))).toThrow(
+        ProfileBusyError,
+      );
+    } finally {
+      lease.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("blocks provider-session probes while publication could own the profile", async () => {
     const dir = mkdtempSync(join(tmpdir(), "ts-google-session-guard-"));
     const lease = acquireProfileOperationGuard(dir);
