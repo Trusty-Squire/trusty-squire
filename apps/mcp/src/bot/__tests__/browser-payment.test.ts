@@ -492,6 +492,9 @@ describe("checkout payment parsing", () => {
         await page.setContent(`
         <form id="checkout">
           <input id="date-of-birth" placeholder="MM/DD/YYYY">
+          <section data-payment-method="paypal">
+            <input id="alternate-billing-city" name="billing_city" value="Alternate Billing">
+          </section>
           <input autocomplete="cc-number">
           <input inputmode="numeric" placeholder="MM/YY">
           <input autocomplete="cc-csc">
@@ -550,11 +553,14 @@ describe("checkout payment parsing", () => {
         expect(await page.locator("body").getAttribute("data-expiry-keys")).toBe("1230");
         expect(result.three_ds_required).toBe(true);
         expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
+        expect(await page.locator("#alternate-billing-city").inputValue()).toBe(
+          "Alternate Billing",
+        );
         expect(
           await page
             .locator("input")
             .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
-        ).toEqual(["", "", "", "", ""]);
+        ).toEqual(["", "Alternate Billing", "", "", "", ""]);
       } finally {
         await browser.close();
       }
@@ -1061,6 +1067,9 @@ describe("checkout payment parsing", () => {
           'history.pushState({}, "", "/orders/pending/confirmation")',
           'history.pushState({}, "", "/orders/confirmation/thank-you")',
           'history.pushState({}, "", "/thank-you/loading")',
+          'history.pushState({}, "", "/receipt/0")',
+          'history.pushState({}, "", "/receipt/payment-pending")',
+          'history.pushState({}, "", "/orders/pending-123/confirmation")',
           'history.pushState({}, "", "/blank/receipt/123")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number:</p>")',
         ]) {

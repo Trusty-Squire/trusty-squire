@@ -374,6 +374,23 @@ const CHECKOUT_TERMINAL_RESERVED_SEGMENTS = new Set([
   "unknown",
 ]);
 
+const CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS = new Set([
+  "blank",
+  "complete",
+  "confirmation",
+  "confirmed",
+  "loading",
+  "lookup",
+  "new",
+  "null",
+  "pending",
+  "preview",
+  "processing",
+  "success",
+  "undefined",
+  "unknown",
+]);
+
 function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
   try {
     const url = new URL(rawUrl);
@@ -413,6 +430,14 @@ function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
     if (identity === undefined || !/[a-z0-9]/i.test(identity)) return null;
     const normalizedIdentity = identity.toLowerCase().replace(/-/g, "_");
     if (CHECKOUT_TERMINAL_RESERVED_SEGMENTS.has(normalizedIdentity)) return null;
+    const identityTokens = identity.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    if (
+      identityTokens.length === 0 ||
+      identityTokens.every((token) => /^0+$/.test(token)) ||
+      identityTokens.some((token) => CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS.has(token))
+    ) {
+      return null;
+    }
     if (segments.some((segment) => ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")))) {
       return null;
     }
@@ -8482,6 +8507,48 @@ export class BrowserController {
         .locator("input,select,textarea")
         .evaluateAll(
           (controls, { token, groupToken }) => {
+            const paymentBoundaryIdentity = (candidate: Element): string =>
+              [
+                candidate.id,
+                candidate.className,
+                candidate.getAttribute("name"),
+                candidate.getAttribute("aria-label"),
+                candidate.getAttribute("data-step"),
+                candidate.getAttribute("data-section"),
+                candidate.getAttribute("data-testid"),
+                candidate.getAttribute("data-payment-method"),
+                candidate.getAttribute("data-payment-method-type"),
+                candidate.getAttribute("data-payment-gateway"),
+                candidate.getAttribute("data-gateway"),
+                candidate.getAttribute("data-method"),
+                candidate.getAttribute("data-provider"),
+              ]
+                .filter((value): value is string => typeof value === "string")
+                .join(" ");
+            const isPaymentMethodBoundary = (candidate: Element): boolean =>
+              candidate.hasAttribute("data-payment-method") ||
+              candidate.hasAttribute("data-payment-method-type") ||
+              candidate.hasAttribute("data-payment-gateway") ||
+              candidate.hasAttribute("data-gateway") ||
+              candidate.hasAttribute("data-method") ||
+              candidate.hasAttribute("data-provider") ||
+              /(?:^|[^a-z])(?:payment|credit.?card|paypal|klarna|afterpay|shop.?pay|apple.?pay|google.?pay|bank.?transfer)(?:[^a-z]|$)/i.test(
+                paymentBoundaryIdentity(candidate),
+              );
+            const isSelectedCardBranch = (candidate: Element): boolean =>
+              Array.from(candidate.querySelectorAll("input")).some((input) => {
+                const autocomplete = (input.getAttribute("autocomplete") ?? "")
+                  .toLowerCase()
+                  .split(/\s+/);
+                const isPan =
+                  autocomplete.includes("cc-number") ||
+                  /cardnumber/i.test(input.getAttribute("name") ?? "") ||
+                  /card-?number|cardnumber/i.test(input.id);
+                return (
+                  isPan &&
+                  input.getAttribute("data-ts-payment-card-control-group") === groupToken
+                );
+              });
             let marked = 0;
             for (const control of controls) {
               const autocomplete = (control.getAttribute("autocomplete") ?? "")
@@ -8494,6 +8561,22 @@ export class BrowserController {
               if (!explicit) continue;
               const owner = control.getAttribute("data-ts-payment-card-control-group");
               if (owner !== null && owner !== groupToken) continue;
+              const groupRoot = control.closest("[data-ts-payment-card-group]");
+              let paymentMethodBoundary = control.parentElement;
+              while (
+                paymentMethodBoundary !== null &&
+                paymentMethodBoundary !== groupRoot &&
+                !isPaymentMethodBoundary(paymentMethodBoundary)
+              ) {
+                paymentMethodBoundary = paymentMethodBoundary.parentElement;
+              }
+              if (
+                paymentMethodBoundary !== null &&
+                paymentMethodBoundary !== groupRoot &&
+                !isSelectedCardBranch(paymentMethodBoundary)
+              ) {
+                continue;
+              }
               control.setAttribute("data-ts-payment-billing-owner", token);
               marked += 1;
             }
