@@ -282,7 +282,7 @@ export async function closeProfileWithProof(opts: {
 interface ProfileOperationOwner {
   host: string;
   pid: number;
-  start_time: string;
+  start_time: string | null;
   token: string;
 }
 
@@ -306,7 +306,7 @@ function readProfileOperationOwner(lockDir: string): ProfileOperationOwner | nul
     if (
       typeof owner.host !== "string" ||
       typeof owner.pid !== "number" ||
-      typeof owner.start_time !== "string" ||
+      (owner.start_time !== undefined && typeof owner.start_time !== "string") ||
       typeof owner.token !== "string"
     ) {
       return null;
@@ -314,7 +314,7 @@ function readProfileOperationOwner(lockDir: string): ProfileOperationOwner | nul
     return {
       host: owner.host,
       pid: owner.pid,
-      start_time: owner.start_time,
+      start_time: owner.start_time ?? null,
       token: owner.token,
     };
   } catch {
@@ -326,6 +326,9 @@ function profileOperationArtifactState(path: string): ProcessIdentityState {
   const owner = readProfileOperationOwner(path);
   if (owner !== null) {
     if (owner.host !== hostname()) return "unknown";
+    if (owner.start_time === null) {
+      return processExistenceState(owner.pid).state === "missing" ? "stale" : "unknown";
+    }
     return processBirthIdentityState(owner);
   }
   try {

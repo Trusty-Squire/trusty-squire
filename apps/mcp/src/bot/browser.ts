@@ -1547,6 +1547,52 @@ export function selfLaunchEnabled(): boolean {
 }
 
 const PERSISTENT_CONTEXT_LAUNCH_TIMEOUT_MS = 30_000;
+const PROFILE_IDENTITY_PROOF_TIMEOUT_MS = 2_000;
+const PROFILE_IDENTITY_POLL_MS = 25;
+const PROFILE_HOLDER_ABSENCE_GRACE_MS = 100;
+
+export type PersistentFallbackIdentityProof =
+  | { state: "owned"; identity: ProfileProcessIdentity }
+  | { state: "absent" }
+  | { state: "unknown" };
+
+export async function resolvePersistentFallbackIdentity(opts: {
+  profileDir: string;
+  platform?: NodeJS.Platform;
+  timeoutMs?: number;
+  pollMs?: number;
+  absenceGraceMs?: number;
+  currentHolderPid?: (profileDir: string) => number | null;
+  readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
+  clearStaleLock?: (profileDir: string) => boolean;
+}): Promise<PersistentFallbackIdentityProof> {
+  if ((opts.platform ?? process.platform) !== "linux") return { state: "unknown" };
+  const timeoutMs = opts.timeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS;
+  const pollMs = opts.pollMs ?? PROFILE_IDENTITY_POLL_MS;
+  const absenceGraceMs = opts.absenceGraceMs ?? PROFILE_HOLDER_ABSENCE_GRACE_MS;
+  const readHolder = opts.currentHolderPid ?? currentProfileHolderPid;
+  const readIdentity = opts.readIdentity ?? profileProcessIdentity;
+  const clearStaleLock = opts.clearStaleLock ?? clearStaleSingletonLock;
+  const deadline = Date.now() + timeoutMs;
+  let absentSince: number | null = null;
+  for (;;) {
+    const holderPid = readHolder(opts.profileDir);
+    if (holderPid === null) {
+      absentSince ??= Date.now();
+      if (Date.now() - absentSince >= absenceGraceMs) return { state: "absent" };
+    } else {
+      absentSince = null;
+      const identity = readIdentity(holderPid, opts.profileDir);
+      if (identity !== null) return { state: "owned", identity };
+      if (clearStaleLock(opts.profileDir)) return { state: "absent" };
+    }
+    if (Date.now() >= deadline) return { state: "unknown" };
+    await new Promise<void>((resolveWait) => {
+      const timer = setTimeout(resolveWait, Math.min(pollMs, Math.max(1, deadline - Date.now())));
+      timer.unref();
+    });
+  }
+}
 
 export async function launchCancellablePersistentContext<T, O extends object>(opts: {
   launch: (options: O & { timeout: number }) => Promise<T>;
@@ -1719,15 +1765,19 @@ async function waitForTrackedProfileChildIdentity(
   child: ChildProcess,
   profileDir: string,
   readIdentity: (pid: number, profileDir: string) => ProfileProcessIdentity | null,
+  timeoutMs: number,
+  pollMs: number,
 ): Promise<ProfileProcessIdentity | null> {
+  const deadline = Date.now() + timeoutMs;
   while (childProcessIsRunning(child)) {
     const identity = child.pid === undefined ? null : readIdentity(child.pid, profileDir);
     if (identity !== null) {
       selfManagedChromes.set(identity.pid, identity);
       return identity;
     }
+    if (Date.now() >= deadline) return null;
     await new Promise<void>((resolveWait) => {
-      const timer = setTimeout(resolveWait, 25);
+      const timer = setTimeout(resolveWait, Math.min(pollMs, Math.max(1, deadline - Date.now())));
       timer.unref();
     });
   }
@@ -1741,6 +1791,8 @@ export async function resolveAttachedProfileChildIdentity(
   options: {
     platform?: NodeJS.Platform;
     readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
+    identityTimeoutMs?: number;
+    identityPollMs?: number;
   } = {},
 ): Promise<ProfileProcessIdentity | null> {
   if (identity !== null || (options.platform ?? process.platform) !== "linux") return identity;
@@ -1748,6 +1800,8 @@ export async function resolveAttachedProfileChildIdentity(
     child,
     profileDir,
     options.readIdentity ?? profileProcessIdentity,
+    options.identityTimeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
+    options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
   );
 }
 
@@ -1759,6 +1813,8 @@ export async function terminateTrackedProfileChild(
     platform?: NodeJS.Platform;
     readIdentity?: (pid: number, profileDir: string) => ProfileProcessIdentity | null;
     terminate?: (identity: ProfileProcessIdentity, profileDir: string) => boolean;
+    identityTimeoutMs?: number;
+    identityPollMs?: number;
   } = {},
 ): Promise<ProfileProcessIdentity | null> {
   const readIdentity = options.readIdentity ?? profileProcessIdentity;
@@ -1772,7 +1828,13 @@ export async function terminateTrackedProfileChild(
   let identity = options.identity ?? null;
   if (identity === null && (options.platform ?? process.platform) !== "linux") return null;
   while (childProcessIsRunning(child)) {
-    identity ??= await waitForTrackedProfileChildIdentity(child, profileDir, readIdentity);
+    identity ??= await waitForTrackedProfileChildIdentity(
+      child,
+      profileDir,
+      readIdentity,
+      options.identityTimeoutMs ?? PROFILE_IDENTITY_PROOF_TIMEOUT_MS,
+      options.identityPollMs ?? PROFILE_IDENTITY_POLL_MS,
+    );
     if (identity === null) break;
     selfManagedChromes.set(identity.pid, identity);
     const terminated = terminate(identity, profileDir);
@@ -2194,6 +2256,9 @@ export async function launchPlainLoginBrowser(params: {
           `plain login Chrome exited immediately (${termination})` +
             `${detail.length > 0 ? `; Chrome stderr: ${detail}` : ""}`,
         );
+      }
+      if (process.platform === "linux" && childIdentity === null) {
+        throw new Error("plain login Chrome identity could not be proven");
       }
     },
     { deadlineMs: 0 },
@@ -2907,19 +2972,20 @@ export class BrowserController {
       this.profilePoolReusable = false;
       this.persistentFallbackLaunchInFlight = true;
       const cleanupProfileHolder = async (): Promise<ProfileCloseState> => {
-        const identity = await this.waitForPersistentFallbackIdentity();
-        if (identity === null) return process.platform === "linux" ? "closed" : "unknown";
+        const proof = await this.waitForPersistentFallbackIdentity();
+        if (proof.state === "absent") return "closed";
+        if (proof.state === "unknown") return "unknown";
+        const { identity } = proof;
         signalProfileProcess(identity, this.profileDir, "SIGKILL");
-        if (process.platform !== "linux") return "unknown";
-        await this.waitForOwnedProfileExit(identity);
-        return "closed";
+        return (await this.waitForOwnedProfileExit(identity)) ? "closed" : "unknown";
       };
       const cleanupCancelled = async (lateContext: BrowserContext): Promise<ProfileCloseState> => {
-        const identity = await this.waitForPersistentFallbackIdentity();
-        if (identity === null) {
+        const proof = await this.waitForPersistentFallbackIdentity();
+        if (proof.state !== "owned") {
           await lateContext.close().catch(() => undefined);
-          return process.platform === "linux" ? "closed" : "unknown";
+          return proof.state === "absent" ? "closed" : "unknown";
         }
+        const { identity } = proof;
         const closeState = await closeProfileWithProof({
           profileDir: this.profileDir,
           identity,
@@ -2929,9 +2995,8 @@ export class BrowserController {
             reapProfileHolderIfOwned(this.profileDir, identity);
           },
         });
-        if (closeState === "closed" || process.platform !== "linux") return closeState;
-        await this.waitForOwnedProfileExit(identity);
-        return "closed";
+        if (closeState === "closed") return closeState;
+        return (await this.waitForOwnedProfileExit(identity)) ? "closed" : "unknown";
       };
       const outcome = await (async () => {
         try {
@@ -12192,31 +12257,26 @@ export class BrowserController {
     return holderPid === null ? null : profileProcessIdentity(holderPid, this.profileDir);
   }
 
-  private async waitForPersistentFallbackIdentity(): Promise<ProfileProcessIdentity | null> {
-    if (process.platform !== "linux") return null;
-    let absentSince = Date.now();
-    while (true) {
-      const holderPid = currentProfileHolderPid(this.profileDir);
-      if (holderPid === null) {
-        if (Date.now() - absentSince >= 100) return null;
-      } else {
-        absentSince = Date.now();
-        const identity = profileProcessIdentity(holderPid, this.profileDir);
-        if (identity !== null) return identity;
-        if (clearStaleSingletonLock(this.profileDir)) return null;
-      }
-      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
-    }
+  private async waitForPersistentFallbackIdentity(): Promise<PersistentFallbackIdentityProof> {
+    return await resolvePersistentFallbackIdentity({ profileDir: this.profileDir });
   }
 
-  private async waitForOwnedProfileExit(identity: ProfileProcessIdentity): Promise<void> {
-    while (profileProcessIdentityState(identity, this.profileDir) !== "stale") {
+  private async waitForOwnedProfileExit(identity: ProfileProcessIdentity): Promise<boolean> {
+    const deadline = Date.now() + PROFILE_IDENTITY_PROOF_TIMEOUT_MS;
+    let state = profileProcessIdentityState(identity, this.profileDir);
+    while (state !== "stale" && Date.now() < deadline) {
       if (profileProcessMatches(identity, this.profileDir)) {
         signalProfileProcess(identity, this.profileDir, "SIGKILL");
       }
-      await new Promise<void>((resolveWait) => setTimeout(resolveWait, 25));
+      await new Promise<void>((resolveWait) => {
+        const timer = setTimeout(resolveWait, PROFILE_IDENTITY_POLL_MS);
+        timer.unref();
+      });
+      state = profileProcessIdentityState(identity, this.profileDir);
     }
+    if (state !== "stale") return false;
     reapProfileHolderIfOwned(this.profileDir, identity);
+    return true;
   }
 
   private async closeAfterStart(): Promise<ProfileCloseState> {

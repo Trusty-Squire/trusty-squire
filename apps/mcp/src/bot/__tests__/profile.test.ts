@@ -321,6 +321,35 @@ describe("profile operation guard", () => {
     lease.release();
   });
 
+  it("retains an aged legacy guard while its same-host process is alive", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ host: hostname(), pid: process.pid, token: "legacy-token" }),
+    );
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockDir, old, old);
+
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+  });
+
+  it("reclaims an aged legacy guard after its same-host process exits", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    writeFileSync(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ host: hostname(), pid: deadPid(), token: "legacy-token" }),
+    );
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockDir, old, old);
+
+    const lease = acquireProfileOperationGuard(dir, lockRoot);
+    lease.release();
+  });
+
   it.skipIf(process.platform !== "linux")(
     "scavenges a stale private tombstone left by a crashed reclaimer",
     () => {

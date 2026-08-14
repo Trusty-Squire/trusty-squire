@@ -16,6 +16,7 @@ import {
   BrowserController,
   childProcessIsRunning,
   launchCancellablePersistentContext,
+  resolvePersistentFallbackIdentity,
   resolveAttachedProfileChildIdentity,
   terminateTrackedProfileChild,
   withChromeStartupLock,
@@ -282,6 +283,27 @@ describe("login browser lifecycle guards", () => {
     await expect(result).resolves.toEqual({ status: "cancelled", closeState: "closed" });
     expect(cleanupCancelled).toHaveBeenCalledWith("late browser");
     expect(cleanupRejected).not.toHaveBeenCalled();
+  });
+
+  it("bounds persistent fallback identity proof when a live holder stays unreadable", async () => {
+    vi.useFakeTimers();
+    const profileDir = "/unused/profile";
+    const readIdentity = vi.fn(() => null);
+    const clearStaleLock = vi.fn(() => false);
+    const resolving = resolvePersistentFallbackIdentity({
+      profileDir,
+      platform: "linux",
+      timeoutMs: 100,
+      pollMs: 25,
+      currentHolderPid: () => 424_244,
+      readIdentity,
+      clearStaleLock,
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(resolving).resolves.toEqual({ state: "unknown" });
+    expect(readIdentity).toHaveBeenCalled();
+    expect(clearStaleLock).toHaveBeenCalled();
   });
 
   it("cancels a wedged pre-launch stage without awaiting its settlement", async () => {
@@ -811,6 +833,40 @@ describe("cancelled self-managed Chrome launch", () => {
         }),
       ).resolves.toEqual(identity);
       expect(probes).toBe(2);
+      expect(childProcessIsRunning(child)).toBe(true);
+    } finally {
+      Object.assign(child, { exitCode: 0 });
+      rmSync(profileDir, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds Linux login-child identity proof without signaling an unknown process", async () => {
+    vi.useFakeTimers();
+    const profileDir = mkdtempSync(join(tmpdir(), "ts-login-chrome-unknown-"));
+    const child = fakeProcess("chrome");
+    Object.assign(child, { pid: 424_245 });
+    const readIdentity = vi.fn(() => null);
+    const terminate = vi.fn(() => true);
+    try {
+      const resolving = resolveAttachedProfileChildIdentity(child, profileDir, null, {
+        platform: "linux",
+        readIdentity,
+        identityTimeoutMs: 100,
+        identityPollMs: 25,
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(resolving).resolves.toBeNull();
+
+      const terminating = terminateTrackedProfileChild(child, profileDir, {
+        platform: "linux",
+        readIdentity,
+        terminate,
+        identityTimeoutMs: 100,
+        identityPollMs: 25,
+      });
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(terminating).resolves.toBeNull();
+      expect(terminate).not.toHaveBeenCalled();
       expect(childProcessIsRunning(child)).toBe(true);
     } finally {
       Object.assign(child, { exitCode: 0 });
