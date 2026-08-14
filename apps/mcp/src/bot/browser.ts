@@ -359,8 +359,12 @@ const CHECKOUT_TERMINAL_RESERVED_SEGMENTS = new Set([
   "confirmed",
   "loading",
   "lookup",
+  "masked",
+  "n_a",
+  "na",
   "new",
   "null",
+  "not_available",
   "order",
   "orders",
   "pending",
@@ -381,6 +385,7 @@ const CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS = new Set([
   "confirmed",
   "loading",
   "lookup",
+  "masked",
   "new",
   "null",
   "pending",
@@ -390,6 +395,26 @@ const CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS = new Set([
   "undefined",
   "unknown",
 ]);
+
+function isSubstantiveCheckoutIdentity(identity: string): boolean {
+  const normalizedIdentity = identity
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  if (normalizedIdentity.length === 0) return false;
+  if (CHECKOUT_TERMINAL_RESERVED_SEGMENTS.has(normalizedIdentity)) return false;
+  const identityTokens = normalizedIdentity.split("_").filter(Boolean);
+  if (
+    identityTokens.length === 0 ||
+    identityTokens.every((token) => /^0+$/.test(token)) ||
+    identityTokens.some((token) => CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS.has(token))
+  ) {
+    return false;
+  }
+  const compactIdentity = identityTokens.join("");
+  return !/^x{2,}\d*$/i.test(compactIdentity);
+}
 
 function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
   try {
@@ -427,17 +452,7 @@ function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
     ) {
       identity = segments.at(-2);
     }
-    if (identity === undefined || !/[a-z0-9]/i.test(identity)) return null;
-    const normalizedIdentity = identity.toLowerCase().replace(/-/g, "_");
-    if (CHECKOUT_TERMINAL_RESERVED_SEGMENTS.has(normalizedIdentity)) return null;
-    const identityTokens = identity.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-    if (
-      identityTokens.length === 0 ||
-      identityTokens.every((token) => /^0+$/.test(token)) ||
-      identityTokens.some((token) => CHECKOUT_TERMINAL_PLACEHOLDER_TOKENS.has(token))
-    ) {
-      return null;
-    }
+    if (identity === undefined || !isSubstantiveCheckoutIdentity(identity)) return null;
     if (segments.some((segment) => ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")))) {
       return null;
     }
@@ -8506,7 +8521,7 @@ export class BrowserController {
       const directCount = await cardGroup.root
         .locator("input,select,textarea")
         .evaluateAll(
-          (controls, { token, groupToken }) => {
+          (controls, { token, groupToken, selectors }) => {
             const paymentBoundaryIdentity = (candidate: Element): string =>
               [
                 candidate.id,
@@ -8532,23 +8547,52 @@ export class BrowserController {
               candidate.hasAttribute("data-gateway") ||
               candidate.hasAttribute("data-method") ||
               candidate.hasAttribute("data-provider") ||
-              /(?:^|[^a-z])(?:payment|credit.?card|paypal|klarna|afterpay|shop.?pay|apple.?pay|google.?pay|bank.?transfer)(?:[^a-z]|$)/i.test(
+              /(?:^|[^a-z])(?:payment|card|credit.?card|paypal|klarna|afterpay|shop.?pay|apple.?pay|google.?pay|bank.?transfer)(?:[^a-z]|$)/i.test(
                 paymentBoundaryIdentity(candidate),
               );
-            const isSelectedCardBranch = (candidate: Element): boolean =>
-              Array.from(candidate.querySelectorAll("input")).some((input) => {
-                const autocomplete = (input.getAttribute("autocomplete") ?? "")
-                  .toLowerCase()
-                  .split(/\s+/);
-                const isPan =
-                  autocomplete.includes("cc-number") ||
-                  /cardnumber/i.test(input.getAttribute("name") ?? "") ||
-                  /card-?number|cardnumber/i.test(input.id);
-                return (
-                  isPan &&
-                  input.getAttribute("data-ts-payment-card-control-group") === groupToken
-                );
-              });
+            const isPan = (input: Element): boolean => {
+              const autocomplete = (input.getAttribute("autocomplete") ?? "")
+                .toLowerCase()
+                .split(/\s+/);
+              return (
+                autocomplete.includes("cc-number") ||
+                /cardnumber/i.test(input.getAttribute("name") ?? "") ||
+                /card-?number|cardnumber/i.test(input.id)
+              );
+            };
+            const selectedPan = controls.find(
+              (control) =>
+                isPan(control) &&
+                control.getAttribute("data-ts-payment-card-control-group") === groupToken,
+            );
+            const groupRoot = selectedPan?.closest("[data-ts-payment-card-group]") ?? null;
+            const hasSelectedControl = (candidate: Element, selector: string): boolean =>
+              controls.some(
+                (control) =>
+                  candidate.contains(control) &&
+                  control.matches(selector) &&
+                  control.getAttribute("data-ts-payment-card-control-group") === groupToken,
+              );
+            const isCompleteSelectedCardBranch = (candidate: Element): boolean =>
+              hasSelectedControl(candidate, selectors.pan) &&
+              hasSelectedControl(candidate, selectors.cvv) &&
+              hasSelectedControl(candidate, selectors.name) &&
+              (hasSelectedControl(candidate, selectors.combinedExpiry) ||
+                (hasSelectedControl(candidate, selectors.expiryMonth) &&
+                  hasSelectedControl(candidate, selectors.expiryYear)));
+            let branchCandidate = selectedPan?.parentElement ?? null;
+            let selectedBranch: Element | null = null;
+            while (branchCandidate !== null) {
+              if (
+                isPaymentMethodBoundary(branchCandidate) &&
+                isCompleteSelectedCardBranch(branchCandidate)
+              ) {
+                selectedBranch = branchCandidate;
+                break;
+              }
+              if (branchCandidate === groupRoot) break;
+              branchCandidate = branchCandidate.parentElement;
+            }
             let marked = 0;
             for (const control of controls) {
               const autocomplete = (control.getAttribute("autocomplete") ?? "")
@@ -8561,19 +8605,20 @@ export class BrowserController {
               if (!explicit) continue;
               const owner = control.getAttribute("data-ts-payment-card-control-group");
               if (owner !== null && owner !== groupToken) continue;
-              const groupRoot = control.closest("[data-ts-payment-card-group]");
+              if (selectedPan === undefined || selectedBranch === null) continue;
+              if (!selectedBranch.contains(control)) continue;
               let paymentMethodBoundary = control.parentElement;
               while (
                 paymentMethodBoundary !== null &&
-                paymentMethodBoundary !== groupRoot &&
+                paymentMethodBoundary !== selectedBranch &&
                 !isPaymentMethodBoundary(paymentMethodBoundary)
               ) {
                 paymentMethodBoundary = paymentMethodBoundary.parentElement;
               }
               if (
                 paymentMethodBoundary !== null &&
-                paymentMethodBoundary !== groupRoot &&
-                !isSelectedCardBranch(paymentMethodBoundary)
+                paymentMethodBoundary !== selectedBranch &&
+                !paymentMethodBoundary.contains(selectedPan)
               ) {
                 continue;
               }
@@ -8582,7 +8627,18 @@ export class BrowserController {
             }
             return marked;
           },
-          { token: directToken, groupToken: cardGroup.token },
+          {
+            token: directToken,
+            groupToken: cardGroup.token,
+            selectors: {
+              pan: CHECKOUT_PAN_FIELD_SELECTORS,
+              cvv: cvvSelectors,
+              name: nameSelectors,
+              combinedExpiry: combinedExpiryGroupSelectors,
+              expiryMonth: expiryMonthSelectors,
+              expiryYear: expiryYearSelectors,
+            },
+          },
         )
         .catch(() => 0);
       if (directCount > 0) billingRoots.push({ frame: cardGroup.frame, token: directToken });
@@ -9598,14 +9654,23 @@ export class BrowserController {
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
     if (!this.page) return { url: "", terminalUrlIdentity: null, domSignals: null };
     const successText =
-      /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt\s*(?:number|#)\s*[:#-]?\s*(?!(?:pending|loading|unknown|n\/a)\b)[a-z0-9][a-z0-9_-]*/i;
-    const domSignals = await this.page
+      /thank you for your order|order (?:confirmed|placed|complete)|your order (?:is confirmed|has been (?:confirmed|placed|received))|we(?:'ve| have) received your order|receipt\s*(?:number|#)\s*[:#-]?\s*[a-z0-9][a-z0-9_\/-]*/i;
+    const capturedDomSignals = await this.page
       .mainFrame()
       .evaluate(extractVisibleTopmostTextSignals, {
         source: successText.source,
         flags: successText.flags,
       })
       .catch(() => null);
+    const domSignals =
+      capturedDomSignals === null
+        ? null
+        : Object.fromEntries(
+            Object.entries(capturedDomSignals).filter(([signal]) => {
+              const receipt = /^receipt(?: number)?\s+(.+)$/i.exec(signal);
+              return receipt === null || isSubstantiveCheckoutIdentity(receipt[1] ?? "");
+            }),
+          );
     const url = this.page.url();
     return { url, terminalUrlIdentity: checkoutTerminalUrlIdentity(url), domSignals };
   }

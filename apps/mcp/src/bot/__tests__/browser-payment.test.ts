@@ -492,13 +492,14 @@ describe("checkout payment parsing", () => {
         await page.setContent(`
         <form id="checkout">
           <input id="date-of-birth" placeholder="MM/DD/YYYY">
-          <section data-payment-method="paypal">
-            <input id="alternate-billing-city" name="billing_city" value="Alternate Billing">
+          <input id="alternate-billing-city" name="billing_city" value="Alternate Billing">
+          <section id="selected-card-fields">
+            <input autocomplete="cc-number">
+            <input inputmode="numeric" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <input id="selected-billing-city" name="billing_city">
           </section>
-          <input autocomplete="cc-number">
-          <input inputmode="numeric" placeholder="MM/YY">
-          <input autocomplete="cc-csc">
-          <input autocomplete="cc-name">
           <button type="submit">Pay now</button>
         </form>
         <script>
@@ -521,6 +522,8 @@ describe("checkout payment parsing", () => {
             document.body.dataset.dobAtSubmit =
               document.querySelector("#date-of-birth").value;
             document.body.dataset.expiryAtSubmit = expiry.value;
+            document.body.dataset.selectedBillingAtSubmit =
+              document.querySelector("#selected-billing-city").value;
             document.body.dataset.submitted = "true";
             setTimeout(() => {
               const challenge = document.createElement("iframe");
@@ -551,16 +554,20 @@ describe("checkout payment parsing", () => {
         expect(await page.locator("body").getAttribute("data-dob-at-submit")).toBe("");
         expect(await page.locator("body").getAttribute("data-expiry-at-submit")).toBe("12/30");
         expect(await page.locator("body").getAttribute("data-expiry-keys")).toBe("1230");
+        expect(
+          await page.locator("body").getAttribute("data-selected-billing-at-submit"),
+        ).toBe("Testville");
         expect(result.three_ds_required).toBe(true);
         expect(await page.locator('input[data-ts-sealed-payment="1"]').count()).toBe(0);
         expect(await page.locator("#alternate-billing-city").inputValue()).toBe(
           "Alternate Billing",
         );
+        expect(await page.locator("#selected-billing-city").inputValue()).toBe("");
         expect(
           await page
             .locator("input")
             .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
-        ).toEqual(["", "Alternate Billing", "", "", "", ""]);
+        ).toEqual(["", "Alternate Billing", "", "", "", "", ""]);
       } finally {
         await browser.close();
       }
@@ -1072,6 +1079,9 @@ describe("checkout payment parsing", () => {
           'history.pushState({}, "", "/orders/pending-123/confirmation")',
           'history.pushState({}, "", "/blank/receipt/123")',
           'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number:</p>")',
+          'document.body.insertAdjacentHTML("beforeend", "<p>Receipt # 0</p>")',
+          'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: processing</p>")',
+          'document.body.insertAdjacentHTML("beforeend", "<p>Receipt number: xxxx1234</p>")',
         ]) {
           const now = vi
             .spyOn(Date, "now")
@@ -2023,6 +2033,19 @@ describe("3-D Secure resolution", () => {
     try {
       await page.locator("#bank-approval").evaluate((element) => element.remove());
       await page.evaluate(() => history.pushState({}, "", "/receipt/123"));
+      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
+    } finally {
+      await browser.close();
+    }
+  });
+
+  it.skipIf(!chromiumAvailable)("accepts a substantive merchant receipt number", async () => {
+    const { browser, page, controller } = await setupChallenge();
+    try {
+      await page.locator("#bank-approval").evaluate((element) => element.remove());
+      await page.locator("body").evaluate((body) => {
+        body.insertAdjacentHTML("beforeend", "<p>Receipt number: ORD-12345</p>");
+      });
       await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
     } finally {
       await browser.close();
