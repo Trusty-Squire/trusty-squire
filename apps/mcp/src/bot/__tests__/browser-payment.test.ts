@@ -1508,6 +1508,106 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "uses the topmost PAN to fill and submit the live-style Shopify PCI form",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/live-two-card-forms";
+      const { page, browser } = await servePages({
+        [pageUrl]: `<title>Kobee Japan</title><iframe src="${frameUrl}"></iframe>`,
+        [frameUrl]: `
+          <style>
+            #card-layer { position: relative; height: 240px; }
+            #card-layer form {
+              display: grid;
+              gap: 8px;
+              inset: 0;
+              position: absolute;
+            }
+            #card-number-network-selector-name-on-card-expiry { z-index: 2; }
+          </style>
+          <section id="card-layer">
+            <form id="credit-card-number-name-on-card-expiry-month-exp">
+              <input autocomplete="cc-number">
+              <input autocomplete="cc-name">
+              <input autocomplete="cc-exp">
+              <input autocomplete="cc-exp-month">
+              <input autocomplete="cc-exp-year">
+              <input autocomplete="cc-csc">
+              <input name="issue-date">
+              <input name="issue-number">
+              <button type="submit">Pay now</button>
+            </form>
+            <form id="card-number-network-selector-name-on-card-expiry">
+              <input autocomplete="cc-number">
+              <input autocomplete="cc-name">
+              <input autocomplete="cc-exp">
+              <input autocomplete="cc-exp-month">
+              <input autocomplete="cc-exp-year">
+              <input autocomplete="cc-csc">
+              <input name="issue-date">
+              <input name="issue-number">
+              <button type="submit">Pay now</button>
+            </form>
+          </section>
+          <script>
+            for (const form of document.querySelectorAll("form")) {
+              form.addEventListener("submit", (event) => {
+                event.preventDefault();
+                document.body.dataset.submittedForm = form.id;
+                document.body.dataset.submittedValues = JSON.stringify(
+                  Array.from(form.querySelectorAll("input"), (input) => input.value),
+                );
+                const challenge = document.createElement("iframe");
+                challenge.title = "3D Secure";
+                document.body.append(challenge);
+              });
+            }
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const frame = page.frames().find((candidate) => candidate.url() === frameUrl)!;
+        const panTopmost = async (formId: string): Promise<boolean> =>
+          await frame.locator(`#${formId} [autocomplete=cc-number]`).evaluate((input) => {
+            const rect = input.getBoundingClientRect();
+            const hit = document.elementFromPoint(
+              rect.left + rect.width / 2,
+              rect.top + rect.height / 2,
+            );
+            return hit === input;
+          });
+        await expect(panTopmost("card-number-network-selector-name-on-card-expiry")).resolves.toBe(
+          true,
+        );
+        await expect(panTopmost("credit-card-number-name-on-card-expiry-month-exp")).resolves.toBe(
+          false,
+        );
+
+        const result = await controller.fillAndSubmitCheckout(CARD);
+
+        expect(result.three_ds_required).toBe(true);
+        expect(await frame.locator("body").getAttribute("data-submitted-form")).toBe(
+          "card-number-network-selector-name-on-card-expiry",
+        );
+        await expect(
+          frame
+            .locator("#credit-card-number-name-on-card-expiry-month-exp input")
+            .evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value)),
+        ).resolves.toEqual(["", "", "", "", "", "", "", ""]);
+        expect(
+          JSON.parse((await frame.locator("body").getAttribute("data-submitted-values")) ?? "null"),
+        ).toEqual([CARD.pan, CARD.name, "", "12", "30", CARD.cvv, "", ""]);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "permits a parent checkout control outside both Shopify card forms",
     async () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
