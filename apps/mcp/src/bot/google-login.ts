@@ -209,7 +209,7 @@ export async function contextHasProviderSession(
 }
 
 const PROVIDER_COOKIE_MARKERS: Record<OAuthProviderId, readonly string[]> = {
-  google: ["__Secure-1PSID", "SAPISID"],
+  google: OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
   github: ["user_session"],
 };
 

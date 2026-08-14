@@ -60,7 +60,10 @@ import {
 } from "./profile.js";
 import type { OAuthProviderId } from "./oauth-providers.js";
 import type { TwoCaptchaCoordinatesResult } from "./captcha-solver-2captcha.js";
-import type { OperatorWorkerIdentity } from "./operator-profile-pool.js";
+import {
+  OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
+  type OperatorWorkerIdentity,
+} from "./operator-profile-pool.js";
 import { startXvfb, xvfbAvailable, type XvfbRig } from "./xvfb.js";
 
 // Lazy registration: installing the plugin mutates the chromium singleton
@@ -1351,7 +1354,7 @@ export function sessionProvidersFromCookies(
     {
       provider: "google",
       host: /(^|\.)google\.com$/i,
-      names: ["SID", "__Secure-1PSID", "__Secure-3PSID"],
+      names: OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
     },
   ];
   const live: OAuthProviderId[] = [];
@@ -1536,7 +1539,7 @@ export function resolveChannelBinary(channel: string | null): string | null {
 // it is specifically the launch flags/instrumentation Playwright injects at
 // launchPersistentContext time. Self-launching the binary (no
 // --enable-automation et al.) and attaching with connectOverCDP avoids it.
-// Default-ON; opt out with BOT_SELF_LAUNCH=0 for the old path. Exported for tests.
+// Default-ON; BOT_SELF_LAUNCH=0 disables local operator browser launch. Exported for tests.
 export function selfLaunchEnabled(): boolean {
   const v = process.env.BOT_SELF_LAUNCH;
   return v !== "0" && v !== "false" && v !== "off";
@@ -2204,7 +2207,7 @@ export class BrowserController {
   private childChrome: ChildProcess | null = null;
   private childChromeIdentity: ProfileProcessIdentity | null = null;
   private cdpBrowser: Browser | null = null;
-  // True once launchPersistentContext succeeded this session.
+  // True once a local browser context launched this session.
   private launchedContext = false;
   private launchedProfileHolderIdentity: ProfileProcessIdentity | null = null;
   private profileOperationLease: ProfileOperationLease | null = null;
@@ -2413,11 +2416,10 @@ export class BrowserController {
   // Launch Chrome ourselves and attach over CDP — the Turnstile-safe launch
   // (see selfLaunchEnabled for the proof). The profile dir is the SAME shared
   // profile launchPersistentContext would use, so the OAuth session carries
-  // over. Options that launchPersistentContext takes at creation but a default
-  // (connectOverCDP) context can't are applied differently:
+  // over. Options that a default connectOverCDP context can't take at creation
+  // are applied differently:
   //   • timezone  → TZ env on the child (more authentic than a CDP override)
-  //   • proxy     → --proxy-server flag (auth-less only; the caller routes
-  //                 credentialed proxies to the old path)
+  //   • proxy     → --proxy-server flag, with credentials applied post-connect
   //   • viewport  → --window-size (with viewport:null-equivalent: we never set
   //                 an emulated viewport on the connected context)
   //   • locale/geo/permissions → applied post-connect by start()
@@ -2812,88 +2814,57 @@ export class BrowserController {
       "clipboard-read",
       "clipboard-write",
     ];
-    // Decide the launch path. Self-launch (Turnstile-safe) requires a real
-    // Chrome binary on disk AND an auth-less proxy (a credentialed proxy needs
-    // Playwright's native proxy auth, which only the launchPersistentContext
-    // path provides — so route those there).
-    const selfLaunchBinary = selfLaunchEnabled() ? resolveChannelBinary(channel) : null;
-    const proxyHasAuth =
-      proxy !== null && typeof proxy.username === "string" && proxy.username.length > 0;
-    const useSelfLaunch = selfLaunchBinary !== null && !proxyHasAuth;
+    const selfLaunchBinary = selfLaunchEnabled()
+      ? (resolveChannelBinary(channel) ?? (channel === null ? launcher.executablePath() : null))
+      : null;
+    if (selfLaunchBinary === null || !existsSync(selfLaunchBinary)) {
+      throw new Error("isolated operator profiles require a self-managed local Chromium binary");
+    }
 
     let context: BrowserContext;
     this.throwIfStartCancelled();
-    if (useSelfLaunch && selfLaunchBinary !== null) {
+    console.error(
+      `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
+    );
+    const window =
+      this.launchedMode === "xvfb"
+        ? { width: 1920, height: 1080 }
+        : { width: 1280, height: 1024 };
+    const selfEnv: NodeJS.ProcessEnv = {
+      ...(chromeEnv ?? process.env),
+      TZ: geo?.timezoneId ?? "America/New_York",
+    };
+    context = await launchWithProfileGate(
+      this.profileDir,
+      () => {
+        this.throwIfStartCancelled();
+        return this.launchSelfManagedContext({
+          binary: selfLaunchBinary,
+          headless: chromeHeadless,
+          args: launchArgs,
+          proxy,
+          env: selfEnv,
+          window,
+        });
+      },
+      { failFast: true },
+    );
+    try {
+      if (proxy?.username !== undefined) {
+        await context.setHTTPCredentials({
+          username: proxy.username,
+          password: proxy.password ?? "",
+        });
+      }
+      await context.grantPermissions(grantedPermissions);
+      if (geo?.geolocation !== undefined) {
+        await context.setGeolocation(geo.geolocation);
+      }
+    } catch (err) {
       console.error(
-        `[operator] self-launch + connectOverCDP (Turnstile-safe launch) binary=${selfLaunchBinary}`,
-      );
-      // Window size matches the display surface so viewport reads as a real
-      // window (no emulated-viewport tell). TZ on the child makes Chrome
-      // report the egress timezone natively.
-      const window =
-        this.launchedMode === "xvfb"
-          ? { width: 1920, height: 1080 }
-          : { width: 1280, height: 1024 };
-      const selfEnv: NodeJS.ProcessEnv = {
-        ...(chromeEnv ?? process.env),
-        TZ: geo?.timezoneId ?? "America/New_York",
-      };
-      context = await launchWithProfileGate(
-        this.profileDir,
-        () => {
-          this.throwIfStartCancelled();
-          return this.launchSelfManagedContext({
-            binary: selfLaunchBinary,
-            headless: chromeHeadless,
-            args: launchArgs,
-            proxy,
-            env: selfEnv,
-            window,
-          });
-        },
-        { failFast: true },
-      );
-      // Options the default (connectOverCDP) context can't take at creation —
-      // applied post-connect. Best-effort: a failure here is non-fatal (the
-      // signup proceeds; only clipboard-key-extraction / geo degrade).
-      try {
-        await context.grantPermissions(grantedPermissions);
-        if (geo?.geolocation !== undefined) {
-          await context.setGeolocation(geo.geolocation);
-        }
-      } catch (err) {
-        console.error(
-          `[operator] post-connect context setup partial: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    } else {
-      if (selfLaunchEnabled() && selfLaunchBinary !== null && proxyHasAuth) {
-        console.error(
-          "[operator] credentialed proxy → launchPersistentContext (self-launch can't carry proxy auth)",
-        );
-      }
-      // T3: a PERSISTENT context (the legacy path). The profile dir carries the
-      // user's Google session so the OAuth-first path reuses it.
-      context = await launchWithProfileGate(
-        this.profileDir,
-        () => {
-          this.commitProfileLaunch();
-          return launcher.launchPersistentContext(this.profileDir, {
-            headless: chromeHeadless,
-            ...(chromeEnv !== undefined ? { env: chromeEnv } : {}),
-            ...(channel !== null ? { channel } : {}),
-            ...(proxy !== null ? { proxy } : {}),
-            args: [...launchArgs],
-            viewport: null,
-            locale: "en-US",
-            timezoneId: geo?.timezoneId ?? "America/New_York",
-            permissions: grantedPermissions,
-            ...(geo?.geolocation !== undefined ? { geolocation: geo.geolocation } : {}),
-          });
-        },
-        { failFast: true },
+        `[operator] post-connect context setup partial: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
       );
     }
     this.context = context;

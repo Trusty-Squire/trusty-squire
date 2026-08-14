@@ -20,6 +20,7 @@ describe("sessionProvidersFromCookies", () => {
 
   it("detects a live Google session from a *SID cookie", () => {
     expect(sessionProvidersFromCookies([c("__Secure-1PSID", ".google.com")])).toEqual(["google"]);
+    expect(sessionProvidersFromCookies([c("SAPISID", ".google.com")])).toEqual(["google"]);
     expect(sessionProvidersFromCookies([c("SID", "accounts.google.com")])).toEqual(["google"]);
   });
 

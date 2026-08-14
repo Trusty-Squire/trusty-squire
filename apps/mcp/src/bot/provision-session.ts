@@ -7339,6 +7339,14 @@ export interface FinishResult {
   closed: true;
 }
 
+function profileRequiresDestroy(session: Session): boolean {
+  return (
+    session.activePayment !== null ||
+    session.paymentFieldSealActive ||
+    (session.replayState?.moneyPath === true && session.replayState.paymentGuard !== "verified")
+  );
+}
+
 export async function finishProvisionSession(sessionId: string): Promise<FinishResult> {
   const session = sessionForCall(sessionId);
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
@@ -7346,8 +7354,7 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
   audit(sessionId, "finish", { url });
   sessions.delete(sessionId);
   try {
-    const reusable = session.activePayment === null && !session.paymentFieldSealActive;
-    await releaseWarmBrowserPage(session.browser, reusable);
+    await releaseWarmBrowserPage(session.browser, !profileRequiresDestroy(session));
   } finally {
     inFlight = false;
   }

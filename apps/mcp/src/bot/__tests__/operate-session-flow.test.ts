@@ -981,6 +981,9 @@ describe("prepared-statement replay", () => {
     await expect(replayOperatorRecipe(started.session_id, recipe, {}, 1)).rejects.toThrow(
       /invalid replay continuation/i,
     );
+    await finishProvisionSession(started.session_id);
+    expect(h.leaseReturnCalls).toBe(0);
+    expect(h.leaseDestroyCalls).toBe(1);
   });
 
   it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
@@ -1071,6 +1074,9 @@ describe("prepared-statement replay", () => {
     await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
       /verification is not satisfied/i,
     );
+    await finishProvisionSession(started.session_id);
+    expect(h.leaseReturnCalls).toBe(0);
+    expect(h.leaseDestroyCalls).toBe(1);
   });
 
   it("rejects unclassified legacy recipes from deterministic replay", async () => {
