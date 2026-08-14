@@ -102,11 +102,11 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   when the user wants the immediate handoff without notification or waiting.
   Card fields never return through MCP.
 - Every payment response includes a `session_id`. Pass that same ID to every
-  follow-up `operate_pay` and `operate_payment_status` call (pass `wait_seconds`,
-  0-15, to bound-wait for a change instead of an instant peek; `operate_payment_await`
-  remains a compatible `max_wait_seconds` alias). Omit `session_id` only when
-  this MCP process has exactly one live session; the compatibility path never
-  guesses the newest checkout.
+  follow-up `operate_pay` and canonical `operate_payment_status` call. Follow the
+  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  for polling arguments and the `operate_payment_await` compatibility alias.
+  Omit `session_id` only when this MCP process has exactly one live session; the
+  compatibility path never guesses the newest checkout.
 - Treat `payment_outcome_unknown` as unconfirmed: do not claim success or submit
   again blindly, because the click may already have charged the card. Re-observe
   and verify the merchant's order state.

@@ -177,7 +177,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         enum: ["single", "fill_card", "confirm"],
         description:
           '"single" (the default; also implied by omitting phase) is an ordinary one-step ' +
-          "checkout. Split checkouts only: \"fill_card\" approves an amount (falling back to the most " +
+          'checkout. Split checkouts only: "fill_card" approves an amount (falling back to the most ' +
           "recent real total this session observed when the card-entry page itself has none) " +
           'and releases the vaulted card without charging; "confirm" reads the final total and ' +
           "charges within that SAME approval — no second tap — refusing instead if the final " +
@@ -593,7 +593,7 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
   description:
     "Read-only: report the status of the addressed session's payment approval currently awaiting " +
     "the human's phone tap, if any — started by an operate_pay call that returned approval_pending. " +
-    'Pass `wait_seconds` (0-15, default 0) to bound-wait for a change instead of an instant peek; ' +
+    "Pass `wait_seconds` (0-15, default 0) to bound-wait for a change instead of an instant peek; " +
     "never blocks longer than that. Never verifies a mandate or opens a card. Only " +
     "candidate_kind=approval with ready_to_charge=true is a final authorization; a review candidate " +
     "still requires final approval.",

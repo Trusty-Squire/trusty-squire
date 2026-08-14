@@ -612,7 +612,7 @@ phase, approved_amount_cents, next:{tool:"operate_payment_status", session_id,
 wait_seconds:15}}` — the friction-audit P0 fix (small models can't tell
 "pending" from "broken" on a silent multi-minute hang, so they panic-retry or
 kill the server).
-- **One read-only tool, `operate_payment_status(session_id?, wait_seconds?)`.**
+- **One canonical read-only tool, `operate_payment_status(session_id?, wait_seconds?)`.**
   `wait_seconds` (0-15, default 0) is an instant peek at 0, a bound-wait
   (client-side race in `readApprovalStatus`, `apps/mcp/src/tools/operate-pay.ts`)
   above 0. Reports `pending`/`approved`/`expired` plus `candidate_submitted`

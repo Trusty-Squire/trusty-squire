@@ -1378,7 +1378,7 @@ describe("operate_pay split checkout phases", () => {
     ).toThrow();
   });
 
-  it("treats phase:\"single\" identically to omitting phase", async () => {
+  it('treats phase:"single" identically to omitting phase', async () => {
     mockBrowser = stubBrowser();
     const createPaymentApproval = vi.fn().mockResolvedValue({
       id: "appr_single",
