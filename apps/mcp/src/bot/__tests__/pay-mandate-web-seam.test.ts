@@ -40,7 +40,7 @@ import { fileURLToPath } from "node:url";
 import canonicalize from "canonicalize";
 import { canonicalize as vouchflowCanonicalize } from "@vouchflow/web";
 import { exportJWK, SignJWT } from "jose";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiClient } from "../../api-client.js";
 import { executeOperatePay, type PaymentBrowser } from "../pay-operator.js";
 import { sealToRecipient } from "../payment-hpke.js";
@@ -377,6 +377,10 @@ async function runSeam(cfg: {
 }
 
 describe("web ↔ mcp mandate canonical form (cross-package seam)", () => {
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("GUARD: the real web page.tsx AND mcp pay-operator.ts declare the SAME payload field set (in order)", () => {
     const webSource = readFileSync(
       fileURLToPath(new URL("../../../../web/app/vault/pay/[id]/page.tsx", import.meta.url)),
