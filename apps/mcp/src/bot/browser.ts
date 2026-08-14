@@ -253,6 +253,7 @@ interface CheckoutPaymentFieldRoot {
 
 interface CheckoutOutcomeBaseline {
   url: string;
+  orderUrlIdentities: readonly string[];
   terminalUrlIdentity: string | null;
 }
 
@@ -423,13 +424,17 @@ function isSubstantiveCheckoutIdentity(identity: string): boolean {
 function checkoutOutcomeBaselineFromDispatchSnapshot(
   snapshot: CheckoutOutcomeDispatchSnapshot,
 ): CheckoutOutcomeBaseline {
+  const identities = checkoutUrlOrderIdentities(snapshot.url);
   return {
     url: snapshot.url,
-    terminalUrlIdentity: checkoutTerminalUrlIdentity(snapshot.url),
+    orderUrlIdentities: identities?.orders ?? [],
+    terminalUrlIdentity: identities?.terminal ?? null,
   };
 }
 
-function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
+function checkoutUrlOrderIdentities(
+  rawUrl: string,
+): { orders: readonly string[]; terminal: string | null } | null {
   try {
     const url = new URL(rawUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") return null;
@@ -445,32 +450,54 @@ function checkoutTerminalUrlIdentity(rawUrl: string): string | null {
       });
     const routeSegment = (offset: number): string =>
       (segments.at(offset) ?? "").toLowerCase().replace(/-/g, "_");
-    let identity: string | undefined;
+    if (
+      segments.some((segment) =>
+        ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")),
+      )
+    ) {
+      return null;
+    }
+    const canonicalIdentity = (identity: string | undefined): string | null => {
+      if (identity === undefined || !isSubstantiveCheckoutIdentity(identity)) return null;
+      const normalizedIdentity = identity.normalize("NFKC").trim().toLowerCase();
+      return `${url.origin}/order/${encodeURIComponent(normalizedIdentity)}`;
+    };
+    const orders = new Set<string>();
+    for (let index = 0; index < segments.length - 1; index += 1) {
+      const marker = segments[index]?.toLowerCase().replace(/-/g, "_");
+      if (
+        !["checkout", "checkouts", "order", "orders", "receipt", "receipts"].includes(
+          marker ?? "",
+        )
+      ) {
+        continue;
+      }
+      const order = canonicalIdentity(segments[index + 1]);
+      if (order !== null) orders.add(order);
+    }
+    let terminalIdentity: string | undefined;
     if (["receipt", "receipts"].includes(routeSegment(-2))) {
-      identity = segments.at(-1);
+      terminalIdentity = segments.at(-1);
     } else if (
       ["order", "orders"].includes(routeSegment(-3)) &&
       ["confirmation", "confirmed", "thank_you"].includes(routeSegment(-1))
     ) {
-      identity = segments.at(-2);
+      terminalIdentity = segments.at(-2);
     } else if (
       ["order_confirmation", "order_confirmed", "order_complete", "thank_you"].includes(
         routeSegment(-2),
       )
     ) {
-      identity = segments.at(-1);
+      terminalIdentity = segments.at(-1);
     } else if (
       ["checkout", "checkouts"].includes(routeSegment(-3)) &&
       routeSegment(-1) === "thank_you"
     ) {
-      identity = segments.at(-2);
+      terminalIdentity = segments.at(-2);
     }
-    if (identity === undefined || !isSubstantiveCheckoutIdentity(identity)) return null;
-    if (segments.some((segment) => ["about_blank", "blank"].includes(segment.toLowerCase().replace(/[-:]/g, "_")))) {
-      return null;
-    }
-    const normalizedIdentity = identity.normalize("NFKC").trim().toLowerCase();
-    return `${url.origin}/order/${encodeURIComponent(normalizedIdentity)}`;
+    const terminal = canonicalIdentity(terminalIdentity);
+    if (terminal !== null) orders.add(terminal);
+    return { orders: [...orders], terminal };
   } catch {
     return null;
   }
@@ -9747,9 +9774,14 @@ export class BrowserController {
   }
 
   private async captureCheckoutOutcomeBaseline(): Promise<CheckoutOutcomeBaseline> {
-    if (!this.page) return { url: "", terminalUrlIdentity: null };
+    if (!this.page) return { url: "", orderUrlIdentities: [], terminalUrlIdentity: null };
     const url = this.page.url();
-    return { url, terminalUrlIdentity: checkoutTerminalUrlIdentity(url) };
+    const identities = checkoutUrlOrderIdentities(url);
+    return {
+      url,
+      orderUrlIdentities: identities?.orders ?? [],
+      terminalUrlIdentity: identities?.terminal ?? null,
+    };
   }
 
   private async hasConfirmedCheckoutOutcome(baseline: CheckoutOutcomeBaseline): Promise<boolean> {
@@ -9765,7 +9797,7 @@ export class BrowserController {
     return (
       sameCheckoutOrigin &&
       current.terminalUrlIdentity !== null &&
-      current.terminalUrlIdentity !== baseline.terminalUrlIdentity
+      !baseline.orderUrlIdentities.includes(current.terminalUrlIdentity)
     );
   }
 
