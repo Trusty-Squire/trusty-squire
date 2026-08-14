@@ -51,7 +51,10 @@ export interface PaymentBrowser {
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
   clearSealedPaymentFields(): Promise<void>;
   clearCheckoutCardFields?(): Promise<void>;
-  waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution>;
+  waitForThreeDsResolution(
+    timeoutMs: number,
+    challengeUrl?: string,
+  ): Promise<ThreeDsResolution>;
   currentUrl(): string;
 }
 
@@ -1293,10 +1296,16 @@ export async function executeOperatePay(
     let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
     if (submitResult.three_ds_required && threeDsWaitMs > 0) {
       getThreeDsTelegramSent = trackThreeDsNotification(api.notifyThreeDs(approvalId));
-      const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
+      const resolution = await browser.waitForThreeDsResolution(
+        threeDsWaitMs,
+        submitResult.challenge_url,
+      );
       if (resolution === "succeeded") paymentStatus = "payment_submitted";
       if (resolution === "failed") paymentStatus = "payment_declined";
       if (resolution === "unconfirmed") paymentStatus = "payment_outcome_unknown";
+      if (resolution === "authenticated_pending_order") {
+        paymentStatus = "payment_3ds_authenticated_pending_order";
+      }
     }
 
     let auditRecorded = true;
@@ -1331,6 +1340,23 @@ export async function executeOperatePay(
         status: paymentStatus,
         audit_recorded: auditRecorded,
         approval_url: approvalUrl,
+      };
+    }
+    if (paymentStatus === "payment_3ds_authenticated_pending_order") {
+      // Fail closed: the issuer authenticated the cardholder out of band
+      // (decoupled/app-push 3DS), but nothing on our side confirmed the
+      // merchant actually finalized the order — never report merchant/
+      // amount success on an unconfirmed completion.
+      return {
+        status: paymentStatus,
+        audit_recorded: auditRecorded,
+        approval_url: approvalUrl,
+        needs_user: {
+          wall: "3ds",
+          message:
+            "The issuer authenticated the payment out of band, but the checkout did not confirm order completion. Check the open checkout / your account on the merchant site before retrying.",
+          resume: "checkout",
+        },
       };
     }
     return {

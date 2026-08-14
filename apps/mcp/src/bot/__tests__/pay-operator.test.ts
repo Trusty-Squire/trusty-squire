@@ -66,7 +66,12 @@ async function harness(
   expectedAudience: string | null = "customer_test",
   apiAudience?: string,
   threeDs?: {
-    resolution: "succeeded" | "failed" | "timeout" | "unconfirmed";
+    resolution:
+      | "succeeded"
+      | "failed"
+      | "timeout"
+      | "unconfirmed"
+      | "authenticated_pending_order";
     waitSeconds?: number;
     notifyNeverResolves?: boolean;
     notifySent?: boolean;
@@ -633,7 +638,10 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(
+      180_000,
+      "https://issuer.synthetic.test/challenge",
+    );
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_submitted" })]);
   });
 
@@ -645,7 +653,10 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(
+      180_000,
+      "https://issuer.synthetic.test/challenge",
+    );
   });
 
   it("notifies and hands back when the 3DS challenge times out", async () => {
@@ -706,6 +717,25 @@ describe("operate_pay", () => {
     expect(result).toMatchObject({ status: "payment_outcome_unknown" });
     expect(notifyCalls).toHaveLength(1);
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+  });
+
+  it("fails closed with a distinct status when the issuer authenticates OOB but the order never confirms", async () => {
+    const { result, auditBodies, notifyCalls } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "authenticated_pending_order" },
+    );
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_authenticated_pending_order",
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(result).not.toHaveProperty("merchant");
+    expect(notifyCalls).toHaveLength(1);
+    expect(auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_3ds_authenticated_pending_order" }),
+    ]);
   });
 
   it("records unknown when single-page submission fails after dispatch", async () => {

@@ -272,9 +272,78 @@ export interface CheckoutSubmitResult {
   challenge_url?: string;
 }
 
-export type ThreeDsResolution = "succeeded" | "failed" | "timeout" | "unconfirmed";
+export type ThreeDsResolution =
+  | "succeeded"
+  | "failed"
+  | "timeout"
+  | "unconfirmed"
+  | "authenticated_pending_order";
 
 const THREE_DS_RESOLUTION_GRACE_MS = 5_000;
+
+interface StripeChallengeParams {
+  paymentIntentId: string;
+  clientSecret: string;
+  publishableKey: string;
+}
+
+// Stripe's decoupled/OOB (app-push) 3DS ACS never posts back into the in-page
+// challenge iframe, so the DOM-only success/failure text and URL heuristics in
+// waitForThreeDsResolution below can never observe it. The PaymentIntent's own
+// status is the one signal the issuer's out-of-band authentication actually
+// updates. Parsing it from the hosted-challenge URL (query params Stripe.js
+// itself puts there) needs only the publishable key — never the account's
+// secret key — the same public retrieve-with-client-secret call Stripe.js
+// makes client-side to poll a decoupled challenge.
+export function parseStripeChallengeParams(url: string): StripeChallengeParams | undefined {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return undefined;
+  }
+  if (!/(^|\.)stripe\.com$/i.test(parsed.hostname)) return undefined;
+  const paymentIntentId = parsed.searchParams.get("payment_intent");
+  const clientSecret = parsed.searchParams.get("payment_intent_client_secret");
+  const publishableKey = parsed.searchParams.get("publishable_key");
+  if (!paymentIntentId || !clientSecret || !publishableKey) return undefined;
+  if (!paymentIntentId.startsWith("pi_")) return undefined;
+  return { paymentIntentId, clientSecret, publishableKey };
+}
+
+type StripePaymentIntentOutcome = "authenticated" | "failed" | "pending" | "unknown";
+
+// Authoritative-signal classification, not a guess: requires_action means the
+// challenge is still open; succeeded/processing/requires_capture mean the ACS
+// authenticated the cardholder (issuer-side truth for decoupled 3DS);
+// requires_payment_method/canceled are Stripe's own failure states.
+export function classifyStripePaymentIntentStatus(status: string): StripePaymentIntentOutcome {
+  if (status === "requires_action") return "pending";
+  if (status === "succeeded" || status === "processing" || status === "requires_capture") {
+    return "authenticated";
+  }
+  if (status === "requires_payment_method" || status === "canceled") return "failed";
+  return "unknown";
+}
+
+async function fetchStripePaymentIntentStatus(
+  params: StripeChallengeParams,
+): Promise<string | undefined> {
+  try {
+    const res = await fetch(
+      `https://api.stripe.com/v1/payment_intents/${encodeURIComponent(params.paymentIntentId)}?client_secret=${encodeURIComponent(params.clientSecret)}`,
+      {
+        headers: { Authorization: `Bearer ${params.publishableKey}` },
+        signal: AbortSignal.timeout(10_000),
+      },
+    );
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { status?: unknown };
+    return typeof body.status === "string" ? body.status : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 interface CheckoutFrameDescriptor {
   url: string;
@@ -9916,7 +9985,10 @@ export class BrowserController {
     return Object.entries(current).some(([signal, count]) => count > (baseline[signal] ?? 0));
   }
 
-  async waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution> {
+  async waitForThreeDsResolution(
+    timeoutMs: number,
+    challengeUrl?: string,
+  ): Promise<ThreeDsResolution> {
     if (!this.page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
@@ -9925,6 +9997,15 @@ export class BrowserController {
     const deadline = Date.now() + timeoutMs;
     let challengeWasActive = this.checkoutThreeDsPending;
     let challengeAbsentSince: number | undefined;
+    const stripeParams =
+      challengeUrl !== undefined ? parseStripeChallengeParams(challengeUrl) : undefined;
+    // Poll the PaymentIntent far less often than the DOM loop (every ~3s) —
+    // it's a real network call against Stripe, the DOM loop is local.
+    let nextStripePollAt = Date.now();
+    let reloadedForOob = false;
+    // Once the ACS confirms OOB, give the merchant's own completion JS a
+    // bounded grace period to redirect/render the receipt before giving up.
+    let oobGraceDeadline: number | undefined;
     do {
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
         this.checkoutThreeDsPending = false;
@@ -9934,20 +10015,60 @@ export class BrowserController {
         this.checkoutThreeDsPending = false;
         return "failed";
       }
+
+      if (stripeParams !== undefined && Date.now() >= nextStripePollAt) {
+        nextStripePollAt = Date.now() + 3_000;
+        const status = await fetchStripePaymentIntentStatus(stripeParams);
+        if (status !== undefined) {
+          const outcome = classifyStripePaymentIntentStatus(status);
+          if (outcome === "failed") {
+            this.checkoutThreeDsPending = false;
+            return "failed";
+          }
+          if (outcome === "authenticated" && oobGraceDeadline === undefined) {
+            // The issuer authenticated out of band (app-push 3DS) — the
+            // in-frame challenge never fires the postMessage the merchant's
+            // JS is waiting on, so the checkout page needs a nudge to
+            // re-check the (now-authoritative) server-side state.
+            oobGraceDeadline = Date.now() + 30_000;
+            if (!reloadedForOob) {
+              reloadedForOob = true;
+              await this.page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
+            }
+          }
+        }
+      }
+
       const challenge = await this.detectThreeDsChallenge();
       if (challenge.three_ds_required) {
         challengeWasActive = true;
         challengeAbsentSince = undefined;
       }
-      if (!challenge.three_ds_required && challengeWasActive) {
+      if (
+        !challenge.three_ds_required &&
+        challengeWasActive &&
+        oobGraceDeadline === undefined
+      ) {
         challengeAbsentSince ??= Date.now();
         if (Date.now() - challengeAbsentSince >= THREE_DS_RESOLUTION_GRACE_MS) {
           this.checkoutThreeDsPending = false;
           return "unconfirmed";
         }
       }
+
+      if (oobGraceDeadline !== undefined && Date.now() > oobGraceDeadline) {
+        // Never claim success on the authoritative-but-unconfirmed-in-DOM
+        // case — the issuer authenticated the cardholder, but we have no
+        // proof the merchant actually finalized the order. Fail closed.
+        this.checkoutThreeDsPending = false;
+        return "authenticated_pending_order";
+      }
+
       await this.page.waitForTimeout(1_000).catch(() => undefined);
-    } while (Date.now() <= deadline);
+    } while (
+      Date.now() <= deadline ||
+      (oobGraceDeadline !== undefined && Date.now() <= oobGraceDeadline)
+    );
     if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
       this.checkoutThreeDsPending = false;
       return "succeeded";
@@ -9955,6 +10076,10 @@ export class BrowserController {
     if (await this.hasNewVisibleCheckoutFailure(failureBaseline)) {
       this.checkoutThreeDsPending = false;
       return "failed";
+    }
+    if (oobGraceDeadline !== undefined) {
+      this.checkoutThreeDsPending = false;
+      return "authenticated_pending_order";
     }
     if (challengeWasActive && !(await this.detectThreeDsChallenge()).three_ds_required) {
       this.checkoutThreeDsPending = false;
