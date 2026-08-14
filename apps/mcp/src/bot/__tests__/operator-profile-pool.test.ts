@@ -117,9 +117,11 @@ describe("operator profile pool migration stage", () => {
     const first = await acquireOperatorProfile("real-source", { sourceProfileDir: source });
     try {
       expect(first.seedGeneration).toBe(generation);
+      const second = await acquireOperatorProfile("alias-source", { sourceProfileDir: alias });
       await expect(
-        acquireOperatorProfile("alias-source", { sourceProfileDir: alias }),
+        acquireOperatorProfile("third-source", { sourceProfileDir: source }),
       ).rejects.toThrow("capacity reached");
+      await second.destroy();
     } finally {
       await first.destroy();
     }
@@ -144,6 +146,66 @@ describe("operator profile pool migration stage", () => {
     });
 
     expect(existsSync(p.seedLock)).toBe(false);
+  });
+
+  it("bounds a third acquisition while seed publication holds the shared lock", async () => {
+    vi.useFakeTimers();
+    let releaseValidation = (): void => undefined;
+    let publication: Promise<string> | undefined;
+    let first: Awaited<ReturnType<typeof acquireOperatorProfile>> | undefined;
+    let second: Awaited<ReturnType<typeof acquireOperatorProfile>> | undefined;
+    try {
+      const { root, source } = fixture();
+      await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+      first = await acquireOperatorProfile("session-a", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      second = await acquireOperatorProfile("session-b", {
+        rootDir: root,
+        sourceProfileDir: source,
+      });
+      let markValidationStarted = (): void => undefined;
+      const validationStarted = new Promise<void>((resolve) => {
+        markValidationStarted = resolve;
+      });
+      const validationGate = new Promise<void>((resolve) => {
+        releaseValidation = resolve;
+      });
+      publication = publishOperatorProfileSeed(source, {
+        rootDir: root,
+        proof: verifiedLoginProof,
+        validateGoogleIdentity: async () => {
+          markValidationStarted();
+          await validationGate;
+          return { googleSignedIn: true, closeState: "closed" };
+        },
+      });
+      await validationStarted;
+      const third = acquireOperatorProfile("session-c", {
+        rootDir: root,
+        sourceProfileDir: source,
+        deadline: Date.now() + 100,
+      });
+      const rejection = expect(third).rejects.toMatchObject({
+        reason: "timeout",
+        phase: "seed_lock",
+      });
+
+      await vi.advanceTimersByTimeAsync(100);
+
+      await rejection;
+      expect(readdirSync(operatorProfilePoolTest.paths(root).active).sort()).toEqual([
+        "slot-0",
+        "slot-1",
+      ]);
+    } finally {
+      releaseValidation();
+      await publication;
+      await second?.destroy();
+      await first?.destroy();
+      vi.useRealTimers();
+    }
   });
 
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
@@ -239,13 +301,13 @@ describe("operator profile pool migration stage", () => {
     );
   });
 
-  it("admits one active lease and never launches from the login-authoring profile", async () => {
+  it("admits two isolated active leases and never launches from the login-authoring profile", async () => {
     const { root, source } = fixture();
     await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
-    const first = await acquireOperatorProfile("session-a", {
-      rootDir: root,
-      sourceProfileDir: source,
-    });
+    const [first, second] = await Promise.all([
+      acquireOperatorProfile("session-a", { rootDir: root, sourceProfileDir: source }),
+      acquireOperatorProfile("session-b", { rootDir: root, sourceProfileDir: source }),
+    ]);
     expect(first.profileDir).not.toBe(source);
     expect(cookieValues(first.profileDir)).toEqual(
       OPERATOR_SEED_GOOGLE_COOKIE_NAMES.map((name) =>
@@ -253,9 +315,11 @@ describe("operator profile pool migration stage", () => {
       ).sort(),
     );
     expect(existsSync(join(first.profileDir, "Default", "Web Data"))).toBe(false);
+    expect(second.profileDir).not.toBe(first.profileDir);
     await expect(
-      acquireOperatorProfile("session-b", { rootDir: root, sourceProfileDir: source }),
+      acquireOperatorProfile("session-c", { rootDir: root, sourceProfileDir: source }),
     ).rejects.toThrow("capacity reached");
+    await second.destroy();
     await first.destroy();
   });
 
@@ -316,6 +380,39 @@ describe("operator profile pool migration stage", () => {
     expect(existsSync(lease.profileDir)).toBe(false);
     expect(existsSync(tombstone)).toBe(false);
     expect(readdirSync(p.activeClaims)).toEqual([]);
+  });
+
+  it("restores an ambiguous quarantined lease to its original second slot", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const first = await acquireOperatorProfile("first-session", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    const second = await acquireOperatorProfile("second-session", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const secondSlot = join(p.active, "slot-1");
+    const owner = JSON.parse(readFileSync(join(secondSlot, "owner.json"), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    writeFileSync(
+      join(secondSlot, "owner.json"),
+      `${JSON.stringify({ ...owner, host: "remote-host" })}\n`,
+    );
+    const tombstone = join(p.tombstones, "active-1-test");
+    renameSync(secondSlot, tombstone);
+
+    operatorProfilePoolTest.scavengeQuarantinedActive(p);
+
+    expect(existsSync(join(p.active, "slot-0"))).toBe(true);
+    expect(existsSync(join(p.active, "slot-1"))).toBe(true);
+    expect(existsSync(tombstone)).toBe(false);
+    await second.destroy();
+    await first.destroy();
   });
 
   it("binds a canonical worker identity through a symlinked pool root", async () => {
@@ -540,11 +637,16 @@ describe("operator profile pool migration stage", () => {
       { mode: 0o600 },
     );
 
+    const second = await acquireOperatorProfile("session-second", {
+      rootDir: root,
+      sourceProfileDir: source,
+    });
     await expect(
       acquireOperatorProfile("session-new", { rootDir: root, sourceProfileDir: source }),
     ).rejects.toThrow("capacity reached");
     expect(readdirSync(p.tombstones)).toEqual([]);
     expect(existsSync(active.profileDir)).toBe(true);
+    await second.destroy();
   });
 
   it("acquires an empty isolated profile without publishing canonical state", async () => {

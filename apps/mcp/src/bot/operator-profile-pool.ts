@@ -32,7 +32,11 @@ import {
   type ProfileProcessIdentity,
 } from "./profile.js";
 
-const ACTIVE_SLOT_COUNT = 1;
+// Fixed per-namespace admission bound. These directories, rather than an
+// in-memory counter, are the authority across MCP processes. A third operator
+// start in the same namespace may wait at the provision seam, but can never
+// create a third active profile while both slots are claimed.
+const ACTIVE_SLOT_COUNT = 2;
 const UNPUBLISHED_SEED_GENERATION = "unpublished";
 const STARTUP_GRACE_MS = 30_000;
 const WARM_IDLE_TTL_MS = 6 * 60 * 60 * 1_000;
@@ -122,7 +126,21 @@ export interface OperatorProfilePoolOptions {
   rootDir?: string;
   sourceProfileDir?: string;
   now?: () => number;
+  deadline?: number;
+  signal?: AbortSignal;
 }
+
+export class OperatorProfileAcquisitionInterruptedError extends Error {
+  constructor(
+    readonly reason: "timeout" | "cancelled",
+    readonly phase: "profile" | "seed_lock" = "profile",
+  ) {
+    super(`operator profile acquisition ${reason === "timeout" ? "timed out" : "was cancelled"}`);
+    this.name = "OperatorProfileAcquisitionInterruptedError";
+  }
+}
+
+type OperatorProfileAcquisitionControl = Pick<OperatorProfilePoolOptions, "deadline" | "signal">;
 
 function defaultPoolRoot(): string {
   return process.env.VITEST === "true"
@@ -408,7 +426,44 @@ function copyIdentitySeed(sourceProfileDir: string, destination: string): void {
   }
 }
 
-async function withSeedLock<T>(p: PoolPaths, fn: () => Promise<T> | T): Promise<T> {
+function assertProfileAcquisitionActive(
+  control: OperatorProfileAcquisitionControl,
+  phase: "profile" | "seed_lock" = "profile",
+): void {
+  if (control.signal?.aborted === true) {
+    throw new OperatorProfileAcquisitionInterruptedError("cancelled", phase);
+  }
+  if (control.deadline !== undefined && Date.now() >= control.deadline) {
+    throw new OperatorProfileAcquisitionInterruptedError("timeout", phase);
+  }
+}
+
+async function waitForSeedLockRetry(control: OperatorProfileAcquisitionControl): Promise<void> {
+  assertProfileAcquisitionActive(control, "seed_lock");
+  const delay =
+    control.deadline === undefined ? 25 : Math.max(0, Math.min(25, control.deadline - Date.now()));
+  await new Promise<void>((resolveWait) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (): void => {
+      if (settled) return;
+      settled = true;
+      if (timer !== undefined) clearTimeout(timer);
+      control.signal?.removeEventListener("abort", finish);
+      resolveWait();
+    };
+    timer = setTimeout(finish, delay);
+    control.signal?.addEventListener("abort", finish, { once: true });
+    if (control.signal?.aborted === true) finish();
+  });
+  assertProfileAcquisitionActive(control, "seed_lock");
+}
+
+async function withSeedLock<T>(
+  p: PoolPaths,
+  fn: () => Promise<T> | T,
+  control: OperatorProfileAcquisitionControl = {},
+): Promise<T> {
   const token = randomUUID();
   const owner = {
     host: hostname(),
@@ -416,8 +471,9 @@ async function withSeedLock<T>(p: PoolPaths, fn: () => Promise<T> | T): Promise<
     token,
   } satisfies SeedLockOwner;
   for (;;) {
+    assertProfileAcquisitionActive(control, "seed_lock");
     if (scavengeSeedLockArtifacts(p)) {
-      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      await waitForSeedLockRetry(control);
       continue;
     }
     const claim = `${p.seedLock}.claim-${randomUUID()}`;
@@ -428,7 +484,7 @@ async function withSeedLock<T>(p: PoolPaths, fn: () => Promise<T> | T): Promise<
       rmSync(claim, { force: true });
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
       if (quarantineStaleSeedLock(p)) continue;
-      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      await waitForSeedLockRetry(control);
       continue;
     }
     try {
@@ -442,6 +498,7 @@ async function withSeedLock<T>(p: PoolPaths, fn: () => Promise<T> | T): Promise<
     break;
   }
   try {
+    assertProfileAcquisitionActive(control, "seed_lock");
     return await fn();
   } finally {
     if (readSeedLockOwner(p.seedLock)?.token === token) {
@@ -673,9 +730,9 @@ function reapQuarantinedActive(
 ): void {
   const owner = readJson<ActiveOwner>(join(tombstone, "owner.json"));
   if (owner !== null && (owner.host !== hostname() || processState(owner) !== "stale")) {
-    // A transient identity read failed before quarantine. Restore the lease if
-    // its public slot is still free; never inspect or signal the worker.
-    const publicSlot = join(p.active, "slot-0");
+    const slotIndex = /^active-(\d+)-/.exec(basename(tombstone))?.[1];
+    if (slotIndex === undefined) return;
+    const publicSlot = join(p.active, `slot-${slotIndex}`);
     try {
       renameSync(tombstone, publicSlot);
     } catch {
@@ -896,18 +953,22 @@ export async function acquireOperatorProfile(
   initializePool(p);
   scavengeDestroyRequired(p);
 
-  const reservation = await withSeedLock(p, () => {
-    scavengeQuarantinedActive(p);
-    scavengeActiveSlots(p, now());
-    for (let index = 0; index < ACTIVE_SLOT_COUNT; index += 1) {
-      const claimed = reserveActiveSlot(p, index, sessionId);
-      if (claimed !== null) return claimed;
-    }
-    return null;
-  });
+  const reservation = await withSeedLock(
+    p,
+    () => {
+      scavengeQuarantinedActive(p);
+      scavengeActiveSlots(p, now());
+      for (let index = 0; index < ACTIVE_SLOT_COUNT; index += 1) {
+        const claimed = reserveActiveSlot(p, index, sessionId);
+        if (claimed !== null) return claimed;
+      }
+      return null;
+    },
+    opts,
+  );
   if (reservation === null) {
     throw new Error(
-      "operate_start capacity reached: 1 operator session is active; finish it and retry",
+      "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
     );
   }
   const { slotDir, ownerToken } = reservation;
@@ -915,53 +976,59 @@ export async function acquireOperatorProfile(
   const claimDir = join(slotDir, "claim");
   let allocatedProfileId: string | null = null;
   try {
-    const acquiredDescriptor = await withSeedLock(p, () => {
-      const generation = currentGeneration(p);
-      scavengeWarm(p, generation ?? UNPUBLISHED_SEED_GENERATION, now());
-      const warm = join(p.warm, "slot-0");
-      let descriptor: ProfileLeaseDescriptor | null = null;
-      try {
-        renameSync(warm, claimDir);
-        descriptor = readLease(claimDir);
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-      }
-      if (descriptor !== null) {
-        const activeDescriptor = { ...descriptor };
-        delete activeDescriptor.returned_at;
-        delete activeDescriptor.worker;
-        writePrivateJson(join(claimDir, "lease.json"), activeDescriptor);
-        return activeDescriptor;
-      }
+    assertProfileAcquisitionActive(opts);
+    const acquiredDescriptor = await withSeedLock(
+      p,
+      () => {
+        const generation = currentGeneration(p);
+        scavengeWarm(p, generation ?? UNPUBLISHED_SEED_GENERATION, now());
+        const warm = join(p.warm, "slot-0");
+        let descriptor: ProfileLeaseDescriptor | null = null;
+        try {
+          renameSync(warm, claimDir);
+          descriptor = readLease(claimDir);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+        }
+        if (descriptor !== null) {
+          const activeDescriptor = { ...descriptor };
+          delete activeDescriptor.returned_at;
+          delete activeDescriptor.worker;
+          writePrivateJson(join(claimDir, "lease.json"), activeDescriptor);
+          return activeDescriptor;
+        }
 
-      rmSync(claimDir, { recursive: true, force: true });
-      const profileId = randomUUID();
-      allocatedProfileId = profileId;
-      const profileRoot = join(p.profiles, profileId);
-      ensurePrivateDir(profileRoot);
-      const userDataDir = join(profileRoot, "user-data");
-      if (generation === null) {
-        ensurePrivateDir(userDataDir);
-      } else {
-        cpSync(join(p.generations, generation, "user-data"), userDataDir, {
-          recursive: true,
-          force: false,
-          errorOnExist: true,
-        });
-        stripTransientProfileState(userDataDir);
-      }
-      ensurePrivateDir(claimDir);
-      const coldDescriptor: ProfileLeaseDescriptor = {
-        version: 1,
-        lease_token: randomUUID(),
-        profile_id: profileId,
-        seed_generation: generation ?? UNPUBLISHED_SEED_GENERATION,
-        created_at: now(),
-        reuse_count: 0,
-      };
-      writePrivateJson(join(claimDir, "lease.json"), coldDescriptor);
-      return coldDescriptor;
-    });
+        rmSync(claimDir, { recursive: true, force: true });
+        const profileId = randomUUID();
+        allocatedProfileId = profileId;
+        const profileRoot = join(p.profiles, profileId);
+        ensurePrivateDir(profileRoot);
+        const userDataDir = join(profileRoot, "user-data");
+        if (generation === null) {
+          ensurePrivateDir(userDataDir);
+        } else {
+          cpSync(join(p.generations, generation, "user-data"), userDataDir, {
+            recursive: true,
+            force: false,
+            errorOnExist: true,
+          });
+          stripTransientProfileState(userDataDir);
+        }
+        ensurePrivateDir(claimDir);
+        const coldDescriptor: ProfileLeaseDescriptor = {
+          version: 1,
+          lease_token: randomUUID(),
+          profile_id: profileId,
+          seed_generation: generation ?? UNPUBLISHED_SEED_GENERATION,
+          created_at: now(),
+          reuse_count: 0,
+        };
+        writePrivateJson(join(claimDir, "lease.json"), coldDescriptor);
+        return coldDescriptor;
+      },
+      opts,
+    );
+    assertProfileAcquisitionActive(opts);
     return new OperatorProfileLease(p, slotDir, claimDir, ownerToken, acquiredDescriptor, now);
   } catch (err) {
     const tombstone = quarantineOwnedActiveSlot(p, slotDir, ownerToken, "failed-active");

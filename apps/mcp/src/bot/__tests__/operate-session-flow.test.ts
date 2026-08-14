@@ -60,7 +60,12 @@ const h = vi.hoisted(() => ({
   leaseSerial: 0,
   warmLeaseProfileDir: null as string | null,
   nextLeaseProfileDir: null as string | null,
+  profileAcquisitionInterruption: null as null | {
+    reason: "timeout" | "cancelled";
+    phase: "profile" | "seed_lock";
+  },
   leaseAcquireCalls: 0,
+  activeLeaseCount: 0,
   leaseReturnCalls: 0,
   leaseDestroyCalls: 0,
   leaseRetainCalls: 0,
@@ -612,44 +617,74 @@ vi.mock("../google-login.js", async (importOriginal) => {
   };
 });
 
-vi.mock("../operator-profile-pool.js", () => ({
-  OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
-  acquireOperatorProfile: async (_sessionId: string, opts: { sourceProfileDir?: string } = {}) => {
-    h.leaseAcquireCalls += 1;
-    const warm = h.warmLeaseProfileDir;
-    h.warmLeaseProfileDir = null;
-    const profileDir =
-      h.nextLeaseProfileDir ??
-      opts.sourceProfileDir ??
-      warm ??
-      `/tmp/trusty-squire-unit-profile-${process.pid}-${++h.leaseSerial}`;
-    h.nextLeaseProfileDir = null;
-    let finished = false;
-    return {
-      profileDir,
-      profileId: `unit-${h.leaseSerial}`,
-      seedGeneration: "unit-seed",
-      bindWorker: () => undefined,
-      returnWarm: async () => {
-        if (finished) return;
-        finished = true;
-        h.leaseReturnCalls += 1;
-        h.warmLeaseProfileDir = profileDir;
-      },
-      destroy: async () => {
-        if (finished) return;
-        finished = true;
-        h.leaseDestroyCalls += 1;
-      },
-      retain: async (destroyRequired = false) => {
-        if (finished) return;
-        finished = true;
-        h.leaseRetainCalls += 1;
-        h.leaseRetainDestroyRequired.push(destroyRequired);
-      },
-    };
-  },
-}));
+vi.mock("../operator-profile-pool.js", () => {
+  class OperatorProfileAcquisitionInterruptedError extends Error {
+    readonly reason: "timeout" | "cancelled";
+    readonly phase: "profile" | "seed_lock";
+    constructor(reason: "timeout" | "cancelled", phase: "profile" | "seed_lock" = "profile") {
+      super(`operator profile acquisition ${reason}`);
+      this.reason = reason;
+      this.phase = phase;
+    }
+  }
+  return {
+    OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
+    OperatorProfileAcquisitionInterruptedError,
+    acquireOperatorProfile: async (
+      _sessionId: string,
+      opts: { sourceProfileDir?: string } = {},
+    ) => {
+      h.leaseAcquireCalls += 1;
+      if (h.profileAcquisitionInterruption !== null) {
+        throw new OperatorProfileAcquisitionInterruptedError(
+          h.profileAcquisitionInterruption.reason,
+          h.profileAcquisitionInterruption.phase,
+        );
+      }
+      if (h.activeLeaseCount >= 2) {
+        throw new Error(
+          "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
+        );
+      }
+      h.activeLeaseCount += 1;
+      const warm = h.warmLeaseProfileDir;
+      h.warmLeaseProfileDir = null;
+      const profileDir =
+        h.nextLeaseProfileDir ??
+        opts.sourceProfileDir ??
+        warm ??
+        `/tmp/trusty-squire-unit-profile-${process.pid}-${++h.leaseSerial}`;
+      h.nextLeaseProfileDir = null;
+      let finished = false;
+      return {
+        profileDir,
+        profileId: `unit-${h.leaseSerial}`,
+        seedGeneration: "unit-seed",
+        bindWorker: () => undefined,
+        returnWarm: async () => {
+          if (finished) return;
+          finished = true;
+          h.activeLeaseCount -= 1;
+          h.leaseReturnCalls += 1;
+          h.warmLeaseProfileDir = profileDir;
+        },
+        destroy: async () => {
+          if (finished) return;
+          finished = true;
+          h.activeLeaseCount -= 1;
+          h.leaseDestroyCalls += 1;
+        },
+        retain: async (destroyRequired = false) => {
+          if (finished) return;
+          finished = true;
+          h.activeLeaseCount -= 1;
+          h.leaseRetainCalls += 1;
+          h.leaseRetainDestroyRequired.push(destroyRequired);
+        },
+      };
+    },
+  };
+});
 
 import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -671,6 +706,7 @@ import {
   captchaGate,
   finishProvisionSession,
   withProvisionSessionCall,
+  paymentSession,
   closeAllProvisionSessions,
   activeSessionCount,
   getSessionUserEmail,
@@ -812,7 +848,9 @@ beforeEach(() => {
   h.leaseSerial = 0;
   h.warmLeaseProfileDir = null;
   h.nextLeaseProfileDir = null;
+  h.profileAcquisitionInterruption = null;
   h.leaseAcquireCalls = 0;
+  h.activeLeaseCount = 0;
   h.leaseReturnCalls = 0;
   h.leaseDestroyCalls = 0;
   h.leaseRetainCalls = 0;
@@ -3669,14 +3707,158 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     }
   });
 
-  it("refuses a second task while the single shared page is in flight", async () => {
-    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-
-    await expect(
+  it("runs two tasks concurrently on distinct isolated profile leases", async () => {
+    const [first, second] = await Promise.all([
+      startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
       startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-    ).rejects.toThrow(/another operator session is already in flight/);
-    expect(h.startCalls).toBe(1);
+    ]);
+
+    expect(h.startCalls).toBe(2);
+    expect(h.profileDirs).toHaveLength(2);
+    expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
     await finishProvisionSession(first.session_id);
+    await finishProvisionSession(second.session_id);
+  });
+
+  it("never lets one session's approval authorize another session's charge", async () => {
+    const [first, second] = await Promise.all([
+      startProvisionSession({ serviceUrl: "https://shop.example.com/first" }),
+      startProvisionSession({ serviceUrl: "https://shop.example.com/second" }),
+    ]);
+    const firstPaymentSession = paymentSession(first.session_id);
+    const secondPaymentSession = paymentSession(second.session_id);
+    const firstClaim = claimActivePaymentForOperatePay(undefined, firstPaymentSession);
+    if (firstClaim.kind !== "lease") throw new Error("expected first payment lease");
+    const firstApproval = {
+      approval_id: "appr_first_session_only",
+      approval_url: "https://web.test/vault/pay/appr_first_session_only",
+      nonce: "nonce_first_session_only",
+      agent: "agent_first_session_only",
+      checkout: {
+        merchant: "First shop",
+        checkout_origin: "https://shop.example.com",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      jit: false,
+      boundCardRef: "card_first_session_only",
+      deadline: Date.now() + 60_000,
+      rejectedCandidates: [],
+      keypair: { publicKey: "public-first", privateKey: "private-first" },
+      item: "First widget",
+      reason: "First session purchase",
+      cardRef: "card_first_session_only",
+    };
+    completeActivePaymentLeaseWithPendingApproval(
+      firstClaim.lease,
+      firstApproval,
+      firstPaymentSession,
+    );
+
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/requires session_id/);
+    expect(getActivePendingApproval(firstPaymentSession)).toBe(firstApproval);
+    expect(getActivePendingApproval(secondPaymentSession)).toBeNull();
+
+    const secondClaim = claimActivePaymentForOperatePay(undefined, secondPaymentSession);
+    if (secondClaim.kind !== "lease") throw new Error("expected second payment lease");
+    expect(secondClaim.resumeApproval).toBeUndefined();
+    expect(() =>
+      completeActivePaymentLeaseWithPendingApproval(
+        firstClaim.lease,
+        firstApproval,
+        secondPaymentSession,
+      ),
+    ).toThrow(/without ownership/);
+    expect(releaseActivePaymentLease(secondClaim.lease, true, secondPaymentSession)).toBe(true);
+
+    const resumedFirst = claimActivePaymentForOperatePay(undefined, firstPaymentSession);
+    if (resumedFirst.kind !== "lease") throw new Error("expected resumed first payment lease");
+    expect(resumedFirst.resumeApproval).toBe(firstApproval);
+    expect(releaseActivePaymentLease(resumedFirst.lease, true, firstPaymentSession)).toBe(true);
+    await finishProvisionSession(first.session_id);
+    await finishProvisionSession(second.session_id);
+  });
+
+  it("starts the same pending third task after one active lease finishes", async () => {
+    vi.useFakeTimers();
+    try {
+      const [first, second] = await Promise.all([
+        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
+        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+      ]);
+      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      expect(h.leaseAcquireCalls).toBe(3);
+
+      expect(h.startCalls).toBe(2);
+      await finishProvisionSession(first.session_id);
+      await vi.advanceTimersByTimeAsync(50);
+
+      const third = await thirdStart;
+      expect(h.startCalls).toBe(3);
+      expect(h.profileDirs).toHaveLength(3);
+      await finishProvisionSession(second.session_id);
+      await finishProvisionSession(third.session_id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("times out a third task without launching another browser", async () => {
+    vi.useFakeTimers();
+    try {
+      const [first, second] = await Promise.all([
+        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
+        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+      ]);
+      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      expect(h.leaseAcquireCalls).toBe(3);
+      const rejection = expect(thirdStart).rejects.toThrow("capacity wait timed out");
+
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      await rejection;
+      expect(h.startCalls).toBe(2);
+      expect(h.profileDirs).toHaveLength(2);
+      await finishProvisionSession(first.session_id);
+      await finishProvisionSession(second.session_id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a shared seed-lock deadline without blaming active capacity", async () => {
+    h.profileAcquisitionInterruption = {
+      reason: "timeout",
+      phase: "seed_lock",
+    };
+
+    await expect(startProvisionSession({ serviceUrl: "https://app.example.com/" })).rejects.toThrow(
+      "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
+    );
+    expect(h.startCalls).toBe(0);
+    expect(h.activeLeaseCount).toBe(0);
+  });
+
+  it("cancels a capacity waiter before shutdown frees an active slot", async () => {
+    vi.useFakeTimers();
+    try {
+      await Promise.all([
+        startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
+        startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
+      ]);
+      const thirdStart = startProvisionSession({ serviceUrl: "https://app.example.com/three" });
+      expect(h.leaseAcquireCalls).toBe(3);
+      const rejection = expect(thirdStart).rejects.toThrow("operator server is shutting down");
+
+      await closeAllProvisionSessions();
+
+      await rejection;
+      expect(h.startCalls).toBe(2);
+      expect(h.profileDirs).toHaveLength(2);
+      expect(activeSessionCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not reap the shared browser while a session is in flight", async () => {

@@ -39,7 +39,11 @@ import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2c
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
-import { acquireOperatorProfile, type OperatorProfileLease } from "./operator-profile-pool.js";
+import {
+  acquireOperatorProfile,
+  OperatorProfileAcquisitionInterruptedError,
+  type OperatorProfileLease,
+} from "./operator-profile-pool.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import {
   type OperatorRecipe,
@@ -602,27 +606,129 @@ interface AcquiredBrowser {
   profileDir: string;
 }
 
-let warmBrowser: WarmBrowser | null = null;
 interface StartingBrowser {
   controller: BrowserController;
   lease: OperatorProfileLease;
   launch: Promise<void>;
   cancelRequested: boolean;
 }
-let startingBrowser: StartingBrowser | null = null;
-// Sequential single-page model: one start may be booting OR one task may hold
-// the browser. This is also the lifecycle/payment safety lease — every reaper
-// checks it before closing shared Chrome.
-let starting = false;
-let inFlight = false;
+
+interface CapacityWaiter {
+  generation: number;
+  cancelRequested: boolean;
+  abortController: AbortController;
+  wake: () => void;
+  settled: Promise<void>;
+  resolveSettled: () => void;
+}
+
+// The pool is authoritative for cross-process capacity; these maps only retain
+// the local controller/lease pairing needed for lifecycle cleanup.  In
+// particular, they deliberately do not impose a process-global single-session
+// gate: each entry owns an isolated profile lease.
+const leasedBrowsers = new Map<BrowserController, WarmBrowser>();
+const startingBrowsers = new Set<StartingBrowser>();
+const capacityWaiters = new Set<CapacityWaiter>();
+let shutdownGeneration = 0;
+const START_CAPACITY_WAIT_MS = 30_000;
+const START_CAPACITY_RETRY_MS = 50;
+
+function isOperatorCapacityError(error: unknown): boolean {
+  return error instanceof Error && error.message.startsWith("operate_start capacity reached:");
+}
+
+async function acquireOperatorProfileBounded(
+  opts: StartOptions,
+  sessionId: string,
+  generation: number,
+): Promise<OperatorProfileLease> {
+  let wake = (): void => undefined;
+  let resolveSettled = (): void => undefined;
+  const waiter: CapacityWaiter = {
+    generation,
+    cancelRequested: false,
+    abortController: new AbortController(),
+    wake: () => wake(),
+    settled: new Promise<void>((resolve) => {
+      resolveSettled = resolve;
+    }),
+    resolveSettled: () => resolveSettled(),
+  };
+  capacityWaiters.add(waiter);
+  const deadline = Date.now() + START_CAPACITY_WAIT_MS;
+  try {
+    for (;;) {
+      if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+        throw new Error("operate_start cancelled: operator server is shutting down");
+      }
+      try {
+        const lease = await acquireOperatorProfile(sessionId, {
+          ...(opts.profileDir !== undefined ? { sourceProfileDir: opts.profileDir } : {}),
+          deadline,
+          signal: waiter.abortController.signal,
+        });
+        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+          await lease.destroy();
+          throw new Error("operate_start cancelled: operator server is shutting down");
+        }
+        return lease;
+      } catch (error) {
+        if (waiter.cancelRequested || waiter.generation !== shutdownGeneration) {
+          throw new Error("operate_start cancelled: operator server is shutting down");
+        }
+        if (
+          error instanceof OperatorProfileAcquisitionInterruptedError &&
+          error.reason === "cancelled"
+        ) {
+          throw new Error("operate_start cancelled: operator server is shutting down");
+        }
+        if (
+          error instanceof OperatorProfileAcquisitionInterruptedError &&
+          error.reason === "timeout"
+        ) {
+          if (error.phase === "seed_lock") {
+            throw new Error(
+              "operate_start failed: start deadline exceeded while waiting to acquire the shared seed lock",
+            );
+          }
+          throw new Error(
+            "operate_start failed: start deadline exceeded while acquiring an isolated operator profile",
+          );
+        }
+        if (isOperatorCapacityError(error) && Date.now() >= deadline) {
+          throw new Error(
+            "operate_start capacity wait timed out: 2 operator sessions are active; finish one and retry",
+          );
+        }
+        if (!isOperatorCapacityError(error)) {
+          throw error;
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+          const timer = setTimeout(resolve, START_CAPACITY_RETRY_MS);
+          waiter.wake = () => {
+            clearTimeout(timer);
+            resolve();
+          };
+        });
+      }
+    }
+  } finally {
+    capacityWaiters.delete(waiter);
+    waiter.resolveSettled();
+  }
+}
 
 async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promise<AcquiredBrowser> {
   if ((process.env.BOT_CDP_ENDPOINT ?? "").trim().length > 0) {
     throw new Error("operate_start does not support remote CDP with isolated profile leases");
   }
-  const lease = await acquireOperatorProfile(sessionId, {
-    ...(opts.profileDir !== undefined ? { sourceProfileDir: opts.profileDir } : {}),
-  });
+  const generation = shutdownGeneration;
+  const lease = await acquireOperatorProfileBounded(opts, sessionId, generation);
+  if (generation !== shutdownGeneration) {
+    await lease.destroy();
+    throw new Error("operate_start cancelled: operator server is shutting down");
+  }
   const controller = new BrowserController({
     profileDir: lease.profileDir,
     ...(opts.proxyUrl !== undefined ? { proxyUrl: opts.proxyUrl } : {}),
@@ -633,7 +739,7 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     launch: startBrowserBounded(controller, sessionId),
     cancelRequested: false,
   };
-  startingBrowser = pending;
+  startingBrowsers.add(pending);
   try {
     await pending.launch;
     if (pending.cancelRequested) {
@@ -652,9 +758,9 @@ async function acquireWarmBrowser(opts: StartOptions, sessionId: string): Promis
     }
     throw err;
   } finally {
-    if (startingBrowser === pending) startingBrowser = null;
+    startingBrowsers.delete(pending);
   }
-  warmBrowser = { controller, lease };
+  leasedBrowsers.set(controller, { controller, lease });
   return { controller, profileDir: lease.profileDir };
 }
 
@@ -662,12 +768,12 @@ async function releaseWarmBrowserPage(
   browser: BrowserController,
   reusable: boolean,
 ): Promise<void> {
-  const slot = warmBrowser;
-  if (slot?.controller !== browser) {
+  const slot = leasedBrowsers.get(browser);
+  if (slot === undefined) {
     await browser.close().catch(() => undefined);
     return;
   }
-  warmBrowser = null;
+  leasedBrowsers.delete(browser);
   try {
     if (reusable) await browser.resetPageForReuse();
     await closeLeasedBrowser(browser, slot.lease, reusable);
@@ -2392,36 +2498,28 @@ async function ensureProvisionPrimaryProviderSession(
 
 export async function startProvisionSession(opts: StartOptions): Promise<Observation> {
   const id = randomUUID();
-  if (starting || inFlight) {
-    throw new Error("operate_start refused: another operator session is already in flight");
-  }
-  starting = true;
   let browser: BrowserController;
   let liveProviders: OAuthProviderId[];
   let workerEmail: string | null;
-  try {
-    const acquired = await acquireWarmBrowser(opts, id);
-    browser = acquired.controller;
-    // Probe the claimed/cloned worker. The canonical login-authoring profile and
-    // immutable seed are never opened by Chrome during an operator start.
-    liveProviders = await ensureProvisionPrimaryProviderSession(browser);
-    workerEmail =
-      typeof browser.detectGoogleAccountEmail === "function"
-        ? await browser.detectGoogleAccountEmail().catch(() => null)
-        : null;
-    // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
-    // needs to act as the user and there's no live Google session, hand back now;
-    // do not start the browser or the task. No autonomous login is attempted.
-    if (opts.requireLiveIdentity === true) {
-      const gate = googleSessionGate(liveProviders);
-      if (!gate.ok) {
-        audit(id, "connect_gate", { ok: false, wall: "google_session" });
-        await releaseWarmBrowserPage(browser, true);
-        return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
-      }
+  const acquired = await acquireWarmBrowser(opts, id);
+  browser = acquired.controller;
+  // Probe the claimed/cloned worker. The canonical login-authoring profile and
+  // immutable seed are never opened by Chrome during an operator start.
+  liveProviders = await ensureProvisionPrimaryProviderSession(browser);
+  workerEmail =
+    typeof browser.detectGoogleAccountEmail === "function"
+      ? await browser.detectGoogleAccountEmail().catch(() => null)
+      : null;
+  // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
+  // needs to act as the user and there's no live Google session, hand back now;
+  // do not start the browser or the task. No autonomous login is attempted.
+  if (opts.requireLiveIdentity === true) {
+    const gate = googleSessionGate(liveProviders);
+    if (!gate.ok) {
+      audit(id, "connect_gate", { ok: false, wall: "google_session" });
+      await releaseWarmBrowserPage(browser, true);
+      return { session_id: id, url: "", text: "", elements: [], needs_user: gate.needs_user };
     }
-  } finally {
-    starting = false;
   }
   const targetHost = registrableHost(opts.serviceUrl);
   const seedHosts = [
@@ -2469,7 +2567,6 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
-  inFlight = true;
   try {
     if (typeof browser.setHostScopeAllowedHosts === "function") {
       await browser.setHostScopeAllowedHosts(
@@ -2515,7 +2612,6 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   } catch (err) {
     sessions.delete(id);
     await releaseWarmBrowserPage(browser, false);
-    inFlight = false;
     throw err;
   }
 }
@@ -2525,9 +2621,6 @@ export async function startHarnessProvisionSession(
   opts: HarnessStartOptions,
 ): Promise<Observation> {
   const id = randomUUID();
-  if (starting || inFlight) {
-    throw new Error("operate_start refused: another operator session is already in flight");
-  }
   if (opts.requireLiveIdentity === true) {
     throw new Error("harness sessions cannot request live identity");
   }
@@ -2576,7 +2669,6 @@ export async function startHarnessProvisionSession(
     ...(opts.api === undefined ? {} : { api: opts.api }),
   };
   sessions.set(id, session);
-  inFlight = true;
   try {
     audit(id, "start_harness", {
       service_url: opts.serviceUrl,
@@ -2587,7 +2679,6 @@ export async function startHarnessProvisionSession(
   } catch (error) {
     sessions.delete(id);
     await opts.browser.close().catch(() => undefined);
-    inFlight = false;
     throw error;
   }
 }
@@ -7470,11 +7561,7 @@ async function closeFinishingProvisionSession(session: Session): Promise<FinishR
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
   sessions.delete(sessionId);
-  try {
-    await releaseWarmBrowserPage(session.browser, !profileRequiresDestroy(session));
-  } finally {
-    inFlight = false;
-  }
+  await releaseWarmBrowserPage(session.browser, !profileRequiresDestroy(session));
   return { session_id: sessionId, url, closed: true };
 }
 
@@ -7504,24 +7591,28 @@ export async function finishProvisionSession(sessionId: string): Promise<FinishR
 
 // Test/teardown helper — close every live session (used by the dev shim on exit).
 export async function closeAllProvisionSessions(): Promise<void> {
-  const pending = startingBrowser;
-  if (pending !== null) {
+  shutdownGeneration += 1;
+  const waiters = [...capacityWaiters];
+  for (const waiter of waiters) {
+    waiter.cancelRequested = true;
+    waiter.abortController.abort();
+    waiter.wake();
+  }
+  await Promise.all(waiters.map((waiter) => waiter.settled));
+  for (const pending of [...startingBrowsers]) {
     pending.cancelRequested = true;
     await pending.controller.close({ cancelStart: true }).catch(() => undefined);
-    void pending.launch.catch(() => undefined);
+    await pending.launch.catch(() => undefined);
     await closeLeasedBrowser(pending.controller, pending.lease, false).catch(() => undefined);
   }
   for (const [id, session] of [...sessions.entries()]) {
     sessions.delete(id);
     await releaseWarmBrowserPage(session.browser, false).catch(() => undefined);
   }
-  const slot = warmBrowser;
-  warmBrowser = null;
-  if (slot !== null) {
+  for (const slot of [...leasedBrowsers.values()]) {
+    leasedBrowsers.delete(slot.controller);
     await closeLeasedBrowser(slot.controller, slot.lease, false).catch(() => undefined);
   }
-  inFlight = false;
-  starting = false;
 }
 
 export function activeSessionCount(): number {

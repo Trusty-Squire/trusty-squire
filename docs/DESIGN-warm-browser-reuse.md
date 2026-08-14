@@ -1,6 +1,6 @@
 # DESIGN — isolated operator profile pool
 
-Status: migration stage 2 implemented (2026-08-14). This document owns the operator profile-pool,
+Status: migration stage 3 implemented (2026-08-14). This document owns the operator profile-pool,
 session lifecycle, and login-seed lifecycle. Payment authorization and secret-handling contracts
 remain owned by [`SECURITY.md`](../SECURITY.md).
 
@@ -11,13 +11,17 @@ Each `operate_start` now leases an isolated Chrome profile. The canonical profil
 Google login can publish a filtered, immutable seed generation, and a new worker profile is cloned
 from that seed or reclaimed from one closed warm-profile slot.
 
-Stage 2 session-addresses payment state and adds drain-before-finish without widening the profile
-pool. It deliberately preserves the existing concurrency behavior:
+Stage 3 retains the session-addressed payment and drain-before-finish gates while widening the
+fixed pool for concurrent execution:
 
-- one in-process start or active task at a time;
-- one filesystem active slot per profile-pool namespace;
+- two starts or active tasks at a time per profile-pool namespace;
+- two filesystem active slots implement that bound;
 - one closed warm-profile slot;
 - one page within the leased worker profile.
+
+A third `operate_start` in the same namespace waits at the provision seam for up to 30 seconds,
+retrying the fixed slots without creating another profile or browser. Shutdown cancels starts
+waiting for capacity before it releases active slots.
 
 There is no warm Chrome process between sessions. `operate_finish` closes Chrome before its profile
 can enter the warm slot.
@@ -31,7 +35,7 @@ connect / Google login
   -> atomically publish seed/current and delete non-current generations
 
 operate_start
-  -> reserve the one active slot
+  -> reserve either active slot, or wait with the bounded retry while both are claimed
   -> under the seed lock, claim a current warm profile or clone seed/current
   -> launch Chrome on the claimed worker profile
   -> bind the worker's process birth identity and exact user-data directory
@@ -59,6 +63,7 @@ seed/
   generations/<generation>/user-data/
 profiles/<profile-id>/user-data/
 active/slot-0 -> ../active-claims/<claim-id>/
+active/slot-1 -> ../active-claims/<claim-id>/
 active-claims/<claim-id>/
   owner.json
   claim/lease.json
@@ -102,9 +107,14 @@ current generation unchanged.
 Under the seed lock, acquisition:
 
 1. scavenges only ownership states it can prove stale;
-2. reserves the single active slot with a private owner token;
+2. reserves the first free active slot with a private owner token;
 3. claims the closed warm profile when it belongs to `seed/current` and is within its bounds; or
 4. copies the current immutable seed into a new worker profile.
+
+Capacity remains fixed at two active leases per namespace. A third start in that namespace retries
+acquisition for at most 30 seconds, including time spent behind seed publication on the shared seed
+lock, and launches only after one of those leases is released. Teardown cancels registered capacity
+waiters and each start rechecks the shutdown generation after acquisition before launch.
 
 Before the first seed exists, acquisition creates an empty worker profile; a caller that requires a
 live identity then fails closed at the existing Google-session gate. Identity and email checks run
@@ -158,15 +168,14 @@ fence intact without putting card or approval state into the pool.
 
 This stage does not add:
 
-- a second active slot or concurrent operator execution;
+- a third active slot or dynamic operator capacity;
 - safe cross-process handoff of a live CDP browser;
 - remote-CDP generality, a CDP proxy, or an authentication service;
 - new v1 configuration, a scheduler, daemon, or control plane;
 - redundant public lease descriptors or previous-generation grace GC.
 
-Those changes require their own migration stages. In particular, the second active slot must remain
-disabled until browser handoff is also session-safe; session-addressed payment ownership alone is
-not enough to widen the pool.
+Those changes require their own migration stages. Live browser handoff remains separate from the
+fixed two-session pool and is not required for isolated local controllers.
 
 ## 8. Code map
 
