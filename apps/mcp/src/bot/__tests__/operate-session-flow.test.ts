@@ -54,6 +54,7 @@ const h = vi.hoisted(() => ({
   resetFailuresRemaining: 0,
   profileProbeCalls: 0,
   controllerProviderProbeCalls: 0,
+  workerEmail: null as string | null,
   connections: [] as boolean[],
   profileDirs: [] as Array<string | undefined>,
   leaseSerial: 0,
@@ -183,6 +184,9 @@ vi.mock("../browser.js", () => ({
     async detectSessionProviders(): Promise<string[]> {
       h.controllerProviderProbeCalls += 1;
       return h.providers;
+    }
+    async detectGoogleAccountEmail(): Promise<string | null> {
+      return h.workerEmail;
     }
     async goto(url: string): Promise<void> {
       h.gotos.push(url);
@@ -599,10 +603,7 @@ vi.mock("../google-login.js", async (importOriginal) => {
 
 vi.mock("../operator-profile-pool.js", () => ({
   OPERATOR_SEED_GOOGLE_COOKIE_NAMES: ["__Secure-1PSID", "SAPISID", "SID"],
-  acquireOperatorProfile: async (
-    _sessionId: string,
-    opts: { sourceProfileDir?: string } = {},
-  ) => {
+  acquireOperatorProfile: async (_sessionId: string, opts: { sourceProfileDir?: string } = {}) => {
     h.leaseAcquireCalls += 1;
     const warm = h.warmLeaseProfileDir;
     h.warmLeaseProfileDir = null;
@@ -792,6 +793,7 @@ beforeEach(() => {
   h.resetFailuresRemaining = 0;
   h.profileProbeCalls = 0;
   h.controllerProviderProbeCalls = 0;
+  h.workerEmail = null;
   h.connections = [];
   h.profileDirs = [];
   h.leaseSerial = 0;
@@ -2099,10 +2101,7 @@ describe("verified recipe recording", () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-known-email-"));
     const profileDir = mkdtempSync(join(tmpdir(), "verified-recipe-known-email-profile-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    writeFileSync(
-      join(profileDir, "provider-emails.json"),
-      JSON.stringify({ google: "buyer@example.com" }),
-    );
+    h.workerEmail = "buyer@example.com";
     h.elements = [
       elem({
         testId: "email-buyer@example.com",
@@ -2157,10 +2156,7 @@ describe("verified recipe recording", () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-credential-email-"));
     const profileDir = mkdtempSync(join(tmpdir(), "verified-recipe-credential-profile-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    writeFileSync(
-      join(profileDir, "provider-emails.json"),
-      JSON.stringify({ google: "buyer@example.com" }),
-    );
+    h.workerEmail = "buyer@example.com";
     h.elements = [
       elem({
         testId: "email-buyer@example.com",
@@ -2213,10 +2209,7 @@ describe("verified recipe recording", () => {
     const dir = mkdtempSync(join(tmpdir(), "verified-recipe-email-url-"));
     const profileDir = mkdtempSync(join(tmpdir(), "verified-recipe-email-url-profile-"));
     process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
-    writeFileSync(
-      join(profileDir, "provider-emails.json"),
-      JSON.stringify({ google: "buyer@example.com" }),
-    );
+    h.workerEmail = "buyer@example.com";
     h.elements = [elem({ testId: "email", labelText: "Email", selector: "#email", value: "" })];
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/cart?email=buyer%40example%2Ecom",
@@ -3508,7 +3501,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await finishProvisionSession(second.session_id);
   });
 
-  it("reads the authoritative email from the claimed worker profile", async () => {
+  it("uses the claimed worker's live email instead of seed-derived profile metadata", async () => {
     const canonical = mkdtempSync(join(tmpdir(), "operator-canonical-email-"));
     const worker = mkdtempSync(join(tmpdir(), "operator-worker-email-"));
     writeFileSync(
@@ -3517,15 +3510,16 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     );
     writeFileSync(
       join(worker, "provider-emails.json"),
-      JSON.stringify({ google: "worker@example.com" }),
+      JSON.stringify({ google: "seed@example.com" }),
     );
     h.nextLeaseProfileDir = worker;
+    h.workerEmail = "live-worker@example.com";
     try {
       const session = await startProvisionSession({
         serviceUrl: "https://app.example.com/",
         profileDir: canonical,
       });
-      expect(getSessionUserEmail(session.session_id)).toBe("worker@example.com");
+      expect(getSessionUserEmail(session.session_id)).toBe("live-worker@example.com");
       await finishProvisionSession(session.session_id);
     } finally {
       rmSync(canonical, { recursive: true, force: true });
@@ -3969,7 +3963,7 @@ describe("operate session — PR3c username/password login (capture-at-login sou
   });
 
   function withEmail(email: string): void {
-    writeFileSync(join(profileDir, "provider-emails.json"), JSON.stringify({ google: email }));
+    h.workerEmail = email;
   }
 
   it("prepare_login seals the captured user email + a generated password (masked handles only)", async () => {

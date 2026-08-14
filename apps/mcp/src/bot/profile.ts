@@ -7,9 +7,11 @@
 // TRUSTY_SQUIRE_PROFILE_DIR.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
   lstatSync,
+  linkSync,
   mkdirSync,
   readFileSync,
   readlinkSync,
@@ -62,15 +64,58 @@ export type ProcessStartTimeRead =
   | { state: "unknown" };
 
 function readProcessStartTime(pid: number): ProcessStartTimeRead {
-  if (process.platform !== "linux") return { state: "unknown" };
+  if (!Number.isSafeInteger(pid) || pid <= 0) return { state: "unknown" };
+  if (process.platform === "linux") {
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const close = stat.lastIndexOf(")");
+      const startTime = close < 0 ? undefined : stat.slice(close + 2).split(" ")[19];
+      return startTime === undefined ? { state: "unknown" } : { state: "present", startTime };
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return code === "ENOENT" || code === "ESRCH" ? { state: "missing" } : { state: "unknown" };
+    }
+  }
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const close = stat.lastIndexOf(")");
-    const startTime = close < 0 ? undefined : stat.slice(close + 2).split(" ")[19];
-    return startTime === undefined ? { state: "unknown" } : { state: "present", startTime };
+    if (process.platform === "darwin") {
+      const startTime = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      })
+        .trim()
+        .replace(/\s+/g, " ");
+      return startTime.length > 0
+        ? { state: "present", startTime: `darwin:${startTime}` }
+        : processExistenceState(pid);
+    }
+    if (process.platform === "win32") {
+      const command =
+        `$p=Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}';` +
+        `if ($null -eq $p) { exit 3 };` +
+        `$p.CreationDate.ToUniversalTime().ToString('O')`;
+      const startTime = execFileSync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", command],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      ).trim();
+      return startTime.length > 0
+        ? { state: "present", startTime: `win32:${startTime}` }
+        : processExistenceState(pid);
+    }
+  } catch {
+    return processExistenceState(pid);
+  }
+  return { state: "unknown" };
+}
+
+function processExistenceState(pid: number): ProcessStartTimeRead {
+  try {
+    process.kill(pid, 0);
+    return { state: "unknown" };
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    return code === "ENOENT" || code === "ESRCH" ? { state: "missing" } : { state: "unknown" };
+    return (err as NodeJS.ErrnoException).code === "ESRCH"
+      ? { state: "missing" }
+      : { state: "unknown" };
   }
 }
 
@@ -220,6 +265,7 @@ interface ProfileOperationOwner {
 }
 
 const profileOperationContext = new AsyncLocalStorage<ReadonlySet<string>>();
+const PROFILE_OPERATION_ORPHAN_GRACE_MS = 30_000;
 
 function profileOperationLockDir(profileDir: string, lockRoot: string): string {
   const digest = createHash("sha256").update(resolve(profileDir)).digest("hex").slice(0, 24);
@@ -228,7 +274,8 @@ function profileOperationLockDir(profileDir: string, lockRoot: string): string {
 
 function readProfileOperationOwner(lockDir: string): ProfileOperationOwner | null {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(join(lockDir, "owner.json"), "utf8"));
+    const ownerPath = lstatSync(lockDir).isDirectory() ? join(lockDir, "owner.json") : lockDir;
+    const parsed: unknown = JSON.parse(readFileSync(ownerPath, "utf8"));
     if (parsed === null || typeof parsed !== "object") return null;
     const owner = parsed as Partial<ProfileOperationOwner>;
     if (
@@ -250,10 +297,23 @@ function readProfileOperationOwner(lockDir: string): ProfileOperationOwner | nul
   }
 }
 
-function quarantineStaleProfileOperationLock(
-  lockDir: string,
-  observedOwner: ProfileOperationOwner,
-): boolean {
+function profileOperationArtifactState(path: string): ProcessIdentityState {
+  const owner = readProfileOperationOwner(path);
+  if (owner !== null) {
+    if (owner.host !== hostname()) return "unknown";
+    return processBirthIdentityState(owner);
+  }
+  try {
+    return Date.now() - lstatSync(path).mtimeMs >= PROFILE_OPERATION_ORPHAN_GRACE_MS
+      ? "stale"
+      : "unknown";
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" ? "stale" : "unknown";
+  }
+}
+
+function quarantineReclaimableProfileOperationLock(lockDir: string): boolean {
+  if (profileOperationArtifactState(lockDir) !== "stale") return false;
   const tombstone = `${lockDir}.stale-${randomUUID()}`;
   try {
     renameSync(lockDir, tombstone);
@@ -261,27 +321,19 @@ function quarantineStaleProfileOperationLock(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return true;
     return false;
   }
-  const quarantinedOwner = readProfileOperationOwner(tombstone);
-  const exactOwner =
-    quarantinedOwner !== null &&
-    quarantinedOwner.host === observedOwner.host &&
-    quarantinedOwner.pid === observedOwner.pid &&
-    quarantinedOwner.start_time === observedOwner.start_time &&
-    quarantinedOwner.token === observedOwner.token;
-  if (exactOwner && processBirthIdentityState(quarantinedOwner) === "stale") {
+  if (profileOperationArtifactState(tombstone) === "stale") {
     rmSync(tombstone, { recursive: true, force: true });
     return true;
-  }
-  try {
-    renameSync(tombstone, lockDir);
-  } catch {
-    return false;
   }
   return false;
 }
 
-function profileOperationTombstones(lockDir: string, lockRoot: string): string[] {
-  const prefix = `${basename(lockDir)}.stale-`;
+function profileOperationArtifacts(
+  lockDir: string,
+  lockRoot: string,
+  kind: "claim" | "stale",
+): string[] {
+  const prefix = `${basename(lockDir)}.${kind}-`;
   try {
     return readdirSync(lockRoot)
       .filter((name) => name.startsWith(prefix))
@@ -289,6 +341,23 @@ function profileOperationTombstones(lockDir: string, lockRoot: string): string[]
   } catch {
     return [];
   }
+}
+
+function scavengeProfileOperationArtifacts(lockDir: string, lockRoot: string): boolean {
+  let retainedTombstone = false;
+  for (const tombstone of profileOperationArtifacts(lockDir, lockRoot, "stale")) {
+    if (profileOperationArtifactState(tombstone) === "stale") {
+      rmSync(tombstone, { recursive: true, force: true });
+    } else {
+      retainedTombstone = true;
+    }
+  }
+  for (const claim of profileOperationArtifacts(lockDir, lockRoot, "claim")) {
+    if (profileOperationArtifactState(claim) === "stale") {
+      rmSync(claim, { recursive: true, force: true });
+    }
+  }
+  return retainedTombstone;
 }
 
 export function acquireProfileOperationGuard(
@@ -300,28 +369,34 @@ export function acquireProfileOperationGuard(
   const birth = processBirthIdentity(process.pid);
   const startTime = birth?.start_time ?? "unknown";
   for (;;) {
+    if (scavengeProfileOperationArtifacts(lockDir, lockRoot)) {
+      throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
+    }
+    const claimPath = `${lockDir}.claim-${randomUUID()}`;
+    writeFileSync(
+      claimPath,
+      JSON.stringify({ host: hostname(), pid: process.pid, start_time: startTime, token }),
+      { mode: 0o600, flag: "wx" },
+    );
     try {
-      mkdirSync(lockDir, { mode: 0o700 });
+      linkSync(claimPath, lockDir);
     } catch (err) {
+      rmSync(claimPath, { force: true });
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      const owner = readProfileOperationOwner(lockDir);
-      if (
-        owner !== null &&
-        owner.host === hostname() &&
-        processBirthIdentityState(owner) === "stale" &&
-        quarantineStaleProfileOperationLock(lockDir, owner)
-      ) {
+      try {
+        lstatSync(lockDir);
+      } catch (lockErr) {
+        if ((lockErr as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw err;
+      }
+      if (quarantineReclaimableProfileOperationLock(lockDir)) {
         continue;
       }
       throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
     }
+    rmSync(claimPath, { force: true });
     try {
-      writeFileSync(
-        join(lockDir, "owner.json"),
-        JSON.stringify({ host: hostname(), pid: process.pid, start_time: startTime, token }),
-        { mode: 0o600 },
-      );
-      if (profileOperationTombstones(lockDir, lockRoot).length > 0) {
+      if (scavengeProfileOperationArtifacts(lockDir, lockRoot)) {
         rmSync(lockDir, { recursive: true, force: true });
         throw new ProfileBusyError(PROFILE_BUSY_MESSAGE);
       }
@@ -340,7 +415,7 @@ export function acquireProfileOperationGuard(
           rmSync(lockDir, { recursive: true, force: true });
           return;
         }
-        for (const tombstone of profileOperationTombstones(lockDir, lockRoot)) {
+        for (const tombstone of profileOperationArtifacts(lockDir, lockRoot, "stale")) {
           if (readProfileOperationOwner(tombstone)?.token === token) {
             rmSync(tombstone, { recursive: true, force: true });
             return;

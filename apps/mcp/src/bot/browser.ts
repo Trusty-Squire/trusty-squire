@@ -1322,6 +1322,18 @@ const CAPTCHA_FRAME_HOST_RE =
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
+const GOOGLE_ACCOUNT_EMAIL_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
+
+export function extractGoogleAccountEmail(pageText: string): string | null {
+  const chip = /Google Account:[^()]*\(([^)]+)\)/i.exec(pageText);
+  if (chip?.[1] !== undefined) {
+    const match = GOOGLE_ACCOUNT_EMAIL_RE.exec(chip[1]);
+    if (match !== null) return match[0].trim();
+  }
+  const any = GOOGLE_ACCOUNT_EMAIL_RE.exec(pageText);
+  return any !== null ? any[0].trim() : null;
+}
+
 // Map a cookie jar to the OAuth providers that have a LIVE logged-in session.
 // The auth cookies that mean "signed in": GitHub → `user_session`; Google →
 // any of the *SID session cookies (NID / CONSENT / 1P_JAR are set even when
@@ -11511,6 +11523,42 @@ export class BrowserController {
       return sessionProvidersFromCookies(await this.context.cookies());
     } catch {
       return [];
+    }
+  }
+
+  async detectGoogleAccountEmail(): Promise<string | null> {
+    if (this.context === null) return null;
+    let identityPage: Page | null = null;
+    try {
+      identityPage = await this.context.newPage();
+      await identityPage.goto("https://myaccount.google.com/", {
+        waitUntil: "domcontentloaded",
+        timeout: 20_000,
+      });
+      if (new URL(identityPage.url()).hostname !== "myaccount.google.com") return null;
+      const identityTokens = await identityPage
+        .locator("[aria-label], [data-identifier]")
+        .evaluateAll((elements) =>
+          elements.flatMap((element) => [
+            element.getAttribute("aria-label") ?? "",
+            element.getAttribute("data-identifier") ?? "",
+          ]),
+        );
+      for (const token of identityTokens) {
+        const trimmed = token.trim();
+        const match = GOOGLE_ACCOUNT_EMAIL_RE.exec(trimmed);
+        const email = /^Google Account:/i.test(trimmed)
+          ? extractGoogleAccountEmail(trimmed)
+          : match?.[0] === trimmed
+            ? trimmed
+            : null;
+        if (email !== null) return email;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      await identityPage?.close().catch(() => undefined);
     }
   }
 

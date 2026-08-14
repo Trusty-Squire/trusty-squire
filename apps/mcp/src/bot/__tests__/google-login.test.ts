@@ -561,6 +561,52 @@ describe("extractGoogleAccountEmail (PR3 capture-at-login)", () => {
   });
 });
 
+describe("claimed worker Google identity", () => {
+  function controllerWithIdentityPage(finalUrl: string, identityTokens: string[]) {
+    const close = vi.fn().mockResolvedValue(undefined);
+    const page = {
+      goto: vi.fn().mockResolvedValue(undefined),
+      url: vi.fn(() => finalUrl),
+      locator: vi.fn(() => ({
+        evaluateAll: vi.fn().mockResolvedValue(identityTokens),
+      })),
+      close,
+    };
+    const controller = new BrowserController({ humanize: false });
+    (controller as unknown as { context: { newPage(): Promise<typeof page> } }).context = {
+      newPage: vi.fn().mockResolvedValue(page),
+    };
+    return { close, controller };
+  }
+
+  it("reads the account email from the live worker context", async () => {
+    const { close, controller } = controllerWithIdentityPage("https://myaccount.google.com/", [
+      "Google Account: Ada Lovelace (live-worker@example.com)",
+    ]);
+
+    await expect(controller.detectGoogleAccountEmail()).resolves.toBe("live-worker@example.com");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("treats a sign-in redirect as unknown even when it remembers an email", async () => {
+    const { close, controller } = controllerWithIdentityPage(
+      "https://accounts.google.com/signin/v2/identifier",
+      ["remembered@example.com"],
+    );
+
+    await expect(controller.detectGoogleAccountEmail()).resolves.toBeNull();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("does not mistake unrelated account-page text for the worker identity", async () => {
+    const { controller } = controllerWithIdentityPage("https://myaccount.google.com/", [
+      "Contact support@example.com",
+    ]);
+
+    await expect(controller.detectGoogleAccountEmail()).resolves.toBeNull();
+  });
+});
+
 describe("google-login env helpers", () => {
   it("binaryOnPath finds a real binary and rejects a fake one", () => {
     expect(binaryOnPath("sh")).toBe(true);

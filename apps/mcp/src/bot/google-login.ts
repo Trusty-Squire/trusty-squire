@@ -62,6 +62,7 @@ import {
   resolveChannelBinary,
   selfLaunchEnabled,
 } from "./browser.js";
+export { extractGoogleAccountEmail } from "./browser.js";
 import {
   startInstallCompletionListener,
   withInstallCompletionCallback,
@@ -796,15 +797,13 @@ export function teardownHeadlessRig(rig: HeadlessRig, graceMs = 1_000): Promise<
   return teardown;
 }
 
-export async function teardownLoginBrowser(
-  opts: {
-    profileDir: string;
-    identity: ProfileProcessIdentity | null;
-    closeBrowser: () => Promise<void>;
-    forceClose: () => unknown;
-    timeoutMs?: number;
-  },
-): Promise<ProfileCloseState> {
+export async function teardownLoginBrowser(opts: {
+  profileDir: string;
+  identity: ProfileProcessIdentity | null;
+  closeBrowser: () => Promise<void>;
+  forceClose: () => unknown;
+  timeoutMs?: number;
+}): Promise<ProfileCloseState> {
   return await closeProfileWithProof({
     profileDir: opts.profileDir,
     identity: opts.identity,
@@ -994,9 +993,7 @@ interface LoginRunResult {
   closeState: ProfileCloseState;
 }
 
-async function runInBotChromeWithProfileGuard(
-  opts: RunInBotChromeOpts,
-): Promise<LoginRunResult> {
+async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   // `mcp login` runs in a SEPARATE process from the MCP server, so the
   // in-process OAuth mutex can't serialize it against an in-flight signup.
   // Chrome's SingletonLock is the cross-process semaphore: reclaim a stale
@@ -1014,9 +1011,7 @@ async function runInBotChromeWithProfileGuard(
   return await runHeadlessChrome(opts);
 }
 
-async function runDisplayedChrome(
-  opts: RunInBotChromeOpts,
-): Promise<LoginRunResult> {
+async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
   // detect completion off the API + SQLite cookie store. See
   // launchPlainLoginBrowser / RunInBotChromeOpts.plainProfileLogin.
@@ -1132,9 +1127,7 @@ async function runDisplayedChrome(
   return { status, closeState };
 }
 
-async function runHeadlessChrome(
-  opts: RunInBotChromeOpts,
-): Promise<LoginRunResult> {
+async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
   requireBinaries(["Xvfb", "x11vnc", "websockify", "cloudflared"]);
   if (!existsSync("/usr/share/novnc")) {
     throw new Error("noVNC web assets not found at /usr/share/novnc — install the `novnc` package");
@@ -1611,26 +1604,6 @@ export async function ensureOAuthSession(opts?: {
   } catch (err) {
     return { status: "error", detail: err instanceof Error ? err.message : String(err) };
   }
-}
-
-// PR3 signin-vault: pull the signed-in Google address out of an account page's
-// text. The OneGoogle account chip carries an aria-label like
-// "Google Account: Ada Lovelace (ada@example.com)" on every Google surface, so
-// prefer that anchored match; fall back to the first email-shaped token (the
-// myaccount.google.com page renders the address prominently). Pure + exported
-// for unit tests. (Eager capture-at-login was removed with the plain-login
-// switch — it needed a live CDP context to scrape myaccount.google.com, which
-// the plain connect browser no longer has; provision scrapes the email per-run
-// when the marker is unset, so this is now the only consumer besides tests.)
-const EMAIL_TOKEN_RE = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
-export function extractGoogleAccountEmail(pageText: string): string | null {
-  const chip = /Google Account:[^()]*\(([^)]+)\)/i.exec(pageText);
-  if (chip?.[1] !== undefined) {
-    const m = EMAIL_TOKEN_RE.exec(chip[1]);
-    if (m !== null) return m[0].trim();
-  }
-  const any = EMAIL_TOKEN_RE.exec(pageText);
-  return any !== null ? any[0].trim() : null;
 }
 
 // Public entry for the install flow: opens the trustysquire /install

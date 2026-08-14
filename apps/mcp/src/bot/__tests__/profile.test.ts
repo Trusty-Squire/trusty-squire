@@ -18,6 +18,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
@@ -299,6 +300,40 @@ describe("profile operation guard", () => {
     const next = acquireProfileOperationGuard(dir, lockRoot);
     next.release();
   });
+
+  it("reclaims an aged ownerless public lock without reclaiming a fresh one", () => {
+    const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+    const lockDir = join(lockRoot, `trusty-squire-profile-${digest}.lock`);
+    mkdirSync(lockDir);
+    expect(() => acquireProfileOperationGuard(dir, lockRoot)).toThrow(ProfileBusyError);
+
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(lockDir, old, old);
+    const lease = acquireProfileOperationGuard(dir, lockRoot);
+    lease.release();
+  });
+
+  it.skipIf(process.platform !== "linux")(
+    "scavenges a stale private tombstone left by a crashed reclaimer",
+    () => {
+      const digest = createHash("sha256").update(dir).digest("hex").slice(0, 24);
+      const tombstone = join(lockRoot, `trusty-squire-profile-${digest}.lock.stale-crashed`);
+      mkdirSync(tombstone);
+      writeFileSync(
+        join(tombstone, "owner.json"),
+        JSON.stringify({
+          host: hostname(),
+          pid: process.pid,
+          start_time: "not-this-process",
+          token: "stale-token",
+        }),
+      );
+
+      const lease = acquireProfileOperationGuard(dir, lockRoot);
+      expect(existsSync(tombstone)).toBe(false);
+      lease.release();
+    },
+  );
 
   it("releases the operation lock when Chrome already owns the profile", async () => {
     writeSingletons(dir, `${hostname()}-${process.pid}`);

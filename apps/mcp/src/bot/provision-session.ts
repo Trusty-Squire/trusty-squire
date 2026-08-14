@@ -39,7 +39,6 @@ import { TwoCaptchaSolver, type TwoCaptchaVaultProxy } from "./captcha-solver-2c
 import type { ApiClient } from "../api-client.js";
 import { extractApiKeyFromText, isTruncatedCapture } from "./credential-text.js";
 import { pickVerificationLink } from "./email-verification.js";
-import { loggedInEmail } from "./login-state.js";
 import { acquireOperatorProfile, type OperatorProfileLease } from "./operator-profile-pool.js";
 import { loginSessionGuidance } from "./skill-hint.js";
 import {
@@ -2310,15 +2309,18 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
   }
   starting = true;
   let browser: BrowserController;
-  let workerProfileDir: string;
   let liveProviders: OAuthProviderId[];
+  let workerEmail: string | null;
   try {
     const acquired = await acquireWarmBrowser(opts, id);
     browser = acquired.controller;
-    workerProfileDir = acquired.profileDir;
     // Probe the claimed/cloned worker. The canonical login-authoring profile and
     // immutable seed are never opened by Chrome during an operator start.
     liveProviders = await ensureProvisionPrimaryProviderSession(browser);
+    workerEmail =
+      typeof browser.detectGoogleAccountEmail === "function"
+        ? await browser.detectGoogleAccountEmail().catch(() => null)
+        : null;
     // Change 5 — fail-closed identity gate BEFORE driving. If an operate task
     // needs to act as the user and there's no live Google session, hand back now;
     // do not start the browser or the task. No autonomous login is attempted.
@@ -2372,7 +2374,7 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     hintServed: opts.hint !== undefined,
     startUrl: opts.serviceUrl,
     consentInboxRead: opts.consentInboxRead === true,
-    userEmail: loggedInEmail("google", workerProfileDir),
+    userEmail: workerEmail,
     ...(opts.api !== undefined ? { api: opts.api } : {}),
   };
   sessions.set(id, session);
