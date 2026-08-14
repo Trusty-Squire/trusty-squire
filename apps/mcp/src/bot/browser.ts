@@ -8919,8 +8919,12 @@ export class BrowserController {
         }
       }
       let frameUrlContext = frame.url();
+      let shopifyPciFrame = false;
       try {
         const parsedFrameUrl = new URL(frameUrlContext);
+        shopifyPciFrame =
+          parsedFrameUrl.protocol === "https:" &&
+          parsedFrameUrl.hostname === "checkout.pci.shopifyinc.com";
         frameUrlContext = `${parsedFrameUrl.hostname}${parsedFrameUrl.pathname}`;
       } catch {
         frameUrlContext = "";
@@ -8928,7 +8932,7 @@ export class BrowserController {
       const detected =
         urlPattern.test(frameUrlContext) ||
         (await frame
-          .evaluate((externalContext) => {
+          .evaluate(({ externalContext, shopifyPciFrame }) => {
             const visibleAndTopmost = (element: Element): boolean => {
               if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) {
                 return false;
@@ -8984,8 +8988,11 @@ export class BrowserController {
             const explicitText =
               /\b(?:3d secure|authenticate (?:this )?payment|security code sent to)\b/i;
             const contextualText = /\bverify (?:your )?identity\b/i;
-            const narrow =
-              /\b\d{1,3}\s+seconds?\s+to\s+confirm\b|\b(?:confirm|approve)\b.{0,80}\b(?:bank|banking|issuer)\s+app\b/i;
+            const countdownText = /\b\d{1,3}\s+seconds?\s+to\s+confirm\b/i;
+            const bankAppText =
+              /\b(?:confirm|approve)\b.{0,80}\b(?:bank|banking|issuer)\s+app\b/i;
+            const dbsBankAppText =
+              /\b(?:confirm|approve)\b.{0,80}\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b|\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b.{0,80}\b(?:confirm|approve)\b/i;
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
             let node = walker.nextNode();
             while (node !== null) {
@@ -8993,7 +9000,17 @@ export class BrowserController {
               const element = node.parentElement;
               if (text.length > 0 && element !== null && visibleAndTopmost(element)) {
                 if (explicitText.test(text)) return true;
-                if (contextualText.test(text) || narrow.test(text)) {
+                if (
+                  dbsBankAppText.test(text) ||
+                  (shopifyPciFrame && (countdownText.test(text) || bankAppText.test(text)))
+                ) {
+                  return true;
+                }
+                if (
+                  contextualText.test(text) ||
+                  countdownText.test(text) ||
+                  bankAppText.test(text)
+                ) {
                   const context: string[] = [externalContext];
                   let ancestor: Element | null = element;
                   for (let depth = 0; ancestor !== null && depth < 8; depth += 1) {
@@ -9017,7 +9034,7 @@ export class BrowserController {
               node = walker.nextNode();
             }
             return false;
-          }, frameContext)
+          }, { externalContext: frameContext, shopifyPciFrame })
           .catch(() => false));
       if (detected) {
         return {

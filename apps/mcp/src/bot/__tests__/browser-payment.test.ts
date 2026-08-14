@@ -694,7 +694,61 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "recognizes Shopify's visible bank-app countdown as a 3-D Secure challenge",
+    "recognizes a plain visible countdown in Shopify's PCI frame",
+    async () => {
+      const pciUrl = "https://checkout.pci.shopifyinc.com/plain-countdown";
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.route(pciUrl, async (route) =>
+          route.fulfill({ contentType: "text/html", body: "<div>60 seconds to confirm</div>" }),
+        );
+        await page.setContent(`
+          <form id="checkout">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-exp">
+            <input autocomplete="cc-csc">
+            <input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            document.querySelector("#checkout").addEventListener("submit", (event) => {
+              event.preventDefault();
+              setTimeout(() => {
+                const frame = document.createElement("iframe");
+                frame.src = "${pciUrl}";
+                document.body.append(frame);
+              }, 50);
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(
+          controller.fillAndSubmitCheckout({
+            pan: "4242424242424242",
+            exp_month: "12",
+            exp_year: "30",
+            cvv: "123",
+            name: "Synthetic Cardholder",
+            billing: {
+              line1: "123 Billing Street",
+              city: "Billingville",
+              postal_code: "10001",
+              country: "US",
+            },
+          }),
+        ).resolves.toMatchObject({ three_ds_required: true, order_confirmed: false });
+      } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "recognizes visible DBS bank-app approval copy without hidden challenge metadata",
     async () => {
       const browser = await chromium.launch({ headless: true });
       try {
@@ -713,7 +767,7 @@ describe("checkout payment parsing", () => {
               setTimeout(() => {
                 document.body.insertAdjacentHTML(
                   "beforeend",
-                  "<section id='shopify-dbs-bank-app-challenge'><div>60 seconds to confirm</div></section>",
+                  "<div>Approve this payment in your DBS digibank app</div>",
                 );
               }, 50);
             });
@@ -742,6 +796,45 @@ describe("checkout payment parsing", () => {
       }
     },
     30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not use Shopify's PCI host alone as a 3DS signal",
+    async () => {
+      const pciUrl = "https://checkout.pci.shopifyinc.com/card-fields";
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route(pciUrl, async (route) =>
+          route.fulfill({ contentType: "text/html", body: "<div>Card entry ready</div>" }),
+        );
+        await page.setContent(`
+          <button id="pay">Pay now</button>
+          <script>
+            document.querySelector("#pay").addEventListener("click", () => {
+              const frame = document.createElement("iframe");
+              frame.src = "${pciUrl}";
+              document.body.append(frame);
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
   );
 
   it.skipIf(!chromiumAvailable)(
