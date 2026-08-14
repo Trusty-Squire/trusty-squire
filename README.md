@@ -71,6 +71,12 @@ operator-sealed final authorization. A first-time
 payment is refused if the merchant, checkout origin, amount, or currency changes
 between approval and submission.
 
+Every payment response includes its `session_id`. Pass it to follow-up
+`operate_pay`, `operate_payment_status`, and `operate_payment_await` calls whenever
+more than one operator session is active. Omitting it remains compatible only while
+this MCP process has exactly one session; it never selects a newest or arbitrary
+checkout.
+
 Some split checkouts collect the card before the final order-confirmation step. On the
 card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
 subtotal qualifies as that payable amount only when the same order summary says
@@ -313,6 +319,8 @@ environment to opt into the 31-tool diagnostics profile.
   add-card approval, then fills the checkout and waits for the user to resolve
   3-D Secure before handing back unresolved challenges. It also supports the
   two-phase `fill_card` then `confirm` flow for split checkouts described above.
+  Payment status and await calls return the same session ID and include it in every
+  follow-up tool hint, so an approval is always resumed in its originating browser.
   Malformed calls return the same `error.guidance` repair fields as
   `operate_act`, including a safe resolution when `card_ref` and `card_label`
   conflict.

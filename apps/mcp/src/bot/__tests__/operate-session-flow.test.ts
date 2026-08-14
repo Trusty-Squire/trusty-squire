@@ -660,6 +660,7 @@ import {
   awaitVerification,
   captchaGate,
   finishProvisionSession,
+  withProvisionSessionCall,
   closeAllProvisionSessions,
   activeSessionCount,
   getSessionUserEmail,
@@ -3437,6 +3438,44 @@ describe("operate session — Change 5 precondition gate", () => {
 });
 
 describe("operate session — isolated profile-pool lifecycle", () => {
+  it("drains an entered session call and rejects new calls before pooling", async () => {
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    let releaseCall: (() => void) | undefined;
+    const entered = withProvisionSessionCall(
+      started.session_id,
+      async () =>
+        await new Promise<void>((resolve) => {
+          releaseCall = resolve;
+        }),
+    );
+    await vi.waitFor(() => expect(releaseCall).toBeTypeOf("function"));
+
+    let finishSettled = false;
+    const finishing = finishProvisionSession(started.session_id).then(() => {
+      finishSettled = true;
+    });
+    await Promise.resolve();
+    expect(finishSettled).toBe(false);
+    await expect(
+      withProvisionSessionCall(started.session_id, async () => undefined),
+    ).rejects.toThrow(/closing/);
+    expect(h.resetCalls).toBe(0);
+
+    releaseCall?.();
+    await entered;
+    await finishing;
+    expect(h.resetCalls).toBe(1);
+  });
+
+  it("asks finish to retry while a payment can still submit", async () => {
+    const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
+    const claim = claimActivePaymentForOperatePay(undefined);
+    expect(claim.kind).toBe("lease");
+    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(/payment operation/);
+    if (claim.kind === "lease") releaseActivePaymentLease(claim.lease);
+    await finishProvisionSession(started.session_id);
+  });
+
   it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {
     const first = await startProvisionSession({
       serviceUrl: "https://app.example.com/one",

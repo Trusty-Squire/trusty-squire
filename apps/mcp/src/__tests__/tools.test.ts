@@ -39,6 +39,10 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof ProvisionSession>();
   return {
     ...actual,
+    withPaymentSessionCall: async (
+      _sessionId: string | undefined,
+      fn: (session: ProvisionSession.Session) => Promise<unknown>,
+    ) => await fn({ id: "00000000-0000-4000-8000-000000000001" } as ProvisionSession.Session),
     activeProvisionBrowserForPayment: async () => mockBrowser,
     activeCartCheckoutForOrigin: () => mockCartCheckout,
     claimActivePaymentForOperatePay: (phase: "fill_card" | "confirm" | undefined) => {
@@ -99,6 +103,7 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       mockAwaitingApproval = state;
     },
     getActivePendingApproval: () => mockAwaitingApproval,
+    recordActivePaymentProvenance: () => undefined,
     releaseActivePaymentLease: (
       lease: { phase: "fill_card" | "single" },
       paymentFieldsCleared = true,
@@ -837,6 +842,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
 });
 
 describe("operate_payment_status / operate_payment_await [P0]", () => {
+  const paymentSessionId = "00000000-0000-4000-8000-000000000001";
   const operatorPublicKey = Buffer.from("status-operator-public-key").toString("base64url");
   const baseState = {
     approval_id: "appr_status",
@@ -894,9 +900,11 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
   it("reports no_pending_payment when nothing is awaiting approval", async () => {
     const api = makeMockApi();
     await expect(operatePaymentStatusTool.handler({}, api)).resolves.toMatchObject({
+      session_id: paymentSessionId,
       status: "no_pending_payment",
     });
     await expect(operatePaymentAwaitTool.handler({}, api)).resolves.toMatchObject({
+      session_id: paymentSessionId,
       status: "no_pending_payment",
     });
   });
@@ -927,10 +935,11 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
 
     const result = await operatePaymentStatusTool.handler({}, api);
     expect(result).toMatchObject({
+      session_id: paymentSessionId,
       status: "pending",
       approval_id: "appr_status",
       candidate_submitted: false,
-      next: { tool: "operate_payment_await" },
+      next: { tool: "operate_payment_await", session_id: paymentSessionId },
     });
     expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "peek");
     expect(confirmPaymentApproval).not.toHaveBeenCalled();
@@ -954,11 +963,12 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
 
     const result = await operatePaymentAwaitTool.handler({}, api);
     expect(result).toMatchObject({
+      session_id: paymentSessionId,
       status: "pending",
       candidate_submitted: true,
       candidate_kind: "approval",
       ready_to_charge: true,
-      next: { tool: "operate_pay" },
+      next: { tool: "operate_pay", session_id: paymentSessionId },
     });
     expect(getPaymentApproval).toHaveBeenCalledWith("appr_status", "wait-peek");
   });
