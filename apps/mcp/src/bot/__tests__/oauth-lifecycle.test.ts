@@ -82,24 +82,24 @@ describe("BrowserController OAuth popup lifecycle", () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
     let resolveProviderReturned: (() => void) | null = null;
-    const providerReturned = new Promise<void>((resolve) => {
+    let rejectProviderReturned: ((error: unknown) => void) | null = null;
+    const providerReturned = new Promise<void>((resolve, reject) => {
       resolveProviderReturned = resolve;
+      rejectProviderReturned = reject;
     });
 
     const onPage = (candidate: Page): void => {
-      // oauth_login first creates its recovery page. Wait a beat so
-      // it has navigated to the product URL; the provider-created popup remains
-      // about:blank until this fixture performs the return redirect below.
       void (async () => {
-        await candidate.waitForTimeout(30);
-        if (candidate === product || candidate.url() !== "about:blank") return;
+        // oauth_login first creates an opener-less recovery page. The provider
+        // popup is the page opened by the product, regardless of navigation speed.
+        if ((await candidate.opener()) !== product) return;
         await candidate.goto("data:text/html,provider-token-exchange");
         await product.locator("#state").evaluate((el) => {
           el.textContent = "Signed in";
         });
         await candidate.close();
         resolveProviderReturned?.();
-      })();
+      })().catch((error: unknown) => rejectProviderReturned?.(error));
     };
     context.on("page", onPage);
 
@@ -110,8 +110,10 @@ describe("BrowserController OAuth popup lifecycle", () => {
         serviceUrl: PRODUCT_URL,
       });
       sessionId = started.session_id;
-      const result = await act(sessionId, { kind: "oauth_login", target: "Login with Provider" });
-      await providerReturned;
+      const [result] = await Promise.all([
+        act(sessionId, { kind: "oauth_login", target: "Login with Provider" }),
+        providerReturned,
+      ]);
 
       expect(product.isClosed()).toBe(false);
       expect((controller as unknown as { page: Page }).page).toBe(product);
@@ -122,7 +124,7 @@ describe("BrowserController OAuth popup lifecycle", () => {
       context.off("page", onPage);
       await context.close().catch(() => undefined);
     }
-  });
+  }, 20_000);
 
   it("tracks a popup opened after a delayed provider-button dispatch", async () => {
     const context = await browser.newContext();
