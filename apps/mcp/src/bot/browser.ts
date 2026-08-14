@@ -7977,26 +7977,39 @@ export class BrowserController {
         if (!(await candidate.isVisible().catch(() => false))) continue;
         if (!(await candidate.isEnabled().catch(() => false))) continue;
         if (cardGroup !== undefined) {
-          const ownerToken = await candidate
+          const ownership = await candidate
             .evaluate(
-              (element) =>
-                element
-                  .closest("[data-ts-payment-card-group]")
-                  ?.getAttribute("data-ts-payment-card-group") ?? null,
+              (element, cardFieldSelectors) => {
+                const form =
+                  element instanceof HTMLButtonElement || element instanceof HTMLInputElement
+                    ? element.form
+                    : null;
+                const owner =
+                  form?.closest("[data-ts-payment-card-group]") ??
+                  element.closest("[data-ts-payment-card-group]");
+                return {
+                  ownerToken: owner?.getAttribute("data-ts-payment-card-group") ?? null,
+                  formOwnsCardFields:
+                    form !== null && form.querySelector(cardFieldSelectors) !== null,
+                };
+              },
+              CHECKOUT_CARD_VALUE_FIELD_SELECTORS,
             )
             .catch(() => undefined);
-          if (ownerToken === undefined) continue;
-          if (ownerToken !== null) {
+          if (ownership === undefined) continue;
+          if (ownership.ownerToken !== null) {
             const knownOwner = cardGroup.groups.some(
-              (group) => group.frame === frame && group.token === ownerToken,
+              (group) => group.frame === frame && group.token === ownership.ownerToken,
             );
             if (
               !knownOwner ||
               frame !== cardGroup.selected.frame ||
-              ownerToken !== cardGroup.selected.token
+              ownership.ownerToken !== cardGroup.selected.token
             ) {
               continue;
             }
+          } else if (ownership.formOwnsCardFields) {
+            continue;
           }
         }
         const label = await candidate

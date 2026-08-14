@@ -1616,6 +1616,63 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "excludes a DOM-external submit control owned by the sibling card form",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="combined">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+          </form>
+          <form id="split">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+          </form>
+          <button type="submit" form="combined">Pay now</button>
+          <button type="submit" form="split">Pay now</button>
+          <script>
+            for (const form of document.querySelectorAll("form")) {
+              form.addEventListener("submit", (event) => {
+                event.preventDefault();
+                document.body.dataset.submittedForm = form.id;
+                document.body.dataset.submittedValues = JSON.stringify(
+                  Array.from(form.querySelectorAll("input"), (input) => input.value),
+                );
+                const challenge = document.createElement("iframe");
+                challenge.title = "3D Secure";
+                document.body.append(challenge);
+              });
+            }
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+        const result = await controller.submitFilledCheckout();
+
+        expect(result.three_ds_required).toBe(true);
+        expect(await page.locator("body").getAttribute("data-submitted-form")).toBe("split");
+        expect(
+          JSON.parse(
+            (await page.locator("body").getAttribute("data-submitted-values")) ?? "null",
+          ),
+        ).toEqual([CARD.pan, CARD.name, "12", "30", CARD.cvv]);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "ignores a selected Shopify card form hidden by an ancestor",
     async () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
