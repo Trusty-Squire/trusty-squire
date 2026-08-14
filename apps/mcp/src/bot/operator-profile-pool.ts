@@ -32,7 +32,11 @@ import {
   type ProfileProcessIdentity,
 } from "./profile.js";
 
-const ACTIVE_SLOT_COUNT = 1;
+// Fixed global admission bound.  These directories, rather than an in-memory
+// counter, are the authority across MCP processes.  A third operator start is
+// allowed to wait at the provision seam, but can never create a third active
+// profile while both slots are claimed.
+const ACTIVE_SLOT_COUNT = 2;
 const UNPUBLISHED_SEED_GENERATION = "unpublished";
 const STARTUP_GRACE_MS = 30_000;
 const WARM_IDLE_TTL_MS = 6 * 60 * 60 * 1_000;
@@ -907,7 +911,7 @@ export async function acquireOperatorProfile(
   });
   if (reservation === null) {
     throw new Error(
-      "operate_start capacity reached: 1 operator session is active; finish it and retry",
+      "operate_start capacity reached: 2 operator sessions are active; finish one and retry",
     );
   }
   const { slotDir, ownerToken } = reservation;

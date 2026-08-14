@@ -3669,14 +3669,17 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     }
   });
 
-  it("refuses a second task while the single shared page is in flight", async () => {
-    const first = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-
-    await expect(
+  it("runs two tasks concurrently on distinct isolated profile leases", async () => {
+    const [first, second] = await Promise.all([
+      startProvisionSession({ serviceUrl: "https://app.example.com/one" }),
       startProvisionSession({ serviceUrl: "https://app.example.com/two" }),
-    ).rejects.toThrow(/another operator session is already in flight/);
-    expect(h.startCalls).toBe(1);
+    ]);
+
+    expect(h.startCalls).toBe(2);
+    expect(h.profileDirs).toHaveLength(2);
+    expect(h.profileDirs[0]).not.toBe(h.profileDirs[1]);
     await finishProvisionSession(first.session_id);
+    await finishProvisionSession(second.session_id);
   });
 
   it("does not reap the shared browser while a session is in flight", async () => {
