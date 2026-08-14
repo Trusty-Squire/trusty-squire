@@ -109,11 +109,13 @@ visible card-number field and hands the checkout back when that field is hosted 
 PayPal or Braintree. A separate PayPal express button does not block fillable merchant
 or Shopify PCI card fields. Trusty Squire does not sign in to PayPal or use vaulted
 PayPal credentials. If the issuer requires 3-D Secure, Trusty Squire notifies
-your linked Telegram chat and waits 180 seconds by default for you to complete
-the challenge in the open checkout instead of automating it. Visible Shopify and
-DBS bank-app approval prompts, including a visible “60 seconds to confirm” countdown,
-activate that wait; the ordinary Shopify PCI card-field host alone does not. It reports
-a visible decline and hands an unresolved challenge back on timeout.
+your linked Telegram chat with a nudge to approve the charge in your bank app,
+then waits 180 seconds by default for that in-app approval to clear instead of
+automating it. Visible Shopify and DBS bank-app approval prompts, including a
+visible “60 seconds to confirm” countdown, activate that wait; the ordinary
+Shopify PCI card-field host alone does not. It reports a visible decline and
+hands an unresolved challenge back on timeout, noting whether the Telegram
+nudge actually went out.
 `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to `0` on
 `operate_pay` to skip the notification and waiting and receive the handoff
 immediately.

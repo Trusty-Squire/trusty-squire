@@ -69,6 +69,7 @@ async function harness(
     resolution: "succeeded" | "failed" | "timeout" | "unconfirmed";
     waitSeconds?: number;
     notifyNeverResolves?: boolean;
+    notifySent?: boolean;
   },
   checkoutOptions: {
     checkout?: CheckoutSummary;
@@ -233,7 +234,7 @@ async function harness(
       if (threeDs?.notifyNeverResolves === true) {
         return new Promise<Response>(() => undefined);
       }
-      return Response.json({ sent: true });
+      return Response.json({ sent: threeDs?.notifySent ?? true });
     }
     if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
       auditBodies.push(JSON.parse(String(init.body)) as unknown);
@@ -635,7 +636,28 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({
       status: "payment_3ds_required",
-      needs_user: { wall: "3ds", resume: "checkout" },
+      needs_user: {
+        wall: "3ds",
+        resume: "checkout",
+        message: expect.stringContaining("bank app"),
+      },
+    });
+    expect(notifyCalls).toHaveLength(1);
+  });
+
+  it("flags an undelivered Telegram nudge in the timeout hand-off instead of blocking or faking it", async () => {
+    const { result, notifyCalls } = await harness("happy", "customer_test", undefined, {
+      resolution: "timeout",
+      notifySent: false,
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_required",
+      needs_user: {
+        wall: "3ds",
+        resume: "checkout",
+        message: expect.stringContaining("could not be delivered"),
+      },
     });
     expect(notifyCalls).toHaveLength(1);
   });
@@ -689,7 +711,11 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({
       status: "payment_3ds_required",
-      needs_user: { wall: "3ds", resume: "checkout" },
+      needs_user: {
+        wall: "3ds",
+        resume: "checkout",
+        message: expect.stringContaining("bank app"),
+      },
     });
     expect(notifyCalls).toHaveLength(0);
     expect(browser.waitForThreeDsResolution).not.toHaveBeenCalled();
@@ -1497,6 +1523,23 @@ describe("operate_pay split checkout — confirm", () => {
 
     expect(result).toMatchObject({ status: "payment_outcome_unknown" });
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+  });
+
+  it("notifies Telegram and hands back an app-push message when confirm hits a 3DS timeout", async () => {
+    const { result, notifyCalls } = await runConfirm({
+      submit: { three_ds_required: true, order_confirmed: false },
+      threeDsResolution: "timeout",
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_required",
+      needs_user: {
+        wall: "3ds",
+        resume: "checkout",
+        message: expect.stringContaining("bank app"),
+      },
+    });
+    expect(notifyCalls).toHaveLength(1);
   });
 
   it("charges within the approved amount when the final total matches it exactly", async () => {

@@ -805,6 +805,7 @@ describe("payment approval relay", () => {
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.text).toContain("Synthetic Books");
     expect(body.text).toContain("USD 25.99");
+    expect(body.text).toContain("bank app");
   });
 
   it("formats zero-decimal currencies without fake cents in 3-D Secure Telegram messages", async () => {
