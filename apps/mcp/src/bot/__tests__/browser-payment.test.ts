@@ -756,6 +756,8 @@ describe("checkout payment parsing", () => {
             #countdown-cover { background: white; inset: 0; position: absolute; z-index: 2; }
           </style>
           <div>60 seconds to confirm</div>
+          <section id="bank-transfer-approval"><div>60 seconds to confirm</div></section>
+          <section id="identity-review"><div>Verify your identity</div></section>
           <div style="display:none" id="dbs-bank-app-challenge">60 seconds to confirm</div>
           <section id="covered-countdown">
             <div id="shopify-bank-app-challenge">60 seconds to confirm</div>
@@ -847,7 +849,7 @@ describe("checkout payment parsing", () => {
               event.preventDefault();
               const challenge = document.createElement("iframe");
               challenge.id = "bank-app";
-              challenge.title = "Bank approval";
+              challenge.title = "Issuer authentication";
               challenge.srcdoc = "<div>60 seconds to confirm</div>";
               document.body.append(challenge);
             });
@@ -876,9 +878,17 @@ describe("checkout payment parsing", () => {
         await bankFrame.locator("body").evaluate((body) => {
           body.textContent = "Payment successful";
         });
-        const wait = vi.spyOn(page, "waitForTimeout").mockResolvedValue();
-        await expect(controller.waitForThreeDsResolution(-1)).resolves.toBe("unconfirmed");
-        wait.mockRestore();
+        let clock = 0;
+        const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+        const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+          clock += timeout;
+        });
+        try {
+          await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
+        } finally {
+          wait.mockRestore();
+          now.mockRestore();
+        }
       } finally {
         await browser.close();
       }
@@ -1522,6 +1532,11 @@ describe("3-D Secure resolution", () => {
     "returns unconfirmed for payment-only DOM and URL states",
     async () => {
       const { browser, page, controller } = await setupChallenge();
+      let clock = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+      });
       try {
         await page.locator("#bank-approval").evaluate((element) => element.remove());
         await page.evaluate(() => {
@@ -1531,8 +1546,49 @@ describe("3-D Secure resolution", () => {
             "<p>Payment created</p><p>Payment processing</p><p>Payment successful</p><p>Failed payment creation</p>",
           );
         });
-        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("unconfirmed");
+        await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
       } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps waiting through a transient challenge gap and delayed order confirmation",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      await page.locator("#bank-approval").evaluate((element) => element.remove());
+      let clock = 0;
+      let waits = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+        waits += 1;
+        if (waits === 1) {
+          await page.locator("body").evaluate((body) => {
+            body.insertAdjacentHTML(
+              "beforeend",
+              '<iframe id="bank-approval" title="DBS bank approval" srcdoc="<div>60 seconds to confirm</div>"></iframe>',
+            );
+          });
+        }
+        if (waits === 2) {
+          await page.locator("#bank-approval").evaluate((element) => element.remove());
+        }
+        if (waits === 3) {
+          await page.locator("body").evaluate((body) => {
+            body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
+          });
+        }
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("succeeded");
+        expect(waits).toBe(3);
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
         await browser.close();
       }
     },

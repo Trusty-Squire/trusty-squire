@@ -266,6 +266,8 @@ export interface CheckoutSubmitResult {
 
 export type ThreeDsResolution = "succeeded" | "failed" | "timeout" | "unconfirmed";
 
+const THREE_DS_RESOLUTION_GRACE_MS = 5_000;
+
 interface CheckoutFrameDescriptor {
   url: string;
   name: string;
@@ -8889,8 +8891,7 @@ export class BrowserController {
 
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
-    const urlPattern =
-      /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/|challenge)/i;
+    const urlPattern = /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/)/i;
     for (const frame of this.page.frames()) {
       if (!(await this.isFrameSurfaceTopmost(frame))) continue;
       let frameContext = frame === this.page.mainFrame() ? "" : `${frame.name()} ${frame.url()}`;
@@ -8914,8 +8915,15 @@ export class BrowserController {
           await owner.dispose().catch(() => undefined);
         }
       }
+      let frameUrlContext = frame.url();
+      try {
+        const parsedFrameUrl = new URL(frameUrlContext);
+        frameUrlContext = `${parsedFrameUrl.hostname}${parsedFrameUrl.pathname}`;
+      } catch {
+        frameUrlContext = "";
+      }
       const detected =
-        urlPattern.test(frame.url()) ||
+        urlPattern.test(frameUrlContext) ||
         (await frame
           .evaluate((externalContext) => {
             const visibleAndTopmost = (element: Element): boolean => {
@@ -8944,7 +8952,7 @@ export class BrowserController {
             };
             const structural = Array.from(
               document.querySelectorAll(
-                'iframe[name*="challenge" i],iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
+                'iframe[title*="3d secure" i],form:has(input[name="creq" i]),form[action*="acs" i]',
               ),
             ).some(
               (element) =>
@@ -8954,20 +8962,35 @@ export class BrowserController {
                 ),
             );
             if (structural) return true;
-            const generic =
-              /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i;
+            const hasKnownChallengeContext = (context: string): boolean => {
+              const explicitThreeDs =
+                /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
+              const shopifyChallenge =
+                /(?:shopify|shopifyinc)/i.test(context) &&
+                /(?:authentication|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
+              const dbsChallenge =
+                /\bdbs\b/i.test(context) &&
+                /(?:bank(?:ing)?\s+app|authentication|challenge|approval|3d[-_ ]?secure|\b3ds2?\b)/i.test(
+                  context,
+                );
+              const issuerAuthentication =
+                /\bissuer\b/i.test(context) &&
+                /(?:authentication|challenge|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
+              return explicitThreeDs || shopifyChallenge || dbsChallenge || issuerAuthentication;
+            };
+            const explicitText =
+              /\b(?:3d secure|authenticate (?:this )?payment|security code sent to)\b/i;
+            const contextualText = /\bverify (?:your )?identity\b/i;
             const narrow =
               /\b\d{1,3}\s+seconds?\s+to\s+confirm\b|\b(?:confirm|approve)\b.{0,80}\b(?:bank|banking|issuer)\s+app\b/i;
-            const challengeContext =
-              /(?:shopify|dbs|bank(?:ing)?|issuer|3d[-_ ]?secure|authentication|challenge|approval)/i;
             const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
             let node = walker.nextNode();
             while (node !== null) {
               const text = (node.nodeValue ?? "").replace(/\s+/g, " ").trim();
               const element = node.parentElement;
               if (text.length > 0 && element !== null && visibleAndTopmost(element)) {
-                if (generic.test(text)) return true;
-                if (narrow.test(text)) {
+                if (explicitText.test(text)) return true;
+                if (contextualText.test(text) || narrow.test(text)) {
                   const context: string[] = [externalContext];
                   let ancestor: Element | null = element;
                   for (let depth = 0; ancestor !== null && depth < 8; depth += 1) {
@@ -8985,7 +9008,7 @@ export class BrowserController {
                     );
                     ancestor = ancestor.parentElement;
                   }
-                  if (challengeContext.test(context.join(" "))) return true;
+                  if (hasKnownChallengeContext(context.join(" "))) return true;
                 }
               }
               node = walker.nextNode();
@@ -9058,6 +9081,7 @@ export class BrowserController {
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
     const deadline = Date.now() + timeoutMs;
     let challengeWasActive = this.checkoutThreeDsPending;
+    let challengeAbsentSince: number | undefined;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     do {
@@ -9074,14 +9098,20 @@ export class BrowserController {
         return "failed";
       }
       const challenge = await this.detectThreeDsChallenge();
-      if (challenge.three_ds_required) challengeWasActive = true;
+      if (challenge.three_ds_required) {
+        challengeWasActive = true;
+        challengeAbsentSince = undefined;
+      }
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
         this.checkoutThreeDsPending = false;
         return "succeeded";
       }
       if (!challenge.three_ds_required && challengeWasActive) {
-        this.checkoutThreeDsPending = false;
-        return "unconfirmed";
+        challengeAbsentSince ??= Date.now();
+        if (Date.now() - challengeAbsentSince >= THREE_DS_RESOLUTION_GRACE_MS) {
+          this.checkoutThreeDsPending = false;
+          return "unconfirmed";
+        }
       }
       await this.page.waitForTimeout(1_000).catch(() => undefined);
     } while (Date.now() <= deadline);
