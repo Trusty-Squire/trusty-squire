@@ -65,7 +65,7 @@ async function harness(
   expectedAudience: string | null = "customer_test",
   apiAudience?: string,
   threeDs?: {
-    resolution: "succeeded" | "failed" | "timeout";
+    resolution: "succeeded" | "failed" | "timeout" | "unconfirmed";
     waitSeconds?: number;
     notifyNeverResolves?: boolean;
   },
@@ -647,6 +647,19 @@ describe("operate_pay", () => {
     expect(result).not.toHaveProperty("merchant");
     expect(notifyCalls).toHaveLength(1);
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_declined" })]);
+  });
+
+  it("records unknown when 3DS resolves without order confirmation", async () => {
+    const { result, auditBodies, notifyCalls } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "unconfirmed" },
+    );
+
+    expect(result).toMatchObject({ status: "payment_outcome_unknown" });
+    expect(notifyCalls).toHaveLength(1);
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
   });
 
   it("hands back immediately without notifying when the 3DS wait is disabled", async () => {
@@ -1387,7 +1400,7 @@ async function runConfirm(cfg: {
   approvedCheckout?: CheckoutSummary;
   live?: CheckoutSummary | Error;
   submit?: CheckoutSubmitResult | Error;
-  threeDsResolution?: "succeeded" | "failed" | "timeout";
+  threeDsResolution?: "succeeded" | "failed" | "timeout" | "unconfirmed";
   waitSeconds?: number;
   clear?: Error;
 }): Promise<{
@@ -1686,6 +1699,20 @@ describe("operate_pay split checkout — confirm", () => {
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0]).toContain("appr_split");
+  });
+
+  it("maps resolved unconfirmed split 3DS to an unknown outcome", async () => {
+    const { result, auditBodies } = await runConfirm({
+      submit: {
+        three_ds_required: true,
+        order_confirmed: false,
+        challenge_url: "https://issuer.synthetic.test/c",
+      },
+      threeDsResolution: "unconfirmed",
+    });
+
+    expect(result).toMatchObject({ status: "payment_outcome_unknown" });
+    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
   });
 });
 

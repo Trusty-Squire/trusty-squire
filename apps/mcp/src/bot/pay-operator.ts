@@ -8,7 +8,12 @@ import canonicalize from "canonicalize";
 import { createLocalJWKSet, decodeJwt, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import { z } from "zod";
 import { ApiCallError, type ApiClient, type PaymentApproval } from "../api-client.js";
-import type { CheckoutCard, CheckoutSubmitResult, CheckoutSummary } from "./browser.js";
+import type {
+  CheckoutCard,
+  CheckoutSubmitResult,
+  CheckoutSummary,
+  ThreeDsResolution,
+} from "./browser.js";
 import { PaymentCardFillCleanupError, UnrecognizedPaymentFrameError } from "./browser.js";
 import { generateOperatorKeypair, openSealed, type OperatorKeypair } from "./payment-hpke.js";
 
@@ -42,7 +47,7 @@ export interface PaymentBrowser {
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
   clearSealedPaymentFields(): Promise<void>;
   clearCheckoutCardFields?(): Promise<void>;
-  waitForThreeDsResolution(timeoutMs: number): Promise<"succeeded" | "failed" | "timeout">;
+  waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution>;
   currentUrl(): string;
 }
 
@@ -1227,6 +1232,7 @@ export async function executeOperatePay(
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
       if (resolution === "succeeded") paymentStatus = "payment_submitted";
       if (resolution === "failed") paymentStatus = "payment_declined";
+      if (resolution === "unconfirmed") paymentStatus = "payment_outcome_unknown";
     }
 
     let auditRecorded = true;
@@ -1433,6 +1439,7 @@ export async function executeOperatePayConfirm(
     const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
     if (resolution === "succeeded") paymentStatus = "payment_submitted";
     if (resolution === "failed") paymentStatus = "payment_declined";
+    if (resolution === "unconfirmed") paymentStatus = "payment_outcome_unknown";
   }
 
   let auditRecorded = true;

@@ -602,6 +602,11 @@ describe("checkout payment parsing", () => {
           });
         });
         await page.setContent(`
+          <style>
+            #merchant-layer { min-height: 180px; position: relative; }
+            #covered-merchant-form, #active-merchant-surface { inset: 0; position: absolute; }
+            #active-merchant-surface { background: white; z-index: 2; }
+          </style>
           <input id="shipping-address" autocomplete="address-line1" value="1-2-3 Shibuya">
           <input id="shipping-city" autocomplete="address-level2" value="Tokyo">
           <input id="shipping-postal" autocomplete="postal-code" value="150-0002">
@@ -611,8 +616,15 @@ describe("checkout payment parsing", () => {
             <input id="hidden-billing-postal" name="billing_postal" value="Hidden Billing">
           </section>
           <section id="payment-method">
-            <iframe src="${pciUrl}"></iframe>
-            <input id="active-billing-city" name="billing_city">
+            <div id="merchant-layer">
+              <form id="covered-merchant-form">
+                <input id="covered-merchant-billing" name="billing_city" value="Covered Merchant Billing">
+              </form>
+              <div id="active-merchant-surface">
+                <iframe src="${pciUrl}"></iframe>
+                <input id="active-billing-city" name="billing_city">
+              </div>
+            </div>
           </section>
           <button id="pay-now">Pay now</button>
           <script>
@@ -649,6 +661,9 @@ describe("checkout payment parsing", () => {
         expect(await page.locator("#shipping-country").inputValue()).toBe("JP");
         expect(await page.locator("#outside-billing-city").inputValue()).toBe("Outside Billing");
         expect(await page.locator("#hidden-billing-postal").inputValue()).toBe("Hidden Billing");
+        expect(await page.locator("#covered-merchant-billing").inputValue()).toBe(
+          "Covered Merchant Billing",
+        );
         expect(await page.locator("body").getAttribute("data-active-billing-city")).toBe(
           "Billingville",
         );
@@ -661,9 +676,9 @@ describe("checkout payment parsing", () => {
           "123 Billing Street",
         );
         expect(await pciFrame.locator("#active-billing-line1").inputValue()).toBe("");
-        expect(
-          await pciFrame.locator('#active-card [autocomplete="cc-number"]').inputValue(),
-        ).toBe("");
+        expect(await pciFrame.locator('#active-card [autocomplete="cc-number"]').inputValue()).toBe(
+          "",
+        );
         expect(await page.locator('[data-ts-sealed-payment="1"]').count()).toBe(0);
       } finally {
         await playwrightBrowser.close();
@@ -690,7 +705,10 @@ describe("checkout payment parsing", () => {
             document.querySelector("#checkout").addEventListener("submit", (event) => {
               event.preventDefault();
               setTimeout(() => {
-                document.body.insertAdjacentHTML("beforeend", "<div>60 seconds to confirm</div>");
+                document.body.insertAdjacentHTML(
+                  "beforeend",
+                  "<section id='shopify-dbs-bank-app-challenge'><div>60 seconds to confirm</div></section>",
+                );
               }, 50);
             });
           </script>
@@ -714,6 +732,51 @@ describe("checkout payment parsing", () => {
           }),
         ).resolves.toMatchObject({ three_ds_required: true, order_confirmed: false });
       } finally {
+        await browser.close();
+      }
+    },
+    30_000,
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores ordinary, hidden, and covered merchant countdowns",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(1)
+        .mockReturnValue(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <style>
+            #covered-countdown { position: relative; }
+            #countdown-cover { background: white; inset: 0; position: absolute; z-index: 2; }
+          </style>
+          <div>60 seconds to confirm</div>
+          <div style="display:none" id="dbs-bank-app-challenge">60 seconds to confirm</div>
+          <section id="covered-countdown">
+            <div id="shopify-bank-app-challenge">60 seconds to confirm</div>
+            <div id="countdown-cover">Merchant offer</div>
+          </section>
+          <form id="checkout">
+            <input autocomplete="cc-number"><input autocomplete="cc-exp">
+            <input autocomplete="cc-csc"><input autocomplete="cc-name">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>document.querySelector("#checkout").addEventListener("submit", (event) => event.preventDefault());</script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
         await browser.close();
       }
     },
@@ -814,7 +877,7 @@ describe("checkout payment parsing", () => {
           body.textContent = "Payment successful";
         });
         const wait = vi.spyOn(page, "waitForTimeout").mockResolvedValue();
-        await expect(controller.waitForThreeDsResolution(-1)).resolves.toBe("timeout");
+        await expect(controller.waitForThreeDsResolution(-1)).resolves.toBe("unconfirmed");
         wait.mockRestore();
       } finally {
         await browser.close();
@@ -1382,76 +1445,114 @@ describe("structured-data checkout totals", () => {
   );
 });
 
-function controllerWithResolutionPage(options: {
-  startUrl: string;
-  nextUrl?: string;
-  text?: string;
-}): BrowserController {
-  let currentUrl = options.startUrl;
-  let outcomeSnapshots = 0;
-  const frame = {
-    url: () => "https://issuer.synthetic.test/",
-    evaluate: async (fn: () => unknown) => {
-      if (String(fn).includes("querySelectorAll")) {
-        outcomeSnapshots += 1;
-        return outcomeSnapshots > 1 && options.text !== undefined ? { [options.text]: 1 } : {};
-      }
-      if (String(fn).includes("querySelector")) return false;
-      if (options.nextUrl !== undefined) currentUrl = options.nextUrl;
-      return options.text ?? "";
-    },
-  };
-  const page = {
-    url: () => currentUrl,
-    mainFrame: () => frame,
-    frames: () => [frame],
-    waitForTimeout: async () => undefined,
-  };
-  const controller = new BrowserController({ humanize: false });
-  (controller as unknown as { page: Page }).page = page as unknown as Page;
-  return controller;
-}
-
 describe("3-D Secure resolution", () => {
-  it("does not treat an unchanged checkout confirmation URL as success", async () => {
-    const controller = controllerWithResolutionPage({
-      startUrl: "https://merchant.test/checkout/confirm?success_url=/done",
+  const setupChallenge = async (): Promise<{
+    browser: Browser;
+    page: Page;
+    controller: BrowserController;
+  }> => {
+    const browser = await chromium.launch({ headless: true });
+    const page = await browser.newPage();
+    await page.route("https://merchant.test/**", async (route) =>
+      route.fulfill({
+        contentType: "text/html",
+        body: `
+          <button id="pay">Pay now</button>
+          <script>
+            document.querySelector("#pay").addEventListener("click", () => {
+              const frame = document.createElement("iframe");
+              frame.id = "bank-approval";
+              frame.title = "DBS bank approval";
+              frame.srcdoc = "<div>60 seconds to confirm</div>";
+              document.body.append(frame);
+            });
+          </script>`,
+      }),
+    );
+    await page.goto("https://merchant.test/checkout");
+    const controller = new BrowserController({ humanize: false });
+    (controller as unknown as { page: Page }).page = page;
+    await expect(controller.submitFilledCheckout()).resolves.toMatchObject({
+      three_ds_required: true,
+      order_confirmed: false,
     });
+    return { browser, page, controller };
+  };
 
-    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("timeout");
-  });
+  it.skipIf(!chromiumAvailable)(
+    "does not treat an unchanged checkout confirmation URL as success",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      const wait = vi.spyOn(page, "waitForTimeout").mockResolvedValue();
+      try {
+        await page.evaluate(() => history.replaceState({}, "", "/checkout?success_url=/done"));
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        await browser.close();
+      }
+    },
+  );
 
-  it("accepts explicit success text without a URL transition", async () => {
-    const controller = controllerWithResolutionPage({
-      startUrl: "https://merchant.test/checkout",
-      text: "Your payment was successful",
-    });
-    const now = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(1);
-
+  it.skipIf(!chromiumAvailable)("accepts new merchant order-confirmation text", async () => {
+    const { browser, page, controller } = await setupChallenge();
     try {
+      await page.locator("#bank-approval").evaluate((element) => element.remove());
+      await page.locator("body").evaluate((body) => {
+        body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
+      });
       await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
     } finally {
-      now.mockRestore();
+      await browser.close();
     }
   });
 
-  it("accepts a transitioned terminal success URL", async () => {
-    const controller = controllerWithResolutionPage({
-      startUrl: "https://merchant.test/checkout",
-      nextUrl: "https://merchant.test/receipt/123",
-    });
-
-    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
+  it.skipIf(!chromiumAvailable)("accepts a transitioned merchant receipt URL", async () => {
+    const { browser, page, controller } = await setupChallenge();
+    try {
+      await page.locator("#bank-approval").evaluate((element) => element.remove());
+      await page.evaluate(() => history.pushState({}, "", "/receipt/123"));
+      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
+    } finally {
+      await browser.close();
+    }
   });
 
-  it("prioritizes failure text over success signals", async () => {
-    const controller = controllerWithResolutionPage({
-      startUrl: "https://merchant.test/checkout",
-      nextUrl: "https://merchant.test/success",
-      text: "Payment declined. Your payment was successful",
-    });
+  it.skipIf(!chromiumAvailable)(
+    "returns unconfirmed for payment-only DOM and URL states",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      try {
+        await page.locator("#bank-approval").evaluate((element) => element.remove());
+        await page.evaluate(() => {
+          history.pushState({}, "", "/payment_success");
+          document.body.insertAdjacentHTML(
+            "beforeend",
+            "<p>Payment created</p><p>Payment processing</p><p>Payment successful</p><p>Failed payment creation</p>",
+          );
+        });
+        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("unconfirmed");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
 
-    await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
+  it.skipIf(!chromiumAvailable)("prioritizes failure text over order confirmation", async () => {
+    const { browser, page, controller } = await setupChallenge();
+    try {
+      await page.locator("#bank-approval").evaluate((element) => element.remove());
+      await page.evaluate(() => {
+        history.pushState({}, "", "/receipt/123");
+        document.body.insertAdjacentHTML(
+          "beforeend",
+          "<p>Order confirmed</p><p>Payment declined</p>",
+        );
+      });
+      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("failed");
+    } finally {
+      await browser.close();
+    }
   });
 });
 
@@ -1774,6 +1875,8 @@ describe("split-checkout card fill (real browser)", () => {
                 );
                 const challenge = document.createElement("iframe");
                 challenge.title = "3D Secure";
+                challenge.style.cssText =
+                  "position:fixed;inset:0;width:100%;height:100%;z-index:9999";
                 document.body.append(challenge);
               });
             }
@@ -1847,6 +1950,8 @@ describe("split-checkout card fill (real browser)", () => {
                 );
                 const challenge = document.createElement("iframe");
                 challenge.title = "3D Secure";
+                challenge.style.cssText =
+                  "position:fixed;inset:0;width:100%;height:100%;z-index:9999";
                 document.body.append(challenge);
               });
             }
