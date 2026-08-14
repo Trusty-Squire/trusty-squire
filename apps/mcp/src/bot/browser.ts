@@ -223,6 +223,17 @@ export interface CheckoutCard {
   };
 }
 
+interface CheckoutCardGroupRoot {
+  frame: Frame;
+  root: Locator;
+  token: string;
+}
+
+interface CheckoutCardGroupScope {
+  selected: CheckoutCardGroupRoot;
+  groups: readonly CheckoutCardGroupRoot[];
+}
+
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
   challenge_url?: string;
@@ -2069,6 +2080,7 @@ export class BrowserController {
   // Google session across runs — see profile.ts / google-login.ts.
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
   // reuse must always restore this original page rather than adopting a popup
@@ -7460,7 +7472,7 @@ export class BrowserController {
     card: CheckoutCard,
     billingOnly = false,
     assertFrameEgress?: (frame: Frame, resolvedOrigin?: string) => void,
-  ): Promise<void> {
+  ): Promise<CheckoutCardGroupScope | undefined> {
     const filled = new Set<string>();
     const expiryMonthSelectors =
       '[autocomplete~="cc-exp-month"],[name*="exp_month" i],[name*="expmonth" i],[name*="exp" i][name*="month" i],[id*="exp" i][id*="month" i]';
@@ -7475,16 +7487,19 @@ export class BrowserController {
     const nameSelectors =
       'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]';
 
-    type CardGroup = { frame: Frame; root: Locator; active: boolean };
+    type CardGroup = CheckoutCardGroupRoot & { active: boolean; controlCount: number };
     const groups = new Map<string, CardGroup>();
     let fillablePanCount = 0;
     let groupSequence = 0;
     await Promise.all(
       frames.map((frame) =>
         frame
-          .locator("[data-ts-payment-card-group]")
+          .locator("[data-ts-payment-card-group],[data-ts-payment-card-control-group]")
           .evaluateAll((elements) => {
-            for (const element of elements) element.removeAttribute("data-ts-payment-card-group");
+            for (const element of elements) {
+              element.removeAttribute("data-ts-payment-card-group");
+              element.removeAttribute("data-ts-payment-card-control-group");
+            }
           })
           .catch(() => undefined),
       ),
@@ -7522,30 +7537,54 @@ export class BrowserController {
                 }
                 return true;
               };
+              const ownedControls = (root: Element): Element[] =>
+                root instanceof HTMLFormElement
+                  ? Array.from(root.elements)
+                  : Array.from(root.querySelectorAll("input,select,textarea,button"));
               const has = (root: Element, selector: string): boolean =>
-                Array.from(root.querySelectorAll(selector)).some(isFillable);
-              const form = input.closest("form");
+                ownedControls(root).some(
+                  (element) => element.matches(selector) && isFillable(element),
+                );
+              const form = input instanceof HTMLInputElement ? input.form : input.closest("form");
               let root: Element | null = form ?? input.parentElement;
               while (root !== null && root !== document.body && root !== document.documentElement) {
+                const hasCombinedExpiry = has(root, selectors.combinedExpiry);
+                const hasSplitExpiry =
+                  has(root, selectors.expiryMonth) && has(root, selectors.expiryYear);
                 const complete =
                   has(root, selectors.pan) &&
                   has(root, selectors.cvv) &&
                   has(root, selectors.name) &&
-                  (has(root, selectors.combinedExpiry) ||
-                    (has(root, selectors.expiryMonth) && has(root, selectors.expiryYear)));
+                  (hasCombinedExpiry || hasSplitExpiry);
                 if (complete) {
                   const existing = root.getAttribute("data-ts-payment-card-group");
                   const token = existing ?? selectors.token;
                   if (existing === null) root.setAttribute("data-ts-payment-card-group", token);
+                  const controls = ownedControls(root);
+                  for (const control of controls) {
+                    control.setAttribute("data-ts-payment-card-control-group", token);
+                  }
                   const active =
                     root.contains(document.activeElement) ||
+                    controls.includes(document.activeElement as Element) ||
                     root.matches(
                       '[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
                     ) ||
                     root.querySelector(
                       'input[type="radio"]:checked,[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
-                    ) !== null;
-                  return { token, active };
+                    ) !== null ||
+                    controls.some((control) =>
+                      control.matches(
+                        'input[type="radio"]:checked,[aria-selected="true"],[aria-current="true"],[data-selected="true"],[data-active="true"]',
+                      ),
+                    );
+                  return {
+                    token,
+                    active,
+                    // A split expiry contributes two independently fillable
+                    // controls, so it outranks an otherwise-equal fallback.
+                    controlCount: 3 + (hasCombinedExpiry ? 1 : 2),
+                  };
                 }
                 if (form !== null) break;
                 root = root.parentElement;
@@ -7567,7 +7606,9 @@ export class BrowserController {
           groups.set(`${frameIndex}:${group.token}`, {
             frame,
             root: frame.locator(`[data-ts-payment-card-group="${group.token}"]`),
+            token: group.token,
             active: group.active,
+            controlCount: group.controlCount,
           });
         }
       }
@@ -7577,9 +7618,17 @@ export class BrowserController {
     if (groups.size === 1) {
       cardGroup = [...groups.values()][0];
     } else if (groups.size > 1) {
-      const active = [...groups.values()].filter((group) => group.active);
-      if (active.length !== 1) throw new Error("payment_card_form_ambiguous");
-      cardGroup = active[0];
+      const ranked = [...groups.values()].sort(
+        (left, right) =>
+          Number(right.active) - Number(left.active) || right.controlCount - left.controlCount,
+      );
+      const selected = ranked[0]!;
+      const equallyRanked = ranked.filter(
+        (candidate) =>
+          candidate.active === selected.active && candidate.controlCount === selected.controlCount,
+      );
+      if (equallyRanked.length !== 1) throw new Error("payment_card_form_ambiguous");
+      cardGroup = selected;
     } else if (fillablePanCount > 1) {
       // Multiple PAN anchors with no single complete container are not safe to
       // combine. A provider topology with one PAN and separate hosted-field
@@ -7600,7 +7649,9 @@ export class BrowserController {
       for (const frame of candidateFrames) {
         const matches =
           withinCardGroup && cardGroup !== undefined
-            ? cardGroup.root.locator(selectors)
+            ? frame
+                .locator(selectors)
+                .and(frame.locator(`[data-ts-payment-card-control-group="${cardGroup.token}"]`))
             : frame.locator(selectors);
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
@@ -7716,7 +7767,9 @@ export class BrowserController {
       for (const frame of candidateFrames) {
         const matches =
           withinCardGroup && cardGroup !== undefined
-            ? cardGroup.root.locator(selectors)
+            ? frame
+                .locator(selectors)
+                .and(frame.locator(`[data-ts-payment-card-control-group="${cardGroup.token}"]`))
             : frame.locator(selectors);
         const count = Math.min(await matches.count().catch(() => 0), 10);
         for (let i = 0; i < count; i += 1) {
@@ -7816,14 +7869,18 @@ export class BrowserController {
       if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
       if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
     }
+    return cardGroup === undefined
+      ? undefined
+      : { selected: cardGroup, groups: [...groups.values()] };
   }
 
   async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
+    this.checkoutCardGroupScope = undefined;
     try {
       await this.waitForPanField(10_000);
-      await this.fillCheckoutCardIntoFrames(this.page.frames(), card);
-      return await this.submitFilledCheckout();
+      const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card);
+      return await this.submitFilledCheckoutInScope(cardGroup);
     } finally {
       await this.clearSealedPaymentFields();
     }
@@ -7840,6 +7897,7 @@ export class BrowserController {
   // extractInteractiveElements reports as sealed so observations mask them.
   async fillCheckoutCardFields(card: CheckoutCard): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    this.checkoutCardGroupScope = undefined;
     const page = this.page;
     const pageUrl = page.url();
     if (!recognizedPaymentProviderFrame(pageUrl, pageUrl)) {
@@ -7880,7 +7938,12 @@ export class BrowserController {
       }
     };
     try {
-      await this.fillCheckoutCardIntoFrames(allowed, card, true, assertFrameEgress);
+      this.checkoutCardGroupScope = await this.fillCheckoutCardIntoFrames(
+        allowed,
+        card,
+        true,
+        assertFrameEgress,
+      );
     } catch (error) {
       let fillError = error;
       if (error instanceof Error && error.message === "payment_field_not_found:pan") {
@@ -7920,6 +7983,12 @@ export class BrowserController {
   // The charge: find and click the pay/place-order control, then poll for a
   // 3-D Secure challenge. Callers gate this on a verified visible total.
   async submitFilledCheckout(): Promise<CheckoutSubmitResult> {
+    return await this.submitFilledCheckoutInScope(this.checkoutCardGroupScope);
+  }
+
+  private async submitFilledCheckoutInScope(
+    cardGroup?: CheckoutCardGroupScope,
+  ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     let submitted = false;
     for (const frame of this.page.frames()) {
@@ -7929,6 +7998,40 @@ export class BrowserController {
         const candidate = matches.nth(i);
         if (!(await candidate.isVisible().catch(() => false))) continue;
         if (!(await candidate.isEnabled().catch(() => false))) continue;
+        if (cardGroup !== undefined) {
+          const ownership = await candidate
+            .evaluate((element, cardFieldSelectors) => {
+              const form =
+                element instanceof HTMLButtonElement || element instanceof HTMLInputElement
+                  ? element.form
+                  : null;
+              const owner =
+                form?.closest("[data-ts-payment-card-group]") ??
+                element.closest("[data-ts-payment-card-group]");
+              return {
+                ownerToken: owner?.getAttribute("data-ts-payment-card-group") ?? null,
+                formOwnsCardFields:
+                  form !== null &&
+                  Array.from(form.elements).some((control) => control.matches(cardFieldSelectors)),
+              };
+            }, CHECKOUT_CARD_VALUE_FIELD_SELECTORS)
+            .catch(() => undefined);
+          if (ownership === undefined) continue;
+          if (ownership.ownerToken !== null) {
+            const knownOwner = cardGroup.groups.some(
+              (group) => group.frame === frame && group.token === ownership.ownerToken,
+            );
+            if (
+              !knownOwner ||
+              frame !== cardGroup.selected.frame ||
+              ownership.ownerToken !== cardGroup.selected.token
+            ) {
+              continue;
+            }
+          } else if (ownership.formOwnsCardFields) {
+            continue;
+          }
+        }
         const label = await candidate
           .evaluate((el) =>
             (
@@ -7956,6 +8059,7 @@ export class BrowserController {
   }
 
   async clearSealedPaymentFields(): Promise<void> {
+    this.checkoutCardGroupScope = undefined;
     if (!this.page) return;
     await this.clearSealedPaymentFieldsInFrames(this.page.frames());
   }
@@ -7981,6 +8085,7 @@ export class BrowserController {
   }
 
   async clearCheckoutCardFields(): Promise<void> {
+    this.checkoutCardGroupScope = undefined;
     if (!this.page) return;
     await this.clearCheckoutCardFieldsInFrames(this.page.frames());
   }

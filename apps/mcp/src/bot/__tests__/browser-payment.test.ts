@@ -1409,7 +1409,7 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "fills one selected Shopify card form coherently when two variants are mounted",
+    "fills the more complete Shopify card form coherently when two variants are mounted",
     async () => {
       const pageUrl = "https://store.kobeejapan.net/checkout";
       const frameUrl = "https://checkout.pci.shopifyinc.com/two-card-forms";
@@ -1422,7 +1422,7 @@ describe("split-checkout card fill (real browser)", () => {
             <input autocomplete="cc-exp" placeholder="MM/YY">
             <input autocomplete="cc-csc">
           </form>
-          <form id="split" aria-selected="true">
+          <form id="split">
             <input autocomplete="cc-number">
             <input autocomplete="cc-name">
             <input autocomplete="cc-exp-month">
@@ -1448,6 +1448,221 @@ describe("split-checkout card fill (real browser)", () => {
         expect(await frame.locator("#split [autocomplete=cc-exp-month]").inputValue()).toBe("12");
         expect(await frame.locator("#split [autocomplete=cc-exp-year]").inputValue()).toBe("30");
         expect(await frame.locator("#split [autocomplete=cc-csc]").inputValue()).toBe(CARD.cvv);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "submits only the selected Shopify card form when both variants have pay controls",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <form id="combined">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <form id="split">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            for (const form of document.querySelectorAll("form")) {
+              form.addEventListener("submit", (event) => {
+                event.preventDefault();
+                document.body.dataset.submittedForm = form.id;
+                document.body.dataset.submittedValues = JSON.stringify(
+                  Array.from(form.querySelectorAll("input"), (input) => input.value),
+                );
+                const challenge = document.createElement("iframe");
+                challenge.title = "3D Secure";
+                document.body.append(challenge);
+              });
+            }
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const result = await controller.fillAndSubmitCheckout(CARD);
+
+        expect(result.three_ds_required).toBe(true);
+        expect(await page.locator("body").getAttribute("data-submitted-form")).toBe("split");
+        expect(
+          JSON.parse((await page.locator("body").getAttribute("data-submitted-values")) ?? "null"),
+        ).toEqual([CARD.pan, CARD.name, "12", "30", CARD.cvv]);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "permits a parent checkout control outside both Shopify card forms",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const frameUrl = "https://checkout.pci.shopifyinc.com/two-card-forms-parent-submit";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Kobee Japan</title>
+          <iframe src="${frameUrl}"></iframe>
+          <button id="place-order">Place order</button>
+          <script>
+            document.querySelector("#place-order").addEventListener("click", () => {
+              document.body.dataset.submitted = "true";
+              const challenge = document.createElement("iframe");
+              challenge.title = "3D Secure";
+              document.body.append(challenge);
+            });
+          </script>`,
+        [frameUrl]: `
+          <form id="combined">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+          </form>
+          <form id="split">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+          </form>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const result = await controller.fillAndSubmitCheckout(CARD);
+
+        expect(result.three_ds_required).toBe(true);
+        expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "retains the selected Shopify card form through split confirmation",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="combined">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp" placeholder="MM/YY">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <form id="split">
+            <input autocomplete="cc-number">
+            <input autocomplete="cc-name">
+            <input autocomplete="cc-exp-month">
+            <input autocomplete="cc-exp-year">
+            <input autocomplete="cc-csc">
+            <button type="submit">Pay now</button>
+          </form>
+          <script>
+            for (const form of document.querySelectorAll("form")) {
+              form.addEventListener("submit", (event) => {
+                event.preventDefault();
+                document.body.dataset.submittedForm = form.id;
+                document.body.dataset.submittedValues = JSON.stringify(
+                  Array.from(form.querySelectorAll("input"), (input) => input.value),
+                );
+                const challenge = document.createElement("iframe");
+                challenge.title = "3D Secure";
+                document.body.append(challenge);
+              });
+            }
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+        const result = await controller.submitFilledCheckout();
+
+        expect(result.three_ds_required).toBe(true);
+        expect(await page.locator("body").getAttribute("data-submitted-form")).toBe("split");
+        expect(
+          JSON.parse((await page.locator("body").getAttribute("data-submitted-values")) ?? "null"),
+        ).toEqual([CARD.pan, CARD.name, "12", "30", CARD.cvv]);
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "keeps externally associated card fields and submit controls in their owning form",
+    async () => {
+      const pageUrl = "https://store.kobeejapan.net/checkout";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <form id="combined"></form>
+          <form id="split"></form>
+          <input form="combined" autocomplete="cc-number">
+          <input form="combined" autocomplete="cc-name">
+          <input form="combined" autocomplete="cc-exp" placeholder="MM/YY">
+          <input form="combined" autocomplete="cc-csc">
+          <input form="split" autocomplete="cc-number">
+          <input form="split" autocomplete="cc-name">
+          <input form="split" autocomplete="cc-exp-month">
+          <input form="split" autocomplete="cc-exp-year">
+          <input form="split" autocomplete="cc-csc">
+          <button type="submit" form="combined">Pay now</button>
+          <button type="submit" form="split">Pay now</button>
+          <script>
+            for (const form of document.querySelectorAll("form")) {
+              form.addEventListener("submit", (event) => {
+                event.preventDefault();
+                document.body.dataset.submittedForm = form.id;
+                document.body.dataset.submittedValues = JSON.stringify(
+                  Array.from(form.elements)
+                    .filter(
+                      (element) =>
+                        element instanceof HTMLInputElement && element.type !== "submit",
+                    )
+                    .map((input) => input.value),
+                );
+                const challenge = document.createElement("iframe");
+                challenge.title = "3D Secure";
+                document.body.append(challenge);
+              });
+            }
+          </script>`,
+      });
+      try {
+        await page.goto(pageUrl);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await controller.fillCheckoutCardFields(CARD);
+        const result = await controller.submitFilledCheckout();
+
+        expect(result.three_ds_required).toBe(true);
+        expect(await page.locator("body").getAttribute("data-submitted-form")).toBe("split");
+        expect(
+          JSON.parse((await page.locator("body").getAttribute("data-submitted-values")) ?? "null"),
+        ).toEqual([CARD.pan, CARD.name, "12", "30", CARD.cvv]);
       } finally {
         await browser.close();
       }
