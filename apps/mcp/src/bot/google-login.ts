@@ -1108,8 +1108,7 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
       env: process.env,
       // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
       // proxy (direct). Connect from the box is the point anyway.
-      proxyServer:
-        proxyDisposition?.server ?? null,
+      proxyServer: proxyDisposition?.server ?? null,
       extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
     });
     let status: LoginRunResult["status"] = "timeout";

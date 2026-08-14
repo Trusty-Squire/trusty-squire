@@ -815,7 +815,8 @@ export class OperatorProfileLease {
       await this.retain();
       return;
     }
-    const { worker: _worker, ...withoutWorker } = this.descriptor;
+    const withoutWorker = { ...this.descriptor };
+    delete withoutWorker.worker;
     this.descriptor = {
       ...withoutWorker,
       returned_at: this.now(),
@@ -866,12 +867,7 @@ export class OperatorProfileLease {
   }
 
   private discardOwnedSlot(label = "owned-active"): void {
-    const tombstone = quarantineOwnedActiveSlot(
-      this.p,
-      this.slotDir,
-      this.ownerToken,
-      label,
-    );
+    const tombstone = quarantineOwnedActiveSlot(this.p, this.slotDir, this.ownerToken, label);
     if (tombstone === null) return;
     const quarantinedLease = readLease(join(tombstone, "claim"));
     if (quarantinedLease?.lease_token !== this.descriptor.lease_token) {
@@ -931,7 +927,9 @@ export async function acquireOperatorProfile(
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       }
       if (descriptor !== null) {
-        const { returned_at: _returnedAt, worker: _worker, ...activeDescriptor } = descriptor;
+        const activeDescriptor = { ...descriptor };
+        delete activeDescriptor.returned_at;
+        delete activeDescriptor.worker;
         writePrivateJson(join(claimDir, "lease.json"), activeDescriptor);
         return activeDescriptor;
       }

@@ -63,12 +63,7 @@ describe("login --force-relogin marker honesty", () => {
   it("clears the provider marker up front on force-relogin (timed-out login can't leave it lying)", async () => {
     m.ensureOAuthSession.mockResolvedValue({ status: "timeout" });
     await expect(
-      runCli([
-        "login",
-        "--provider=github",
-        "--force-relogin",
-        `--profile-dir=${profileDir}`,
-      ]),
+      runCli(["login", "--provider=github", "--force-relogin", `--profile-dir=${profileDir}`]),
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(m.clearProviderLoggedIn).toHaveBeenCalledWith("github", profileDir);
@@ -91,9 +86,7 @@ describe("login --force-relogin marker honesty", () => {
       detail: "another Trusty Squire session is already using the browser — close it first",
     });
 
-    await expect(runCli(["login", `--profile-dir=${profileDir}`])).rejects.toThrow(
-      "process.exit",
-    );
+    await expect(runCli(["login", `--profile-dir=${profileDir}`])).rejects.toThrow("process.exit");
 
     expect(exitSpy).toHaveBeenCalledWith(1);
   });

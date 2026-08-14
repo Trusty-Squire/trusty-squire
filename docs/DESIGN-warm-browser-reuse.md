@@ -1,134 +1,171 @@
-# DESIGN — warm browser reuse (skip the per-session Chrome boot)
+# DESIGN — isolated operator profile pool
 
-Status: implemented (2026-08-05). Section 8 is the locked authoritative model; the earlier sections
-summarize the resulting lifecycle and its rationale.
+Status: migration stage 1 implemented (2026-08-14). This document owns the operator profile-pool
+and login-seed lifecycle. Payment authorization and secret-handling contracts remain owned by
+[`SECURITY.md`](../SECURITY.md).
 
-## 1. Problem
+## 1. Stage boundary
 
-Before this change, every `operate_start` did a full self-launch Chrome boot (self-launched Chrome +
-`connectOverCDP` + Xvfb + anti-bot settle) — measured at **~120s cold**. `operate_finish` and the
-session reaper then closed the whole browser, so back-to-back tasks paid that cost repeatedly.
+Each `operate_start` now leases an isolated Chrome profile. The canonical profile used by
+`connect` and `login` is an authoring source only: operator Chrome never opens it. A successful
+Google login can publish a filtered, immutable seed generation, and a new worker profile is cloned
+from that seed or reclaimed from one closed warm-profile slot.
 
-## 2. The model (what the evidence actually supports)
+This stage deliberately preserves the existing concurrency behavior:
 
-**Keep one module-level `BrowserController` warm and reuse its original handler-bound page
-sequentially.** Section 8 owns the locked decisions; the implemented lifecycle is:
+- one in-process start or active task at a time;
+- one filesystem active slot per profile-pool namespace;
+- one closed warm-profile slot;
+- one page within the leased worker profile.
 
-1. **One persistent profile and one page.** `operate_finish` resets the original page to
-   `about:blank`, closes incidental popups, clears controller-local per-page state, and preserves
-   profile cookies and storage. It does not create a tab or context for the next task.
-2. **One task at a time.** A second `operate_start` is rejected while a start or task is in flight.
-3. **Narrow reuse eligibility.** Reuse requires the same requested `profileDir` and `proxyUrl`, a
-   connected CDP browser, and a successful page reset. A mismatch, dead connection, or reset failure
-   discards the warm browser and cold-boots.
-4. **Bounded lifetime.** Every operate call resets an unrefed idle timer. Defaults are six hours
-   (`BOT_WARM_BROWSER_IDLE_TTL_MS`), 50 reuses (`BOT_WARM_BROWSER_MAX_REUSES`), and 24 hours of
-   wall-clock age (`BOT_WARM_BROWSER_MAX_AGE_MS`). Reaping skips and re-arms while a start or task is
-   in flight; reuse-count and max-age recycling occurs only at a safe task boundary.
-5. **The stdio connection owns server lifetime.** `runServer` handles transport close, stdin
-   EOF/close, `SIGINT`, and `SIGTERM` through one shutdown path. It closes active sessions and any
-   browser launch still in progress, closes the MCP server, then explicitly exits so Chrome cannot
-   keep Node alive. The lower-level Chrome cleanup still covers process exit and `SIGHUP` (plus
-   `SIGINT`/`SIGTERM` outside server mode). The Linux PPID=1 boot-time sweep covers verifier
-   profiles, the default interactive profile, and an explicitly requested operator profile.
+There is no warm Chrome process between sessions. `operate_finish` closes Chrome before its profile
+can enter the warm slot.
 
+```text
+connect / Google login
+  -> close canonical Chrome with proof
+  -> copy only the identity seed under the seed lock
+  -> validate Google identity through a disposable clone
+  -> close validation Chrome with proof
+  -> atomically publish seed/current and delete non-current generations
+
+operate_start
+  -> reserve the one active slot
+  -> under the seed lock, claim a current warm profile or clone seed/current
+  -> launch Chrome on the claimed worker profile
+  -> bind the worker's process birth identity and exact user-data directory
+  -> validate identity through that worker
+
+operate_finish
+  -> classify payment state
+  -> reset the page and close Chrome with proof
+  -> return a safe profile to the one warm slot, otherwise destroy or quarantine it
 ```
- operate_start ──► warm slot eligible, connected, unexpired? ──yes──► reset the SAME page
-                              │no                                   │
-                              ▼                                     ▼
-                         discard + cold-boot ──────────────────► navigate task
- operate_finish ──► reset SAME page to about:blank; keep Chrome; re-arm idle timer
- idle TTL / reuse / max-age boundary, nothing in flight ──► close warm Chrome
- reaper fires during a task ──► skip + re-arm
- stdio close / EOF / SIGINT / SIGTERM ──► close sessions + MCP server ──► process exit
+
+## 2. Filesystem model
+
+The default pool lives under
+`~/.trusty-squire/operator-profiles/namespaces/<source-profile-hash>/`. An explicit source profile
+gets its own namespace. Pool directories and JSON descriptors are private (`0700` directories and
+`0600` files).
+
+```text
+seed/
+  .lock
+  current -> generations/<generation>
+  generations/<generation>/user-data/
+profiles/<profile-id>/user-data/
+active/slot-0 -> ../active-claims/<claim-id>/
+active-claims/<claim-id>/
+  owner.json
+  claim/lease.json
+warm/slot-0/lease.json
+tombstones/
 ```
 
-## 3. Why the simpler ideas were ruled out (evidence)
+Seed generations are immutable after publication. A generation contains only Chrome's `Local
+State`, provider/email markers, and selected Google identity cookies copied into a new SQLite cookie
+store. Transient locks and caches are excluded. Pool ownership and lease metadata contain opaque
+IDs, private tokens, timestamps, reuse counters, and process identity only.
 
-- **Fresh contexts or tabs per session** — multi-tenant/concurrent patterns; Trusty Squire has one
-  identity and a controller whose lifecycle handlers are bound to one page. Cut.
-- **Anti-bot benefit of a *warm process*** — the returning-user signal comes from the persistent
-  *profile on disk* (2-year Google cookies, accumulated state), which survives a cold boot. Keeping
-  the process warm is therefore **purely a latency win**, not an anti-bot one. (Research: a fresh
-  clean browser IS flagged as suspicious; a persistent cookie jar looks like a returning user —
-  which we already have via the profile.)
-- **A memory/recycle watchdog** — unnecessary sampling and mid-task lifecycle machinery. The idle
-  TTL plus task-boundary reuse-count and max-age backstops bound daemon lifetime without recycling
-  during live work.
-- **"Keep warm across a campaign"** — there is no campaign. Trusty Squire is on-demand tools with no
-  campaign abstraction in its runtime.
+Card data, payment approvals, mandates, sealed fields, and other payment material are never copied
+into the seed or written to pool metadata.
 
-## 4. Money-path + concurrency
+## 3. Seed publication
 
-- The warm browser is shared over time, never concurrently: `starting` and `inFlight` enforce one
-  task on the single page, and a second `operate_start` fails closed.
-- Payment work occurs inside that live task. Every idle or recycle path checks the same guard, so it
-  cannot close Chrome while a task or its payment is in flight.
+Publication is allowed only when all of these conditions hold:
 
-## 5. Maps onto existing code
+1. The runtime is Linux, where process birth identity can be proven.
+2. A Google login completed during the current run. A preflight hit or cached marker is not enough.
+3. The login Chrome process has closed and closure was proven.
+4. A disposable clone of the candidate seed reaches `myaccount.google.com` as signed in.
+5. The validation Chrome process also closes with proof.
 
-| Piece | Where | Change |
-|---|---|---|
-| Acquire/reuse | `provision-session.ts` | reuse a module-level controller only when launch options and connection health match; otherwise cold-boot |
-| Page reset | `browser.ts` `resetPageForReuse` | retain the original handler-bound page, close popups, clear local state, navigate to `about:blank` |
-| Finish/reaper | `provision-drive.ts` `operate_finish`; `provision-session.ts` | reset the task page, keep Chrome, arm an unrefed idle timer, and skip/re-arm while in flight |
-| Lifetime backstops | `provision-session.ts` | recycle at safe boundaries after configured reuse-count or max-age limits |
-| Server shutdown | `server.ts` `runServer`; `provision-session.ts` | on stdio disconnect or termination, close sessions (including an in-progress launch), close the MCP server, and force process exit |
-| Fallback exit reap | `browser.ts` `installSelfManagedChromeCleanup` | reap self-managed Chrome on process exit and `SIGHUP`, and on `SIGINT`/`SIGTERM` outside server mode |
-| Orphan sweep | `browser.ts` `reapOrphanedBrowsersOnce` | match verifier and exact configured operator profiles on Linux |
+The canonical profile operation guard remains held through login teardown and publication. One
+filesystem seed lock serializes publication, `seed/current` resolution, warm-profile selection,
+seed cloning, and generation garbage collection. Publication stages a new generation, validates a
+separate clone rather than the canonical profile or immutable candidate, atomically switches
+`seed/current`, and then deletes every non-current generation. This stage has no previous-generation
+grace window.
 
-New surface is **moderate, not trivial** (review correction — the earlier "holder + timer + regex"
-undersold it): `BrowserController` is single-page by construction (`this.page`, with framenavigated/
-load/response/console handlers and `settleAfterOAuth` page-switching all bound to it), so reuse is a
-real lifecycle change — see the locked model in §8.
+A failed login, uncertain close, failed validation, or uncertain validation close leaves the
+current generation unchanged.
 
-## 6. Out of scope (deferred, with triggers)
+## 4. Acquisition and reuse
 
-- **Multi-identity warm pools** — Trusty Squire is single-identity; N/A unless it becomes a shared
-  multi-tenant service (then: warm-browser-per-identity, and the anti-bot rule "never share one
-  fingerprint across many cookie jars" applies).
-- **Multi-page concurrency and `storageState`-backed fresh contexts** — not needed for the locked
-  one-task, one-identity model.
-- **Campaign abstractions and memory watchdogs** — the task-boundary lifecycle backstops are the
-  complete leak-control surface for this model.
+`acquireWarmBrowser` remains the runtime seam, but it now always obtains an
+`OperatorProfileLease` before constructing `BrowserController`.
 
-## 7. Honest risks (for review)
+Under the seed lock, acquisition:
 
-- **SIGKILL orphan**: the one exit path that runs no handler; mitigated by the widened boot-time
-  sweep (next server start reaps it), but there is a window where an orphaned operator Chrome squats
-  RAM until the next boot. Acceptable; SIGKILL of the MCP server is rare.
-- **Shared warm browser as new shared state**: a dead connection, mismatched launch configuration,
-  or failed page reset forces a discard and cold boot rather than carrying uncertain state forward.
-- **Lifecycle defaults are operational guesses**: six-hour idle, 50-reuse, and 24-hour max-age
-  defaults are configurable and should be tuned against real daemon usage.
+1. scavenges only ownership states it can prove stale;
+2. reserves the single active slot with a private owner token;
+3. claims the closed warm profile when it belongs to `seed/current` and is within its bounds; or
+4. copies the current immutable seed into a new worker profile.
 
-## 8. Eng-review outcome (2026-08-04) — LOCKED
+Before the first seed exists, acquisition creates an empty worker profile; a caller that requires a
+live identity then fails closed at the existing Google-session gate. Identity and email checks run
+against the claimed worker profile, never the canonical profile or seed.
 
-Scope challenge caught the doc underselling the change (`BrowserController` is single-page). Core
-idea (warm reuse) upheld; three corrections + two fork decisions:
+A warm profile is eligible for at most six hours idle, 50 reuses, or 24 hours of age. Bounds and
+current-generation invalidation are enforced deterministically on the next serialized pool
+operation; there is no background timer or daemon. Publishing a new seed therefore invalidates the
+old warm profile before it can be claimed again.
 
-**Corrections:**
-- **Not "a holder + a timer."** `BrowserController` is built around one `this.page` with page-bound
-  handlers + OAuth page-switching. Reuse is a lifecycle change, not a trivial add.
-- **Reuse eligibility is narrow.** A warm browser is bound to ONE `profileDir` + ONE `proxyUrl`. The
-  reuse check must match profile AND proxy (a task needing different egress cold-boots), not just
-  "a browser exists."
-- **Health-check-on-reuse is REQUIRED, not a risk.** Before reusing, verify the CDP connection is
-  alive (`isConnected`); if the warm browser died between tasks, discard it and cold-boot.
+## 5. Ownership and crash recovery
 
-**Fork D1 — page model → SEQUENTIAL SINGLE-PAGE REUSE.** The warm browser keeps its one page; the
-next `operate_start` resets that page's state (about:blank + clear per-page state) and navigates it.
-ONE task at a time — matches the sporadic, single-identity usage. Do NOT refactor to multi-page;
-add that only if real concurrency (two purchases at once) ever appears.
+Raw PID equality is never authority to signal a process. A worker binding records host, PID, Linux
+process start time, and the normalized expected `--user-data-dir`. Cleanup signals Chrome only when
+both the process birth identity and exact worker-profile path still match.
 
-**Fork D2 — leak backstop → IDLE-TTL + REUSE-COUNT/MAX-AGE BACKSTOP.** The "idle-TTL self-bounds the
-leak" claim only holds if quiet gaps exceed the TTL. A regularly-but-lightly-used daemon (a task
-every few hours, all day — the gifting-daemon shape) never idles 6h, never recycles, and Chrome
-bloats over days. So ALSO recycle after N reuses (or a wall-clock max-age) regardless of idle. Few
-lines; bounds the leak unconditionally.
+Destructive cleanup first atomically renames a claimable active or warm lease into `tombstones/`.
+Only the private, unclaimable tombstone is inspected, signalled, or deleted. An unknown owner or
+worker identity is retained for later inspection; it is not treated as stale. A verified matching
+worker may be killed, but its profile is removed only after a later check proves that worker no
+longer matches.
 
-**Locked build order:** (1) sequential single-page reuse with explicit page-state reset +
-reuse-eligibility guard (profile+proxy+`isConnected`); (2) `operate_finish` stops closing the browser,
-resets the page, arms the idle-TTL; (3) reuse-count/max-age backstop recycle; (4) widen the orphan
-sweep to the operator profile. VERDICT: proceed with the locked model; the doc's earlier "small
-surface" and "idle-TTL self-bounds" framings are superseded by this section.
+Lease tokens and active-owner tokens stay in private files. CDP is local loopback only in this
+stage. `BOT_CDP_ENDPOINT` is rejected for isolated operator leases, and non-Linux operator profile
+acquisition fails before launch.
+
+## 6. Finish and the money fence
+
+A profile may return to the closed warm slot only after the page reset succeeds, Chrome closure is
+proven, its seed generation is still current, and the session has no payment-sensitive state.
+Failure to prove closure quarantines the lease instead of pooling or deleting it.
+
+The profile is destroy-required when any of these are true at finish:
+
+- an active payment object remains;
+- payment fields remain sealed; or
+- a money-path replay has not reached a verified payment guard.
+
+Destroy-required profiles never enter the warm slot. If Chrome closed with proof, the quarantined
+profile is deleted. If closure is unknown, the profile remains quarantined and later scavenging uses
+the bound worker identity before any signal or deletion. This keeps the existing payment money
+fence intact without putting card or approval state into the pool.
+
+## 7. Deferred stages
+
+This stage does not add:
+
+- a second active slot or concurrent operator execution;
+- safe cross-process handoff of a live CDP browser;
+- session-addressed payment state, resolve-once semantics, or drain-before-finish gates;
+- remote-CDP generality, a CDP proxy, or an authentication service;
+- new v1 configuration, a scheduler, daemon, or control plane;
+- redundant public lease descriptors or previous-generation grace GC.
+
+Those changes require their own migration stages. In particular, the second active slot must remain
+disabled until browser handoff and payment ownership are session-safe.
+
+## 8. Code map
+
+| Contract                                           | Owner                                                             |
+| -------------------------------------------------- | ----------------------------------------------------------------- |
+| Pool layout, seed lock, leases, warm slot, GC      | `apps/mcp/src/bot/operator-profile-pool.ts`                       |
+| Process birth and profile-path identity            | `apps/mcp/src/bot/profile.ts`                                     |
+| Local Chrome lifecycle and closure proof           | `apps/mcp/src/bot/browser.ts`                                     |
+| Login teardown, seed publication, clone validation | `apps/mcp/src/bot/google-login.ts`                                |
+| Acquire seam, identity probe, finish disposition   | `apps/mcp/src/bot/provision-session.ts`                           |
+| Install provider-completion evidence               | `apps/mcp/src/bot/install-completion.ts`, `apps/web/app/install/` |

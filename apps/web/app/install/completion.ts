@@ -91,9 +91,7 @@ export function clearInstallCompletionUrl(token: string): void {
     window.sessionStorage.removeItem(`${COMPLETION_STORAGE_PREFIX}${token}`);
     window.sessionStorage.removeItem(`${COMPLETION_ACK_STORAGE_PREFIX}${token}`);
     for (const provider of INSTALL_COMPLETION_PROVIDERS) {
-      window.sessionStorage.removeItem(
-        `${COMPLETION_PROVIDER_STORAGE_PREFIX}${token}:${provider}`,
-      );
+      window.sessionStorage.removeItem(`${COMPLETION_PROVIDER_STORAGE_PREFIX}${token}:${provider}`);
     }
   } catch {
     // Best-effort cleanup after Finish.
@@ -106,10 +104,7 @@ export function recordInstallCompletionProvider(
 ): void {
   if (typeof window === "undefined") return;
   try {
-    window.sessionStorage.setItem(
-      `${COMPLETION_PROVIDER_STORAGE_PREFIX}${token}:${provider}`,
-      "1",
-    );
+    window.sessionStorage.setItem(`${COMPLETION_PROVIDER_STORAGE_PREFIX}${token}:${provider}`, "1");
   } catch {
     // The current page can still report its in-memory completion state.
   }

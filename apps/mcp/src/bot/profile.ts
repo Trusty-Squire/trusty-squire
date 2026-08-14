@@ -12,7 +12,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   lstatSync,
   linkSync,
-  mkdirSync,
   readFileSync,
   readlinkSync,
   realpathSync,

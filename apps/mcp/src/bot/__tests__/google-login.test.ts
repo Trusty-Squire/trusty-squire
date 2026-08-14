@@ -267,12 +267,10 @@ describe("login browser lifecycle guards", () => {
       profileHolderPresent = false;
       return "closed" as const;
     });
-    const launchImpl = vi.fn(
-      (options: { headless: boolean; timeout: number }): Promise<string> => {
-        expect(options).toEqual({ headless: true, timeout: 25 });
-        return launch;
-      },
-    );
+    const launchImpl = vi.fn((options: { headless: boolean; timeout: number }): Promise<string> => {
+      expect(options).toEqual({ headless: true, timeout: 25 });
+      return launch;
+    });
     const result = launchCancellablePersistentContext({
       launch: launchImpl,
       options: { headless: true },
@@ -777,7 +775,7 @@ describe("confirmed login finalization", () => {
     db.exec("CREATE TABLE cookies (host_key TEXT NOT NULL, name TEXT NOT NULL)");
     db.prepare("INSERT INTO cookies (host_key, name) VALUES (?, ?)").run(".google.com", "SID");
     db.close();
-    const pollUntilClaimed = vi.fn(async () => ({ status: "claimed", provider: null } as const));
+    const pollUntilClaimed = vi.fn(async () => ({ status: "claimed", provider: null }) as const);
     const validateGoogleSeed = vi.fn(async () => ({
       googleSignedIn: true,
       closeState: "closed" as const,
@@ -869,62 +867,65 @@ describe("Google seed validation", () => {
     ["https://myaccount.google.com/", true, "closed"],
     ["https://accounts.google.com/v3/signin/identifier", false, "closed"],
     ["https://myaccount.google.com/", true, "unknown"],
-  ] as const)("observes Google identity and proven closure at %s", async (url, signedIn, closeState) => {
-    const profileDir = mkdtempSync(join(tmpdir(), "ts-google-seed-validation-"));
-    const proxyDisposition = {
-      server: "http://proxy.example:8080",
-      username: "agent",
-      password: "secret",
-    };
-    const close = vi.fn(async () => undefined);
-    const goto = vi.fn(async () => undefined);
-    const page = { goto, url: () => url };
-    const context = {
-      pages: () => [page],
-      newPage: vi.fn(async () => page),
-      close,
-    };
-    const launchPersistentContext = vi.fn(async () => context);
-    const launcher = { launchPersistentContext } as unknown as PersistentLauncher;
-    const closeValidationBrowser = vi.fn(
-      async (opts: Parameters<typeof teardownLoginBrowser>[0]) => {
-        await opts.closeBrowser();
-        return closeState;
-      },
-    );
+  ] as const)(
+    "observes Google identity and proven closure at %s",
+    async (url, signedIn, closeState) => {
+      const profileDir = mkdtempSync(join(tmpdir(), "ts-google-seed-validation-"));
+      const proxyDisposition = {
+        server: "http://proxy.example:8080",
+        username: "agent",
+        password: "secret",
+      };
+      const close = vi.fn(async () => undefined);
+      const goto = vi.fn(async () => undefined);
+      const page = { goto, url: () => url };
+      const context = {
+        pages: () => [page],
+        newPage: vi.fn(async () => page),
+        close,
+      };
+      const launchPersistentContext = vi.fn(async () => context);
+      const launcher = { launchPersistentContext } as unknown as PersistentLauncher;
+      const closeValidationBrowser = vi.fn(
+        async (opts: Parameters<typeof teardownLoginBrowser>[0]) => {
+          await opts.closeBrowser();
+          return closeState;
+        },
+      );
 
-    try {
-      await expect(
-        validateGoogleProfileSession(
+      try {
+        await expect(
+          validateGoogleProfileSession(
+            profileDir,
+            proxyDisposition,
+            launcher,
+            closeValidationBrowser,
+          ),
+        ).resolves.toEqual({ googleSignedIn: signedIn, closeState });
+        expect(goto).toHaveBeenCalledWith("https://myaccount.google.com/", {
+          waitUntil: "domcontentloaded",
+          timeout: 30_000,
+        });
+        expect(launchPersistentContext).toHaveBeenCalledWith(
           profileDir,
-          proxyDisposition,
-          launcher,
-          closeValidationBrowser,
-        ),
-      ).resolves.toEqual({ googleSignedIn: signedIn, closeState });
-      expect(goto).toHaveBeenCalledWith("https://myaccount.google.com/", {
-        waitUntil: "domcontentloaded",
-        timeout: 30_000,
-      });
-      expect(launchPersistentContext).toHaveBeenCalledWith(
-        profileDir,
-        expect.objectContaining({
-          channel: "chrome",
-          proxy: {
-            server: "http://proxy.example:8080",
-            username: "agent",
-            password: "secret",
-          },
-        }),
-      );
-      expect(closeValidationBrowser).toHaveBeenCalledWith(
-        expect.objectContaining({ profileDir, identity: null }),
-      );
-      expect(close).toHaveBeenCalledOnce();
-    } finally {
-      rmSync(profileDir, { recursive: true, force: true });
-    }
-  });
+          expect.objectContaining({
+            channel: "chrome",
+            proxy: {
+              server: "http://proxy.example:8080",
+              username: "agent",
+              password: "secret",
+            },
+          }),
+        );
+        expect(closeValidationBrowser).toHaveBeenCalledWith(
+          expect.objectContaining({ profileDir, identity: null }),
+        );
+        expect(close).toHaveBeenCalledOnce();
+      } finally {
+        rmSync(profileDir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 describe("cancelled self-managed Chrome launch", () => {
