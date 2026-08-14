@@ -12,6 +12,7 @@ import type { ChildProcess } from "node:child_process";
 import Database from "better-sqlite3";
 import { shortenVncUrl } from "../../api-client.js";
 import {
+  attachSelfManagedLoginContext,
   BrowserController,
   childProcessIsRunning,
   resolveAttachedProfileChildIdentity,
@@ -618,6 +619,49 @@ describe("confirmed login finalization", () => {
 });
 
 describe("cancelled self-managed Chrome launch", () => {
+  it.each([
+    { failure: "attach", expectedCloseCalls: 0 },
+    { failure: "context", expectedCloseCalls: 1 },
+  ])(
+    "terminates an owned login child after $failure failure",
+    async ({ failure, expectedCloseCalls }) => {
+      const profileDir = mkdtempSync(join(tmpdir(), "ts-login-attach-failure-"));
+      const child = fakeProcess("chrome");
+      Object.assign(child, { pid: 424_240 });
+      const identity = {
+        host: hostname(),
+        pid: 424_240,
+        start_time: "birth",
+        user_data_dir: profileDir,
+      };
+      const close = vi.fn(async () => undefined);
+      const connectOverCDP =
+        failure === "attach"
+          ? vi.fn(async () => {
+              throw new Error("CDP attach failed");
+            })
+          : vi.fn(async () => ({ contexts: () => [], close }));
+      const terminateChild = vi.fn(async () => identity);
+      try {
+        await expect(
+          attachSelfManagedLoginContext("http://127.0.0.1:9222", child, profileDir, identity, {
+            launcher: { connectOverCDP } as never,
+            terminateChild,
+          }),
+        ).rejects.toThrow(
+          failure === "attach"
+            ? "CDP attach failed"
+            : "self-launched login Chrome exposed no default browser context",
+        );
+        expect(close).toHaveBeenCalledTimes(expectedCloseCalls);
+        expect(terminateChild).toHaveBeenCalledWith(child, profileDir, identity);
+      } finally {
+        Object.assign(child, { exitCode: 0 });
+        rmSync(profileDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("allows a non-Linux attachment to continue with unknown identity", async () => {
     const profileDir = mkdtempSync(join(tmpdir(), "ts-nonlinux-chrome-"));
     const child = fakeProcess("chrome");

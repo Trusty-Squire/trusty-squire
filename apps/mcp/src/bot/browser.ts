@@ -1905,6 +1905,41 @@ export function childProcessIsRunning(child: ChildProcess | null): boolean {
   return child !== null && child.exitCode === null && child.signalCode === null;
 }
 
+export async function attachSelfManagedLoginContext(
+  endpoint: string,
+  child: ChildProcess,
+  profileDir: string,
+  identity: ProfileProcessIdentity | null,
+  options: {
+    launcher?: { connectOverCDP(endpoint: string): Promise<Browser> };
+    terminateChild?: (
+      child: ChildProcess,
+      profileDir: string,
+      identity: ProfileProcessIdentity | null,
+    ) => Promise<ProfileProcessIdentity | null>;
+  } = {},
+): Promise<{ browser: Browser; context: BrowserContext }> {
+  let browser: Browser | null = null;
+  try {
+    browser = await (options.launcher ?? getChromium()).connectOverCDP(endpoint);
+    const context = browser.contexts()[0];
+    if (context === undefined) {
+      throw new Error("self-launched login Chrome exposed no default browser context");
+    }
+    return { browser, context };
+  } catch (error) {
+    await browser?.close().catch(() => undefined);
+    const terminateChild =
+      options.terminateChild ??
+      ((ownedChild, ownedProfileDir, ownedIdentity) =>
+        terminateTrackedProfileChild(ownedChild, ownedProfileDir, {
+          identity: ownedIdentity,
+        }));
+    await terminateChild(child, profileDir, identity);
+    throw error;
+  }
+}
+
 function profileCollisionFromStderr(stderr: string): ProfileBusyError | null {
   return /ProcessSingleton|SingletonLock|profile.*in use/i.test(stderr)
     ? new ProfileBusyError(PROFILE_BUSY_MESSAGE)
@@ -1997,13 +2032,16 @@ export async function launchSelfManagedLoginContext(params: {
     },
     { deadlineMs: 0 },
   );
-
-  const launcher = getChromium();
-  const browser = await launcher.connectOverCDP(endpoint);
-  const ctx = browser.contexts()[0];
-  if (ctx === undefined) {
-    throw new Error("self-launched login Chrome exposed no default browser context");
+  if (child === null) {
+    throw new Error("self-launched login Chrome lost its process handle");
   }
+
+  const { browser, context } = await attachSelfManagedLoginContext(
+    endpoint,
+    child,
+    params.profileDir,
+    childIdentity,
+  );
 
   let torn = false;
   const teardown = async (): Promise<void> => {
@@ -2026,7 +2064,7 @@ export async function launchSelfManagedLoginContext(params: {
     reapProfileHolderIfOwned(params.profileDir, childIdentity);
   };
 
-  return { context: ctx, teardown, forceTeardown, identity: childIdentity };
+  return { context, teardown, forceTeardown, identity: childIdentity };
 }
 
 export interface PlainLoginBrowser {
