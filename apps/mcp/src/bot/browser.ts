@@ -223,9 +223,15 @@ export interface CheckoutCard {
   };
 }
 
-interface CheckoutCardGroupScope {
+interface CheckoutCardGroupRoot {
   frame: Frame;
   root: Locator;
+  token: string;
+}
+
+interface CheckoutCardGroupScope {
+  selected: CheckoutCardGroupRoot;
+  groups: readonly CheckoutCardGroupRoot[];
 }
 
 export interface CheckoutSubmitResult {
@@ -2074,6 +2080,7 @@ export class BrowserController {
   // Google session across runs — see profile.ts / google-login.ts.
   private context: BrowserContext | null = null;
   private page: Page | null = null;
+  private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
   // reuse must always restore this original page rather than adopting a popup
@@ -7480,7 +7487,7 @@ export class BrowserController {
     const nameSelectors =
       'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]';
 
-    type CardGroup = { frame: Frame; root: Locator; active: boolean; controlCount: number };
+    type CardGroup = CheckoutCardGroupRoot & { active: boolean; controlCount: number };
     const groups = new Map<string, CardGroup>();
     let fillablePanCount = 0;
     let groupSequence = 0;
@@ -7580,6 +7587,7 @@ export class BrowserController {
           groups.set(`${frameIndex}:${group.token}`, {
             frame,
             root: frame.locator(`[data-ts-payment-card-group="${group.token}"]`),
+            token: group.token,
             active: group.active,
             controlCount: group.controlCount,
           });
@@ -7839,11 +7847,14 @@ export class BrowserController {
       if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
       if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
     }
-    return cardGroup;
+    return cardGroup === undefined
+      ? undefined
+      : { selected: cardGroup, groups: [...groups.values()] };
   }
 
   async fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
+    this.checkoutCardGroupScope = undefined;
     try {
       await this.waitForPanField(10_000);
       const cardGroup = await this.fillCheckoutCardIntoFrames(this.page.frames(), card);
@@ -7864,6 +7875,7 @@ export class BrowserController {
   // extractInteractiveElements reports as sealed so observations mask them.
   async fillCheckoutCardFields(card: CheckoutCard): Promise<void> {
     if (!this.page) throw new Error("Browser not started");
+    this.checkoutCardGroupScope = undefined;
     const page = this.page;
     const pageUrl = page.url();
     if (!recognizedPaymentProviderFrame(pageUrl, pageUrl)) {
@@ -7904,7 +7916,12 @@ export class BrowserController {
       }
     };
     try {
-      await this.fillCheckoutCardIntoFrames(allowed, card, true, assertFrameEgress);
+      this.checkoutCardGroupScope = await this.fillCheckoutCardIntoFrames(
+        allowed,
+        card,
+        true,
+        assertFrameEgress,
+      );
     } catch (error) {
       let fillError = error;
       if (error instanceof Error && error.message === "payment_field_not_found:pan") {
@@ -7944,7 +7961,7 @@ export class BrowserController {
   // The charge: find and click the pay/place-order control, then poll for a
   // 3-D Secure challenge. Callers gate this on a verified visible total.
   async submitFilledCheckout(): Promise<CheckoutSubmitResult> {
-    return await this.submitFilledCheckoutInScope();
+    return await this.submitFilledCheckoutInScope(this.checkoutCardGroupScope);
   }
 
   private async submitFilledCheckoutInScope(
@@ -7952,17 +7969,36 @@ export class BrowserController {
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     let submitted = false;
-    const candidateFrames = cardGroup === undefined ? this.page.frames() : [cardGroup.frame];
-    for (const frame of candidateFrames) {
-      const matches =
-        cardGroup === undefined
-          ? frame.locator('button,input[type="submit"],[role="button"]')
-          : cardGroup.root.locator('button,input[type="submit"],[role="button"]');
+    for (const frame of this.page.frames()) {
+      const matches = frame.locator('button,input[type="submit"],[role="button"]');
       const count = Math.min(await matches.count().catch(() => 0), 100);
       for (let i = 0; i < count; i += 1) {
         const candidate = matches.nth(i);
         if (!(await candidate.isVisible().catch(() => false))) continue;
         if (!(await candidate.isEnabled().catch(() => false))) continue;
+        if (cardGroup !== undefined) {
+          const ownerToken = await candidate
+            .evaluate(
+              (element) =>
+                element
+                  .closest("[data-ts-payment-card-group]")
+                  ?.getAttribute("data-ts-payment-card-group") ?? null,
+            )
+            .catch(() => undefined);
+          if (ownerToken === undefined) continue;
+          if (ownerToken !== null) {
+            const knownOwner = cardGroup.groups.some(
+              (group) => group.frame === frame && group.token === ownerToken,
+            );
+            if (
+              !knownOwner ||
+              frame !== cardGroup.selected.frame ||
+              ownerToken !== cardGroup.selected.token
+            ) {
+              continue;
+            }
+          }
+        }
         const label = await candidate
           .evaluate((el) =>
             (
@@ -7990,6 +8026,7 @@ export class BrowserController {
   }
 
   async clearSealedPaymentFields(): Promise<void> {
+    this.checkoutCardGroupScope = undefined;
     if (!this.page) return;
     await this.clearSealedPaymentFieldsInFrames(this.page.frames());
   }
@@ -8015,6 +8052,7 @@ export class BrowserController {
   }
 
   async clearCheckoutCardFields(): Promise<void> {
+    this.checkoutCardGroupScope = undefined;
     if (!this.page) return;
     await this.clearCheckoutCardFieldsInFrames(this.page.frames());
   }
