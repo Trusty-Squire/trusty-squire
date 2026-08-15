@@ -8922,7 +8922,7 @@ export class BrowserController {
         withinBillingContext,
       );
     }
-    for (const required of ["pan", "expiry", "cvv", "name"]) {
+    for (const required of ["pan", "expiry", "cvv"]) {
       if (required === "expiry" && filled.has("exp_month") && filled.has("exp_year")) continue;
       if (!filled.has(required)) throw new Error(`payment_field_not_found:${required}`);
     }

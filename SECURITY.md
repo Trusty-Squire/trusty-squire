@@ -108,8 +108,10 @@ server rather than relying on client convention. On resume, the operator fails
 closed unless the approval record contains a non-blank server-bound card
 reference, and uses that reference when re-creating the signed purchase payload.
 Immediately before filling and submitting a single-page just-in-time checkout,
-it re-reads the live merchant, origin, amount, and currency and refuses submission
-if any signed field changed.
+it attempts to re-read the live merchant, origin, amount, and currency. When that
+read succeeds, it refuses submission if any signed field changed. When the page no
+longer exposes a machine-readable total, it keeps the original mandate-bound checkout
+values rather than minting another approval.
 
 A split checkout may collect card details before it exposes the final payable total.
 On every observation, the session best-effort captures the most recent real checkout
@@ -117,10 +119,13 @@ total read from the current page, replacing the prior value only after a success
 read and scoping it to that page's origin. The `fill_card` phase prefers the live
 card-entry page's own total. A subtotal is accepted as the payable amount only when
 the same scoped order summary states that shipping is free; recommendation sections
-are excluded before any amount is selected. Only when that page has no readable total
-may it use the same session's captured value, after re-checking that the current origin
-matches; a caller-supplied amount is never a fallback. The resulting single amount-bound
-approval both releases the card and authorizes a later charge up to that amount.
+are excluded before any amount is selected. When that page has no readable total,
+caller-supplied `amount_cents` and `currency` take precedence as the approval amount;
+an omitted merchant name falls back to the checkout hostname. If those values were
+not supplied, the operator may instead use the same session's captured value after
+re-checking that the current origin matches. The resulting single amount-bound
+approval displays and signs whichever amount was selected, releases the card, and
+authorizes a later charge up to that amount.
 After approval it requires the live page origin to equal the mandate's checkout
 origin, fills no submit control, and permits card data only in the main frame,
 same-registrable-domain HTTPS frames, or curated HTTPS payment-provider frames. A
@@ -146,7 +151,9 @@ controls inside a card group are eligible only for the selected group in both
 same-step and later confirmation,
 and both card fields and charge controls follow their HTML `form` relationship when
 mounted elsewhere in the DOM; a merchant checkout control outside every card group
-remains eligible.
+remains eligible. Once the payment context is selected, PAN, expiry, and CVV are the
+required card fields. Cardholder name and the remaining billing fields are filled
+best-effort, and a missing name input does not abort an otherwise fillable payment.
 
 The later `confirm` phase is the charge boundary. Its strict reader requires a final
 payable total from the main frame or a visible trusted payment frame, with no

@@ -167,22 +167,24 @@ cart and checkout observations expose a best-effort checkout_state overlay with 
      retry clicks
   -> checkout_state is informational only; it is never a charge input
   -> observed card controls direct the agent to operate_pay, while model-supplied
-     PAN-shaped entry remains refused until operate_pay independently verifies the total
+     PAN-shaped entry remains refused; operate_pay establishes the approval amount
+     without exposing the vaulted card to the model
 agent starts operate_pay in the addressed checkout session
   -> operate_pay accepts that session_id; omission is compatible only when the
      MCP process has exactly one session and never selects a newest session
   -> agent supplies a non-empty item and reason
-  -> a single-page checkout reads merchant, origin, and payable total from the
-     live page; an unreadable amount stops before approval with
-     payment_checkout_total_not_found
+  -> a single-page checkout prefers merchant, origin, and payable total from the
+     live page; when the total is unreadable, caller-supplied amount_cents and
+     currency become the approval amount and an omitted merchant falls back to
+     the checkout hostname
   -> every session observation best-effort captures the most recent real checkout
      total, replacing the prior value after a successful read and preserving it
      when a later page has no total; the value remains scoped to its page origin
-  -> split fill_card first reads the live card-entry total; only when none is
-     readable may it use that same session's captured total after re-checking the
-     current origin. Subtotal and recommendation-price qualification follows the
-     payment safety contract in [SECURITY.md](../SECURITY.md); caller-supplied
-     amounts never provide this fallback
+  -> split fill_card first reads the live card-entry total; when none is readable,
+     caller-supplied amount_cents and currency take precedence, otherwise it may
+     use that same session's captured total after re-checking the current origin.
+     Subtotal and recommendation-price qualification follows the payment contract
+     in [SECURITY.md](../SECURITY.md)
   -> the actual visible PAN field's frame controls the unsupported-wallet gate:
      PayPal/Braintree hosted card fields hand initial/fill calls to the user, while
      a separate PayPal express button does not block fillable Shopify PCI fields
@@ -202,12 +204,15 @@ agent starts operate_pay in the addressed checkout session
      entry and return its session_id in their result and every follow-up hint
   -> the operator verifies the final JWS, opens the card, and confirms the exact
      candidate fingerprint; successful confirmation clears the JWS and ciphertext
-  -> single-page add-card re-reads every signed checkout field, then fills and
-     submits only if merchant, origin, amount, and currency still match
+  -> single-page add-card attempts to re-read every signed checkout field; a
+     successful read must still match, while an unreadable total reuses the
+     original mandate-bound checkout
   -> split fill_card requires the current origin to match its amount-bound mandate
      and fills without submitting; only the main frame,
      same-registrable-domain HTTPS frames, and curated HTTPS payment-provider frames
      can receive card data
+  -> PAN, expiry, and CVV are required; cardholder name and other billing fields
+     are filled best-effort, so a missing name field does not abort the payment
   -> the raw card is zeroed; sealed, observation-masked page fields remain, while
      session state retains only approval/mandate and card-reference metadata
   -> operate_act blocks charge-labeled clicks and Enter while that state is pending;

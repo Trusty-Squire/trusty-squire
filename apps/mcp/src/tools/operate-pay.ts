@@ -140,18 +140,23 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "Pay the checkout in the addressed operate_start browser session. session_id is required " +
     "when multiple operator sessions are active (and optional only for a sole local session). " +
     'phase="single" (the default, also implied by omitting phase) is an ordinary one-step checkout. ' +
-    "Reads the live " +
-    "merchant and authoritative checkout total independently of informational checkout_state, " +
+    "Reads the live merchant and checkout total independently of informational checkout_state. " +
+    "When the live total cannot be machine-read, caller-supplied amount_cents and currency become " +
+    "the authoritative approval amount and take precedence over a prior cart observation. " +
     "creates a phone approval link, waits for approval, " +
     "verifies the passkey-signed purchase mandate, opens the card only in this process, " +
     "fills common checkout fields, submits, and audits only the last four digits. Never " +
     "solves 3-D Secure; waits for user completion, then returns a needs_user handoff if unresolved. " +
     "With no card_ref/card_label and no card on file, the approval link becomes a first-time " +
     "add-card ceremony and the card is bound server-side before the mandate is signed. " +
+    "On approval resume, an unreadable live checkout reuses the original mandate-bound checkout; " +
+    "a successfully-read checkout with a different amount, currency, merchant, or origin returns " +
+    "payment_amount_mismatch without filling the card. " +
     "For a SPLIT checkout (a card-entry step with no visible total, e.g. Rakuten): call with " +
     'phase="fill_card" on that step — the approval amount is sourced from the most recent real ' +
-    "total this session observed (e.g. the cart page) when the card-entry page itself shows " +
-    "none, and releases the card into recognized payment-provider fields without charging. Then " +
+    "total this session observed (e.g. the cart page) only when the card-entry page itself shows " +
+    "none and amount_cents plus currency were not supplied, and releases the card into recognized " +
+    "payment-provider fields without charging. Then " +
     'drive the checkout to the order-confirmation step and call phase="confirm" — it reads the ' +
     "strict final total and places the order if it does not exceed the amount already approved " +
     "at fill_card, with NO second approval. A final total above that amount is refused, never " +

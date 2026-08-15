@@ -374,8 +374,9 @@ describe("operate_pay", () => {
         {
           card_ref: "card_test",
           merchant: "Japan Flower Shop",
-          amount_cents: 9_845,
-          currency: "JPY",
+          ...(error === "payment_checkout_total_not_found"
+            ? {}
+            : { amount_cents: 9_845, currency: "JPY" }),
           item: "Flowers",
           reason: "Gift",
         },
@@ -385,6 +386,165 @@ describe("operate_pay", () => {
       ),
     ).resolves.toEqual(expected);
     expect(approvalBodies).toEqual([]);
+  });
+
+  // REGRESSION: itch.io ("Paying $2.99 for…") and Gumroad have no labelled
+  // "total"/"amount due" line, so readCheckoutSummary can't machine-read a
+  // total. That used to hard-refuse (needs_cart_total /
+  // checkout_total_not_on_page) even when the caller passed amount_cents.
+  // A caller-supplied amount_cents must now be honored as the approval
+  // amount — the human passkey approval (which shows the amount to the
+  // user) remains the real amount check.
+  it("honors a caller-supplied amount_cents when the page total cannot be machine-read", async () => {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const jwk = await exportJWK(publicKey);
+    const approvalBodies: Array<Record<string, unknown>> = [];
+    const filledCards: CheckoutCard[] = [];
+    const auditBodies: unknown[] = [];
+    const nonce = "fallback-nonce";
+    const agent = "fallback-agent";
+    const checkoutOrigin = "https://itch-style.synthetic.test";
+    // What pay-operator's fallback constructs when the total can't be read:
+    // merchant from the page hostname, amount/currency from the caller.
+    const FALLBACK_CHECKOUT = {
+      merchant: "itch-style.synthetic.test",
+      checkout_origin: checkoutOrigin,
+      amount_cents: 299,
+      currency: "USD",
+    };
+
+    const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url === "https://vouchflow.test/.well-known/jwks.json") {
+        return Response.json({ keys: [{ ...jwk, alg: "RS256", use: "sig", kid: "test-key" }] });
+      }
+      if (url.endsWith("/v1/pay/config") && init?.method === "GET") {
+        return Response.json({ vouchflow_audience: "customer_test" });
+      }
+      if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
+        approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+        return Response.json(
+          {
+            id: "approval_fallback",
+            nonce,
+            agent,
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+          },
+          { status: 201 },
+        );
+      }
+      if (
+        (url.endsWith("/v1/pay/approvals/approval_fallback") ||
+          url.endsWith("/v1/pay/approvals/approval_fallback?wait_for_submission=1")) &&
+        init?.method === "GET"
+      ) {
+        const operatorPublicKey = String(approvalBodies[0]!.operator_pubkey);
+        const recipientHash = createHash("sha256")
+          .update(Buffer.from(operatorPublicKey, "base64url"))
+          .digest("base64url");
+        const canonical = canonicalize({
+          approval_id: "approval_fallback",
+          merchant: FALLBACK_CHECKOUT.merchant,
+          checkout_origin: FALLBACK_CHECKOUT.checkout_origin,
+          amount_cents: FALLBACK_CHECKOUT.amount_cents,
+          currency: FALLBACK_CHECKOUT.currency,
+          nonce,
+          card_ref: "card_test",
+          recipient_pubkey_hash: recipientHash,
+          item: approvalBodies[0]!.item,
+          reason: approvalBodies[0]!.reason,
+          agent,
+        })!;
+        const aad = createHash("sha256").update(canonical, "utf8").digest();
+        const jws = await new SignJWT({
+          payload_sha256: aad.toString("base64url"),
+          context: "purchase",
+          confidence: "high",
+          mandate_id: "fallback-mandate",
+        })
+          .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+          .setIssuer("https://vouchflow.dev")
+          .setAudience("customer_test")
+          .sign(privateKey);
+        const sealed_card = await sealToRecipient(
+          operatorPublicKey,
+          new TextEncoder().encode(JSON.stringify(SYNTHETIC_CARD)),
+          aad,
+        );
+        return Response.json({
+          id: "approval_fallback",
+          status: "approved",
+          ...FALLBACK_CHECKOUT,
+          nonce,
+          card_ref: "card_test",
+          operator_pubkey: operatorPublicKey,
+          jws,
+          sealed_card,
+          expires_at: new Date(Date.now() + 60_000).toISOString(),
+        });
+      }
+      if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
+        auditBodies.push(JSON.parse(String(init.body)) as unknown);
+        return Response.json({ id: "audit_fallback" }, { status: 201 });
+      }
+      return Response.json({ error: "not_found" }, { status: 404 });
+    }) as typeof fetch;
+
+    const api = new ApiClient({
+      apiBaseUrl: "https://api.test",
+      registryBaseUrl: "https://registry.test",
+      agentSessionToken: "synthetic-session-token",
+      fetch: fetchMock,
+    });
+
+    const browser: PaymentBrowser = {
+      isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
+      readCheckoutSummary: vi.fn().mockRejectedValue(new Error("payment_checkout_total_not_found")),
+      readCheckoutConfirmSummary: vi
+        .fn()
+        .mockRejectedValue(new Error("payment_checkout_total_not_found")),
+      currentUrl: vi.fn().mockReturnValue(`${checkoutOrigin}/session/test`),
+      fillCheckoutCardFields: vi.fn(),
+      submitFilledCheckout: vi.fn(),
+      clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
+      fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
+        filledCards.push(card);
+        return { three_ds_required: false, order_confirmed: true };
+      }),
+      waitForThreeDsResolution: vi.fn(),
+    };
+
+    const result = await executeOperatePay(
+      {
+        card_ref: "card_test",
+        amount_cents: 299,
+        currency: "USD",
+        item: "Indie game",
+        reason: "Paying $2.99 for the game",
+      },
+      api,
+      browser,
+      {
+        fetch: fetchMock,
+        sleep: async () => undefined,
+        vouchflowApiBase: "https://vouchflow.test",
+        vouchflowExpectedAudience: "customer_test",
+        webBase: "https://web.test",
+        surfaceApprovalUrl: vi.fn(),
+        onCardResolved: () => undefined,
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      merchant: FALLBACK_CHECKOUT.merchant,
+      amount_cents: 299,
+      currency: "USD",
+    });
+    // Exactly one approval minted for the purchase.
+    expect(approvalBodies).toHaveLength(1);
+    expect(approvalBodies[0]).toMatchObject({ amount_cents: 299, currency: "USD" });
+    expect(filledCards).toHaveLength(1);
   });
 
   it("verifies the mandate, opens the card, fills the checkout, and audits last4 only", async () => {
@@ -1035,15 +1195,21 @@ describe("operate_pay JIT add-card ceremony", () => {
     expect(originDrift.filledCards).toHaveLength(0);
   });
 
-  it("fails closed when the live total can no longer be read on resume", async () => {
-    const { result, filledCards } = await runJit({
+  it("uses the approved checkout when the live total can no longer be read on resume", async () => {
+    const { result, filledCards, summaryReads } = await runJit({
       boundCardRef: "card_x",
       poll: () => ({ status: "approved", card_ref: "card_x" }),
       resumeThrows: true,
     });
 
-    expect(result).toMatchObject({ status: "payment_amount_mismatch" });
-    expect(filledCards).toHaveLength(0);
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      merchant: JIT_CHECKOUT.merchant,
+      amount_cents: JIT_CHECKOUT.amount_cents,
+      currency: JIT_CHECKOUT.currency,
+    });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(summaryReads).toBe(2);
   });
 
   it("returns card_required when the link expires before a card is added", async () => {
