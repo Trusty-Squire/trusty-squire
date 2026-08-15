@@ -87,6 +87,7 @@ async function harness(
   const approvalBodies: Array<Record<string, unknown>> = [];
   const filledCards: CheckoutCard[] = [];
   const notifyCalls: string[] = [];
+  const notifyBodies: Array<Record<string, unknown>> = [];
   const resolvedCardRefs: string[] = [];
   const confirmationBodies: Array<Record<string, unknown>> = [];
   const pendingStates: PendingApprovalWait[] = [];
@@ -233,6 +234,7 @@ async function harness(
     }
     if (url.endsWith("/v1/pay/approvals/approval_test/notify-3ds") && init?.method === "POST") {
       notifyCalls.push(url);
+      notifyBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       if (threeDs?.notifyNeverResolves === true) {
         return new Promise<Response>(() => undefined);
       }
@@ -308,6 +310,7 @@ async function harness(
     auditBodies,
     filledCards,
     notifyCalls,
+    notifyBodies,
     resolvedCardRefs,
     confirmationBodies,
     pendingStates,
@@ -810,9 +813,14 @@ describe("operate_pay", () => {
   });
 
   it("notifies and hands back when the 3DS challenge times out", async () => {
-    const { result, notifyCalls } = await harness("happy", "customer_test", undefined, {
-      resolution: "timeout",
-    });
+    const { result, notifyCalls, notifyBodies } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      {
+        resolution: "timeout",
+      },
+    );
 
     expect(result).toMatchObject({
       status: "payment_3ds_required",
@@ -823,6 +831,34 @@ describe("operate_pay", () => {
       },
     });
     expect(notifyCalls).toHaveLength(1);
+    expect(notifyBodies).toEqual([{ mode: "detected_challenge" }]);
+  });
+
+  it("waits and hands back an app-push message without an on-page challenge", async () => {
+    const { result, notifyCalls, notifyBodies, browser } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "timeout" },
+      {
+        fillAndSubmitCheckout: async () => ({
+          three_ds_required: false,
+          order_confirmed: false,
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      needs_user: {
+        wall: "3ds",
+        resume: "checkout",
+        message: expect.stringMatching(/No order confirmation.*bank app/),
+      },
+    });
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyBodies).toEqual([{ mode: "possible_out_of_band" }]);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
   });
 
   it("flags an undelivered Telegram nudge in the timeout hand-off instead of blocking or faking it", async () => {
@@ -1625,10 +1661,12 @@ async function runConfirm(cfg: {
   result: Record<string, unknown>;
   auditBodies: unknown[];
   notifyCalls: string[];
+  notifyBodies: Array<Record<string, unknown>>;
   browser: PaymentBrowser;
 }> {
   const auditBodies: unknown[] = [];
   const notifyCalls: string[] = [];
+  const notifyBodies: Array<Record<string, unknown>> = [];
   const approvedCheckout = cfg.approvedCheckout ?? SPLIT_CHECKOUT;
   const live = cfg.live ?? { ...approvedCheckout };
   const submit = cfg.submit ?? { three_ds_required: false, order_confirmed: true };
@@ -1641,6 +1679,7 @@ async function runConfirm(cfg: {
     }
     if (url.endsWith("/notify-3ds") && init?.method === "POST") {
       notifyCalls.push(url);
+      notifyBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
       return Response.json({ sent: true });
     }
     return Response.json({ error: "not_found" }, { status: 404 });
@@ -1685,21 +1724,31 @@ async function runConfirm(cfg: {
     browser,
   )) as Record<string, unknown>;
 
-  return { result, auditBodies, notifyCalls, browser };
+  return { result, auditBodies, notifyCalls, notifyBodies, browser };
 }
 
 describe("operate_pay split checkout — confirm", () => {
   it("does not report payment_submitted when post-submit confirmation is absent", async () => {
-    const { result, auditBodies } = await runConfirm({
+    const { result, auditBodies, notifyCalls, notifyBodies, browser } = await runConfirm({
       submit: { three_ds_required: false, order_confirmed: false },
     });
 
-    expect(result).toMatchObject({ status: "payment_outcome_unknown" });
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      needs_user: {
+        wall: "3ds",
+        resume: "checkout",
+        message: expect.stringMatching(/No order confirmation.*bank app/),
+      },
+    });
+    expect(notifyCalls).toHaveLength(1);
+    expect(notifyBodies).toEqual([{ mode: "possible_out_of_band" }]);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
   });
 
   it("notifies Telegram and hands back an app-push message when confirm hits a 3DS timeout", async () => {
-    const { result, notifyCalls } = await runConfirm({
+    const { result, notifyCalls, notifyBodies } = await runConfirm({
       submit: { three_ds_required: true, order_confirmed: false },
       threeDsResolution: "timeout",
     });
@@ -1713,6 +1762,7 @@ describe("operate_pay split checkout — confirm", () => {
       },
     });
     expect(notifyCalls).toHaveLength(1);
+    expect(notifyBodies).toEqual([{ mode: "detected_challenge" }]);
   });
 
   it("charges within the approved amount when the final total matches it exactly", async () => {
