@@ -2143,6 +2143,31 @@ describe("3-D Secure resolution", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "does not resolve when a success destination query appears during the wait",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      let clock = 0;
+      let polls = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+        if (polls++ === 0) {
+          await page.evaluate(() =>
+            history.pushState({}, "", "/checkout?success_url=/success&return_url=/receipt"),
+          );
+        }
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "resolves succeeded when generic success text appears during the wait",
     async () => {
       const { browser, page, controller } = await setupChallenge();

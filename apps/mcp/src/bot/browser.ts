@@ -441,6 +441,36 @@ function checkoutOutcomeBaselineFromDispatchSnapshot(
   };
 }
 
+function checkoutSuccessRouteMatches(rawUrl: string, successRoute: RegExp): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    const pathnames = [url.pathname];
+    const fragment = url.hash.slice(1).replace(/^!/, "");
+    if (fragment.length > 0) {
+      let decodedFragment = fragment;
+      try {
+        decodedFragment = decodeURIComponent(fragment);
+      } catch {
+        decodedFragment = fragment;
+      }
+      if (!/^[^/?#]+=[^#]*$/.test(decodedFragment)) {
+        const fragmentUrl = new URL(
+          /^[a-z][a-z\d+.-]*:/i.test(decodedFragment)
+            ? decodedFragment
+            : decodedFragment.startsWith("/")
+              ? `${url.origin}${decodedFragment}`
+              : `${url.origin}/${decodedFragment}`,
+        );
+        pathnames.push(fragmentUrl.pathname);
+      }
+    }
+    return pathnames.some((pathname) => successRoute.test(pathname));
+  } catch {
+    return false;
+  }
+}
+
 function checkoutUrlOrderIdentities(
   rawUrl: string,
 ): { orders: readonly string[]; terminal: string | null } | null {
@@ -9489,7 +9519,7 @@ export class BrowserController {
 
   private async captureMerchantSuccessEvidence(
     merchantOrigin: string | null,
-    successUrl: RegExp,
+    successRoute: RegExp,
     successText: RegExp,
   ): Promise<{ url: boolean; text: boolean }> {
     if (!this.page || merchantOrigin === null) return { url: false, text: false };
@@ -9508,7 +9538,7 @@ export class BrowserController {
         }
         if (frameOrigin !== merchantOrigin) return { url: false, text: false };
         return {
-          url: successUrl.test(frame.url()),
+          url: checkoutSuccessRouteMatches(frame.url(), successRoute),
           text: successText.test(
             await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
           ),
@@ -9529,8 +9559,8 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
-    const successUrl =
-      /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|\/paid\b|payment_intent=.*succe/i;
+    const successRoute =
+      /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|order[-_]?received|\/paid\b/i;
     const successText =
       /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
     const failureText =
@@ -9543,7 +9573,7 @@ export class BrowserController {
     }
     const waitEntrySuccessEvidence = await this.captureMerchantSuccessEvidence(
       merchantOrigin,
-      successUrl,
+      successRoute,
       successText,
     );
     const deadline = Date.now() + timeoutMs;
@@ -9561,7 +9591,7 @@ export class BrowserController {
       if (texts.some((text) => failureText.test(text))) return "failed";
       const currentSuccessEvidence = await this.captureMerchantSuccessEvidence(
         merchantOrigin,
-        successUrl,
+        successRoute,
         successText,
       );
       if (
