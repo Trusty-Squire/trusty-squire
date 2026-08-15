@@ -2140,6 +2140,35 @@ describe("3-D Secure resolution", () => {
     },
   );
 
+  it.skipIf(!chromiumAvailable)(
+    "does not resolve from generic success text inside the issuer frame",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      let clock = 0;
+      let polls = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+        if (polls++ === 0) {
+          await page
+            .locator("#bank-approval")
+            .contentFrame()
+            .locator("body")
+            .evaluate((body) => {
+              body.textContent = "Payment successful";
+            });
+        }
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
   it.skipIf(!chromiumAvailable)("returns failed for visible decline text", async () => {
     const { browser, page, controller } = await setupChallenge();
     try {
@@ -2181,13 +2210,38 @@ describe("3-D Secure resolution", () => {
       const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
         clock += timeout;
         if (polls++ === 0) {
-          await page.evaluate(() =>
-            history.replaceState({}, "", "/success?state=waiting#polling"),
-          );
+          await page.evaluate(() => history.replaceState({}, "", "/success?state=waiting#polling"));
         }
       });
       try {
         await page.evaluate(() => history.replaceState({}, "", "/success?state=pending"));
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not treat a changed pre-existing success phrase as new success evidence",
+    async () => {
+      const { browser, page, controller } = await setupChallenge(
+        '<p id="merchant-status">Payment successful</p>',
+      );
+      let clock = 0;
+      let polls = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+        if (polls++ === 0) {
+          await page.locator("#merchant-status").evaluate((status) => {
+            status.textContent = "Order confirmed";
+          });
+        }
+      });
+      try {
         await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
       } finally {
         wait.mockRestore();

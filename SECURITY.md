@@ -169,12 +169,14 @@ fields and pending metadata remain
 available for a safe retry. Once submission starts and serializes their values, the
 eligible sealed fields are cleared when cleanup can be confirmed, even while 3-D Secure
 or outcome verification continues. Dispatching the charge control is not itself a
-successful outcome: the operator requires a new merchant terminal route with a
-substantive order identity that was absent before dispatch. The browser completes
-3-D Secure natively, including out-of-band bank-app challenges. The operator never
-manipulates or intercepts the challenge frame; it detects challenges only with
-read-only URL, selector, and text checks, and reads text passively to identify declines.
-Resolution polls the outer page for that same terminal-order signal. A bare click with
+successful outcome. The operator normally requires a new merchant terminal route with
+a substantive order identity that was absent before dispatch. During the long 3-D
+Secure wait only, a generic success-shaped URL or success text that newly appears on
+the merchant page also confirms the outcome; pre-existing evidence and
+issuer/challenge-frame success copy never qualify. The browser completes 3-D Secure
+natively, including out-of-band bank-app challenges. The operator never manipulates
+or intercepts the challenge frame; it detects challenges only with read-only URL,
+selector, and text checks, and reads text passively to identify declines. A bare click with
 no detected challenge is recorded as `payment_outcome_unknown`. A detected
 challenge that remains unresolved on timeout stays `payment_3ds_required` and is handed
 back to the user. Neither status can be mistaken for `payment_submitted`, permits a

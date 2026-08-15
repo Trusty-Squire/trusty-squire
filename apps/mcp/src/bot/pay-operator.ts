@@ -482,6 +482,14 @@ function threeDsHandoffMessage(
     : threeDsOutOfBandMessage(telegramSent);
 }
 
+function threeDsNotificationMode(
+  submitResult: CheckoutSubmitResult,
+): "detected_challenge" | "possible_out_of_band" {
+  return submitResult.three_ds_required || submitResult.challenge_url !== undefined
+    ? "detected_challenge"
+    : "possible_out_of_band";
+}
+
 function statusAfterThreeDsResolution(
   currentStatus: string,
   resolution: ThreeDsResolution,
@@ -1342,7 +1350,9 @@ export async function executeOperatePay(
 
     let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
     if (!submitResult.order_confirmed && threeDsWaitMs > 0) {
-      getThreeDsTelegramSent = trackThreeDsNotification(api.notifyThreeDs(approvalId));
+      getThreeDsTelegramSent = trackThreeDsNotification(
+        api.notifyThreeDs(approvalId, threeDsNotificationMode(submitResult)),
+      );
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
     }
@@ -1358,10 +1368,7 @@ export async function executeOperatePay(
     } catch {
       auditRecorded = false;
     }
-    if (
-      paymentStatus === "payment_3ds_required" ||
-      paymentStatus === "payment_outcome_unknown"
-    ) {
+    if (paymentStatus === "payment_3ds_required" || paymentStatus === "payment_outcome_unknown") {
       return {
         status: paymentStatus,
         audit_recorded: auditRecorded,
@@ -1550,7 +1557,9 @@ export async function executeOperatePayConfirm(
 
   let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
   if (!submitResult.order_confirmed && threeDsWaitMs > 0) {
-    getThreeDsTelegramSent = trackThreeDsNotification(api.notifyThreeDs(pending.approval_id));
+    getThreeDsTelegramSent = trackThreeDsNotification(
+      api.notifyThreeDs(pending.approval_id, threeDsNotificationMode(submitResult)),
+    );
     const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
     paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
   }
@@ -1568,10 +1577,7 @@ export async function executeOperatePayConfirm(
   } catch {
     auditRecorded = false;
   }
-  if (
-    paymentStatus === "payment_3ds_required" ||
-    paymentStatus === "payment_outcome_unknown"
-  ) {
+  if (paymentStatus === "payment_3ds_required" || paymentStatus === "payment_outcome_unknown") {
     return {
       status: paymentStatus,
       audit_recorded: auditRecorded,

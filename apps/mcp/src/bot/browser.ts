@@ -9502,26 +9502,13 @@ export class BrowserController {
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     const waitEntryHadSuccessUrl = successUrl.test(this.page.url());
-    const collectSuccessTextSignals = (texts: readonly string[]): ReadonlyMap<string, number> => {
-      const pattern = new RegExp(successText.source, `${successText.flags}g`);
-      const signals = new Map<string, number>();
-      for (const text of texts) {
-        for (const match of text.matchAll(pattern)) {
-          const signal = match[0].normalize("NFKC").toLowerCase();
-          signals.set(signal, (signals.get(signal) ?? 0) + 1);
-        }
-      }
-      return signals;
-    };
-    const waitEntryTexts = await Promise.all(
-      this.page
-        .frames()
-        .map(
-          async (frame) =>
-            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-        ),
-    );
-    const waitEntrySuccessTextSignals = collectSuccessTextSignals(waitEntryTexts);
+    const merchantHasSuccessText = async (): Promise<boolean> =>
+      successText.test(
+        await this.page!.mainFrame()
+          .evaluate(() => document.body?.innerText ?? "")
+          .catch(() => ""),
+      );
+    const waitEntryHadSuccessText = await merchantHasSuccessText();
     const deadline = Date.now() + timeoutMs;
     do {
       await this.page.bringToFront().catch(() => undefined);
@@ -9536,12 +9523,9 @@ export class BrowserController {
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
       const currentUrl = this.page.url();
-      const currentSuccessTextSignals = collectSuccessTextSignals(texts);
       if (
         (!waitEntryHadSuccessUrl && successUrl.test(currentUrl)) ||
-        [...currentSuccessTextSignals].some(
-          ([signal, count]) => count > (waitEntrySuccessTextSignals.get(signal) ?? 0),
-        )
+        (!waitEntryHadSuccessText && (await merchantHasSuccessText()))
       ) {
         return "succeeded";
       }

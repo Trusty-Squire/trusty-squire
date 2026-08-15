@@ -231,10 +231,13 @@ agent starts operate_pay in the addressed checkout session
      session against later payment operations (the contract lives in SECURITY.md)
   -> a missing submit control retains the pending fill for retry; terminal payment
      outcomes clear it
-  -> when 3-D Secure is required, the API nudges a linked Telegram chat and the
-     browser completes the challenge natively (including out-of-band bank-app
-     approval) while the operator only polls for the same terminal merchant
-     order route a plain checkout uses, or a visible decline
+  -> when 3-D Secure is detected, the API sends a challenge-specific Telegram
+     nudge; when authentication may be out of band without an on-page challenge,
+     it sends cautious bank-app guidance instead
+  -> the browser completes authentication natively while the operator polls for
+     a new terminal merchant order route, a newly appearing generic success URL
+     or merchant-page success text during the long wait, or a visible decline;
+     pre-existing evidence and issuer/challenge-frame success copy never qualify
   -> a visible decline is payment_declined; timeout, or a disabled wait, hands
      the unresolved challenge to the user instead of guessing success
   -> the post-wait metadata-only payment status is audited

@@ -77,12 +77,13 @@ reuses the original mandate-bound checkout values. Card entry requires the PAN,
 expiry, and CVV fields; cardholder name and other explicitly labeled billing fields
 are filled best-effort, so a missing name field does not abort the payment. Sealing
 and cleanup touch only those selected payment controls; merchant shipping address and
-country controls remain untouched. A submit
-is reported as `payment_submitted` only after the checkout reaches a new merchant
-order-confirmation URL. The browser completes 3-D Secure natively, including
-out-of-band bank-app challenges — Trusty Squire never manipulates or intercepts
-the challenge; it uses read-only checks while polling the outer page for that same
-order-confirmation signal. A bare click with no
+country controls remain untouched. A submit is reported as `payment_submitted` after
+the checkout reaches a new merchant order-confirmation URL, or during the long 3-D
+Secure wait when a generic success-shaped URL or success text newly appears on the
+merchant page. Pre-existing evidence and issuer/challenge-frame success copy never
+qualify. The browser completes 3-D Secure natively, including out-of-band bank-app
+challenges — Trusty Squire never manipulates or intercepts the challenge; it uses
+read-only checks while polling the merchant page for those confirmation signals. A bare click with no
 challenge detected returns `payment_outcome_unknown` instead of guessing that the
 charge succeeded. A detected challenge that remains unresolved on timeout stays
 `payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user
