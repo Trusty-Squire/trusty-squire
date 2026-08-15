@@ -544,8 +544,8 @@ export interface Session {
   // [P0] "awaiting_approval" is a NEW rest state (not held during a call —
   // operate_pay no longer blocks): the human hasn't tapped approve yet. A
   // later operate_pay call validates the stored approval before reusing it;
-  // stale or terminal resources are replaced. operate_payment_status/await
-  // read it without changing it.
+  // stale or terminal resources are replaced. operate_payment_status reads it
+  // without changing it.
   activePayment:
     | { status: "operating"; lease: ActivePaymentLease }
     | { status: "awaiting_approval"; state: PendingApprovalWait }
@@ -2808,8 +2808,8 @@ export function getActivePendingCardFill(selectedSession?: Session): PendingCard
 }
 
 // [P0] Read-only: the outstanding approval a prior operate_pay call left
-// waiting on the human, if any. Backs operate_payment_status/await — neither
-// tool touches session state, they just report on it.
+// waiting on the human, if any. Backs operate_payment_status, which does not
+// touch session state and just reports on it.
 export function getActivePendingApproval(selectedSession?: Session): PendingApprovalWait | null {
   const state = (selectedSession ?? activeProvisionSession()).activePayment;
   return state?.status === "awaiting_approval" ? state.state : null;
@@ -2886,7 +2886,7 @@ export function completeActivePaymentLeaseWithPendingFill(
 // still-pending-approval outcome: the human hasn't responded yet, so this
 // call ends with no card filled — just a resumable wait, picked up by the
 // NEXT operate_pay call for live-resource validation or read by
-// operate_payment_status/await.
+// operate_payment_status.
 export function completeActivePaymentLeaseWithPendingApproval(
   lease: ActivePaymentLease,
   state: PendingApprovalWait,

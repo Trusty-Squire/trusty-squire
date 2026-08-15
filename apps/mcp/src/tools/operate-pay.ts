@@ -446,7 +446,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   },
 };
 
-// [P0] Shared by operate_payment_status/await: maps the LIVE server record
+// [P0] Used by operate_payment_status: maps the LIVE server record
 // (never the locally-cached approval terms) to a status the host can act on.
 // Never opens the sealed card or calls confirm — read-only, no side effects.
 // `boundMs`, when given, races the server call so this can never outlast the

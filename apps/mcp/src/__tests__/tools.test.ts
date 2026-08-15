@@ -33,7 +33,7 @@ let mockPaymentSealActive = false;
 const mockRecordActivePaymentProvenance = vi.hoisted(() => vi.fn());
 // [P0] The awaiting-approval rest state — mirrors provision-session.ts's real
 // state machine so operate_pay's approval_pending path, and
-// operate_payment_status/await, can be exercised against this fake session.
+// operate_payment_status can be exercised against this fake session.
 let mockAwaitingApproval: PendingApprovalWait | null = null;
 let mockCartCheckout: CartCheckoutObservation | null = null;
 const PAYMENT_SESSION_A_ID = "00000000-0000-4000-8000-000000000001";
