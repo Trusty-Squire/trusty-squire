@@ -4,8 +4,10 @@ import {
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
+  completeActivePendingCardFillWithUnconfirmedOutcome,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
+  completeActivePaymentLeaseWithUnconfirmedOutcome,
   getActivePendingApproval,
   markActivePendingCardFillSubmitStarted,
   recordActivePaymentProvenance,
@@ -243,6 +245,11 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           }
           if (shouldRestorePendingCardFill(result)) {
             setActivePendingCardFill(pending, session);
+          } else if (status === "payment_3ds_authenticated_pending_order") {
+            completeActivePendingCardFillWithUnconfirmedOutcome(
+              result.payment_fields_cleared === true,
+              session,
+            );
           } else if (
             status === "payment_submitted" ||
             status === "payment_3ds_required" ||
@@ -400,6 +407,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             throw new Error("operate_pay pending approval returned without resumable state");
           }
           completeActivePaymentLeaseWithPendingApproval(paymentLease, approvalPending, session);
+          paymentLeaseCompleted = true;
+        }
+        if (result.status === "payment_3ds_authenticated_pending_order") {
+          completeActivePaymentLeaseWithUnconfirmedOutcome(
+            paymentLease,
+            paymentFieldsCleared,
+            session,
+          );
           paymentLeaseCompleted = true;
         }
         if (result.status === "payment_submitted" || result.status === "payment_3ds_required") {

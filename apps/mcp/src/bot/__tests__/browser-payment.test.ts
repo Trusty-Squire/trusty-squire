@@ -3769,7 +3769,28 @@ describe("Stripe decoupled/OOB 3DS challenge parsing", () => {
       paymentIntentId: "pi_synthetic123",
       clientSecret: "pi_synthetic123_secret_abc",
       publishableKey: "pk_live_synthetic",
+      accountId: "acct_synthetic",
     });
+  });
+
+  it("accepts a non-Connect challenge without a Stripe account", () => {
+    expect(
+      parseStripeChallengeParams(
+        "https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_x&payment_intent_client_secret=pi_x_secret_y&publishable_key=pk_live_z",
+      ),
+    ).toEqual({
+      paymentIntentId: "pi_x",
+      clientSecret: "pi_x_secret_y",
+      publishableKey: "pk_live_z",
+    });
+  });
+
+  it("refuses a malformed connected-account id", () => {
+    expect(
+      parseStripeChallengeParams(
+        "https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_x&payment_intent_client_secret=pi_x_secret_y&publishable_key=pk_live_z&stripe_account=not_an_account",
+      ),
+    ).toBeUndefined();
   });
 
   it("refuses a non-Stripe host even if the query params match", () => {
@@ -3801,10 +3822,20 @@ describe("Stripe decoupled/OOB 3DS challenge parsing", () => {
 
 function controllerWithOobResolutionPage(options: {
   confirmAfterReload?: boolean;
-}): { controller: BrowserController; reload: ReturnType<typeof vi.fn> } {
+  dialogDuringReload?: boolean;
+}): {
+  controller: BrowserController;
+  dismissDialog: ReturnType<typeof vi.fn>;
+  reload: ReturnType<typeof vi.fn>;
+} {
   const currentUrl = "https://merchant.test/checkout";
   let reloaded = false;
+  let dialogHandler: ((dialog: { dismiss: () => Promise<void> }) => Promise<void>) | undefined;
+  const dismissDialog = vi.fn(async () => undefined);
   const reload = vi.fn(async () => {
+    if (options.dialogDuringReload === true && dialogHandler !== undefined) {
+      await dialogHandler({ dismiss: dismissDialog });
+    }
     reloaded = true;
   });
   const page = {
@@ -3812,6 +3843,16 @@ function controllerWithOobResolutionPage(options: {
     frames: () => [],
     waitForTimeout: async () => undefined,
     reload,
+    on: vi.fn(
+      (event: string, handler: (dialog: { dismiss: () => Promise<void> }) => Promise<void>) => {
+        if (event === "dialog") dialogHandler = handler;
+      },
+    ),
+    off: vi.fn(
+      (event: string, handler: (dialog: { dismiss: () => Promise<void> }) => Promise<void>) => {
+        if (event === "dialog" && dialogHandler === handler) dialogHandler = undefined;
+      },
+    ),
   };
   const controller = new BrowserController({ humanize: false });
   (controller as unknown as { page: Page }).page = page as unknown as Page;
@@ -3822,8 +3863,7 @@ function controllerWithOobResolutionPage(options: {
       terminalUrlIdentity: null,
     }),
     captureVisibleCheckoutFailureSignals: async () => ({}),
-    hasConfirmedCheckoutOutcome: async () =>
-      reloaded && options.confirmAfterReload === true,
+    hasConfirmedCheckoutOutcome: async () => reloaded && options.confirmAfterReload === true,
     hasNewVisibleCheckoutFailure: async () => false,
     detectThreeDsChallenge: async () => ({
       three_ds_required: true,
@@ -3831,7 +3871,7 @@ function controllerWithOobResolutionPage(options: {
       challenge_url: STRIPE_CHALLENGE_URL,
     }),
   });
-  return { controller, reload };
+  return { controller, dismissDialog, reload };
 }
 
 describe("decoupled/out-of-band (app-push) 3DS completion", () => {
@@ -3842,7 +3882,9 @@ describe("decoupled/out-of-band (app-push) 3DS completion", () => {
       json: async () => ({ status: statuses.shift() ?? "succeeded" }),
     }));
     vi.stubGlobal("fetch", fetchMock);
-    const { controller, reload } = controllerWithOobResolutionPage({});
+    const { controller, dismissDialog, reload } = controllerWithOobResolutionPage({
+      dialogDuringReload: true,
+    });
     let now = 0;
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
       now += 3_500;
@@ -3857,9 +3899,13 @@ describe("decoupled/out-of-band (app-push) 3DS completion", () => {
       expect(fetchMock).toHaveBeenCalledWith(
         expect.stringContaining("pi_synthetic123"),
         expect.objectContaining({
-          headers: { Authorization: "Bearer pk_live_synthetic" },
+          headers: {
+            Authorization: "Bearer pk_live_synthetic",
+            "Stripe-Account": "acct_synthetic",
+          },
         }),
       );
+      expect(dismissDialog).toHaveBeenCalledTimes(1);
     } finally {
       nowSpy.mockRestore();
       vi.unstubAllGlobals();
@@ -3892,6 +3938,37 @@ describe("decoupled/out-of-band (app-push) 3DS completion", () => {
     }
   });
 
+  it("polls non-Connect PaymentIntents without a Stripe-Account header", async () => {
+    const statuses = ["requires_action", "succeeded"];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { controller } = controllerWithOobResolutionPage({});
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+    const challengeUrl = STRIPE_CHALLENGE_URL.replace("&stripe_account=acct_synthetic", "");
+
+    try {
+      await expect(controller.waitForThreeDsResolution(120_000, challengeUrl)).resolves.toBe(
+        "authenticated_pending_order",
+      );
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: { Authorization: "Bearer pk_live_synthetic" },
+        }),
+      );
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("returns failed when the issuer-side PaymentIntent lands in a terminal failure state", async () => {
     const statuses = ["requires_action", "requires_payment_method"];
     const fetchMock = vi.fn(async () => ({
@@ -3910,6 +3987,31 @@ describe("decoupled/out-of-band (app-push) 3DS completion", () => {
       await expect(
         controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
       ).resolves.toBe("failed");
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not reload unless it observes this PaymentIntent leave requires_action", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { controller, reload } = controllerWithOobResolutionPage({});
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+
+    try {
+      await expect(controller.waitForThreeDsResolution(10_000, STRIPE_CHALLENGE_URL)).resolves.toBe(
+        "timeout",
+      );
+      expect(fetchMock).toHaveBeenCalled();
       expect(reload).not.toHaveBeenCalled();
     } finally {
       nowSpy.mockRestore();

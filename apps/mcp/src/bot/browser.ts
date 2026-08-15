@@ -27,6 +27,7 @@ import type {
   Browser,
   BrowserContext,
   CDPSession,
+  Dialog,
   ElementHandle,
   FileChooser,
   Frame,
@@ -285,6 +286,7 @@ interface StripeChallengeParams {
   paymentIntentId: string;
   clientSecret: string;
   publishableKey: string;
+  accountId?: string;
 }
 
 // Stripe's decoupled/OOB (app-push) 3DS ACS never posts back into the in-page
@@ -306,9 +308,16 @@ export function parseStripeChallengeParams(url: string): StripeChallengeParams |
   const paymentIntentId = parsed.searchParams.get("payment_intent");
   const clientSecret = parsed.searchParams.get("payment_intent_client_secret");
   const publishableKey = parsed.searchParams.get("publishable_key");
+  const accountId = parsed.searchParams.get("stripe_account");
   if (!paymentIntentId || !clientSecret || !publishableKey) return undefined;
   if (!paymentIntentId.startsWith("pi_")) return undefined;
-  return { paymentIntentId, clientSecret, publishableKey };
+  if (accountId !== null && !/^acct_[A-Za-z0-9]+$/.test(accountId)) return undefined;
+  return {
+    paymentIntentId,
+    clientSecret,
+    publishableKey,
+    ...(accountId !== null ? { accountId } : {}),
+  };
 }
 
 type StripePaymentIntentOutcome = "authenticated" | "failed" | "pending" | "unknown";
@@ -333,7 +342,10 @@ async function fetchStripePaymentIntentStatus(
     const res = await fetch(
       `https://api.stripe.com/v1/payment_intents/${encodeURIComponent(params.paymentIntentId)}?client_secret=${encodeURIComponent(params.clientSecret)}`,
       {
-        headers: { Authorization: `Bearer ${params.publishableKey}` },
+        headers: {
+          Authorization: `Bearer ${params.publishableKey}`,
+          ...(params.accountId !== undefined ? { "Stripe-Account": params.accountId } : {}),
+        },
         signal: AbortSignal.timeout(10_000),
       },
     );
@@ -10003,6 +10015,7 @@ export class BrowserController {
     // it's a real network call against Stripe, the DOM loop is local.
     let nextStripePollAt = Date.now();
     let reloadedForOob = false;
+    let stripeRequiresActionObserved = false;
     // Once the ACS confirms OOB, give the merchant's own completion JS a
     // bounded grace period to redirect/render the receipt before giving up.
     let oobGraceDeadline: number | undefined;
@@ -10021,11 +10034,16 @@ export class BrowserController {
         const status = await fetchStripePaymentIntentStatus(stripeParams);
         if (status !== undefined) {
           const outcome = classifyStripePaymentIntentStatus(status);
+          if (outcome === "pending") stripeRequiresActionObserved = true;
           if (outcome === "failed") {
             this.checkoutThreeDsPending = false;
             return "failed";
           }
-          if (outcome === "authenticated" && oobGraceDeadline === undefined) {
+          if (
+            outcome === "authenticated" &&
+            stripeRequiresActionObserved &&
+            oobGraceDeadline === undefined
+          ) {
             // The issuer authenticated out of band (app-push 3DS) — the
             // in-frame challenge never fires the postMessage the merchant's
             // JS is waiting on, so the checkout page needs a nudge to
@@ -10033,7 +10051,17 @@ export class BrowserController {
             oobGraceDeadline = Date.now() + 30_000;
             if (!reloadedForOob) {
               reloadedForOob = true;
-              await this.page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
+              const page = this.page;
+              const dismissReloadDialog = async (dialog: Dialog): Promise<void> => {
+                page.off("dialog", dismissReloadDialog);
+                await dialog.dismiss().catch(() => undefined);
+              };
+              page.on("dialog", dismissReloadDialog);
+              try {
+                await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
+              } finally {
+                page.off("dialog", dismissReloadDialog);
+              }
             }
           }
         }
@@ -10044,11 +10072,7 @@ export class BrowserController {
         challengeWasActive = true;
         challengeAbsentSince = undefined;
       }
-      if (
-        !challenge.three_ds_required &&
-        challengeWasActive &&
-        oobGraceDeadline === undefined
-      ) {
+      if (!challenge.three_ds_required && challengeWasActive && oobGraceDeadline === undefined) {
         challengeAbsentSince ??= Date.now();
         if (Date.now() - challengeAbsentSince >= THREE_DS_RESOLUTION_GRACE_MS) {
           this.checkoutThreeDsPending = false;
