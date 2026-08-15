@@ -262,6 +262,10 @@ interface CheckoutOutcomeDispatchSnapshot {
   urls: readonly string[];
 }
 
+interface CheckoutPaymentDispatchSnapshot extends CheckoutOutcomeDispatchSnapshot {
+  failureSignals: Readonly<Record<string, number>>;
+}
+
 type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
 
 const CHECKOUT_FAILURE_TEXT_RE =
@@ -9119,7 +9123,7 @@ export class BrowserController {
         const dispatchTrackingInstalled = await candidate
           .evaluate(
             (element, options) => {
-              const { baselineStorageKey, frameUrls, token } = options;
+              const { baselineStorageKey, failurePattern, frameUrls, token } = options;
               const stateWindow = window as Window & {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
@@ -9147,25 +9151,34 @@ export class BrowserController {
                   const merchantWindow = window.top;
                   if (merchantWindow === null) return;
                   const urls = new Set(frameUrls);
-                  const collectFrameUrls = (currentWindow: Window): void => {
+                  const failureSignals: Record<string, number> = {};
+                  const collectFrameState = (currentWindow: Window): void => {
                     try {
                       urls.add(currentWindow.location.href);
+                      const matches = (currentWindow.document.body?.innerText ?? "").match(
+                        new RegExp(failurePattern.source, failurePattern.flags),
+                      );
+                      for (const match of matches ?? []) {
+                        const signal = match.replace(/\s+/g, " ").trim().toLowerCase();
+                        failureSignals[signal] = (failureSignals[signal] ?? 0) + 1;
+                      }
                       for (let index = 0; index < currentWindow.frames.length; index += 1) {
-                        collectFrameUrls(currentWindow.frames[index]!);
+                        collectFrameState(currentWindow.frames[index]!);
                       }
                     } catch (error) {
                       void error;
                     }
                   };
-                  collectFrameUrls(merchantWindow);
-                  const snapshot: CheckoutOutcomeDispatchSnapshot = {
+                  collectFrameState(merchantWindow);
+                  const snapshot: CheckoutPaymentDispatchSnapshot = {
+                    failureSignals,
                     url: merchantWindow.location.href,
                     urls: [...urls],
                   };
                   const baselineWindow = merchantWindow as Window & {
                     __trustySquirePaymentDispatchBaselines?: Record<
                       string,
-                      CheckoutOutcomeDispatchSnapshot
+                      CheckoutPaymentDispatchSnapshot
                     >;
                   };
                   baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
@@ -9187,6 +9200,10 @@ export class BrowserController {
             },
             {
               baselineStorageKey: dispatchBaselineStorageKey,
+              failurePattern: {
+                flags: CHECKOUT_FAILURE_TEXT_RE.flags,
+                source: CHECKOUT_FAILURE_TEXT_RE.source,
+              },
               frameUrls: preDispatchFrameUrls,
               token: dispatchToken,
             },
@@ -9194,14 +9211,17 @@ export class BrowserController {
           .then(() => true)
           .catch(() => false);
         if (!dispatchTrackingInstalled) continue;
-        const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
+        const readDispatchBaseline = async (): Promise<{
+          failure: CheckoutFailureBaseline;
+          outcome: CheckoutOutcomeBaseline;
+        } | null> => {
           const snapshot = await this.page!.mainFrame()
             .evaluate(
               ({ baselineStorageKey, token }) => {
                 const baselineWindow = window as Window & {
                   __trustySquirePaymentDispatchBaselines?: Record<
                     string,
-                    CheckoutOutcomeDispatchSnapshot
+                    CheckoutPaymentDispatchSnapshot
                   >;
                 };
                 let captured =
@@ -9213,7 +9233,7 @@ export class BrowserController {
                   try {
                     const stored = sessionStorage.getItem(baselineStorageKey);
                     if (stored !== null) {
-                      captured = JSON.parse(stored) as CheckoutOutcomeDispatchSnapshot;
+                      captured = JSON.parse(stored) as CheckoutPaymentDispatchSnapshot;
                     }
                   } catch {
                     captured = null;
@@ -9233,11 +9253,20 @@ export class BrowserController {
             snapshot === null ||
             typeof snapshot.url !== "string" ||
             !Array.isArray(snapshot.urls) ||
-            !snapshot.urls.every((url) => typeof url === "string")
+            !snapshot.urls.every((url) => typeof url === "string") ||
+            typeof snapshot.failureSignals !== "object" ||
+            snapshot.failureSignals === null ||
+            Array.isArray(snapshot.failureSignals) ||
+            !Object.values(snapshot.failureSignals).every(
+              (count) => Number.isInteger(count) && count >= 0,
+            )
           ) {
             return null;
           }
-          return checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
+          return {
+            failure: snapshot.failureSignals,
+            outcome: checkoutOutcomeBaselineFromDispatchSnapshot(snapshot),
+          };
         };
         const clearDispatchTracking = async (): Promise<void> => {
           await candidate
@@ -9268,11 +9297,10 @@ export class BrowserController {
               }
             }, dispatchToken)
             .catch(() => undefined);
-          await readDispatchOutcomeBaseline();
+          await readDispatchBaseline();
         };
         try {
           await this.page.bringToFront().catch(() => undefined);
-          this.checkoutFailureBaseline = await this.captureCheckoutFailureSignals();
           await candidate.click();
         } catch (error) {
           const dispatchState = await frame
@@ -9294,9 +9322,11 @@ export class BrowserController {
           if (dispatchState?.sameDocument === true && !dispatchState.dispatched) throw error;
           throw new PaymentSubmitOutcomeUnknownError();
         }
+        const dispatchBaseline = await readDispatchBaseline();
         outcomeBaseline =
-          (await readDispatchOutcomeBaseline()) ?? (await this.captureCheckoutOutcomeBaseline());
+          dispatchBaseline?.outcome ?? (await this.captureCheckoutOutcomeBaseline());
         this.checkoutOutcomeBaseline = outcomeBaseline;
+        this.checkoutFailureBaseline = dispatchBaseline?.failure ?? null;
         await clearDispatchTracking();
         submitted = true;
         break;
