@@ -262,15 +262,6 @@ interface CheckoutOutcomeDispatchSnapshot {
   urls: readonly string[];
 }
 
-interface CheckoutPaymentDispatchSnapshot extends CheckoutOutcomeDispatchSnapshot {
-  failureSignals: Readonly<Record<string, number>>;
-}
-
-type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
-
-const CHECKOUT_FAILURE_TEXT_RE =
-  /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/gi;
-
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
   // A dispatched click is not a payment outcome. The submit path sets this
@@ -2622,7 +2613,6 @@ export class BrowserController {
   private page: Page | null = null;
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
-  private checkoutFailureBaseline: CheckoutFailureBaseline | undefined;
   private checkoutSubmitSequence = 0;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
@@ -9064,7 +9054,6 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
     this.checkoutOutcomeBaseline = undefined;
-    this.checkoutFailureBaseline = undefined;
     let submitted = false;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
@@ -9123,7 +9112,7 @@ export class BrowserController {
         const dispatchTrackingInstalled = await candidate
           .evaluate(
             (element, options) => {
-              const { baselineStorageKey, failurePattern, frameUrls, token } = options;
+              const { baselineStorageKey, frameUrls, token } = options;
               const stateWindow = window as Window & {
                 __trustySquirePaymentSubmitDispatch?: {
                   token: string;
@@ -9151,34 +9140,25 @@ export class BrowserController {
                   const merchantWindow = window.top;
                   if (merchantWindow === null) return;
                   const urls = new Set(frameUrls);
-                  const failureSignals: Record<string, number> = {};
-                  const collectFrameState = (currentWindow: Window): void => {
+                  const collectFrameUrls = (currentWindow: Window): void => {
                     try {
                       urls.add(currentWindow.location.href);
-                      const matches = (currentWindow.document.body?.innerText ?? "").match(
-                        new RegExp(failurePattern.source, failurePattern.flags),
-                      );
-                      for (const match of matches ?? []) {
-                        const signal = match.replace(/\s+/g, " ").trim().toLowerCase();
-                        failureSignals[signal] = (failureSignals[signal] ?? 0) + 1;
-                      }
                       for (let index = 0; index < currentWindow.frames.length; index += 1) {
-                        collectFrameState(currentWindow.frames[index]!);
+                        collectFrameUrls(currentWindow.frames[index]!);
                       }
                     } catch (error) {
                       void error;
                     }
                   };
-                  collectFrameState(merchantWindow);
-                  const snapshot: CheckoutPaymentDispatchSnapshot = {
-                    failureSignals,
+                  collectFrameUrls(merchantWindow);
+                  const snapshot: CheckoutOutcomeDispatchSnapshot = {
                     url: merchantWindow.location.href,
                     urls: [...urls],
                   };
                   const baselineWindow = merchantWindow as Window & {
                     __trustySquirePaymentDispatchBaselines?: Record<
                       string,
-                      CheckoutPaymentDispatchSnapshot
+                      CheckoutOutcomeDispatchSnapshot
                     >;
                   };
                   baselineWindow.__trustySquirePaymentDispatchBaselines ??= {};
@@ -9200,10 +9180,6 @@ export class BrowserController {
             },
             {
               baselineStorageKey: dispatchBaselineStorageKey,
-              failurePattern: {
-                flags: CHECKOUT_FAILURE_TEXT_RE.flags,
-                source: CHECKOUT_FAILURE_TEXT_RE.source,
-              },
               frameUrls: preDispatchFrameUrls,
               token: dispatchToken,
             },
@@ -9211,17 +9187,14 @@ export class BrowserController {
           .then(() => true)
           .catch(() => false);
         if (!dispatchTrackingInstalled) continue;
-        const readDispatchBaseline = async (): Promise<{
-          failure: CheckoutFailureBaseline;
-          outcome: CheckoutOutcomeBaseline;
-        } | null> => {
+        const readDispatchOutcomeBaseline = async (): Promise<CheckoutOutcomeBaseline | null> => {
           const snapshot = await this.page!.mainFrame()
             .evaluate(
               ({ baselineStorageKey, token }) => {
                 const baselineWindow = window as Window & {
                   __trustySquirePaymentDispatchBaselines?: Record<
                     string,
-                    CheckoutPaymentDispatchSnapshot
+                    CheckoutOutcomeDispatchSnapshot
                   >;
                 };
                 let captured =
@@ -9233,7 +9206,7 @@ export class BrowserController {
                   try {
                     const stored = sessionStorage.getItem(baselineStorageKey);
                     if (stored !== null) {
-                      captured = JSON.parse(stored) as CheckoutPaymentDispatchSnapshot;
+                      captured = JSON.parse(stored) as CheckoutOutcomeDispatchSnapshot;
                     }
                   } catch {
                     captured = null;
@@ -9253,20 +9226,11 @@ export class BrowserController {
             snapshot === null ||
             typeof snapshot.url !== "string" ||
             !Array.isArray(snapshot.urls) ||
-            !snapshot.urls.every((url) => typeof url === "string") ||
-            typeof snapshot.failureSignals !== "object" ||
-            snapshot.failureSignals === null ||
-            Array.isArray(snapshot.failureSignals) ||
-            !Object.values(snapshot.failureSignals).every(
-              (count) => Number.isInteger(count) && count >= 0,
-            )
+            !snapshot.urls.every((url) => typeof url === "string")
           ) {
             return null;
           }
-          return {
-            failure: snapshot.failureSignals,
-            outcome: checkoutOutcomeBaselineFromDispatchSnapshot(snapshot),
-          };
+          return checkoutOutcomeBaselineFromDispatchSnapshot(snapshot);
         };
         const clearDispatchTracking = async (): Promise<void> => {
           await candidate
@@ -9297,7 +9261,7 @@ export class BrowserController {
               }
             }, dispatchToken)
             .catch(() => undefined);
-          await readDispatchBaseline();
+          await readDispatchOutcomeBaseline();
         };
         try {
           await this.page.bringToFront().catch(() => undefined);
@@ -9322,11 +9286,9 @@ export class BrowserController {
           if (dispatchState?.sameDocument === true && !dispatchState.dispatched) throw error;
           throw new PaymentSubmitOutcomeUnknownError();
         }
-        const dispatchBaseline = await readDispatchBaseline();
         outcomeBaseline =
-          dispatchBaseline?.outcome ?? (await this.captureCheckoutOutcomeBaseline());
+          (await readDispatchOutcomeBaseline()) ?? (await this.captureCheckoutOutcomeBaseline());
         this.checkoutOutcomeBaseline = outcomeBaseline;
-        this.checkoutFailureBaseline = dispatchBaseline?.failure ?? null;
         await clearDispatchTracking();
         submitted = true;
         break;
@@ -9504,44 +9466,6 @@ export class BrowserController {
     );
   }
 
-  private async captureCheckoutFailureSignals(): Promise<CheckoutFailureBaseline> {
-    if (!this.page) return null;
-    const frameSignals = await Promise.all(
-      this.page.frames().map(
-        async (frame) =>
-          await frame
-            .evaluate(
-              ({ flags, source }) => {
-                const matches = (document.body?.innerText ?? "").match(new RegExp(source, flags));
-                const signals: Record<string, number> = {};
-                for (const match of matches ?? []) {
-                  const signal = match.replace(/\s+/g, " ").trim().toLowerCase();
-                  signals[signal] = (signals[signal] ?? 0) + 1;
-                }
-                return signals;
-              },
-              { flags: CHECKOUT_FAILURE_TEXT_RE.flags, source: CHECKOUT_FAILURE_TEXT_RE.source },
-            )
-            .catch(() => null),
-      ),
-    );
-    const combined: Record<string, number> = {};
-    for (const signals of frameSignals) {
-      if (signals === null) return null;
-      for (const [signal, count] of Object.entries(signals)) {
-        combined[signal] = (combined[signal] ?? 0) + count;
-      }
-    }
-    return combined;
-  }
-
-  private async hasNewCheckoutFailure(baseline: CheckoutFailureBaseline): Promise<boolean> {
-    if (baseline === null) return false;
-    const current = await this.captureCheckoutFailureSignals();
-    if (current === null) return false;
-    return Object.entries(current).some(([signal, count]) => count > (baseline[signal] ?? 0));
-  }
-
   // Let the browser complete the challenge natively (including out-of-band
   // bank-app 3DS): just poll for the same terminal-order signal a plain
   // non-3DS checkout uses, plus a passive plain-text decline check. It never
@@ -9550,15 +9474,21 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
-    const failureBaseline =
-      this.checkoutFailureBaseline === undefined
-        ? await this.captureCheckoutFailureSignals()
-        : this.checkoutFailureBaseline;
+    const failureText =
+      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     const deadline = Date.now() + timeoutMs;
     do {
       await this.page.bringToFront().catch(() => undefined);
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) return "succeeded";
-      if (await this.hasNewCheckoutFailure(failureBaseline)) return "failed";
+      const texts = await Promise.all(
+        this.page
+          .frames()
+          .map(
+            async (frame) =>
+              await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+          ),
+      );
+      if (texts.some((text) => failureText.test(text))) return "failed";
       await this.page.waitForTimeout(1_000).catch(() => undefined);
     } while (Date.now() <= deadline);
     return "timeout";
