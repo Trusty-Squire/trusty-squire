@@ -20,8 +20,7 @@ import {
   canPublishOperatorProfileSeed,
   operatorProfilePoolTest,
   OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
-  publishOperatorProfileSeed as publishOperatorProfileSeedRaw,
-  type OperatorSeedGoogleValidation,
+  publishOperatorProfileSeed,
 } from "../operator-profile-pool.js";
 import { profilePathIdentity } from "../profile.js";
 
@@ -31,20 +30,6 @@ const verifiedLoginProof = {
   closeState: "closed",
   provider: "google",
 } as const;
-
-function publishOperatorProfileSeed(
-  sourceProfileDir: string,
-  opts: Omit<Parameters<typeof publishOperatorProfileSeedRaw>[1], "validateGoogleIdentity"> & {
-    validateGoogleIdentity?: (profileDir: string) => Promise<OperatorSeedGoogleValidation>;
-  },
-): ReturnType<typeof publishOperatorProfileSeedRaw> {
-  return publishOperatorProfileSeedRaw(sourceProfileDir, {
-    ...opts,
-    validateGoogleIdentity:
-      opts.validateGoogleIdentity ??
-      (() => Promise.resolve({ googleSignedIn: true, closeState: "closed" })),
-  });
-}
 
 function writeCookies(
   source: string,
@@ -148,10 +133,10 @@ describe("operator profile pool migration stage", () => {
     expect(existsSync(p.seedLock)).toBe(false);
   });
 
-  it("bounds a third acquisition while seed publication holds the shared lock", async () => {
+  it("bounds a third acquisition while the shared seed lock is held", async () => {
     vi.useFakeTimers();
-    let releaseValidation = (): void => undefined;
-    let publication: Promise<string> | undefined;
+    let releaseLock = (): void => undefined;
+    let holder: Promise<void> | undefined;
     let first: Awaited<ReturnType<typeof acquireOperatorProfile>> | undefined;
     let second: Awaited<ReturnType<typeof acquireOperatorProfile>> | undefined;
     try {
@@ -165,23 +150,19 @@ describe("operator profile pool migration stage", () => {
         rootDir: root,
         sourceProfileDir: source,
       });
-      let markValidationStarted = (): void => undefined;
-      const validationStarted = new Promise<void>((resolve) => {
-        markValidationStarted = resolve;
+      const p = operatorProfilePoolTest.paths(root);
+      let markLockHeld = (): void => undefined;
+      const lockHeld = new Promise<void>((resolve) => {
+        markLockHeld = resolve;
       });
-      const validationGate = new Promise<void>((resolve) => {
-        releaseValidation = resolve;
+      const lockGate = new Promise<void>((resolve) => {
+        releaseLock = resolve;
       });
-      publication = publishOperatorProfileSeed(source, {
-        rootDir: root,
-        proof: verifiedLoginProof,
-        validateGoogleIdentity: async () => {
-          markValidationStarted();
-          await validationGate;
-          return { googleSignedIn: true, closeState: "closed" };
-        },
+      holder = operatorProfilePoolTest.withSeedLock(p, async () => {
+        markLockHeld();
+        await lockGate;
       });
-      await validationStarted;
+      await lockHeld;
       const third = acquireOperatorProfile("session-c", {
         rootDir: root,
         sourceProfileDir: source,
@@ -200,8 +181,8 @@ describe("operator profile pool migration stage", () => {
         "slot-1",
       ]);
     } finally {
-      releaseValidation();
-      await publication;
+      releaseLock();
+      await holder;
       await second?.destroy();
       await first?.destroy();
       vi.useRealTimers();
@@ -245,7 +226,7 @@ describe("operator profile pool migration stage", () => {
     expect(operatorProfilePoolTest.currentGeneration(p)).toBe(second);
   });
 
-  it("keeps the current seed when observable Google validation fails", async () => {
+  it("publishes on completed-login proof alone, without any seed re-validation re-open", async () => {
     const { root, source } = fixture();
     const first = await publishOperatorProfileSeed(source, {
       rootDir: root,
@@ -254,51 +235,15 @@ describe("operator profile pool migration stage", () => {
     const p = operatorProfilePoolTest.paths(root);
     writeCookies(source, [{ host: ".google.com", name: "SID", value: "replacement" }]);
 
-    await expect(
-      publishOperatorProfileSeed(source, {
-        rootDir: root,
-        proof: verifiedLoginProof,
-        validateGoogleIdentity: async (profileDir) => {
-          expect(profileDir).not.toBe(source);
-          expect(cookieValues(profileDir)).toEqual(["replacement"]);
-          return { googleSignedIn: false, closeState: "closed" };
-        },
-      }),
-    ).rejects.toThrow("failed Google identity validation");
-
-    expect(operatorProfilePoolTest.currentGeneration(p)).toBe(first);
-    expect(readdirSync(p.generations)).toEqual([first]);
-    expect(readdirSync(p.tombstones)).toEqual([]);
-  });
-
-  it("retains validation profile state when Chrome closure is unproven", async () => {
-    const { root, source } = fixture();
-    const first = await publishOperatorProfileSeed(source, {
+    const second = await publishOperatorProfileSeed(source, {
       rootDir: root,
       proof: verifiedLoginProof,
     });
-    const p = operatorProfilePoolTest.paths(root);
 
-    await expect(
-      publishOperatorProfileSeed(source, {
-        rootDir: root,
-        proof: verifiedLoginProof,
-        validateGoogleIdentity: async (profileDir) => {
-          writeFileSync(join(profileDir, "validation-live"), "retained");
-          return { googleSignedIn: true, closeState: "unknown" };
-        },
-      }),
-    ).rejects.toThrow("validation Chrome closure was not proven");
-
-    expect(operatorProfilePoolTest.currentGeneration(p)).toBe(first);
-    expect(readdirSync(p.generations)).toEqual([first]);
-    const validation = readdirSync(p.tombstones).find((entry) =>
-      entry.startsWith("seed-validation-"),
-    );
-    expect(validation).toBeDefined();
-    expect(readFileSync(join(p.tombstones, validation!, "validation-live"), "utf8")).toBe(
-      "retained",
-    );
+    expect(second).not.toBe(first);
+    expect(operatorProfilePoolTest.currentGeneration(p)).toBe(second);
+    expect(readdirSync(p.generations)).toEqual([second]);
+    expect(readdirSync(p.tombstones)).toEqual([]);
   });
 
   it("admits two isolated active leases and never launches from the login-authoring profile", async () => {

@@ -522,33 +522,13 @@ function currentGeneration(p: PoolPaths): string | null {
   }
 }
 
-async function publishSeedLocked(
-  p: PoolPaths,
-  sourceProfileDir: string,
-  validateGoogleIdentity: (profileDir: string) => Promise<OperatorSeedGoogleValidation>,
-): Promise<string> {
+async function publishSeedLocked(p: PoolPaths, sourceProfileDir: string): Promise<string> {
   const generation = randomUUID();
   const staging = join(p.generations, `.${generation}.tmp`);
   const destination = join(p.generations, generation);
-  const validationProfile = join(p.tombstones, `seed-validation-${generation}`);
-  let validationClosed = false;
   try {
     ensurePrivateDir(staging);
     copyIdentitySeed(sourceProfileDir, join(staging, "user-data"));
-    cpSync(join(staging, "user-data"), validationProfile, {
-      recursive: true,
-      force: false,
-      errorOnExist: true,
-    });
-    const validation = await validateGoogleIdentity(validationProfile);
-    validationClosed = validation.closeState === "closed";
-    if (!validationClosed) {
-      throw new Error("operator profile seed validation Chrome closure was not proven");
-    }
-    if (!validation.googleSignedIn) {
-      throw new Error("operator profile seed failed Google identity validation");
-    }
-    rmSync(validationProfile, { recursive: true, force: true });
     renameSync(staging, destination);
     const nextLink = join(p.seed, `.current-${generation}`);
     symlinkSync(join("generations", generation), nextLink, "dir");
@@ -560,7 +540,6 @@ async function publishSeedLocked(
     }
     return generation;
   } catch (err) {
-    if (validationClosed) rmSync(validationProfile, { recursive: true, force: true });
     rmSync(staging, { recursive: true, force: true });
     throw err;
   }
@@ -580,11 +559,6 @@ export interface OperatorSeedPublicationProof {
   provider: OAuthProviderId | null;
 }
 
-export interface OperatorSeedGoogleValidation {
-  googleSignedIn: boolean;
-  closeState: ProfileCloseState;
-}
-
 export function canPublishOperatorProfileSeed(
   proof: OperatorSeedPublicationProof,
   platform: NodeJS.Platform = process.platform,
@@ -601,7 +575,6 @@ export async function publishOperatorProfileSeed(
   sourceProfileDir: string = CHROME_PROFILE_DIR,
   opts: Pick<OperatorProfilePoolOptions, "rootDir"> & {
     proof: OperatorSeedPublicationProof;
-    validateGoogleIdentity: (profileDir: string) => Promise<OperatorSeedGoogleValidation>;
   },
 ): Promise<string> {
   if (!canPublishOperatorProfileSeed(opts.proof)) {
@@ -612,9 +585,7 @@ export async function publishOperatorProfileSeed(
   const resolvedSource = profilePathIdentity(sourceProfileDir);
   const p = paths(poolRootForSource(resolvedSource, opts.rootDir));
   initializePool(p);
-  return await withSeedLock(p, () =>
-    publishSeedLocked(p, resolvedSource, opts.validateGoogleIdentity),
-  );
+  return await withSeedLock(p, () => publishSeedLocked(p, resolvedSource));
 }
 
 function profileDir(p: PoolPaths, profileId: string): string {
