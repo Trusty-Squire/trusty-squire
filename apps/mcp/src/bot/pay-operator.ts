@@ -689,11 +689,18 @@ export async function executeOperatePay(
           };
         }
         if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
-          // Rakuten-style split checkouts show no total on the card-entry page
-          // itself. Only for fill_card, fall back to the most recent total this
-          // SAME session actually read from a real page (the cart step) — never
-          // an agent-supplied amount. Any other reader failure above still fails.
-          if (args.phase === "fill_card" && deps.cartFallbackCheckout !== undefined) {
+          if (args.amount_cents !== undefined && args.currency !== undefined) {
+            const checkoutUrl = new URL(browser.currentUrl());
+            checkout = {
+              merchant: args.merchant ?? checkoutUrl.hostname.replace(/^www\./, ""),
+              checkout_origin: checkoutUrl.origin,
+              amount_cents: args.amount_cents,
+              currency: args.currency.toUpperCase(),
+            };
+          } else if (args.phase === "fill_card" && deps.cartFallbackCheckout !== undefined) {
+            // Rakuten-style split checkouts show no total on the card-entry page
+            // itself. For fill_card, fall back to the most recent total this
+            // SAME session actually read from a real page (the cart step).
             checkout = deps.cartFallbackCheckout.checkout;
           } else {
             return needsCartTotalResult(args.phase, deps.cartFallbackCheckout?.url);

@@ -2157,6 +2157,56 @@ describe("3-D Secure resolution", () => {
       }
     },
   );
+
+  // REGRESSION: Gumroad collects "Full name" in its own form field, outside
+  // the Stripe card box our selectors reach — the name field is never found.
+  // That used to hard-abort the whole payment (payment_field_not_found:name).
+  // Only the essential card fields (number, expiry, CVC) may block a charge.
+  it.skipIf(!chromiumAvailable)(
+    "submits the payment even when no cardholder-name field is present",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+        <form id="checkout">
+          <input autocomplete="cc-number">
+          <input autocomplete="cc-exp">
+          <input autocomplete="cc-csc">
+          <button type="submit">Pay now</button>
+        </form>
+        <script>
+          document.querySelector("#checkout").addEventListener("submit", (event) => {
+            event.preventDefault();
+            document.body.dataset.submitted = "true";
+          });
+        </script>
+      `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        const result = await controller.fillAndSubmitCheckout({
+          pan: "4242424242424242",
+          exp_month: "12",
+          exp_year: "30",
+          cvv: "123",
+          name: "Synthetic Cardholder",
+          billing: {
+            line1: "123 Synthetic Street",
+            city: "Testville",
+            postal_code: "10001",
+            country: "US",
+          },
+        });
+
+        expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
+        expect(result.three_ds_required).toBe(false);
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
 });
 
 describe("recognized payment-provider frames", () => {
