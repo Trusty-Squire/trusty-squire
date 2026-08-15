@@ -21,6 +21,7 @@ import {
   type CheckoutCard,
   type CheckoutSubmitResult,
   type CheckoutSummary,
+  type ThreeDsResolution,
 } from "../browser.js";
 
 const CHECKOUT = {
@@ -66,7 +67,7 @@ async function harness(
   expectedAudience: string | null = "customer_test",
   apiAudience?: string,
   threeDs?: {
-    resolution: "succeeded" | "failed" | "timeout" | "unconfirmed";
+    resolution: "succeeded" | "failed" | "timeout" | "unconfirmed" | "authenticated_pending_order";
     waitSeconds?: number;
     notifyNeverResolves?: boolean;
     notifySent?: boolean;
@@ -633,7 +634,10 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(
+      180_000,
+      "https://issuer.synthetic.test/challenge",
+    );
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_submitted" })]);
   });
 
@@ -645,7 +649,10 @@ describe("operate_pay", () => {
 
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(
+      180_000,
+      "https://issuer.synthetic.test/challenge",
+    );
   });
 
   it("notifies and hands back when the 3DS challenge times out", async () => {
@@ -706,6 +713,25 @@ describe("operate_pay", () => {
     expect(result).toMatchObject({ status: "payment_outcome_unknown" });
     expect(notifyCalls).toHaveLength(1);
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
+  });
+
+  it("fails closed with a distinct status when the issuer authenticates OOB but the order never confirms", async () => {
+    const { result, auditBodies, notifyCalls } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "authenticated_pending_order" },
+    );
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_authenticated_pending_order",
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(result).not.toHaveProperty("merchant");
+    expect(notifyCalls).toHaveLength(1);
+    expect(auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_3ds_authenticated_pending_order" }),
+    ]);
   });
 
   it("records unknown when single-page submission fails after dispatch", async () => {
@@ -1464,7 +1490,7 @@ async function runConfirm(cfg: {
   approvedCheckout?: CheckoutSummary;
   live?: CheckoutSummary | Error;
   submit?: CheckoutSubmitResult | Error;
-  threeDsResolution?: "succeeded" | "failed" | "timeout" | "unconfirmed";
+  threeDsResolution?: ThreeDsResolution;
   waitSeconds?: number;
   clear?: Error;
 }): Promise<{
@@ -1768,7 +1794,7 @@ describe("operate_pay split checkout — confirm", () => {
   });
 
   it("runs the 3DS wait against the fill-time approval id — no second approval to mint one", async () => {
-    const { result, notifyCalls } = await runConfirm({
+    const { result, notifyCalls, browser } = await runConfirm({
       submit: {
         three_ds_required: true,
         order_confirmed: false,
@@ -1780,6 +1806,31 @@ describe("operate_pay split checkout — confirm", () => {
     expect(result).toMatchObject({ status: "payment_submitted" });
     expect(notifyCalls).toHaveLength(1);
     expect(notifyCalls[0]).toContain("appr_split");
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(
+      180_000,
+      "https://issuer.synthetic.test/c",
+    );
+  });
+
+  it("fails closed when split-checkout 3DS authenticates but the order stays pending", async () => {
+    const { result, auditBodies } = await runConfirm({
+      submit: {
+        three_ds_required: true,
+        order_confirmed: false,
+        challenge_url: "https://issuer.synthetic.test/c",
+      },
+      threeDsResolution: "authenticated_pending_order",
+    });
+
+    expect(result).toMatchObject({
+      status: "payment_3ds_authenticated_pending_order",
+      payment_fields_cleared: true,
+      needs_user: { wall: "3ds", resume: "checkout" },
+    });
+    expect(result).not.toHaveProperty("merchant");
+    expect(auditBodies).toEqual([
+      expect.objectContaining({ status: "payment_3ds_authenticated_pending_order" }),
+    ]);
   });
 
   it("maps resolved unconfirmed split 3DS to an unknown outcome", async () => {

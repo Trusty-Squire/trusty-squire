@@ -551,6 +551,7 @@ export interface Session {
     | { status: "awaiting_approval"; state: PendingApprovalWait }
     | { status: "pending"; pending: PendingCardFill }
     | { status: "confirming"; pending: PendingCardFill; submitStarted: boolean }
+    | { status: "authenticated_pending_order" }
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
@@ -2839,6 +2840,11 @@ export function claimActivePaymentForOperatePay(
   if (state?.status === "sealed") {
     throw new Error("operate_pay refused: payment field cleanup remains unverified");
   }
+  if (state?.status === "authenticated_pending_order") {
+    throw new Error(
+      "operate_pay refused: the prior authenticated payment still needs a manual order check",
+    );
+  }
   if (state?.status === "pending") {
     if (phase !== "confirm") {
       throw new Error(
@@ -2915,6 +2921,22 @@ export function releaseActivePaymentLease(
   return true;
 }
 
+export function completeActivePaymentLeaseWithUnconfirmedOutcome(
+  lease: ActivePaymentLease,
+  paymentFieldsCleared = true,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const state = session.activePayment;
+  if (state?.status !== "operating" || state.lease !== lease) {
+    throw new Error("operate_pay lost ownership of the active payment lease");
+  }
+  session.activePayment = paymentFieldsCleared
+    ? { status: "authenticated_pending_order" }
+    : { status: "sealed" };
+  session.paymentFieldSealActive = !paymentFieldsCleared;
+}
+
 export function markActivePendingCardFillSubmitStarted(selectedSession?: Session): void {
   const state = (selectedSession ?? activeProvisionSession()).activePayment;
   if (state?.status === "confirming") state.submitStarted = true;
@@ -2937,6 +2959,21 @@ export function clearActivePendingCardFill(
 ): void {
   const session = selectedSession ?? activeProvisionSession();
   session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
+  session.paymentFieldSealActive = !paymentFieldsCleared;
+}
+
+export function completeActivePendingCardFillWithUnconfirmedOutcome(
+  paymentFieldsCleared = true,
+  selectedSession?: Session,
+): void {
+  const session = selectedSession ?? activeProvisionSession();
+  const state = session.activePayment;
+  if (state?.status !== "confirming") {
+    throw new Error("operate_pay confirm lost ownership of the active payment state");
+  }
+  session.activePayment = paymentFieldsCleared
+    ? { status: "authenticated_pending_order" }
+    : { status: "sealed" };
   session.paymentFieldSealActive = !paymentFieldsCleared;
 }
 

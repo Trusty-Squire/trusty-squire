@@ -397,14 +397,6 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
----
-
-## Maintaining this file
-
-This file is a living contract, not a historical record. When you learn something during a task that would have changed how you approached it — a gotcha, a footgun, a rule that saved you from a mistake — add it here in the same pass, in the appropriate section. Keep entries proportionate: durable, repo-specific knowledge that the code/CI itself doesn't already make obvious, not step-by-step task narration. Prefer pointing at the authoritative file/command/doc over duplicating its content. Remove or correct entries you find to be stale or wrong rather than leaving them to mislead the next agent.
-
----
-
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.
@@ -473,3 +465,15 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
 
 - `packages/skill-schema/src/skill.ts` (`SkillSchema`, `entry_state`)
 - `apps/mcp/src/bot/promote-to-skill.ts`, `apps/mcp/src/bot/onboarding-capture.ts` (auto-promote)
+
+---
+
+## Maintaining this file
+
+This file is a living contract, not a historical record. Keep it for durable,
+repo-specific knowledge useful to almost every future agent session, not step-by-step
+task narration or facts already obvious from the code. When a task reveals a gotcha,
+footgun, or rule that would have changed the approach, add it in the same pass and
+point to the authoritative file, command, or document. Prefer rewriting or pruning
+existing guidance over appending duplicates, and remove stale guidance rather than
+leaving it to mislead the next agent.

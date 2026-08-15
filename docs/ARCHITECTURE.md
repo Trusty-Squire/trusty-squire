@@ -227,8 +227,13 @@ agent starts operate_pay in the addressed checkout session
   -> a missing submit control retains the pending fill for retry; terminal payment
      outcomes clear it
   -> when 3-D Secure is required, the API nudges a linked Telegram chat and
-     the operator waits for success or failure when waiting is enabled
-  -> timeout, or a disabled wait, hands the unresolved challenge to the user
+     the operator keeps the challenge frame active while waiting; Stripe-hosted
+     challenges also poll their PaymentIntent for out-of-band issuer completion
+  -> an out-of-band authentication reloads the checkout once so merchant code can
+     finish the order, but only a new terminal merchant route proves success;
+     otherwise payment_3ds_authenticated_pending_order requires a manual order check
+  -> a terminal Stripe failure is declined; timeout, or a disabled wait, hands the
+     unresolved challenge to the user
   -> the post-wait metadata-only payment status is audited
   -> operate_finish closes that session's admission gate, drains calls that already
      entered, and refuses teardown while a payment is active or resumable

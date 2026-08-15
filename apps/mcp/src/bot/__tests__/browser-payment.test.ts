@@ -4,12 +4,14 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
+  classifyStripePaymentIntentStatus,
   hasPayPalHostedCheckoutFrame,
   PaymentCardFillCleanupError,
   PaymentSubmitOutcomeUnknownError,
   parseCheckoutAmount,
   parseCheckoutAmounts,
   parseStructuredCheckoutTotal,
+  parseStripeChallengeParams,
   recognizedPaymentProviderFrame,
   UnrecognizedPaymentFrameError,
 } from "../browser.js";
@@ -458,6 +460,7 @@ describe("checkout payment parsing", () => {
       `);
         const controller = new BrowserController({ humanize: false });
         (controller as unknown as { page: Page }).page = page;
+        const bringToFront = vi.spyOn(page, "bringToFront");
 
         const result = await controller.fillAndSubmitCheckout({
           pan: "4242424242424242",
@@ -476,6 +479,7 @@ describe("checkout payment parsing", () => {
         expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
         expect(await page.locator("body").getAttribute("data-wrong-click")).toBeNull();
         expect(result.three_ds_required).toBe(true);
+        expect(bringToFront).toHaveBeenCalled();
       } finally {
         await browser.close();
       }
@@ -3756,4 +3760,355 @@ describe("split-checkout card fill (real browser)", () => {
       }
     },
   );
+});
+
+const STRIPE_CHALLENGE_URL =
+  "https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_synthetic123&payment_intent_client_secret=pi_synthetic123_secret_abc&publishable_key=pk_live_synthetic&stripe_account=acct_synthetic";
+
+describe("Stripe decoupled/OOB 3DS challenge parsing", () => {
+  it("extracts payment intent id, client secret, and publishable key from a hosted challenge URL", () => {
+    expect(parseStripeChallengeParams(STRIPE_CHALLENGE_URL)).toEqual({
+      paymentIntentId: "pi_synthetic123",
+      clientSecret: "pi_synthetic123_secret_abc",
+      publishableKey: "pk_live_synthetic",
+      accountId: "acct_synthetic",
+    });
+  });
+
+  it("accepts a non-Connect challenge without a Stripe account", () => {
+    expect(
+      parseStripeChallengeParams(
+        "https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_x&payment_intent_client_secret=pi_x_secret_y&publishable_key=pk_live_z",
+      ),
+    ).toEqual({
+      paymentIntentId: "pi_x",
+      clientSecret: "pi_x_secret_y",
+      publishableKey: "pk_live_z",
+    });
+  });
+
+  it("refuses a malformed connected-account id", () => {
+    expect(
+      parseStripeChallengeParams(
+        "https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_x&payment_intent_client_secret=pi_x_secret_y&publishable_key=pk_live_z&stripe_account=not_an_account",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("refuses a non-Stripe host even if the query params match", () => {
+    expect(
+      parseStripeChallengeParams(
+        "https://evil.test/3d_secure_2/hosted?payment_intent=pi_x&payment_intent_client_secret=pi_x_secret_y&publishable_key=pk_live_z",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("refuses when a required param is missing", () => {
+    expect(
+      parseStripeChallengeParams("https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_x"),
+    ).toBeUndefined();
+  });
+
+  it.each([
+    ["requires_action", "pending"],
+    ["succeeded", "authenticated"],
+    ["processing", "authenticated"],
+    ["requires_capture", "authenticated"],
+    ["requires_payment_method", "failed"],
+    ["canceled", "failed"],
+    ["requires_confirmation", "unknown"],
+  ] as const)("classifies PaymentIntent status %s as %s", (status, expected) => {
+    expect(classifyStripePaymentIntentStatus(status)).toBe(expected);
+  });
+});
+
+function controllerWithOobResolutionPage(options: {
+  confirmAfterReload?: boolean;
+  detectedChallengeUrl?: string;
+  dialogDuringReload?: boolean;
+  lateStripeFrameUrl?: string;
+  onReload?: () => void;
+}): {
+  bringToFront: ReturnType<typeof vi.fn>;
+  controller: BrowserController;
+  dismissDialog: ReturnType<typeof vi.fn>;
+  reload: ReturnType<typeof vi.fn>;
+} {
+  const currentUrl = "https://merchant.test/checkout";
+  let reloaded = false;
+  let lateStripeFrameVisible = false;
+  let dialogHandler: ((dialog: { dismiss: () => Promise<void> }) => Promise<void>) | undefined;
+  const dismissDialog = vi.fn(async () => undefined);
+  const bringToFront = vi.fn(async () => undefined);
+  const reload = vi.fn(async () => {
+    if (options.dialogDuringReload === true && dialogHandler !== undefined) {
+      await dialogHandler({ dismiss: dismissDialog });
+    }
+    options.onReload?.();
+    reloaded = true;
+  });
+  const lateStripeFrame = {
+    url: () => options.lateStripeFrameUrl ?? "",
+  };
+  const page = {
+    url: () => currentUrl,
+    frames: () => (lateStripeFrameVisible ? [lateStripeFrame] : []),
+    waitForTimeout: async () => undefined,
+    reload,
+    bringToFront,
+    on: vi.fn(
+      (event: string, handler: (dialog: { dismiss: () => Promise<void> }) => Promise<void>) => {
+        if (event === "dialog") dialogHandler = handler;
+      },
+    ),
+    off: vi.fn(
+      (event: string, handler: (dialog: { dismiss: () => Promise<void> }) => Promise<void>) => {
+        if (event === "dialog" && dialogHandler === handler) dialogHandler = undefined;
+      },
+    ),
+  };
+  const controller = new BrowserController({ humanize: false });
+  (controller as unknown as { page: Page }).page = page as unknown as Page;
+  Object.assign(controller, {
+    captureCheckoutOutcomeBaseline: async () => ({
+      url: currentUrl,
+      orderUrlIdentities: [],
+      terminalUrlIdentity: null,
+    }),
+    captureVisibleCheckoutFailureSignals: async () => ({}),
+    hasConfirmedCheckoutOutcome: async () => reloaded && options.confirmAfterReload === true,
+    hasNewVisibleCheckoutFailure: async () => false,
+    isFrameSurfaceTopmost: async () => true,
+    detectThreeDsChallenge: async () => {
+      lateStripeFrameVisible = options.lateStripeFrameUrl !== undefined;
+      return {
+        three_ds_required: true,
+        order_confirmed: false,
+        challenge_url: options.detectedChallengeUrl ?? STRIPE_CHALLENGE_URL,
+      };
+    },
+  });
+  return { bringToFront, controller, dismissDialog, reload };
+}
+
+describe("decoupled/out-of-band (app-push) 3DS completion", () => {
+  it("polls the PaymentIntent, reloads once authenticated, and fails closed if the order never confirms", async () => {
+    const statuses = ["requires_action", "succeeded"];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { bringToFront, controller, dismissDialog, reload } = controllerWithOobResolutionPage({
+      dialogDuringReload: true,
+    });
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+
+    try {
+      await expect(
+        controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
+      ).resolves.toBe("authenticated_pending_order");
+      expect(reload).toHaveBeenCalledTimes(1);
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("pi_synthetic123"),
+        expect.objectContaining({
+          headers: {
+            Authorization: "Bearer pk_live_synthetic",
+            "Stripe-Account": "acct_synthetic",
+          },
+        }),
+      );
+      expect(dismissDialog).toHaveBeenCalledTimes(1);
+      expect(bringToFront).toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("reports success once the reloaded checkout shows a genuine merchant completion", async () => {
+    const statuses = ["requires_action", "succeeded"];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { controller } = controllerWithOobResolutionPage({
+      confirmAfterReload: true,
+    });
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+
+    try {
+      await expect(
+        controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
+      ).resolves.toBe("succeeded");
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("starts the merchant confirmation grace period after a slow reload settles", async () => {
+    const statuses = ["requires_action", "succeeded"];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    let now = 0;
+    const { controller } = controllerWithOobResolutionPage({
+      confirmAfterReload: true,
+      onReload: () => {
+        now += 31_000;
+      },
+    });
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+
+    try {
+      await expect(
+        controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
+      ).resolves.toBe("succeeded");
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("polls non-Connect PaymentIntents without a Stripe-Account header", async () => {
+    const statuses = ["requires_action", "succeeded"];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { controller } = controllerWithOobResolutionPage({});
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+    const challengeUrl = STRIPE_CHALLENGE_URL.replace("&stripe_account=acct_synthetic", "");
+
+    try {
+      await expect(controller.waitForThreeDsResolution(120_000, challengeUrl)).resolves.toBe(
+        "authenticated_pending_order",
+      );
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          headers: { Authorization: "Bearer pk_live_synthetic" },
+        }),
+      );
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("discovers and pins a nested Stripe challenge frame that loads after detection", async () => {
+    const statuses = ["requires_action", "succeeded"];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { controller, reload } = controllerWithOobResolutionPage({
+      detectedChallengeUrl: "https://merchant.test/checkout",
+      lateStripeFrameUrl: STRIPE_CHALLENGE_URL,
+    });
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+
+    try {
+      await expect(
+        controller.waitForThreeDsResolution(120_000, "https://merchant.test/checkout"),
+      ).resolves.toBe("authenticated_pending_order");
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("pi_synthetic123"),
+        expect.any(Object),
+      );
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("returns failed when the issuer-side PaymentIntent lands in a terminal failure state", async () => {
+    const statuses = ["requires_action", "requires_payment_method"];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: statuses.shift() ?? "requires_payment_method" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { controller, reload } = controllerWithOobResolutionPage({});
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+
+    try {
+      await expect(
+        controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
+      ).resolves.toBe("failed");
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("does not reload unless it observes this PaymentIntent leave requires_action", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { controller, reload } = controllerWithOobResolutionPage({});
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+
+    try {
+      await expect(controller.waitForThreeDsResolution(10_000, STRIPE_CHALLENGE_URL)).resolves.toBe(
+        "timeout",
+      );
+      expect(fetchMock).toHaveBeenCalled();
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("never polls Stripe or reloads for the ordinary in-frame challenge (no challenge_url)", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { controller, reload } = controllerWithOobResolutionPage({});
+
+    try {
+      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("timeout");
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(reload).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });

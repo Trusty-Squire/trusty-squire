@@ -65,12 +65,16 @@ export function formatVaultEventMessage(event: VaultAuditEventInput, at: Date): 
       return `💳 Card added: ${cardSubject(p)} · ${ts}`;
     case VAULT_AUDIT_TYPES.cardDeleted:
       return `💳 Card removed: ${cardSubject(p)} · ${p.reference} · ${ts}`;
-    case VAULT_AUDIT_TYPES.paymentExecuted:
-      return `💸 Payment ${p.payment_status ?? "executed"}: ${p.merchant ?? "unknown merchant"}${
+    case VAULT_AUDIT_TYPES.paymentExecuted: {
+      const paymentDetail = `${p.merchant ?? "unknown merchant"}${
         p.amount_cents !== undefined && p.currency !== undefined
           ? ` — ${formatCurrencyAmount(p.amount_cents, p.currency)}`
           : ""
       }${p.last4 !== undefined ? ` ··${p.last4}` : ""} · ${ts}`;
+      return p.payment_status === "payment_3ds_authenticated_pending_order"
+        ? `⚠️ Payment pending — manual order check required: ${paymentDetail}`
+        : `💸 Payment ${p.payment_status ?? "executed"}: ${paymentDetail}`;
+    }
     case VAULT_AUDIT_TYPES.grantMinted:
       return `🔗 Egress grant minted: ${subject} · ${ts}`;
     case VAULT_AUDIT_TYPES.grantRevoked:
