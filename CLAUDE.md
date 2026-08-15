@@ -620,11 +620,8 @@ kill the server).
   above 0. Reports `pending`/`approved`/`expired` plus `candidate_submitted`
   (the phone responded; call `operate_pay` again to actually verify the
   mandate, open the card, and fill/charge — this tool never does that).
-  `operate_payment_await(session_id?, max_wait_seconds?)`, the increment-4
-  consolidation's delegating alias, was dropped from the registry (captain's
-  decision 2026-08-15, the last remaining operator alias) — `paymentStatusResult()`
-  in `operate-pay.ts` remains the sole handler, called only by
-  `operate_payment_status` now.
+  `paymentStatusResult()` in `operate-pay.ts` is the sole handler, called only
+  by `operate_payment_status`; no payment-status alias remains in the registry.
 - **Validated idempotent resume.** A still-pending call
   hands its resumable state (approval id/nonce/keypair/checkout/rejected-
   candidates — `PendingApprovalWait` in `pay-operator.ts`) to session state

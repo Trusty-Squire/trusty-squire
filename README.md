@@ -234,9 +234,8 @@ is `operate_start`, `operate_observe`, `operate_act`, `operate_pay`,
 `operate_payment_status`, `operate_finish`, `operate_recipe_run`, and
 `operate_recipe_save` — every former standalone workflow/lifecycle/login tool
 name was dropped and its behavior folded into `operate_act` as a `kind` (or into
-`operate_finish`'s `outcome`); none of those folded operator names remains as a
-delegating alias. `operate_payment_await` was the last remaining alias and is
-also dropped — poll payment status via `operate_payment_status(wait_seconds)`.
+`operate_finish`'s `outcome`); no delegating aliases remain. Poll payment status
+via `operate_payment_status(wait_seconds)`.
 The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
