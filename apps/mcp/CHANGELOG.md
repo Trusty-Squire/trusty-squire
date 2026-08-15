@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.22 (2026-08-15)
+
+- fix(mcp): complete decoupled/out-of-band (app-push) 3DS challenges instead of only detecting and waiting on them, so orders authenticated in a mobile banking app finalize instead of leaving `payment_outcome_unknown` (#524)
+
 ## 1.1.9-rc.21 (2026-08-14)
 
 - fix(mcp): preserve merchant shipping controls on single-page Shopify checkout after "Pay now" by clearing only positively-owned card/billing fields; detect in-page Shopify/DBS 3DS challenges so the 3DS wait engages; and fail closed unless a structural order-confirmation URL is reached, returning `payment_outcome_unknown` for uncertain outcomes rather than a false success (#516)
