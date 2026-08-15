@@ -119,11 +119,10 @@ interface PayDependencies {
   onCardFillCleanupFailed: () => void;
   onSubmitStarted: () => void;
   // fill_card only, and only consulted when the live card-entry page itself
-  // has no readable total (Rakuten-style split checkouts). The most recent
-  // successfully-parsed checkout total observed earlier in THIS session (the
-  // cart page), scoped to the same origin. Never sourced from tool input —
-  // the approval still binds to a real, browser-read amount, never a
-  // caller-supplied one.
+  // has no readable total and amount_cents plus currency were not supplied.
+  // The most recent successfully-parsed checkout total observed earlier in
+  // THIS session (the cart page), scoped to the same origin. Caller-supplied
+  // amount_cents plus currency take precedence when the page total is unreadable.
   cartFallbackCheckout?: CartCheckoutObservation;
   // [P0] Resume a previously-created, still-pending approval instead of
   // minting a new one. Set by the MCP tool layer from session state when a
@@ -1436,8 +1435,8 @@ export async function executeOperatePayConfirm(
   }
   // Merchant is deliberately NOT compared: it derives from the page title,
   // which legitimately changes between checkout steps ("Payment" → "Review
-  // order"). Origin and currency are exact trust anchors — both were read for
-  // real (the amount-bound approval at fill), never a caller-supplied value.
+  // order"). Origin and currency remain exact matches against the amount-bound
+  // approval created at fill.
   if (live.checkout_origin !== checkout.checkout_origin || live.currency !== checkout.currency) {
     return {
       status: "payment_amount_mismatch",

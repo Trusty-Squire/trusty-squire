@@ -495,7 +495,13 @@ describe("operate_pay", () => {
     const browser: PaymentBrowser = {
       isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
       readCheckoutSummary: vi.fn().mockRejectedValue(new Error("payment_checkout_total_not_found")),
+      readCheckoutConfirmSummary: vi
+        .fn()
+        .mockRejectedValue(new Error("payment_checkout_total_not_found")),
       currentUrl: vi.fn().mockReturnValue(`${checkoutOrigin}/session/test`),
+      fillCheckoutCardFields: vi.fn(),
+      submitFilledCheckout: vi.fn(),
+      clearSealedPaymentFields: vi.fn().mockResolvedValue(undefined),
       fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
         filledCards.push(card);
         return { three_ds_required: false, order_confirmed: true };
