@@ -73,12 +73,15 @@ between approval and submission. Card entry, sealing, and cleanup touch only the
 selected card controls and explicitly labeled billing controls inside that payment
 context; merchant shipping address and country controls remain untouched. A submit
 is reported as `payment_submitted` only after the checkout reaches a new merchant
-order-confirmation URL. A bare click, or a 3-D Secure prompt that disappears without
-that confirmation, returns `payment_outcome_unknown` instead of guessing that the
-charge succeeded. If the issuer authenticates out of band but the merchant order is
-still not confirmed, the distinct `payment_3ds_authenticated_pending_order` status
-is returned. Neither status is success, and neither permits blind resubmission:
-manually check the merchant's order state before any retry.
+order-confirmation URL. The browser completes 3-D Secure natively, including
+out-of-band bank-app challenges — Trusty Squire never manipulates or intercepts
+the challenge; it uses read-only checks while polling the outer page for that same
+order-confirmation signal. A bare click with no
+challenge detected returns `payment_outcome_unknown` instead of guessing that the
+charge succeeded. A detected challenge that remains unresolved on timeout stays
+`payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user
+completion. Neither status is success or permits blind resubmission: manually check
+the merchant's order state before any retry.
 
 Every payment response includes its `session_id`. Pass that same ID to every
 follow-up `operate_pay` and canonical `operate_payment_status` call. Pass
@@ -117,11 +120,10 @@ or Shopify PCI card fields. Trusty Squire does not sign in to PayPal or use vaul
 PayPal credentials. If the issuer requires 3-D Secure, Trusty Squire notifies
 your linked Telegram chat with a nudge to approve the charge in your bank app,
 then waits 180 seconds by default for that in-app approval to clear instead of
-automating it. Visible Shopify and DBS bank-app approval prompts, including a
-visible “60 seconds to confirm” countdown, activate that wait; the ordinary
-Shopify PCI card-field host alone does not. It reports a visible decline and
-hands an unresolved challenge back on timeout, noting whether the Telegram
-nudge actually went out.
+automating it. Standard 3-D Secure signals and bank-agnostic CardinalCommerce or
+Stripe challenge frames activate that wait; the ordinary Shopify PCI card-field host
+alone does not. It reports a visible decline and hands an unresolved challenge
+back on timeout, noting whether the Telegram nudge actually went out.
 `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to `0` on
 `operate_pay` to skip the notification and waiting and receive the handoff
 immediately.

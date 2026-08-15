@@ -27,7 +27,6 @@ import type {
   Browser,
   BrowserContext,
   CDPSession,
-  Dialog,
   ElementHandle,
   FileChooser,
   Frame,
@@ -263,8 +262,6 @@ interface CheckoutOutcomeDispatchSnapshot {
   urls: readonly string[];
 }
 
-type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
-
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
   // A dispatched click is not a payment outcome. The submit path sets this
@@ -273,89 +270,13 @@ export interface CheckoutSubmitResult {
   challenge_url?: string;
 }
 
-export type ThreeDsResolution =
-  | "succeeded"
-  | "failed"
-  | "timeout"
-  | "unconfirmed"
-  | "authenticated_pending_order";
-
-const THREE_DS_RESOLUTION_GRACE_MS = 5_000;
-
-interface StripeChallengeParams {
-  paymentIntentId: string;
-  clientSecret: string;
-  publishableKey: string;
-  accountId?: string;
-}
-
-// Stripe's decoupled/OOB (app-push) 3DS ACS never posts back into the in-page
-// challenge iframe, so the DOM-only success/failure text and URL heuristics in
-// waitForThreeDsResolution below can never observe it. The PaymentIntent's own
-// status is the one signal the issuer's out-of-band authentication actually
-// updates. Parsing it from the hosted-challenge URL (query params Stripe.js
-// itself puts there) needs only the publishable key — never the account's
-// secret key — the same public retrieve-with-client-secret call Stripe.js
-// makes client-side to poll a decoupled challenge.
-export function parseStripeChallengeParams(url: string): StripeChallengeParams | undefined {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return undefined;
-  }
-  if (!/(^|\.)stripe\.com$/i.test(parsed.hostname)) return undefined;
-  const paymentIntentId = parsed.searchParams.get("payment_intent");
-  const clientSecret = parsed.searchParams.get("payment_intent_client_secret");
-  const publishableKey = parsed.searchParams.get("publishable_key");
-  const accountId = parsed.searchParams.get("stripe_account");
-  if (!paymentIntentId || !clientSecret || !publishableKey) return undefined;
-  if (!paymentIntentId.startsWith("pi_")) return undefined;
-  if (accountId !== null && !/^acct_[A-Za-z0-9]+$/.test(accountId)) return undefined;
-  return {
-    paymentIntentId,
-    clientSecret,
-    publishableKey,
-    ...(accountId !== null ? { accountId } : {}),
-  };
-}
-
-type StripePaymentIntentOutcome = "authenticated" | "failed" | "pending" | "unknown";
-
-// Authoritative-signal classification, not a guess: requires_action means the
-// challenge is still open; succeeded/processing/requires_capture mean the ACS
-// authenticated the cardholder (issuer-side truth for decoupled 3DS);
-// requires_payment_method/canceled are Stripe's own failure states.
-export function classifyStripePaymentIntentStatus(status: string): StripePaymentIntentOutcome {
-  if (status === "requires_action") return "pending";
-  if (status === "succeeded" || status === "processing" || status === "requires_capture") {
-    return "authenticated";
-  }
-  if (status === "requires_payment_method" || status === "canceled") return "failed";
-  return "unknown";
-}
-
-async function fetchStripePaymentIntentStatus(
-  params: StripeChallengeParams,
-): Promise<string | undefined> {
-  try {
-    const res = await fetch(
-      `https://api.stripe.com/v1/payment_intents/${encodeURIComponent(params.paymentIntentId)}?client_secret=${encodeURIComponent(params.clientSecret)}`,
-      {
-        headers: {
-          Authorization: `Bearer ${params.publishableKey}`,
-          ...(params.accountId !== undefined ? { "Stripe-Account": params.accountId } : {}),
-        },
-        signal: AbortSignal.timeout(10_000),
-      },
-    );
-    if (!res.ok) return undefined;
-    const body = (await res.json()) as { status?: unknown };
-    return typeof body.status === "string" ? body.status : undefined;
-  } catch {
-    return undefined;
-  }
-}
+// The browser completes 3-D Secure natively (its own checkout JS drives the
+// challenge, including out-of-band bank-app pushes) — we only classify the
+// outcome once it's over. An earlier operator-side detect/wait/teardown
+// machine (rc.21-rc.22) intercepted the challenge instead and could never
+// finish a decoupled/app-push ACS handshake in the headless operator
+// browser; do not reintroduce interception here.
+export type ThreeDsResolution = "succeeded" | "failed" | "timeout";
 
 interface CheckoutFrameDescriptor {
   url: string;
@@ -1513,143 +1434,6 @@ function extractObservationVisibleText(): string {
     }
   }
   return text;
-}
-
-function extractVisibleTopmostTextSignals({
-  source,
-  flags,
-}: {
-  source: string;
-  flags: string;
-}): Record<string, number> {
-  const pattern = new RegExp(source, flags);
-  const normalize = (text: string): string => text.replace(/\s+/g, " ").trim();
-  const canonicalize = (text: string): string =>
-    text
-      .normalize("NFKC")
-      .toLowerCase()
-      .replace(/[*•●◦▪■□×]+/g, " masked ")
-      .replace(/[^a-z0-9]+/g, " ")
-      .trim();
-  const visuallyTopmostAtPoint = (element: Element, x: number, y: number): boolean => {
-    const restored: Array<{
-      element: HTMLElement;
-      priority: string;
-      value: string;
-    }> = [];
-    for (const candidate of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
-      const style = getComputedStyle(candidate);
-      if (
-        style.pointerEvents !== "none" ||
-        style.display === "none" ||
-        style.visibility === "hidden" ||
-        Number.parseFloat(style.opacity) <= 0 ||
-        !Array.from(candidate.getClientRects()).some(
-          (rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
-        )
-      ) {
-        continue;
-      }
-      restored.push({
-        element: candidate,
-        priority: candidate.style.getPropertyPriority("pointer-events"),
-        value: candidate.style.getPropertyValue("pointer-events"),
-      });
-      candidate.style.setProperty("pointer-events", "auto", "important");
-    }
-    const hit = document.elementFromPoint(x, y);
-    for (const original of restored) {
-      if (original.value.length === 0) {
-        original.element.style.removeProperty("pointer-events");
-      } else {
-        original.element.style.setProperty("pointer-events", original.value, original.priority);
-      }
-    }
-    return hit === element;
-  };
-  const visibleAndTopmost = (node: Text): boolean => {
-    const element = node.parentElement;
-    if (element === null) return false;
-    let ancestor: HTMLElement | null = element as HTMLElement;
-    while (ancestor !== null) {
-      const style = getComputedStyle(ancestor);
-      if (
-        style.display === "none" ||
-        style.visibility === "hidden" ||
-        style.visibility === "collapse" ||
-        Number.parseFloat(style.opacity) <= 0
-      ) {
-        return false;
-      }
-      ancestor = ancestor.parentElement;
-    }
-    const range = document.createRange();
-    range.selectNodeContents(node);
-    for (const rect of Array.from(range.getClientRects())) {
-      if (rect.width < 1 || rect.height < 1) continue;
-      const left = Math.max(0, rect.left);
-      const right = Math.min(window.innerWidth, rect.right);
-      const top = Math.max(0, rect.top);
-      const bottom = Math.min(window.innerHeight, rect.bottom);
-      if (right <= left || bottom <= top) continue;
-      const x = left + (right - left) / 2;
-      const y = top + (bottom - top) / 2;
-      if (visuallyTopmostAtPoint(element, x, y)) return true;
-    }
-    return false;
-  };
-  const signals: Record<string, number> = {};
-  const body = document.body;
-  if (body === null) return signals;
-  const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
-  const splitCandidateMatches = new Map<Element, string | null>();
-  const splitCandidates = new Map<Element, string>();
-  let node = walker.nextNode();
-  while (node !== null) {
-    const text = normalize(node.textContent ?? "");
-    pattern.lastIndex = 0;
-    const match = text.length > 0 && text.length <= 500 ? pattern.exec(text) : null;
-    pattern.lastIndex = 0;
-    if (match !== null && visibleAndTopmost(node as Text)) {
-      const signal = canonicalize(match[0]);
-      if (signal.length > 0) signals[signal] = 1;
-    } else if (match === null && text.length > 0) {
-      let container = node.parentElement;
-      for (let depth = 0; container !== null && depth < 4; depth += 1) {
-        let combinedMatchText: string | null;
-        if (splitCandidateMatches.has(container)) {
-          combinedMatchText = splitCandidateMatches.get(container) ?? null;
-        } else {
-          const combined = normalize(container.textContent ?? "");
-          pattern.lastIndex = 0;
-          const combinedMatch =
-            combined.length > 0 && combined.length <= 500 ? pattern.exec(combined) : null;
-          pattern.lastIndex = 0;
-          combinedMatchText = combinedMatch?.[0] ?? null;
-          splitCandidateMatches.set(container, combinedMatchText);
-        }
-        if (combinedMatchText !== null) {
-          splitCandidates.set(container, combinedMatchText);
-          break;
-        }
-        container = container.parentElement;
-      }
-    }
-    node = walker.nextNode();
-  }
-  for (const [container, match] of splitCandidates) {
-    const textNodes: Text[] = [];
-    const containerWalker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-    let textNode = containerWalker.nextNode();
-    while (textNode !== null) {
-      if (normalize(textNode.textContent ?? "").length > 0) textNodes.push(textNode as Text);
-      textNode = containerWalker.nextNode();
-    }
-    if (textNodes.length < 2 || !textNodes.every(visibleAndTopmost)) continue;
-    const signal = canonicalize(match);
-    if (signal.length > 0) signals[signal] = 1;
-  }
-  return signals;
 }
 
 const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
@@ -2829,8 +2613,6 @@ export class BrowserController {
   private page: Page | null = null;
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
-  private checkoutFailureBaseline: CheckoutFailureBaseline | undefined;
-  private checkoutThreeDsPending = false;
   private checkoutSubmitSequence = 0;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
@@ -9270,11 +9052,8 @@ export class BrowserController {
     cardGroup?: CheckoutCardGroupScope,
   ): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
-    this.checkoutThreeDsPending = false;
-    const failureBaseline = await this.captureVisibleCheckoutFailureSignals();
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
     this.checkoutOutcomeBaseline = undefined;
-    this.checkoutFailureBaseline = failureBaseline;
     let submitted = false;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
@@ -9521,14 +9300,10 @@ export class BrowserController {
       const challengeDeadline = Date.now() + 15_000;
       while (Date.now() < challengeDeadline) {
         if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
-          this.checkoutThreeDsPending = false;
           return { three_ds_required: false, order_confirmed: true };
         }
         const challenge = await this.detectThreeDsChallenge();
-        if (challenge.three_ds_required) {
-          this.checkoutThreeDsPending = true;
-          return challenge;
-        }
+        if (challenge.three_ds_required) return challenge;
         await this.page.waitForTimeout(250).catch(() => undefined);
       }
       return { three_ds_required: false, order_confirmed: false };
@@ -9633,314 +9408,26 @@ export class BrowserController {
     }
   }
 
-  private async isFrameSurfaceTopmost(frame: Frame): Promise<boolean> {
-    let childFrame = frame;
-    let parentFrame = childFrame.parentFrame();
-    while (parentFrame !== null) {
-      const owner = await childFrame.frameElement().catch(() => null);
-      if (owner === null) return false;
-      const topmost = await owner
-        .evaluate((element) => {
-          const visualHitAtPoint = (x: number, y: number): Element | null => {
-            const restored: Array<{
-              element: HTMLElement;
-              priority: string;
-              value: string;
-            }> = [];
-            for (const candidate of Array.from(document.querySelectorAll<HTMLElement>("body *"))) {
-              const style = getComputedStyle(candidate);
-              if (
-                style.pointerEvents !== "none" ||
-                style.display === "none" ||
-                style.visibility === "hidden" ||
-                Number.parseFloat(style.opacity) <= 0 ||
-                !Array.from(candidate.getClientRects()).some(
-                  (rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
-                )
-              ) {
-                continue;
-              }
-              restored.push({
-                element: candidate,
-                priority: candidate.style.getPropertyPriority("pointer-events"),
-                value: candidate.style.getPropertyValue("pointer-events"),
-              });
-              candidate.style.setProperty("pointer-events", "auto", "important");
-            }
-            const hit = document.elementFromPoint(x, y);
-            for (const original of restored) {
-              if (original.value.length === 0) {
-                original.element.style.removeProperty("pointer-events");
-              } else {
-                original.element.style.setProperty(
-                  "pointer-events",
-                  original.value,
-                  original.priority,
-                );
-              }
-            }
-            return hit;
-          };
-          if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) {
-            return false;
-          }
-          let current: HTMLElement | null = element;
-          while (current !== null) {
-            const style = getComputedStyle(current);
-            if (
-              style.display === "none" ||
-              style.visibility === "hidden" ||
-              style.visibility === "collapse" ||
-              Number.parseFloat(style.opacity) <= 0
-            ) {
-              return false;
-            }
-            current = current.parentElement;
-          }
-          const rect = element.getBoundingClientRect();
-          if (rect.width < 1 || rect.height < 1) return false;
-          const x = Math.min(window.innerWidth - 1, Math.max(0, rect.left + rect.width / 2));
-          const y = Math.min(window.innerHeight - 1, Math.max(0, rect.top + rect.height / 2));
-          const hit = visualHitAtPoint(x, y);
-          return hit !== null && (hit === element || element.contains(hit));
-        })
-        .catch(() => false);
-      await owner.dispose().catch(() => undefined);
-      if (!topmost) return false;
-      childFrame = parentFrame;
-      parentFrame = childFrame.parentFrame();
-    }
-    return true;
-  }
-
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
-    const urlPattern = /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/)/i;
+    const urlPattern =
+      /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/|challenge)/i;
     for (const frame of this.page.frames()) {
-      if (!(await this.isFrameSurfaceTopmost(frame))) continue;
-      let frameContext = frame === this.page.mainFrame() ? "" : `${frame.name()} ${frame.url()}`;
-      if (frame !== this.page.mainFrame()) {
-        const owner = await frame.frameElement().catch(() => null);
-        if (owner !== null) {
-          frameContext += await owner
-            .evaluate((element) => {
-              if (!(element instanceof Element)) return "";
-              return [
-                element.id,
-                element.className,
-                element.getAttribute("name"),
-                element.getAttribute("title"),
-                element.getAttribute("aria-label"),
-                element.getAttribute("data-testid"),
-              ]
-                .filter((value): value is string => typeof value === "string")
-                .join(" ");
-            })
-            .catch(() => "");
-          await owner.dispose().catch(() => undefined);
-        }
-      }
-      let frameUrlContext = frame.url();
-      let shopifyPciFrame = false;
-      try {
-        const parsedFrameUrl = new URL(frameUrlContext);
-        shopifyPciFrame =
-          parsedFrameUrl.protocol === "https:" &&
-          parsedFrameUrl.hostname === "checkout.pci.shopifyinc.com";
-        frameUrlContext = `${parsedFrameUrl.hostname}${parsedFrameUrl.pathname}`;
-      } catch {
-        frameUrlContext = "";
-      }
       const detected =
-        urlPattern.test(frameUrlContext) ||
+        urlPattern.test(frame.url()) ||
         (await frame
-          .evaluate(
-            ({ externalContext, shopifyPciFrame }) => {
-              const visualHitAtPoint = (x: number, y: number): Element | null => {
-                const restored: Array<{
-                  element: HTMLElement;
-                  priority: string;
-                  value: string;
-                }> = [];
-                for (const candidate of Array.from(
-                  document.querySelectorAll<HTMLElement>("body *"),
-                )) {
-                  const style = getComputedStyle(candidate);
-                  if (
-                    style.pointerEvents !== "none" ||
-                    style.display === "none" ||
-                    style.visibility === "hidden" ||
-                    Number.parseFloat(style.opacity) <= 0 ||
-                    !Array.from(candidate.getClientRects()).some(
-                      (rect) =>
-                        x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom,
-                    )
-                  ) {
-                    continue;
-                  }
-                  restored.push({
-                    element: candidate,
-                    priority: candidate.style.getPropertyPriority("pointer-events"),
-                    value: candidate.style.getPropertyValue("pointer-events"),
-                  });
-                  candidate.style.setProperty("pointer-events", "auto", "important");
-                }
-                const hit = document.elementFromPoint(x, y);
-                for (const original of restored) {
-                  if (original.value.length === 0) {
-                    original.element.style.removeProperty("pointer-events");
-                  } else {
-                    original.element.style.setProperty(
-                      "pointer-events",
-                      original.value,
-                      original.priority,
-                    );
-                  }
-                }
-                return hit;
-              };
-              const visibleAndTopmost = (element: Element): boolean => {
-                if (!(element instanceof HTMLElement) || element.getClientRects().length === 0) {
-                  return false;
-                }
-                let current: HTMLElement | null = element;
-                while (current !== null) {
-                  const style = getComputedStyle(current);
-                  if (
-                    style.display === "none" ||
-                    style.visibility === "hidden" ||
-                    style.visibility === "collapse" ||
-                    Number.parseFloat(style.opacity) <= 0
-                  ) {
-                    return false;
-                  }
-                  current = current.parentElement;
-                }
-                return Array.from(element.getClientRects()).some((rect) => {
-                  const left = Math.max(0, rect.left);
-                  const right = Math.min(window.innerWidth, rect.right);
-                  const top = Math.max(0, rect.top);
-                  const bottom = Math.min(window.innerHeight, rect.bottom);
-                  if (right <= left || bottom <= top) return false;
-                  const x = left + (right - left) / 2;
-                  const y = top + (bottom - top) / 2;
-                  return visualHitAtPoint(x, y) === element;
-                });
-              };
-              const visibleTextAndTopmost = (node: Text): boolean => {
-                const element = node.parentElement;
-                if (element === null) return false;
-                let current: HTMLElement | null = element;
-                while (current !== null) {
-                  const style = getComputedStyle(current);
-                  if (
-                    style.display === "none" ||
-                    style.visibility === "hidden" ||
-                    style.visibility === "collapse" ||
-                    Number.parseFloat(style.opacity) <= 0
-                  ) {
-                    return false;
-                  }
-                  current = current.parentElement;
-                }
-                const range = document.createRange();
-                range.selectNodeContents(node);
-                return Array.from(range.getClientRects()).some((rect) => {
-                  const left = Math.max(0, rect.left);
-                  const right = Math.min(window.innerWidth, rect.right);
-                  const top = Math.max(0, rect.top);
-                  const bottom = Math.min(window.innerHeight, rect.bottom);
-                  if (right <= left || bottom <= top) return false;
-                  const x = left + (right - left) / 2;
-                  const y = top + (bottom - top) / 2;
-                  return visualHitAtPoint(x, y) === element;
-                });
-              };
-              const structural = Array.from(
-                document.querySelectorAll(
-                  'iframe[title*="3d secure" i],form:has(input[name="creq" i]),form[action*="acs" i]',
-                ),
-              ).some(
-                (element) =>
-                  visibleAndTopmost(element) ||
-                  Array.from(element.querySelectorAll("button,input,select,textarea")).some(
-                    visibleAndTopmost,
-                  ),
-              );
-              if (structural) return true;
-              const hasKnownChallengeContext = (context: string): boolean => {
-                const explicitThreeDs =
-                  /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
-                const shopifyChallenge =
-                  /(?:shopify|shopifyinc)/i.test(context) &&
-                  /(?:authentication|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
-                const dbsChallenge =
-                  /\bdbs\b/i.test(context) &&
-                  /(?:bank(?:ing)?\s+app|authentication|challenge|approval|3d[-_ ]?secure|\b3ds2?\b)/i.test(
-                    context,
-                  );
-                const issuerAuthentication =
-                  /\bissuer\b/i.test(context) &&
-                  /(?:authentication|challenge|3d[-_ ]?secure|\b3ds2?\b|\bacs\b)/i.test(context);
-                return explicitThreeDs || shopifyChallenge || dbsChallenge || issuerAuthentication;
-              };
-              const explicitText =
-                /\b(?:3d secure|authenticate (?:this )?payment|security code sent to)\b/i;
-              const contextualText = /\bverify (?:your )?identity\b/i;
-              const countdownText = /\b\d{1,3}\s+seconds?\s+to\s+confirm\b/i;
-              const bankAppText =
-                /\b(?:confirm|approve)\b.{0,80}\b(?:bank|banking|issuer)\s+app\b/i;
-              const dbsBankAppText =
-                /\b(?:confirm|approve)\b.{0,80}\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b|\bdbs\b.{0,80}\b(?:bank(?:ing)?\s+app|digibank)\b.{0,80}\b(?:confirm|approve)\b/i;
-              const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-              let node = walker.nextNode();
-              while (node !== null) {
-                const text = (node.nodeValue ?? "").replace(/\s+/g, " ").trim();
-                const element = node.parentElement;
-                if (text.length > 0 && element !== null) {
-                  const explicitMatch = explicitText.test(text);
-                  const dbsBankAppMatch = dbsBankAppText.test(text);
-                  const countdownMatch = countdownText.test(text);
-                  const bankAppMatch = bankAppText.test(text);
-                  const contextualMatch = contextualText.test(text);
-                  if (
-                    (explicitMatch ||
-                      dbsBankAppMatch ||
-                      countdownMatch ||
-                      bankAppMatch ||
-                      contextualMatch) &&
-                    visibleTextAndTopmost(node as Text)
-                  ) {
-                    if (explicitMatch) return true;
-                    if (dbsBankAppMatch || (shopifyPciFrame && (countdownMatch || bankAppMatch))) {
-                      return true;
-                    }
-                    const context: string[] = [externalContext];
-                    let ancestor: Element | null = element;
-                    for (let depth = 0; ancestor !== null && depth < 8; depth += 1) {
-                      context.push(
-                        [
-                          ancestor.id,
-                          ancestor.className,
-                          ancestor.getAttribute("name"),
-                          ancestor.getAttribute("title"),
-                          ancestor.getAttribute("aria-label"),
-                          ancestor.getAttribute("data-testid"),
-                        ]
-                          .filter((value): value is string => typeof value === "string")
-                          .join(" "),
-                      );
-                      ancestor = ancestor.parentElement;
-                    }
-                    if (hasKnownChallengeContext(context.join(" "))) return true;
-                  }
-                }
-                node = walker.nextNode();
-              }
-              return false;
-            },
-            { externalContext: frameContext, shopifyPciFrame },
-          )
+          .evaluate(() => {
+            const text = document.body?.innerText ?? "";
+            if (
+              document.querySelector(
+                'iframe[name*="challenge" i],iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
+              ) !== null
+            )
+              return true;
+            return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
+              text,
+            );
+          })
           .catch(() => false));
       if (detected) {
         return {
@@ -9979,163 +9466,31 @@ export class BrowserController {
     );
   }
 
-  private async captureVisibleCheckoutFailureSignals(): Promise<CheckoutFailureBaseline> {
-    if (!this.page) return null;
-    const failureText =
-      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
-    const frameSignals = await Promise.all(
-      this.page.frames().map(async (frame) => {
-        if (!(await this.isFrameSurfaceTopmost(frame))) return {};
-        const signals = await frame
-          .evaluate(extractVisibleTopmostTextSignals, {
-            source: failureText.source,
-            flags: failureText.flags,
-          })
-          .catch(() => null);
-        if (signals === null) return null;
-        return signals;
-      }),
-    );
-    const combined: Record<string, number> = {};
-    for (const signals of frameSignals) {
-      if (signals === null) return null;
-      for (const [signal, count] of Object.entries(signals)) {
-        combined[signal] = (combined[signal] ?? 0) + count;
-      }
-    }
-    return combined;
-  }
-
-  private async hasNewVisibleCheckoutFailure(baseline: CheckoutFailureBaseline): Promise<boolean> {
-    if (baseline === null) return false;
-    const current = await this.captureVisibleCheckoutFailureSignals();
-    if (current === null) return false;
-    return Object.entries(current).some(([signal, count]) => count > (baseline[signal] ?? 0));
-  }
-
-  private async discoverActiveStripeChallengeParams(): Promise<StripeChallengeParams | undefined> {
-    if (!this.page) return undefined;
-    for (const frame of [...this.page.frames()].reverse()) {
-      const params = parseStripeChallengeParams(frame.url());
-      if (params !== undefined && (await this.isFrameSurfaceTopmost(frame))) return params;
-    }
-    return undefined;
-  }
-
-  async waitForThreeDsResolution(
-    timeoutMs: number,
-    challengeUrl?: string,
-  ): Promise<ThreeDsResolution> {
+  // Let the browser complete the challenge natively (including out-of-band
+  // bank-app 3DS): just poll for the same terminal-order signal a plain
+  // non-3DS checkout uses, plus a passive plain-text decline check. It never
+  // manipulates, intercepts, or gates completion on the challenge frame.
+  async waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution> {
     if (!this.page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
-    const failureBaseline =
-      this.checkoutFailureBaseline ?? (await this.captureVisibleCheckoutFailureSignals());
+    const failureText =
+      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
     const deadline = Date.now() + timeoutMs;
-    let challengeWasActive = this.checkoutThreeDsPending;
-    let challengeAbsentSince: number | undefined;
-    let stripeParams =
-      challengeUrl !== undefined ? parseStripeChallengeParams(challengeUrl) : undefined;
-    // Poll the PaymentIntent far less often than the DOM loop (every ~3s) —
-    // it's a real network call against Stripe, the DOM loop is local.
-    let nextStripePollAt = Date.now();
-    let reloadedForOob = false;
-    let stripeRequiresActionObserved = false;
-    // Once the ACS confirms OOB, give the merchant's own completion JS a
-    // bounded grace period to redirect/render the receipt before giving up.
-    let oobGraceDeadline: number | undefined;
     do {
       await this.page.bringToFront().catch(() => undefined);
-      stripeParams ??= await this.discoverActiveStripeChallengeParams();
-      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
-        this.checkoutThreeDsPending = false;
-        return "succeeded";
-      }
-      if (await this.hasNewVisibleCheckoutFailure(failureBaseline)) {
-        this.checkoutThreeDsPending = false;
-        return "failed";
-      }
-
-      if (stripeParams !== undefined && Date.now() >= nextStripePollAt) {
-        nextStripePollAt = Date.now() + 3_000;
-        const status = await fetchStripePaymentIntentStatus(stripeParams);
-        if (status !== undefined) {
-          const outcome = classifyStripePaymentIntentStatus(status);
-          if (outcome === "pending") stripeRequiresActionObserved = true;
-          if (outcome === "failed") {
-            this.checkoutThreeDsPending = false;
-            return "failed";
-          }
-          if (
-            outcome === "authenticated" &&
-            stripeRequiresActionObserved &&
-            oobGraceDeadline === undefined
-          ) {
-            // The issuer authenticated out of band (app-push 3DS) — the
-            // in-frame challenge never fires the postMessage the merchant's
-            // JS is waiting on, so the checkout page needs a nudge to
-            // re-check the (now-authoritative) server-side state.
-            if (!reloadedForOob) {
-              reloadedForOob = true;
-              const page = this.page;
-              const dismissReloadDialog = async (dialog: Dialog): Promise<void> => {
-                page.off("dialog", dismissReloadDialog);
-                await dialog.dismiss().catch(() => undefined);
-              };
-              page.on("dialog", dismissReloadDialog);
-              try {
-                await page.reload({ waitUntil: "domcontentloaded" }).catch(() => undefined);
-              } finally {
-                page.off("dialog", dismissReloadDialog);
-              }
-            }
-            oobGraceDeadline = Date.now() + 30_000;
-          }
-        }
-      }
-
-      const challenge = await this.detectThreeDsChallenge();
-      if (challenge.three_ds_required) {
-        challengeWasActive = true;
-        challengeAbsentSince = undefined;
-      }
-      if (!challenge.three_ds_required && challengeWasActive && oobGraceDeadline === undefined) {
-        challengeAbsentSince ??= Date.now();
-        if (Date.now() - challengeAbsentSince >= THREE_DS_RESOLUTION_GRACE_MS) {
-          this.checkoutThreeDsPending = false;
-          return "unconfirmed";
-        }
-      }
-
-      if (oobGraceDeadline !== undefined && Date.now() > oobGraceDeadline) {
-        // Never claim success on the authoritative-but-unconfirmed-in-DOM
-        // case — the issuer authenticated the cardholder, but we have no
-        // proof the merchant actually finalized the order. Fail closed.
-        this.checkoutThreeDsPending = false;
-        return "authenticated_pending_order";
-      }
-
+      if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) return "succeeded";
+      const texts = await Promise.all(
+        this.page
+          .frames()
+          .map(
+            async (frame) =>
+              await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+          ),
+      );
+      if (texts.some((text) => failureText.test(text))) return "failed";
       await this.page.waitForTimeout(1_000).catch(() => undefined);
-    } while (
-      Date.now() <= deadline ||
-      (oobGraceDeadline !== undefined && Date.now() <= oobGraceDeadline)
-    );
-    if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
-      this.checkoutThreeDsPending = false;
-      return "succeeded";
-    }
-    if (await this.hasNewVisibleCheckoutFailure(failureBaseline)) {
-      this.checkoutThreeDsPending = false;
-      return "failed";
-    }
-    if (oobGraceDeadline !== undefined) {
-      this.checkoutThreeDsPending = false;
-      return "authenticated_pending_order";
-    }
-    if (challengeWasActive && !(await this.detectThreeDsChallenge()).three_ds_required) {
-      this.checkoutThreeDsPending = false;
-      return "unconfirmed";
-    }
+    } while (Date.now() <= deadline);
     return "timeout";
   }
 

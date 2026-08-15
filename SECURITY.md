@@ -163,13 +163,16 @@ available for a safe retry. Once submission starts and serializes their values, 
 eligible sealed fields are cleared when cleanup can be confirmed, even while 3-D Secure
 or outcome verification continues. Dispatching the charge control is not itself a
 successful outcome: the operator requires a new merchant terminal route with a
-substantive order identity that was absent before dispatch. A bare click or a vanished
-3-D Secure prompt without that evidence is recorded as `payment_outcome_unknown`,
-so it cannot be mistaken for `payment_submitted`. If Stripe reports that the issuer
-authenticated out of band but no merchant terminal route appears,
-`payment_3ds_authenticated_pending_order` records that distinct unconfirmed state.
-Neither status permits a success claim or blind resubmission; the merchant's order
-state must be checked manually before any retry. Every payment entry is claimed before
+substantive order identity that was absent before dispatch. The browser completes
+3-D Secure natively, including out-of-band bank-app challenges. The operator never
+manipulates or intercepts the challenge frame; it detects challenges only with
+read-only URL, selector, and text checks, and reads text passively to identify declines.
+Resolution polls the outer page for that same terminal-order signal. A bare click with
+no detected challenge is recorded as `payment_outcome_unknown`. A detected
+challenge that remains unresolved on timeout stays `payment_3ds_required` and is handed
+back to the user. Neither status can be mistaken for `payment_submitted`, permits a
+success claim, or allows blind resubmission; the merchant's order state must be checked
+manually before any retry. Every payment entry is claimed before
 asynchronous work begins, and a pending confirmation is claimed atomically, so
 overlapping `operate_pay` calls cannot race toward the same submission. A failed
 confirmation becomes retryable only if submission has not started. If field cleanup

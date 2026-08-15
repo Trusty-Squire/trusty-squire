@@ -181,7 +181,7 @@ describe("NotifyingVaultAuditStore", () => {
     expect(yenPayMsg).not.toContain("JPY 98.45");
   });
 
-  it("formats authenticated payments awaiting order confirmation as manual-check warnings", () => {
+  it("formats legacy authenticated-pending payments as manual-check warnings", () => {
     const message = formatVaultEventMessage(
       {
         account_id: "a",

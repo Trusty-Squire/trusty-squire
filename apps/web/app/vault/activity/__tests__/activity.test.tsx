@@ -144,7 +144,7 @@ describe("activity timeline — card / payment / grant events", () => {
     expect(container.querySelector(".tl-row .tl-dot.ok")).toBeNull();
   });
 
-  it("renders an authenticated payment awaiting order confirmation as a warning", async () => {
+  it("renders legacy authenticated-pending payments as warnings", async () => {
     api.apiGet.mockImplementation((path: string) => {
       if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
       if (path.startsWith("/v1/vault/audit")) {
