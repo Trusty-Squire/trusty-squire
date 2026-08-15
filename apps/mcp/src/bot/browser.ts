@@ -2148,6 +2148,13 @@ const onSelfManagedSigint = (): void => exitForSelfManagedSignal(2);
 const onSelfManagedSigterm = (): void => exitForSelfManagedSignal(15);
 const onSelfManagedSighup = (): void => exitForSelfManagedSignal(1);
 
+// Whether the self-managed SIGINT/SIGTERM handlers may exit the process.
+// False means another shutdown owner (the MCP server's disconnect coordinator,
+// or an in-flight interactive login) holds process-exit responsibility.
+export function isSelfManagedChromeTerminationSignalExitEnabled(): boolean {
+  return selfManagedTerminationSignalExitEnabled;
+}
+
 export function setSelfManagedChromeTerminationSignalExitEnabled(enabled: boolean): void {
   if (selfManagedTerminationSignalExitEnabled === enabled) return;
   selfManagedTerminationSignalExitEnabled = enabled;

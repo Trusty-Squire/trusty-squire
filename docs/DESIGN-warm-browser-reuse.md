@@ -131,6 +131,14 @@ Raw PID equality is never authority to signal a process. A worker binding record
 process start time, and the normalized expected `--user-data-dir`. Cleanup signals Chrome only when
 both the process birth identity and exact worker-profile path still match.
 
+Process shutdown has one exit owner per mode. During an interactive headless CLI login, the login
+lifecycle temporarily suspends the general Chrome `SIGINT`/`SIGTERM` exit handlers, performs its
+capped browser-and-rig teardown, and then restores them. In server mode those login exit handlers
+remain disabled: on transport/stdin disconnect or a termination signal, the server coordinator
+first drains every tracked OAuth-bootstrap login, then closes provision sessions and the server.
+Cancellation and normal completion share one memoized, identity-proven browser teardown; process
+`exit` hooks remain the force-kill backstop.
+
 Destructive cleanup first atomically renames a claimable active or warm lease into `tombstones/`.
 Only the private, unclaimable tombstone is inspected, signalled, or deleted. An unknown owner or
 worker identity is retained for later inspection; it is not treated as stale. A verified matching
@@ -184,6 +192,6 @@ fixed two-session pool and is not required for isolated local controllers.
 | Pool layout, seed lock, leases, warm slot, GC      | `apps/mcp/src/bot/operator-profile-pool.ts`                       |
 | Process birth and profile-path identity            | `apps/mcp/src/bot/profile.ts`                                     |
 | Local Chrome lifecycle and closure proof           | `apps/mcp/src/bot/browser.ts`                                     |
-| Login teardown, seed publication, clone validation | `apps/mcp/src/bot/google-login.ts`                                |
+| Login lifecycle, seed publication, clone validation | `apps/mcp/src/bot/google-login.ts`                               |
 | Acquire seam, payment selection, call drain, finish disposition | `apps/mcp/src/bot/provision-session.ts`              |
 | Install provider-completion evidence               | `apps/mcp/src/bot/install-completion.ts`, `apps/web/app/install/` |

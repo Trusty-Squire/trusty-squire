@@ -20,6 +20,7 @@ import {
   resolveAttachedProfileChildIdentity,
   terminateTrackedProfileChild,
   withChromeStartupLock,
+  type PlainLoginBrowser,
 } from "../browser.js";
 import {
   acquireProfileOperationGuard,
@@ -29,6 +30,7 @@ import {
 import { loggedInProviders, markProviderLoggedIn } from "../login-state.js";
 import {
   binaryOnPath,
+  cancelActiveLoginBrowsers,
   installHint,
   installClaimPollCompleted,
   openInstallConfirmInBotChrome,
@@ -44,10 +46,12 @@ import {
   pollUntil,
   profileHasProviderCookies,
   registerHeadlessRigCleanup,
+  runDisplayedChrome,
   scopesAreBasic,
   scrapeGoogleScopePhrases,
   teardownHeadlessRig,
   teardownLoginBrowser,
+  trackActiveLoginBrowser,
   ensureOAuthSession,
   finalizeLoginRun,
   launchPersistentLoginContext,
@@ -127,6 +131,10 @@ function cleanupRuntime(): {
   const handlers = new Map<string, (...args: never[]) => void>();
   const exit = vi.fn();
   const runtime = {
+    on: vi.fn((event: string, listener: (...args: never[]) => void) => {
+      handlers.set(event, listener);
+      return runtime;
+    }),
     once: vi.fn((event: string, listener: (...args: never[]) => void) => {
       handlers.set(event, listener);
       return runtime;
@@ -168,6 +176,30 @@ describe("headless login VNC lifecycle", () => {
     for (const child of processes) expect(child.kill).toHaveBeenCalledWith("SIGTERM");
     remove();
   });
+
+  it.each(["SIGINT", "SIGTERM"])(
+    "force-cleans synchronously when %s repeats during graceful teardown",
+    (signal) => {
+      vi.useFakeTimers();
+      const child = fakeProcess("cloudflared", true);
+      const rig: HeadlessRig = { display: ":99", procs: [child] };
+      const { handlers, runtime, exit } = cleanupRuntime();
+      const set = vi.fn();
+      registerHeadlessRigCleanup(
+        rig,
+        () => vi.fn(() => new Promise<void>(() => undefined)),
+        runtime,
+        { enabled: () => true, set },
+      );
+
+      handlers.get(signal)!();
+      handlers.get(signal)!();
+
+      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+      expect(exit).toHaveBeenCalledWith(signal === "SIGINT" ? 130 : 143);
+      expect(set).toHaveBeenLastCalledWith(true);
+    },
+  );
 
   it("escalates to SIGKILL when a session process ignores SIGTERM", async () => {
     const child = fakeProcess("cloudflared", true);
@@ -224,6 +256,50 @@ describe("headless login VNC lifecycle", () => {
     remove();
   });
 
+  it("takes sole signal ownership from the self-managed Chrome handlers for its duration", () => {
+    const { rig } = rigWithEverySessionProcess();
+    const { handlers, runtime } = cleanupRuntime();
+    const set = vi.fn();
+    const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime, {
+      enabled: () => true,
+      set,
+    });
+
+    expect(set).toHaveBeenCalledTimes(1);
+    expect(set).toHaveBeenCalledWith(false);
+    for (const event of ["exit", "SIGTERM", "SIGINT", "uncaughtException", "unhandledRejection"]) {
+      expect(handlers.has(event)).toBe(true);
+    }
+
+    remove();
+    expect(set).toHaveBeenLastCalledWith(true);
+    expect(handlers.size).toBe(0);
+  });
+
+  it("stands down to the central shutdown coordinator when signal exit is disabled", () => {
+    const { rig } = rigWithEverySessionProcess();
+    const { handlers, runtime } = cleanupRuntime();
+    const set = vi.fn();
+    const remove = registerHeadlessRigCleanup(rig, () => undefined, runtime, {
+      enabled: () => false,
+      set,
+    });
+
+    // Only the pure-cleanup exit hook: the server's requestShutdown owns
+    // signals/exit and drains the login via cancelActiveLoginBrowsers, and
+    // exit-calling uncaught/unhandled handlers would break the server's
+    // log-and-keep-serving process guards.
+    expect(handlers.has("exit")).toBe(true);
+    for (const event of ["SIGTERM", "SIGINT", "uncaughtException", "unhandledRejection"]) {
+      expect(handlers.has(event)).toBe(false);
+    }
+    expect(set).not.toHaveBeenCalled();
+
+    remove();
+    expect(set).not.toHaveBeenCalled();
+    expect(handlers.size).toBe(0);
+  });
+
   it("uses HTTP/2 for the per-session cloudflared fallback", () => {
     expect(fallbackCloudflaredArgs(4567)).toEqual([
       "tunnel",
@@ -245,6 +321,72 @@ describe("headless login VNC lifecycle", () => {
     await expect(
       shortenVncUrl("https://api.test", "https://long.test/#p=secret", fetchImpl),
     ).resolves.toBe("https://trustysquire.ai/g/short");
+  });
+});
+
+describe("operator shutdown — OAuth-bootstrap login browser cancellation", () => {
+  it("cancels every tracked login browser once and drains the registry", async () => {
+    const closed: string[] = [];
+    trackActiveLoginBrowser(async () => {
+      closed.push("displayed");
+    });
+    trackActiveLoginBrowser(async () => {
+      closed.push("headless");
+      throw new Error("teardown failed mid-shutdown");
+    });
+
+    await cancelActiveLoginBrowsers();
+    expect(closed.sort()).toEqual(["displayed", "headless"]);
+
+    // Drained: a second shutdown trigger must not double-tear anything.
+    await cancelActiveLoginBrowsers();
+    expect(closed).toHaveLength(2);
+  });
+
+  it("skips a login run that already completed and unregistered", async () => {
+    const cancel = vi.fn(async () => undefined);
+    const untrack = trackActiveLoginBrowser(cancel);
+    untrack();
+
+    await cancelActiveLoginBrowsers();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("shares one teardown when shutdown cancels a deferred displayed launch", async () => {
+    let finishLaunch: ((browser: PlainLoginBrowser) => void) | undefined;
+    const launch = new Promise<PlainLoginBrowser>((resolve) => {
+      finishLaunch = resolve;
+    });
+    const teardown = vi.fn(async () => undefined);
+    const browser: PlainLoginBrowser = {
+      identity: null,
+      teardown,
+      forceTeardown: vi.fn(),
+      isRunning: () => true,
+    };
+    const running = runDisplayedChrome(
+      {
+        profileDir: "/unused/profile",
+        url: "https://example.test/login",
+        deadline: Date.now() + 60_000,
+        pollUntilDone: async () => false,
+        bannerLabel: "Complete sign-in.",
+        plainProfileLogin: true,
+        plainPollUntilDone: async () => false,
+      },
+      {
+        resolveChannelBinary: () => "/unused/chrome",
+        launchPlainLoginBrowser: async () => await launch,
+      },
+    );
+    await Promise.resolve();
+
+    const shutdown = cancelActiveLoginBrowsers();
+    finishLaunch?.(browser);
+
+    await shutdown;
+    await expect(running).rejects.toThrow("login browser cancelled during shutdown");
+    expect(teardown).toHaveBeenCalledOnce();
   });
 });
 
