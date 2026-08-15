@@ -3823,6 +3823,7 @@ describe("Stripe decoupled/OOB 3DS challenge parsing", () => {
 function controllerWithOobResolutionPage(options: {
   confirmAfterReload?: boolean;
   dialogDuringReload?: boolean;
+  onReload?: () => void;
 }): {
   controller: BrowserController;
   dismissDialog: ReturnType<typeof vi.fn>;
@@ -3836,6 +3837,7 @@ function controllerWithOobResolutionPage(options: {
     if (options.dialogDuringReload === true && dialogHandler !== undefined) {
       await dialogHandler({ dismiss: dismissDialog });
     }
+    options.onReload?.();
     reloaded = true;
   });
   const page = {
@@ -3923,6 +3925,35 @@ describe("decoupled/out-of-band (app-push) 3DS completion", () => {
       confirmAfterReload: true,
     });
     let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+
+    try {
+      await expect(
+        controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
+      ).resolves.toBe("succeeded");
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("starts the merchant confirmation grace period after a slow reload settles", async () => {
+    const statuses = ["requires_action", "succeeded"];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    let now = 0;
+    const { controller } = controllerWithOobResolutionPage({
+      confirmAfterReload: true,
+      onReload: () => {
+        now += 31_000;
+      },
+    });
     const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
       now += 3_500;
       return now;

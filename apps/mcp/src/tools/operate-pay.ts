@@ -90,6 +90,14 @@ function shouldRestorePendingCardFill(result: Record<string, unknown>): boolean 
   }
 }
 
+function shouldRecordPaymentProvenance(status: unknown): boolean {
+  return (
+    status === "payment_submitted" ||
+    status === "payment_3ds_required" ||
+    status === "payment_3ds_authenticated_pending_order"
+  );
+}
+
 function paymentSchemaRepair(
   _args: unknown,
   issues: readonly { path: (string | number)[]; message: string }[],
@@ -240,7 +248,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             },
           );
           const status = result.status;
-          if (status === "payment_submitted" || status === "payment_3ds_required") {
+          if (shouldRecordPaymentProvenance(status)) {
             recordActivePaymentProvenance(pending.card_ref, session);
           }
           if (shouldRestorePendingCardFill(result)) {
@@ -417,7 +425,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           );
           paymentLeaseCompleted = true;
         }
-        if (result.status === "payment_submitted" || result.status === "payment_3ds_required") {
+        if (shouldRecordPaymentProvenance(result.status)) {
           if (resolvedCardRef === null) {
             throw new Error("operate_pay succeeded without an action-time card source attestation");
           }

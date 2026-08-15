@@ -31,6 +31,7 @@ let mockPaymentLease: { phase: "fill_card" | "single" } | null = null;
 let mockPaymentSealed = false;
 let mockPaymentSealActive = false;
 let mockPaymentAuthenticatedPendingOrder = false;
+const mockRecordActivePaymentProvenance = vi.hoisted(() => vi.fn());
 // [P0] The awaiting-approval rest state — mirrors provision-session.ts's real
 // state machine so operate_pay's approval_pending path, and
 // operate_payment_status/await, can be exercised against this fake session.
@@ -269,7 +270,7 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
     },
     getActivePendingApproval: (session?: ProvisionSession.Session) =>
       paymentSessionState(session).awaitingApproval,
-    recordActivePaymentProvenance: () => undefined,
+    recordActivePaymentProvenance: mockRecordActivePaymentProvenance,
     releaseActivePaymentLease: (
       lease: { phase: "fill_card" | "single" },
       paymentFieldsCleared = true,
@@ -398,6 +399,7 @@ beforeEach(() => {
   mockPaymentSealed = false;
   mockPaymentSealActive = false;
   mockPaymentAuthenticatedPendingOrder = false;
+  mockRecordActivePaymentProvenance.mockReset();
   mockAwaitingApproval = null;
   mockCartCheckout = null;
   mockPaymentSessions.clear();
@@ -1677,6 +1679,10 @@ describe("operate_pay split checkout phases", () => {
     });
     expect(mockPendingConfirming).toBe(false);
     expect(mockPaymentAuthenticatedPendingOrder).toBe(true);
+    expect(mockRecordActivePaymentProvenance).toHaveBeenCalledWith(
+      "card_split",
+      expect.objectContaining({ id: PAYMENT_SESSION_A_ID }),
+    );
     await expect(
       operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
     ).rejects.toThrow(/prior authenticated payment still needs a manual order check/);

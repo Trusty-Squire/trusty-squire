@@ -10048,7 +10048,6 @@ export class BrowserController {
             // in-frame challenge never fires the postMessage the merchant's
             // JS is waiting on, so the checkout page needs a nudge to
             // re-check the (now-authoritative) server-side state.
-            oobGraceDeadline = Date.now() + 30_000;
             if (!reloadedForOob) {
               reloadedForOob = true;
               const page = this.page;
@@ -10063,6 +10062,7 @@ export class BrowserController {
                 page.off("dialog", dismissReloadDialog);
               }
             }
+            oobGraceDeadline = Date.now() + 30_000;
           }
         }
       }
