@@ -78,12 +78,14 @@ expiry, and CVV fields; cardholder name and other explicitly labeled billing fie
 are filled best-effort, so a missing name field does not abort the payment. Sealing
 and cleanup touch only those selected payment controls; merchant shipping address and
 country controls remain untouched. A submit is reported as `payment_submitted` only
-after the checkout reaches a new merchant order-confirmation URL. The browser
+after the checkout reaches a new merchant order-confirmation URL or, during the
+bounded post-submit wait, new merchant-origin success text or a success URL appears.
+Success markers already present when that wait begins do not count. The browser
 completes 3-D Secure natively, including out-of-band bank-app challenges — Trusty
 Squire never manipulates or intercepts the challenge; it uses read-only checks while
-polling for that same order-confirmation signal. A bare click with no
-challenge detected returns `payment_outcome_unknown` instead of guessing that the
-charge succeeded. A detected challenge that remains unresolved on timeout stays
+polling for those confirmation signals. A bare click that produces no confirmation
+signal and no detected challenge returns `payment_outcome_unknown` instead of guessing
+that the charge succeeded. A detected challenge that remains unresolved on timeout stays
 `payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user
 completion. Neither status is success or permits blind resubmission: manually check
 the merchant's order state before any retry.
@@ -121,13 +123,15 @@ Before an initial single-page or `fill_card` call, Trusty Squire follows the act
 visible card-number field and hands the checkout back when that field is hosted by
 PayPal or Braintree. A separate PayPal express button does not block fillable merchant
 or Shopify PCI card fields. Trusty Squire does not sign in to PayPal or use vaulted
-PayPal credentials. If the issuer requires 3-D Secure, Trusty Squire notifies
-your linked Telegram chat with a nudge to approve the charge in your bank app,
-then waits 180 seconds by default for that in-app approval to clear instead of
-automating it. Standard 3-D Secure signals and bank-agnostic CardinalCommerce or
-Stripe challenge frames activate that wait; the ordinary Shopify PCI card-field host
-alone does not. It reports a visible decline and hands an unresolved challenge
-back on timeout, noting whether the Telegram nudge actually went out.
+PayPal credentials. After any submit that has not yet reached a confirmed order,
+Trusty Squire waits 180 seconds by default for native completion, including
+out-of-band bank-app approval. A linked Telegram chat receives a challenge-specific
+nudge when 3-D Secure is detected, or cautious bank-app guidance when no on-page
+challenge appeared. Standard cross-processor 3-D Secure signals and recognized
+CardinalCommerce or Stripe challenge frames classify the first case; captcha-hosted
+frames never count as 3-D Secure, and an ordinary Shopify PCI card-field host alone
+does not either. It reports a visible decline and hands an unresolved outcome back on
+timeout, noting whether the Telegram nudge actually went out.
 `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to `0` on
 `operate_pay` to skip the notification and waiting and receive the handoff
 immediately.
@@ -344,8 +348,8 @@ DOM-diagnostics pair is excluded from that surface; set
   `operate_pay` accepts an explicit `session_id` and `phase` of `"single"`
   (the default, also implied by omitting phase), `"fill_card"`, or `"confirm"`.
   It can use a selected card, the only card on file, or a just-in-time
-  add-card approval, then fills the checkout and waits for the user to resolve
-  3-D Secure before handing back unresolved challenges. It also supports the
+  add-card approval, then fills the checkout and applies the post-submit outcome
+  wait described above before handing back unresolved outcomes. It also supports the
   two-phase `fill_card` then `confirm` flow for split checkouts described above.
   `operate_payment_status` follows the [payment guide](#one-prompt) polling
   contract. It returns the session ID and includes it in every follow-up tool

@@ -95,9 +95,10 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   reference, or omit both selectors: one saved card is used automatically, no
   saved cards starts a just-in-time add-card approval, and multiple cards return
   their labels so the user can choose. Never guess among several cards. The tool
-  requests phone approval for the exact purchase, fills the checkout, nudges
-  the user's linked Telegram chat when configured and 3-D Secure is required,
-  and waits for them to resolve it before handing back an unresolved challenge.
+  requests phone approval for the exact purchase, fills the checkout, and waits
+  after any unconfirmed submit for native completion. When Telegram is linked,
+  the nudge distinguishes a detected 3-D Secure challenge from possible
+  out-of-band bank-app authentication before handing back an unresolved outcome.
   If add-card returns `needs_user.wall: "card_required"`, re-run for a fresh
   link; if `payment_approval_timeout` includes `card_persisted: true`, the added
   card remains available for the retry. Set `three_ds_wait_seconds` to `0` only

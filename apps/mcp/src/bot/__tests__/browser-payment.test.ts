@@ -2092,6 +2092,11 @@ describe("3-D Secure resolution", () => {
     return { browser, page, controller };
   };
 
+  const mutateOnFirstResolutionPoll = (page: Page, mutate: () => Promise<void>) =>
+    vi.spyOn(page, "waitForTimeout").mockImplementationOnce(async () => {
+      await mutate();
+    });
+
   it.skipIf(!chromiumAvailable)(
     "resolves succeeded from the outer page's own order route while the challenge frame stays open and unresponsive",
     async () => {
@@ -2103,6 +2108,79 @@ describe("3-D Secure resolution", () => {
         await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
         expect(await page.locator("#bank-approval").count()).toBe(1);
       } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "resolves succeeded when a generic success URL appears during the long wait",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      const wait = mutateOnFirstResolutionPoll(page, async () => {
+        await page.evaluate(() => history.pushState({}, "", "/success"));
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
+      } finally {
+        wait.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "resolves succeeded when generic success text appears during the long wait",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      const wait = mutateOnFirstResolutionPoll(page, async () => {
+        await page.locator("body").evaluate((body) => {
+          body.insertAdjacentHTML("beforeend", "<p>Payment successful</p>");
+        });
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
+      } finally {
+        wait.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not treat a success URL that predates the long wait as new evidence",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      let clock = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+      });
+      try {
+        await page.evaluate(() => history.replaceState({}, "", "/success"));
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not treat success text that predates the long wait as new evidence",
+    async () => {
+      const { browser, page, controller } = await setupChallenge("<p>Payment successful</p>");
+      let clock = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
         await browser.close();
       }
     },
@@ -3490,33 +3568,37 @@ describe("3DS detection vs captcha frames", () => {
     }
   }
 
-  it.skipIf(!chromiumAvailable)("keeps every retained cross-processor 3DS signal", async () => {
-    const browser = await chromium.launch({ headless: true });
-    const cases = [
-      {
-        frameUrl: "https://0merchantacsstag.cardinalcommerce.com/V1/Cruise/StepUp",
-      },
-      { frameUrl: "https://hooks.stripe.com/3d_secure/authenticate/src_1" },
-      { frameUrl: "https://issuer.example.test/acs/challenge?provider=hcaptcha.com" },
-      { frameUrl: "https://issuer.example.test/flow/3d-secure/start" },
-      { frameUrl: "https://issuer.example.test/flow/three-d-secure/start" },
-      { frameUrl: "https://issuer.example.test/3ds2/authenticate" },
-      {
-        frameUrl: "https://issuer.example.test/authenticate",
-        frameAttributes: 'title="3D Secure authentication"',
-      },
-      { merchantHtml: "<p>Please authenticate this payment using 3-D Secure</p>" },
-    ];
-    try {
-      for (const testCase of cases) {
-        await expect(detectInRealPage(browser, testCase)).resolves.toMatchObject({
-          three_ds_required: true,
-        });
+  it.skipIf(!chromiumAvailable)(
+    "keeps every retained cross-processor 3DS signal",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const cases = [
+        {
+          frameUrl: "https://0merchantacsstag.cardinalcommerce.com/V1/Cruise/StepUp",
+        },
+        { frameUrl: "https://hooks.stripe.com/3d_secure/authenticate/src_1" },
+        { frameUrl: "https://issuer.example.test/acs/challenge?provider=hcaptcha.com" },
+        { frameUrl: "https://issuer.example.test/flow/3d-secure/start" },
+        { frameUrl: "https://issuer.example.test/flow/three-d-secure/start" },
+        { frameUrl: "https://issuer.example.test/3ds2/authenticate" },
+        {
+          frameUrl: "https://issuer.example.test/authenticate",
+          frameAttributes: 'title="3D Secure authentication"',
+        },
+        { merchantHtml: "<p>Please authenticate this payment using 3-D Secure</p>" },
+      ];
+      try {
+        for (const testCase of cases) {
+          await expect(detectInRealPage(browser, testCase)).resolves.toMatchObject({
+            three_ds_required: true,
+          });
+        }
+      } finally {
+        await browser.close();
       }
-    } finally {
-      await browser.close();
-    }
-  });
+    },
+    15_000,
+  );
 
   it.skipIf(!chromiumAvailable)("rejects captcha and removed bare challenge signals", async () => {
     const browser = await chromium.launch({ headless: true });

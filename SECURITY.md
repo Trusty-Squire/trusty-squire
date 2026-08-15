@@ -169,13 +169,19 @@ fields and pending metadata remain
 available for a safe retry. Once submission starts and serializes their values, the
 eligible sealed fields are cleared when cleanup can be confirmed, even while 3-D Secure
 or outcome verification continues. Dispatching the charge control is not itself a
-successful outcome: the operator requires a new merchant terminal route with a
-substantive order identity that was absent before dispatch. The browser completes
-3-D Secure natively, including out-of-band bank-app challenges. The operator never
-manipulates or intercepts the challenge frame; it detects challenges only with
-read-only URL, selector, and text checks, and reads non-captcha text passively to
-identify declines. A bare click with
-no detected challenge is recorded as `payment_outcome_unknown`. A detected
+successful outcome. The immediate submission result requires a new merchant terminal
+route with a substantive order identity that was absent before dispatch. During the
+bounded post-submit wait, the operator also accepts merchant-origin generic success
+routes or success text only when that evidence was absent at wait entry and appears
+during the wait. The browser completes 3-D Secure natively, including out-of-band
+bank-app challenges. The operator never manipulates or intercepts the challenge
+frame; it uses read-only URL, selector, and text checks. Captcha-hosted frames are
+excluded before challenge detection, success evidence, or passive decline checks. Any
+unconfirmed submission enters the long wait when it is enabled, even if no on-page
+challenge was detected; the linked Telegram notification distinguishes a detected
+challenge from merely possible out-of-band authentication. After that wait, a bare
+click with neither confirmation nor a detected challenge remains
+`payment_outcome_unknown`. A detected
 challenge that remains unresolved on timeout stays `payment_3ds_required` and is handed
 back to the user. Neither status can be mistaken for `payment_submitted`, permits a
 success claim, or allows blind resubmission; the merchant's order state must be checked
