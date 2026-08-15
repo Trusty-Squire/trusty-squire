@@ -1770,7 +1770,6 @@ describe("operate_pay split checkout — confirm", () => {
     expect(notifyCalls[0]).toContain("appr_split");
     expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
   });
-
 });
 
 // ── Non-blocking approval [P0] ───────────────────────────────────────────

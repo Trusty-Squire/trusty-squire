@@ -75,8 +75,8 @@ context; merchant shipping address and country controls remain untouched. A subm
 is reported as `payment_submitted` only after the checkout reaches a new merchant
 order-confirmation URL. The browser completes 3-D Secure natively, including
 out-of-band bank-app challenges — Trusty Squire never manipulates or intercepts
-the challenge, using only passive text reads for detection and declines while it
-polls the outer page for that same order-confirmation signal. A bare click with no
+the challenge; it uses read-only checks while polling the outer page for that same
+order-confirmation signal. A bare click with no
 challenge detected returns `payment_outcome_unknown` instead of guessing that the
 charge succeeded. A detected challenge that remains unresolved on timeout stays
 `payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user

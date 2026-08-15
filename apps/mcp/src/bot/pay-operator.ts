@@ -414,9 +414,9 @@ function cardRequiredResult(
   };
 }
 
-// The captain's bank approves 3-D Secure via an app-push in their own bank
-// app, not in the browser — see operator-3ds-handoff-decision.md. Fires the
-// Telegram nudge WITHOUT awaiting it (a slow/unresolved Telegram call must
+// The cardholder approves 3-D Secure via an app-push in their bank app while
+// the browser's checkout JavaScript owns the native challenge handshake. Fires
+// the Telegram nudge WITHOUT awaiting it (a slow/unresolved Telegram call must
 // never delay the 3DS wait loop) while still tracking whether it actually
 // went out, so a timed-out challenge can tell the host whether the captain
 // was nudged or needs a direct check of the bank app.

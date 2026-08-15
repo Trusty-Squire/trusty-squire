@@ -397,38 +397,6 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
-### 9. Never intercept the 3-D Secure challenge frame — let the browser complete it natively
-
-`fillAndSubmitCheckout`/`submitFilledCheckout` (`apps/mcp/src/bot/browser.ts`) detect
-whether a payment dispatch triggered a 3-D Secure challenge (`detectThreeDsChallenge`),
-but the challenge itself is **never** driven from the operator side.
-`waitForThreeDsResolution` polls the outer checkout page for the same
-terminal-order-route signal (`hasConfirmedCheckoutOutcome`/`CheckoutOutcomeBaseline`) a
-plain non-3DS checkout uses, plus passive decline-text reads across frames. It does not
-manipulate, hit-test, intercept, or gate completion on the challenge iframe, and it does
-not poll any payment processor's API for out-of-band status.
-
-**This was tried and reverted.** rc.21 (#516) added a DOM-mutating hit-test walker
-(`isFrameSurfaceTopmost`/`extractVisibleTopmostTextSignals`, forced
-`pointer-events:auto !important` on every element on each poll tick, including inside
-the ACS iframe) plus a challenge-absent grace-teardown timer; rc.22 (#524) layered a
-Stripe PaymentIntent out-of-band poll + page reload on top. In the headless operator
-browser this interception machine could never finish a decoupled/app-push 3DS
-handshake (issuer authenticates in the cardholder's bank app, never posts back into
-the in-page iframe) — Stripe recorded `requires_action` and the order never finalized,
-even though the issuer had authenticated correctly (live DBS repro, 2026-08-14). Both
-were removed in `fm/operator-restore-native-3ds`, restoring the pre-rc.21 behavior:
-fill card, click Pay, let the browser's own checkout JS finish the challenge.
-
-**The rule:** if a 3DS/payment-completion change is tempting you to add DOM
-manipulation, occlusion/visibility hit-testing, or payment-processor API polling
-inside `waitForThreeDsResolution`/`detectThreeDsChallenge`, stop — that is the exact
-shape of the bug above. Detection may only ever be read-only (URL pattern + a plain
-text/selector check); resolution may only ever use passive text reads plus the *outer*
-page's terminal state. If a specific processor's decoupled flow needs support, it needs
-proof the native flow doesn't already handle it (a live repro), not a new interception
-layer.
-
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.
