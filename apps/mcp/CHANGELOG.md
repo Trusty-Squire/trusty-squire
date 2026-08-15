@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.25 (2026-08-15)
+
+- fix(mcp): allow checkouts with unreadable totals or missing name fields (#532)
+- fix(mcp): remove operator seed revalidation (#531)
+
 ## 1.1.9-rc.24 (2026-08-15)
 
 - feat(mcp): remove payment await alias (#529)
