@@ -181,28 +181,6 @@ describe("NotifyingVaultAuditStore", () => {
     expect(yenPayMsg).not.toContain("JPY 98.45");
   });
 
-  it("formats authenticated payments awaiting order confirmation as manual-check warnings", () => {
-    const message = formatVaultEventMessage(
-      {
-        account_id: "a",
-        type: VAULT_AUDIT_TYPES.paymentExecuted,
-        payload: {
-          reference: "pay://p3",
-          requester: "agent",
-          merchant: "Synthetic Books",
-          amount_cents: 1234,
-          currency: "USD",
-          payment_status: "payment_3ds_authenticated_pending_order",
-        },
-      },
-      NOW,
-    );
-
-    expect(message).toContain("⚠️ Payment pending — manual order check required");
-    expect(message).toContain("Synthetic Books — USD 12.34");
-    expect(message).not.toContain("💸");
-  });
-
   it("logs audit failures without rejecting a completed mutation", async () => {
     const logger = { error: vi.fn() };
     await expect(

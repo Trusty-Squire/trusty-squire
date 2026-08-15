@@ -4,10 +4,8 @@ import {
   activeProvisionBrowserForPayment,
   claimActivePaymentForOperatePay,
   clearActivePendingCardFill,
-  completeActivePendingCardFillWithUnconfirmedOutcome,
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
-  completeActivePaymentLeaseWithUnconfirmedOutcome,
   getActivePendingApproval,
   markActivePendingCardFillSubmitStarted,
   recordActivePaymentProvenance,
@@ -91,11 +89,7 @@ function shouldRestorePendingCardFill(result: Record<string, unknown>): boolean 
 }
 
 function shouldRecordPaymentProvenance(status: unknown): boolean {
-  return (
-    status === "payment_submitted" ||
-    status === "payment_3ds_required" ||
-    status === "payment_3ds_authenticated_pending_order"
-  );
+  return status === "payment_submitted" || status === "payment_3ds_required";
 }
 
 function paymentSchemaRepair(
@@ -253,11 +247,6 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           }
           if (shouldRestorePendingCardFill(result)) {
             setActivePendingCardFill(pending, session);
-          } else if (status === "payment_3ds_authenticated_pending_order") {
-            completeActivePendingCardFillWithUnconfirmedOutcome(
-              result.payment_fields_cleared === true,
-              session,
-            );
           } else if (
             status === "payment_submitted" ||
             status === "payment_3ds_required" ||
@@ -415,14 +404,6 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             throw new Error("operate_pay pending approval returned without resumable state");
           }
           completeActivePaymentLeaseWithPendingApproval(paymentLease, approvalPending, session);
-          paymentLeaseCompleted = true;
-        }
-        if (result.status === "payment_3ds_authenticated_pending_order") {
-          completeActivePaymentLeaseWithUnconfirmedOutcome(
-            paymentLease,
-            paymentFieldsCleared,
-            session,
-          );
           paymentLeaseCompleted = true;
         }
         if (shouldRecordPaymentProvenance(result.status)) {

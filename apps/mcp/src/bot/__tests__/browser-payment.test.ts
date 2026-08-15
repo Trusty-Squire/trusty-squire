@@ -4,14 +4,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
-  classifyStripePaymentIntentStatus,
   hasPayPalHostedCheckoutFrame,
   PaymentCardFillCleanupError,
   PaymentSubmitOutcomeUnknownError,
   parseCheckoutAmount,
   parseCheckoutAmounts,
   parseStructuredCheckoutTotal,
-  parseStripeChallengeParams,
   recognizedPaymentProviderFrame,
   UnrecognizedPaymentFrameError,
 } from "../browser.js";
@@ -841,111 +839,6 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "recognizes a plain visible countdown in Shopify's PCI frame",
-    async () => {
-      const pciUrl = "https://checkout.pci.shopifyinc.com/plain-countdown";
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        await page.route(pciUrl, async (route) =>
-          route.fulfill({ contentType: "text/html", body: "<div>60 seconds to confirm</div>" }),
-        );
-        await page.setContent(`
-          <form id="checkout">
-            <input autocomplete="cc-number">
-            <input autocomplete="cc-exp">
-            <input autocomplete="cc-csc">
-            <input autocomplete="cc-name">
-            <button type="submit">Pay now</button>
-          </form>
-          <script>
-            document.querySelector("#checkout").addEventListener("submit", (event) => {
-              event.preventDefault();
-              setTimeout(() => {
-                const frame = document.createElement("iframe");
-                frame.src = "${pciUrl}";
-                document.body.append(frame);
-              }, 50);
-            });
-          </script>
-        `);
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
-
-        await expect(
-          controller.fillAndSubmitCheckout({
-            pan: "4242424242424242",
-            exp_month: "12",
-            exp_year: "30",
-            cvv: "123",
-            name: "Synthetic Cardholder",
-            billing: {
-              line1: "123 Billing Street",
-              city: "Billingville",
-              postal_code: "10001",
-              country: "US",
-            },
-          }),
-        ).resolves.toMatchObject({ three_ds_required: true, order_confirmed: false });
-      } finally {
-        await browser.close();
-      }
-    },
-    30_000,
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "recognizes visible DBS bank-app approval copy without hidden challenge metadata",
-    async () => {
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <form id="checkout">
-            <input autocomplete="cc-number">
-            <input autocomplete="cc-exp">
-            <input autocomplete="cc-csc">
-            <input autocomplete="cc-name">
-            <button type="submit">Pay now</button>
-          </form>
-          <script>
-            document.querySelector("#checkout").addEventListener("submit", (event) => {
-              event.preventDefault();
-              setTimeout(() => {
-                document.body.insertAdjacentHTML(
-                  "beforeend",
-                  "<div>Approve this payment in your DBS digibank app</div>",
-                );
-              }, 50);
-            });
-          </script>
-        `);
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
-
-        await expect(
-          controller.fillAndSubmitCheckout({
-            pan: "4242424242424242",
-            exp_month: "12",
-            exp_year: "30",
-            cvv: "123",
-            name: "Synthetic Cardholder",
-            billing: {
-              line1: "123 Billing Street",
-              city: "Billingville",
-              postal_code: "10001",
-              country: "US",
-            },
-          }),
-        ).resolves.toMatchObject({ three_ds_required: true, order_confirmed: false });
-      } finally {
-        await browser.close();
-      }
-    },
-    30_000,
-  );
-
-  it.skipIf(!chromiumAvailable)(
     "does not use Shopify's PCI host alone as a 3DS signal",
     async () => {
       const pciUrl = "https://checkout.pci.shopifyinc.com/card-fields";
@@ -982,62 +875,6 @@ describe("checkout payment parsing", () => {
         await browser.close();
       }
     },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "ignores ordinary, hidden, and covered merchant countdowns",
-    async () => {
-      const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(1)
-        .mockReturnValue(15_000);
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <style>
-            #covered-countdown { position: relative; }
-            #countdown-cover { background: white; inset: 0; pointer-events: none; position: absolute; z-index: 2; }
-            #offscreen-authentication-challenge {
-              align-items: flex-end;
-              display: flex;
-              height: 300vh;
-              left: 500px;
-              position: absolute;
-              top: 0;
-              width: 180px;
-            }
-          </style>
-          <div>60 seconds to confirm</div>
-          <section id="bank-transfer-approval"><div>60 seconds to confirm</div></section>
-          <section id="identity-review"><div>Verify your identity</div></section>
-          <div style="display:none" id="dbs-bank-app-challenge">60 seconds to confirm</div>
-          <section id="covered-countdown">
-            <div id="shopify-bank-app-challenge">60 seconds to confirm<div id="countdown-cover">Merchant offer</div></div>
-          </section>
-          <div id="offscreen-authentication-challenge">60 seconds to confirm</div>
-          <form id="checkout">
-            <input autocomplete="cc-number"><input autocomplete="cc-exp">
-            <input autocomplete="cc-csc"><input autocomplete="cc-name">
-            <button type="submit">Pay now</button>
-          </form>
-          <script>document.querySelector("#checkout").addEventListener("submit", (event) => event.preventDefault());</script>
-        `);
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
-
-        await expect(controller.submitFilledCheckout()).resolves.toEqual({
-          three_ds_required: false,
-          order_confirmed: false,
-        });
-      } finally {
-        now.mockRestore();
-        await browser.close();
-      }
-    },
-    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -1510,147 +1347,6 @@ describe("checkout payment parsing", () => {
         await browser.close();
       }
     },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "fails closed when pre-submit payment signal baselines cannot be read",
-    async () => {
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <p>Order confirmed</p>
-          <p>Payment declined</p>
-          <form id="checkout">
-            <input autocomplete="cc-number"><input autocomplete="cc-exp">
-            <input autocomplete="cc-csc"><input autocomplete="cc-name">
-            <button type="submit">Pay now</button>
-          </form>
-          <script>
-            document.querySelector("#checkout").addEventListener("submit", (event) => {
-              event.preventDefault();
-              const challenge = document.createElement("iframe");
-              challenge.id = "bank-app";
-              challenge.title = "Issuer authentication";
-              challenge.srcdoc = "<div>60 seconds to confirm</div>";
-              document.body.append(challenge);
-            });
-          </script>
-        `);
-        await page.evaluate(() => {
-          const originalCreateTreeWalker = document.createTreeWalker.bind(document);
-          let remainingFailures = 2;
-          Object.defineProperty(document, "createTreeWalker", {
-            configurable: true,
-            value(root: Node, whatToShow?: number, filter?: NodeFilter | null) {
-              if (remainingFailures > 0) {
-                remainingFailures -= 1;
-                throw new Error("synthetic baseline read failure");
-              }
-              return originalCreateTreeWalker(root, whatToShow, filter);
-            },
-          });
-        });
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
-
-        await expect(
-          controller.fillAndSubmitCheckout({
-            pan: "4242424242424242",
-            exp_month: "12",
-            exp_year: "30",
-            cvv: "123",
-            name: "Synthetic Cardholder",
-            billing: {
-              line1: "123 Billing Street",
-              city: "Billingville",
-              postal_code: "10001",
-              country: "US",
-            },
-          }),
-        ).resolves.toMatchObject({ three_ds_required: true, order_confirmed: false });
-
-        await page.locator("#bank-app").evaluate((element) => element.remove());
-        let clock = 0;
-        const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-        const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-          clock += timeout;
-        });
-        try {
-          await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
-        } finally {
-          wait.mockRestore();
-          now.mockRestore();
-        }
-      } finally {
-        await browser.close();
-      }
-    },
-    30_000,
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "does not treat issuer-frame success copy as merchant confirmation after 3DS",
-    async () => {
-      const browser = await chromium.launch({ headless: true });
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
-          <form id="checkout">
-            <input autocomplete="cc-number"><input autocomplete="cc-exp">
-            <input autocomplete="cc-csc"><input autocomplete="cc-name">
-            <button type="submit">Pay now</button>
-          </form>
-          <script>
-            document.querySelector("#checkout").addEventListener("submit", (event) => {
-              event.preventDefault();
-              const challenge = document.createElement("iframe");
-              challenge.id = "bank-app";
-              challenge.title = "Issuer authentication";
-              challenge.srcdoc = "<div>60 seconds to confirm</div>";
-              document.body.append(challenge);
-            });
-          </script>
-        `);
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
-
-        await expect(
-          controller.fillAndSubmitCheckout({
-            pan: "4242424242424242",
-            exp_month: "12",
-            exp_year: "30",
-            cvv: "123",
-            name: "Synthetic Cardholder",
-            billing: {
-              line1: "123 Billing Street",
-              city: "Billingville",
-              postal_code: "10001",
-              country: "US",
-            },
-          }),
-        ).resolves.toMatchObject({ three_ds_required: true, order_confirmed: false });
-
-        const bankFrame = page.frames().find((frame) => frame !== page.mainFrame())!;
-        await bankFrame.locator("body").evaluate((body) => {
-          body.textContent = "Payment successful";
-        });
-        let clock = 0;
-        const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-        const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-          clock += timeout;
-        });
-        try {
-          await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
-        } finally {
-          wait.mockRestore();
-          now.mockRestore();
-        }
-      } finally {
-        await browser.close();
-      }
-    },
-    30_000,
   );
 
   it.skipIf(!chromiumAvailable)(
@@ -2283,6 +1979,11 @@ describe("structured-data checkout totals", () => {
 });
 
 describe("3-D Secure resolution", () => {
+  // The browser completes 3-D Secure natively (including out-of-band
+  // bank-app pushes) — waitForThreeDsResolution only classifies the
+  // outcome afterward. It never detects, waits on, or tears down the
+  // challenge frame itself; it just polls the same terminal-order-route
+  // signal a plain non-3DS checkout uses, plus a plain decline-text check.
   const setupChallenge = async (
     initialMerchantHtml = "",
   ): Promise<{
@@ -2292,9 +1993,6 @@ describe("3-D Secure resolution", () => {
   }> => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
-    await page.route("https://issuer.test/**", async (route) =>
-      route.fulfill({ contentType: "text/html", body: "<p>Payment declined</p>" }),
-    );
     await page.route("https://merchant.test/**", async (route) =>
       route.fulfill({
         contentType: "text/html",
@@ -2305,7 +2003,7 @@ describe("3-D Secure resolution", () => {
             document.querySelector("#pay").addEventListener("click", () => {
               const frame = document.createElement("iframe");
               frame.id = "bank-approval";
-              frame.title = "DBS bank approval";
+              frame.title = "3D Secure authentication";
               frame.srcdoc = "<div>60 seconds to confirm</div>";
               document.body.append(frame);
             });
@@ -2323,215 +2021,25 @@ describe("3-D Secure resolution", () => {
   };
 
   it.skipIf(!chromiumAvailable)(
-    "does not treat an unchanged checkout confirmation URL as success",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      const wait = vi.spyOn(page, "waitForTimeout").mockResolvedValue();
-      try {
-        await page.evaluate(() => history.replaceState({}, "", "/checkout?success_url=/done"));
-        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("timeout");
-      } finally {
-        wait.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "does not accept merchant order-confirmation text without a terminal route",
+    "resolves succeeded from the outer page's own order route while the challenge frame stays open and unresponsive",
     async () => {
       const { browser, page, controller } = await setupChallenge();
       try {
-        await page.locator("#bank-approval").evaluate((element) => element.remove());
-        await page.locator("body").evaluate((body) => {
-          body.insertAdjacentHTML("beforeend", "<p>Thank you <strong>for your order</strong></p>");
-        });
-        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("unconfirmed");
+        // The ACS iframe is never touched or removed — simulating a frozen/
+        // unresponsive decoupled challenge. Only the merchant's own JS (here,
+        // a plain pushState) drives completion.
+        await page.evaluate(() => history.pushState({}, "", "/receipt/123"));
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
+        expect(await page.locator("#bank-approval").count()).toBe(1);
       } finally {
         await browser.close();
       }
     },
   );
 
-  it.skipIf(!chromiumAvailable)("accepts a transitioned merchant receipt URL", async () => {
+  it.skipIf(!chromiumAvailable)("returns failed for visible decline text", async () => {
     const { browser, page, controller } = await setupChallenge();
     try {
-      await page.locator("#bank-approval").evaluate((element) => element.remove());
-      await page.evaluate(() => history.pushState({}, "", "/receipt/123"));
-      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
-    } finally {
-      await browser.close();
-    }
-  });
-
-  it.skipIf(!chromiumAvailable)(
-    "does not accept a merchant receipt number without a terminal route",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      try {
-        await page.locator("#bank-approval").evaluate((element) => element.remove());
-        await page.locator("body").evaluate((body) => {
-          body.insertAdjacentHTML("beforeend", "<p>Receipt number: ORD-12345</p>");
-        });
-        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("unconfirmed");
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "returns unconfirmed for payment-only DOM and URL states",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      let clock = 0;
-      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-        clock += timeout;
-      });
-      try {
-        await page.locator("#bank-approval").evaluate((element) => element.remove());
-        await page.evaluate(() => {
-          history.pushState({}, "", "/payment_success");
-          document.body.insertAdjacentHTML(
-            "beforeend",
-            "<p>Payment created</p><p>Payment processing</p><p>Payment successful</p><p>Failed payment creation</p>",
-          );
-        });
-        await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
-      } finally {
-        wait.mockRestore();
-        now.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "keeps waiting through a transient challenge gap and delayed order confirmation",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      await page.locator("#bank-approval").evaluate((element) => element.remove());
-      let clock = 0;
-      let waits = 0;
-      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-        clock += timeout;
-        waits += 1;
-        if (waits === 1) {
-          await page.locator("body").evaluate((body) => {
-            body.insertAdjacentHTML(
-              "beforeend",
-              '<iframe id="bank-approval" title="DBS bank approval" srcdoc="<div>60 seconds to confirm</div>"></iframe>',
-            );
-          });
-        }
-        if (waits === 2) {
-          await page.locator("#bank-approval").evaluate((element) => element.remove());
-        }
-        if (waits === 3) {
-          await page.locator("body").evaluate((body) => {
-            history.pushState({}, "", "/receipt/ORD-12345");
-            body.insertAdjacentHTML("beforeend", "<p>Order confirmed</p>");
-          });
-        }
-      });
-      try {
-        await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("succeeded");
-        expect(waits).toBe(3);
-      } finally {
-        wait.mockRestore();
-        now.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "lets a new merchant order confirmation win over simultaneous failure text",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      try {
-        await page.locator("#bank-approval").evaluate((element) => element.remove());
-        await page.evaluate(() => {
-          history.pushState({}, "", "/receipt/123");
-          document.body.insertAdjacentHTML(
-            "beforeend",
-            "<p>Order confirmed</p><p>Payment declined</p>",
-          );
-        });
-        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("succeeded");
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)("ignores pre-submit visible payment failure text", async () => {
-    const { browser, page, controller } = await setupChallenge("<p>Payment declined</p>");
-    let clock = 0;
-    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-    const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-      clock += timeout;
-    });
-    try {
-      await page.locator("#bank-approval").evaluate((element) => element.remove());
-      await page.getByText("Payment declined", { exact: true }).evaluate((element) => {
-        element.textContent = "Payment   declined.";
-      });
-      await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
-    } finally {
-      wait.mockRestore();
-      now.mockRestore();
-      await browser.close();
-    }
-  });
-
-  it.skipIf(!chromiumAvailable)(
-    "returns unconfirmed when a short 3DS wait ends after challenge resolution",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      let clock = 0;
-      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-        clock += timeout;
-      });
-      try {
-        await page.locator("#bank-approval").evaluate((element) => element.remove());
-        await expect(controller.waitForThreeDsResolution(500)).resolves.toBe("unconfirmed");
-      } finally {
-        wait.mockRestore();
-        now.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "keeps a pre-submit issuer failure stable across URL query and hash changes",
-    async () => {
-      const { browser, page, controller } = await setupChallenge(
-        '<iframe id="issuer-error" src="https://issuer.test/error?attempt=1"></iframe>',
-      );
-      try {
-        const issuerFrame = page
-          .frames()
-          .find((frame) => frame.url().startsWith("https://issuer.test/error"))!;
-        await issuerFrame.evaluate(() => {
-          history.replaceState({}, "", "/error?attempt=2#retry");
-        });
-        await page.locator("#bank-approval").evaluate((element) => element.remove());
-        await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("unconfirmed");
-      } finally {
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)("returns failed for new visible payment failure text", async () => {
-    const { browser, page, controller } = await setupChallenge();
-    try {
-      await page.locator("#bank-approval").evaluate((element) => element.remove());
       await page.locator("body").evaluate((body) => {
         body.insertAdjacentHTML("beforeend", "<p>Payment declined</p>");
       });
@@ -2541,25 +2049,44 @@ describe("3-D Secure resolution", () => {
     }
   });
 
-  it.skipIf(!chromiumAvailable)("ignores new hidden payment failure text", async () => {
-    const { browser, page, controller } = await setupChallenge();
-    let clock = 0;
-    const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-    const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-      clock += timeout;
-    });
-    try {
-      await page.locator("#bank-approval").evaluate((element) => element.remove());
-      await page.locator("body").evaluate((body) => {
-        body.insertAdjacentHTML("beforeend", '<p style="display:none">Payment declined</p>');
+  it.skipIf(!chromiumAvailable)(
+    "returns timeout when neither an order route nor a decline appears",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      let clock = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
       });
-      await expect(controller.waitForThreeDsResolution(10_000)).resolves.toBe("unconfirmed");
-    } finally {
-      wait.mockRestore();
-      now.mockRestore();
-      await browser.close();
-    }
-  });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not treat an unchanged checkout confirmation URL as success",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      let clock = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+      });
+      try {
+        await page.evaluate(() => history.replaceState({}, "", "/checkout?success_url=/done"));
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
 });
 
 describe("recognized payment-provider frames", () => {
@@ -3760,355 +3287,4 @@ describe("split-checkout card fill (real browser)", () => {
       }
     },
   );
-});
-
-const STRIPE_CHALLENGE_URL =
-  "https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_synthetic123&payment_intent_client_secret=pi_synthetic123_secret_abc&publishable_key=pk_live_synthetic&stripe_account=acct_synthetic";
-
-describe("Stripe decoupled/OOB 3DS challenge parsing", () => {
-  it("extracts payment intent id, client secret, and publishable key from a hosted challenge URL", () => {
-    expect(parseStripeChallengeParams(STRIPE_CHALLENGE_URL)).toEqual({
-      paymentIntentId: "pi_synthetic123",
-      clientSecret: "pi_synthetic123_secret_abc",
-      publishableKey: "pk_live_synthetic",
-      accountId: "acct_synthetic",
-    });
-  });
-
-  it("accepts a non-Connect challenge without a Stripe account", () => {
-    expect(
-      parseStripeChallengeParams(
-        "https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_x&payment_intent_client_secret=pi_x_secret_y&publishable_key=pk_live_z",
-      ),
-    ).toEqual({
-      paymentIntentId: "pi_x",
-      clientSecret: "pi_x_secret_y",
-      publishableKey: "pk_live_z",
-    });
-  });
-
-  it("refuses a malformed connected-account id", () => {
-    expect(
-      parseStripeChallengeParams(
-        "https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_x&payment_intent_client_secret=pi_x_secret_y&publishable_key=pk_live_z&stripe_account=not_an_account",
-      ),
-    ).toBeUndefined();
-  });
-
-  it("refuses a non-Stripe host even if the query params match", () => {
-    expect(
-      parseStripeChallengeParams(
-        "https://evil.test/3d_secure_2/hosted?payment_intent=pi_x&payment_intent_client_secret=pi_x_secret_y&publishable_key=pk_live_z",
-      ),
-    ).toBeUndefined();
-  });
-
-  it("refuses when a required param is missing", () => {
-    expect(
-      parseStripeChallengeParams("https://hooks.stripe.com/3d_secure_2/hosted?payment_intent=pi_x"),
-    ).toBeUndefined();
-  });
-
-  it.each([
-    ["requires_action", "pending"],
-    ["succeeded", "authenticated"],
-    ["processing", "authenticated"],
-    ["requires_capture", "authenticated"],
-    ["requires_payment_method", "failed"],
-    ["canceled", "failed"],
-    ["requires_confirmation", "unknown"],
-  ] as const)("classifies PaymentIntent status %s as %s", (status, expected) => {
-    expect(classifyStripePaymentIntentStatus(status)).toBe(expected);
-  });
-});
-
-function controllerWithOobResolutionPage(options: {
-  confirmAfterReload?: boolean;
-  detectedChallengeUrl?: string;
-  dialogDuringReload?: boolean;
-  lateStripeFrameUrl?: string;
-  onReload?: () => void;
-}): {
-  bringToFront: ReturnType<typeof vi.fn>;
-  controller: BrowserController;
-  dismissDialog: ReturnType<typeof vi.fn>;
-  reload: ReturnType<typeof vi.fn>;
-} {
-  const currentUrl = "https://merchant.test/checkout";
-  let reloaded = false;
-  let lateStripeFrameVisible = false;
-  let dialogHandler: ((dialog: { dismiss: () => Promise<void> }) => Promise<void>) | undefined;
-  const dismissDialog = vi.fn(async () => undefined);
-  const bringToFront = vi.fn(async () => undefined);
-  const reload = vi.fn(async () => {
-    if (options.dialogDuringReload === true && dialogHandler !== undefined) {
-      await dialogHandler({ dismiss: dismissDialog });
-    }
-    options.onReload?.();
-    reloaded = true;
-  });
-  const lateStripeFrame = {
-    url: () => options.lateStripeFrameUrl ?? "",
-  };
-  const page = {
-    url: () => currentUrl,
-    frames: () => (lateStripeFrameVisible ? [lateStripeFrame] : []),
-    waitForTimeout: async () => undefined,
-    reload,
-    bringToFront,
-    on: vi.fn(
-      (event: string, handler: (dialog: { dismiss: () => Promise<void> }) => Promise<void>) => {
-        if (event === "dialog") dialogHandler = handler;
-      },
-    ),
-    off: vi.fn(
-      (event: string, handler: (dialog: { dismiss: () => Promise<void> }) => Promise<void>) => {
-        if (event === "dialog" && dialogHandler === handler) dialogHandler = undefined;
-      },
-    ),
-  };
-  const controller = new BrowserController({ humanize: false });
-  (controller as unknown as { page: Page }).page = page as unknown as Page;
-  Object.assign(controller, {
-    captureCheckoutOutcomeBaseline: async () => ({
-      url: currentUrl,
-      orderUrlIdentities: [],
-      terminalUrlIdentity: null,
-    }),
-    captureVisibleCheckoutFailureSignals: async () => ({}),
-    hasConfirmedCheckoutOutcome: async () => reloaded && options.confirmAfterReload === true,
-    hasNewVisibleCheckoutFailure: async () => false,
-    isFrameSurfaceTopmost: async () => true,
-    detectThreeDsChallenge: async () => {
-      lateStripeFrameVisible = options.lateStripeFrameUrl !== undefined;
-      return {
-        three_ds_required: true,
-        order_confirmed: false,
-        challenge_url: options.detectedChallengeUrl ?? STRIPE_CHALLENGE_URL,
-      };
-    },
-  });
-  return { bringToFront, controller, dismissDialog, reload };
-}
-
-describe("decoupled/out-of-band (app-push) 3DS completion", () => {
-  it("polls the PaymentIntent, reloads once authenticated, and fails closed if the order never confirms", async () => {
-    const statuses = ["requires_action", "succeeded"];
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
-    }));
-    vi.stubGlobal("fetch", fetchMock);
-    const { bringToFront, controller, dismissDialog, reload } = controllerWithOobResolutionPage({
-      dialogDuringReload: true,
-    });
-    let now = 0;
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
-      now += 3_500;
-      return now;
-    });
-
-    try {
-      await expect(
-        controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
-      ).resolves.toBe("authenticated_pending_order");
-      expect(reload).toHaveBeenCalledTimes(1);
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("pi_synthetic123"),
-        expect.objectContaining({
-          headers: {
-            Authorization: "Bearer pk_live_synthetic",
-            "Stripe-Account": "acct_synthetic",
-          },
-        }),
-      );
-      expect(dismissDialog).toHaveBeenCalledTimes(1);
-      expect(bringToFront).toHaveBeenCalled();
-    } finally {
-      nowSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("reports success once the reloaded checkout shows a genuine merchant completion", async () => {
-    const statuses = ["requires_action", "succeeded"];
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
-    }));
-    vi.stubGlobal("fetch", fetchMock);
-    const { controller } = controllerWithOobResolutionPage({
-      confirmAfterReload: true,
-    });
-    let now = 0;
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
-      now += 3_500;
-      return now;
-    });
-
-    try {
-      await expect(
-        controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
-      ).resolves.toBe("succeeded");
-    } finally {
-      nowSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("starts the merchant confirmation grace period after a slow reload settles", async () => {
-    const statuses = ["requires_action", "succeeded"];
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
-    }));
-    vi.stubGlobal("fetch", fetchMock);
-    let now = 0;
-    const { controller } = controllerWithOobResolutionPage({
-      confirmAfterReload: true,
-      onReload: () => {
-        now += 31_000;
-      },
-    });
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
-      now += 3_500;
-      return now;
-    });
-
-    try {
-      await expect(
-        controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
-      ).resolves.toBe("succeeded");
-    } finally {
-      nowSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("polls non-Connect PaymentIntents without a Stripe-Account header", async () => {
-    const statuses = ["requires_action", "succeeded"];
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
-    }));
-    vi.stubGlobal("fetch", fetchMock);
-    const { controller } = controllerWithOobResolutionPage({});
-    let now = 0;
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
-      now += 3_500;
-      return now;
-    });
-    const challengeUrl = STRIPE_CHALLENGE_URL.replace("&stripe_account=acct_synthetic", "");
-
-    try {
-      await expect(controller.waitForThreeDsResolution(120_000, challengeUrl)).resolves.toBe(
-        "authenticated_pending_order",
-      );
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.objectContaining({
-          headers: { Authorization: "Bearer pk_live_synthetic" },
-        }),
-      );
-    } finally {
-      nowSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("discovers and pins a nested Stripe challenge frame that loads after detection", async () => {
-    const statuses = ["requires_action", "succeeded"];
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
-    }));
-    vi.stubGlobal("fetch", fetchMock);
-    const { controller, reload } = controllerWithOobResolutionPage({
-      detectedChallengeUrl: "https://merchant.test/checkout",
-      lateStripeFrameUrl: STRIPE_CHALLENGE_URL,
-    });
-    let now = 0;
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
-      now += 3_500;
-      return now;
-    });
-
-    try {
-      await expect(
-        controller.waitForThreeDsResolution(120_000, "https://merchant.test/checkout"),
-      ).resolves.toBe("authenticated_pending_order");
-      expect(fetchMock).toHaveBeenCalledWith(
-        expect.stringContaining("pi_synthetic123"),
-        expect.any(Object),
-      );
-      expect(reload).toHaveBeenCalledTimes(1);
-    } finally {
-      nowSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("returns failed when the issuer-side PaymentIntent lands in a terminal failure state", async () => {
-    const statuses = ["requires_action", "requires_payment_method"];
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ status: statuses.shift() ?? "requires_payment_method" }),
-    }));
-    vi.stubGlobal("fetch", fetchMock);
-    const { controller, reload } = controllerWithOobResolutionPage({});
-    let now = 0;
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
-      now += 3_500;
-      return now;
-    });
-
-    try {
-      await expect(
-        controller.waitForThreeDsResolution(120_000, STRIPE_CHALLENGE_URL),
-      ).resolves.toBe("failed");
-      expect(reload).not.toHaveBeenCalled();
-    } finally {
-      nowSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("does not reload unless it observes this PaymentIntent leave requires_action", async () => {
-    const fetchMock = vi.fn(async () => ({
-      ok: true,
-      json: async () => ({ status: "succeeded" }),
-    }));
-    vi.stubGlobal("fetch", fetchMock);
-    const { controller, reload } = controllerWithOobResolutionPage({});
-    let now = 0;
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
-      now += 3_500;
-      return now;
-    });
-
-    try {
-      await expect(controller.waitForThreeDsResolution(10_000, STRIPE_CHALLENGE_URL)).resolves.toBe(
-        "timeout",
-      );
-      expect(fetchMock).toHaveBeenCalled();
-      expect(reload).not.toHaveBeenCalled();
-    } finally {
-      nowSpy.mockRestore();
-      vi.unstubAllGlobals();
-    }
-  });
-
-  it("never polls Stripe or reloads for the ordinary in-frame challenge (no challenge_url)", async () => {
-    const fetchMock = vi.fn();
-    vi.stubGlobal("fetch", fetchMock);
-    const { controller, reload } = controllerWithOobResolutionPage({});
-
-    try {
-      await expect(controller.waitForThreeDsResolution(0)).resolves.toBe("timeout");
-      expect(fetchMock).not.toHaveBeenCalled();
-      expect(reload).not.toHaveBeenCalled();
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
 });

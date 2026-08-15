@@ -30,7 +30,6 @@ let mockSubmitStarted = false;
 let mockPaymentLease: { phase: "fill_card" | "single" } | null = null;
 let mockPaymentSealed = false;
 let mockPaymentSealActive = false;
-let mockPaymentAuthenticatedPendingOrder = false;
 const mockRecordActivePaymentProvenance = vi.hoisted(() => vi.fn());
 // [P0] The awaiting-approval rest state — mirrors provision-session.ts's real
 // state machine so operate_pay's approval_pending path, and
@@ -48,7 +47,6 @@ interface MockPaymentSessionState {
   paymentLease: { phase: "fill_card" | "single" } | null;
   paymentSealed: boolean;
   paymentSealActive: boolean;
-  paymentAuthenticatedPendingOrder: boolean;
   awaitingApproval: PendingApprovalWait | null;
   cartCheckout: CartCheckoutObservation | null;
 }
@@ -96,12 +94,6 @@ const primaryPaymentState: MockPaymentSessionState = {
   set paymentSealActive(value) {
     mockPaymentSealActive = value;
   },
-  get paymentAuthenticatedPendingOrder() {
-    return mockPaymentAuthenticatedPendingOrder;
-  },
-  set paymentAuthenticatedPendingOrder(value) {
-    mockPaymentAuthenticatedPendingOrder = value;
-  },
   get awaitingApproval() {
     return mockAwaitingApproval;
   },
@@ -132,7 +124,6 @@ function createPaymentSessionState(
     paymentLease: null,
     paymentSealed: false,
     paymentSealActive: false,
-    paymentAuthenticatedPendingOrder: false,
     awaitingApproval: null,
     cartCheckout: null,
     ...overrides,
@@ -198,11 +189,6 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       if (state.paymentSealed) {
         throw new Error("operate_pay refused: payment field cleanup remains unverified");
       }
-      if (state.paymentAuthenticatedPendingOrder) {
-        throw new Error(
-          "operate_pay refused: the prior authenticated payment still needs a manual order check",
-        );
-      }
       if (state.pending !== null) {
         if (phase !== "confirm") {
           throw new Error(
@@ -254,20 +240,6 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       state.paymentLease = null;
       state.awaitingApproval = approval;
     },
-    completeActivePaymentLeaseWithUnconfirmedOutcome: (
-      lease: { phase: "fill_card" | "single" },
-      paymentFieldsCleared = true,
-      session?: ProvisionSession.Session,
-    ) => {
-      const state = paymentSessionState(session);
-      if (state.paymentLease !== lease) {
-        throw new Error("operate_pay lost ownership of the active payment lease");
-      }
-      state.paymentLease = null;
-      state.paymentAuthenticatedPendingOrder = paymentFieldsCleared;
-      state.paymentSealed = !paymentFieldsCleared;
-      state.paymentSealActive = !paymentFieldsCleared;
-    },
     getActivePendingApproval: (session?: ProvisionSession.Session) =>
       paymentSessionState(session).awaitingApproval,
     recordActivePaymentProvenance: mockRecordActivePaymentProvenance,
@@ -304,7 +276,6 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       state.paymentLease = null;
       state.paymentSealed = false;
       state.paymentSealActive = true;
-      state.paymentAuthenticatedPendingOrder = false;
     },
     retainActivePaymentFieldSeal: (session?: ProvisionSession.Session) => {
       const state = paymentSessionState(session);
@@ -320,20 +291,6 @@ vi.mock("../bot/provision-session.js", async (importOriginal) => {
       state.pendingConfirming = false;
       state.submitStarted = false;
       state.paymentLease = null;
-      state.paymentSealed = !paymentFieldsCleared;
-      state.paymentSealActive = !paymentFieldsCleared;
-      state.paymentAuthenticatedPendingOrder = false;
-    },
-    completeActivePendingCardFillWithUnconfirmedOutcome: (
-      paymentFieldsCleared = true,
-      session?: ProvisionSession.Session,
-    ) => {
-      const state = paymentSessionState(session);
-      if (!state.pendingConfirming) {
-        throw new Error("operate_pay confirm lost ownership of the active payment state");
-      }
-      state.pendingConfirming = false;
-      state.paymentAuthenticatedPendingOrder = paymentFieldsCleared;
       state.paymentSealed = !paymentFieldsCleared;
       state.paymentSealActive = !paymentFieldsCleared;
     },
@@ -398,7 +355,6 @@ beforeEach(() => {
   mockPaymentLease = null;
   mockPaymentSealed = false;
   mockPaymentSealActive = false;
-  mockPaymentAuthenticatedPendingOrder = false;
   mockRecordActivePaymentProvenance.mockReset();
   mockAwaitingApproval = null;
   mockCartCheckout = null;
@@ -1656,36 +1612,6 @@ describe("operate_pay split checkout phases", () => {
     expect(mockBrowser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
     expect(mockPending).toBeNull();
     expect(mockPaymentSealActive).toBe(false);
-  });
-
-  it("keeps authenticated-but-unconfirmed split payment terminal and blocks another charge", async () => {
-    mockPending = { ...PENDING };
-    vi.mocked(mockBrowser.submitFilledCheckout).mockResolvedValue({
-      three_ds_required: true,
-      order_confirmed: false,
-      challenge_url: "https://issuer.synthetic.test/challenge",
-    });
-    vi.mocked(mockBrowser.waitForThreeDsResolution).mockResolvedValue(
-      "authenticated_pending_order",
-    );
-    const api = makeMockApi({
-      auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }),
-      notifyThreeDs: vi.fn().mockResolvedValue({ sent: true }),
-    });
-    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
-
-    await expect(operatePayTool.handler(args, api)).resolves.toMatchObject({
-      status: "payment_3ds_authenticated_pending_order",
-    });
-    expect(mockPendingConfirming).toBe(false);
-    expect(mockPaymentAuthenticatedPendingOrder).toBe(true);
-    expect(mockRecordActivePaymentProvenance).toHaveBeenCalledWith(
-      "card_split",
-      expect.objectContaining({ id: PAYMENT_SESSION_A_ID }),
-    );
-    await expect(
-      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
-    ).rejects.toThrow(/prior authenticated payment still needs a manual order check/);
   });
 
   it("confirm retains the seal lock when terminal cleanup cannot clear the fields", async () => {
