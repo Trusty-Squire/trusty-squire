@@ -857,7 +857,88 @@ export async function cancelActiveLoginBrowsers(): Promise<void> {
   await Promise.all(pending.map((cancel) => cancel().catch(() => undefined)));
 }
 
-type LoginProcessRuntime = Pick<NodeJS.Process, "once" | "removeListener" | "exit">;
+interface TrackedLoginBrowserLifecycle {
+  cancel(): Promise<void>;
+  throwIfCancelled(): void;
+  browserLaunched(teardown: () => Promise<ProfileCloseState>): void;
+  finish(): Promise<ProfileCloseState>;
+}
+
+function createTrackedLoginBrowserLifecycle(
+  teardownRun?: () => Promise<void>,
+): TrackedLoginBrowserLifecycle {
+  let cancelled = false;
+  let launchSettled = false;
+  let resolveLaunchSettlement: (() => void) | undefined;
+  const launchSettlement = new Promise<void>((resolve) => {
+    resolveLaunchSettlement = resolve;
+  });
+  let teardownBrowser: (() => Promise<ProfileCloseState>) | undefined;
+  let browserTeardown: Promise<ProfileCloseState> | undefined;
+  let runTeardown: Promise<void> | undefined;
+  let cancellation: Promise<void> | undefined;
+  let finishing: Promise<ProfileCloseState> | undefined;
+
+  const settleLaunch = (): void => {
+    if (launchSettled) return;
+    launchSettled = true;
+    resolveLaunchSettlement?.();
+  };
+  const closeBrowser = (): Promise<ProfileCloseState> => {
+    if (teardownBrowser === undefined) return Promise.resolve("unknown");
+    browserTeardown ??= teardownBrowser();
+    return browserTeardown;
+  };
+  const closeRun = (): Promise<void> => {
+    if (teardownRun === undefined) return Promise.resolve();
+    runTeardown ??= teardownRun();
+    return runTeardown;
+  };
+  let lifecycle!: TrackedLoginBrowserLifecycle;
+  const untrack = trackActiveLoginBrowser(async () => await lifecycle.cancel());
+  lifecycle = {
+    cancel: (): Promise<void> => {
+      cancelled = true;
+      cancellation ??= (async () => {
+        await launchSettlement;
+        try {
+          await closeBrowser();
+        } finally {
+          await closeRun();
+        }
+      })();
+      return cancellation;
+    },
+    throwIfCancelled: (): void => {
+      if (cancelled) throw new Error("login browser cancelled during shutdown");
+    },
+    browserLaunched: (teardown): void => {
+      teardownBrowser = teardown;
+      settleLaunch();
+      lifecycle.throwIfCancelled();
+    },
+    finish: (): Promise<ProfileCloseState> => {
+      settleLaunch();
+      finishing ??= (async () => {
+        let closeState: ProfileCloseState = "unknown";
+        try {
+          closeState = await closeBrowser();
+        } finally {
+          try {
+            await closeRun();
+          } finally {
+            untrack();
+          }
+        }
+        return closeState;
+      })();
+      return finishing;
+    },
+  };
+  return lifecycle;
+}
+
+type LoginProcessRuntime = Pick<NodeJS.Process, "on" | "once" | "removeListener" | "exit">;
 
 // How registerHeadlessRigCleanup coordinates exit ownership with browser.ts's
 // self-managed Chrome signal handlers. Injectable for tests; the default is
@@ -898,6 +979,13 @@ export function registerHeadlessRigCleanup(
   signalExit: LoginSignalExitCoordination = selfManagedSignalExitCoordination,
 ): () => void {
   let finishing = false;
+  let signalExitSuspended = false;
+
+  const restoreSignalExitOwnership = (): void => {
+    if (!signalExitSuspended) return;
+    signalExitSuspended = false;
+    signalExit.set(true);
+  };
 
   const teardownBrowserWithin = async (): Promise<void> => {
     const closeBrowser = activeBrowserTeardown();
@@ -916,12 +1004,14 @@ export function registerHeadlessRigCleanup(
   const exitAfterCleanup = (code: number): void => {
     if (finishing) {
       forceTeardownHeadlessRig(rig);
+      restoreSignalExitOwnership();
       runtime.exit(code);
       return;
     }
     finishing = true;
     void teardownBrowserWithin().finally(async () => {
       await teardownHeadlessRig(rig);
+      restoreSignalExitOwnership();
       runtime.exit(code);
     });
   };
@@ -942,20 +1032,22 @@ export function registerHeadlessRigCleanup(
   const ownsTerminationExit = signalExit.enabled();
   if (ownsTerminationExit) {
     signalExit.set(false);
-    runtime.once("SIGTERM", onSigterm);
-    runtime.once("SIGINT", onSigint);
+    signalExitSuspended = true;
+    runtime.on("SIGTERM", onSigterm);
+    runtime.on("SIGINT", onSigint);
     runtime.once("uncaughtException", onUncaughtException);
     runtime.once("unhandledRejection", onUnhandledRejection);
   }
 
   return (): void => {
+    if (finishing) return;
     runtime.removeListener("exit", onExit);
     if (!ownsTerminationExit) return;
     runtime.removeListener("SIGTERM", onSigterm);
     runtime.removeListener("SIGINT", onSigint);
     runtime.removeListener("uncaughtException", onUncaughtException);
     runtime.removeListener("unhandledRejection", onUnhandledRejection);
-    signalExit.set(true);
+    restoreSignalExitOwnership();
   };
 }
 
@@ -1146,7 +1238,13 @@ async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise
   return await runHeadlessChrome(opts);
 }
 
-async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
+export async function runDisplayedChrome(
+  opts: RunInBotChromeOpts,
+  runtime: {
+    resolveChannelBinary: typeof resolveChannelBinary;
+    launchPlainLoginBrowser: typeof launchPlainLoginBrowser;
+  } = { resolveChannelBinary, launchPlainLoginBrowser },
+): Promise<LoginRunResult> {
   // PLAIN-BROWSER path (connect claim): launch plain Chrome, never attach CDP,
   // detect completion off the API + SQLite cookie store. See
   // launchPlainLoginBrowser / RunInBotChromeOpts.plainProfileLogin.
@@ -1154,7 +1252,7 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
     if (opts.plainPollUntilDone === undefined) {
       throw new Error("plainProfileLogin set without plainPollUntilDone");
     }
-    const binary = resolveChannelBinary("chrome");
+    const binary = runtime.resolveChannelBinary("chrome");
     if (binary === null) {
       throw new Error("no Chrome binary found for the plain login browser");
     }
@@ -1164,35 +1262,30 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
         ? selfLaunchProxyDisposition(proxyOpt)
         : null;
     opts.onProxyDisposition?.(proxyDisposition);
-    const browser = await launchPlainLoginBrowser({
-      binary,
-      profileDir: opts.profileDir,
-      url: opts.url,
-      window: { width: 1280, height: 800 },
-      env: process.env,
-      // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
-      // proxy (direct). Connect from the box is the point anyway.
-      proxyServer: proxyDisposition?.server ?? null,
-      extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
-    });
+    const lifecycle = createTrackedLoginBrowserLifecycle();
     let status: LoginRunResult["status"] = "timeout";
     let closeState: ProfileCloseState = "unknown";
-    // Memoized so the normal finally and an external shutdown cancel share
-    // one proof-checked teardown instead of racing two.
-    let browserTeardown: Promise<ProfileCloseState> | undefined;
-    const teardownBrowser = (): Promise<ProfileCloseState> => {
-      browserTeardown ??= teardownLoginBrowser({
-        profileDir: opts.profileDir,
-        identity: browser.identity,
-        closeBrowser: browser.teardown,
-        forceClose: browser.forceTeardown,
-      });
-      return browserTeardown;
-    };
-    const untrackLoginRun = trackActiveLoginBrowser(async () => {
-      await teardownBrowser();
-    });
     try {
+      const browser = await runtime.launchPlainLoginBrowser({
+        binary,
+        profileDir: opts.profileDir,
+        url: opts.url,
+        window: { width: 1280, height: 800 },
+        env: process.env,
+        // Self-launch/--proxy-server can't carry proxy auth — drop a credentialed
+        // proxy (direct). Connect from the box is the point anyway.
+        proxyServer: proxyDisposition?.server ?? null,
+        extraArgs: ["--no-sandbox", "--disable-dev-shm-usage"],
+      });
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: browser.identity,
+            closeBrowser: browser.teardown,
+            forceClose: browser.forceTeardown,
+          }),
+      );
       console.error(`\n[login] A Chrome window has opened. ${opts.bannerLabel}\n`);
       const ok = await pollUntil(
         opts.deadline,
@@ -1211,52 +1304,48 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
       }
       status = ok ? "completed" : "timeout";
     } finally {
-      untrackLoginRun();
-      closeState = await teardownBrowser();
+      closeState = await lifecycle.finish();
     }
     return { status, closeState };
   }
   const chromium = resolveChromium();
   const proxyOpt = loginProxyOption();
   opts.onProxyDisposition?.(proxyOpt ?? null);
-  const context = await launchWithProfileGate(
-    opts.profileDir,
-    () =>
-      launchPersistentLoginContext(chromium, opts.profileDir, {
-        headless: false,
-        viewport: { width: 1280, height: 800 },
-        // Drop Playwright's default --enable-automation switch: it paints the
-        // "Chrome is being controlled by automated test software" infobar AND
-        // is itself an automation fingerprint the provider can read during the
-        // sign-in (so removing it also helps the session survive).
-        ignoreDefaultArgs: ["--enable-automation"],
-        args: [
-          "--disable-blink-features=AutomationControlled",
-          "--no-sandbox",
-          "--disable-dev-shm-usage",
-        ],
-        ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
-      }),
-    { failFast: true },
-  );
-  const holderPid = currentProfileHolderPid(opts.profileDir);
-  const identity = holderPid === null ? null : profileProcessIdentity(holderPid, opts.profileDir);
+  const lifecycle = createTrackedLoginBrowserLifecycle();
   let status: LoginRunResult["status"] = "timeout";
   let closeState: ProfileCloseState = "unknown";
-  let browserTeardown: Promise<ProfileCloseState> | undefined;
-  const teardownBrowser = (): Promise<ProfileCloseState> => {
-    browserTeardown ??= teardownLoginBrowser({
-      profileDir: opts.profileDir,
-      identity,
-      closeBrowser: () => context.close(),
-      forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
-    });
-    return browserTeardown;
-  };
-  const untrackLoginRun = trackActiveLoginBrowser(async () => {
-    await teardownBrowser();
-  });
   try {
+    const context = await launchWithProfileGate(
+      opts.profileDir,
+      () =>
+        launchPersistentLoginContext(chromium, opts.profileDir, {
+          headless: false,
+          viewport: { width: 1280, height: 800 },
+          // Drop Playwright's default --enable-automation switch: it paints the
+          // "Chrome is being controlled by automated test software" infobar AND
+          // is itself an automation fingerprint the provider can read during the
+          // sign-in (so removing it also helps the session survive).
+          ignoreDefaultArgs: ["--enable-automation"],
+          args: [
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+          ],
+          ...(proxyOpt !== undefined ? { proxy: proxyOpt } : {}),
+        }),
+      { failFast: true },
+    );
+    const holderPid = currentProfileHolderPid(opts.profileDir);
+    const identity = holderPid === null ? null : profileProcessIdentity(holderPid, opts.profileDir);
+    lifecycle.browserLaunched(
+      async () =>
+        await teardownLoginBrowser({
+          profileDir: opts.profileDir,
+          identity,
+          closeBrowser: () => context.close(),
+          forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
+        }),
+    );
     const preflightSatisfied =
       opts.preflight !== undefined &&
       (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)));
@@ -1281,8 +1370,7 @@ async function runDisplayedChrome(opts: RunInBotChromeOpts): Promise<LoginRunRes
       status = ok ? "completed" : "timeout";
     }
   } finally {
-    untrackLoginRun();
-    closeState = await teardownBrowser();
+    closeState = await lifecycle.finish();
   }
   return { status, closeState };
 }
@@ -1330,15 +1418,8 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
   // Cover normal cleanup, interrupts, and fatal process errors. The returned
   // disposer removes process-global listeners once this login finishes.
   const removeRigCleanup = registerHeadlessRigCleanup(rig, () => activeTeardown);
-  // Register for external shutdown BEFORE the Chrome launch so the whole
-  // starting phase is cancellable: a cancel mid-launch still tears the rig,
-  // and once activeTeardown exists it closes the bootstrap Chrome through its
-  // identity-proven teardown.
-  const untrackLoginRun = trackActiveLoginBrowser(async () => {
-    const closeBrowser = activeTeardown;
-    if (closeBrowser !== undefined) await closeBrowser().catch(() => undefined);
-    await teardownHeadlessRig(rig);
-  });
+  const lifecycle = createTrackedLoginBrowserLifecycle(async () => await teardownHeadlessRig(rig));
+  activeTeardown = lifecycle.cancel;
 
   try {
     // 1. Virtual display — phone-shaped.
@@ -1346,6 +1427,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
       spawnBg("Xvfb", [display, "-screen", "0", `${HEADLESS_W}x${HEADLESS_H}x24`, "-ac"]),
     );
     await new Promise((r) => setTimeout(r, 1500));
+    lifecycle.throwIfCancelled();
 
     // 2. Chrome on that display, persistent profile, window filling the display.
     //    Self-launch + connectOverCDP is the STATE.md 2026-06-12 launcher fix:
@@ -1380,9 +1462,6 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
     // plainPollUntilDone (API + on-disk cookies), never a live context.
     const plain = opts.plainProfileLogin === true;
     let context: BrowserContext | undefined;
-    let teardownContext: () => Promise<void>;
-    let forceTeardownContext: () => void;
-    let profileIdentity: ProfileProcessIdentity | null = null;
     if (plain) {
       if (opts.plainPollUntilDone === undefined) {
         throw new Error("plainProfileLogin set without plainPollUntilDone");
@@ -1404,10 +1483,16 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
         proxyServer: proxyDisposition?.server ?? null,
         extraArgs: sharedChromeArgs,
       });
-      teardownContext = browser.teardown;
-      forceTeardownContext = browser.forceTeardown;
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: browser.identity,
+            closeBrowser: browser.teardown,
+            forceClose: browser.forceTeardown,
+          }),
+      );
       plainBrowserIsRunning = browser.isRunning;
-      profileIdentity = browser.identity;
     } else if (useSelfLaunch && chromeBinary !== null) {
       const proxyDisposition = selfLaunchProxyDisposition(proxyOpt);
       opts.onProxyDisposition?.(proxyDisposition);
@@ -1423,10 +1508,16 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
         proxyServer: proxyDisposition?.server ?? null,
         extraArgs: sharedChromeArgs,
       });
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity: launched.identity,
+            closeBrowser: launched.teardown,
+            forceClose: launched.forceTeardown,
+          }),
+      );
       context = launched.context;
-      teardownContext = launched.teardown;
-      forceTeardownContext = launched.forceTeardown;
-      profileIdentity = launched.identity;
     } else {
       const chromium = resolveChromium();
       opts.onProxyDisposition?.(proxyOpt ?? null);
@@ -1450,31 +1541,20 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
           }),
         { failFast: true },
       );
-      context = persistent;
       const persistentPid = currentProfileHolderPid(opts.profileDir);
-      const persistentIdentity =
+      const identity =
         persistentPid === null ? null : profileProcessIdentity(persistentPid, opts.profileDir);
-      teardownContext = async (): Promise<void> => {
-        await persistent.close();
-      };
-      forceTeardownContext = (): void => {
-        reapProfileHolderIfOwned(opts.profileDir, persistentIdentity);
-      };
-      profileIdentity = persistentIdentity;
+      lifecycle.browserLaunched(
+        async () =>
+          await teardownLoginBrowser({
+            profileDir: opts.profileDir,
+            identity,
+            closeBrowser: () => persistent.close(),
+            forceClose: () => reapProfileHolderIfOwned(opts.profileDir, identity),
+          }),
+      );
+      context = persistent;
     }
-    let browserTeardown: Promise<ProfileCloseState> | undefined;
-    const teardownBrowser = (): Promise<ProfileCloseState> => {
-      browserTeardown ??= teardownLoginBrowser({
-        profileDir: opts.profileDir,
-        identity: profileIdentity,
-        closeBrowser: teardownContext,
-        forceClose: forceTeardownContext,
-      });
-      return browserTeardown;
-    };
-    activeTeardown = async () => {
-      await teardownBrowser();
-    };
     try {
       // CDP path only: preflight + drive the first page to the URL. The plain
       // path has no context — plain Chrome's --app already opened opts.url.
@@ -1483,7 +1563,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
           opts.preflight !== undefined &&
           (await checkLoginStatusWithin(opts.deadline, () => opts.preflight!(context)))
         ) {
-          const closeState = await teardownBrowser();
+          const closeState = await lifecycle.finish();
           return { status: "preflight_satisfied", closeState };
         }
         const page = context.pages()[0] ?? (await context.newPage());
@@ -1515,6 +1595,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
         ]),
       );
       await new Promise((r) => setTimeout(r, 1500));
+      lifecycle.throwIfCancelled();
 
       // 4. noVNC web bridge — serves our branded vnc.html plus the
       //    installed noVNC core from a temp dir; localhost only,
@@ -1528,6 +1609,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
         ]),
       );
       await new Promise((r) => setTimeout(r, 1500));
+      lifecycle.throwIfCancelled();
 
       // 5. Outbound tunnel.
       //
@@ -1554,6 +1636,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
         const cf = spawnBg("cloudflared", fallbackCloudflaredArgs(webPort));
         rig.procs.push(cf);
         const tunnelUrl = await awaitTunnelUrl(cf, 30000);
+        lifecycle.throwIfCancelled();
         const longVncUrl = `${tunnelUrl}/#p=${vncPassword}`;
 
         // G15 (deprecated by G16): shorten the cloudflared URL through
@@ -1564,6 +1647,7 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
         bannerUrl = longVncUrl;
         if (opts.apiBaseUrl !== undefined) {
           bannerUrl = await shortenVncUrl(opts.apiBaseUrl, longVncUrl);
+          lifecycle.throwIfCancelled();
         }
       }
 
@@ -1613,20 +1697,23 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
           }
         }
       }
-      const closeState = await teardownBrowser();
+      const closeState = await lifecycle.finish();
       return { status: ok ? "completed" : "timeout", closeState };
     } finally {
       // Idempotent (self-launch teardown guards with a `torn` flag; the
       // persistent fallback's close() is .catch-wrapped), so the success-path
       // call above and this finally can both fire safely.
-      await teardownBrowser();
+      await lifecycle.finish();
       // Torn down — the signal handler must not double-tear it.
       activeTeardown = undefined;
     }
   } finally {
-    untrackLoginRun();
-    await teardownHeadlessRig(rig);
-    removeRigCleanup();
+    try {
+      await lifecycle.finish();
+    } finally {
+      activeTeardown = undefined;
+      removeRigCleanup();
+    }
   }
 }
 
