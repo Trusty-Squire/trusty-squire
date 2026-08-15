@@ -1,5 +1,10 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.23 (2026-08-15)
+
+- fix(mcp): restore native browser 3-D Secure completion (#527)
+- feat(mcp): consolidate operator tools into canonical surface (#526)
+
 ## 1.1.9-rc.22 (2026-08-15)
 
 - fix(mcp): complete decoupled/out-of-band (app-push) 3DS challenges instead of only detecting and waiting on them, so orders authenticated in a mobile banking app finalize instead of leaving `payment_outcome_unknown` (#524)
