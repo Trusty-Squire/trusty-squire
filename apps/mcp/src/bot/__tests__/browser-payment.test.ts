@@ -2065,10 +2065,23 @@ describe("3-D Secure resolution", () => {
   }> => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
-    await page.route("https://merchant.test/**", async (route) =>
+    await page.route("https://issuer.test/**", async (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: `
+        body: route.request().url().endsWith("/success")
+          ? "<p>Payment successful</p>"
+          : "<div>60 seconds to confirm</div>",
+      }),
+    );
+    await page.route("https://merchant.test/**", async (route) => {
+      const url = route.request().url();
+      return route.fulfill({
+        contentType: "text/html",
+        body: url.endsWith("/status")
+          ? "<p>Payment successful</p>"
+          : url.endsWith("/success")
+            ? "<p>Waiting for merchant confirmation</p>"
+            : `
           ${initialMerchantHtml}
           <button id="pay">Pay now</button>
           <script>
@@ -2076,12 +2089,12 @@ describe("3-D Secure resolution", () => {
               const frame = document.createElement("iframe");
               frame.id = "bank-approval";
               frame.title = "3D Secure authentication";
-              frame.srcdoc = "<div>60 seconds to confirm</div>";
+              frame.src = "https://issuer.test/acs/challenge";
               document.body.append(frame);
             });
           </script>`,
-      }),
-    );
+      });
+    });
     await page.goto("https://merchant.test/checkout");
     const controller = new BrowserController({ humanize: false });
     (controller as unknown as { page: Page }).page = page;
@@ -2141,6 +2154,46 @@ describe("3-D Secure resolution", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "resolves from a generic success URL in a verified merchant child frame",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      try {
+        const resolution = controller.waitForThreeDsResolution(5_000);
+        await page.waitForTimeout(50);
+        await page.locator("body").evaluate((body) => {
+          body.insertAdjacentHTML(
+            "beforeend",
+            '<iframe id="merchant-success-url" src="https://merchant.test/success"></iframe>',
+          );
+        });
+        await expect(resolution).resolves.toBe("succeeded");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "resolves from generic success text in a verified merchant child frame",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      try {
+        const resolution = controller.waitForThreeDsResolution(5_000);
+        await page.waitForTimeout(50);
+        await page.locator("body").evaluate((body) => {
+          body.insertAdjacentHTML(
+            "beforeend",
+            '<iframe id="merchant-success-text" src="https://merchant.test/status"></iframe>',
+          );
+        });
+        await expect(resolution).resolves.toBe("succeeded");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "does not resolve from generic success text inside the issuer frame",
     async () => {
       const { browser, page, controller } = await setupChallenge();
@@ -2158,6 +2211,27 @@ describe("3-D Secure resolution", () => {
               body.textContent = "Payment successful";
             });
         }
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "does not resolve after the top-level page redirects to issuer success",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      let clock = 0;
+      let polls = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+        if (polls++ === 0) await page.goto("https://issuer.test/acs/success");
       });
       try {
         await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
@@ -3501,72 +3575,95 @@ describe("split-checkout card fill (real browser)", () => {
     },
   );
 });
-function controllerWithFrame(frameUrl: string, text = ""): BrowserController {
-  const threeDsText =
-    /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i;
-  const frame = {
-    url: () => frameUrl,
-    evaluate: async () => threeDsText.test(text),
-  };
-  const page = { url: () => "https://merchant.test/checkout", frames: () => [frame] };
-  const controller = new BrowserController({ humanize: false });
-  (controller as unknown as { page: Page }).page = page as unknown as Page;
-  return controller;
-}
-
 describe("3DS detection vs captcha frames", () => {
-  async function detect(controller: BrowserController): Promise<CheckoutSubmitResult> {
-    return (
-      controller as unknown as { detectThreeDsChallenge: () => Promise<CheckoutSubmitResult> }
-    ).detectThreeDsChallenge();
+  async function detectInRealPage(
+    browser: Browser,
+    options: {
+      frameUrl?: string;
+      frameAttributes?: string;
+      frameHtml?: string;
+      merchantHtml?: string;
+    },
+  ): Promise<CheckoutSubmitResult> {
+    const page = await browser.newPage();
+    const merchantUrl = "https://merchant.test/checkout";
+    const frameMarkup =
+      options.frameUrl === undefined
+        ? ""
+        : `<iframe ${options.frameAttributes ?? ""} src="${options.frameUrl}"></iframe>`;
+    try {
+      await page.route("**/*", async (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body:
+            route.request().url() === merchantUrl
+              ? `${options.merchantHtml ?? ""}${frameMarkup}`
+              : (options.frameHtml ?? "<div>Authentication frame</div>"),
+        }),
+      );
+      await page.goto(merchantUrl);
+      await page.waitForLoadState("networkidle");
+      const controller = new BrowserController({ humanize: false });
+      (controller as unknown as { page: Page }).page = page;
+      return await (
+        controller as unknown as { detectThreeDsChallenge: () => Promise<CheckoutSubmitResult> }
+      ).detectThreeDsChallenge();
+    } finally {
+      await page.close();
+    }
   }
 
-  it("does not flag Stripe's invisible hCaptcha frame as a 3DS challenge", async () => {
-    const controller = controllerWithFrame(
-      "https://newassets.hcaptcha.com/captcha/v1/abc123/static/hcaptcha.html#frame=challenge&id=xyz",
-      "Please authenticate this payment using 3-D Secure",
-    );
-
-    await expect(detect(controller)).resolves.toEqual({
-      three_ds_required: false,
-      order_confirmed: false,
-    });
+  it.skipIf(!chromiumAvailable)("keeps every retained cross-processor 3DS signal", async () => {
+    const browser = await chromium.launch({ headless: true });
+    const cases = [
+      {
+        frameUrl: "https://0merchantacsstag.cardinalcommerce.com/V1/Cruise/StepUp",
+      },
+      { frameUrl: "https://hooks.stripe.com/3d_secure/authenticate/src_1" },
+      { frameUrl: "https://issuer.example.test/acs/challenge?provider=hcaptcha.com" },
+      { frameUrl: "https://issuer.example.test/flow/3d-secure/start" },
+      { frameUrl: "https://issuer.example.test/flow/three-d-secure/start" },
+      { frameUrl: "https://issuer.example.test/3ds2/authenticate" },
+      {
+        frameUrl: "https://issuer.example.test/authenticate",
+        frameAttributes: 'title="3D Secure authentication"',
+      },
+      { merchantHtml: "<p>Please authenticate this payment using 3-D Secure</p>" },
+    ];
+    try {
+      for (const testCase of cases) {
+        await expect(detectInRealPage(browser, testCase)).resolves.toMatchObject({
+          three_ds_required: true,
+        });
+      }
+    } finally {
+      await browser.close();
+    }
   });
 
-  it("still detects a real CardinalCommerce StepUp frame as 3DS", async () => {
-    const controller = controllerWithFrame(
-      "https://0merchantacsstag.cardinalcommerce.com/V1/Cruise/StepUp",
-    );
-
-    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
-  });
-
-  it("still detects a Stripe hooks 3d_secure frame as 3DS", async () => {
-    const controller = controllerWithFrame("https://hooks.stripe.com/3d_secure/authenticate/src_1");
-
-    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
-  });
-
-  it("still detects an /acs/ challenge frame as 3DS", async () => {
-    const controller = controllerWithFrame("https://issuer.example.test/acs/challenge");
-
-    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
-  });
-
-  it("does not treat captcha text in an ACS query parameter as a captcha host", async () => {
-    const controller = controllerWithFrame(
-      "https://issuer.example.test/acs/challenge?provider=hcaptcha.com",
-    );
-
-    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
-  });
-
-  it("still detects 3DS text on the page", async () => {
-    const controller = controllerWithFrame(
-      "https://merchant.test/checkout",
-      "Please authenticate this payment using 3-D Secure",
-    );
-
-    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
+  it.skipIf(!chromiumAvailable)("rejects captcha and removed bare challenge signals", async () => {
+    const browser = await chromium.launch({ headless: true });
+    const cases = [
+      { frameUrl: "https://issuer.example.test/challenge" },
+      {
+        frameUrl: "https://issuer.example.test/authenticate",
+        frameAttributes: 'name="payment-challenge"',
+      },
+      {
+        frameUrl:
+          "https://newassets.hcaptcha.com/captcha/v1/abc123/static/hcaptcha.html#frame=challenge&id=xyz",
+        frameHtml: "<p>Please authenticate this payment using 3-D Secure</p>",
+      },
+    ];
+    try {
+      for (const testCase of cases) {
+        await expect(detectInRealPage(browser, testCase)).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      }
+    } finally {
+      await browser.close();
+    }
   });
 });

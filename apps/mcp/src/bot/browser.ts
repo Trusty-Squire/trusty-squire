@@ -9487,6 +9487,40 @@ export class BrowserController {
     );
   }
 
+  private async captureMerchantSuccessEvidence(
+    merchantOrigin: string | null,
+    successUrl: RegExp,
+    successText: RegExp,
+  ): Promise<{ url: boolean; text: boolean }> {
+    if (!this.page || merchantOrigin === null) return { url: false, text: false };
+    const mainFrame = this.page.mainFrame();
+    const evidence = await Promise.all(
+      this.page.frames().map(async (frame) => {
+        let frameOrigin: string | null = null;
+        if (frame === mainFrame) {
+          try {
+            frameOrigin = new URL(frame.url()).origin;
+          } catch {
+            frameOrigin = null;
+          }
+        } else {
+          frameOrigin = await this.frameActiveOrigin(frame);
+        }
+        if (frameOrigin !== merchantOrigin) return { url: false, text: false };
+        return {
+          url: successUrl.test(frame.url()),
+          text: successText.test(
+            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+          ),
+        };
+      }),
+    );
+    return {
+      url: evidence.some((entry) => entry.url),
+      text: evidence.some((entry) => entry.text),
+    };
+  }
+
   // Let the browser complete the challenge natively (including out-of-band
   // bank-app 3DS): just poll for the same terminal-order signal a plain
   // non-3DS checkout uses, plus a passive plain-text decline check. It never
@@ -9501,14 +9535,17 @@ export class BrowserController {
       /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
-    const waitEntryHadSuccessUrl = successUrl.test(this.page.url());
-    const merchantHasSuccessText = async (): Promise<boolean> =>
-      successText.test(
-        await this.page!.mainFrame()
-          .evaluate(() => document.body?.innerText ?? "")
-          .catch(() => ""),
-      );
-    const waitEntryHadSuccessText = await merchantHasSuccessText();
+    let merchantOrigin: string | null = null;
+    try {
+      merchantOrigin = new URL(outcomeBaseline.url).origin;
+    } catch {
+      merchantOrigin = null;
+    }
+    const waitEntrySuccessEvidence = await this.captureMerchantSuccessEvidence(
+      merchantOrigin,
+      successUrl,
+      successText,
+    );
     const deadline = Date.now() + timeoutMs;
     do {
       await this.page.bringToFront().catch(() => undefined);
@@ -9522,10 +9559,14 @@ export class BrowserController {
           ),
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
-      const currentUrl = this.page.url();
+      const currentSuccessEvidence = await this.captureMerchantSuccessEvidence(
+        merchantOrigin,
+        successUrl,
+        successText,
+      );
       if (
-        (!waitEntryHadSuccessUrl && successUrl.test(currentUrl)) ||
-        (!waitEntryHadSuccessText && (await merchantHasSuccessText()))
+        (!waitEntrySuccessEvidence.url && currentSuccessEvidence.url) ||
+        (!waitEntrySuccessEvidence.text && currentSuccessEvidence.text)
       ) {
         return "succeeded";
       }
