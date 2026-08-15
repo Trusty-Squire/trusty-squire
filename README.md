@@ -78,14 +78,13 @@ expiry, and CVV fields; cardholder name and other explicitly labeled billing fie
 are filled best-effort, so a missing name field does not abort the payment. Sealing
 and cleanup touch only those selected payment controls; merchant shipping address and
 country controls remain untouched. A submit is reported as `payment_submitted` only
-after the checkout reaches a new merchant order-confirmation URL or, during the
-bounded post-submit wait, new merchant-origin success text or a success URL appears.
-Success markers already present when that wait begins do not count. The browser
-completes 3-D Secure natively, including out-of-band bank-app challenges — Trusty
-Squire never manipulates or intercepts the challenge; it uses read-only checks while
-polling for those confirmation signals. A bare click that produces no confirmation
-signal and no detected challenge returns `payment_outcome_unknown` instead of guessing
-that the charge succeeded. A detected challenge that remains unresolved on timeout stays
+after the checkout reaches a new merchant order-confirmation URL with a substantive
+order or receipt identity. The browser completes 3-D Secure natively, including
+out-of-band bank-app challenges — Trusty Squire never manipulates or intercepts the
+challenge; it uses read-only checks while polling for that same order-confirmation
+signal. A bare click that produces no confirmation and no detected challenge returns
+`payment_outcome_unknown` instead of guessing that the charge succeeded. A detected
+challenge that remains unresolved on timeout stays
 `payment_3ds_required` with `needs_user.wall: "3ds"`, handing control back for user
 completion. Neither status is success or permits blind resubmission: manually check
 the merchant's order state before any retry.

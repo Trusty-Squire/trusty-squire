@@ -234,9 +234,9 @@ agent starts operate_pay in the addressed checkout session
   -> every unconfirmed submit enters the bounded authentication/outcome wait; the
      API sends a challenge-specific Telegram nudge for detected 3-D Secure or
      cautious bank-app guidance when authentication may be out of band
-  -> the browser completes authentication natively while the operator uses the
-     terminal outcome evidence defined in SECURITY.md; captcha-hosted frames are
-     excluded from challenge and outcome classification
+  -> the browser completes authentication natively while the operator polls only for
+     a new merchant terminal route with a substantive order or receipt identity;
+     captcha-hosted frames are excluded from challenge and failure-text classification
   -> a visible decline is payment_declined; timeout, or a disabled wait, hands
      the unresolved outcome to the user instead of guessing success
   -> the post-wait metadata-only payment status is audited
