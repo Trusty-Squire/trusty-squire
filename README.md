@@ -229,10 +229,18 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 29 tools. The maintainer-only
-`list_extract_failures` → `get_extract_failure` DOM-diagnostics pair is excluded
-from that surface; set `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server
-environment to opt into the 31-tool diagnostics profile.
+The default MCP registry exposes 17 tools. The bare-essentials operator surface
+is `operate_start`, `operate_observe`, `operate_act`, `operate_pay`,
+`operate_payment_status`, `operate_finish`, `operate_recipe_run`, and
+`operate_recipe_save` — every former standalone workflow/lifecycle/login tool
+name was dropped and its behavior folded into `operate_act` as a `kind` (or into
+`operate_finish`'s `outcome`); none of those folded operator names remains as a
+delegating alias.
+`operate_payment_await` also remains registered pending a separate in-flight
+payment fix. The maintainer-only `list_extract_failures` → `get_extract_failure`
+DOM-diagnostics pair is excluded from that surface; set
+`TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
+19-tool diagnostics profile.
 
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop
@@ -270,17 +278,17 @@ environment to opt into the 31-tool diagnostics profile.
   `detail` is `none`. `oauth_click` and `oauth_settle` remain for legacy replay
   compatibility. If an observation races that legacy transition, the response
   reports `oauth.state: "in_progress"` and directs the host to observe again.
-- `operate_act` also owns five consolidated workflow kinds. Their former public
-  tool names remain delegating aliases to the same handlers and return the same
-  result shapes:
-  - `select_many` (`operate_form_select_many`) accepts an ordered
-    label/ref-to-option map for coupled variant, shipping, or similar selectors.
-    It applies selections sequentially, re-observes after every success,
-    tolerates partial failure, and returns each field's `selected` or `failed`
-    outcome plus a current observation.
-  - `cart_add` (`operate_cart_add`) is the retry-safe add-to-cart path. Give it
-    the canonical product identity, selected-variant options hash, and a stable
-    idempotency key; it post-verifies the exact cart line and returns `added` or
+- `operate_act` also owns eight consolidated workflow/lifecycle kinds — the
+  entire operator surface beyond navigation, payment, finish, and recipe
+  replay is reached through `operate_act`'s `kind`:
+  - `select_many` accepts an ordered label/ref-to-option map for coupled
+    variant, shipping, or similar selectors. It applies selections
+    sequentially, re-observes after every success, tolerates partial failure,
+    and returns each field's `selected` or `failed` outcome plus a current
+    observation.
+  - `cart_add` is the retry-safe add-to-cart path. Give it the canonical
+    product identity, selected-variant options hash, and a stable idempotency
+    key; it post-verifies the exact cart line and returns `added` or
     `already_in_cart`, `cart_delta` (`+1`, `0`, or `unknown`), and the canonical
     cart URL when observable, without clicking again for the same product and
     variant. Cart and checkout observations expose an informational,
@@ -289,35 +297,31 @@ environment to opt into the 31-tool diagnostics profile.
     known, canonical cart URL, and one `next_action`. `operate_pay` always reads
     the authoritative charge total from the live checkout instead of accepting
     this state as payment input.
-  - `extract` (`operate_extract`) captures a generated credential into a sealed
-    slot or the vault, preserving the alias's secret-visibility boundaries.
-  - `solve_captcha` (`operate_captcha_gate`) uses the same solver and returns the
-    same fail-fast `needs_user` handoff when the gate cannot be cleared.
-  - `await_verification` (`operate_await_verification`) preserves sender-scoped
-    inbox search, explicit inbox consent, and sealed-OTP transfer through
-    `into_slot`.
+  - `extract` captures a generated credential into a sealed slot or the vault.
+  - `solve_captcha` drives the in-session captcha gate and returns the
+    fail-fast `needs_user` handoff when it cannot be cleared.
+  - `await_verification` reads the user's own inbox for an email verification
+    code/link, with sender-scoped search, explicit inbox consent, and
+    sealed-OTP transfer through `into_slot`.
+  - `login_prepare_signup`, `login_store_signup`, and `login_load_saved` own
+    the sealed username/password lifecycle. `login_prepare_signup` seals the
+    user's captured email and a generated password, `login_store_signup`
+    vaults those slots with explicit login-host policy, and `login_load_saved`
+    retrieves an allowed saved login through encrypted browser-fill into
+    sealed session slots. Raw values never enter the tool result.
 - Observed card controls are marked `payment_field` and
   `interaction: "vaulted_card_only"`, with `operate_pay { phase: "fill_card" }`
   as the recommended action. Typing a Luhn-valid, card-number-shaped value
   manually through `operate_act` is refused with `safe_alternative: "operate_pay"`
   and the missing prerequisite `verified_cart_total`.
-- `operate_login` owns the sealed username/password lifecycle. Its
-  `prepare_signup` action seals the user's captured email and a generated
-  password, `store_signup` vaults those slots with explicit login-host policy,
-  and `load_saved` retrieves an allowed saved login through encrypted
-  browser-fill into sealed session slots. Raw values never enter the tool
-  result. `operate_prepare_login`, `operate_store_login`, and
-  `operate_seal_vault_credential` remain delegating aliases with the same return
-  shapes.
 - `operate_finish` closes the session and optionally accepts a nested `outcome`.
   `none` only closes; `credentials` requires `store` and preserves credential
   extraction, vault storage, and auto-promotion; `result` requires `summary` or
-  `data` and can run `verify_recipe` before closing. `operate_finish_task`
-  remains a delegating compatibility alias for the credential and result
-  outcomes. Finish first stops new calls and drains calls already using that
-  session. It refuses to close while a payment is in progress, awaiting approval,
-  or filled and awaiting confirmation, so the browser cannot be reset or pooled
-  out from under a resumable charge.
+  `data` and can run `verify_recipe` before closing. Finish first stops new
+  calls and drains calls already using that session. It refuses to close while
+  a payment is in progress, awaiting approval, or filled and awaiting
+  confirmation, so the browser cannot be reset or pooled out from under a
+  resumable charge.
 - `operate_recipe_save` saves a postcondition-verified local recipe under a
   closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs
@@ -330,8 +334,7 @@ environment to opt into the 31-tool diagnostics profile.
   the site it was recorded for; normal keyed replay refuses a violation before
   navigation and continues with cold driving. On one ordinary missed step,
   replay returns a local repair point and can continue in the same session.
-  Older name-only recipes remain planning hints. `operate_remember` and
-  `operate_use` remain behavior-identical aliases.
+  Older name-only recipes remain planning hints.
 - `list_payment_cards` returns saved-card labels and opaque references;
   `operate_pay` accepts an explicit `session_id` and `phase` of `"single"`
   (the default, also implied by omitting phase), `"fill_card"`, or `"confirm"`.

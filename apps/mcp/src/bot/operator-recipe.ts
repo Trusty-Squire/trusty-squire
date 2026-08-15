@@ -225,8 +225,8 @@ export function renderOperatorRecipeHint(recipe: OperatorRecipe): string {
   }
   if (recipe.secrets.length > 0) {
     lines.push(
-      `- sealed steps: reveal + seal each secret YOURSELF (operate_extract ` +
-        `{into_slot}) and type it from the slot (type_secret). The recipe never ` +
+      `- sealed steps: reveal + seal each secret YOURSELF (operate_act { kind: "extract", ` +
+        `into_slot }) and type it from the slot (type_secret). The recipe never ` +
         `holds the value.`,
     );
   }

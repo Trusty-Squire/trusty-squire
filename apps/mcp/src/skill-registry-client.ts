@@ -395,7 +395,7 @@ export class SkillRegistryClient {
    * addition to the registry's own server-side re-check) so this is the
    * single choke point every submission passes through regardless of
    * caller. Fire-and-forget at the caller level — a failure here must
-   * never fail the local `operate_remember` that produced the recipe;
+   * never fail the local `operate_recipe_save` that produced the recipe;
    * the local copy always stands on its own.
    */
   async publishRecipe(recipe: OperatorRecipe): Promise<PublishRecipeOutcome> {

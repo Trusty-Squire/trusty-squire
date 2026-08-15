@@ -93,8 +93,8 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     // so a host never has to block an RPC on the human's phone tap.
     operatePaymentStatusTool,
     operatePaymentAwaitTool,
-    // Interactive host-driven provisioning (provision_start/observe/act/
-    // captcha_gate/await_verification/extract/finish).
+    // Interactive host-driven provisioning (operate_start/observe/act/finish
+    // plus recipe save/run; workflow kinds are consolidated under operate_act).
     ...OPERATE_TOOLS,
   ] as Tool[];
 }

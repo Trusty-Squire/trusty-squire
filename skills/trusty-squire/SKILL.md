@@ -71,16 +71,17 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 
 - `operate_start`, `operate_observe`, `operate_act` — open the real website and
   drive it one step at a time (signup, sign-in, form fill), clearing bot gates.
-- For shopping, use `operate_cart_add` instead of clicking an add-to-cart
-  control directly. Keep its idempotency key stable across retries and bind the
-  canonical product identity plus selected-variant options hash. For later cart
-  controls, pass that identity pair to `operate_act` when known. Follow the one
-  `checkout_state.next_action`, but treat the state and its money fields as
-  informational only; `operate_pay` independently verifies the charge total.
-- `operate_await_verification` — read the email verification code or link from
-  the user's own inbox, behind an explicit consent gate.
-- `operate_extract` — capture a revealed API key/secret straight into the
-  write-only vault (never back into the conversation).
+- For shopping, use `operate_act { kind: "cart_add" }` instead of clicking an
+  add-to-cart control directly. Keep its idempotency key stable across retries
+  and bind the canonical product identity plus selected-variant options hash.
+  For later cart controls, pass that identity pair to `operate_act` when known.
+  Follow the one `checkout_state.next_action`, but treat the state and its
+  money fields as informational only; `operate_pay` independently verifies the
+  charge total.
+- `operate_act { kind: "await_verification" }` — read the email verification
+  code or link from the user's own inbox, behind an explicit consent gate.
+- `operate_act { kind: "extract" }` — capture a revealed API key/secret
+  straight into the write-only vault (never back into the conversation).
 - `list_credentials`, `use_credential` — find a stored credential and make an
   authenticated API call **without** the raw value returning to the agent; put
   `${SECRET}` (or `${SECRET.field}`) placeholders in the request and the server

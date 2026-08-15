@@ -37,6 +37,15 @@ describe("LLM discovery files", () => {
     }
   });
 
+  it("publishes the registered operator tool names", () => {
+    const content = buildLlmsFullTxt();
+    expect(content).toContain('`operate_act { kind: "extract" }`');
+    expect(content).toContain("`operate_recipe_save` and `operate_recipe_run`");
+    expect(content).not.toContain("`operate_extract`");
+    expect(content).not.toContain("`operate_remember`");
+    expect(content).not.toContain("`operate_use`");
+  });
+
   it("limits prose and detail links to reviewed service-page samples", () => {
     const content = buildLlmsFullTxt();
     const lines = serviceLines(content);

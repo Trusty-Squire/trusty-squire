@@ -496,7 +496,7 @@ export function isRecipeDomainLocked(recipe: OperatorRecipe): boolean {
 // This is deliberately a heuristic, PATTERN-based classifier, and
 // deliberately biased toward false positives over false negatives: when in
 // doubt, the recipe stays local rather than reaching the shared registry.
-// A recipe that fails this check is not broken — operate_use still replays
+// A recipe that fails this check is not broken — operate_recipe_run still replays
 // it from the LOCAL store exactly as before; it simply never gets
 // published for other users to reuse.
 export interface RecipeShareEligibility {

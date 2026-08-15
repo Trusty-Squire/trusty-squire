@@ -189,7 +189,7 @@ export const registerRecipesRoute: FastifyPluginAsync<RecipesRouteDeps> = async 
 
   // ── GET /recipes/:verb/:domain ──────────────────────────────────
   // A key nobody has ever written to 404s exactly like it always has; the
-  // caller (operate_use) falls back to local storage or cold driving
+  // caller (operate_recipe_run) falls back to local storage or cold driving
   // either way.
   fastify.get<{ Params: { verb: string; domain: string } }>(
     "/recipes/:verb/:domain",

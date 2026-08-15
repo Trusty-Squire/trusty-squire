@@ -25,7 +25,10 @@ import { isMaskedDisplay } from "../apps/mcp/dist/bot/credential-shape.js";
 
 const PORT = Number(process.env.OP_PORT || 8731);
 const startUrl = process.argv[2];
-const allowed = (process.argv[3] || "").split(",").map((s) => s.trim()).filter(Boolean);
+const allowed = (process.argv[3] || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const requireLive = process.argv[4] === "live";
 let sid = null;
 
@@ -35,8 +38,14 @@ const compact = (o) => ({
   guidance: o.guidance ? String(o.guidance).slice(0, 600) : undefined,
   text: String(o.text || "").slice(0, 2200),
   elements: (o.elements || []).slice(0, 400).map((e) => ({
-    ref: e.ref, tag: e.tag, role: e.role, type: e.type,
-    label: e.label, href: e.href, value: e.value, checked: e.checked,
+    ref: e.ref,
+    tag: e.tag,
+    role: e.role,
+    type: e.type,
+    label: e.label,
+    href: e.href,
+    value: e.value,
+    checked: e.checked,
   })),
 });
 
@@ -62,7 +71,11 @@ const server = http.createServer(async (req, res) => {
       if (body.into_slot) {
         const vals = ex.credentials || {};
         const cands = Object.entries(vals).filter(
-          ([k, v]) => !k.endsWith("_truncated") && typeof v === "string" && v.length >= 8 && !isMaskedDisplay(v),
+          ([k, v]) =>
+            !k.endsWith("_truncated") &&
+            typeof v === "string" &&
+            v.length >= 8 &&
+            !isMaskedDisplay(v),
         );
         const want = body.secret_label ? norm(body.secret_label) : null;
         // Prefer a candidate whose VALUE matches a caller-supplied shape (e.g.
@@ -77,7 +90,9 @@ const server = http.createServer(async (req, res) => {
         const full = (chosen ?? cands[0])?.[1];
         if (!full)
           return send(200, {
-            sealed: false, slot: null, candidate_count: ex.candidate_count,
+            sealed: false,
+            slot: null,
+            candidate_count: ex.candidate_count,
             blocked_reason: ex.blocked_reason || "no full unmasked value to seal",
             keys: Object.keys(vals),
           });
@@ -97,13 +112,15 @@ const server = http.createServer(async (req, res) => {
       // Seal a literal value into a session slot (for when a value is visible
       // to the planner but not machine-extractable — e.g. GCP's new client
       // secret lives only in a copy-button aria-label). Mirrors the slot the
-      // operate_extract{into_slot} path would have produced.
+      // operate_act { kind: "extract", into_slot } path would have produced.
       const handle = stashSecretSlot(sid, body.slot, body.value);
       return send(200, { sealed: true, slot: handle });
     }
     if (req.url === "/remember") {
       const r = await rememberRecipe(sid, {
-        name: body.name, goal: body.goal, postcondition: body.postcondition,
+        name: body.name,
+        goal: body.goal,
+        postcondition: body.postcondition,
       });
       return send(200, r);
     }
@@ -120,7 +137,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 // `use:<recipe-name>` launch mode: start with the saved recipe's rail injected
-// as the hint (proves operate_use). Templates filled from OP_PARAMS (JSON env).
+// as the hint (proves operate_recipe_run). Templates filled from OP_PARAMS (JSON env).
 async function startOptions() {
   if (startUrl.startsWith("use:")) {
     const recipe = await readRecipe(startUrl.slice(4));

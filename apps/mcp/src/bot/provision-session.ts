@@ -321,7 +321,7 @@ export interface Observation {
   checkout_state?: CheckoutState;
   // The postcondition for a cart-add attempt. `unknown` is honest when the
   // merchant did not expose a count we can verify; callers still receive the
-  // canonical cart URL and safe retry semantics from operate_cart_add.
+  // canonical cart URL and safe retry semantics from operate_act { kind: "cart_add" }.
   cart_delta?: "+1" | "0" | "unknown";
   selected_option?: string;
 }
@@ -508,7 +508,7 @@ export interface Session {
   // MEDIUM capture rounds for skill synthesis at verified success (docs/DESIGN-
   // operator-hints.md): inventory + action + url per step, no screenshots, raw
   // html only on the extract round. Accumulated live; written + promoted at
-  // operate_finish_task on a verified success.
+  // operate_finish on a verified success.
   captureRounds: OnboardingRoundCapture[];
   // Deliverable #1 measurement (docs/DESIGN-operator-hints.md): when the session
   // started and whether a registry hint was served this run, so finish emits the
@@ -516,7 +516,7 @@ export interface Session {
   startedAt: number;
   hintServed: boolean;
   // The session's START url (service_url at operate_start, or the resolved
-  // entry on an operate_use replay). Persisted as the recipe's canonical
+  // entry on an operate_recipe_run replay). Persisted as the recipe's canonical
   // entry_url so a replay always opens at a STABLE page, never a mid-flow
   // single-use link inferred from the trace.
   startUrl: string;
@@ -2004,7 +2004,7 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
   if (hasOneTimeSecretModal(pageText)) {
     parts.push(
       "One-time secret: the key/secret is shown HERE and will NOT be shown again. " +
-        "Extract it immediately with operate_extract (use secret_label to pick the " +
+        'Extract it immediately with operate_act { kind: "extract" } (use secret_label to pick the ' +
         "right field if several values are shown, and into_slot/store to capture it) " +
         "BEFORE clicking anything that could dismiss this modal or navigate away.",
     );
@@ -2041,7 +2041,7 @@ export function provisionPerceptionGuidance(pageText: string): string | undefine
       "Unlinked OAuth identity: the provider returned 'account not found' — your " +
         "Google/GitHub identity is not a linked account here, so the OAuth button " +
         "is sign-IN only. Do NOT keep clicking it. Switch to EMAIL signup/OTP " +
-        "(submit the email field, then operate_await_verification for the code) to " +
+        '(submit the email field, then operate_act { kind: "await_verification" } for the code) to ' +
         "create the account, then continue to the keys page.",
     );
   }
@@ -4393,7 +4393,7 @@ export async function act(
   const bindCartIdentity = (affecting: boolean): void => {
     // Generic operate_act cart controls stay usable without identity. Identity
     // is a best-effort observation hint here; exact product/variant binding and
-    // retry suppression belong to operate_cart_add's dedicated contract.
+    // retry suppression belong to operate_act { kind: "cart_add" }'s dedicated contract.
     if (!affecting || cartIdentity === undefined) return;
     cartAffecting = true;
     cartIdentity.onActionReady?.();
@@ -4502,7 +4502,7 @@ export async function act(
       if (value === undefined) {
         throw new Error(
           `type_secret: no sealed slot named "${action.slot}". Capture it first with ` +
-            `operate_extract { into_slot: "${action.slot}" }. Known slots: ` +
+            `operate_act { kind: "extract", into_slot: "${action.slot}" }. Known slots: ` +
             `[${[...session.secretSlots.keys()].join(", ")}]`,
         );
       }
@@ -5093,7 +5093,7 @@ export function scrubKnownEmail(s: string, userEmail: string | null): string {
 function assertRecipeEmailScrubbed(recipe: OperatorRecipe, userEmail: string | null): void {
   const serialized = JSON.stringify(recipe);
   if (scrubKnownEmail(serialized, userEmail) !== serialized) {
-    throw new Error("operate_remember refused: known email remains in serialized recipe data");
+    throw new Error("operate_recipe_save refused: known email remains in serialized recipe data");
   }
 }
 
@@ -5200,7 +5200,7 @@ function recordTrace(
 ): void {
   // Never freeze a single-use link (email-verify / magic / reset token) into
   // the recipe — it's dead on the next replay. The host agent re-plans the
-  // verification step live (operate_await_verification fetches a FRESH link)
+  // verification step live (operate_act { kind: "await_verification" } fetches a FRESH link)
   // when it reaches that state, per the "recipe is a MAP, not a script" model.
   if (action.kind === "goto" && isSingleUseUrl(action.url)) {
     // Log only the host — never the token-bearing URL.
@@ -5555,7 +5555,7 @@ function traceWithVerifiedProvenance(session: Session, inputs: KnownRecipeInputs
     }
     const authoritative = knownRecipeInputValue(inputs, source.hole);
     if (authoritative === undefined) {
-      throw new Error(`provenance ${source.hole} has no authoritative operate_remember input`);
+      throw new Error(`provenance ${source.hole} has no authoritative operate_recipe_save input`);
     }
     if (authoritative !== source.literal) {
       throw new Error(`provenance ${source.hole} does not match the injected value`);
@@ -5678,21 +5678,23 @@ export async function rememberRecipe(
   if (session === undefined) throw new Error(`unknown provision session ${sessionId}`);
   if (session.usedLocatorFallback) {
     throw new Error(
-      "operate_remember refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
+      "operate_recipe_save refused: this session used a text=/css= locator fallback that operator recipes cannot represent",
     );
   }
   if (session.recipeRejectionReason !== null) {
-    throw new Error(`operate_remember refused: ${session.recipeRejectionReason}`);
+    throw new Error(`operate_recipe_save refused: ${session.recipeRejectionReason}`);
   }
   if (opts.inputs === undefined) {
-    throw new Error("operate_remember refused: complete provenance inputs are required");
+    throw new Error("operate_recipe_save refused: complete provenance inputs are required");
   }
   // Record only through the existing machine-checkable success gate. Previously
-  // operate_remember wrote first and operate_finish_task verified later, leaving
+  // operate_recipe_save wrote first and operate_finish verified later, leaving
   // an unverified recipe on disk when the postcondition failed.
   const verified = await verifyPostcondition(sessionId, opts.postcondition);
   if (!verified.confirmed) {
-    throw new Error(`operate_remember refused: postcondition not confirmed (${verified.reason})`);
+    throw new Error(
+      `operate_recipe_save refused: postcondition not confirmed (${verified.reason})`,
+    );
   }
   const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
   const scrubbedStartUrl = scrubKnownEmail(session.startUrl, session.userEmail);
@@ -5724,7 +5726,7 @@ export async function rememberRecipe(
   const unprovenancedMoneyField = findUnprovenancedMoneyField(recipe);
   if (unprovenancedMoneyField !== null) {
     throw new Error(
-      `operate_remember refused: money field lacks provenance (${unprovenancedMoneyField})`,
+      `operate_recipe_save refused: money field lacks provenance (${unprovenancedMoneyField})`,
     );
   }
   const file = await writeRecipe(recipe);
@@ -5914,7 +5916,7 @@ export type OperatorReplayResult =
       // single-leg (or leg-less) recipe. Not resumable via resume_from,
       // and the same fail-closed payment gate as human_required stays shut
       // for this session's remainder: operate_pay is refused, and
-      // operate_remember / operate_use{leg:"checkout"} both throw on this
+      // operate_recipe_save / operate_recipe_run{leg:"checkout"} both throw on this
       // session (recipeRejectionReason is set, replayState is retained by
       // design). The host may drive the checkout leg's NON-payment steps
       // cold from from_step_index; completing payment requires a fresh
@@ -7419,7 +7421,7 @@ export function buildVerificationResult(
     wall: "verification_code",
     message:
       "No verification email found in the inbox YET. Most often it just hasn't " +
-      "arrived (they commonly take 10–30s) — call operate_await_verification AGAIN " +
+      'arrived (they commonly take 10–30s) — call operate_act { kind: "await_verification" } AGAIN ' +
       "in a few seconds. If it still fails, the code may have gone by SMS/" +
       "authenticator: ask the user for it and type it with operate_act. The " +
       "session stays live either way.",
@@ -7440,7 +7442,7 @@ export function buildConsentRefusal(sessionId: string): VerificationResult {
     message:
       "Inbox reading is not consented, so the operator did not read any mail. Ask " +
       "the user, in context: may the operator read your inbox to fetch the code for " +
-      "this signup? If YES, retry operate_await_verification with " +
+      'this signup? If YES, retry operate_act { kind: "await_verification" } with ' +
       "grant_inbox_consent:true (grants it for the rest of this session). If NO, " +
       "ask them for the code and type it with operate_act — the session is still " +
       "live either way. (To grant it permanently, re-run `connect` and allow inbox access.)",

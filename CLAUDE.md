@@ -15,9 +15,10 @@ user's machine; an API on Fly.io handles persistence and orchestration.
 **One provisioning path:**
 
 **Interactive operator driver** — the host agent plans each step with
-`operate_start`, `operate_observe`, `operate_act`, `operate_extract`,
-and `operate_finish`; Trusty Squire supplies the scoped
-browser, DOM/screenshot observations, vault extraction, and registry hints.
+`operate_start`, `operate_observe`, `operate_act` (which owns `extract` and
+every other workflow/lifecycle kind), and `operate_finish`; Trusty Squire supplies
+the scoped browser, DOM/screenshot observations, vault extraction, and registry
+hints.
 Account-bound, vault-backed. Provisioning is free during beta (no signup quota).
 Closed-loop with the skill registry: eligible successful runs publish a Skill that
 subsequent provisions replay in ~30s instead of the ~6min a from-scratch
@@ -70,9 +71,10 @@ silent failures.
   v16+ shipped.
 - **Email verification — the user's own inbox.** Signups are user-owned:
   the operator reads the verification code/link from the user's own Gmail
-  through their signed-in browser session (`operate_await_verification`),
-  behind a JIT consent gate. The Squire-alias inbound-mail subsystem
-  (`packages/inbox`, the resend-inbound webhook) was retired in 1.0.1 —
+  through their signed-in browser session
+  (`operate_act { kind: "await_verification" }`), behind a JIT consent gate. The
+  Squire-alias inbound-mail subsystem (`packages/inbox`, the resend-inbound
+  webhook) was retired in 1.0.1 —
   no aliases are minted and nothing receives inbound mail server-side.
   Operator-side OTP still arrives via the bot's own Gmail over IMAP
   (`operator-otp-poller.ts`, see `OPERATOR_IMAP_*` below). Resend is
@@ -114,10 +116,10 @@ silent failures.
     (`cf-turnstile-response` or `g-recaptcha-response`) populated, up
     to 30s timeout. Returns `captcha_blocked` on timeout so the MCP
     tool can surface a clear status to the user.
-  - User-inbox verification read (`operate_await_verification` reads the
-    code/link from the user's own signed-in Gmail behind a JIT consent
-    gate), verification-link click, and post-verify navigation primitives
-    the host agent drives via `operate_*`.
+  - User-inbox verification read (`operate_act { kind: "await_verification" }`
+    reads the code/link from the user's own signed-in Gmail behind a JIT consent
+    gate), verification-link click, and post-verify navigation
+    primitives the host agent drives via `operate_*`.
   - DOM/screenshot observation + vault-backed credential extraction +
     operator-recipe replay (`operate_recipe_run`) the host agent composes per step.
   - **Frame/iframe support (operator-frame-support).** Ordinary child-frame
