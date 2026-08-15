@@ -877,6 +877,45 @@ describe("checkout payment parsing", () => {
     },
   );
 
+  it.skipIf(!chromiumAvailable)(
+    "does not use CardinalCommerce device collection as a 3DS signal",
+    async () => {
+      const collectionUrl = "https://centinelapi.cardinalcommerce.com/V1/Cruise/Collect";
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.route(collectionUrl, async (route) =>
+          route.fulfill({ contentType: "text/html", body: "<div>Device data ready</div>" }),
+        );
+        await page.setContent(`
+          <button id="pay">Pay now</button>
+          <script>
+            document.querySelector("#pay").addEventListener("click", () => {
+              const frame = document.createElement("iframe");
+              frame.src = ${JSON.stringify(collectionUrl)};
+              document.body.append(frame);
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
   it.skipIf(!chromiumAvailable).each([
     ["CardinalCommerce", "https://centinelapi.cardinalcommerce.com/V2/Cruise/StepUp"],
     ["Stripe", "https://hooks.stripe.com/3d_secure_2/hosted"],
