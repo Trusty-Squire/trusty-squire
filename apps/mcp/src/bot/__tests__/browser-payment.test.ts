@@ -2105,6 +2105,11 @@ describe("3-D Secure resolution", () => {
     return { browser, page, controller };
   };
 
+  const mutateOnFirstResolutionPoll = (page: Page, mutate: () => Promise<void>) =>
+    vi.spyOn(page, "waitForTimeout").mockImplementationOnce(async () => {
+      await mutate();
+    });
+
   it.skipIf(!chromiumAvailable)(
     "resolves succeeded from the outer page's own order route while the challenge frame stays open and unresponsive",
     async () => {
@@ -2125,12 +2130,13 @@ describe("3-D Secure resolution", () => {
     "resolves succeeded when a generic success URL appears during the wait",
     async () => {
       const { browser, page, controller } = await setupChallenge();
-      try {
-        const resolution = controller.waitForThreeDsResolution(5_000);
-        await page.waitForTimeout(50);
+      const wait = mutateOnFirstResolutionPoll(page, async () => {
         await page.evaluate(() => history.pushState({}, "", "/success"));
-        await expect(resolution).resolves.toBe("succeeded");
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
       } finally {
+        wait.mockRestore();
         await browser.close();
       }
     },
@@ -2140,14 +2146,15 @@ describe("3-D Secure resolution", () => {
     "resolves succeeded when generic success text appears during the wait",
     async () => {
       const { browser, page, controller } = await setupChallenge();
-      try {
-        const resolution = controller.waitForThreeDsResolution(5_000);
-        await page.waitForTimeout(50);
+      const wait = mutateOnFirstResolutionPoll(page, async () => {
         await page.locator("body").evaluate((body) => {
           body.insertAdjacentHTML("beforeend", "<p>Payment successful</p>");
         });
-        await expect(resolution).resolves.toBe("succeeded");
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
       } finally {
+        wait.mockRestore();
         await browser.close();
       }
     },
@@ -2157,17 +2164,18 @@ describe("3-D Secure resolution", () => {
     "resolves from a generic success URL in a verified merchant child frame",
     async () => {
       const { browser, page, controller } = await setupChallenge();
-      try {
-        const resolution = controller.waitForThreeDsResolution(5_000);
-        await page.waitForTimeout(50);
+      const wait = mutateOnFirstResolutionPoll(page, async () => {
         await page.locator("body").evaluate((body) => {
           body.insertAdjacentHTML(
             "beforeend",
             '<iframe id="merchant-success-url" src="https://merchant.test/success"></iframe>',
           );
         });
-        await expect(resolution).resolves.toBe("succeeded");
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
       } finally {
+        wait.mockRestore();
         await browser.close();
       }
     },
@@ -2177,17 +2185,18 @@ describe("3-D Secure resolution", () => {
     "resolves from generic success text in a verified merchant child frame",
     async () => {
       const { browser, page, controller } = await setupChallenge();
-      try {
-        const resolution = controller.waitForThreeDsResolution(5_000);
-        await page.waitForTimeout(50);
+      const wait = mutateOnFirstResolutionPoll(page, async () => {
         await page.locator("body").evaluate((body) => {
           body.insertAdjacentHTML(
             "beforeend",
             '<iframe id="merchant-success-text" src="https://merchant.test/status"></iframe>',
           );
         });
-        await expect(resolution).resolves.toBe("succeeded");
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
       } finally {
+        wait.mockRestore();
         await browser.close();
       }
     },
@@ -3653,6 +3662,12 @@ describe("3DS detection vs captcha frames", () => {
         frameUrl:
           "https://newassets.hcaptcha.com/captcha/v1/abc123/static/hcaptcha.html#frame=challenge&id=xyz",
         frameHtml: "<p>Please authenticate this payment using 3-D Secure</p>",
+      },
+      {
+        frameUrl:
+          "https://newassets.hcaptcha.com/captcha/v1/abc123/static/hcaptcha.html#frame=nested&id=xyz",
+        frameHtml:
+          '<iframe srcdoc="<p>Please verify your identity</p><input name=&quot;creq&quot;>"></iframe>',
       },
     ];
     try {

@@ -9433,7 +9433,7 @@ export class BrowserController {
       // misread as a 3DS challenge — e.g. Stripe's invisible hCaptcha frame
       // at hcaptcha.html#frame=challenge previously tripped the bare
       // "challenge" match this pattern used to include.
-      if (isCaptchaFrameUrl(frame.url())) continue;
+      if (this.frameWithinCaptcha(frame)) continue;
       const detected =
         urlPattern.test(frame.url()) ||
         (await frame
