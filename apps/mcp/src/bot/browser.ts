@@ -9410,9 +9410,17 @@ export class BrowserController {
 
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
+    // Cross-processor 3DS signals only — never key on a single PSP's internal
+    // state. CardinalCommerce backs the ACS/StepUp flow for many processors
+    // (not just Stripe), so its host is a generic signal, not Stripe-specific.
     const urlPattern =
-      /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/|challenge)/i;
+      /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com\/(?:v\d+\/)?cruise\/stepup(?:[/?#]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/)/i;
     for (const frame of this.page.frames()) {
+      // A captcha frame (fraud-check, not authentication) must never be
+      // misread as a 3DS challenge — e.g. Stripe's invisible hCaptcha frame
+      // at hcaptcha.html#frame=challenge previously tripped the bare
+      // "challenge" match this pattern used to include.
+      if (CAPTCHA_FRAME_HOST_RE.test(frame.url())) continue;
       const detected =
         urlPattern.test(frame.url()) ||
         (await frame
@@ -9420,7 +9428,7 @@ export class BrowserController {
             const text = document.body?.innerText ?? "";
             if (
               document.querySelector(
-                'iframe[name*="challenge" i],iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
+                'iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
               ) !== null
             )
               return true;

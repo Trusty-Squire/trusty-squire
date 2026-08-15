@@ -11,6 +11,7 @@ import {
   parseCheckoutAmounts,
   parseStructuredCheckoutTotal,
   recognizedPaymentProviderFrame,
+  type CheckoutSubmitResult,
   UnrecognizedPaymentFrameError,
 } from "../browser.js";
 import {
@@ -3407,4 +3408,65 @@ describe("split-checkout card fill (real browser)", () => {
       }
     },
   );
+});
+function controllerWithFrame(frameUrl: string, text = ""): BrowserController {
+  const threeDsText =
+    /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i;
+  const frame = {
+    url: () => frameUrl,
+    // No DOM elements in this synthetic frame — only the page-text fallback applies.
+    evaluate: async () => threeDsText.test(text),
+  };
+  const page = { url: () => "https://merchant.test/checkout", frames: () => [frame] };
+  const controller = new BrowserController({ humanize: false });
+  (controller as unknown as { page: Page }).page = page as unknown as Page;
+  return controller;
+}
+
+describe("3DS detection vs captcha frames", () => {
+  async function detect(controller: BrowserController): Promise<CheckoutSubmitResult> {
+    return (
+      controller as unknown as { detectThreeDsChallenge: () => Promise<CheckoutSubmitResult> }
+    ).detectThreeDsChallenge();
+  }
+
+  it("does not flag Stripe's invisible hCaptcha frame as a 3DS challenge", async () => {
+    const controller = controllerWithFrame(
+      "https://newassets.hcaptcha.com/captcha/v1/abc123/static/hcaptcha.html#frame=challenge&id=xyz",
+    );
+
+    await expect(detect(controller)).resolves.toEqual({
+      three_ds_required: false,
+      order_confirmed: false,
+    });
+  });
+
+  it("still detects a real CardinalCommerce StepUp frame as 3DS", async () => {
+    const controller = controllerWithFrame(
+      "https://0merchantacsstag.cardinalcommerce.com/V1/Cruise/StepUp",
+    );
+
+    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
+  });
+
+  it("still detects a Stripe hooks 3d_secure frame as 3DS", async () => {
+    const controller = controllerWithFrame("https://hooks.stripe.com/3d_secure/authenticate/src_1");
+
+    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
+  });
+
+  it("still detects an /acs/ challenge frame as 3DS", async () => {
+    const controller = controllerWithFrame("https://issuer.example.test/acs/challenge");
+
+    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
+  });
+
+  it("still detects 3DS text on the page", async () => {
+    const controller = controllerWithFrame(
+      "https://merchant.test/checkout",
+      "Please authenticate this payment using 3-D Secure",
+    );
+
+    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
+  });
 });
