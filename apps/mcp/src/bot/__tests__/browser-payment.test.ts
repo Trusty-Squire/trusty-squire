@@ -460,6 +460,7 @@ describe("checkout payment parsing", () => {
       `);
         const controller = new BrowserController({ humanize: false });
         (controller as unknown as { page: Page }).page = page;
+        const bringToFront = vi.spyOn(page, "bringToFront");
 
         const result = await controller.fillAndSubmitCheckout({
           pan: "4242424242424242",
@@ -478,6 +479,7 @@ describe("checkout payment parsing", () => {
         expect(await page.locator("body").getAttribute("data-submitted")).toBe("true");
         expect(await page.locator("body").getAttribute("data-wrong-click")).toBeNull();
         expect(result.three_ds_required).toBe(true);
+        expect(bringToFront).toHaveBeenCalled();
       } finally {
         await browser.close();
       }
@@ -3822,17 +3824,22 @@ describe("Stripe decoupled/OOB 3DS challenge parsing", () => {
 
 function controllerWithOobResolutionPage(options: {
   confirmAfterReload?: boolean;
+  detectedChallengeUrl?: string;
   dialogDuringReload?: boolean;
+  lateStripeFrameUrl?: string;
   onReload?: () => void;
 }): {
+  bringToFront: ReturnType<typeof vi.fn>;
   controller: BrowserController;
   dismissDialog: ReturnType<typeof vi.fn>;
   reload: ReturnType<typeof vi.fn>;
 } {
   const currentUrl = "https://merchant.test/checkout";
   let reloaded = false;
+  let lateStripeFrameVisible = false;
   let dialogHandler: ((dialog: { dismiss: () => Promise<void> }) => Promise<void>) | undefined;
   const dismissDialog = vi.fn(async () => undefined);
+  const bringToFront = vi.fn(async () => undefined);
   const reload = vi.fn(async () => {
     if (options.dialogDuringReload === true && dialogHandler !== undefined) {
       await dialogHandler({ dismiss: dismissDialog });
@@ -3840,11 +3847,15 @@ function controllerWithOobResolutionPage(options: {
     options.onReload?.();
     reloaded = true;
   });
+  const lateStripeFrame = {
+    url: () => options.lateStripeFrameUrl ?? "",
+  };
   const page = {
     url: () => currentUrl,
-    frames: () => [],
+    frames: () => (lateStripeFrameVisible ? [lateStripeFrame] : []),
     waitForTimeout: async () => undefined,
     reload,
+    bringToFront,
     on: vi.fn(
       (event: string, handler: (dialog: { dismiss: () => Promise<void> }) => Promise<void>) => {
         if (event === "dialog") dialogHandler = handler;
@@ -3867,13 +3878,17 @@ function controllerWithOobResolutionPage(options: {
     captureVisibleCheckoutFailureSignals: async () => ({}),
     hasConfirmedCheckoutOutcome: async () => reloaded && options.confirmAfterReload === true,
     hasNewVisibleCheckoutFailure: async () => false,
-    detectThreeDsChallenge: async () => ({
-      three_ds_required: true,
-      order_confirmed: false,
-      challenge_url: STRIPE_CHALLENGE_URL,
-    }),
+    isFrameSurfaceTopmost: async () => true,
+    detectThreeDsChallenge: async () => {
+      lateStripeFrameVisible = options.lateStripeFrameUrl !== undefined;
+      return {
+        three_ds_required: true,
+        order_confirmed: false,
+        challenge_url: options.detectedChallengeUrl ?? STRIPE_CHALLENGE_URL,
+      };
+    },
   });
-  return { controller, dismissDialog, reload };
+  return { bringToFront, controller, dismissDialog, reload };
 }
 
 describe("decoupled/out-of-band (app-push) 3DS completion", () => {
@@ -3884,7 +3899,7 @@ describe("decoupled/out-of-band (app-push) 3DS completion", () => {
       json: async () => ({ status: statuses.shift() ?? "succeeded" }),
     }));
     vi.stubGlobal("fetch", fetchMock);
-    const { controller, dismissDialog, reload } = controllerWithOobResolutionPage({
+    const { bringToFront, controller, dismissDialog, reload } = controllerWithOobResolutionPage({
       dialogDuringReload: true,
     });
     let now = 0;
@@ -3908,6 +3923,7 @@ describe("decoupled/out-of-band (app-push) 3DS completion", () => {
         }),
       );
       expect(dismissDialog).toHaveBeenCalledTimes(1);
+      expect(bringToFront).toHaveBeenCalled();
     } finally {
       nowSpy.mockRestore();
       vi.unstubAllGlobals();
@@ -3994,6 +4010,38 @@ describe("decoupled/out-of-band (app-push) 3DS completion", () => {
           headers: { Authorization: "Bearer pk_live_synthetic" },
         }),
       );
+    } finally {
+      nowSpy.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("discovers and pins a nested Stripe challenge frame that loads after detection", async () => {
+    const statuses = ["requires_action", "succeeded"];
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ status: statuses.shift() ?? "succeeded" }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { controller, reload } = controllerWithOobResolutionPage({
+      detectedChallengeUrl: "https://merchant.test/checkout",
+      lateStripeFrameUrl: STRIPE_CHALLENGE_URL,
+    });
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => {
+      now += 3_500;
+      return now;
+    });
+
+    try {
+      await expect(
+        controller.waitForThreeDsResolution(120_000, "https://merchant.test/checkout"),
+      ).resolves.toBe("authenticated_pending_order");
+      expect(fetchMock).toHaveBeenCalledWith(
+        expect.stringContaining("pi_synthetic123"),
+        expect.any(Object),
+      );
+      expect(reload).toHaveBeenCalledTimes(1);
     } finally {
       nowSpy.mockRestore();
       vi.unstubAllGlobals();

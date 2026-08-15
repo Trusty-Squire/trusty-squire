@@ -3438,6 +3438,9 @@ export class BrowserController {
     // self-launch path their ABSENCE is the whole fix.
     const launchArgs: readonly string[] = [
       "--disable-blink-features=AutomationControlled",
+      "--disable-background-timer-throttling",
+      "--disable-backgrounding-occluded-windows",
+      "--disable-renderer-backgrounding",
       "--no-sandbox",
       "--disable-dev-shm-usage",
       "--enable-unsafe-swiftshader",
@@ -9470,6 +9473,7 @@ export class BrowserController {
           await readDispatchOutcomeBaseline();
         };
         try {
+          await this.page.bringToFront().catch(() => undefined);
           await candidate.click();
         } catch (error) {
           const dispatchState = await frame
@@ -9997,6 +10001,15 @@ export class BrowserController {
     return Object.entries(current).some(([signal, count]) => count > (baseline[signal] ?? 0));
   }
 
+  private async discoverActiveStripeChallengeParams(): Promise<StripeChallengeParams | undefined> {
+    if (!this.page) return undefined;
+    for (const frame of [...this.page.frames()].reverse()) {
+      const params = parseStripeChallengeParams(frame.url());
+      if (params !== undefined && (await this.isFrameSurfaceTopmost(frame))) return params;
+    }
+    return undefined;
+  }
+
   async waitForThreeDsResolution(
     timeoutMs: number,
     challengeUrl?: string,
@@ -10009,7 +10022,7 @@ export class BrowserController {
     const deadline = Date.now() + timeoutMs;
     let challengeWasActive = this.checkoutThreeDsPending;
     let challengeAbsentSince: number | undefined;
-    const stripeParams =
+    let stripeParams =
       challengeUrl !== undefined ? parseStripeChallengeParams(challengeUrl) : undefined;
     // Poll the PaymentIntent far less often than the DOM loop (every ~3s) —
     // it's a real network call against Stripe, the DOM loop is local.
@@ -10020,6 +10033,8 @@ export class BrowserController {
     // bounded grace period to redirect/render the receipt before giving up.
     let oobGraceDeadline: number | undefined;
     do {
+      await this.page.bringToFront().catch(() => undefined);
+      stripeParams ??= await this.discoverActiveStripeChallengeParams();
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) {
         this.checkoutThreeDsPending = false;
         return "succeeded";
