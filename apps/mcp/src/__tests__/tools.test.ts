@@ -33,7 +33,7 @@ let mockPaymentSealActive = false;
 const mockRecordActivePaymentProvenance = vi.hoisted(() => vi.fn());
 // [P0] The awaiting-approval rest state — mirrors provision-session.ts's real
 // state machine so operate_pay's approval_pending path, and
-// operate_payment_status/await, can be exercised against this fake session.
+// operate_payment_status can be exercised against this fake session.
 let mockAwaitingApproval: PendingApprovalWait | null = null;
 let mockCartCheckout: CartCheckoutObservation | null = null;
 const PAYMENT_SESSION_A_ID = "00000000-0000-4000-8000-000000000001";
@@ -303,10 +303,10 @@ import {
   listCredentialsTool,
   listPaymentCardsTool,
   operatePayTool,
-  operatePaymentAwaitTool,
   operatePaymentStatusTool,
   revokeAppAccessTool,
   buildToolRegistry,
+  findTool,
   TOOLS,
 } from "../tools/index.js";
 import {
@@ -999,7 +999,7 @@ describe("operate_pay non-blocking approval [P0] — tool wiring", () => {
   });
 });
 
-describe("operate_payment_status / operate_payment_await [P0]", () => {
+describe("operate_payment_status [P0]", () => {
   const paymentSessionId = PAYMENT_SESSION_A_ID;
   const operatorPublicKey = Buffer.from("status-operator-public-key").toString("base64url");
   const baseState = {
@@ -1061,10 +1061,6 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
       session_id: paymentSessionId,
       status: "no_pending_payment",
     });
-    await expect(operatePaymentAwaitTool.handler({}, api)).resolves.toMatchObject({
-      session_id: paymentSessionId,
-      status: "no_pending_payment",
-    });
   });
 
   it("routes every payment tool to only its addressed session", async () => {
@@ -1112,17 +1108,17 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     });
     expect(getStatusApproval).toHaveBeenCalledWith("appr_session_a", "peek");
 
-    const getAwaitApproval = vi.fn().mockResolvedValue(approvalRecord(stateB));
+    const getWaitApproval = vi.fn().mockResolvedValue(approvalRecord(stateB));
     await expect(
-      operatePaymentAwaitTool.handler(
-        { session_id: PAYMENT_SESSION_B_ID },
-        makeMockApi({ getPaymentApproval: getAwaitApproval } as unknown as ApiClient),
+      operatePaymentStatusTool.handler(
+        { session_id: PAYMENT_SESSION_B_ID, wait_seconds: 15 },
+        makeMockApi({ getPaymentApproval: getWaitApproval } as unknown as ApiClient),
       ),
     ).resolves.toMatchObject({
       session_id: PAYMENT_SESSION_B_ID,
       approval_id: "appr_session_b",
     });
-    expect(getAwaitApproval).toHaveBeenCalledWith("appr_session_b", "wait-peek");
+    expect(getWaitApproval).toHaveBeenCalledWith("appr_session_b", "wait-peek");
 
     const getPayApproval = vi.fn().mockResolvedValue(approvalRecord(stateB));
     const payApi = makeMockApi({
@@ -1159,54 +1155,14 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     await expect(operatePaymentStatusTool.handler({}, api)).rejects.toThrow(
       /requires session_id when multiple operator sessions are active/,
     );
-    await expect(operatePaymentAwaitTool.handler({}, api)).rejects.toThrow(
-      /requires session_id when multiple operator sessions are active/,
-    );
   });
 
   it("rejects waits longer than the 15-second tool contract", () => {
-    expect(() => operatePaymentAwaitTool.inputSchema.parse({ max_wait_seconds: 16 })).toThrow();
-    expect(operatePaymentAwaitTool.jsonInputSchema).toMatchObject({
-      properties: { max_wait_seconds: { maximum: 15 } },
-    });
     expect(() => operatePaymentStatusTool.inputSchema.parse({ wait_seconds: 16 })).toThrow();
     expect(() => operatePaymentStatusTool.inputSchema.parse({ wait_seconds: -1 })).toThrow();
     expect(operatePaymentStatusTool.jsonInputSchema).toMatchObject({
       properties: { wait_seconds: { minimum: 0, maximum: 15 } },
     });
-  });
-
-  it("operate_payment_await is a delegating alias for operate_payment_status(wait_seconds)", async () => {
-    mockAwaitingApproval = baseState;
-    const getPaymentApproval = vi.fn().mockResolvedValue({
-      id: "appr_status",
-      status: "pending",
-      merchant: "M",
-      amount_cents: 100,
-      currency: "USD",
-      expires_at: new Date(Date.now() + 60_000).toISOString(),
-      card_ref: "card_1",
-      operator_pubkey: operatorPublicKey,
-      jws: null,
-      sealed_card: null,
-    });
-    const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
-
-    const viaAlias = await operatePaymentAwaitTool.handler({ max_wait_seconds: 5 }, api);
-    const viaCanonical = await operatePaymentStatusTool.handler({ wait_seconds: 5 }, api);
-    expect(viaAlias).toEqual(viaCanonical);
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(1, "appr_status", "wait-peek");
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(2, "appr_status", "wait-peek");
-
-    // Omitting max_wait_seconds on the alias still waits (defaults to 15s),
-    // unlike omitting wait_seconds on the canonical tool (defaults to an
-    // instant peek, 0s).
-    const aliasDefault = await operatePaymentAwaitTool.handler({}, api);
-    const statusDefault = await operatePaymentStatusTool.handler({}, api);
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(3, "appr_status", "wait-peek");
-    expect(getPaymentApproval).toHaveBeenNthCalledWith(4, "appr_status", "peek");
-    expect(aliasDefault).toMatchObject({ status: "pending" });
-    expect(statusDefault).toMatchObject({ status: "pending" });
   });
 
   it("status: read-only — never opens the card or confirms a candidate", async () => {
@@ -1254,7 +1210,7 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     });
     const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
 
-    const result = await operatePaymentAwaitTool.handler({}, api);
+    const result = await operatePaymentStatusTool.handler({ wait_seconds: 15 }, api);
     expect(result).toMatchObject({
       session_id: paymentSessionId,
       status: "pending",
@@ -1282,7 +1238,9 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     });
     const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
 
-    await expect(operatePaymentAwaitTool.handler({}, api)).resolves.toMatchObject({
+    await expect(
+      operatePaymentStatusTool.handler({ wait_seconds: 15 }, api),
+    ).resolves.toMatchObject({
       status: "pending",
       candidate_submitted: true,
       candidate_kind: "review",
@@ -1333,18 +1291,18 @@ describe("operate_payment_status / operate_payment_await [P0]", () => {
     });
     const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
 
-    const result = await operatePaymentAwaitTool.handler({ max_wait_seconds: 5 }, api);
+    const result = await operatePaymentStatusTool.handler({ wait_seconds: 5 }, api);
     expect(result).toMatchObject({ status: "expired" });
     expect(result).not.toHaveProperty("next");
   });
 
-  it("await never outlasts its own bound even if the server call hangs", async () => {
+  it("wait never outlasts its own bound even if the server call hangs", async () => {
     mockAwaitingApproval = baseState;
     const getPaymentApproval = vi.fn(() => new Promise<never>(() => undefined));
     const api = makeMockApi({ getPaymentApproval } as unknown as ApiClient);
 
     const start = Date.now();
-    const result = await operatePaymentAwaitTool.handler({ max_wait_seconds: 1 }, api);
+    const result = await operatePaymentStatusTool.handler({ wait_seconds: 1 }, api);
     expect(Date.now() - start).toBeLessThan(2_000);
     expect(result).toMatchObject({ status: "pending", candidate_submitted: false });
   });
@@ -1701,7 +1659,7 @@ describe("audit_log", () => {
 });
 
 describe("TOOLS registry", () => {
-  it("exposes the bare-essentials 17-tool default surface without maintainer diagnostics", () => {
+  it("exposes the essential 8-operator, 16-tool default surface without maintainer diagnostics", () => {
     // Credential read/write tools (write-only sink; rotation = re-store, delete
     // is web-only) + grant_app_access
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
@@ -1713,9 +1671,9 @@ describe("TOOLS registry", () => {
     // await_verification/login_prepare_signup/login_store_signup/login_load_saved)
     // or as operate_finish{outcome} (operate_finish_task) / operate_recipe_run
     // and operate_recipe_save (operate_use/operate_remember).
-    // operate_payment_await stays registered — its removal belongs to the
-    // in-flight operator-restore-native-3ds payment fix, not this cut.
-    expect(TOOLS).toHaveLength(17);
+    // operate_payment_await dropped (captain's decision 2026-08-15): the last
+    // remaining alias, folded into operate_payment_status(wait_seconds).
+    expect(TOOLS).toHaveLength(16);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
       "grant_app_access",
@@ -1726,7 +1684,6 @@ describe("TOOLS registry", () => {
       "operate_finish",
       "operate_observe",
       "operate_pay",
-      "operate_payment_await",
       "operate_payment_status",
       "operate_recipe_run",
       "operate_recipe_save",
@@ -1737,19 +1694,25 @@ describe("TOOLS registry", () => {
     ]);
   });
 
+  it("drops the operate_payment_await alias entirely; polling is reachable only via operate_payment_status", () => {
+    expect(TOOLS.map((t) => t.name)).not.toContain("operate_payment_await");
+    expect(findTool("operate_payment_await")).toBeNull();
+    expect(findTool("operate_payment_status")).not.toBeNull();
+  });
+
   it("adds the two-stage extract diagnostics profile only when explicitly enabled", async () => {
     for (const disabled of [undefined, "", "0", "false", "off"]) {
       const tools = buildToolRegistry(
         disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
       );
-      expect(tools).toHaveLength(17);
+      expect(tools).toHaveLength(16);
       expect(tools.map((tool) => tool.name)).not.toEqual(
         expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
       );
     }
 
     const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
-    expect(tools).toHaveLength(19);
+    expect(tools).toHaveLength(18);
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
     );

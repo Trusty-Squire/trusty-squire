@@ -2323,8 +2323,7 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
 
 // Bare-essentials cut (captain's decision 2026-08-15): the operator surface is
 // these 6 plus operate_pay and operate_payment_status, which are wired separately
-// in tools/index.ts. operate_payment_await stays registered there pending its
-// separately owned payment change; diagnostics remain behind the opt-in profile.
+// in tools/index.ts. diagnostics remain behind the opt-in profile.
 // Every dropped alias's behavior remains reachable: cart_add/select_many/
 // extract/solve_captcha/await_verification/login_prepare_signup/login_store_signup/
 // login_load_saved as operate_act kinds; operate_finish_task as operate_finish{outcome}.

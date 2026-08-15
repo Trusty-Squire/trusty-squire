@@ -381,7 +381,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
               ? { resumeFrom: paymentClaim.resumeApproval }
               : {}),
             // [P0] Never block the RPC waiting on the human — one live check,
-            // then hand back approval_pending. operate_payment_await/status (or
+            // then hand back approval_pending. operate_payment_status (or
             // simply calling operate_pay again, which resumes this SAME
             // approval) is how the host finds out when the phone responds.
             pollBudgetMs: 0,
@@ -446,7 +446,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
   },
 };
 
-// [P0] Shared by operate_payment_status/await: maps the LIVE server record
+// [P0] Used by operate_payment_status: maps the LIVE server record
 // (never the locally-cached approval terms) to a status the host can act on.
 // Never opens the sealed card or calls confirm — read-only, no side effects.
 // `boundMs`, when given, races the server call so this can never outlast the
@@ -569,10 +569,9 @@ function noPendingPaymentResult(session: Session): Record<string, unknown> {
   };
 }
 
-// Shared by operate_payment_status and its operate_payment_await alias: an
-// immediate peek (waitSeconds <= 0) never blocks, a positive waitSeconds
-// bound-waits (clamped to [1s, 15s] — the server's wait-peek window is a
-// fixed ~15s regardless of what's requested).
+// Backs operate_payment_status: an immediate peek (waitSeconds <= 0) never
+// blocks, a positive waitSeconds bound-waits (clamped to [1s, 15s] — the
+// server's wait-peek window is a fixed ~15s regardless of what's requested).
 async function paymentStatusResult(
   api: ApiClient,
   session: Session,
@@ -624,46 +623,6 @@ export const operatePaymentStatusTool: Tool<z.infer<typeof paymentStatusInputSch
     assertApi(api);
     return await withPaymentSessionCall(args.session_id, (session) =>
       paymentStatusResult(api, session, args.wait_seconds ?? 0),
-    );
-  },
-};
-
-const paymentAwaitInputSchema = z.object({
-  session_id: z.string().uuid().optional(),
-  max_wait_seconds: z.number().int().min(1).max(15).optional(),
-});
-
-export const operatePaymentAwaitTool: Tool<z.infer<typeof paymentAwaitInputSchema>> = {
-  name: "operate_payment_await",
-  description:
-    "Bounded wait (never more than ~15s) for the addressed session's payment approval currently " +
-    "awaiting the human's phone tap — started by an operate_pay call that returned approval_pending. " +
-    "Returns explicit candidate_kind and ready_to_charge fields: only an approval-bound candidate " +
-    "is ready to complete; a review-bound candidate still requires final approval. Never hangs " +
-    "for minutes; call it again (or operate_payment_status) if it comes back pending. Equivalent to " +
-    "operate_payment_status with wait_seconds set from max_wait_seconds.",
-  inputSchema: paymentAwaitInputSchema,
-  jsonInputSchema: {
-    type: "object",
-    properties: {
-      session_id: {
-        type: "string",
-        format: "uuid",
-        description: "The payment session; omit only when exactly one local session is active.",
-      },
-      max_wait_seconds: {
-        type: "integer",
-        minimum: 1,
-        maximum: 15,
-        description: "Upper bound on this call's wait. Defaults to 15s; clamped to [1, 15].",
-      },
-    },
-  },
-  annotations: { readOnlyHint: true },
-  async handler(args, api) {
-    assertApi(api);
-    return await withPaymentSessionCall(args.session_id, (session) =>
-      paymentStatusResult(api, session, args.max_wait_seconds ?? 15),
     );
   },
 };

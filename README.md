@@ -86,10 +86,8 @@ the merchant's order state before any retry.
 Every payment response includes its `session_id`. Pass that same ID to every
 follow-up `operate_pay` and canonical `operate_payment_status` call. Pass
 `wait_seconds` (0-15, default 0) to bound-wait for a change instead of an instant
-peek. If compatibility requires `operate_payment_await`, pass the same
-`session_id`; its `max_wait_seconds` defaults to a 15-second wait. Omitting
-`session_id` remains compatible only while this MCP process has exactly one
-session; it never selects a newest or arbitrary checkout.
+peek. Omitting `session_id` remains compatible only while this MCP process has
+exactly one session; it never selects a newest or arbitrary checkout.
 
 Some split checkouts collect the card before the final order-confirmation step. On the
 card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
@@ -231,18 +229,17 @@ for the system and data flows.
 
 ## MCP tools
 
-The default MCP registry exposes 17 tools. The bare-essentials operator surface
+The default MCP registry exposes 16 tools. The essential operator surface
 is `operate_start`, `operate_observe`, `operate_act`, `operate_pay`,
 `operate_payment_status`, `operate_finish`, `operate_recipe_run`, and
 `operate_recipe_save` — every former standalone workflow/lifecycle/login tool
 name was dropped and its behavior folded into `operate_act` as a `kind` (or into
-`operate_finish`'s `outcome`); none of those folded operator names remains as a
-delegating alias.
-`operate_payment_await` also remains registered pending a separate in-flight
-payment fix. The maintainer-only `list_extract_failures` → `get_extract_failure`
+`operate_finish`'s `outcome`); no delegating aliases remain. Poll payment status
+via `operate_payment_status(wait_seconds)`.
+The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
 `TRUSTY_SQUIRE_DIAGNOSTICS=1` in the MCP server environment to opt into the
-19-tool diagnostics profile.
+18-tool diagnostics profile.
 
 - Rejected tool calls return a JSON `error` envelope with a stable `code` and
   message. Malformed and unknown calls fail only that request; they do not stop
@@ -344,10 +341,9 @@ DOM-diagnostics pair is excluded from that surface; set
   add-card approval, then fills the checkout and waits for the user to resolve
   3-D Secure before handing back unresolved challenges. It also supports the
   two-phase `fill_card` then `confirm` flow for split checkouts described above.
-  `operate_payment_status` and its delegating `operate_payment_await` alias follow
-  the [payment guide](#one-prompt) polling contract. Both return the same session
-  ID and include it in every follow-up tool hint, so an approval is always
-  resumed in its originating browser. Malformed calls return the same
+  `operate_payment_status` follows the [payment guide](#one-prompt) polling
+  contract. It returns the session ID and includes it in every follow-up tool
+  hint, so an approval is always resumed in its originating browser. Malformed calls return the same
   `error.guidance` repair fields as `operate_act`, including a safe resolution
   when `card_ref` and `card_label` conflict.
 - `list_credentials` and `use_credential` find saved credentials and make authenticated API calls without returning raw values.

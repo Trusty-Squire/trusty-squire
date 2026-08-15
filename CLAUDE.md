@@ -598,7 +598,7 @@ own signature; Shopify↔WooCommerce mutual discrimination holds, 0 overlap).
   reports' actual field-name lists (Shopify's 45-name intersection across
   6 merchants; 5 real WooCommerce stores' captured sets) verbatim.
 
-### Non-blocking payment approval (operate_payment_status/await)
+### Non-blocking payment approval (operate_payment_status)
 
 The public tool contract lives in the [README payment guide](README.md#one-prompt),
 the data flow in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#payment-flow), and
@@ -620,11 +620,8 @@ kill the server).
   above 0. Reports `pending`/`approved`/`expired` plus `candidate_submitted`
   (the phone responded; call `operate_pay` again to actually verify the
   mandate, open the card, and fill/charge — this tool never does that).
-  `operate_payment_await(session_id?, max_wait_seconds?)` (increment-4
-  consolidation) is now a delegating alias — `paymentStatusResult()` in
-  `operate-pay.ts` is the single shared handler both tools call, with
-  `max_wait_seconds` translated to `wait_seconds` (default 15, so the alias
-  always waits, unlike the canonical tool's default instant peek).
+  `paymentStatusResult()` in `operate-pay.ts` is the sole handler, called only
+  by `operate_payment_status`; no payment-status alias remains in the registry.
 - **Validated idempotent resume.** A still-pending call
   hands its resumable state (approval id/nonce/keypair/checkout/rejected-
   candidates — `PendingApprovalWait` in `pay-operator.ts`) to session state
