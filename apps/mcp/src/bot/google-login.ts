@@ -1408,10 +1408,10 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
   }
   const vncPassword = randomBytes(4).toString("hex"); // 8 chars — VNC's limit
   const rig: HeadlessRig = { procs: [], display };
-  // Teardown for the login browser — for the self-launch path this ALSO kills
-  // the spawned Chrome child (a bare context.close() over CDP leaves it
-  // running), for the persistent fallback it's just context.close(). Tracked
-  // so the signal handler can release the profile lock before exiting.
+  // The lifecycle below memoizes browser and rig teardown across normal
+  // completion, CLI signals, and server cancellation. Self-launched Chrome
+  // needs child teardown as well as context.close(); every forced close still
+  // goes through the launch-time process-identity proof.
   let activeTeardown: (() => Promise<void>) | undefined;
   let plainBrowserIsRunning: (() => boolean) | undefined;
 
@@ -1700,9 +1700,8 @@ async function runHeadlessChrome(opts: RunInBotChromeOpts): Promise<LoginRunResu
       const closeState = await lifecycle.finish();
       return { status: ok ? "completed" : "timeout", closeState };
     } finally {
-      // Idempotent (self-launch teardown guards with a `torn` flag; the
-      // persistent fallback's close() is .catch-wrapped), so the success-path
-      // call above and this finally can both fire safely.
+      // Shared and memoized with the success and cancellation paths, so this
+      // finally cannot double-tear the browser or rig.
       await lifecycle.finish();
       // Torn down — the signal handler must not double-tear it.
       activeTeardown = undefined;

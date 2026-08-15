@@ -33,6 +33,7 @@ import {
   currentProfileHolderPid,
   launchWithProfileGate,
   profileProcessIdentity,
+  profileProcessIdentityState,
   processBirthIdentityState,
   ProfileBusyError,
   reapLeakedProfileHolder,
@@ -80,6 +81,41 @@ describe("profile process identity", () => {
           true,
         );
         expect(killed).toEqual([child.pid]);
+      } finally {
+        child.kill("SIGKILL");
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "keeps the launch identity valid after Chrome flattens its process title",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "ts-profile-flattened-title-"));
+      const child = spawn(
+        process.execPath,
+        [
+          "-e",
+          `process.stdin.once("data", () => {
+            process.title = process.execPath + " --user-data-dir=${dir}";
+            process.stdout.write("flattened\\n");
+          }); setInterval(() => undefined, 1000);`,
+          "--",
+          `--user-data-dir=${dir}`,
+        ],
+        { stdio: ["pipe", "pipe", "ignore"] },
+      );
+      try {
+        let identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+        await vi.waitFor(() => {
+          identity = child.pid === undefined ? null : profileProcessIdentity(child.pid, dir);
+          expect(identity).not.toBeNull();
+        });
+
+        child.stdin.write("flatten");
+        await new Promise<void>((resolve) => child.stdout.once("data", () => resolve()));
+
+        expect(profileProcessIdentityState(identity!, dir)).toBe("matching");
       } finally {
         child.kill("SIGKILL");
         rmSync(dir, { recursive: true, force: true });

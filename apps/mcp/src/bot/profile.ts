@@ -157,13 +157,23 @@ function processProfileState(pid: number, profileDir: string): ProcessIdentitySt
   if (process.platform !== "linux") return "unknown";
   try {
     const expected = profilePathIdentity(profileDir);
-    const matches = readFileSync(`/proc/${pid}/cmdline`, "utf8")
+    const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8")
       .split("\0")
-      .some(
-        (arg) =>
-          arg.startsWith("--user-data-dir=") &&
-          profilePathIdentity(arg.slice("--user-data-dir=".length)) === expected,
-      );
+      .filter((arg) => arg.length > 0);
+    let candidate = argv
+      .find((arg) => arg.startsWith("--user-data-dir="))
+      ?.slice("--user-data-dir=".length);
+
+    // Chrome may overwrite argv with a human-readable process title after
+    // launch. Linux then exposes one space-delimited cmdline entry instead of
+    // the original NUL-delimited argv. Keep the launch identity usable only
+    // when that title still contains one exact --user-data-dir argument.
+    if (candidate === undefined && argv.length === 1) {
+      const match =
+        /(?:^|\s)--user-data-dir=(?:"([^"]+)"|'([^']+)'|([^\s]+))(?=\s|$)/.exec(argv[0]!);
+      candidate = match?.[1] ?? match?.[2] ?? match?.[3];
+    }
+    const matches = candidate !== undefined && profilePathIdentity(candidate) === expected;
     return matches ? "matching" : "stale";
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
