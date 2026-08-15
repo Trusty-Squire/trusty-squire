@@ -75,7 +75,10 @@ context; merchant shipping address and country controls remain untouched. A subm
 is reported as `payment_submitted` only after the checkout reaches a new merchant
 order-confirmation URL. A bare click, or a 3-D Secure prompt that disappears without
 that confirmation, returns `payment_outcome_unknown` instead of guessing that the
-charge succeeded.
+charge succeeded. If the issuer authenticates out of band but the merchant order is
+still not confirmed, the distinct `payment_3ds_authenticated_pending_order` status
+is returned. Neither status is success, and neither permits blind resubmission:
+manually check the merchant's order state before any retry.
 
 Every payment response includes its `session_id`. Pass that same ID to every
 follow-up `operate_pay` and canonical `operate_payment_status` call. Pass

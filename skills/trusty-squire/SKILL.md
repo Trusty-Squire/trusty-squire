@@ -107,9 +107,11 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   for polling arguments and the `operate_payment_await` compatibility alias.
   Omit `session_id` only when this MCP process has exactly one live session; the
   compatibility path never guesses the newest checkout.
-- Treat `payment_outcome_unknown` as unconfirmed: do not claim success or submit
-  again blindly, because the click may already have charged the card. Re-observe
-  and verify the merchant's order state.
+- Treat `payment_outcome_unknown` and
+  `payment_3ds_authenticated_pending_order` as unconfirmed: do not claim success
+  or submit again blindly. The former may already have charged the card; the
+  latter means the issuer authenticated out of band but the merchant order was
+  never confirmed. Manually check the merchant's order state before any retry.
 - On a split checkout whose card-entry step shows no total (or only a subtotal),
   call `operate_pay` with `phase: "fill_card"`. It approves the live card-entry
   total when readable; a subtotal qualifies only when the same order summary says
