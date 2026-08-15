@@ -77,7 +77,6 @@ import {
   canPublishOperatorProfileSeed,
   GOOGLE_LOGIN_COOKIE_MARKERS,
   publishOperatorProfileSeed,
-  type OperatorSeedGoogleValidation,
 } from "./operator-profile-pool.js";
 
 const require = createRequire(import.meta.url);
@@ -1139,7 +1138,6 @@ export interface RunInBotChromeOpts {
   onProxyDisposition?: (proxy: LoginProxyDisposition) => void;
   onConfirmedLogin?: () => Promise<void>;
   seedProvider?: OAuthProviderId | (() => OAuthProviderId | null);
-  validateGoogleSeed?: (profileDir: string) => Promise<OperatorSeedGoogleValidation>;
 }
 
 const LOGIN_BROWSER_CLOSED_ERROR =
@@ -1163,10 +1161,7 @@ export interface LoginRunResult {
 }
 
 export async function finalizeLoginRun(
-  opts: Pick<
-    RunInBotChromeOpts,
-    "profileDir" | "onConfirmedLogin" | "seedProvider" | "validateGoogleSeed"
-  >,
+  opts: Pick<RunInBotChromeOpts, "profileDir" | "onConfirmedLogin" | "seedProvider">,
   result: LoginRunResult,
   publishSeed: typeof publishOperatorProfileSeed = publishOperatorProfileSeed,
 ): Promise<void> {
@@ -1176,48 +1171,9 @@ export async function finalizeLoginRun(
   const provider =
     typeof opts.seedProvider === "function" ? opts.seedProvider() : (opts.seedProvider ?? null);
   const proof = { loginStatus: result.status, closeState: result.closeState, provider };
-  if (canPublishOperatorProfileSeed(proof) && opts.validateGoogleSeed !== undefined) {
-    await publishSeed(opts.profileDir, {
-      proof,
-      validateGoogleIdentity: opts.validateGoogleSeed,
-    });
+  if (canPublishOperatorProfileSeed(proof)) {
+    await publishSeed(opts.profileDir, { proof });
   }
-}
-
-export async function validateGoogleProfileSession(
-  profileDir: string,
-  proxyDisposition: LoginProxyDisposition,
-  launcher: PersistentLauncher = resolveChromium(),
-  closeValidationBrowser: typeof teardownLoginBrowser = teardownLoginBrowser,
-): Promise<OperatorSeedGoogleValidation> {
-  const context = await launchWithProfileGate(profileDir, () =>
-    launchPersistentLoginContext(launcher, profileDir, {
-      headless: true,
-      ignoreDefaultArgs: ["--enable-automation"],
-      args: ["--no-sandbox", "--disable-dev-shm-usage"],
-      ...(proxyDisposition !== null ? { proxy: proxyDisposition } : {}),
-    }),
-  );
-  const holderPid = currentProfileHolderPid(profileDir);
-  const identity = holderPid === null ? null : profileProcessIdentity(holderPid, profileDir);
-  let googleSignedIn = false;
-  try {
-    const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto("https://myaccount.google.com/", {
-      waitUntil: "domcontentloaded",
-      timeout: 30_000,
-    });
-    googleSignedIn = new URL(page.url()).hostname === "myaccount.google.com";
-  } catch {
-    googleSignedIn = false;
-  }
-  const closeState = await closeValidationBrowser({
-    profileDir,
-    identity,
-    closeBrowser: () => context.close(),
-    forceClose: () => reapProfileHolderIfOwned(profileDir, identity),
-  });
-  return { googleSignedIn, closeState };
 }
 
 async function runInBotChromeWithProfileGuard(opts: RunInBotChromeOpts): Promise<LoginRunResult> {
@@ -1814,7 +1770,6 @@ export async function ensureOAuthSession(opts?: {
   const profileDir = opts?.profileDir ?? CHROME_PROFILE_DIR;
   const timeoutMinutes = Math.max(1, opts?.timeoutMinutes ?? 15);
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
-  let proxyDisposition: LoginProxyDisposition = null;
 
   try {
     const result = await runInBotChrome({
@@ -1851,13 +1806,8 @@ export async function ensureOAuthSession(opts?: {
         return hasProviderSession(ctx, target);
       },
       pollUntilDone: (ctx) => hasProviderSession(ctx, target),
-      onProxyDisposition: (proxy) => {
-        proxyDisposition = proxy;
-      },
       onConfirmedLogin: async () => markProviderLoggedIn(provider, profileDir),
       seedProvider: provider,
-      validateGoogleSeed: (validationProfile) =>
-        validateGoogleProfileSession(validationProfile, proxyDisposition),
       ...(opts?.apiBaseUrl !== undefined ? { apiBaseUrl: opts.apiBaseUrl } : {}),
     });
     // Map runInBotChrome's status set to ensureOAuthSession's contract.
@@ -1904,7 +1854,6 @@ export async function openInstallConfirmInBotChrome(
     heartbeatMessage?: string | (() => string);
   },
   runChrome: typeof runInBotChrome = runInBotChrome,
-  validateGoogleSeed: typeof validateGoogleProfileSession = validateGoogleProfileSession,
 ): Promise<{
   status: "claimed" | "timeout" | "error";
   detail?: string;
@@ -1914,7 +1863,6 @@ export async function openInstallConfirmInBotChrome(
   const deadline = Date.now() + timeoutMinutes * 60 * 1000;
   let completion: Awaited<ReturnType<typeof startInstallCompletionListener>> | undefined;
   let observedGoogleIdentity = false;
-  let proxyDisposition: LoginProxyDisposition = null;
   const completedProviders = new Set<OAuthProviderId>();
 
   try {
@@ -1966,12 +1914,7 @@ export async function openInstallConfirmInBotChrome(
         // when unset, so dropping eager capture is safe and keeping CDP off
         // the OAuth login is the whole point of the plain path.
       },
-      onProxyDisposition: (proxy) => {
-        proxyDisposition = proxy;
-      },
       seedProvider: () => (observedGoogleIdentity ? "google" : null),
-      validateGoogleSeed: (validationProfile) =>
-        validateGoogleSeed(validationProfile, proxyDisposition),
     });
     if (result.status === "completed") {
       return { status: "claimed" };

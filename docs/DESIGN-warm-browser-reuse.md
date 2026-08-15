@@ -30,8 +30,6 @@ can enter the warm slot.
 connect / Google login
   -> close canonical Chrome with proof
   -> copy only the identity seed under the seed lock
-  -> validate Google identity through a disposable clone
-  -> close validation Chrome with proof
   -> atomically publish seed/current and delete non-current generations
 
 operate_start
@@ -86,18 +84,15 @@ Publication is allowed only when all of these conditions hold:
 1. The runtime is Linux, where process birth identity can be proven.
 2. A Google login completed during the current run. A preflight hit or cached marker is not enough.
 3. The login Chrome process has closed and closure was proven.
-4. A disposable clone of the candidate seed reaches `myaccount.google.com` as signed in.
-5. The validation Chrome process also closes with proof.
 
 The canonical profile operation guard remains held through login teardown and publication. One
 filesystem seed lock serializes publication, `seed/current` resolution, warm-profile selection,
 seed cloning, and generation garbage collection. Publication stages a new generation, validates a
-separate clone rather than the canonical profile or immutable candidate, atomically switches
-`seed/current`, and then deletes every non-current generation. This stage has no previous-generation
-grace window.
+completed-login proof captured from the actual interactive flow, atomically switches `seed/current`,
+and then deletes every non-current generation. It does not open or independently revalidate a copy
+of the candidate seed. This stage has no previous-generation grace window.
 
-A failed login, uncertain close, failed validation, or uncertain validation close leaves the
-current generation unchanged.
+A failed login or uncertain close leaves the current generation unchanged.
 
 ## 4. Acquisition and reuse
 
@@ -192,6 +187,6 @@ fixed two-session pool and is not required for isolated local controllers.
 | Pool layout, seed lock, leases, warm slot, GC      | `apps/mcp/src/bot/operator-profile-pool.ts`                       |
 | Process birth and profile-path identity            | `apps/mcp/src/bot/profile.ts`                                     |
 | Local Chrome lifecycle and closure proof           | `apps/mcp/src/bot/browser.ts`                                     |
-| Login lifecycle, seed publication, clone validation | `apps/mcp/src/bot/google-login.ts`                               |
+| Login lifecycle and seed-publication provenance     | `apps/mcp/src/bot/google-login.ts`                               |
 | Acquire seam, payment selection, call drain, finish disposition | `apps/mcp/src/bot/provision-session.ts`              |
 | Install provider-completion evidence               | `apps/mcp/src/bot/install-completion.ts`, `apps/web/app/install/` |
