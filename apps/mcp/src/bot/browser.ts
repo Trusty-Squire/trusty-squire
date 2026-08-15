@@ -1573,7 +1573,20 @@ export interface BrowserControllerOptions {
 // these frames — their content is handled by the dedicated captcha-gate flow,
 // not surfaced as ordinary el_table rows.
 const CAPTCHA_FRAME_HOST_RE =
-  /(hcaptcha\.com|challenges\.cloudflare\.com|google\.com\/recaptcha|recaptcha\.net|arkoselabs\.com|funcaptcha\.com)/i;
+  /(?:^|\.)(?:hcaptcha\.com|challenges\.cloudflare\.com|recaptcha\.net|arkoselabs\.com|funcaptcha\.com)$/i;
+const GOOGLE_RECAPTCHA_HOST_RE = /(?:^|\.)google\.com$/i;
+
+function isCaptchaFrameUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return (
+      CAPTCHA_FRAME_HOST_RE.test(url.hostname) ||
+      (GOOGLE_RECAPTCHA_HOST_RE.test(url.hostname) && /^\/recaptcha(?:\/|$)/i.test(url.pathname))
+    );
+  } catch {
+    return false;
+  }
+}
 
 export type CaptchaKind = "turnstile" | "recaptcha" | "hcaptcha";
 
@@ -3576,7 +3589,7 @@ export class BrowserController {
         reapplyWebglSpoof();
         return;
       }
-      if (!CAPTCHA_FRAME_HOST_RE.test(frame.url())) return;
+      if (!isCaptchaFrameUrl(frame.url())) return;
       const cfHost = (() => {
         try {
           return new URL(frame.url()).host;
@@ -9420,7 +9433,7 @@ export class BrowserController {
       // misread as a 3DS challenge — e.g. Stripe's invisible hCaptcha frame
       // at hcaptcha.html#frame=challenge previously tripped the bare
       // "challenge" match this pattern used to include.
-      if (CAPTCHA_FRAME_HOST_RE.test(frame.url())) continue;
+      if (isCaptchaFrameUrl(frame.url())) continue;
       const detected =
         urlPattern.test(frame.url()) ||
         (await frame
@@ -9482,8 +9495,33 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
+    const successUrl =
+      /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|\/paid\b|payment_intent=.*succe/i;
+    const successText =
+      /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
+    const waitEntryUrl = this.page.url();
+    const collectSuccessTextSignals = (texts: readonly string[]): ReadonlyMap<string, number> => {
+      const pattern = new RegExp(successText.source, `${successText.flags}g`);
+      const signals = new Map<string, number>();
+      for (const text of texts) {
+        for (const match of text.matchAll(pattern)) {
+          const signal = match[0].normalize("NFKC").toLowerCase();
+          signals.set(signal, (signals.get(signal) ?? 0) + 1);
+        }
+      }
+      return signals;
+    };
+    const waitEntryTexts = await Promise.all(
+      this.page
+        .frames()
+        .map(
+          async (frame) =>
+            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
+        ),
+    );
+    const waitEntrySuccessTextSignals = collectSuccessTextSignals(waitEntryTexts);
     const deadline = Date.now() + timeoutMs;
     do {
       await this.page.bringToFront().catch(() => undefined);
@@ -9497,6 +9535,16 @@ export class BrowserController {
           ),
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
+      const currentUrl = this.page.url();
+      const currentSuccessTextSignals = collectSuccessTextSignals(texts);
+      if (
+        (currentUrl !== waitEntryUrl && successUrl.test(currentUrl)) ||
+        [...currentSuccessTextSignals].some(
+          ([signal, count]) => count > (waitEntrySuccessTextSignals.get(signal) ?? 0),
+        )
+      ) {
+        return "succeeded";
+      }
       await this.page.waitForTimeout(1_000).catch(() => undefined);
     } while (Date.now() <= deadline);
     return "timeout";
@@ -11618,7 +11666,7 @@ export class BrowserController {
   private frameWithinCaptcha(frame: Frame): boolean {
     let current: Frame | null = frame;
     while (current !== null) {
-      if (CAPTCHA_FRAME_HOST_RE.test(current.url())) return true;
+      if (isCaptchaFrameUrl(current.url())) return true;
       current = current.parentFrame();
     }
     return false;

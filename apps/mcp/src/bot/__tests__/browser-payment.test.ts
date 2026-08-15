@@ -2108,6 +2108,38 @@ describe("3-D Secure resolution", () => {
     },
   );
 
+  it.skipIf(!chromiumAvailable)(
+    "resolves succeeded when a generic success URL appears during the wait",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      try {
+        const resolution = controller.waitForThreeDsResolution(5_000);
+        await page.waitForTimeout(50);
+        await page.evaluate(() => history.pushState({}, "", "/success"));
+        await expect(resolution).resolves.toBe("succeeded");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
+    "resolves succeeded when generic success text appears during the wait",
+    async () => {
+      const { browser, page, controller } = await setupChallenge();
+      try {
+        const resolution = controller.waitForThreeDsResolution(5_000);
+        await page.waitForTimeout(50);
+        await page.locator("body").evaluate((body) => {
+          body.insertAdjacentHTML("beforeend", "<p>Payment successful</p>");
+        });
+        await expect(resolution).resolves.toBe("succeeded");
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
   it.skipIf(!chromiumAvailable)("returns failed for visible decline text", async () => {
     const { browser, page, controller } = await setupChallenge();
     try {
@@ -2140,16 +2172,16 @@ describe("3-D Secure resolution", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "does not treat an unchanged checkout confirmation URL as success",
+    "does not treat pre-existing generic success URL or text as success",
     async () => {
-      const { browser, page, controller } = await setupChallenge();
+      const { browser, page, controller } = await setupChallenge("<p>Payment successful</p>");
       let clock = 0;
       const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
       const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
         clock += timeout;
       });
       try {
-        await page.evaluate(() => history.replaceState({}, "", "/checkout?success_url=/done"));
+        await page.evaluate(() => history.replaceState({}, "", "/success"));
         await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
       } finally {
         wait.mockRestore();
@@ -3414,7 +3446,6 @@ function controllerWithFrame(frameUrl: string, text = ""): BrowserController {
     /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i;
   const frame = {
     url: () => frameUrl,
-    // No DOM elements in this synthetic frame — only the page-text fallback applies.
     evaluate: async () => threeDsText.test(text),
   };
   const page = { url: () => "https://merchant.test/checkout", frames: () => [frame] };
@@ -3433,6 +3464,7 @@ describe("3DS detection vs captcha frames", () => {
   it("does not flag Stripe's invisible hCaptcha frame as a 3DS challenge", async () => {
     const controller = controllerWithFrame(
       "https://newassets.hcaptcha.com/captcha/v1/abc123/static/hcaptcha.html#frame=challenge&id=xyz",
+      "Please authenticate this payment using 3-D Secure",
     );
 
     await expect(detect(controller)).resolves.toEqual({
@@ -3457,6 +3489,14 @@ describe("3DS detection vs captcha frames", () => {
 
   it("still detects an /acs/ challenge frame as 3DS", async () => {
     const controller = controllerWithFrame("https://issuer.example.test/acs/challenge");
+
+    await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
+  });
+
+  it("does not treat captcha text in an ACS query parameter as a captcha host", async () => {
+    const controller = controllerWithFrame(
+      "https://issuer.example.test/acs/challenge?provider=hcaptcha.com",
+    );
 
     await expect(detect(controller)).resolves.toMatchObject({ three_ds_required: true });
   });

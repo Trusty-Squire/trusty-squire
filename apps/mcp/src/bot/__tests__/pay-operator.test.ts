@@ -825,6 +825,32 @@ describe("operate_pay", () => {
     expect(notifyCalls).toHaveLength(1);
   });
 
+  it("waits and hands back an app-push message without an on-page challenge", async () => {
+    const { result, notifyCalls, browser } = await harness(
+      "happy",
+      "customer_test",
+      undefined,
+      { resolution: "timeout" },
+      {
+        fillAndSubmitCheckout: async () => ({
+          three_ds_required: false,
+          order_confirmed: false,
+        }),
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      needs_user: {
+        wall: "3ds",
+        resume: "checkout",
+        message: expect.stringMatching(/No order confirmation.*bank app/),
+      },
+    });
+    expect(notifyCalls).toHaveLength(1);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
+  });
+
   it("flags an undelivered Telegram nudge in the timeout hand-off instead of blocking or faking it", async () => {
     const { result, notifyCalls } = await harness("happy", "customer_test", undefined, {
       resolution: "timeout",
@@ -1690,11 +1716,20 @@ async function runConfirm(cfg: {
 
 describe("operate_pay split checkout — confirm", () => {
   it("does not report payment_submitted when post-submit confirmation is absent", async () => {
-    const { result, auditBodies } = await runConfirm({
+    const { result, auditBodies, notifyCalls, browser } = await runConfirm({
       submit: { three_ds_required: false, order_confirmed: false },
     });
 
-    expect(result).toMatchObject({ status: "payment_outcome_unknown" });
+    expect(result).toMatchObject({
+      status: "payment_outcome_unknown",
+      needs_user: {
+        wall: "3ds",
+        resume: "checkout",
+        message: expect.stringMatching(/No order confirmation.*bank app/),
+      },
+    });
+    expect(notifyCalls).toHaveLength(1);
+    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
     expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
   });
 

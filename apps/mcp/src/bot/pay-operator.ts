@@ -454,6 +454,34 @@ function threeDsChallengeMessage(telegramSent: boolean | undefined): string {
   return "The issuer requires 3-D Secure authentication, approved from the cardholder's bank app.";
 }
 
+function threeDsOutOfBandMessage(telegramSent: boolean | undefined): string {
+  if (telegramSent === false) {
+    return (
+      "No order confirmation or on-page 3-D Secure challenge appeared. The Telegram nudge could " +
+      "not be delivered — check the cardholder's bank app directly, then resume checkout."
+    );
+  }
+  if (telegramSent === true) {
+    return (
+      "No order confirmation or on-page 3-D Secure challenge appeared. A Telegram nudge was sent " +
+      "— check the cardholder's bank app for an approval request, then resume checkout."
+    );
+  }
+  return (
+    "No order confirmation or on-page 3-D Secure challenge appeared. Check the cardholder's bank " +
+    "app for an approval request, then resume checkout."
+  );
+}
+
+function threeDsHandoffMessage(
+  submitResult: CheckoutSubmitResult,
+  telegramSent: boolean | undefined,
+): string {
+  return submitResult.three_ds_required || submitResult.challenge_url !== undefined
+    ? threeDsChallengeMessage(telegramSent)
+    : threeDsOutOfBandMessage(telegramSent);
+}
+
 function statusAfterThreeDsResolution(
   currentStatus: string,
   resolution: ThreeDsResolution,
@@ -1313,7 +1341,7 @@ export async function executeOperatePay(
     }
 
     let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
-    if (submitResult.three_ds_required && threeDsWaitMs > 0) {
+    if (!submitResult.order_confirmed && threeDsWaitMs > 0) {
       getThreeDsTelegramSent = trackThreeDsNotification(api.notifyThreeDs(approvalId));
       const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
       paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
@@ -1330,7 +1358,10 @@ export async function executeOperatePay(
     } catch {
       auditRecorded = false;
     }
-    if (paymentStatus === "payment_3ds_required") {
+    if (
+      paymentStatus === "payment_3ds_required" ||
+      paymentStatus === "payment_outcome_unknown"
+    ) {
       return {
         status: paymentStatus,
         audit_recorded: auditRecorded,
@@ -1340,7 +1371,7 @@ export async function executeOperatePay(
           : {}),
         needs_user: {
           wall: "3ds",
-          message: threeDsChallengeMessage(getThreeDsTelegramSent()),
+          message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
           resume: "checkout",
           ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
         },
@@ -1518,7 +1549,7 @@ export async function executeOperatePayConfirm(
   const paymentFieldsCleared = await clearPaymentFields();
 
   let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
-  if (submitResult.three_ds_required && threeDsWaitMs > 0) {
+  if (!submitResult.order_confirmed && threeDsWaitMs > 0) {
     getThreeDsTelegramSent = trackThreeDsNotification(api.notifyThreeDs(pending.approval_id));
     const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
     paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
@@ -1537,7 +1568,10 @@ export async function executeOperatePayConfirm(
   } catch {
     auditRecorded = false;
   }
-  if (paymentStatus === "payment_3ds_required") {
+  if (
+    paymentStatus === "payment_3ds_required" ||
+    paymentStatus === "payment_outcome_unknown"
+  ) {
     return {
       status: paymentStatus,
       audit_recorded: auditRecorded,
@@ -1548,7 +1582,7 @@ export async function executeOperatePayConfirm(
         : {}),
       needs_user: {
         wall: "3ds",
-        message: threeDsChallengeMessage(getThreeDsTelegramSent()),
+        message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
         resume: "checkout",
         ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
       },
