@@ -3433,9 +3433,14 @@ export class BrowserController {
     // Launch args shared by BOTH paths (launchPersistentContext and the
     // self-launch). See the per-flag rationale: swiftshader gives a real
     // (software) WebGL context on the GPU-less Xvfb box; the others are the
-    // standard headless/sandbox flags. NOTE we deliberately do NOT include
-    // Playwright's automation flags (--enable-automation et al.) — on the
-    // self-launch path their ABSENCE is the whole fix.
+    // standard headless/sandbox flags. The three background-throttling disables
+    // are payment correctness controls: a backgrounded CardinalCommerce ACS
+    // frame must keep running its timers long enough to finish the issuer's OOB
+    // post-approval handshake with Stripe. Keep them paired with bringToFront()
+    // before payment submission and in waitForThreeDsResolution(). NOTE we
+    // deliberately do NOT include Playwright's automation flags
+    // (--enable-automation et al.) — on the self-launch path their ABSENCE is
+    // the whole fix.
     const launchArgs: readonly string[] = [
       "--disable-blink-features=AutomationControlled",
       "--disable-background-timer-throttling",

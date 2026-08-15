@@ -397,30 +397,6 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
-### 9. Decoupled/out-of-band (app-push) 3DS requires an active challenge frame
-
-The live DBS reproduction established that a headless or backgrounded Chrome tab
-can throttle the CardinalCommerce ACS iframe's JavaScript timers. The frozen frame
-then cannot finish its post-approval handshake with Stripe, so an app approval can
-end as `requires_payment_method` (a clean authentication failure) rather than
-leaving the PaymentIntent in `requires_action` indefinitely.
-
-Keep the shared Chrome launch args `--disable-background-timer-throttling`,
-`--disable-backgrounding-occluded-windows`, and
-`--disable-renderer-backgrounding`. Also keep `page.bringToFront()` immediately
-before checkout submission and during every iteration of
-`BrowserController.waitForThreeDsResolution` (`apps/mcp/src/bot/browser.ts`). These
-are the completion-driving safeguards that let the Cardinal iframe run.
-
-The Stripe PaymentIntent poll is an outcome classifier only, never a finalizer. It
-uses the publishable key and client secret parsed from the hosted-challenge URL,
-classifies `requires_payment_method`/`canceled` as failure, and reloads the checkout
-only after observing the same transaction move from `requires_action` to
-`succeeded`, `processing`, or `requires_capture`. Success still requires a genuine
-merchant order-completion route; otherwise
-`payment_3ds_authenticated_pending_order` remains the fail-closed outcome. Never
-replace these boundaries with DOM-only completion or unconditional reloads.
-
 ## Final note
 
 You are reading this file because a prior agent burned four version numbers, confused users, and forced a human to intervene. The agent was not malicious. It was not lazy. It was pattern-matching on its own prose instead of on tool output.
