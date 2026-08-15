@@ -9501,7 +9501,7 @@ export class BrowserController {
       /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
-    const waitEntryUrl = this.page.url();
+    const waitEntryHadSuccessUrl = successUrl.test(this.page.url());
     const collectSuccessTextSignals = (texts: readonly string[]): ReadonlyMap<string, number> => {
       const pattern = new RegExp(successText.source, `${successText.flags}g`);
       const signals = new Map<string, number>();
@@ -9538,7 +9538,7 @@ export class BrowserController {
       const currentUrl = this.page.url();
       const currentSuccessTextSignals = collectSuccessTextSignals(texts);
       if (
-        (currentUrl !== waitEntryUrl && successUrl.test(currentUrl)) ||
+        (!waitEntryHadSuccessUrl && successUrl.test(currentUrl)) ||
         [...currentSuccessTextSignals].some(
           ([signal, count]) => count > (waitEntrySuccessTextSignals.get(signal) ?? 0),
         )

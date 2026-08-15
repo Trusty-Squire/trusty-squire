@@ -2172,16 +2172,22 @@ describe("3-D Secure resolution", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "does not treat pre-existing generic success URL or text as success",
+    "does not treat query or hash churn on pre-existing success evidence as success",
     async () => {
       const { browser, page, controller } = await setupChallenge("<p>Payment successful</p>");
       let clock = 0;
+      let polls = 0;
       const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
       const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
         clock += timeout;
+        if (polls++ === 0) {
+          await page.evaluate(() =>
+            history.replaceState({}, "", "/success?state=waiting#polling"),
+          );
+        }
       });
       try {
-        await page.evaluate(() => history.replaceState({}, "", "/success"));
+        await page.evaluate(() => history.replaceState({}, "", "/success?state=pending"));
         await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
       } finally {
         wait.mockRestore();
