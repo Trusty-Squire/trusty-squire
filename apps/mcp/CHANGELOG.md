@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.26 (2026-08-15)
+
+- fix(mcp): handle captcha and out-of-band 3DS correctly (#534)
+
 ## 1.1.9-rc.25 (2026-08-15)
 
 - fix(mcp): allow checkouts with unreadable totals or missing name fields (#532)
