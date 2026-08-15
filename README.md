@@ -122,7 +122,7 @@ your linked Telegram chat with a nudge to approve the charge in your bank app,
 then waits 180 seconds by default for that in-app approval to clear instead of
 automating it. Standard 3-D Secure signals and bank-agnostic CardinalCommerce or
 Stripe challenge frames activate that wait; the ordinary Shopify PCI card-field host
-alone does not. It reports a newly visible decline and hands an unresolved challenge
+alone does not. It reports a visible decline and hands an unresolved challenge
 back on timeout, noting whether the Telegram nudge actually went out.
 `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to `0` on
 `operate_pay` to skip the notification and waiting and receive the handoff
