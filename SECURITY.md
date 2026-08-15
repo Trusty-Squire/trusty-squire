@@ -180,8 +180,8 @@ cannot be confirmed, pending metadata is discarded, the observation seal remains
 active, and the session refuses further payment operations.
 
 Payment state, the approval keypair, and the verified mandate remain attached to the
-addressed operate session. `operate_pay`, `operate_payment_status`, and
-`operate_payment_await` resolve `session_id` once at tool entry and return that ID in
+addressed operate session. `operate_pay` and `operate_payment_status`
+resolve `session_id` once at tool entry and return that ID in
 their results and follow-up hints. Omitting the ID is accepted only when exactly one
 process-local session exists; no path selects a newest or arbitrary session. Closing a
 session first rejects new calls and drains calls that already entered, then refuses

@@ -105,9 +105,8 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 - Every payment response includes a `session_id`. Pass that same ID to every
   follow-up `operate_pay` and canonical `operate_payment_status` call. Follow the
   [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
-  for polling arguments and the `operate_payment_await` compatibility alias.
-  Omit `session_id` only when this MCP process has exactly one live session; the
-  compatibility path never guesses the newest checkout.
+  for polling arguments. Omit `session_id` only when this MCP process has
+  exactly one live session; it never guesses the newest checkout.
 - Treat `payment_outcome_unknown` as unconfirmed: do not claim success or
   submit again blindly. The card may already have been charged — manually
   check the merchant's order state before any retry.

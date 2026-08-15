@@ -18,12 +18,7 @@ import { grantAppAccessTool } from "./grant-app-access.js";
 import { revokeAppAccessTool, listAppAccessTool } from "./revoke-app-access.js";
 import { auditLogTool } from "./audit-log.js";
 import { OPERATE_TOOLS } from "./provision-drive.js";
-import {
-  listPaymentCardsTool,
-  operatePayTool,
-  operatePaymentAwaitTool,
-  operatePaymentStatusTool,
-} from "./operate-pay.js";
+import { listPaymentCardsTool, operatePayTool, operatePaymentStatusTool } from "./operate-pay.js";
 
 export interface Tool<TArgs extends Record<string, unknown> = Record<string, unknown>> {
   name: string;
@@ -92,7 +87,6 @@ export function buildToolRegistry(env: NodeJS.ProcessEnv = process.env): Tool[] 
     // [P0] Non-blocking payment approval: read-only status + a bounded wait,
     // so a host never has to block an RPC on the human's phone tap.
     operatePaymentStatusTool,
-    operatePaymentAwaitTool,
     // Interactive host-driven provisioning (operate_start/observe/act/finish
     // plus recipe save/run; workflow kinds are consolidated under operate_act).
     ...OPERATE_TOOLS,
@@ -125,5 +119,4 @@ export {
   listPaymentCardsTool,
   operatePayTool,
   operatePaymentStatusTool,
-  operatePaymentAwaitTool,
 };
