@@ -71,7 +71,9 @@ export function formatVaultEventMessage(event: VaultAuditEventInput, at: Date): 
           ? ` — ${formatCurrencyAmount(p.amount_cents, p.currency)}`
           : ""
       }${p.last4 !== undefined ? ` ··${p.last4}` : ""} · ${ts}`;
-      return `💸 Payment ${p.payment_status ?? "executed"}: ${paymentDetail}`;
+      return p.payment_status === "payment_3ds_authenticated_pending_order"
+        ? `⚠️ Payment pending — manual order check required: ${paymentDetail}`
+        : `💸 Payment ${p.payment_status ?? "executed"}: ${paymentDetail}`;
     }
     case VAULT_AUDIT_TYPES.grantMinted:
       return `🔗 Egress grant minted: ${subject} · ${ts}`;

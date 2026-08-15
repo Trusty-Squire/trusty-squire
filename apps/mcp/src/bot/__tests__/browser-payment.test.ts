@@ -877,41 +877,37 @@ describe("checkout payment parsing", () => {
     },
   );
 
-  it.skipIf(!chromiumAvailable)(
-    "detects a DBS bank-app countdown without challenge URL or selector metadata",
-    async () => {
-      const browser = await chromium.launch({ headless: true });
-      const now = vi
-        .spyOn(Date, "now")
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(0)
-        .mockReturnValueOnce(15_000);
-      try {
-        const page = await browser.newPage();
-        await page.setContent(`
+  it.skipIf(!chromiumAvailable).each([
+    ["CardinalCommerce", "https://centinelapi.cardinalcommerce.com/V2/Cruise/StepUp"],
+    ["Stripe", "https://hooks.stripe.com/3d_secure_2/hosted"],
+  ])("detects a %s challenge frame from its host structure", async (_provider, challengeUrl) => {
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.route(challengeUrl, async (route) =>
+        route.fulfill({ contentType: "text/html", body: "<div>Approve in your bank app</div>" }),
+      );
+      await page.setContent(`
           <button id="pay">Pay now</button>
           <script>
             document.querySelector("#pay").addEventListener("click", () => {
-              document.body.insertAdjacentHTML(
-                "beforeend",
-                "<div>60 seconds to confirm</div><div>Approve in your DBS digibank app</div>",
-              );
+              const frame = document.createElement("iframe");
+              frame.src = ${JSON.stringify(challengeUrl)};
+              document.body.append(frame);
             });
           </script>
         `);
-        const controller = new BrowserController({ humanize: false });
-        (controller as unknown as { page: Page }).page = page;
+      const controller = new BrowserController({ humanize: false });
+      (controller as unknown as { page: Page }).page = page;
 
-        await expect(controller.submitFilledCheckout()).resolves.toMatchObject({
-          three_ds_required: true,
-          order_confirmed: false,
-        });
-      } finally {
-        now.mockRestore();
-        await browser.close();
-      }
-    },
-  );
+      await expect(controller.submitFilledCheckout()).resolves.toMatchObject({
+        three_ds_required: true,
+        order_confirmed: false,
+      });
+    } finally {
+      await browser.close();
+    }
+  });
 
   it.skipIf(!chromiumAvailable)(
     "ignores a merchant confirmation signal that predates the Pay now click",
@@ -2083,6 +2079,25 @@ describe("3-D Secure resolution", () => {
       await browser.close();
     }
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores decline text present before payment dispatch",
+    async () => {
+      const { browser, page, controller } = await setupChallenge("<p>Payment declined</p>");
+      let clock = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+      });
+      try {
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "returns timeout when neither an order route nor a decline appears",

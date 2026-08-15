@@ -262,6 +262,11 @@ interface CheckoutOutcomeDispatchSnapshot {
   urls: readonly string[];
 }
 
+type CheckoutFailureBaseline = Readonly<Record<string, number>> | null;
+
+const CHECKOUT_FAILURE_TEXT_RE =
+  /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/gi;
+
 export interface CheckoutSubmitResult {
   three_ds_required: boolean;
   // A dispatched click is not a payment outcome. The submit path sets this
@@ -2613,6 +2618,7 @@ export class BrowserController {
   private page: Page | null = null;
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
+  private checkoutFailureBaseline: CheckoutFailureBaseline | undefined;
   private checkoutSubmitSequence = 0;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
@@ -9054,6 +9060,7 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     let outcomeBaseline: CheckoutOutcomeBaseline | undefined;
     this.checkoutOutcomeBaseline = undefined;
+    this.checkoutFailureBaseline = undefined;
     let submitted = false;
     for (const frame of this.page.frames()) {
       const matches = frame.locator('button,input[type="submit"],[role="button"]');
@@ -9265,6 +9272,7 @@ export class BrowserController {
         };
         try {
           await this.page.bringToFront().catch(() => undefined);
+          this.checkoutFailureBaseline = await this.captureCheckoutFailureSignals();
           await candidate.click();
         } catch (error) {
           const dispatchState = await frame
@@ -9411,7 +9419,7 @@ export class BrowserController {
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     const urlPattern =
-      /(?:3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/|challenge)/i;
+      /(?:https?:\/\/(?:[^/]+\.)*cardinalcommerce\.com(?:[/:]|$)|https?:\/\/hooks\.stripe\.com\/3d_secure|3d[-_ ]?secure|three[-_ ]?d[-_ ]?secure|\/3ds(?:2)?\/|\/acs\/|challenge)/i;
     for (const frame of this.page.frames()) {
       const detected =
         urlPattern.test(frame.url()) ||
@@ -9422,11 +9430,6 @@ export class BrowserController {
               document.querySelector(
                 'iframe[name*="challenge" i],iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
               ) !== null
-            )
-              return true;
-            if (
-              /\b\d{1,3}\s+seconds?\s+to\s+confirm\b/i.test(text) &&
-              /\b(?:dbs|digibank|bank(?:ing)?[\s-]+app)\b/i.test(text)
             )
               return true;
             return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
@@ -9471,6 +9474,44 @@ export class BrowserController {
     );
   }
 
+  private async captureCheckoutFailureSignals(): Promise<CheckoutFailureBaseline> {
+    if (!this.page) return null;
+    const frameSignals = await Promise.all(
+      this.page.frames().map(
+        async (frame) =>
+          await frame
+            .evaluate(
+              ({ flags, source }) => {
+                const matches = (document.body?.innerText ?? "").match(new RegExp(source, flags));
+                const signals: Record<string, number> = {};
+                for (const match of matches ?? []) {
+                  const signal = match.replace(/\s+/g, " ").trim().toLowerCase();
+                  signals[signal] = (signals[signal] ?? 0) + 1;
+                }
+                return signals;
+              },
+              { flags: CHECKOUT_FAILURE_TEXT_RE.flags, source: CHECKOUT_FAILURE_TEXT_RE.source },
+            )
+            .catch(() => null),
+      ),
+    );
+    const combined: Record<string, number> = {};
+    for (const signals of frameSignals) {
+      if (signals === null) return null;
+      for (const [signal, count] of Object.entries(signals)) {
+        combined[signal] = (combined[signal] ?? 0) + count;
+      }
+    }
+    return combined;
+  }
+
+  private async hasNewCheckoutFailure(baseline: CheckoutFailureBaseline): Promise<boolean> {
+    if (baseline === null) return false;
+    const current = await this.captureCheckoutFailureSignals();
+    if (current === null) return false;
+    return Object.entries(current).some(([signal, count]) => count > (baseline[signal] ?? 0));
+  }
+
   // Let the browser complete the challenge natively (including out-of-band
   // bank-app 3DS): just poll for the same terminal-order signal a plain
   // non-3DS checkout uses, plus a passive plain-text decline check. It never
@@ -9479,21 +9520,15 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
-    const failureText =
-      /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
+    const failureBaseline =
+      this.checkoutFailureBaseline === undefined
+        ? await this.captureCheckoutFailureSignals()
+        : this.checkoutFailureBaseline;
     const deadline = Date.now() + timeoutMs;
     do {
       await this.page.bringToFront().catch(() => undefined);
       if (await this.hasConfirmedCheckoutOutcome(outcomeBaseline)) return "succeeded";
-      const texts = await Promise.all(
-        this.page
-          .frames()
-          .map(
-            async (frame) =>
-              await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-          ),
-      );
-      if (texts.some((text) => failureText.test(text))) return "failed";
+      if (await this.hasNewCheckoutFailure(failureBaseline)) return "failed";
       await this.page.waitForTimeout(1_000).catch(() => undefined);
     } while (Date.now() <= deadline);
     return "timeout";
