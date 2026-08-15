@@ -374,8 +374,9 @@ describe("operate_pay", () => {
         {
           card_ref: "card_test",
           merchant: "Japan Flower Shop",
-          amount_cents: 9_845,
-          currency: "JPY",
+          ...(error === "payment_checkout_total_not_found"
+            ? {}
+            : { amount_cents: 9_845, currency: "JPY" }),
           item: "Flowers",
           reason: "Gift",
         },
@@ -497,7 +498,7 @@ describe("operate_pay", () => {
       currentUrl: vi.fn().mockReturnValue(`${checkoutOrigin}/session/test`),
       fillAndSubmitCheckout: vi.fn(async (card: CheckoutCard) => {
         filledCards.push(card);
-        return { three_ds_required: false };
+        return { three_ds_required: false, order_confirmed: true };
       }),
       waitForThreeDsResolution: vi.fn(),
     };
@@ -1183,15 +1184,21 @@ describe("operate_pay JIT add-card ceremony", () => {
     expect(originDrift.filledCards).toHaveLength(0);
   });
 
-  it("fails closed when the live total can no longer be read on resume", async () => {
-    const { result, filledCards } = await runJit({
+  it("uses the approved checkout when the live total can no longer be read on resume", async () => {
+    const { result, filledCards, summaryReads } = await runJit({
       boundCardRef: "card_x",
       poll: () => ({ status: "approved", card_ref: "card_x" }),
       resumeThrows: true,
     });
 
-    expect(result).toMatchObject({ status: "payment_amount_mismatch" });
-    expect(filledCards).toHaveLength(0);
+    expect(result).toMatchObject({
+      status: "payment_submitted",
+      merchant: JIT_CHECKOUT.merchant,
+      amount_cents: JIT_CHECKOUT.amount_cents,
+      currency: JIT_CHECKOUT.currency,
+    });
+    expect(filledCards).toEqual([SYNTHETIC_CARD]);
+    expect(summaryReads).toBe(2);
   });
 
   it("returns card_required when the link expires before a card is added", async () => {

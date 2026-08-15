@@ -1168,7 +1168,7 @@ export async function executeOperatePay(
       } catch {
         live = undefined;
       }
-      if (!checkoutSummaryMatches(checkout, live)) {
+      if (live !== undefined && !checkoutSummaryMatches(checkout, live)) {
         return {
           status: "payment_amount_mismatch",
           approval_url: approvalUrl,
