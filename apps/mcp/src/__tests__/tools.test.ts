@@ -1775,15 +1775,21 @@ describe("audit_log", () => {
 });
 
 describe("TOOLS registry", () => {
-  it("exposes the 29-tool default surface without maintainer diagnostics", () => {
+  it("exposes the bare-essentials 17-tool default surface without maintainer diagnostics", () => {
     // Credential read/write tools (write-only sink; rotation = re-store, delete
     // is web-only) + grant_app_access
     // (egress grants: a deployed app uses a vaulted credential via the proxy).
     // The read-back get_credential tool was removed: in the sink model an
     // agent never sees a raw secret value.
-    // Canonical lifecycle/recipe names are additive for this compatibility
-    // release: every legacy name remains registered as a delegating alias.
-    expect(TOOLS).toHaveLength(29);
+    // Bare-essentials cut (captain's decision 2026-08-15): every legacy
+    // delegating alias was dropped from the registry. Their behavior remains
+    // reachable as operate_act kinds (cart_add/select_many/extract/solve_captcha/
+    // await_verification/login_prepare_signup/login_store_signup/login_load_saved)
+    // or as operate_finish{outcome} (operate_finish_task) / operate_recipe_run
+    // and operate_recipe_save (operate_use/operate_remember).
+    // operate_payment_await stays registered — its removal belongs to the
+    // in-flight operator-restore-native-3ds payment fix, not this cut.
+    expect(TOOLS).toHaveLength(17);
     expect(TOOLS.map((t) => t.name).sort()).toEqual([
       "audit_log",
       "grant_app_access",
@@ -1791,26 +1797,14 @@ describe("TOOLS registry", () => {
       "list_credentials",
       "list_payment_cards",
       "operate_act",
-      "operate_await_verification",
-      "operate_captcha_gate",
-      "operate_cart_add",
-      "operate_extract",
       "operate_finish",
-      "operate_finish_task",
-      "operate_form_select_many",
-      "operate_login",
       "operate_observe",
       "operate_pay",
       "operate_payment_await",
       "operate_payment_status",
-      "operate_prepare_login",
       "operate_recipe_run",
       "operate_recipe_save",
-      "operate_remember",
-      "operate_seal_vault_credential",
       "operate_start",
-      "operate_store_login",
-      "operate_use",
       "revoke_app_access",
       "store_credential",
       "use_credential",
@@ -1822,14 +1816,14 @@ describe("TOOLS registry", () => {
       const tools = buildToolRegistry(
         disabled === undefined ? {} : { TRUSTY_SQUIRE_DIAGNOSTICS: disabled },
       );
-      expect(tools).toHaveLength(29);
+      expect(tools).toHaveLength(17);
       expect(tools.map((tool) => tool.name)).not.toEqual(
         expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
       );
     }
 
     const tools = buildToolRegistry({ TRUSTY_SQUIRE_DIAGNOSTICS: "1" });
-    expect(tools).toHaveLength(31);
+    expect(tools).toHaveLength(19);
     expect(tools.map((tool) => tool.name)).toEqual(
       expect.arrayContaining(["list_extract_failures", "get_extract_failure"]),
     );
@@ -1870,7 +1864,7 @@ describe("TOOLS registry", () => {
     expect(names).not.toContain("check_provision_status");
   });
 
-  it("exposes consolidated operate_act kinds while retaining all five delegating aliases", () => {
+  it("exposes consolidated operate_act kinds and drops their former standalone tool names", () => {
     const properties = provisionActTool.jsonInputSchema.properties as Record<string, unknown>;
     const kinds = (properties.kind as { enum: string[] }).enum;
     expect(kinds).toEqual(
@@ -1880,22 +1874,31 @@ describe("TOOLS registry", () => {
         "extract",
         "solve_captcha",
         "await_verification",
+        "login_prepare_signup",
+        "login_store_signup",
+        "login_load_saved",
       ]),
     );
 
     const names = TOOLS.map((tool) => tool.name);
-    expect(names).toEqual(
+    expect(names).not.toEqual(
       expect.arrayContaining([
         "operate_cart_add",
         "operate_form_select_many",
         "operate_extract",
         "operate_captcha_gate",
         "operate_await_verification",
+        "operate_login",
+        "operate_prepare_login",
+        "operate_store_login",
+        "operate_seal_vault_credential",
       ]),
     );
   });
 
-  it("exposes consolidated lifecycle/recipe schemas while retaining all six aliases", () => {
+  it("operate_login's former action variants map onto the operate_act login_* kinds", () => {
+    // operateLoginTool is no longer registered (folded into operate_act), but the
+    // object stays defined as the internal handle for this equivalence check.
     const loginVariants = operateLoginTool.jsonInputSchema.oneOf as {
       properties: { action: { const: string } };
     }[];
@@ -1905,6 +1908,14 @@ describe("TOOLS registry", () => {
       "load_saved",
     ]);
 
+    const properties = provisionActTool.jsonInputSchema.properties as Record<string, unknown>;
+    const kinds = (properties.kind as { enum: string[] }).enum;
+    expect(kinds).toEqual(
+      expect.arrayContaining(["login_prepare_signup", "login_store_signup", "login_load_saved"]),
+    );
+  });
+
+  it("exposes consolidated lifecycle/recipe schemas and drops their former standalone tool names", () => {
     const finishProperties = provisionFinishTool.jsonInputSchema.properties as Record<
       string,
       unknown
@@ -1920,7 +1931,7 @@ describe("TOOLS registry", () => {
     expect(operateRecipeRunTool.name).toBe("operate_recipe_run");
     expect(operateRecipeSaveTool.name).toBe("operate_recipe_save");
     const names = TOOLS.map((tool) => tool.name);
-    expect(names).toEqual(
+    expect(names).not.toEqual(
       expect.arrayContaining([
         "operate_prepare_login",
         "operate_store_login",

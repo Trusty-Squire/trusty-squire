@@ -183,7 +183,7 @@ export type FallbackRescue = (input: {
 /**
  * Execute the shipping replay path against a page owned by the harness. It
  * reaches the same production resolver, action executor, provenance checks,
- * and money-field attestations as operate_use.
+ * and money-field attestations as operate_recipe_run.
  */
 export async function replayRecipeOnHarnessPage(args: {
   page: Page;

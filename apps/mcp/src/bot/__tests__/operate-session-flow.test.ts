@@ -4345,6 +4345,14 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       { action: "prepare_signup", session_id: obs.session_id },
       null as unknown as ApiClient,
     )) as typeof legacy;
+    // The bare-essentials default surface: operate_act{kind:"login_prepare_signup"}.
+    const viaAct = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: obs.session_id,
+        kind: "login_prepare_signup",
+      }),
+      null,
+    )) as typeof legacy;
 
     expect(consolidated).toMatchObject({
       session_id: obs.session_id,
@@ -4354,8 +4362,16 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       },
       email_preview: legacy.email_preview,
     });
+    expect(viaAct).toMatchObject({
+      session_id: obs.session_id,
+      slots: {
+        login: { slot: legacy.slots.login.slot, length: legacy.slots.login.length },
+        password: { slot: legacy.slots.password.slot, length: legacy.slots.password.length },
+      },
+      email_preview: legacy.email_preview,
+    });
     // Neither the handle preview nor the email_preview leaks the raw address.
-    expect(JSON.stringify({ legacy, consolidated })).not.toContain("ada@example.com");
+    expect(JSON.stringify({ legacy, consolidated, viaAct })).not.toContain("ada@example.com");
     expect(consolidated.slots.password.length).toBeGreaterThanOrEqual(16);
   });
 
@@ -4425,9 +4441,14 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       { action: "store_signup", ...args },
       api,
     )) as typeof legacy;
+    const viaAct = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({ ...args, kind: "login_store_signup" }),
+      api,
+    )) as typeof legacy;
 
     expect(consolidated).toEqual(legacy);
-    expect(captured).toHaveLength(2);
+    expect(viaAct).toEqual(legacy);
+    expect(captured).toHaveLength(3);
     for (const call of captured) {
       expect(call.type).toBe("username_password");
       expect(call.auth_strategy).toBe("username_password");
@@ -4495,9 +4516,14 @@ describe("operate session — PR3c username/password login (capture-at-login sou
       { action: "load_saved", ...args },
       api,
     )) as typeof legacy;
+    const viaAct = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({ ...args, kind: "login_load_saved" }),
+      api,
+    )) as typeof legacy;
 
     expect(consolidated).toEqual(legacy);
-    expect(captured).toHaveLength(2);
+    expect(viaAct).toEqual(legacy);
+    expect(captured).toHaveLength(3);
     for (const call of captured) {
       expect(call).toMatchObject({
         current_host: "https://app.example.com/login",

@@ -560,7 +560,7 @@ describe("buildVerificationResult (Flow A — code-wall hand-back)", () => {
     expect(r.needs_user).toEqual({
       wall: "verification_code",
       // Steers to a retry first (emails lag the trigger), then the user-ask fallback.
-      message: expect.stringContaining("operate_await_verification AGAIN"),
+      message: expect.stringContaining('operate_act { kind: "await_verification" } AGAIN'),
       resume: "code",
     });
     expect(r.needs_user?.message.toLowerCase()).toContain("ask the user");

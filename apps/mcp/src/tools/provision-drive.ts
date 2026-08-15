@@ -305,7 +305,7 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     "{session_id, url, text, el_table, delta, snapshot_file}. " +
     OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup with " +
-    "operate_act, re-read with operate_observe, and call operate_extract " +
+    'operate_act, re-read with operate_observe, and call operate_act { kind: "extract" } ' +
     "when you reach the credentials. Always operate_finish when done. The " +
     "browser is domain-scoped to the target + its identity providers. If the " +
     "registry knows this service, the first observation includes a `hint` — the " +
@@ -439,6 +439,31 @@ interface AwaitVerificationArgs {
   grant_inbox_consent?: boolean | undefined;
 }
 
+interface LoginPrepareSignupArgs {
+  session_id: string;
+  login_slot?: string | undefined;
+  password_slot?: string | undefined;
+  password_length?: number | undefined;
+}
+
+interface LoginStoreSignupArgs {
+  session_id: string;
+  service: string;
+  login_slot?: string | undefined;
+  password_slot?: string | undefined;
+  label?: string | undefined;
+  signin_url?: string | undefined;
+  login_hosts: string[];
+}
+
+interface LoginLoadSavedArgs {
+  session_id: string;
+  reference?: string | undefined;
+  service?: string | undefined;
+  fields: string[];
+  slot_prefix: string;
+}
+
 const actSchema = z
   .object({
     session_id: z.string().min(1),
@@ -462,6 +487,9 @@ const actSchema = z
       "extract",
       "solve_captcha",
       "await_verification",
+      "login_prepare_signup",
+      "login_store_signup",
+      "login_load_saved",
     ]),
     target: z.string().min(1).max(200).optional(),
     text: z.string().max(4096).optional(),
@@ -485,6 +513,21 @@ const actSchema = z
     store: storeShape.optional(),
     sender: z.string().min(1).max(120).optional(),
     grant_inbox_consent: z.boolean().optional(),
+    // login_prepare_signup / login_store_signup: sealed username/password
+    // signup slots (never raw values).
+    login_slot: z.string().min(1).max(60).optional(),
+    password_slot: z.string().min(1).max(60).optional(),
+    password_length: z.number().int().min(16).max(64).optional(),
+    // login_store_signup: vault the prepared signup as a username_password
+    // credential. login_load_saved: fetch an existing one instead.
+    service: z.string().min(1).max(120).optional(),
+    label: z.string().min(1).max(120).optional(),
+    signin_url: z.string().url().optional(),
+    login_hosts: z.array(z.string().min(1).max(253)).min(1).max(20).optional(),
+    // login_load_saved: which saved credential + which fields to seal.
+    reference: z.string().min(1).max(400).optional(),
+    fields: z.array(z.string().min(1).max(120)).min(1).max(20).optional(),
+    slot_prefix: z.string().min(1).max(60).optional(),
     provenance: RecipeHoleSchema.shape.hole.optional(),
     replay_step_index: z.number().int().min(0).optional(),
     replay_hole: RecipeHoleSchema.shape.hole.optional(),
@@ -534,6 +577,33 @@ const actSchema = z
         code: z.ZodIssueCode.custom,
         path: ["selections"],
         message: 'Required for kind="select_many"',
+      });
+    }
+    if (value.kind === "login_store_signup") {
+      if (value.service === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["service"],
+          message: 'Required for kind="login_store_signup"',
+        });
+      }
+      if (value.login_hosts === undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["login_hosts"],
+          message: 'Required for kind="login_store_signup"',
+        });
+      }
+    }
+    if (
+      value.kind === "login_load_saved" &&
+      value.reference === undefined &&
+      value.service === undefined
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["reference"],
+        message: 'kind="login_load_saved" requires one of reference or service',
       });
     }
     if ((value.replay_step_index === undefined) !== (value.replay_hole === undefined)) {
@@ -605,6 +675,9 @@ const ACTION_KINDS = [
   "extract",
   "solve_captcha",
   "await_verification",
+  "login_prepare_signup",
+  "login_store_signup",
+  "login_load_saved",
 ] as const;
 
 type ActionKind = (typeof ACTION_KINDS)[number];
@@ -671,6 +744,36 @@ const ACTION_REPAIR_BY_KIND: Partial<Record<ActionKind, ActionRepair>> = {
       "Retry await_verification with sender scoped to the service and prefer into_slot so the OTP stays sealed. Leave grant_inbox_consent false unless the user explicitly agrees; only retry with grant_inbox_consent:true after that explicit yes." +
       manualCardRecovery,
   },
+  login_prepare_signup: {
+    example: {
+      session_id: "<session_id>",
+      kind: "login_prepare_signup",
+    },
+    safe_alternative:
+      "Retry login_prepare_signup to seal the user's captured email and a generated password into session slots, then fill the signup form with type_secret using the returned login/password slots." +
+      manualCardRecovery,
+  },
+  login_store_signup: {
+    example: {
+      session_id: "<session_id>",
+      kind: "login_store_signup",
+      service: "<service-name>",
+      login_hosts: ["service.example"],
+    },
+    safe_alternative:
+      "Retry login_store_signup with service and login_hosts (the hosts where this login may be filled) after the account is created — it vaults the prepared login_prepare_signup slots server-side." +
+      manualCardRecovery,
+  },
+  login_load_saved: {
+    example: {
+      session_id: "<session_id>",
+      kind: "login_load_saved",
+      service: "<service-name>",
+    },
+    safe_alternative:
+      "Retry login_load_saved with reference or service to fetch an allowed saved login and seal its fields into session slots, then fill with type_secret." +
+      manualCardRecovery,
+  },
 };
 
 function actionSchemaRepair(args: unknown, issues: readonly { path: (string | number)[] }[]) {
@@ -720,7 +823,7 @@ function actionSchemaRepair(args: unknown, issues: readonly { path: (string | nu
     kindRepair !== undefined
       ? kindRepair.safe_alternative
       : kind === "type_secret" && missing.includes("slot")
-        ? 'First capture the value with operate_extract { into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
+        ? 'First capture the value with operate_act { kind: "extract", into_slot: "sealed_secret" }, then retry with that slot and a ref from operate_observe. Never enter card values with operate_act; use operate_pay.'
         : 'Use kind "type" for text fields or "select" for options, and take target refs from operate_observe. Never enter card values with operate_act; use operate_pay.';
   return {
     error: "invalid_action_arguments",
@@ -803,6 +906,9 @@ function buildAction(args: z.infer<typeof actSchema>): ProvisionAction {
     case "extract":
     case "solve_captcha":
     case "await_verification":
+    case "login_prepare_signup":
+    case "login_store_signup":
+    case "login_load_saved":
       throw new Error(`operate_act kind="${args.kind}" must use its delegated handler`);
   }
 }
@@ -854,7 +960,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
         slot: null,
         blocked_reason:
           "the secret is still masked/hidden — reveal it first (click the " +
-          "show/reveal/copy control near the key), then operate_extract again",
+          'show/reveal/copy control near the key), then operate_act { kind: "extract" } again',
       };
     }
     const handle = stashSecretSlot(args.session_id, args.into_slot, full);
@@ -875,7 +981,7 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
     return extracted;
   }
   if (api === null) {
-    throw new Error("operate_extract store requires an active Trusty Squire session");
+    throw new Error('operate_act { kind: "extract" } store requires an active Trusty Squire session');
   }
   const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
   return storedExtractResult(extracted, stored);
@@ -934,7 +1040,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "operator work, " +
     "allow_host (host — cross into another app's domain mid-task, e.g. from the " +
     "GCP console into Firebase), type_secret (slot + target — type a secret you " +
-    "captured into a sealed slot via operate_extract{into_slot} into a field " +
+    'captured into a sealed slot via extract{into_slot} into a field ' +
     "on the current site; the value never leaves the browser), scroll (direction " +
     "down/up/bottom/top, default down — reveal below-the-fold controls on a long " +
     "form, then operate_observe to pick up the newly-visible elements), " +
@@ -947,10 +1053,21 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "idempotent cart mutation, exact-line post-verify it, and return its postcondition), " +
     "select_many (ordered selections map — select sequentially, re-observe after " +
     "each success, and retain partial results), extract (into_slot/secret_label/store — " +
-    "the same credential-safe slot/vault behavior as operate_extract), solve_captcha " +
-    "(the same solver and needs_user fail-fast handoff as operate_captcha_gate), and " +
-    "await_verification (sender/into_slot/grant_inbox_consent — the same sealed OTP " +
-    "and consent gate as operate_await_verification). The five legacy tool names remain aliases. " +
+    "reveal masked keys and extract credentials from the current page, sealed slot or vaulted), " +
+    "solve_captcha (detect and drive the in-session captcha gate; settled=false carries a " +
+    "needs_user{gate,message,remedy} — FAIL FAST and relay it to the user), " +
+    "await_verification (sender/into_slot/grant_inbox_consent — read the user's OWN inbox " +
+    "through their signed-in browser session for an email verification code/link, sealed " +
+    "into a slot with into_slot). Sealed username/password login lifecycle, never exposing raw " +
+    "values: login_prepare_signup (login_slot/password_slot/password_length — seal the user's " +
+    "captured email and a generated strong password into session slots; fill the signup form " +
+    "with type_secret using the returned slots), login_store_signup (service + login_hosts, " +
+    "optional label/signin_url — after the account is created, vault the prepared signup slots " +
+    "as a username_password credential so the user can sign back in; the signin_url host, if " +
+    "given, is always included in login_hosts), login_load_saved (reference or service, " +
+    "optional fields/slot_prefix — for a sign-in page, fetch a saved username/password " +
+    "credential only if the current browser host is allowed for login, then seal its fields " +
+    "into session slots; fill with type_secret). " +
     "For type/select/set_phone_country, pass provenance when the value came from a " +
     "Squire-known address, contact, product_query, or quantity input; type_secret and " +
     "operate_pay record credential and card provenance from their sealed sources. " +
@@ -991,6 +1108,9 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
           "extract",
           "solve_captcha",
           "await_verification",
+          "login_prepare_signup",
+          "login_store_signup",
+          "login_load_saved",
         ],
       },
       target: { type: "string" },
@@ -1020,6 +1140,16 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
       },
       sender: { type: "string" },
       grant_inbox_consent: { type: "boolean" },
+      login_slot: { type: "string" },
+      password_slot: { type: "string" },
+      password_length: { type: "number" },
+      service: { type: "string" },
+      label: { type: "string" },
+      signin_url: { type: "string" },
+      login_hosts: { type: "array", items: { type: "string" } },
+      reference: { type: "string" },
+      fields: { type: "array", items: { type: "string" } },
+      slot_prefix: { type: "string" },
       provenance: {
         type: "string",
         pattern:
@@ -1048,6 +1178,19 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
         return await handleCaptcha(args);
       case "await_verification":
         return await handleAwaitVerification(args);
+      case "login_prepare_signup":
+        return await handlePrepareLogin(args as LoginPrepareSignupArgs);
+      case "login_store_signup":
+        return await handleStoreLogin(args as LoginStoreSignupArgs, api);
+      case "login_load_saved":
+        return await handleSealVaultCredential(
+          {
+            ...(args as LoginLoadSavedArgs),
+            fields: args.fields ?? ["login", "password"],
+            slot_prefix: args.slot_prefix ?? "vault",
+          },
+          api,
+        );
     }
     // Keep the defense-in-depth guard in act() for internal/replay callers,
     // while this public tool surface makes the safe recovery explicit at the
@@ -1079,6 +1222,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   },
 };
 
+// Below: NOT part of the default MCP tool surface (dropped from OPERATE_TOOLS in
+// the bare-essentials cut). Kept as internal implementation objects — their
+// `handler` is the exact function operate_act's matching `kind` calls, so tests
+// exercise the same code path through these handles without a second live
+// registration. See OPERATE_TOOLS at the bottom of this file for what a host
+// agent actually sees.
 const cartAddSchema = z.object({
   session_id: z.string().min(1),
   product_identity: z.string().trim().min(1).max(500),
@@ -1143,79 +1292,9 @@ export const operateFormSelectManyTool: Tool<z.infer<typeof formSelectManySchema
   handler: handleFormSelectMany,
 };
 
-// Vault-store an extracted credential. Shared by extract + the credentials
-// terminal so the stored record is byte-identical regardless of entry point.
-export interface StoredCredentialMetadata {
-  reference: string;
-  service: string;
-  label: string | undefined;
-  field_names: string[];
-  allowed_hosts: string[];
-  updated: boolean;
-}
-
-async function persistExtracted(
-  sessionId: string,
-  credentials: Record<string, string>,
-  store: StoreSpec,
-  api: ApiClient,
-): Promise<StoredCredentialMetadata> {
-  const observedHosts = [
-    ...new Set([...(store.egress_hosts ?? []), ...observedHostsForSession(sessionId)]),
-  ];
-  const singleValue = credentials.api_key;
-  const storeInput =
-    typeof singleValue === "string" && Object.keys(credentials).length === 1
-      ? { value: singleValue }
-      : { fields: credentials };
-  const stored = await api.storeCredential({
-    service: store.service,
-    ...(store.label !== undefined ? { label: store.label } : {}),
-    ...storeInput,
-    ...(store.env_var_suggestion !== undefined
-      ? { env_var_suggestion: store.env_var_suggestion }
-      : {}),
-    ...(store.type !== undefined ? { type: store.type } : { type: "api_key" }),
-    ...(store.auth_shape !== undefined ? { auth_shape: store.auth_shape } : {}),
-    ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
-  });
-  return {
-    reference: stored.reference,
-    service: stored.service,
-    label: stored.label,
-    field_names: stored.field_names,
-    allowed_hosts: stored.allowed_hosts,
-    updated: stored.updated,
-  };
-}
-
-/**
- * Build the MCP-visible result after a successful vault write.
- *
- * `ExtractResult.credentials` contains the raw values read from the browser. A
- * stored extraction must never spread that object back into the MCP response:
- * the host/model receives only non-secret extraction and vault metadata.
- */
-export function storedExtractResult(extracted: ExtractResult, stored: StoredCredentialMetadata) {
-  return {
-    session_id: extracted.session_id,
-    url: extracted.url,
-    candidate_count: extracted.candidate_count,
-    ...(extracted.blocked_reason !== undefined ? { blocked_reason: extracted.blocked_reason } : {}),
-    stored_credential: stored,
-  };
-}
-
 const extractSchema = z.object({
   session_id: z.string().min(1),
-  // Sealed transfer: stash the extracted secret in a session-local slot and
-  // return ONLY a masked handle (never the value), so a later type_secret can
-  // enter it into another site's form without the value crossing to the host.
   into_slot: z.string().min(1).max(60).optional(),
-  // Disambiguate WHICH credential to seal when the page shows several (Google's
-  // OAuth dialog has both a client ID and a client secret). Matches the
-  // credential's field label, e.g. "client secret" / "secret". Omit when there's
-  // only one.
   secret_label: z.string().min(1).max(60).optional(),
   store: storeShape.optional(),
 });
@@ -1285,13 +1364,7 @@ export const provisionCaptchaGateTool: Tool<z.infer<typeof captchaSchema>> = {
 const verifySchema = z.object({
   session_id: z.string().min(1),
   sender: z.string().min(1).max(120).optional(),
-  // Seal a found OTP into this slot instead of returning it — then enter it
-  // with operate_act{type_secret, slot}. The code never reaches you (safer, and
-  // it dodges client-side payload truncation).
   into_slot: z.string().min(1).max(60).optional(),
-  // PR3b — set true ONLY after the user agrees, in context, to let the operator
-  // read their inbox for this signup. Grants inbox-read for the rest of this
-  // session and proceeds to read. Never set this without an explicit user yes.
   grant_inbox_consent: z.boolean().optional(),
 });
 
@@ -1331,30 +1404,77 @@ export const provisionAwaitVerificationTool: Tool<z.infer<typeof verifySchema>> 
   handler: handleAwaitVerification,
 };
 
+// Vault-store an extracted credential. Shared by extract + the credentials
+// terminal so the stored record is byte-identical regardless of entry point.
+export interface StoredCredentialMetadata {
+  reference: string;
+  service: string;
+  label: string | undefined;
+  field_names: string[];
+  allowed_hosts: string[];
+  updated: boolean;
+}
+
+async function persistExtracted(
+  sessionId: string,
+  credentials: Record<string, string>,
+  store: StoreSpec,
+  api: ApiClient,
+): Promise<StoredCredentialMetadata> {
+  const observedHosts = [
+    ...new Set([...(store.egress_hosts ?? []), ...observedHostsForSession(sessionId)]),
+  ];
+  const singleValue = credentials.api_key;
+  const storeInput =
+    typeof singleValue === "string" && Object.keys(credentials).length === 1
+      ? { value: singleValue }
+      : { fields: credentials };
+  const stored = await api.storeCredential({
+    service: store.service,
+    ...(store.label !== undefined ? { label: store.label } : {}),
+    ...storeInput,
+    ...(store.env_var_suggestion !== undefined
+      ? { env_var_suggestion: store.env_var_suggestion }
+      : {}),
+    ...(store.type !== undefined ? { type: store.type } : { type: "api_key" }),
+    ...(store.auth_shape !== undefined ? { auth_shape: store.auth_shape } : {}),
+    ...(observedHosts.length > 0 ? { observed_hosts: observedHosts } : {}),
+  });
+  return {
+    reference: stored.reference,
+    service: stored.service,
+    label: stored.label,
+    field_names: stored.field_names,
+    allowed_hosts: stored.allowed_hosts,
+    updated: stored.updated,
+  };
+}
+
+/**
+ * Build the MCP-visible result after a successful vault write.
+ *
+ * `ExtractResult.credentials` contains the raw values read from the browser. A
+ * stored extraction must never spread that object back into the MCP response:
+ * the host/model receives only non-secret extraction and vault metadata.
+ */
+export function storedExtractResult(extracted: ExtractResult, stored: StoredCredentialMetadata) {
+  return {
+    session_id: extracted.session_id,
+    url: extracted.url,
+    candidate_count: extracted.candidate_count,
+    ...(extracted.blocked_reason !== undefined ? { blocked_reason: extracted.blocked_reason } : {}),
+    stored_credential: stored,
+  };
+}
+
 // Change 2 — the pluggable terminal. Two outcome kinds: `credentials` (the
-// signup case — extract + vault-store, byte-identical to operate_extract's
+// signup case — extract + vault-store, byte-identical to operate_act's extract kind's
 // store path) and `result` (any operate task — a summary + optional structured
 // data: design-review findings, "task done" with confirmed in data, etc.).
-// Both close the session. The legacy operate_finish_task tool delegates here.
+// operate_finish is the single terminal. `outcome.kind` picks the shape.
 const finishDataSchema = z.record(
   z.union([z.string().max(4000), z.number(), z.boolean()]).transform(String),
 );
-
-const finishTaskSchema = z.object({
-  session_id: z.string().min(1),
-  kind: z.enum(["credentials", "result"]),
-  // credentials kind: where to vault the extracted key (same shape as extract).
-  store: storeShape.optional(),
-  // result kind: a human-readable outcome + optional bounded structured data.
-  summary: z.string().max(4000).optional(),
-  // Accept scalar values (a "task done" flag is naturally a boolean/number) and
-  // coerce to string so the trail stays Record<string,string> — rejecting a bare
-  // boolean forced callers to stringify by hand.
-  data: finishDataSchema.optional(),
-  // result kind: verify a saved operator-recipe's postcondition before closing
-  // (the anti-false-green gate). `verified.confirmed` reflects the machine check.
-  verify_recipe: z.string().min(1).max(80).optional(),
-});
 
 const finishOutcomeSchema = z.union([
   z.object({ kind: z.literal("none") }),
@@ -1426,6 +1546,18 @@ async function handleFinishOutcome(
   });
   return { ...prepared, url: finish.url };
 }
+
+// Not part of the default MCP tool surface (dropped from OPERATE_TOOLS). Kept
+// as an internal object — operate_finish{outcome} is the strict superset (also
+// covers outcome.kind='none'). handleFinishOutcome is the shared implementation.
+const finishTaskSchema = z.object({
+  session_id: z.string().min(1),
+  kind: z.enum(["credentials", "result"]),
+  store: storeShape.optional(),
+  summary: z.string().max(4000).optional(),
+  data: finishDataSchema.optional(),
+  verify_recipe: z.string().min(1).max(80).optional(),
+});
 
 export const provisionFinishTaskTool: Tool<z.infer<typeof finishTaskSchema>> = {
   name: "operate_finish_task",
@@ -2187,23 +2319,20 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
   },
 };
 
+// Bare-essentials cut (captain's decision 2026-08-15): the default MCP surface
+// is exactly these 6 (plus operate_pay/operate_payment_status/operate_pay-adjacent
+// tools wired separately in tools/index.ts, and diagnostics behind the opt-in dev
+// profile). Every dropped alias's behavior remains reachable: cart_add/select_many/
+// extract/solve_captcha/await_verification/login_prepare_signup/login_store_signup/
+// login_load_saved as operate_act kinds; operate_finish_task as operate_finish{outcome}.
+// The alias Tool objects above stay defined (unregistered) as the shared implementation
+// operate_act's kinds and operate_recipe_save/run delegate to, and as direct handles
+// for tests that pin down that folded behavior.
 export const OPERATE_TOOLS: Tool[] = [
   provisionStartTool,
   provisionObserveTool,
   provisionActTool,
-  operateCartAddTool,
-  operateFormSelectManyTool,
-  provisionCaptchaGateTool,
-  provisionAwaitVerificationTool,
-  provisionExtractTool,
-  operateLoginTool,
-  provisionPrepareLoginTool,
-  provisionStoreLoginTool,
-  provisionSealVaultCredentialTool,
   operateRecipeSaveTool,
   operateRecipeRunTool,
-  provisionRememberTool,
-  provisionUseTool,
-  provisionFinishTaskTool,
   provisionFinishTool,
 ] as Tool[];
