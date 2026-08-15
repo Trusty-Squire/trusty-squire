@@ -981,7 +981,9 @@ async function handleExtract(args: ExtractArgs, api: ApiClient | null) {
     return extracted;
   }
   if (api === null) {
-    throw new Error('operate_act { kind: "extract" } store requires an active Trusty Squire session');
+    throw new Error(
+      'operate_act { kind: "extract" } store requires an active Trusty Squire session',
+    );
   }
   const stored = await persistExtracted(args.session_id, extracted.credentials, args.store, api);
   return storedExtractResult(extracted, stored);
@@ -1222,12 +1224,12 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   },
 };
 
-// Below: NOT part of the default MCP tool surface (dropped from OPERATE_TOOLS in
-// the bare-essentials cut). Kept as internal implementation objects — their
+// The former standalone tool objects in the following sections are NOT part of
+// the default MCP surface (they were dropped from OPERATE_TOOLS in the
+// bare-essentials cut). They remain as internal implementation objects: each
 // `handler` is the exact function operate_act's matching `kind` calls, so tests
-// exercise the same code path through these handles without a second live
-// registration. See OPERATE_TOOLS at the bottom of this file for what a host
-// agent actually sees.
+// exercise the same code path without a second live registration. See
+// OPERATE_TOOLS at the bottom of this file for what a host agent actually sees.
 const cartAddSchema = z.object({
   session_id: z.string().min(1),
   product_identity: z.string().trim().min(1).max(500),
@@ -2319,10 +2321,11 @@ export const operateLoginTool: Tool<z.infer<typeof loginSchema>> = {
   },
 };
 
-// Bare-essentials cut (captain's decision 2026-08-15): the default MCP surface
-// is exactly these 6 (plus operate_pay/operate_payment_status/operate_pay-adjacent
-// tools wired separately in tools/index.ts, and diagnostics behind the opt-in dev
-// profile). Every dropped alias's behavior remains reachable: cart_add/select_many/
+// Bare-essentials cut (captain's decision 2026-08-15): the operator surface is
+// these 6 plus operate_pay and operate_payment_status, which are wired separately
+// in tools/index.ts. operate_payment_await stays registered there pending its
+// separately owned payment change; diagnostics remain behind the opt-in profile.
+// Every dropped alias's behavior remains reachable: cart_add/select_many/
 // extract/solve_captcha/await_verification/login_prepare_signup/login_store_signup/
 // login_load_saved as operate_act kinds; operate_finish_task as operate_finish{outcome}.
 // The alias Tool objects above stay defined (unregistered) as the shared implementation

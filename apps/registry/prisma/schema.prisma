@@ -20,7 +20,7 @@ datasource db {
 
 // OperatorRecipeRecord — shared Operator Recipes (replay-serve-live-
 // domainlock), keyed by (verb, eTLD+1). `POST /recipes` (unauthenticated)
-// writes here directly and the write is immediately live — `operate_use` /
+// writes here directly and the write is immediately live — `operate_recipe_run` /
 // `GET /recipes/:verb/:domain` read this table the instant it lands. There
 // is no candidate/promotion tier (the earlier housekeeper-vetted gate was
 // retired). Safety instead comes from the HARD DOMAIN-LOCK

@@ -5692,7 +5692,9 @@ export async function rememberRecipe(
   // an unverified recipe on disk when the postcondition failed.
   const verified = await verifyPostcondition(sessionId, opts.postcondition);
   if (!verified.confirmed) {
-    throw new Error(`operate_recipe_save refused: postcondition not confirmed (${verified.reason})`);
+    throw new Error(
+      `operate_recipe_save refused: postcondition not confirmed (${verified.reason})`,
+    );
   }
   const secrets = [...session.secretSlots.keys()].map((slot) => ({ slot, stored: false as const }));
   const scrubbedStartUrl = scrubKnownEmail(session.startUrl, session.userEmail);

@@ -695,10 +695,10 @@ import { exportJWK, SignJWT } from "jose";
 import { sealToRecipient } from "../payment-hpke.js";
 import { operatePayTool } from "../../tools/operate-pay.js";
 import { ApiClient } from "../../api-client.js";
+import type { formSelectMany } from "../provision-session.js";
 import {
   startProvisionSession,
   act,
-  formSelectMany,
   observe,
   observedHostsForSession,
   stashSecretSlot,
@@ -1810,10 +1810,7 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     await writeRecipe(recipe);
 
     await expect(
-      operateRecipeRunTool.handler(
-        { name: `purchase--${shapeKey}` },
-        null as unknown as ApiClient,
-      ),
+      operateRecipeRunTool.handler({ name: `purchase--${shapeKey}` }, null as unknown as ApiClient),
     ).rejects.toThrow(/checkout-leg recipe.*operate_recipe_run\{leg:"checkout"\}/i);
     expect(h.startCalls).toBe(0);
 
@@ -3426,11 +3423,18 @@ describe("operate session — sealed credential transfer", () => {
       serviceUrl: "https://shop.example.com/checkout",
     });
 
-    const result = await formSelectMany(started.session_id, {
-      Variant: "Blue",
-      Size: "Large",
-      Color: "Red",
-    });
+    const result = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: started.session_id,
+        kind: "select_many",
+        selections: {
+          Variant: "Blue",
+          Size: "Large",
+          Color: "Red",
+        },
+      }),
+      null,
+    )) as Awaited<ReturnType<typeof formSelectMany>>;
 
     expect(h.selected).toEqual([
       { selector: "#variant", matcher: "Blue" },
@@ -3484,6 +3488,40 @@ describe("operate_extract — vault-store response", () => {
     expect(JSON.stringify(result)).not.toContain(rawSecret);
     expect(JSON.stringify(result)).not.toContain("also-secret");
     expect(result.stored_credential.reference).toBe("cred_123");
+  });
+
+  it("keeps vault-store extraction reachable through operate_act without returning the secret", async () => {
+    const rawSecret = "sk-live-folded-extract-secret-123456789";
+    h.visibleText = `API key ${rawSecret}`;
+    const started = await startProvisionSession({
+      serviceUrl: "https://app.example.com/api-keys",
+    });
+    const storeCredential = vi.fn().mockResolvedValue({
+      reference: "vault://acct/folded-extract",
+      service: "example",
+      label: "default",
+      field_names: ["api_key"],
+      allowed_hosts: ["app.example.com"],
+      created_at: "now",
+      updated: false,
+    });
+    const api = { storeCredential } as unknown as ApiClient;
+
+    const result = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: started.session_id,
+        kind: "extract",
+        store: { service: "example" },
+      }),
+      api,
+    )) as Record<string, unknown>;
+
+    expect(storeCredential).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      session_id: started.session_id,
+      stored_credential: { reference: "vault://acct/folded-extract" },
+    });
+    expect(JSON.stringify(result)).not.toContain(rawSecret);
   });
 });
 
@@ -3994,7 +4032,14 @@ describe("operate session — await_verification into_slot (T3 fix: OTP never ro
     });
     const sid = obs.session_id;
     h.visibleText = "Your verification code is 481920. It expires in 10 minutes.";
-    const res = await awaitVerification(sid, { intoSlot: "otp" });
+    const res = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: sid,
+        kind: "await_verification",
+        into_slot: "otp",
+      }),
+      null,
+    )) as Awaited<ReturnType<typeof awaitVerification>>;
 
     expect(res.found).toBe(true);
     expect(res.sealed).toBe(true);
@@ -4062,7 +4107,13 @@ describe("operate session — captcha gate", () => {
     h.captchaVariant = "recaptcha_v2";
     const obs = await startProvisionSession({ serviceUrl: "https://app.example.com/" });
 
-    const res = await captchaGate(obs.session_id);
+    const res = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: obs.session_id,
+        kind: "solve_captcha",
+      }),
+      null,
+    )) as Awaited<ReturnType<typeof captchaGate>>;
 
     expect(res).toMatchObject({ found: true, variant: "recaptcha_v2", settled: true });
     expect(h.visibleSolveCalls).toBe(1);
@@ -5560,7 +5611,16 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     ];
     const started = await startProvisionSession({ serviceUrl: h.currentUrl });
 
-    const added = await cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-1");
+    const added = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: started.session_id,
+        kind: "cart_add",
+        product_identity: "sku:tiara",
+        options_hash: "size=M",
+        idempotency_key: "cart-add-1",
+      }),
+      null,
+    )) as Awaited<ReturnType<typeof cartAdd>>;
 
     expect(added).toMatchObject({
       status: "added",
@@ -5582,7 +5642,16 @@ describe("fill_card cart-total carry-forward (Session.lastCartCheckout)", () => 
     });
     expect(h.locatorClickCalls).toBe(1);
 
-    const retried = await cartAdd(started.session_id, "sku:tiara", "size=M", "cart-add-1");
+    const retried = (await provisionActTool.handler(
+      provisionActTool.inputSchema.parse({
+        session_id: started.session_id,
+        kind: "cart_add",
+        product_identity: "sku:tiara",
+        options_hash: "size=M",
+        idempotency_key: "cart-add-1",
+      }),
+      null,
+    )) as Awaited<ReturnType<typeof cartAdd>>;
     expect(retried).toMatchObject({ status: "already_in_cart", cart_delta: "0" });
     expect(h.locatorClickCalls).toBe(1);
   });

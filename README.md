@@ -234,7 +234,8 @@ is `operate_start`, `operate_observe`, `operate_act`, `operate_pay`,
 `operate_payment_status`, `operate_finish`, `operate_recipe_run`, and
 `operate_recipe_save` — every former standalone workflow/lifecycle/login tool
 name was dropped and its behavior folded into `operate_act` as a `kind` (or into
-`operate_finish`'s `outcome`); there are no more delegating alias tool names.
+`operate_finish`'s `outcome`); none of those folded operator names remains as a
+delegating alias.
 `operate_payment_await` also remains registered pending a separate in-flight
 payment fix. The maintainer-only `list_extract_failures` → `get_extract_failure`
 DOM-diagnostics pair is excluded from that surface; set
