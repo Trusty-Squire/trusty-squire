@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.24 (2026-08-15)
+
+- feat(mcp): remove payment await alias (#529)
+
 ## 1.1.9-rc.23 (2026-08-15)
 
 - fix(mcp): restore native browser 3-D Secure completion (#527)
