@@ -878,6 +878,42 @@ describe("checkout payment parsing", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "detects a DBS bank-app countdown without challenge URL or selector metadata",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const now = vi
+        .spyOn(Date, "now")
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(0)
+        .mockReturnValueOnce(15_000);
+      try {
+        const page = await browser.newPage();
+        await page.setContent(`
+          <button id="pay">Pay now</button>
+          <script>
+            document.querySelector("#pay").addEventListener("click", () => {
+              document.body.insertAdjacentHTML(
+                "beforeend",
+                "<div>60 seconds to confirm</div><div>Approve in your DBS digibank app</div>",
+              );
+            });
+          </script>
+        `);
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toMatchObject({
+          three_ds_required: true,
+          order_confirmed: false,
+        });
+      } finally {
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "ignores a merchant confirmation signal that predates the Pay now click",
     async () => {
       const browser = await chromium.launch({ headless: true });
@@ -1981,9 +2017,9 @@ describe("structured-data checkout totals", () => {
 describe("3-D Secure resolution", () => {
   // The browser completes 3-D Secure natively (including out-of-band
   // bank-app pushes) — waitForThreeDsResolution only classifies the
-  // outcome afterward. It never detects, waits on, or tears down the
+  // outcome afterward. It never manipulates, intercepts, or gates on the
   // challenge frame itself; it just polls the same terminal-order-route
-  // signal a plain non-3DS checkout uses, plus a plain decline-text check.
+  // signal a plain non-3DS checkout uses, plus passive decline-text reads.
   const setupChallenge = async (
     initialMerchantHtml = "",
   ): Promise<{
@@ -2025,9 +2061,8 @@ describe("3-D Secure resolution", () => {
     async () => {
       const { browser, page, controller } = await setupChallenge();
       try {
-        // The ACS iframe is never touched or removed — simulating a frozen/
-        // unresponsive decoupled challenge. Only the merchant's own JS (here,
-        // a plain pushState) drives completion.
+        // The ACS iframe remains open and unresponsive. Only the merchant's
+        // own JS (here, a plain pushState) drives completion.
         await page.evaluate(() => history.pushState({}, "", "/receipt/123"));
         await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
         expect(await page.locator("#bank-approval").count()).toBe(1);

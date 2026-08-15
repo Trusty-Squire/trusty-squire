@@ -164,13 +164,14 @@ eligible sealed fields are cleared when cleanup can be confirmed, even while 3-D
 or outcome verification continues. Dispatching the charge control is not itself a
 successful outcome: the operator requires a new merchant terminal route with a
 substantive order identity that was absent before dispatch. The browser completes
-3-D Secure natively, including out-of-band bank-app challenges — the operator never
-detects, waits on, or tears down the challenge frame itself, only polls for that same
-terminal-order signal (or a visible decline) once the challenge is underway. A bare
-click or a vanished 3-D Secure prompt without that evidence is recorded as
-`payment_outcome_unknown`, so it cannot be mistaken for `payment_submitted`. That
-status never permits a success claim or blind resubmission; the merchant's order
-state must be checked manually before any retry. Every payment entry is claimed before
+3-D Secure natively, including out-of-band bank-app challenges. The operator never
+manipulates or intercepts the challenge frame; it uses passive text reads for detection
+and declines while polling the outer page for that same terminal-order signal. A bare
+click with no detected challenge is recorded as `payment_outcome_unknown`. A detected
+challenge that remains unresolved on timeout stays `payment_3ds_required` and is handed
+back to the user. Neither status can be mistaken for `payment_submitted`, permits a
+success claim, or allows blind resubmission; the merchant's order state must be checked
+manually before any retry. Every payment entry is claimed before
 asynchronous work begins, and a pending confirmation is claimed atomically, so
 overlapping `operate_pay` calls cannot race toward the same submission. A failed
 confirmation becomes retryable only if submission has not started. If field cleanup

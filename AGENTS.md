@@ -402,11 +402,11 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 `fillAndSubmitCheckout`/`submitFilledCheckout` (`apps/mcp/src/bot/browser.ts`) detect
 whether a payment dispatch triggered a 3-D Secure challenge (`detectThreeDsChallenge`),
 but the challenge itself is **never** driven from the operator side.
-`waitForThreeDsResolution` only polls the outer checkout page for the same
+`waitForThreeDsResolution` polls the outer checkout page for the same
 terminal-order-route signal (`hasConfirmedCheckoutOutcome`/`CheckoutOutcomeBaseline`) a
-plain non-3DS checkout uses, plus a plain decline-text check — it does not read,
-hit-test, or wait on anything inside the challenge iframe, and it does not poll any
-payment processor's API for out-of-band status.
+plain non-3DS checkout uses, plus passive decline-text reads across frames. It does not
+manipulate, hit-test, intercept, or gate completion on the challenge iframe, and it does
+not poll any payment processor's API for out-of-band status.
 
 **This was tried and reverted.** rc.21 (#516) added a DOM-mutating hit-test walker
 (`isFrameSurfaceTopmost`/`extractVisibleTopmostTextSignals`, forced
@@ -424,8 +424,8 @@ fill card, click Pay, let the browser's own checkout JS finish the challenge.
 manipulation, occlusion/visibility hit-testing, or payment-processor API polling
 inside `waitForThreeDsResolution`/`detectThreeDsChallenge`, stop — that is the exact
 shape of the bug above. Detection may only ever be read-only (URL pattern + a plain
-text/selector check); resolution may only ever watch the *outer* page for its own
-terminal state. If a specific processor's decoupled flow needs support, it needs
+text/selector check); resolution may only ever use passive text reads plus the *outer*
+page's terminal state. If a specific processor's decoupled flow needs support, it needs
 proof the native flow doesn't already handle it (a live repro), not a new interception
 layer.
 

@@ -9417,14 +9417,20 @@ export class BrowserController {
         urlPattern.test(frame.url()) ||
         (await frame
           .evaluate(() => {
+            const text = document.body?.innerText ?? "";
             if (
               document.querySelector(
                 'iframe[name*="challenge" i],iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
               ) !== null
             )
               return true;
+            if (
+              /\b\d{1,3}\s+seconds?\s+to\s+confirm\b/i.test(text) &&
+              /\b(?:dbs|digibank|bank(?:ing)?[\s-]+app)\b/i.test(text)
+            )
+              return true;
             return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
-              document.body?.innerText ?? "",
+              text,
             );
           })
           .catch(() => false));
@@ -9467,8 +9473,8 @@ export class BrowserController {
 
   // Let the browser complete the challenge natively (including out-of-band
   // bank-app 3DS): just poll for the same terminal-order signal a plain
-  // non-3DS checkout uses, plus a plain-text decline check. No detection,
-  // no waiting on the challenge frame itself, no teardown.
+  // non-3DS checkout uses, plus a passive plain-text decline check. It never
+  // manipulates, intercepts, or gates completion on the challenge frame.
   async waitForThreeDsResolution(timeoutMs: number): Promise<ThreeDsResolution> {
     if (!this.page) throw new Error("Browser not started");
     const outcomeBaseline =
