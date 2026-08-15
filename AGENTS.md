@@ -397,37 +397,29 @@ Unlike `ci.yml` (which builds every `packages/**` dist generically via `pnpm -r 
 
 **The rule:** any PR that changes `packages/recipe-schema/src/**` or `packages/skill-schema/src/**` MUST bump that package's `version` in the same PR (prerelease shape on `staging`, matching the branch-shape check the release workflow itself enforces — see gotcha #5). Verify a bump actually shipped the change with `npm view @trusty-squire/<pkg> versions --json` and `npm pack --dry-run` / grepping `dist/index.js` for the new export, not just by reading the source.
 
-### 9. Decoupled/out-of-band (app-push) 3DS needs an authoritative signal, not DOM watching
+### 9. Decoupled/out-of-band (app-push) 3DS requires an active challenge frame
 
-`BrowserController.waitForThreeDsResolution` (`apps/mcp/src/bot/browser.ts`) only
-watched the browser for 3DS completion — that works when the cardholder completes
-the challenge *inside* the CardinalCommerce iframe, but decoupled/app-push 3DS
-(e.g. DBS) authenticates entirely out of band in the issuer's mobile app, and the
-merchant page's own JS may never receive a postMessage back into that frame. The
-fix polls the Stripe PaymentIntent status directly (publishable-key only, parsed
-from the hosted-challenge URL — never the secret key) as the authoritative signal,
-then reloads the checkout page so the merchant's own completion logic re-evaluates
-server state, and requires a genuine merchant order-completion route within a
-bounded grace window before reporting success. See
-`payment_3ds_authenticated_pending_order` in `pay-operator.ts` for the fail-closed
-outcome when the issuer authenticated but the order never visibly confirmed —
-never invent a third "detect completion" heuristic without first checking whether
-the provider already exposes an authoritative status you can poll.
+The live DBS reproduction established that a headless or backgrounded Chrome tab
+can throttle the CardinalCommerce ACS iframe's JavaScript timers. The frozen frame
+then cannot finish its post-approval handshake with Stripe, so an app approval can
+end as `requires_payment_method` (a clean authentication failure) rather than
+leaving the PaymentIntent in `requires_action` indefinitely.
 
----
+Keep the shared Chrome launch args `--disable-background-timer-throttling`,
+`--disable-backgrounding-occluded-windows`, and
+`--disable-renderer-backgrounding`. Also keep `page.bringToFront()` immediately
+before checkout submission and during every iteration of
+`BrowserController.waitForThreeDsResolution` (`apps/mcp/src/bot/browser.ts`). These
+are the completion-driving safeguards that let the Cardinal iframe run.
 
-## Maintaining this file
-
-This file is a living contract, not a historical record. When you learn something during a task that would have changed how you approached it — a gotcha, a footgun, a rule that saved you from a mistake — add it here in the same pass, in the appropriate section. Keep entries proportionate: durable, repo-specific knowledge that the code/CI itself doesn't already make obvious, not step-by-step task narration. Prefer pointing at the authoritative file/command/doc over duplicating its content. Remove or correct entries you find to be stale or wrong rather than leaving them to mislead the next agent.
-
----
-
-## Maintaining this file
-
-Keep this file for knowledge useful to almost every future agent session in this project.
-Do not repeat what the codebase already shows; point to the authoritative file or command instead.
-Prefer rewriting or pruning existing entries over appending new ones.
-When updating this file, preserve this bar for all agents and keep entries concise.
+The Stripe PaymentIntent poll is an outcome classifier only, never a finalizer. It
+uses the publishable key and client secret parsed from the hosted-challenge URL,
+classifies `requires_payment_method`/`canceled` as failure, and reloads the checkout
+only after observing the same transaction move from `requires_action` to
+`succeeded`, `processing`, or `requires_capture`. Success still requires a genuine
+merchant order-completion route; otherwise
+`payment_3ds_authenticated_pending_order` remains the fail-closed outcome. Never
+replace these boundaries with DOM-only completion or unconditional reloads.
 
 ## Final note
 
@@ -497,3 +489,15 @@ virgin signup succeeds on an UNCOVERED service (no active skill in registry)
 
 - `packages/skill-schema/src/skill.ts` (`SkillSchema`, `entry_state`)
 - `apps/mcp/src/bot/promote-to-skill.ts`, `apps/mcp/src/bot/onboarding-capture.ts` (auto-promote)
+
+---
+
+## Maintaining this file
+
+This file is a living contract, not a historical record. Keep it for durable,
+repo-specific knowledge useful to almost every future agent session, not step-by-step
+task narration or facts already obvious from the code. When a task reveals a gotcha,
+footgun, or rule that would have changed the approach, add it in the same pass and
+point to the authoritative file, command, or document. Prefer rewriting or pruning
+existing guidance over appending duplicates, and remove stale guidance rather than
+leaving it to mislead the next agent.
