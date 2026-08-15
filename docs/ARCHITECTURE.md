@@ -235,9 +235,8 @@ agent starts operate_pay in the addressed checkout session
      nudge; when authentication may be out of band without an on-page challenge,
      it sends cautious bank-app guidance instead
   -> the browser completes authentication natively while the operator polls for
-     a new terminal merchant order route, a newly appearing generic success URL
-     or merchant-page success text during the long wait, or a visible decline;
-     pre-existing evidence and issuer/challenge-frame success copy never qualify
+     a new terminal merchant order route or visible decline; captcha-frame text
+     never qualifies as a decline
   -> a visible decline is payment_declined; timeout, or a disabled wait, hands
      the unresolved challenge to the user instead of guessing success
   -> the post-wait metadata-only payment status is audited

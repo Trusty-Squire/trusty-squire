@@ -2065,23 +2065,10 @@ describe("3-D Secure resolution", () => {
   }> => {
     const browser = await chromium.launch({ headless: true });
     const page = await browser.newPage();
-    await page.route("https://issuer.test/**", async (route) =>
+    await page.route("https://merchant.test/**", async (route) =>
       route.fulfill({
         contentType: "text/html",
-        body: route.request().url().endsWith("/success")
-          ? "<p>Payment successful</p>"
-          : "<div>60 seconds to confirm</div>",
-      }),
-    );
-    await page.route("https://merchant.test/**", async (route) => {
-      const url = route.request().url();
-      return route.fulfill({
-        contentType: "text/html",
-        body: url.endsWith("/status")
-          ? "<p>Payment successful</p>"
-          : url.endsWith("/success")
-            ? "<p>Waiting for merchant confirmation</p>"
-            : `
+        body: `
           ${initialMerchantHtml}
           <button id="pay">Pay now</button>
           <script>
@@ -2089,12 +2076,12 @@ describe("3-D Secure resolution", () => {
               const frame = document.createElement("iframe");
               frame.id = "bank-approval";
               frame.title = "3D Secure authentication";
-              frame.src = "https://issuer.test/acs/challenge";
+              frame.srcdoc = "<div>60 seconds to confirm</div>";
               document.body.append(frame);
             });
           </script>`,
-      });
-    });
+      }),
+    );
     await page.goto("https://merchant.test/checkout");
     const controller = new BrowserController({ humanize: false });
     (controller as unknown as { page: Page }).page = page;
@@ -2104,11 +2091,6 @@ describe("3-D Secure resolution", () => {
     });
     return { browser, page, controller };
   };
-
-  const mutateOnFirstResolutionPoll = (page: Page, mutate: () => Promise<void>) =>
-    vi.spyOn(page, "waitForTimeout").mockImplementationOnce(async () => {
-      await mutate();
-    });
 
   it.skipIf(!chromiumAvailable)(
     "resolves succeeded from the outer page's own order route while the challenge frame stays open and unresponsive",
@@ -2126,157 +2108,6 @@ describe("3-D Secure resolution", () => {
     },
   );
 
-  it.skipIf(!chromiumAvailable)(
-    "resolves succeeded when a generic success URL appears during the wait",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      const wait = mutateOnFirstResolutionPoll(page, async () => {
-        await page.evaluate(() => history.pushState({}, "", "/success"));
-      });
-      try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
-      } finally {
-        wait.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "does not resolve when a success destination query appears during the wait",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      let clock = 0;
-      let polls = 0;
-      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-        clock += timeout;
-        if (polls++ === 0) {
-          await page.evaluate(() =>
-            history.pushState({}, "", "/checkout?success_url=/success&return_url=/receipt"),
-          );
-        }
-      });
-      try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
-      } finally {
-        wait.mockRestore();
-        now.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "resolves succeeded when generic success text appears during the wait",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      const wait = mutateOnFirstResolutionPoll(page, async () => {
-        await page.locator("body").evaluate((body) => {
-          body.insertAdjacentHTML("beforeend", "<p>Payment successful</p>");
-        });
-      });
-      try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
-      } finally {
-        wait.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "resolves from a generic success URL in a verified merchant child frame",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      const wait = mutateOnFirstResolutionPoll(page, async () => {
-        await page.locator("body").evaluate((body) => {
-          body.insertAdjacentHTML(
-            "beforeend",
-            '<iframe id="merchant-success-url" src="https://merchant.test/success"></iframe>',
-          );
-        });
-      });
-      try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
-      } finally {
-        wait.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "resolves from generic success text in a verified merchant child frame",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      const wait = mutateOnFirstResolutionPoll(page, async () => {
-        await page.locator("body").evaluate((body) => {
-          body.insertAdjacentHTML(
-            "beforeend",
-            '<iframe id="merchant-success-text" src="https://merchant.test/status"></iframe>',
-          );
-        });
-      });
-      try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("succeeded");
-      } finally {
-        wait.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "does not resolve from generic success text inside the issuer frame",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      let clock = 0;
-      let polls = 0;
-      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-        clock += timeout;
-        if (polls++ === 0) {
-          await page
-            .locator("#bank-approval")
-            .contentFrame()
-            .locator("body")
-            .evaluate((body) => {
-              body.textContent = "Payment successful";
-            });
-        }
-      });
-      try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
-      } finally {
-        wait.mockRestore();
-        now.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "does not resolve after the top-level page redirects to issuer success",
-    async () => {
-      const { browser, page, controller } = await setupChallenge();
-      let clock = 0;
-      let polls = 0;
-      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-        clock += timeout;
-        if (polls++ === 0) await page.goto("https://issuer.test/acs/success");
-      });
-      try {
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
-      } finally {
-        wait.mockRestore();
-        now.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
   it.skipIf(!chromiumAvailable)("returns failed for visible decline text", async () => {
     const { browser, page, controller } = await setupChallenge();
     try {
@@ -2288,6 +2119,49 @@ describe("3-D Secure resolution", () => {
       await browser.close();
     }
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores captcha failure text when no 3DS challenge is detected",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage();
+      await page.route("https://merchant.test/**", async (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<iframe src="https://newassets.hcaptcha.com/captcha/frame"></iframe>',
+        }),
+      );
+      await page.route("https://newassets.hcaptcha.com/**", async (route) =>
+        route.fulfill({
+          contentType: "text/html",
+          body: '<iframe srcdoc="<p>Authentication failed</p>"></iframe>',
+        }),
+      );
+      await page.goto("https://merchant.test/checkout");
+      await page.waitForLoadState("networkidle");
+      const controller = new BrowserController({ humanize: false });
+      (controller as unknown as { page: Page }).page = page;
+      let clock = 0;
+      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
+      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
+        clock += timeout;
+      });
+      try {
+        await expect(
+          (
+            controller as unknown as {
+              detectThreeDsChallenge: () => Promise<CheckoutSubmitResult>;
+            }
+          ).detectThreeDsChallenge(),
+        ).resolves.toEqual({ three_ds_required: false, order_confirmed: false });
+        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
+      } finally {
+        wait.mockRestore();
+        now.mockRestore();
+        await browser.close();
+      }
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "returns timeout when neither an order route nor a decline appears",
@@ -2309,47 +2183,16 @@ describe("3-D Secure resolution", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
-    "does not treat query or hash churn on pre-existing success evidence as success",
+    "does not treat an unchanged checkout confirmation URL as success",
     async () => {
-      const { browser, page, controller } = await setupChallenge("<p>Payment successful</p>");
+      const { browser, page, controller } = await setupChallenge();
       let clock = 0;
-      let polls = 0;
       const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
       const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
         clock += timeout;
-        if (polls++ === 0) {
-          await page.evaluate(() => history.replaceState({}, "", "/success?state=waiting#polling"));
-        }
       });
       try {
-        await page.evaluate(() => history.replaceState({}, "", "/success?state=pending"));
-        await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
-      } finally {
-        wait.mockRestore();
-        now.mockRestore();
-        await browser.close();
-      }
-    },
-  );
-
-  it.skipIf(!chromiumAvailable)(
-    "does not treat a changed pre-existing success phrase as new success evidence",
-    async () => {
-      const { browser, page, controller } = await setupChallenge(
-        '<p id="merchant-status">Payment successful</p>',
-      );
-      let clock = 0;
-      let polls = 0;
-      const now = vi.spyOn(Date, "now").mockImplementation(() => clock);
-      const wait = vi.spyOn(page, "waitForTimeout").mockImplementation(async (timeout) => {
-        clock += timeout;
-        if (polls++ === 0) {
-          await page.locator("#merchant-status").evaluate((status) => {
-            status.textContent = "Order confirmed";
-          });
-        }
-      });
-      try {
+        await page.evaluate(() => history.replaceState({}, "", "/checkout?success_url=/done"));
         await expect(controller.waitForThreeDsResolution(5_000)).resolves.toBe("timeout");
       } finally {
         wait.mockRestore();

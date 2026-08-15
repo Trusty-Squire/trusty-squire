@@ -441,36 +441,6 @@ function checkoutOutcomeBaselineFromDispatchSnapshot(
   };
 }
 
-function checkoutSuccessRouteMatches(rawUrl: string, successRoute: RegExp): boolean {
-  try {
-    const url = new URL(rawUrl);
-    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-    const pathnames = [url.pathname];
-    const fragment = url.hash.slice(1).replace(/^!/, "");
-    if (fragment.length > 0) {
-      let decodedFragment = fragment;
-      try {
-        decodedFragment = decodeURIComponent(fragment);
-      } catch {
-        decodedFragment = fragment;
-      }
-      if (!/^[^/?#]+=[^#]*$/.test(decodedFragment)) {
-        const fragmentUrl = new URL(
-          /^[a-z][a-z\d+.-]*:/i.test(decodedFragment)
-            ? decodedFragment
-            : decodedFragment.startsWith("/")
-              ? `${url.origin}${decodedFragment}`
-              : `${url.origin}/${decodedFragment}`,
-        );
-        pathnames.push(fragmentUrl.pathname);
-      }
-    }
-    return pathnames.some((pathname) => successRoute.test(pathname));
-  } catch {
-    return false;
-  }
-}
-
 function checkoutUrlOrderIdentities(
   rawUrl: string,
 ): { orders: readonly string[]; terminal: string | null } | null {
@@ -9517,40 +9487,6 @@ export class BrowserController {
     );
   }
 
-  private async captureMerchantSuccessEvidence(
-    merchantOrigin: string | null,
-    successRoute: RegExp,
-    successText: RegExp,
-  ): Promise<{ url: boolean; text: boolean }> {
-    if (!this.page || merchantOrigin === null) return { url: false, text: false };
-    const mainFrame = this.page.mainFrame();
-    const evidence = await Promise.all(
-      this.page.frames().map(async (frame) => {
-        let frameOrigin: string | null = null;
-        if (frame === mainFrame) {
-          try {
-            frameOrigin = new URL(frame.url()).origin;
-          } catch {
-            frameOrigin = null;
-          }
-        } else {
-          frameOrigin = await this.frameActiveOrigin(frame);
-        }
-        if (frameOrigin !== merchantOrigin) return { url: false, text: false };
-        return {
-          url: checkoutSuccessRouteMatches(frame.url(), successRoute),
-          text: successText.test(
-            await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
-          ),
-        };
-      }),
-    );
-    return {
-      url: evidence.some((entry) => entry.url),
-      text: evidence.some((entry) => entry.text),
-    };
-  }
-
   // Let the browser complete the challenge natively (including out-of-band
   // bank-app 3DS): just poll for the same terminal-order signal a plain
   // non-3DS checkout uses, plus a passive plain-text decline check. It never
@@ -9559,23 +9495,8 @@ export class BrowserController {
     if (!this.page) throw new Error("Browser not started");
     const outcomeBaseline =
       this.checkoutOutcomeBaseline ?? (await this.captureCheckoutOutcomeBaseline());
-    const successRoute =
-      /\/success\b|\/receipt\b|payment[_-]?success|thank[-_]?you|order[-_]?received|\/paid\b/i;
-    const successText =
-      /payment (?:received|successful|succeeded|complete)|thank you for your (?:payment|order)|your payment (?:was )?succe|order confirmed/i;
     const failureText =
       /(?:payment|card|transaction) (?:was )?declined|authentication failed|could not be (?:authenticated|processed|completed)|(?:please )?try (?:a |another )?(?:different )?card|3-?d ?secure (?:failed|unsuccessful)/i;
-    let merchantOrigin: string | null = null;
-    try {
-      merchantOrigin = new URL(outcomeBaseline.url).origin;
-    } catch {
-      merchantOrigin = null;
-    }
-    const waitEntrySuccessEvidence = await this.captureMerchantSuccessEvidence(
-      merchantOrigin,
-      successRoute,
-      successText,
-    );
     const deadline = Date.now() + timeoutMs;
     do {
       await this.page.bringToFront().catch(() => undefined);
@@ -9583,23 +9504,13 @@ export class BrowserController {
       const texts = await Promise.all(
         this.page
           .frames()
+          .filter((frame) => !this.frameWithinCaptcha(frame))
           .map(
             async (frame) =>
               await frame.evaluate(() => document.body?.innerText ?? "").catch(() => ""),
           ),
       );
       if (texts.some((text) => failureText.test(text))) return "failed";
-      const currentSuccessEvidence = await this.captureMerchantSuccessEvidence(
-        merchantOrigin,
-        successRoute,
-        successText,
-      );
-      if (
-        (!waitEntrySuccessEvidence.url && currentSuccessEvidence.url) ||
-        (!waitEntrySuccessEvidence.text && currentSuccessEvidence.text)
-      ) {
-        return "succeeded";
-      }
       await this.page.waitForTimeout(1_000).catch(() => undefined);
     } while (Date.now() <= deadline);
     return "timeout";
