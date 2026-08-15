@@ -155,11 +155,11 @@ A profile may return to the closed warm slot only after the page reset succeeds,
 proven, its seed generation is still current, and the session has no payment-sensitive state.
 Failure to prove closure quarantines the lease instead of pooling or deleting it.
 
-`operate_finish` and `operate_finish_task` first mark the addressed session closing. New calls for
-that session are rejected, calls that already acquired the session drain, and outcome preparation
-runs behind the same closed admission gate. Finish refuses while payment is operating or confirming,
-while approval is awaiting the user, or while a filled card awaits confirmation. Only then may page
-reset, Chrome closure, or profile disposition begin.
+`operate_finish` first marks the addressed session closing. New calls for that session are rejected,
+calls that already acquired the session drain, and outcome preparation runs behind the same closed
+admission gate. Finish refuses while payment is operating or confirming, while approval is awaiting
+the user, or while a filled card awaits confirmation. Only then may page reset, Chrome closure, or
+profile disposition begin.
 
 The profile is destroy-required when any of these are true at finish:
 

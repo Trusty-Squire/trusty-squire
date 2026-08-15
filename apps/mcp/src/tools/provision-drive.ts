@@ -1040,7 +1040,7 @@ export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
     "operator work, " +
     "allow_host (host — cross into another app's domain mid-task, e.g. from the " +
     "GCP console into Firebase), type_secret (slot + target — type a secret you " +
-    'captured into a sealed slot via extract{into_slot} into a field ' +
+    'captured into a sealed slot via operate_act { kind: "extract", into_slot: "<slot>" } into a field ' +
     "on the current site; the value never leaves the browser), scroll (direction " +
     "down/up/bottom/top, default down — reveal below-the-fold controls on a long " +
     "form, then operate_observe to pick up the newly-visible elements), " +
@@ -1921,7 +1921,7 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
     }
     if (recipe.domain !== undefined && isCheckoutShapeKey(recipe.domain)) {
       throw new Error(
-        `operator-recipe "${recipe.name}" is a checkout-leg recipe and can only be replayed via operate_use{leg:"checkout"}`,
+        `operator-recipe "${recipe.name}" is a checkout-leg recipe and can only be replayed via operate_recipe_run{leg:"checkout"}`,
       );
     }
     const entry = recipeEntryUrl(recipe, args.service_url);
@@ -1936,7 +1936,7 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
     if (missing.length > 0) {
       throw new Error(
         `operator-recipe "${recipe.name}" needs params: ${missing.join(", ")} — ` +
-          `pass them as operate_use{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
+          `pass them as operate_recipe_run{ params: { ${missing.map((m) => `${m}: "..."`).join(", ")} } }`,
       );
     }
     const domainLockViolation = recipeDomainLockViolationForReplay(recipe, url);

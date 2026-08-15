@@ -1810,8 +1810,11 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     await writeRecipe(recipe);
 
     await expect(
-      provisionUseTool.handler({ name: `purchase--${shapeKey}` }, null as unknown as ApiClient),
-    ).rejects.toThrow(/checkout-leg recipe.*leg:"checkout"/i);
+      operateRecipeRunTool.handler(
+        { name: `purchase--${shapeKey}` },
+        null as unknown as ApiClient,
+      ),
+    ).rejects.toThrow(/checkout-leg recipe.*operate_recipe_run\{leg:"checkout"\}/i);
     expect(h.startCalls).toBe(0);
 
     h.checkoutFieldNames = fields;
@@ -1831,6 +1834,30 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
     )) as { replay: { status: string } };
     expect(result.replay.status).toBe("complete");
     expect(h.clickCalls).toBe(1);
+
+    delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("uses canonical public tools in operator recovery guidance", async () => {
+    expect(provisionActTool.description).toContain(
+      'operate_act { kind: "extract", into_slot: "<slot>" }',
+    );
+
+    const dir = mkdtempSync(join(tmpdir(), "recipe-guidance-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    await writeRecipe(
+      replayRecipe({
+        name: "missing-param-test",
+        verb: undefined,
+        domain: undefined,
+        entry_url: "https://${TENANT}.example.com/start",
+      }),
+    );
+
+    await expect(
+      operateRecipeRunTool.handler({ name: "missing-param-test" }, null as unknown as ApiClient),
+    ).rejects.toThrow(/pass them as operate_recipe_run\{ params:/i);
 
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });

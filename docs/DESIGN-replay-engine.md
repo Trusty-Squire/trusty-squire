@@ -12,8 +12,8 @@ successful run is recorded as ordered mechanics plus typed parameter holes, then
 replayed with fresh values. The host LLM classifies the task and repairs a local
 miss; it does not choose targets during a clean replay.
 
-`operate_remember` and `operate_use` remain behavior-identical compatibility
-aliases for `operate_recipe_save` and `operate_recipe_run`, respectively.
+Recipes are saved with `operate_recipe_save` and replayed with
+`operate_recipe_run`.
 
 ## Recipe identity
 
