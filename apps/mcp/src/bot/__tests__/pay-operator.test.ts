@@ -424,7 +424,12 @@ describe("operate_pay", () => {
       if (url.endsWith("/v1/pay/approvals") && init?.method === "POST") {
         approvalBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
         return Response.json(
-          { id: "approval_fallback", nonce, agent, expires_at: new Date(Date.now() + 60_000).toISOString() },
+          {
+            id: "approval_fallback",
+            nonce,
+            agent,
+            expires_at: new Date(Date.now() + 60_000).toISOString(),
+          },
           { status: 201 },
         );
       }

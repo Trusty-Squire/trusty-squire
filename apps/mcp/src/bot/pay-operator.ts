@@ -1156,10 +1156,12 @@ export async function executeOperatePay(
     // filling it, so a mid-ceremony navigation could swap the merchant, origin,
     // or total out from under the signed mandate. Re-read the live checkout
     // immediately before filling (smallest possible time-of-check→time-of-use
-    // gap) and refuse if ANY signed field the mandate binds — merchant, origin,
-    // amount, currency — drifted. The card was opened above but is never
-    // submitted on a mismatch; the outer finally zeroes it. Fresh has-card
-    // calls retain their prior behavior; resumed has-card calls recheck too.
+    // gap). When the read succeeds, refuse if any signed field the mandate binds
+    // — merchant, origin, amount, currency — drifted. If the total is no longer
+    // machine-readable, continue under the original mandate-bound checkout. The
+    // card was opened above but is never submitted on a detected mismatch; the
+    // outer finally zeroes it. Fresh has-card calls retain their prior behavior;
+    // resumed has-card calls recheck too.
     if (phaseArg !== "fill_card" && (jit || resume !== undefined)) {
       let live: CheckoutSummary | undefined;
       try {

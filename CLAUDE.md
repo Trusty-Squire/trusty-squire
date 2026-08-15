@@ -644,12 +644,9 @@ kill the server).
   and tool hints repeat the same ID. `operate_finish*` closes admission, drains
   entered calls, and refuses teardown while payment state remains active or
   resumable.
-- **P1, same audit:** a card-entry page with no total (Rakuten-style split
-  checkout) now returns structured `{status:"needs_cart_total", next:{tool:
-  "operate_observe", hint}}` instead of a bare `payment_checkout_total_not_found`
-  string, when no persisted cart total (`Session.lastCartCheckout`) is
-  usable as a fallback. Never changes what gets approved — browser-observed
-  totals only, still never a model-supplied amount.
+- **Unreadable checkout totals.** Follow the README payment guide for the public
+  precedence contract; `executeOperatePay` in `pay-operator.ts` is the
+  authoritative implementation.
 - **Late-mounting cross-origin PCI iframe (fillAndSubmitCheckout /
   fillCheckoutCardFields).** Before taking their `page.frames()` snapshot,
   both paths wait up to 10 seconds for a PAN field. This lets a single-page

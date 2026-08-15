@@ -53,25 +53,31 @@ never shown, even after reveal. The Activity page also records card additions
 and removals, payments, and app-grant changes without storing a PAN or CVV.
 
 `operate_pay` requires a non-empty item and reason (calls that omit either
-receive a validation error). On a single-page checkout it reads the checkout total,
-sends you a short-lived approval link, and submits only after you approve the exact
-purchase. A clean visible labeled total wins; when none is readable, strict schema.org
-`Order`/`Invoice.totalPaymentDue` structured data can supply the amount and currency.
-Product and offer prices never qualify as checkout totals. Page currency notation is
-authoritative: Trusty Squire refuses to create an approval when it cannot resolve that
-notation, or when the displayed fractional precision conflicts with an agent-supplied
-fallback currency. Approval, 3-D Secure, Activity, and
+receive a validation error). On a single-page checkout it prefers a machine-read
+checkout total, sends you a short-lived approval link, and submits only after you
+approve the purchase. A clean visible labeled total wins; when none is readable,
+strict schema.org `Order`/`Invoice.totalPaymentDue` structured data can supply the
+amount and currency. If neither source exposes a total, caller-supplied
+`amount_cents` and `currency` become the authoritative approval amount; an omitted
+merchant name falls back to the checkout URL's hostname. Product and offer prices
+never qualify as machine-read checkout totals. When page currency notation is
+readable, it remains authoritative: Trusty Squire refuses to create an approval when
+it cannot resolve that notation, or when the displayed fractional precision
+conflicts with an agent-supplied fallback currency. Approval, 3-D Secure, Activity, and
 notification amounts use the currency's minor-unit precision (for example, whole
 yen for JPY and two decimals for USD). The anonymous approval page shows the
 merchant, checkout origin, amount and currency, item, and reason directly from the
 short-lived server record before one passkey ceremony authorizes those canonical
 payment values. You also see the requesting MCP client (for example, Hermes) and
 that a saved card will be used before clicking **Approve payment** to relay the
-operator-sealed final authorization. A first-time
-payment is refused if the merchant, checkout origin, amount, or currency changes
-between approval and submission. Card entry, sealing, and cleanup touch only the
-selected card controls and explicitly labeled billing controls inside that payment
-context; merchant shipping address and country controls remain untouched. A submit
+operator-sealed final authorization. When the pre-submission checkout can be
+machine-read, the payment is refused if its merchant, origin, amount, or currency has
+changed since approval. If that resume read cannot recover a total, Trusty Squire
+reuses the original mandate-bound checkout values. Card entry requires the PAN,
+expiry, and CVV fields; cardholder name and other explicitly labeled billing fields
+are filled best-effort, so a missing name field does not abort the payment. Sealing
+and cleanup touch only those selected payment controls; merchant shipping address and
+country controls remain untouched. A submit
 is reported as `payment_submitted` only after the checkout reaches a new merchant
 order-confirmation URL. The browser completes 3-D Secure natively, including
 out-of-band bank-app challenges — Trusty Squire never manipulates or intercepts
@@ -93,9 +99,10 @@ Some split checkouts collect the card before the final order-confirmation step. 
 card-entry page, `operate_pay { phase: "fill_card" }` first reads the live total. A
 subtotal qualifies as that payable amount only when the same order summary says
 shipping is free; recommendation and related-product prices are excluded. If that
-page exposes no total, it uses the most recent real total observed earlier in the same
-browser session, such as the cart subtotal, only when the checkout origin still
-matches. It never uses a caller-supplied amount for this fallback. One phone approval
+page exposes no total, caller-supplied `amount_cents` and `currency` take precedence
+as the approval amount. If they are omitted, Trusty Squire may use the most recent real
+total observed earlier in the same browser session, such as the cart subtotal, only
+when the checkout origin still matches. One phone approval
 binds that amount, releases the card, and authorizes the eventual charge up to the
 approved amount; Trusty Squire then fills the card without submitting. It fills only
 the merchant's own HTTPS frames or recognized payment-provider frames. The card stays

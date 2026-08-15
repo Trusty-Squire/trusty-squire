@@ -76,8 +76,9 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   and bind the canonical product identity plus selected-variant options hash.
   For later cart controls, pass that identity pair to `operate_act` when known.
   Follow the one `checkout_state.next_action`, but treat the state and its
-  money fields as informational only; `operate_pay` independently verifies the
-  charge total.
+  money fields as informational only. Follow the
+  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  for `operate_pay` checkout-amount precedence.
 - `operate_act { kind: "await_verification" }` — read the email verification
   code or link from the user's own inbox, behind an explicit consent gate.
 - `operate_act { kind: "extract" }` — capture a revealed API key/secret
@@ -111,11 +112,9 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   submit again blindly. The card may already have been charged — manually
   check the merchant's order state before any retry.
 - On a split checkout whose card-entry step shows no total (or only a subtotal),
-  call `operate_pay` with `phase: "fill_card"`. It approves the live card-entry
-  total when readable; a subtotal qualifies only when the same order summary says
-  shipping is free, and recommendation prices never qualify. Otherwise it may use
-  the most recent real total observed in this session on the same origin. That one
-  approval releases and fills the card,
+  call `operate_pay` with `phase: "fill_card"` and follow the
+  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  for amount precedence. That one approval releases and fills the card,
   charging nothing yet, and authorizes the eventual charge up to the approved
   amount. Advance only through non-charge navigation such as **Next** or
   **Continue to review**, then call `operate_pay` with `phase: "confirm"` once the
@@ -144,7 +143,9 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 - Card controls marked `interaction: "vaulted_card_only"` must be handled with
   their recommended `operate_pay { phase: "fill_card" }` action. Never type a
   PAN or Luhn-valid card number through `operate_act`; a refusal points back to
-  `operate_pay` and requires a verified cart total.
+  `operate_pay`. Follow the
+  [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
+  for checkout-amount precedence and split-checkout handling.
 - The user connects Google/GitHub themselves in the real browser during
   `connect`. Never ask for or type the user's password in chat.
 
