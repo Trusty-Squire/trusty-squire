@@ -154,7 +154,7 @@ async function autoPromoteProvision(sessionId: string): Promise<string> {
   }
 }
 
-// replay-serve-live-domainlock — after `operate_remember` writes a recipe
+// replay-serve-live-domainlock — after `operate_recipe_save` writes a recipe
 // locally, best-effort PUBLISH it to the shared registry so the NEXT
 // install to visit this (verb, eTLD+1) can immediately reuse it — a
 // recipe serves live the moment the registry accepts it; there is no

@@ -99,8 +99,8 @@ No. It can continue through real website flows that defeat general browser opera
 
 ## MCP tool groups
 
-- Browser operation: \`operate_start\`, \`operate_observe\`, \`operate_act\`, and \`operate_extract\`.
-- Replayable website work: \`operate_remember\` and \`operate_use\`.
+- Browser operation: \`operate_start\`, \`operate_observe\`, and \`operate_act\` (including \`operate_act { kind: "extract" }\`).
+- Replayable website work: \`operate_recipe_save\` and \`operate_recipe_run\`.
 - Credential use: \`list_credentials\` and \`use_credential\`.
 - Backend access: \`grant_app_access\` and \`revoke_app_access\`.
 - Accountability: \`audit_log\`.
