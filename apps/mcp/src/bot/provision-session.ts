@@ -7540,26 +7540,11 @@ function profileRequiresDestroy(session: Session): boolean {
   );
 }
 
-// operate_finish must close the session unconditionally — a pending / filled /
-// awaiting-confirmation payment never blocks it (a declined card used to strand
-// the caller with no exit but an MCP process restart). The only thing still
-// guarded here is an operate_pay call actively in flight on the SAME session
-// (a real concurrent-call race, not a payment awaiting the human/caller).
-function assertNoPaymentOperationInProgress(session: Session): void {
-  const status = session.activePayment?.status;
-  if (status === "operating" || status === "confirming") {
-    throw new Error("operate_finish retry: payment operation is still in progress");
-  }
-}
-
 async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {
   const sessionId = session.id;
-  assertNoPaymentOperationInProgress(session);
   const url = session.browser.currentUrl();
   audit(sessionId, "finish", { url });
   const destroyProfile = profileRequiresDestroy(session);
-  // Clear any pending/sealed payment state so it can't leak into a later
-  // session sharing this Session object's memory.
   session.activePayment = null;
   session.paymentFieldSealActive = false;
   sessions.delete(sessionId);
@@ -7577,7 +7562,6 @@ export async function finishProvisionSessionWithPreparation<T>(
   session.closing = true;
   try {
     await waitForSessionCallsToDrain(session);
-    assertNoPaymentOperationInProgress(session);
     const prepared = await prepare();
     const finish = await closeFinishingProvisionSession(session);
     return { finish, prepared };

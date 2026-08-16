@@ -705,6 +705,7 @@ import {
   awaitVerification,
   captchaGate,
   finishProvisionSession,
+  finishProvisionSessionWithPreparation,
   withProvisionSessionCall,
   paymentSession,
   closeAllProvisionSessions,
@@ -3583,20 +3584,40 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.resetCalls).toBe(1);
   });
 
-  it("asks finish to retry while a payment can still submit", async () => {
+  it("closes after a submitted confirmation throws and leaves stale confirming state", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    const claim = claimActivePaymentForOperatePay(undefined);
-    expect(claim.kind).toBe("lease");
-    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(/payment operation/);
-    if (claim.kind === "lease") releaseActivePaymentLease(claim.lease);
-    await finishProvisionSession(started.session_id);
+    const originalSession = paymentSession(started.session_id);
+    const pending = {
+      approval_id: "appr_stale_confirming",
+      approval_url: "https://web.test/vault/pay/appr_stale_confirming",
+      checkout: {
+        merchant: "Shop",
+        checkout_origin: "https://app.example.com",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      card_ref: "card_stale_confirming",
+      last4: "4242",
+    };
+    setActivePendingCardFill(pending, originalSession);
+    expect(claimActivePaymentForOperatePay("confirm", originalSession).kind).toBe("confirm");
+    markActivePendingCardFillSubmitStarted(originalSession);
+    expect(restoreActivePendingCardFillAfterConfirmThrow(pending, originalSession)).toBe(false);
+
+    await expect(
+      finishProvisionSessionWithPreparation(started.session_id, async () => "prepared"),
+    ).resolves.toMatchObject({ finish: { closed: true }, prepared: "prepared" });
+    expect(originalSession.activePayment).toBeNull();
+    expect(originalSession.paymentFieldSealActive).toBe(false);
+    expect(h.leaseDestroyCalls).toBe(1);
   });
 
   it("closes unconditionally with an approval or filled card still resumable, clearing payment state", async () => {
     const approvalSession = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const approvalClaim = claimActivePaymentForOperatePay(undefined);
+    const originalApprovalSession = paymentSession(approvalSession.session_id);
+    const approvalClaim = claimActivePaymentForOperatePay(undefined, originalApprovalSession);
     if (approvalClaim.kind !== "lease") throw new Error("expected payment lease");
     const approval = {
       approval_id: "appr_finish_guard",
@@ -3618,33 +3639,43 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       reason: "Synthetic purchase",
       cardRef: "card_finish_guard",
     };
-    completeActivePaymentLeaseWithPendingApproval(approvalClaim.lease, approval);
+    completeActivePaymentLeaseWithPendingApproval(
+      approvalClaim.lease,
+      approval,
+      originalApprovalSession,
+    );
 
-    // A pending payment forces the warm profile to be destroyed rather than
-    // reused (profileRequiresDestroy), so resetCalls (reuse path) stays put.
     await expect(finishProvisionSession(approvalSession.session_id)).resolves.toMatchObject({
       closed: true,
     });
-    expect(h.resetCalls).toBe(0);
+    expect(originalApprovalSession.activePayment).toBeNull();
+    expect(originalApprovalSession.paymentFieldSealActive).toBe(false);
+    expect(h.leaseDestroyCalls).toBe(1);
 
     const pendingSession = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    setActivePendingCardFill({
-      approval_id: "appr_pending_finish_guard",
-      approval_url: "https://web.test/vault/pay/appr_pending_finish_guard",
-      checkout: approval.checkout,
-      card_ref: "card_finish_guard",
-      last4: "4242",
-    });
+    const originalPendingSession = paymentSession(pendingSession.session_id);
+    setActivePendingCardFill(
+      {
+        approval_id: "appr_pending_finish_guard",
+        approval_url: "https://web.test/vault/pay/appr_pending_finish_guard",
+        checkout: approval.checkout,
+        card_ref: "card_finish_guard",
+        last4: "4242",
+      },
+      originalPendingSession,
+    );
 
-    await expect(finishProvisionSession(pendingSession.session_id)).resolves.toMatchObject({
+    await expect(
+      provisionFinishTool.handler({ session_id: pendingSession.session_id }, null),
+    ).resolves.toMatchObject({
       closed: true,
     });
-    expect(h.resetCalls).toBe(0);
+    expect(originalPendingSession.activePayment).toBeNull();
+    expect(originalPendingSession.paymentFieldSealActive).toBe(false);
+    expect(h.leaseDestroyCalls).toBe(2);
 
-    // A fresh session after the stuck one closes proves there's no leftover
-    // exit-blocking state and no need to restart the MCP process.
     const retried = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
