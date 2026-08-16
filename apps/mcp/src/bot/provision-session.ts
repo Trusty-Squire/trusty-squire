@@ -23,7 +23,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrowserController,
-  CHECKOUT_SUBMIT_LABEL_RE,
   parseCheckoutAmount,
   type CheckoutSummary,
   type FrameTarget,
@@ -2166,29 +2165,6 @@ export function manualCardEntryBlockReason(text: string): string | null {
     }
   }
   return null;
-}
-
-// While a vaulted card sits filled in the checkout (operate_pay
-// phase="fill_card"), the model must not be able to reach the charge itself:
-// the pay/place-order click is reserved for operate_pay {phase:"confirm"},
-// which verifies the live total against the user-approved amount first.
-// Ordinary between-step navigation ("Next", "Continue to review") stays free —
-// only charge-verb labels are refused.
-function pendingCardFillChargeBlockReason(
-  session: Session,
-  labels: ReadonlyArray<string | null | undefined>,
-): string | null {
-  if (!session.paymentFieldSealActive) return null;
-  const isCharge = labels.some(
-    (label) => typeof label === "string" && CHECKOUT_SUBMIT_LABEL_RE.test(label.trim()),
-  );
-  if (!isCharge) return null;
-  return (
-    "click refused: a vaulted payment card is filled into this checkout and this " +
-    "control looks like the charge/place-order action. The charge must go through " +
-    'operate_pay {phase:"confirm"}, which verifies the live total against the ' +
-    "user-approved amount before submitting."
-  );
 }
 
 export function buildScreenOutline(
@@ -4429,26 +4405,6 @@ export async function act(
       break;
     }
     case "press": {
-      // Enter fires the form's default submit — on an order-confirmation page
-      // that IS the charge. Same rule as the charge-click guard below.
-      const key = action.key.trim();
-      if (session.paymentFieldSealActive && /^(?:enter|numpadenter)$/i.test(key)) {
-        throw new Error(
-          "press refused: a vaulted payment card is filled into this checkout, and " +
-            "Enter can trigger the page's default submit (the charge). Use operate_pay " +
-            '{phase:"confirm"} to place the order.',
-        );
-      }
-      if (
-        session.paymentFieldSealActive &&
-        (/^(?:space|spacebar)$/i.test(key) || action.key === " ")
-      ) {
-        const chargeBlock = pendingCardFillChargeBlockReason(
-          session,
-          await browser.focusedElementLabels(),
-        );
-        if (chargeBlock !== null) throw new Error(chargeBlock);
-      }
       await browser.pressKey(action.key);
       break;
     }
@@ -4627,10 +4583,6 @@ export async function act(
             assertFrameTargetAllowed(session, resolved.frameTarget, action.kind);
           }
           bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
-          if (action.kind === "click" || action.kind === "js_click") {
-            const chargeBlock = pendingCardFillChargeBlockReason(session, resolved.labels);
-            if (chargeBlock !== null) throw new Error(chargeBlock);
-          }
           session.usedLocatorFallback = true;
           if (action.kind === "click") await browser.clickHandle(resolved.handle);
           else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
@@ -4668,17 +4620,6 @@ export async function act(
       // A main-frame or same-domain-frame target is unaffected.
       assertFrameTargetAllowed(session, el, action.kind);
       bindCartIdentity(isCartAffectingAction(action, el));
-      // oauth_click included: it clicks the element too (expecting a popup),
-      // so it must not be a side door to the charge control.
-      if (action.kind === "click" || action.kind === "js_click" || action.kind === "oauth_click") {
-        const chargeBlock = pendingCardFillChargeBlockReason(session, [
-          el.ariaLabel,
-          el.visibleText,
-          el.labelText,
-          el.value,
-        ]);
-        if (chargeBlock !== null) throw new Error(chargeBlock);
-      }
       if (action.kind === "click") {
         const target = frameTargetFor(el);
         if (target !== null) await browser.clickInFrame(target, el.selector);
@@ -4822,13 +4763,6 @@ export async function act(
       }
       resolvedEl = el;
       assertNoFrameTarget(el, "oauth_login");
-      const chargeBlock = pendingCardFillChargeBlockReason(session, [
-        el.ariaLabel,
-        el.visibleText,
-        el.labelText,
-        el.value,
-      ]);
-      if (chargeBlock !== null) throw new Error(chargeBlock);
       await browser.loginWithOAuth(el.selector);
       await settleAfterStateChange(browser);
       break;

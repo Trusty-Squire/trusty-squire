@@ -7,12 +7,10 @@ import {
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
   getActivePendingApproval,
-  markActivePendingCardFillSubmitStarted,
   recordActivePaymentProvenance,
   releaseActivePaymentLease,
   retainActivePaymentFieldSeal,
   restoreActivePendingCardFillAfterConfirmThrow,
-  setActivePendingCardFill,
   withPaymentSessionCall,
   type Session,
 } from "../bot/provision-session.js";
@@ -66,26 +64,6 @@ function paymentResult<T extends object>(
   session_id: string;
 } {
   return { ...result, session_id: session.id };
-}
-
-function shouldRestorePendingCardFill(result: Record<string, unknown>): boolean {
-  switch (result.status) {
-    case "payment_configuration_error":
-    case "payment_checkout_currency_unresolved":
-    case "payment_checkout_total_not_found":
-    case "payment_approval_timeout":
-    case "payment_mandate_rejected":
-    case "payment_review_verification_failed":
-    case "payment_card_open_failed":
-    case "payment_checkout_origin_mismatch":
-    case "payment_amount_mismatch":
-    case "payment_amount_exceeds_approval":
-      return true;
-    case "payment_checkout_failed":
-      return result.reason === "payment_submit_not_found";
-    default:
-      return false;
-  }
 }
 
 function shouldRecordPaymentProvenance(status: unknown): boolean {
@@ -156,12 +134,14 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     'phase="fill_card" on that step — the approval amount is sourced from the most recent real ' +
     "total this session observed (e.g. the cart page) only when the card-entry page itself shows " +
     "none and amount_cents plus currency were not supplied, and releases the card into recognized " +
-    "payment-provider fields without charging. Then " +
-    'drive the checkout to the order-confirmation step and call phase="confirm" — it reads the ' +
-    "strict final total and places the order if it does not exceed the amount already approved " +
-    "at fill_card, with NO second approval. A final total above that amount is refused, never " +
-    "re-approved. Exactly one human approval per purchase. Never click the pay/place-order " +
-    "control via operate_act.",
+    "payment-provider fields without charging. Then drive the checkout to the order-confirmation " +
+    "step, VERIFY the live final total there matches the returned approved amount_cents and " +
+    "currency, and place the order yourself via operate_act, handling any 3-D Secure challenge " +
+    "directly — Trusty Squire never re-reads the total or clicks the pay/place-order control. Call " +
+    'phase="confirm" any time after the fill to close out the approval; it is not a prerequisite ' +
+    "to placing the order. Exactly one human approval per purchase. If the payment gets stuck or " +
+    "the card is declined, recover with operate_finish and start a fresh session — operate_pay " +
+    "does not support refilling a different card mid-session.",
   inputSchema,
   jsonInputSchema: {
     type: "object",
@@ -188,9 +168,9 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           '"single" (the default; also implied by omitting phase) is an ordinary one-step ' +
           'checkout. Split checkouts only: "fill_card" approves an amount (falling back to the most ' +
           "recent real total this session observed when the card-entry page itself has none) " +
-          'and releases the vaulted card without charging; "confirm" reads the final total and ' +
-          "charges within that SAME approval — no second tap — refusing instead if the final " +
-          "total exceeds it.",
+          "and releases the vaulted card without charging — the caller then verifies the final " +
+          'total against that amount and places the order itself via operate_act. "confirm" just ' +
+          "closes out that approval afterward (no total check, no click, no charge).",
       },
       item: { type: "string", minLength: 1 },
       reason: { type: "string", minLength: 1 },
@@ -217,9 +197,15 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     return await withPaymentSessionCall(args.session_id, async (session) => {
       const paymentClaim = claimActivePaymentForOperatePay(phase, session);
       // Confirm step of a split checkout: the card is already filled (and the
-      // mandate already signed), so no card resolution and no PayPal gate — the
-      // job is verify-the-total-then-charge. Routed before the PayPal check so
-      // an incidental PayPal button iframe on the review page can't block it.
+      // mandate already signed), so no card resolution and no PayPal gate.
+      // confirm no longer touches the browser or charges anything — it only
+      // reports the approved terms back and releases the pending-fill lease.
+      // Card values are NEVER cleared here (the caller still needs them
+      // filled to submit), so masking must stay active: clear with
+      // paymentFieldsCleared=false, which moves the session to "sealed" —
+      // blocking further operate_pay calls without ever unmasking the still-
+      // live PAN/CVV. Recovery from a stuck or declined payment is
+      // operate_finish, not another fill in the same session.
       if (phase === "confirm") {
         if (paymentClaim.kind === "missing_confirm") {
           throw new Error(
@@ -232,34 +218,8 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
         }
         const pending = paymentClaim.pending;
         try {
-          const browser = await activeProvisionBrowserForPayment(session);
-          const result = await executeOperatePayConfirm(
-            pending,
-            {
-              ...(args.three_ds_wait_seconds !== undefined
-                ? { three_ds_wait_seconds: args.three_ds_wait_seconds }
-                : {}),
-            },
-            api,
-            browser,
-            {
-              onSubmitStarted: () => markActivePendingCardFillSubmitStarted(session),
-            },
-          );
-          const status = result.status;
-          if (shouldRecordPaymentProvenance(status)) {
-            recordActivePaymentProvenance(pending.card_ref, session);
-          }
-          if (shouldRestorePendingCardFill(result)) {
-            setActivePendingCardFill(pending, session);
-          } else if (
-            status === "payment_submitted" ||
-            status === "payment_3ds_required" ||
-            status === "payment_declined" ||
-            status === "payment_outcome_unknown"
-          ) {
-            clearActivePendingCardFill(result.payment_fields_cleared === true, session);
-          }
+          const result = await executeOperatePayConfirm(pending);
+          clearActivePendingCardFill(false, session);
           return paymentResult(session, result);
         } catch (error) {
           restoreActivePendingCardFillAfterConfirmThrow(pending, session);
@@ -373,6 +333,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             },
             onCardFilled: (pending) => {
               filledPending = pending;
+              recordActivePaymentProvenance(pending.card_ref, session);
             },
             onCardFillCleanupFailed: () => {
               paymentFieldsCleared = false;

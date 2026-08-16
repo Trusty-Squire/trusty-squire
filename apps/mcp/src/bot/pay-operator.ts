@@ -34,10 +34,10 @@ export interface OperatePayArgs {
   reason: string;
   three_ds_wait_seconds?: number;
   // "fill_card" = split-checkout card entry: a SINGLE amount-bound approval
-  // (one human passkey tap) both releases the vaulted card and authorizes the
-  // eventual charge up to that amount, then fills payment fields WITHOUT
-  // submitting. confirm later charges within that same approval — never a
-  // second tap — and fails closed if the final total exceeds it.
+  // (one human passkey tap) releases the vaulted card, then fills payment
+  // fields WITHOUT submitting. The caller verifies the final total and
+  // places the order itself; confirm only closes out this approval
+  // afterward — never a second tap.
   // Absent = the single-page fill+charge.
   phase?: "fill_card";
 }
@@ -1206,12 +1206,12 @@ export async function executeOperatePay(
     }
 
     // Split-checkout card entry (phase="fill_card"): the human approval above
-    // is a SINGLE amount-bound approval (one passkey tap) that both releases
-    // the card here and authorizes the eventual charge up to checkout's
-    // amount_cents — executeOperatePayConfirm charges within it, never a
-    // second approval. The live check still needed here (the ceremony can
-    // take minutes, and the fill targets the CURRENT page) is that the
-    // browser remains on the origin the approval was signed for.
+    // is a SINGLE amount-bound approval (one passkey tap) that releases the
+    // card here. The caller verifies the final total and places the order
+    // itself; confirm only closes out this approval afterward, never a
+    // second one. The live check still needed here (the ceremony can take
+    // minutes, and the fill targets the CURRENT page) is that the browser
+    // remains on the origin the approval was signed for.
     if (phaseArg === "fill_card") {
       let liveOrigin: string | null;
       try {
@@ -1285,11 +1285,12 @@ export async function executeOperatePay(
         currency: checkout.currency,
         last4,
         next:
-          "Nothing was charged. Drive the checkout to the order-confirmation step (the page " +
-          'showing the final total), then call operate_pay {phase:"confirm"} — it reads the ' +
-          "final total and places the order if it does not exceed the amount already approved " +
-          "here, with no further approval needed. A final total above the approved amount is " +
-          "refused, never re-approved. Never click the pay/place-order control yourself.",
+          "Nothing was charged. Drive the checkout to the order-confirmation step, verify the " +
+          "live final total there matches the approved amount_cents/currency above, then place " +
+          "the order yourself via operate_act and handle any 3-D Secure challenge directly — " +
+          "Trusty Squire never re-reads the total or clicks the pay/place-order control. Call " +
+          'operate_pay {phase:"confirm"} any time after this fill to close out the approval; it ' +
+          "does not need to happen before you place the order.",
       };
     }
 
@@ -1398,192 +1399,27 @@ export async function executeOperatePay(
   }
 }
 
-// The charge half of a split checkout: the card was filled by phase="fill_card"
-// and the host has driven the checkout to its order-confirmation step. THIS is
-// where the money moves, so the total-verification gate lives here: the live
-// page must show a readable final total before the pay/place-order control is
-// clicked. There is exactly ONE human approval per purchase (minted at fill) —
-// confirm charges within that same approved amount and never mints a second
-// one. A drifted origin/currency, or a final total above the approved amount,
-// refuses closed instead.
+// The close-out half of a split checkout: the card was filled by
+// phase="fill_card" and that SAME fill-time approval already authorized a
+// charge up to checkout.amount_cents. confirm no longer re-reads the live
+// total and no longer clicks the pay/place-order control — the caller drives
+// the checkout to its order-confirmation step, verifies the live final total
+// against the approved amount_cents/currency itself, and places the order via
+// operate_act. confirm makes no browser call and records no audit event (it
+// never charges) — it only reports the approved terms back so the pending
+// card-fill lease can be released.
 export async function executeOperatePayConfirm(
   pending: PendingCardFill,
-  args: { three_ds_wait_seconds?: number },
-  api: ApiClient,
-  browser: PaymentBrowser,
-  overrides: { onSubmitStarted?: () => void } = {},
 ): Promise<Record<string, unknown>> {
-  const threeDsWaitMs = Math.min(Math.max(args.three_ds_wait_seconds ?? 180, 0), 600) * 1000;
   const checkout = pending.checkout;
-  const approvalUrl = pending.approval_url;
-
-  let live: CheckoutSummary;
-  try {
-    // Thread the already-approved currency through so a page notation that
-    // can't be pinned to one ISO currency on its own (a currency-selector /
-    // FX-preview module, a bare "$" shared by several locales, …) resolves
-    // against what the operator already committed to instead of refusing the
-    // confirm read. The equality check below still refuses closed on any
-    // actual currency/amount drift, so this cannot itself authorize a bad charge.
-    live = await browser.readCheckoutConfirmSummary(checkout.currency);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "";
-    if (message === "payment_checkout_total_not_found") {
-      // Confirmation fails closed when the live total disappears; the
-      // approved amount is never used as a substitute at charge time.
-      return {
-        status: "payment_checkout_total_not_found",
-        approval_url: approvalUrl,
-        reason:
-          "The confirm step requires the order total to be visible on the live page. " +
-          "Navigate to the order-confirmation step, then retry.",
-      };
-    }
-    if (message === "payment_checkout_total_conflict") {
-      return {
-        status: "payment_amount_mismatch",
-        approval_url: approvalUrl,
-        reason: "conflicting_checkout_totals",
-      };
-    }
-    throw error;
-  }
-  // Merchant is deliberately NOT compared: it derives from the page title,
-  // which legitimately changes between checkout steps ("Payment" → "Review
-  // order"). Origin and currency remain exact matches against the amount-bound
-  // approval created at fill.
-  if (live.checkout_origin !== checkout.checkout_origin || live.currency !== checkout.currency) {
-    return {
-      status: "payment_amount_mismatch",
-      approval_url: approvalUrl,
-      merchant: checkout.merchant,
-      mandate_amount_cents: checkout.amount_cents,
-      mandate_currency: checkout.currency,
-      live_amount_cents: live.amount_cents,
-      live_currency: live.currency,
-      live_merchant: live.merchant,
-      live_checkout_origin: live.checkout_origin,
-    };
-  }
-
-  // Exactly one human approval per purchase: the fill-time approval already
-  // authorizes a charge up to checkout.amount_cents. A live total at or below
-  // it charges under that SAME approval — no second tap. A live total above
-  // it refuses closed; there is deliberately no reapproval path here.
-  if (live.amount_cents > checkout.amount_cents) {
-    return {
-      status: "payment_amount_exceeds_approval",
-      approval_url: approvalUrl,
-      merchant: checkout.merchant,
-      approved_amount_cents: checkout.amount_cents,
-      approved_currency: checkout.currency,
-      live_amount_cents: live.amount_cents,
-      live_currency: live.currency,
-    };
-  }
-
-  let paymentStatus = "payment_submitted";
-  let submitResult: CheckoutSubmitResult = { three_ds_required: false, order_confirmed: false };
-  const clearPaymentFields = async (): Promise<boolean> => {
-    try {
-      if (browser.clearCheckoutCardFields !== undefined) {
-        await browser.clearCheckoutCardFields();
-      } else {
-        await browser.clearSealedPaymentFields();
-      }
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  try {
-    overrides.onSubmitStarted?.();
-    submitResult = await browser.submitFilledCheckout();
-    if (submitResult.three_ds_required) paymentStatus = "payment_3ds_required";
-    else if (!submitResult.order_confirmed) paymentStatus = "payment_outcome_unknown";
-  } catch (error) {
-    const submitNotFound = error instanceof Error && error.message === "payment_submit_not_found";
-    paymentStatus = submitNotFound ? "payment_checkout_failed" : "payment_outcome_unknown";
-    const paymentFieldsCleared = submitNotFound ? false : await clearPaymentFields();
-    let audit_recorded = true;
-    try {
-      await api.auditPayment({
-        merchant: checkout.merchant,
-        amount_cents: live.amount_cents,
-        currency: live.currency,
-        last4: pending.last4,
-        status: paymentStatus,
-        ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
-      });
-    } catch {
-      audit_recorded = false;
-    }
-    return {
-      status: paymentStatus,
-      audit_recorded,
-      reason: submitNotFound ? "payment_submit_not_found" : "payment_submit_outcome_unknown",
-      approval_url: approvalUrl,
-      ...(!submitNotFound ? { payment_fields_cleared: paymentFieldsCleared } : {}),
-    };
-  }
-  // Submission serialized the card values; clear them from the page now, the
-  // same point the single-page flow clears them.
-  const paymentFieldsCleared = await clearPaymentFields();
-
-  let getThreeDsTelegramSent: () => boolean | undefined = () => undefined;
-  if (!submitResult.order_confirmed && threeDsWaitMs > 0) {
-    getThreeDsTelegramSent = trackThreeDsNotification(
-      api.notifyThreeDs(pending.approval_id, threeDsNotificationMode(submitResult)),
-    );
-    const resolution = await browser.waitForThreeDsResolution(threeDsWaitMs);
-    paymentStatus = statusAfterThreeDsResolution(paymentStatus, resolution);
-  }
-
-  let auditRecorded = true;
-  try {
-    await api.auditPayment({
-      merchant: checkout.merchant,
-      amount_cents: live.amount_cents,
-      currency: live.currency,
-      last4: pending.last4,
-      status: paymentStatus,
-      ...(pending.mandate_id !== undefined ? { mandate_id: pending.mandate_id } : {}),
-    });
-  } catch {
-    auditRecorded = false;
-  }
-  if (paymentStatus === "payment_3ds_required" || paymentStatus === "payment_outcome_unknown") {
-    return {
-      status: paymentStatus,
-      audit_recorded: auditRecorded,
-      approval_url: approvalUrl,
-      payment_fields_cleared: paymentFieldsCleared,
-      ...(submitResult.challenge_url !== undefined
-        ? { challenge_url: submitResult.challenge_url }
-        : {}),
-      needs_user: {
-        wall: "3ds",
-        message: threeDsHandoffMessage(submitResult, getThreeDsTelegramSent()),
-        resume: "checkout",
-        ...(submitResult.challenge_url !== undefined ? { url: submitResult.challenge_url } : {}),
-      },
-    };
-  }
-  if (paymentStatus === "payment_declined") {
-    return {
-      status: paymentStatus,
-      audit_recorded: auditRecorded,
-      approval_url: approvalUrl,
-      payment_fields_cleared: paymentFieldsCleared,
-    };
-  }
   return {
-    status: paymentStatus,
-    audit_recorded: auditRecorded,
-    approval_url: approvalUrl,
+    status: "payment_ready_to_place",
+    approval_url: pending.approval_url,
     merchant: checkout.merchant,
-    amount_cents: live.amount_cents,
-    currency: live.currency,
-    payment_fields_cleared: paymentFieldsCleared,
+    amount_cents: checkout.amount_cents,
+    currency: checkout.currency,
+    next:
+      "Trusty Squire closed out the fill-time approval and released the pending-fill lease. " +
+      "It did not inspect, submit, or otherwise change the checkout.",
   };
 }
