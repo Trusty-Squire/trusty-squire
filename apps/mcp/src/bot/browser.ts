@@ -9490,6 +9490,8 @@ export class BrowserController {
       // "challenge" match this pattern used to include.
       if (this.frameWithinCaptcha(frame)) continue;
       if (!(await this.isFrameVisible(frame))) continue;
+      // Text signals intentionally use rendered innerText without effective-rect gating;
+      // overflow-clipped 3DS phrasing is an accepted contrived residual.
       const [text, structural] = await Promise.all([
         frame.evaluate(extractObservationVisibleText).catch(() => ""),
         this.hasVisibleThreeDsStructuralSignal(frame),
