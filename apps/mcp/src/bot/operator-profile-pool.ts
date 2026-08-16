@@ -503,7 +503,7 @@ async function waitForSeedLockRetry(control: OperatorProfileAcquisitionControl):
 
 async function withSeedLock<T>(
   p: PoolPaths,
-  fn: (assertOwned: () => void) => Promise<T> | T,
+  fn: (assertOwned: () => void, owner: SeedLockOwner) => Promise<T> | T,
   control: OperatorProfileAcquisitionControl = {},
 ): Promise<T> {
   const token = randomUUID();
@@ -547,7 +547,7 @@ async function withSeedLock<T>(
       }
     };
     assertOwned();
-    return await fn(assertOwned);
+    return await fn(assertOwned, owner);
   } finally {
     if (readSeedLockOwner(p.seedLock)?.token === token) {
       rmSync(p.seedLock, { recursive: true, force: true });
@@ -567,6 +567,49 @@ function currentGeneration(p: PoolPaths): string | null {
     return existsSync(join(p.generations, generation, "user-data")) ? generation : null;
   } catch {
     return null;
+  }
+}
+
+function seedGenerationHasReader(path: string): boolean {
+  try {
+    for (const entry of readdirSync(path, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.startsWith(".reader-")) continue;
+      const owner = readJson<SeedLockOwner>(join(path, entry.name));
+      if (owner === null || owner.host !== hostname() || processState(owner) !== "stale") {
+        return true;
+      }
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+async function copySeedGenerationLocked(
+  p: PoolPaths,
+  generation: string,
+  destination: string,
+  owner: SeedLockOwner,
+  assertOwned: () => void,
+  copy: (source: string, destination: string) => Promise<void> | void = (source, target) => {
+    cpSync(source, target, {
+      recursive: true,
+      force: false,
+      errorOnExist: true,
+    });
+  },
+): Promise<void> {
+  const generationRoot = join(p.generations, generation);
+  const pin = join(generationRoot, `.reader-${owner.token}`);
+  assertOwned();
+  writeFileSync(pin, `${JSON.stringify(owner)}\n`, { mode: 0o600, flag: "wx" });
+  try {
+    assertOwned();
+    await copy(join(generationRoot, "user-data"), destination);
+    assertOwned();
+    stripTransientProfileState(destination);
+  } finally {
+    rmSync(pin, { force: true });
   }
 }
 
@@ -594,7 +637,11 @@ async function publishSeedLocked(
     renameSync(nextLink, p.current);
     assertOwned();
     for (const entry of readdirSync(p.generations, { withFileTypes: true })) {
-      if (entry.name !== generation && !entry.name.startsWith(".")) {
+      if (
+        entry.name !== generation &&
+        !entry.name.startsWith(".") &&
+        !seedGenerationHasReader(join(p.generations, entry.name))
+      ) {
         assertOwned();
         rmSync(join(p.generations, entry.name), { recursive: true, force: true });
       }
@@ -1017,7 +1064,7 @@ export async function acquireOperatorProfile(
     assertProfileAcquisitionActive(opts);
     const acquiredDescriptor = await withSeedLock(
       p,
-      (assertOwned) => {
+      async (assertOwned, seedLockOwner) => {
         const generation = currentGeneration(p);
         assertOwned();
         scavengeWarm(p, generation ?? UNPUBLISHED_SEED_GENERATION, now());
@@ -1051,14 +1098,13 @@ export async function acquireOperatorProfile(
           assertOwned();
           ensurePrivateDir(userDataDir);
         } else {
-          assertOwned();
-          cpSync(join(p.generations, generation, "user-data"), userDataDir, {
-            recursive: true,
-            force: false,
-            errorOnExist: true,
-          });
-          assertOwned();
-          stripTransientProfileState(userDataDir);
+          await copySeedGenerationLocked(
+            p,
+            generation,
+            userDataDir,
+            seedLockOwner,
+            assertOwned,
+          );
         }
         assertOwned();
         ensurePrivateDir(claimDir);
@@ -1109,6 +1155,7 @@ export const operatorProfilePoolTest = {
   currentGeneration,
   withSeedLock,
   publishSeedLocked,
+  copySeedGenerationLocked,
   reserveActiveSlot,
   scavengeQuarantinedActive,
   scavengeDestroyRequired,

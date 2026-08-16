@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -331,6 +332,47 @@ describe("operator profile pool migration stage", () => {
     expect(reclaimed).toBe(true);
     expect(operatorProfilePoolTest.currentGeneration(p)).toBe(original);
     expect(readdirSync(p.generations)).toEqual([original]);
+  });
+
+  it("pins a seed generation while an in-flight cold copy loses its lock", async () => {
+    const { root, source } = fixture();
+    const original = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const destination = join(root, "interrupted-cold-copy");
+    let replacement: string | null = null;
+
+    await expect(
+      operatorProfilePoolTest.withSeedLock(p, async (assertOwned, owner) =>
+        operatorProfilePoolTest.copySeedGenerationLocked(
+          p,
+          original,
+          destination,
+          owner,
+          assertOwned,
+          async (generationSource, copyDestination) => {
+            const longAgo = new Date(Date.now() - 3 * 60_000);
+            utimesSync(p.seedLock, longAgo, longAgo);
+            replacement = await publishOperatorProfileSeed(source, {
+              rootDir: root,
+              proof: verifiedLoginProof,
+            });
+            cpSync(generationSource, copyDestination, {
+              recursive: true,
+              force: false,
+              errorOnExist: true,
+            });
+          },
+        ),
+      ),
+    ).rejects.toThrow("shared seed lock ownership was reclaimed");
+
+    expect(replacement).not.toBeNull();
+    expect(operatorProfilePoolTest.currentGeneration(p)).toBe(replacement);
+    expect(existsSync(join(p.generations, original, "user-data"))).toBe(true);
+    expect(readFileSync(join(destination, "Local State"), "utf8")).toBe("identity-key-state");
   });
 
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
