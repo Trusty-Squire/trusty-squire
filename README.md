@@ -131,10 +131,11 @@ Trusty Squire waits 180 seconds by default for native completion, including
 out-of-band bank-app approval. A linked Telegram chat receives a challenge-specific
 nudge when 3-D Secure is detected, or cautious bank-app guidance when no on-page
 challenge appeared. Standard cross-processor 3-D Secure signals and recognized
-CardinalCommerce or Stripe challenge frames classify the first case; captcha-hosted
-frames never count as 3-D Secure, and an ordinary Shopify PCI card-field host alone
-does not either. It reports a visible decline and hands an unresolved outcome back on
-timeout, noting whether the Telegram nudge actually went out.
+CardinalCommerce or Stripe challenge frames classify the first case only when the
+containing frame is visibly rendered. Hidden 3-D Secure Method pre-authentication and
+captcha-hosted frames never count as 3-D Secure, and an ordinary Shopify PCI card-field
+host alone does not either. It reports a visible decline and hands an unresolved outcome
+back on timeout, noting whether the Telegram nudge actually went out.
 `three_ds_wait_seconds` accepts whole seconds from 0 to 600; set it to `0` on
 `operate_pay` to skip the notification and waiting and receive the handoff
 immediately.

@@ -965,11 +965,9 @@ describe("checkout payment parsing", () => {
     }
   });
 
-  // REGRESSION (live Shopify + DBS frictionless checkout, 2026-08-16): EMV 3DS
-  // runs a hidden "3DS Method" pre-auth iframe at an ACS-shaped URL with zero
-  // user interaction — it must never be read as a challenge, and a real
-  // frictionless order confirmation reached moments later must still resolve
-  // as success rather than a spurious 3DS wall.
+  // A hidden EMV 3DS Method pre-auth frame can use the same ACS-shaped URL as a
+  // challenge. It must not interrupt polling for a later frictionless order
+  // confirmation because it presents no user interaction.
   it.skipIf(!chromiumAvailable)(
     "does not flag a hidden 3DS-method ping frame and still confirms a frictionless order",
     async () => {

@@ -1433,11 +1433,9 @@ function elementHasEffectiveVisibleRect(element: Element): boolean {
       const clipLeft = ancestorRect.left + clientLeft;
       const clipTop = ancestorRect.top + clientTop;
       const clipRight =
-        clipLeft +
-        (ancestor instanceof HTMLElement ? ancestor.clientWidth : ancestorRect.width);
+        clipLeft + (ancestor instanceof HTMLElement ? ancestor.clientWidth : ancestorRect.width);
       const clipBottom =
-        clipTop +
-        (ancestor instanceof HTMLElement ? ancestor.clientHeight : ancestorRect.height);
+        clipTop + (ancestor instanceof HTMLElement ? ancestor.clientHeight : ancestorRect.height);
       if (clipsX) {
         left = Math.max(left, clipLeft);
         right = Math.min(right, clipRight);
@@ -9459,9 +9457,7 @@ export class BrowserController {
 
   private async hasVisibleThreeDsStructuralSignal(frame: Frame): Promise<boolean> {
     const elements = await frame
-      .locator(
-        'iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i])',
-      )
+      .locator('iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i])')
       .elementHandles()
       .catch(() => []);
     try {
