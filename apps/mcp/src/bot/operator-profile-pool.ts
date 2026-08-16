@@ -39,7 +39,6 @@ import {
 const ACTIVE_SLOT_COUNT = 2;
 const UNPUBLISHED_SEED_GENERATION = "unpublished";
 const STARTUP_GRACE_MS = 30_000;
-const SEED_LOCK_HOLD_TTL_MS = 2 * 60_000;
 const WARM_IDLE_TTL_MS = 6 * 60 * 60 * 1_000;
 const WARM_MAX_REUSES = 50;
 const WARM_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
@@ -233,20 +232,17 @@ function readSeedLockOwner(path: string): SeedLockOwner | null {
   }
 }
 
-function lockHeldPastTtl(path: string): boolean {
-  try {
-    return Date.now() - lstatSync(path).mtimeMs >= SEED_LOCK_HOLD_TTL_MS;
-  } catch {
-    return false;
-  }
-}
-
 function seedLockState(path: string): "matching" | "stale" | "unknown" {
+  // Delivered scope is confirmed-dead-PID reclaim only. A same-host holder with
+  // matching PID/start_time is intentionally unreclaimed: wall-clock reclaim of
+  // a plausibly-live owner cannot be fully race-free without a heavier heartbeat
+  // or fencing protocol, which was evaluated and rejected as out of scope. Such
+  // a protocol also cannot protect against an already-running old-version orphan
+  // like the 2026-08-15 incident; identify and kill that process by PID instead.
   const owner = readSeedLockOwner(path);
   if (owner !== null) {
     if (owner.host !== hostname()) return "unknown";
-    const state = processState(owner);
-    return state === "matching" && lockHeldPastTtl(path) ? "stale" : state;
+    return processState(owner);
   }
   try {
     return Date.now() - lstatSync(path).mtimeMs >= STARTUP_GRACE_MS ? "stale" : "unknown";
