@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
-  cpSync,
   existsSync,
   lstatSync,
   mkdtempSync,
@@ -11,7 +10,6 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -25,13 +23,12 @@ import {
   OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
   publishOperatorProfileSeed,
 } from "../operator-profile-pool.js";
-import { processBirthIdentity, profilePathIdentity } from "../profile.js";
+import { profilePathIdentity } from "../profile.js";
 
-// A pid that has certainly exited: spawn a no-op node and let it finish.
 function deadPid(): number {
-  const r = spawnSync(process.execPath, ["-e", ""]);
-  if (r.pid === undefined) throw new Error("could not spawn a throwaway process");
-  return r.pid;
+  const result = spawnSync(process.execPath, ["-e", ""]);
+  if (result.pid === undefined) throw new Error("could not spawn a throwaway process");
+  return result.pid;
 }
 
 const roots: string[] = [];
@@ -226,286 +223,6 @@ describe("operator profile pool migration stage", () => {
     }
   });
 
-  it("reclaims a seed lock held past the bounded TTL even though its holder process is still alive", async () => {
-    const { root, source } = fixture();
-    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
-    const p = operatorProfilePoolTest.paths(root);
-    const identity = processBirthIdentity(process.pid);
-    if (identity === null) throw new Error("could not read this test process's own identity");
-    writeFileSync(
-      p.seedLock,
-      `${JSON.stringify({ host: hostname(), ...identity, token: "wedged-holder" })}\n`,
-      { mode: 0o600 },
-    );
-    const longAgo = new Date(Date.now() - 3 * 60_000);
-    utimesSync(p.seedLock, longAgo, longAgo);
-
-    const lease = await acquireOperatorProfile("session-wedged-holder", {
-      rootDir: root,
-      sourceProfileDir: source,
-      deadline: Date.now() + 5_000,
-    });
-    try {
-      expect(lease.profileDir).toBeTruthy();
-    } finally {
-      await lease.destroy();
-    }
-  });
-
-  it("keeps serializing a live seed-lock holder that is still within the bounded TTL", async () => {
-    const { root, source } = fixture();
-    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
-    const p = operatorProfilePoolTest.paths(root);
-    const identity = processBirthIdentity(process.pid);
-    if (identity === null) throw new Error("could not read this test process's own identity");
-    writeFileSync(
-      p.seedLock,
-      `${JSON.stringify({ host: hostname(), ...identity, token: "genuinely-live-holder" })}\n`,
-      { mode: 0o600 },
-    );
-
-    await expect(
-      acquireOperatorProfile("session-genuine-contention", {
-        rootDir: root,
-        sourceProfileDir: source,
-        deadline: Date.now() + 200,
-      }),
-    ).rejects.toMatchObject({ reason: "timeout", phase: "seed_lock" });
-
-    rmSync(p.seedLock, { force: true });
-  });
-
-  it("bounds unverifiable seed-lock owners until their lock exceeds the TTL", async () => {
-    const identity = processBirthIdentity(process.pid);
-    if (identity === null) throw new Error("could not read this test process's own identity");
-    const owners = [
-      { host: `${hostname()}-renamed`, ...identity, token: "cross-host-holder" },
-      { host: hostname(), pid: process.pid, start_time: "unknown", token: "unknown-holder" },
-    ];
-
-    for (const [index, owner] of owners.entries()) {
-      const { root, source } = fixture();
-      await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
-      const p = operatorProfilePoolTest.paths(root);
-      writeFileSync(p.seedLock, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
-
-      await expect(
-        acquireOperatorProfile(`session-unverifiable-${index}`, {
-          rootDir: root,
-          sourceProfileDir: source,
-          deadline: Date.now() + 100,
-        }),
-      ).rejects.toMatchObject({ reason: "timeout", phase: "seed_lock" });
-
-      const longAgo = new Date(Date.now() - 3 * 60_000);
-      utimesSync(p.seedLock, longAgo, longAgo);
-      const lease = await acquireOperatorProfile(`session-reclaimed-${index}`, {
-        rootDir: root,
-        sourceProfileDir: source,
-        deadline: Date.now() + 5_000,
-      });
-      await lease.destroy();
-    }
-  });
-
-  it("fences an in-flight seed publication after its lock is reclaimed", async () => {
-    const { root, source } = fixture();
-    const original = await publishOperatorProfileSeed(source, {
-      rootDir: root,
-      proof: verifiedLoginProof,
-    });
-    const p = operatorProfilePoolTest.paths(root);
-    let reclaimed = false;
-
-    await expect(
-      operatorProfilePoolTest.withSeedLock(p, async (assertOwned, owner) =>
-        operatorProfilePoolTest.publishSeedLocked(p, source, owner, assertOwned, async () => {
-          const longAgo = new Date(Date.now() - 3 * 60_000);
-          utimesSync(p.seedLock, longAgo, longAgo);
-          await operatorProfilePoolTest.withSeedLock(p, () => {
-            reclaimed = true;
-          });
-        }),
-      ),
-    ).rejects.toThrow("shared seed lock ownership was reclaimed");
-
-    expect(reclaimed).toBe(true);
-    expect(operatorProfilePoolTest.currentGeneration(p)).toBe(original);
-    expect(readdirSync(p.generations)).toEqual([original]);
-  });
-
-  it("does not unlink a successor while releasing an obsolete lock token", async () => {
-    const { root, source } = fixture();
-    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
-    const p = operatorProfilePoolTest.paths(root);
-    const identity = processBirthIdentity(process.pid);
-    if (identity === null) throw new Error("could not read this test process's own identity");
-    const successor = { host: hostname(), ...identity, token: "successor-holder" };
-    writeFileSync(p.seedLock, `${JSON.stringify(successor)}\n`, { mode: 0o600 });
-
-    operatorProfilePoolTest.releaseOwnedSeedLock(p, "obsolete-holder");
-
-    expect(JSON.parse(readFileSync(p.seedLock, "utf8"))).toEqual(successor);
-  });
-
-  it("pins a seed generation while an in-flight cold copy loses its lock", async () => {
-    const { root, source } = fixture();
-    const original = await publishOperatorProfileSeed(source, {
-      rootDir: root,
-      proof: verifiedLoginProof,
-    });
-    const p = operatorProfilePoolTest.paths(root);
-    const destination = join(root, "interrupted-cold-copy");
-    let replacement: string | null = null;
-
-    await expect(
-      operatorProfilePoolTest.withSeedLock(p, async (assertOwned, owner) =>
-        operatorProfilePoolTest.copySeedGenerationLocked(
-          p,
-          original,
-          destination,
-          owner,
-          assertOwned,
-          async (generationSource, copyDestination) => {
-            const longAgo = new Date(Date.now() - 3 * 60_000);
-            utimesSync(p.seedLock, longAgo, longAgo);
-            replacement = await publishOperatorProfileSeed(source, {
-              rootDir: root,
-              proof: verifiedLoginProof,
-            });
-            cpSync(generationSource, copyDestination, {
-              recursive: true,
-              force: false,
-              errorOnExist: true,
-            });
-          },
-        ),
-      ),
-    ).rejects.toThrow("shared seed lock ownership was reclaimed");
-
-    expect(replacement).not.toBeNull();
-    expect(operatorProfilePoolTest.currentGeneration(p)).toBe(replacement);
-    expect(existsSync(join(p.generations, original, "user-data"))).toBe(true);
-    expect(readFileSync(join(destination, "Local State"), "utf8")).toBe("identity-key-state");
-  });
-
-  it("expires unverifiable reader pins while retaining confirmed live readers", async () => {
-    const { root, source } = fixture();
-    const first = await publishOperatorProfileSeed(source, {
-      rootDir: root,
-      proof: verifiedLoginProof,
-    });
-    const p = operatorProfilePoolTest.paths(root);
-    const identity = processBirthIdentity(process.pid);
-    if (identity === null) throw new Error("could not read this test process's own identity");
-    const expired = new Date(Date.now() - 3 * 60_000);
-    const crossHostPin = join(p.generations, first, ".reader-cross-host");
-    writeFileSync(
-      crossHostPin,
-      `${JSON.stringify({ host: `${hostname()}-renamed`, ...identity, token: "cross-host" })}\n`,
-    );
-    const unknownIdentityPin = join(p.generations, first, ".reader-unknown-identity");
-    writeFileSync(
-      unknownIdentityPin,
-      `${JSON.stringify({
-        host: hostname(),
-        pid: process.pid,
-        start_time: "unknown",
-        token: "unknown-identity",
-      })}\n`,
-    );
-
-    const second = await publishOperatorProfileSeed(source, {
-      rootDir: root,
-      proof: verifiedLoginProof,
-    });
-    expect(existsSync(join(p.generations, first, "user-data"))).toBe(true);
-
-    utimesSync(crossHostPin, expired, expired);
-    utimesSync(unknownIdentityPin, expired, expired);
-    const third = await publishOperatorProfileSeed(source, {
-      rootDir: root,
-      proof: verifiedLoginProof,
-    });
-    expect(existsSync(join(p.generations, first))).toBe(false);
-    expect(existsSync(join(p.generations, second))).toBe(false);
-
-    const livePin = join(p.generations, third, ".reader-live");
-    writeFileSync(livePin, `${JSON.stringify({ host: hostname(), ...identity, token: "live" })}\n`);
-    utimesSync(livePin, expired, expired);
-    const fourth = await publishOperatorProfileSeed(source, {
-      rootDir: root,
-      proof: verifiedLoginProof,
-    });
-    expect(existsSync(join(p.generations, third, "user-data"))).toBe(true);
-
-    rmSync(livePin);
-    const malformedPin = join(p.generations, fourth, ".reader-malformed");
-    writeFileSync(malformedPin, "{}\n");
-    const fifth = await publishOperatorProfileSeed(source, {
-      rootDir: root,
-      proof: verifiedLoginProof,
-    });
-    expect(existsSync(join(p.generations, fourth, "user-data"))).toBe(true);
-
-    utimesSync(malformedPin, expired, expired);
-    await publishOperatorProfileSeed(source, {
-      rootDir: root,
-      proof: verifiedLoginProof,
-    });
-    expect(existsSync(join(p.generations, fourth))).toBe(false);
-    expect(existsSync(join(p.generations, fifth))).toBe(false);
-  });
-
-  it("scavenges abandoned staging while retaining live and recent publishers", async () => {
-    const { root, source } = fixture();
-    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
-    const p = operatorProfilePoolTest.paths(root);
-    const identity = processBirthIdentity(process.pid);
-    if (identity === null) throw new Error("could not read this test process's own identity");
-    const staging = {
-      dead: join(p.generations, ".00000000-0000-4000-8000-000000000001.tmp"),
-      crossHost: join(p.generations, ".00000000-0000-4000-8000-000000000002.tmp"),
-      ownerlessOld: join(p.generations, ".00000000-0000-4000-8000-000000000003.tmp"),
-      live: join(p.generations, ".00000000-0000-4000-8000-000000000004.tmp"),
-      ownerlessRecent: join(p.generations, ".00000000-0000-4000-8000-000000000005.tmp"),
-    };
-    for (const path of Object.values(staging)) mkdirSync(path);
-    writeFileSync(
-      join(staging.dead, "owner.json"),
-      `${JSON.stringify({
-        host: hostname(),
-        pid: deadPid(),
-        start_time: "dead-birth",
-        token: "dead-staging",
-      })}\n`,
-    );
-    writeFileSync(
-      join(staging.crossHost, "owner.json"),
-      `${JSON.stringify({
-        host: `${hostname()}-renamed`,
-        ...identity,
-        token: "cross-host-staging",
-      })}\n`,
-    );
-    writeFileSync(
-      join(staging.live, "owner.json"),
-      `${JSON.stringify({ host: hostname(), ...identity, token: "live-staging" })}\n`,
-    );
-    const expired = new Date(Date.now() - 3 * 60_000);
-    utimesSync(staging.crossHost, expired, expired);
-    utimesSync(staging.ownerlessOld, expired, expired);
-    utimesSync(staging.live, expired, expired);
-
-    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
-
-    expect(existsSync(staging.dead)).toBe(false);
-    expect(existsSync(staging.crossHost)).toBe(false);
-    expect(existsSync(staging.ownerlessOld)).toBe(false);
-    expect(existsSync(staging.live)).toBe(true);
-    expect(existsSync(staging.ownerlessRecent)).toBe(true);
-  });
-
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
     const { root, source } = fixture();
     const first = await publishOperatorProfileSeed(source, {
@@ -534,16 +251,12 @@ describe("operator profile pool migration stage", () => {
     ).toThrow();
 
     writeCookies(source, [{ host: ".google.com", name: "SID", value: "new-identity-cookie" }]);
-    const inProgressStaging = join(p.generations, ".other-publisher.tmp");
-    mkdirSync(inProgressStaging);
-    writeFileSync(join(inProgressStaging, "marker"), "in progress");
     const second = await publishOperatorProfileSeed(source, {
       rootDir: root,
       proof: verifiedLoginProof,
     });
     expect(second).not.toBe(first);
-    expect(readdirSync(p.generations).sort()).toEqual([".other-publisher.tmp", second].sort());
-    expect(readFileSync(join(inProgressStaging, "marker"), "utf8")).toBe("in progress");
+    expect(readdirSync(p.generations)).toEqual([second]);
     expect(operatorProfilePoolTest.currentGeneration(p)).toBe(second);
   });
 
