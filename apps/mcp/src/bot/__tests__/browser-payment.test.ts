@@ -312,9 +312,11 @@ describe("checkout payment parsing", () => {
 
   it("refuses a count-only checkout review summary", async () => {
     const browser = new BrowserController({ humanize: false });
+    const frame = { evaluate: vi.fn().mockResolvedValue("合計 3点") };
     const page = {
       evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
-      frames: () => [{ evaluate: vi.fn().mockResolvedValue("合計 3点") }],
+      mainFrame: () => frame,
+      frames: () => [frame],
       url: () => "https://flowers.example.test/checkout",
     };
     Object.defineProperty(browser, "page", { value: page });
@@ -3103,6 +3105,34 @@ describe("split-checkout card fill (real browser)", () => {
   );
 
   it.skipIf(!chromiumAvailable)(
+    "keeps the main review total authoritative over an untrusted ambiguous frame total",
+    async () => {
+      const pageUrl = "https://shop.example.test/checkout/review";
+      const rogueUrl = "https://rogue-payments.example.net/summary";
+      const { page, browser } = await servePages({
+        [pageUrl]: `
+          <title>Review order</title>
+          <div>Order total USD 88.87</div>
+          <iframe src="${rogueUrl}"></iframe>`,
+        [rogueUrl]: "Order total 98.45 kr",
+      });
+      try {
+        await page.goto(pageUrl);
+        await page.waitForLoadState("networkidle");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.readCheckoutReviewSummary("USD")).resolves.toMatchObject({
+          amount_cents: 8_887,
+          currency: "USD",
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+  );
+
+  it.skipIf(!chromiumAvailable)(
     "keeps the main payable total authoritative and refuses trusted-frame conflicts",
     async () => {
       const pageUrl = "https://shop.example.test/checkout/review";
@@ -3120,6 +3150,9 @@ describe("split-checkout card fill (real browser)", () => {
         (controller as unknown as { page: Page }).page = page;
 
         await expect(controller.readCheckoutConfirmSummary()).rejects.toThrow(
+          "payment_checkout_total_conflict",
+        );
+        await expect(controller.readCheckoutReviewSummary()).rejects.toThrow(
           "payment_checkout_total_conflict",
         );
       } finally {
