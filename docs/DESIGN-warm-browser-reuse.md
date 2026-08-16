@@ -89,8 +89,14 @@ The canonical profile operation guard remains held through login teardown and pu
 filesystem seed lock serializes publication, `seed/current` resolution, warm-profile selection,
 seed cloning, and generation garbage collection. Publication stages a new generation, validates a
 completed-login proof captured from the actual interactive flow, atomically switches `seed/current`,
-and then deletes every non-current generation. It does not open or independently revalidate a copy
-of the candidate seed. This stage has no previous-generation grace window.
+and then deletes each non-current generation that has no active reader pin. A cold clone pins its
+source generation until copying finishes, so publication cannot delete identity data while another
+holder reads it. Confirmed-live reader pins are retained; dead pins are reclaimed immediately, and
+unverifiable pins expire after the bounded seed-lock TTL. Staging directories carry the same process
+ownership record and are scavenged when their owner is confirmed dead or remains unverifiable past
+that TTL; ownerless staging receives only the startup grace window. Publication does not open or
+independently revalidate a copy of the candidate seed, and there is no unpinned previous-generation
+grace window.
 
 A failed login or uncertain close leaves the current generation unchanged.
 

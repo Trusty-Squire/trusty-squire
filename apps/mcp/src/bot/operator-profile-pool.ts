@@ -300,6 +300,7 @@ function seedLockArtifacts(p: PoolPaths, kind: "claim" | "stale"): string[] {
 }
 
 function scavengeSeedLockArtifacts(p: PoolPaths): boolean {
+  scavengeSeedStaging(p);
   let retainedTombstone = false;
   for (const tombstone of seedLockArtifacts(p, "stale")) {
     if (seedLockState(tombstone) === "stale") {
@@ -327,6 +328,46 @@ function quarantineStaleSeedLock(p: PoolPaths): boolean {
     return true;
   }
   return false;
+}
+
+function restoreForeignSeedLock(p: PoolPaths, tombstone: string): void {
+  try {
+    if (lstatSync(tombstone).isDirectory()) return;
+    linkSync(tombstone, p.seedLock);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "EEXIST") return;
+    throw err;
+  }
+  rmSync(tombstone, { force: true });
+}
+
+function releaseOwnedSeedLock(p: PoolPaths, token: string): void {
+  const tombstone = join(p.tombstones, `seed-lock-${randomUUID()}`);
+  try {
+    renameSync(p.seedLock, tombstone);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  if (readSeedLockOwner(tombstone)?.token === token) {
+    rmSync(tombstone, { recursive: true, force: true });
+  } else {
+    restoreForeignSeedLock(p, tombstone);
+  }
+}
+
+function releaseOwnedSeedLockTombstone(p: PoolPaths, path: string, token: string): void {
+  const isolated = join(p.tombstones, `seed-lock-${randomUUID()}`);
+  try {
+    renameSync(path, isolated);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
+  }
+  if (readSeedLockOwner(isolated)?.token === token) {
+    rmSync(isolated, { recursive: true, force: true });
+  }
 }
 
 function stripTransientProfileState(root: string): void {
@@ -532,9 +573,7 @@ async function withSeedLock<T>(
     try {
       rmSync(claim, { force: true });
     } catch (err) {
-      if (readSeedLockOwner(p.seedLock)?.token === token) {
-        rmSync(p.seedLock, { recursive: true, force: true });
-      }
+      releaseOwnedSeedLock(p, token);
       throw err;
     }
     break;
@@ -549,13 +588,9 @@ async function withSeedLock<T>(
     assertOwned();
     return await fn(assertOwned, owner);
   } finally {
-    if (readSeedLockOwner(p.seedLock)?.token === token) {
-      rmSync(p.seedLock, { recursive: true, force: true });
-    }
+    releaseOwnedSeedLock(p, token);
     for (const tombstone of seedLockArtifacts(p, "stale")) {
-      if (readSeedLockOwner(tombstone)?.token === token) {
-        rmSync(tombstone, { recursive: true, force: true });
-      }
+      releaseOwnedSeedLockTombstone(p, tombstone, token);
     }
   }
 }
@@ -596,6 +631,31 @@ function seedReaderPinIsActive(path: string): boolean {
     if (state === "stale") return false;
   }
   return !lockHeldPastTtl(path);
+}
+
+function seedStagingIsActive(path: string): boolean {
+  const owner = readSeedReaderOwner(join(path, "owner.json"));
+  if (owner === null) {
+    try {
+      return Date.now() - lstatSync(path).mtimeMs < STARTUP_GRACE_MS;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code !== "ENOENT";
+    }
+  }
+  if (owner.host === hostname()) {
+    const state = processState(owner);
+    if (state === "matching") return true;
+    if (state === "stale") return false;
+  }
+  return !lockHeldPastTtl(path);
+}
+
+function scavengeSeedStaging(p: PoolPaths): void {
+  for (const entry of readdirSync(p.generations, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !/^\.[0-9a-f-]{36}\.tmp$/.test(entry.name)) continue;
+    const staging = join(p.generations, entry.name);
+    if (!seedStagingIsActive(staging)) rmSync(staging, { recursive: true, force: true });
+  }
 }
 
 function seedGenerationHasReader(path: string): boolean {
@@ -641,6 +701,7 @@ async function copySeedGenerationLocked(
 async function publishSeedLocked(
   p: PoolPaths,
   sourceProfileDir: string,
+  owner: SeedLockOwner,
   assertOwned: () => void,
   afterStaging?: () => Promise<void>,
 ): Promise<string> {
@@ -652,8 +713,12 @@ async function publishSeedLocked(
     assertOwned();
     ensurePrivateDir(staging);
     assertOwned();
+    writePrivateJson(join(staging, "owner.json"), owner);
+    assertOwned();
     copyIdentitySeed(sourceProfileDir, join(staging, "user-data"));
     await afterStaging?.();
+    assertOwned();
+    rmSync(join(staging, "owner.json"), { force: true });
     assertOwned();
     renameSync(staging, destination);
     assertOwned();
@@ -719,8 +784,8 @@ export async function publishOperatorProfileSeed(
   const resolvedSource = profilePathIdentity(sourceProfileDir);
   const p = paths(poolRootForSource(resolvedSource, opts.rootDir));
   initializePool(p);
-  return await withSeedLock(p, (assertOwned) =>
-    publishSeedLocked(p, resolvedSource, assertOwned),
+  return await withSeedLock(p, (assertOwned, owner) =>
+    publishSeedLocked(p, resolvedSource, owner, assertOwned),
   );
 }
 
@@ -1179,6 +1244,7 @@ export const operatorProfilePoolTest = {
   poolRootForSource,
   currentGeneration,
   withSeedLock,
+  releaseOwnedSeedLock,
   publishSeedLocked,
   copySeedGenerationLocked,
   reserveActiveSlot,

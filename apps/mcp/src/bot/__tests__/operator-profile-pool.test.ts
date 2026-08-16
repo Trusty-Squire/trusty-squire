@@ -318,8 +318,8 @@ describe("operator profile pool migration stage", () => {
     let reclaimed = false;
 
     await expect(
-      operatorProfilePoolTest.withSeedLock(p, async (assertOwned) =>
-        operatorProfilePoolTest.publishSeedLocked(p, source, assertOwned, async () => {
+      operatorProfilePoolTest.withSeedLock(p, async (assertOwned, owner) =>
+        operatorProfilePoolTest.publishSeedLocked(p, source, owner, assertOwned, async () => {
           const longAgo = new Date(Date.now() - 3 * 60_000);
           utimesSync(p.seedLock, longAgo, longAgo);
           await operatorProfilePoolTest.withSeedLock(p, () => {
@@ -332,6 +332,20 @@ describe("operator profile pool migration stage", () => {
     expect(reclaimed).toBe(true);
     expect(operatorProfilePoolTest.currentGeneration(p)).toBe(original);
     expect(readdirSync(p.generations)).toEqual([original]);
+  });
+
+  it("does not unlink a successor while releasing an obsolete lock token", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    const identity = processBirthIdentity(process.pid);
+    if (identity === null) throw new Error("could not read this test process's own identity");
+    const successor = { host: hostname(), ...identity, token: "successor-holder" };
+    writeFileSync(p.seedLock, `${JSON.stringify(successor)}\n`, { mode: 0o600 });
+
+    operatorProfilePoolTest.releaseOwnedSeedLock(p, "obsolete-holder");
+
+    expect(JSON.parse(readFileSync(p.seedLock, "utf8"))).toEqual(successor);
   });
 
   it("pins a seed generation while an in-flight cold copy loses its lock", async () => {
@@ -441,6 +455,55 @@ describe("operator profile pool migration stage", () => {
     });
     expect(existsSync(join(p.generations, fourth))).toBe(false);
     expect(existsSync(join(p.generations, fifth))).toBe(false);
+  });
+
+  it("scavenges abandoned staging while retaining live and recent publishers", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    const identity = processBirthIdentity(process.pid);
+    if (identity === null) throw new Error("could not read this test process's own identity");
+    const staging = {
+      dead: join(p.generations, ".00000000-0000-4000-8000-000000000001.tmp"),
+      crossHost: join(p.generations, ".00000000-0000-4000-8000-000000000002.tmp"),
+      ownerlessOld: join(p.generations, ".00000000-0000-4000-8000-000000000003.tmp"),
+      live: join(p.generations, ".00000000-0000-4000-8000-000000000004.tmp"),
+      ownerlessRecent: join(p.generations, ".00000000-0000-4000-8000-000000000005.tmp"),
+    };
+    for (const path of Object.values(staging)) mkdirSync(path);
+    writeFileSync(
+      join(staging.dead, "owner.json"),
+      `${JSON.stringify({
+        host: hostname(),
+        pid: deadPid(),
+        start_time: "dead-birth",
+        token: "dead-staging",
+      })}\n`,
+    );
+    writeFileSync(
+      join(staging.crossHost, "owner.json"),
+      `${JSON.stringify({
+        host: `${hostname()}-renamed`,
+        ...identity,
+        token: "cross-host-staging",
+      })}\n`,
+    );
+    writeFileSync(
+      join(staging.live, "owner.json"),
+      `${JSON.stringify({ host: hostname(), ...identity, token: "live-staging" })}\n`,
+    );
+    const expired = new Date(Date.now() - 3 * 60_000);
+    utimesSync(staging.crossHost, expired, expired);
+    utimesSync(staging.ownerlessOld, expired, expired);
+    utimesSync(staging.live, expired, expired);
+
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+
+    expect(existsSync(staging.dead)).toBe(false);
+    expect(existsSync(staging.crossHost)).toBe(false);
+    expect(existsSync(staging.ownerlessOld)).toBe(false);
+    expect(existsSync(staging.live)).toBe(true);
+    expect(existsSync(staging.ownerlessRecent)).toBe(true);
   });
 
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
