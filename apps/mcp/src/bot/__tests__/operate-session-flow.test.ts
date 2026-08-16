@@ -32,6 +32,10 @@ const h = vi.hoisted(() => ({
   clearElementsOnClick: false,
   clickValueMutation: null as { selector: string; value: string } | null,
   clickPhoneCountryMutation: null as string | null,
+  trackedClickFailure: null as null | {
+    dispatchStatus: "not_dispatched" | "dispatched" | "unknown";
+    message: string;
+  },
   autocompleteSuggestions: [] as string[],
   autocompleteCommitMutation: null as { selector: string; value: string } | null,
   autocompleteCommitCalls: [] as number[],
@@ -404,6 +408,31 @@ vi.mock("../browser.js", () => ({
     async clickViaJsInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
       h.frameJsClicks.push(`${target.frameUrl}|${selector}`);
     }
+    async clickWithDispatchTracking(target: {
+      kind: "selector" | "handle" | "frame";
+      selector?: string;
+      frame?: { frameUrl: string };
+      method: "click" | "js_click";
+    }): Promise<"not_dispatched" | "dispatched" | "unknown"> {
+      const failure = h.trackedClickFailure;
+      if (failure?.dispatchStatus !== "not_dispatched") {
+        if (target.kind === "handle") {
+          h.locatorClickCalls += 1;
+        } else if (target.kind === "frame") {
+          const destination = `${target.frame!.frameUrl}|${target.selector!}`;
+          if (target.method === "click") h.frameClicks.push(destination);
+          else h.frameJsClicks.push(destination);
+        } else {
+          await this.click();
+        }
+      }
+      if (failure !== null) {
+        throw Object.assign(new Error(failure.message), {
+          dispatchStatus: failure.dispatchStatus,
+        });
+      }
+      return "dispatched";
+    }
     async typeInFrame(target: { frameUrl: string }, selector: string, text: string): Promise<void> {
       h.frameTypes.push({ frameUrl: target.frameUrl, selector, text });
       for (const element of h.elements as Array<Record<string, unknown>>) {
@@ -563,6 +592,20 @@ vi.mock("../browser.js", () => ({
   // Mirrors the real export — the pending-card-fill charge guard reads it.
   CHECKOUT_SUBMIT_LABEL_RE:
     /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b/i,
+  checkoutSubmitLabel: (signals: {
+    ariaLabel?: string | null;
+    inputValue?: string | null;
+    textContent?: string | null;
+  }) => (signals.ariaLabel || signals.inputValue || signals.textContent || "").trim(),
+  clickDispatchStatusForError: (error: unknown) => {
+    if (error instanceof Error && "dispatchStatus" in error) {
+      const status = error.dispatchStatus;
+      if (status === "not_dispatched" || status === "dispatched" || status === "unknown") {
+        return status;
+      }
+    }
+    return "unknown";
+  },
   parseCheckoutAmount: (texts: readonly string[], fallbackCurrency?: string) => {
     for (const text of texts) {
       const match = text.match(
@@ -820,6 +863,7 @@ beforeEach(() => {
   h.clearElementsOnClick = false;
   h.clickValueMutation = null;
   h.clickPhoneCountryMutation = null;
+  h.trackedClickFailure = null;
   h.autocompleteSuggestions = [];
   h.autocompleteCommitMutation = null;
   h.autocompleteCommitCalls = [];
@@ -5186,14 +5230,40 @@ describe("pending card-fill charge guard", () => {
       act(started.session_id, { kind: "js_click", target: "Place order" }),
     ).rejects.toThrow(/place-order attempt already fired/);
     expect(h.clickCalls).toBe(1);
-    await expect(
-      act(started.session_id, { kind: "click", target: "Place order" }),
-    ).rejects.toThrow(/fresh operate_pay approval is required/);
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /fresh operate_pay approval is required/,
+    );
     expect(h.clickCalls).toBe(1);
 
     // Non-charge-verb clicks stay completely unaffected by the guard.
     await act(started.session_id, { kind: "click", target: "Continue to review" });
     expect(h.clickCalls).toBe(2);
+  });
+
+  it("recognizes input submit values as place-order labels", async () => {
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "submit",
+        value: "Place order",
+        visibleText: null,
+        labelText: null,
+        ariaLabel: null,
+        selector: "#place-order-input",
+      }),
+    ];
+    h.visibleText = "Checkout";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(1);
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /place-order attempt already fired/,
+    );
+    expect(h.clickCalls).toBe(1);
   });
 
   it("keeps the place-order guard bound to its approval across confirm, resets only on a fresh fill", async () => {
@@ -5213,9 +5283,9 @@ describe("pending card-fill charge guard", () => {
     // the guard: the same approval's attempt stays consumed either before or
     // after the caller closes out confirm.
     clearActivePendingCardFill(false);
-    await expect(
-      act(started.session_id, { kind: "click", target: "Place order" }),
-    ).rejects.toThrow(/place-order attempt already fired/);
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /place-order attempt already fired/,
+    );
 
     // A verified full clear (paymentFieldsCleared=true) IS a clean slate.
     // Used here only to simulate a genuinely fresh approval's fill — a real
@@ -5254,9 +5324,66 @@ describe("pending card-fill charge guard", () => {
     });
 
     // The refused second attempt fires no second audit event.
-    await expect(
-      act(started.session_id, { kind: "click", target: "Place order" }),
-    ).rejects.toThrow(/place-order attempt already fired/);
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /place-order attempt already fired/,
+    );
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["dispatched", "unknown"] as const)(
+    "records the attempt when a click throws with %s dispatch state",
+    async (dispatchStatus) => {
+      h.elements = [
+        elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+      ];
+      h.visibleText = "Checkout";
+      h.trackedClickFailure = {
+        dispatchStatus,
+        message: "page detached during navigation",
+      };
+      const auditPayment = vi.fn().mockResolvedValue({ id: "evt_1" });
+      const started = await startProvisionSession({
+        serviceUrl: "https://shop.example.com/checkout",
+        api: { auditPayment } as unknown as ApiClient,
+      });
+      setActivePendingCardFill(pending);
+
+      await expect(
+        act(started.session_id, { kind: "click", target: "Place order" }),
+      ).rejects.toThrow(/page detached during navigation/);
+      expect(auditPayment).toHaveBeenCalledTimes(1);
+      await expect(
+        act(started.session_id, { kind: "click", target: "Place order" }),
+      ).rejects.toThrow(/place-order attempt already fired/);
+      expect(auditPayment).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("does not audit or consume the approval when click dispatch is disproven", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+    ];
+    h.visibleText = "Checkout";
+    h.trackedClickFailure = {
+      dispatchStatus: "not_dispatched",
+      message: "target detached before click",
+    };
+    const auditPayment = vi.fn().mockResolvedValue({ id: "evt_1" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingCardFill(pending);
+
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /target detached before click/,
+    );
+    expect(auditPayment).not.toHaveBeenCalled();
+    expect(h.clickCalls).toBe(0);
+
+    h.trackedClickFailure = null;
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(1);
     expect(auditPayment).toHaveBeenCalledTimes(1);
   });
 
@@ -5274,9 +5401,9 @@ describe("pending card-fill charge guard", () => {
     // click itself, and the guard against a second attempt, still work.
     await act(started.session_id, { kind: "click", target: "Place order" });
     expect(h.clickCalls).toBe(1);
-    await expect(
-      act(started.session_id, { kind: "click", target: "Place order" }),
-    ).rejects.toThrow(/place-order attempt already fired/);
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+      /place-order attempt already fired/,
+    );
   });
 
   it("allows a locator-fallback click on a charge control while filled", async () => {

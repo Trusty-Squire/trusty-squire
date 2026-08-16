@@ -270,6 +270,32 @@ export interface CheckoutSubmitResult {
   challenge_url?: string;
 }
 
+export type ClickDispatchStatus = "not_dispatched" | "dispatched" | "unknown";
+
+export type TrackedClickTarget =
+  | { kind: "selector"; selector: string; method: "click" | "js_click" }
+  | { kind: "handle"; handle: ElementHandle<Element>; method: "click" | "js_click" }
+  | {
+      kind: "frame";
+      frame: FrameTarget;
+      selector: string;
+      method: "click" | "js_click";
+    };
+
+export class BrowserClickDispatchError extends Error {
+  readonly dispatchStatus: ClickDispatchStatus;
+
+  constructor(dispatchStatus: ClickDispatchStatus, error: unknown) {
+    super(error instanceof Error ? error.message : String(error));
+    this.name = "BrowserClickDispatchError";
+    this.dispatchStatus = dispatchStatus;
+  }
+}
+
+export function clickDispatchStatusForError(error: unknown): ClickDispatchStatus {
+  return error instanceof BrowserClickDispatchError ? error.dispatchStatus : "unknown";
+}
+
 // The browser completes 3-D Secure natively (its own checkout JS drives the
 // challenge, including out-of-band bank-app pushes) — we only classify the
 // outcome once it's over. An earlier operator-side detect/wait/teardown
@@ -586,6 +612,14 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
 // as 購入手続きへ). 確定 (finalize) is deliberate — 確認 (review) must NOT match.
 export const CHECKOUT_SUBMIT_LABEL_RE =
   /^(?:pay(?:\s+now)?|place\s+order|complete\s+(?:order|purchase|payment)|submit\s+payment|buy\s+now|confirm\s+(?:order|payment))\b|^ご?注文(?:内容)?[をの]?確定|^ご?注文する|^確定(?:する|$)|^購入(?:する|を確定|$)|^今すぐ(?:購入|注文|支払)|^支払う|^お?支払い(?:を確定|$)/i;
+
+export function checkoutSubmitLabel(signals: {
+  ariaLabel?: string | null;
+  inputValue?: string | null;
+  textContent?: string | null;
+}): string {
+  return (signals.ariaLabel || signals.inputValue || signals.textContent || "").trim();
+}
 
 // Descriptor-level PayPal surface classifier retained for callers that need to
 // inventory wallet/card frames. It is not the payment refusal gate: the operator
@@ -2601,6 +2635,7 @@ export class BrowserController {
   private checkoutCardGroupScope: CheckoutCardGroupScope | undefined;
   private checkoutOutcomeBaseline: CheckoutOutcomeBaseline | undefined;
   private checkoutSubmitSequence = 0;
+  private clickDispatchSequence = 0;
   // The page start() configured with the controller's navigation/captcha
   // handlers. OAuth may temporarily switch `this.page` to a popup, but warm
   // reuse must always restore this original page rather than adopting a popup
@@ -4762,13 +4797,114 @@ export class BrowserController {
     });
   }
 
+  private async runTrackedClick(
+    handle: ElementHandle<Element>,
+    click: () => Promise<void>,
+  ): Promise<ClickDispatchStatus> {
+    const token = `ts-click-${this.clickDispatchSequence++}`;
+    const installed = await handle
+      .evaluate((element, dispatchToken) => {
+        const stateWindow = window as Window & {
+          __trustySquireClickDispatch?: { token: string; dispatched: boolean };
+        };
+        const tracked = element as Element & { __tsClickDispatchListener?: EventListener };
+        if (tracked.__tsClickDispatchListener !== undefined) {
+          element.removeEventListener("click", tracked.__tsClickDispatchListener, true);
+        }
+        stateWindow.__trustySquireClickDispatch = { token: dispatchToken, dispatched: false };
+        const listener: EventListener = () => {
+          const state = stateWindow.__trustySquireClickDispatch;
+          if (state?.token === dispatchToken) state.dispatched = true;
+        };
+        tracked.__tsClickDispatchListener = listener;
+        element.addEventListener("click", listener, { capture: true, once: true });
+      }, token)
+      .then(() => true)
+      .catch(() => false);
+    const readState = async (): Promise<ClickDispatchStatus> => {
+      if (!installed) return "unknown";
+      return await handle
+        .evaluate((element, dispatchToken) => {
+          const stateWindow = window as Window & {
+            __trustySquireClickDispatch?: { token: string; dispatched: boolean };
+          };
+          const tracked = element as Element & { __tsClickDispatchListener?: EventListener };
+          const state = stateWindow.__trustySquireClickDispatch;
+          if (tracked.__tsClickDispatchListener !== undefined) {
+            element.removeEventListener("click", tracked.__tsClickDispatchListener, true);
+            delete tracked.__tsClickDispatchListener;
+          }
+          if (state?.token !== dispatchToken) return "unknown" as const;
+          delete stateWindow.__trustySquireClickDispatch;
+          return state.dispatched ? ("dispatched" as const) : ("not_dispatched" as const);
+        }, token)
+        .catch(() => "unknown" as const);
+    };
+    try {
+      await click();
+    } catch (error) {
+      if (error instanceof BrowserClickDispatchError) {
+        await readState();
+        throw error;
+      }
+      throw new BrowserClickDispatchError(await readState(), error);
+    }
+    return await readState();
+  }
+
+  async clickWithDispatchTracking(target: TrackedClickTarget): Promise<ClickDispatchStatus> {
+    if (!this.page) {
+      throw new BrowserClickDispatchError("not_dispatched", new Error("Browser not started"));
+    }
+    let handle: ElementHandle<Element> | null;
+    let dispose = false;
+    if (target.kind === "handle") {
+      handle = target.handle;
+    } else if (target.kind === "frame") {
+      handle = await this.resolveFrameElement(target.frame, target.selector);
+      dispose = true;
+    } else {
+      handle = await this.page.$(target.selector);
+      dispose = true;
+    }
+    if (handle === null) {
+      throw new BrowserClickDispatchError(
+        "not_dispatched",
+        new Error("click target detached before dispatch"),
+      );
+    }
+    try {
+      return await this.runTrackedClick(handle, async () => {
+        if (target.kind === "handle") {
+          if (target.method === "click") await this.clickHandle(handle);
+          else await this.jsClickHandle(handle);
+        } else if (target.kind === "frame") {
+          if (target.method === "click") await handle.click({ timeout: 8000 });
+          else await handle.evaluate((element) => (element as HTMLElement).click());
+        } else if (target.method === "click") {
+          await this.click(target.selector);
+        } else {
+          await this.clickViaJs(target.selector);
+        }
+      });
+    } finally {
+      if (dispose) await handle.dispose().catch(() => undefined);
+    }
+  }
+
   async clickHandle(handle: ElementHandle<Element>): Promise<void> {
     const state = await this.locatorClickState(handle);
     if (state === "detached") {
-      throw new Error("locator target detached from the page before the click");
+      throw new BrowserClickDispatchError(
+        "not_dispatched",
+        new Error("locator target detached from the page before the click"),
+      );
     }
     if (state === "disabled") {
-      throw new Error("locator target is disabled");
+      throw new BrowserClickDispatchError(
+        "not_dispatched",
+        new Error("locator target is disabled"),
+      );
     }
     await handle.click({ timeout: 8000, noWaitAfter: true });
   }
@@ -4776,10 +4912,16 @@ export class BrowserController {
   async jsClickHandle(handle: ElementHandle<Element>): Promise<void> {
     const state = await this.locatorClickState(handle);
     if (state === "detached") {
-      throw new Error("locator target detached from the page before the click");
+      throw new BrowserClickDispatchError(
+        "not_dispatched",
+        new Error("locator target detached from the page before the click"),
+      );
     }
     if (state === "disabled") {
-      throw new Error("locator target is disabled");
+      throw new BrowserClickDispatchError(
+        "not_dispatched",
+        new Error("locator target is disabled"),
+      );
     }
     const dispatchState = await handle.evaluate((el) => {
       if (!el.isConnected) return "detached";
@@ -4799,10 +4941,16 @@ export class BrowserController {
       return "ok";
     });
     if (dispatchState === "detached") {
-      throw new Error("locator target detached from the page before the click");
+      throw new BrowserClickDispatchError(
+        "not_dispatched",
+        new Error("locator target detached from the page before the click"),
+      );
     }
     if (dispatchState === "disabled") {
-      throw new Error("locator target is disabled");
+      throw new BrowserClickDispatchError(
+        "not_dispatched",
+        new Error("locator target is disabled"),
+      );
     }
   }
 
@@ -9083,15 +9231,14 @@ export class BrowserController {
             continue;
           }
         }
-        const label = await candidate
-          .evaluate((el) =>
-            (
-              el.getAttribute("aria-label") ||
-              (el instanceof HTMLInputElement ? el.value : el.textContent) ||
-              ""
-            ).trim(),
-          )
-          .catch(() => "");
+        const labelSignals = await candidate
+          .evaluate((el) => ({
+            ariaLabel: el.getAttribute("aria-label"),
+            inputValue: el instanceof HTMLInputElement ? el.value : null,
+            textContent: el.textContent,
+          }))
+          .catch(() => null);
+        const label = checkoutSubmitLabel(labelSignals ?? {});
         if (!CHECKOUT_SUBMIT_LABEL_RE.test(label)) continue;
         const dispatchToken = `ts-payment-submit-${this.checkoutSubmitSequence++}`;
         const dispatchBaselineStorageKey = `__trusty_squire_payment_baseline_${dispatchToken}`;

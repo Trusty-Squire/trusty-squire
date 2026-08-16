@@ -14,14 +14,13 @@
 // matches on rendered text (innerText, so hidden descendants don't leak), gates
 // on a real click affordance, checks visibility through the ancestor chain,
 // collapses a button and its inner <span> to one, refuses an ambiguous match,
-// and pierces open shadow roots. clickHandle uses one actionability-checked click
-// (noWaitAfter, so it can't throw post-dispatch and double-click); jsClickHandle
-// is the explicit DOM-dispatch path through a transparent overlay. This test
-// drives real Chromium. Synthetic fixtures only — no credentials.
+// and pierces open shadow roots. clickHandle uses one actionability-checked click;
+// jsClickHandle is the explicit DOM-dispatch path through a transparent overlay.
+// This test drives real Chromium. Synthetic fixtures only — no credentials.
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
-import { BrowserController } from "../browser.js";
+import { BrowserController, clickDispatchStatusForError } from "../browser.js";
 import { parseLocatorTarget, shouldBlockUnsafeProvisionSignals } from "../provision-session.js";
 
 // Mirrors the Casetify shape: 20 decorative cursor:pointer card-eligible divs
@@ -459,6 +458,13 @@ describe("resolvePageTarget (real Chromium)", () => {
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("");
       expect(resolved.labels).toEqual(["Place order"]);
+      await expect(
+        ctrl.clickWithDispatchTracking({
+          kind: "handle",
+          handle: resolved.handle,
+          method: "click",
+        }),
+      ).resolves.toBe("dispatched");
       await resolved.handle.dispose();
     } finally {
       await page.close();
@@ -634,6 +640,14 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       await page.evaluate(() => document.querySelector("#buy")?.remove());
+      const trackedError = await ctrl
+        .clickWithDispatchTracking({
+          kind: "handle",
+          handle: resolved.handle,
+          method: "click",
+        })
+        .catch((error: unknown) => error);
+      expect(clickDispatchStatusForError(trackedError)).toBe("not_dispatched");
       await expect(ctrl.clickHandle(resolved.handle)).rejects.toThrow(/detached/);
       await expect(ctrl.jsClickHandle(resolved.handle)).rejects.toThrow(/detached/);
       await resolved.handle.dispose();

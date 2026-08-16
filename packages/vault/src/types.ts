@@ -115,7 +115,8 @@ export interface VaultAuditPayload {
   // its duplicates were merged into. Set together by the one-time
   // dedup-credentials migration so the collapse is auditable + reversible.
   collapsed_into?: string;
-  // Payment-card + payment forensics (card_* / payment_executed events).
+  // Payment-card + payment forensics (card_* / payment_executed events,
+  // including caller-placed order attempts).
   // Display metadata only — `last4` is exactly the four digits the E2E
   // card row stores for display; a full PAN or CVV never reaches an
   // audit payload (the server can't read them out of the sealed blob).
@@ -124,6 +125,9 @@ export interface VaultAuditPayload {
   merchant?: string;
   amount_cents?: number;
   currency?: string;
+  mandate_id?: string;
+  card_ref?: string;
+  approval_id?: string;
   // Free-form processor status ("approved" / "declined" / …) — distinct
   // from `outcome`, whose union is the vault's own retrieval outcomes.
   payment_status?: string;

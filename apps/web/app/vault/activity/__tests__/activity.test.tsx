@@ -170,4 +170,29 @@ describe("activity timeline — card / payment / grant events", () => {
     expect(container.querySelector(".tl-row .tl-dot.ok")).toBeNull();
     expect(container.querySelector(".tl-row .tl-dot.err")).toBeNull();
   });
+
+  it("renders a caller-placed order attempt neutrally instead of as a successful payment", async () => {
+    api.apiGet.mockImplementation((path: string) => {
+      if (path === "/v1/status") return Promise.resolve({ billing_enabled: false });
+      if (path.startsWith("/v1/vault/audit")) {
+        return Promise.resolve({
+          events: [
+            {
+              ...EVENTS[1],
+              id: "place-order-attempt",
+              payment_status: "payment_place_order_attempted",
+            },
+          ],
+          next_before: null,
+        });
+      }
+      return Promise.reject(new Error(`unexpected GET ${path}`));
+    });
+
+    const { container } = render(<ActivityPage />);
+    await waitFor(() => expect(screen.getByText("Place-order attempted")).toBeTruthy());
+    expect(screen.queryByText("Payment")).toBeNull();
+    expect(container.querySelector(".tl-row .tl-dot.neutral")).toBeTruthy();
+    expect(container.querySelector(".tl-row .tl-dot.ok")).toBeNull();
+  });
 });

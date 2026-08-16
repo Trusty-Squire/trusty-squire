@@ -24,7 +24,10 @@ import { join } from "node:path";
 import {
   BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
+  checkoutSubmitLabel,
+  clickDispatchStatusForError,
   parseCheckoutAmount,
+  type ClickDispatchStatus,
   type CheckoutSummary,
   type FrameTarget,
   type InteractiveElement,
@@ -4363,16 +4366,16 @@ function isCheckoutSubmitLabeled(labels: readonly (string | null | undefined)[])
 // knowledge); this reuses the SAME label heuristic (CHECKOUT_SUBMIT_LABEL_RE)
 // Squire's own retired single-phase submit used to find the pay/place-order
 // control, so a click/js_click only counts as a place-order attempt when it
-// targets a control that reads like one. Returns true when THIS action is the
-// (first, now-recorded) attempt; throws before the click executes on a
+// targets a control that reads like one. Returns the approval snapshot when
+// THIS action is the first attempt; throws before the click executes on a
 // repeat. A fresh attempt requires a fresh operate_pay approval — since a
 // filled card can never be refilled in the same session (Pillar 2), that
 // means a new session.
 function enforcePlaceOrderGuard(
   session: Session,
   labels: readonly (string | null | undefined)[],
-): boolean {
-  if (session.placeOrderApproval === null || !isCheckoutSubmitLabeled(labels)) return false;
+): Session["placeOrderApproval"] {
+  if (session.placeOrderApproval === null || !isCheckoutSubmitLabeled(labels)) return null;
   if (session.placeOrderAttempted) {
     throw new Error(
       "operate_act refused: a place-order attempt already fired for this approval " +
@@ -4381,8 +4384,9 @@ function enforcePlaceOrderGuard(
         "before placing the order again.",
     );
   }
+  const approval = session.placeOrderApproval;
   session.placeOrderAttempted = true;
-  return true;
+  return approval;
 }
 
 // D1 — best-effort server-side record that a caller-placed charge was
@@ -4391,9 +4395,11 @@ function enforcePlaceOrderGuard(
 // the total or the order-confirmation page here), only that the approval was
 // consumed and the place-order control was pressed. Never blocks the click —
 // mirrors the audit_recorded best-effort handling in pay-operator.ts.
-async function recordPlaceOrderAttemptAudit(session: Session): Promise<void> {
-  const approval = session.placeOrderApproval;
-  if (approval === null || session.api === undefined) return;
+async function recordPlaceOrderAttemptAudit(
+  session: Session,
+  approval: NonNullable<Session["placeOrderApproval"]>,
+): Promise<void> {
+  if (session.api === undefined) return;
   try {
     await session.api.auditPayment({
       merchant: approval.merchant,
@@ -4409,6 +4415,28 @@ async function recordPlaceOrderAttemptAudit(session: Session): Promise<void> {
     // Best-effort — an audit write failure must never fail the caller's
     // place-order action.
   }
+}
+
+async function runPlaceOrderClick(
+  session: Session,
+  approval: NonNullable<Session["placeOrderApproval"]>,
+  click: () => Promise<ClickDispatchStatus>,
+): Promise<void> {
+  try {
+    const dispatchStatus = await click();
+    if (dispatchStatus === "not_dispatched") {
+      if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
+      return;
+    }
+  } catch (error) {
+    if (clickDispatchStatusForError(error) === "not_dispatched") {
+      if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
+    } else {
+      await recordPlaceOrderAttemptAudit(session, approval);
+    }
+    throw error;
+  }
+  await recordPlaceOrderAttemptAudit(session, approval);
 }
 
 export async function act(
@@ -4693,14 +4721,24 @@ export async function act(
           }
           bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
           session.usedLocatorFallback = true;
-          const placeOrderAttemptFired =
+          const placeOrderApproval =
             action.kind === "click" || action.kind === "js_click"
               ? enforcePlaceOrderGuard(session, [...resolved.labels, resolved.text])
-              : false;
-          if (action.kind === "click") await browser.clickHandle(resolved.handle);
+              : null;
+          if (
+            placeOrderApproval !== null &&
+            (action.kind === "click" || action.kind === "js_click")
+          ) {
+            await runPlaceOrderClick(session, placeOrderApproval, () =>
+              browser.clickWithDispatchTracking({
+                kind: "handle",
+                handle: resolved.handle,
+                method: action.kind,
+              }),
+            );
+          } else if (action.kind === "click") await browser.clickHandle(resolved.handle);
           else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
           else await browser.typeHandle(resolved.handle, action.text);
-          if (placeOrderAttemptFired) await recordPlaceOrderAttemptAudit(session);
         } finally {
           await resolved.handle.dispose().catch(() => undefined);
         }
@@ -4735,21 +4773,28 @@ export async function act(
       assertFrameTargetAllowed(session, el, action.kind);
       bindCartIdentity(isCartAffectingAction(action, el));
       if (action.kind === "click" || action.kind === "js_click") {
-        const placeOrderAttemptFired = enforcePlaceOrderGuard(session, [
-          el.ariaLabel,
-          el.visibleText,
-          el.labelText,
-        ]);
-        if (action.kind === "click") {
-          const target = frameTargetFor(el);
+        const submitLabel = checkoutSubmitLabel({
+          ariaLabel: el.ariaLabel,
+          inputValue: el.tag.toLowerCase() === "input" ? (el.value ?? null) : null,
+          textContent: el.visibleText,
+        });
+        const placeOrderApproval = enforcePlaceOrderGuard(session, [submitLabel, el.labelText]);
+        const target = frameTargetFor(el);
+        if (placeOrderApproval !== null) {
+          await runPlaceOrderClick(session, placeOrderApproval, () =>
+            browser.clickWithDispatchTracking(
+              target !== null
+                ? { kind: "frame", frame: target, selector: el.selector, method: action.kind }
+                : { kind: "selector", selector: el.selector, method: action.kind },
+            ),
+          );
+        } else if (action.kind === "click") {
           if (target !== null) await browser.clickInFrame(target, el.selector);
           else await browser.click(el.selector);
         } else {
-          const target = frameTargetFor(el);
           if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
           else await browser.clickViaJs(el.selector);
         }
-        if (placeOrderAttemptFired) await recordPlaceOrderAttemptAudit(session);
       } else if (action.kind === "type" && frameTargetFor(el) !== null) {
         // Frame targets skip the autocomplete-popup-commit machinery below —
         // it operates on the main page's DOM only (markPreexistingType
