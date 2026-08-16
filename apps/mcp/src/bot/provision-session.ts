@@ -560,7 +560,7 @@ export interface Session {
   // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
   // so the place-order guard below still has what it needs after activePayment
   // itself has moved on to "confirming" or "sealed" (sealed drops `pending`).
-  // Cleared only at session (re)init.
+  // Cleared only at session (re)init or after verified full field cleanup.
   placeOrderApproval: {
     approvalId: string;
     mandateId?: string;

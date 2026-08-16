@@ -109,14 +109,20 @@ binds that amount and releases the card; Trusty Squire fills the card without
 submitting and its role in the purchase ends there. It fills only the merchant's own
 HTTPS frames or recognized payment-provider frames. The card stays in the page as
 sealed, observation-masked fields while the agent advances to the review step and
-places the order — charge-like `operate_act` clicks and Enter are ordinary actions
-during that interval, not reserved for the operator. Verify the live final total
-against the approved `amount_cents`/currency yourself before placing the order; Trusty
-Squire no longer re-reads the total or submits anything.
+places the order. Verify the live final total against the approved
+`amount_cents`/currency yourself before placing the order; Trusty Squire no longer
+re-reads the total or submits anything. For `click` and `js_click`, a control whose
+label looks like pay/place-order may fire only once for that approval. A second
+recognized attempt is refused and requires a fresh `operate_pay` approval in a new
+session. Non-charge-labeled clicks, key presses, and `oauth_click` remain ungated.
+After a recognized click dispatches, Trusty Squire best-effort records a secret-free
+`payment_place_order_attempted` Activity event bound to the approval, optional
+mandate, approved amount/currency, merchant, and opaque card reference. This records
+an attempt, not a verified charge outcome.
 
 `operate_pay { phase: "confirm" }` just releases the session's pending-fill lock and
 reports the approved terms back — it makes no browser or provider call, records no
-audit event, and never charges. It can be called any time after the fill — it does not
+audit event itself, and never charges. It can be called any time after the fill — it does not
 need to happen before you place the order, and it never reads a total or verifies an
 amount. If a payment gets stuck or a card is declined, recover with `operate_finish`
 and start a fresh session; `operate_pay` does not support refilling a different card

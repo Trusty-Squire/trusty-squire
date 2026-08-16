@@ -162,8 +162,8 @@ export const VAULT_AUDIT_TYPES = {
   // the server, so nothing sensitive can land here by construction.
   cardStored: "vault.card_stored",
   cardDeleted: "vault.card_deleted",
-  // A payment executed with a stored card (operate_pay's audit report).
-  // Merchant + amount + last4 only — never a PAN.
+  // A stored-card payment event: either operate_pay's outcome report or a
+  // caller-placed order attempt. Metadata only — never a PAN.
   paymentExecuted: "vault.payment_executed",
   // Egress-grant lifecycle — a standing token that lets a deployed app
   // spend the referenced credential through the injecting proxy.

@@ -393,10 +393,7 @@ vi.mock("../browser.js", () => ({
         const element = (h.elements as Array<Record<string, unknown>>).find(
           (candidate) => candidate.selector === selector,
         );
-        if (
-          element?.tag === "input" &&
-          (element.type === "checkbox" || element.type === "radio")
-        ) {
+        if (element?.tag === "input" && (element.type === "checkbox" || element.type === "radio")) {
           element.checked = true;
         }
         if (element?.role === "switch" || element?.role === "checkbox") {
@@ -438,14 +435,13 @@ vi.mock("../browser.js", () => ({
               (candidate) => candidate.selector === target.selector,
             );
       const labels =
-        target.kind === "handle"
+        target.kind === "handle" && h.locatorResolve.ok
           ? (h.locatorResolve.labels ?? [h.locatorResolve.text])
-          : [
-              element?.ariaLabel,
-              element?.value,
-              element?.visibleText,
-              element?.labelText,
-            ].filter((label): label is string => typeof label === "string");
+          : target.kind === "handle"
+            ? []
+            : [element?.ariaLabel, element?.value, element?.visibleText, element?.labelText].filter(
+                (label): label is string => typeof label === "string",
+              );
       const tracked = shouldTrack(labels);
       const failure = h.trackedClickFailure;
       if (failure?.dispatchStatus !== "not_dispatched") {

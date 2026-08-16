@@ -1,6 +1,6 @@
 // Card + payment + grant lifecycle on the vault audit trail.
 //
-// The load-bearing properties: (1) card add/delete and payment executions
+// The load-bearing properties: (1) card add/delete and payment events
 // land as VaultAuditEvent rows the Activity page can render — display
 // metadata only, never a PAN; (2) the card detail route's response shape
 // carries the sealed blob + display metadata and NO cvv/pan field for any

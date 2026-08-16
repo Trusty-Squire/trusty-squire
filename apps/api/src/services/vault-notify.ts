@@ -7,7 +7,7 @@
 //
 // Deliberately NOTIFIED (rare, user-significant):
 //   credential stored / rotated / deleted / restored,
-//   card stored / deleted, payment executed, grant minted / revoked.
+//   card stored / deleted, payment executed or attempted, grant minted / revoked.
 // Deliberately EXCLUDED (per-event pushes would be spam):
 //   ACCESS events — vault.credential_retrieved, vault.proxy_executed,
 //   vault.proxy_rejected. A future access DIGEST (batched summary behind a

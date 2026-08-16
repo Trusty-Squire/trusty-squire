@@ -598,15 +598,15 @@ const CHECKOUT_CARD_VALUE_FIELD_SELECTORS = [
   'input[autocomplete~="cc-name"],input[name*="cardholder" i],input[name*="card-name" i],input[id*="cardholder" i]',
 ].join(",");
 
-// Charge-verb button labels — the click that actually moves money. Used by
+// Charge-verb button labels — the click that may move money. Used by
 // submitFilledCheckout to find the charge control, and by operate_act's
-// pending-card-fill guard to refuse the model clicking such a control directly
-// while a vaulted card sits filled in the checkout. NOT English-only: Japanese
+// pending-card-fill guard to recognize and cap caller-placed attempts while a
+// vaulted card sits filled in the checkout. NOT English-only: Japanese
 // checkouts (the
 // Rakuten-style flows the card-fill path targets) label the charge
 // ご注文を確定する / 注文する / 購入する / お支払い. Ambiguous confirm/pay
-// wording errs toward matching — a false positive is a safe refusal routed
-// through the confirm gate; a false negative is a bypassed charge gate.
+// wording errs toward matching — a false positive may consume the approval's
+// one guarded attempt; a false negative leaves a charge click unguarded.
 // Note: \b is ASCII-only, so the Japanese alternatives anchor on ^ (with $
 // where a bare noun like 購入 would otherwise swallow navigation labels such
 // as 購入手続きへ). 確定 (finalize) is deliberate — 確認 (review) must NOT match.

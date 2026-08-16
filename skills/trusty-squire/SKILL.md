@@ -119,9 +119,13 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   charging nothing yet. Trusty Squire's part is then done: drive the checkout
   to the order-confirmation step, VERIFY the live final total there matches
   the approved `amount_cents`/currency yourself, and place the order via
-  `operate_act` (clicking the pay/place-order control or pressing Enter is
-  fine — it is no longer reserved), handling any 3-D Secure challenge
-  directly. Call `operate_pay` with `phase: "confirm"` any time after the fill
+  `operate_act`, handling any 3-D Secure challenge directly. Prefer `click` or
+  `js_click` on the observed pay/place-order control: exactly one recognized
+  control click may dispatch for that approval, and a repeat is refused until a
+  fresh `operate_pay` approval in a new session. Do not use an ungated key press
+  or `oauth_click` to bypass that refusal. A dispatched recognized click records
+  a metadata-only attempt event; it does not prove the merchant charged the card.
+  Call `operate_pay` with `phase: "confirm"` any time after the fill
   to close out the approval and release the session's pending-fill lock — it
   does not need to happen before you place the order, and it never
   reads a total, verifies an amount, or submits anything itself. `item` and

@@ -61,6 +61,15 @@ from the canonical
 [`VAULT_AUDIT_TYPES`](../../packages/vault/src/types.ts) values rather than a
 second hand-maintained enum. Every event payload is display metadata only.
 
+`POST /v1/vault/payments/audit` requires `merchant`, `amountCents`, `currency`,
+four-digit `last4`, and `status`; `mandateId`, opaque `cardRef`, and `approvalId`
+are optional. Caller-placed split-checkout clicks use
+`status: "payment_place_order_attempted"` and bind those references to the
+fill-time approval. The resulting vault event keeps the existing
+`vault.payment_executed` type but describes an attempt, not a verified charge.
+The request and stored payload have no PAN or CVV field; the detailed boundary is
+owned by [`SECURITY.md`](../../SECURITY.md#client-encrypted-card-data).
+
 Payment approval creation requires non-empty `item` and `reason` strings and
 stores their trimmed values. The API records `agent` from a valid, non-empty
 `X-Squire-Agent-Identity` header; the MCP server sets that header from the

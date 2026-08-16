@@ -702,18 +702,14 @@ describe("resolvePageTarget (real Chromium)", () => {
         .catch((error: unknown) => error);
       expect(clickDispatchStatusForError(firstError)).toBe("not_dispatched");
       expect(
-        await page.evaluate(
-          () => (window as unknown as { __chargeClicks: number }).__chargeClicks,
-        ),
+        await page.evaluate(() => (window as unknown as { __chargeClicks: number }).__chargeClicks),
       ).toBe(0);
 
       await expect(
         ctrl.clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" }),
       ).resolves.toBe("dispatched");
       expect(
-        await page.evaluate(
-          () => (window as unknown as { __chargeClicks: number }).__chargeClicks,
-        ),
+        await page.evaluate(() => (window as unknown as { __chargeClicks: number }).__chargeClicks),
       ).toBe(1);
     } finally {
       await page.close();
@@ -738,9 +734,7 @@ describe("resolvePageTarget (real Chromium)", () => {
         ctrl.clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" }),
       ).resolves.toBe("dispatched");
       expect(
-        await page.evaluate(
-          () => (window as unknown as { __chargeClicks: number }).__chargeClicks,
-        ),
+        await page.evaluate(() => (window as unknown as { __chargeClicks: number }).__chargeClicks),
       ).toBe(1);
     } finally {
       await page.close();
