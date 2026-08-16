@@ -3653,6 +3653,10 @@ describe("3DS detection vs captcha frames", () => {
           frameUrl: "https://issuer.example.test/authenticate",
           frameAttributes: 'title="3D Secure authentication"',
         },
+        {
+          frameUrl: "https://issuer.example.test/authenticate",
+          frameHtml: '<form><input type="hidden" name="creq"><button>Authorize</button></form>',
+        },
         { merchantHtml: "<p>Please authenticate this payment using 3-D Secure</p>" },
       ];
       try {
@@ -3705,4 +3709,41 @@ describe("3DS detection vs captcha frames", () => {
       await browser.close();
     }
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores 3DS signals hidden by their element or an ancestor",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const cases = [
+        {
+          merchantHtml:
+            '<div style="opacity:0"><iframe src="https://issuer.example.test/acs/method" width="100" height="100"></iframe></div>',
+        },
+        {
+          merchantHtml:
+            '<div style="visibility:hidden"><iframe title="3D Secure authentication" src="https://issuer.example.test/authenticate"></iframe></div>',
+        },
+        {
+          merchantHtml:
+            '<div style="display:none"><form action="https://issuer.example.test/acs/challenge"><button>Authorize</button></form></div>',
+        },
+        {
+          merchantHtml:
+            '<div style="opacity:0"><p>Please authenticate this payment using 3-D Secure</p></div>',
+        },
+        { merchantHtml: '<input type="hidden" name="creq">' },
+      ];
+      try {
+        for (const testCase of cases) {
+          await expect(detectInRealPage(browser, testCase)).resolves.toEqual({
+            three_ds_required: false,
+            order_confirmed: false,
+          });
+        }
+      } finally {
+        await browser.close();
+      }
+    },
+    15_000,
+  );
 });

@@ -9395,29 +9395,43 @@ export class BrowserController {
     }
   }
 
-  // EMV 3DS runs a hidden "3DS Method" pre-auth iframe (browser fingerprint
-  // ping, zero user interaction) at a URL often indistinguishable from the
-  // real ACS challenge endpoint — frictionless/out-of-band approvals (seen
-  // live on a Shopify + DBS checkout) load this invisible iframe and nothing
-  // else, so a signal match alone isn't enough. Only a frame the buyer can
-  // actually see and act on counts as a challenge; main-frame text matches
-  // (no iframe involved) are unaffected.
-  private async isChildFrameVisible(frame: Frame): Promise<boolean> {
-    const frameElement = await frame.frameElement().catch(() => null);
-    if (frameElement === null) return false;
-    try {
-      const box = await frameElement.boundingBox().catch(() => null);
-      if (box === null || box.width < 4 || box.height < 4) return false;
-      const hidden = await frameElement
-        .evaluate((el: Element) => {
-          const style = getComputedStyle(el);
-          return style.display === "none" || style.visibility === "hidden" || style.opacity === "0";
-        })
-        .catch(() => true);
-      return !hidden;
-    } finally {
-      await frameElement.dispose().catch(() => undefined);
+  private async isFrameVisible(frame: Frame): Promise<boolean> {
+    if (!this.page) return false;
+    const mainFrame = this.page.mainFrame();
+    let current: Frame | null = frame;
+    while (current !== mainFrame) {
+      if (current === null) return false;
+      const frameElement = await current.frameElement().catch(() => null);
+      if (frameElement === null) return false;
+      try {
+        const [box, rendered] = await Promise.all([
+          frameElement.boundingBox().catch(() => null),
+          frameElement
+            .evaluate((element: Element) => {
+              let currentElement: Element | null = element;
+              while (currentElement !== null) {
+                const style = getComputedStyle(currentElement);
+                if (
+                  style.display === "none" ||
+                  style.visibility === "hidden" ||
+                  style.visibility === "collapse" ||
+                  Number.parseFloat(style.opacity) <= 0
+                ) {
+                  return false;
+                }
+                currentElement = currentElement.parentElement;
+              }
+              return true;
+            })
+            .catch(() => false),
+        ]);
+        if (box === null || box.width < 4 || box.height < 4 || !rendered) return false;
+      } finally {
+        await frameElement.dispose().catch(() => undefined);
+      }
+      current = current.parentFrame();
     }
+    return true;
   }
 
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
@@ -9433,24 +9447,46 @@ export class BrowserController {
       // at hcaptcha.html#frame=challenge previously tripped the bare
       // "challenge" match this pattern used to include.
       if (this.frameWithinCaptcha(frame)) continue;
+      if (!(await this.isFrameVisible(frame))) continue;
+      const [text, structural] = await Promise.all([
+        frame.evaluate(extractObservationVisibleText).catch(() => ""),
+        frame
+          .evaluate(() => {
+            const rendered = (element: Element): boolean => {
+              let currentElement: Element | null = element;
+              while (currentElement !== null) {
+                const style = getComputedStyle(currentElement);
+                if (
+                  style.display === "none" ||
+                  style.visibility === "hidden" ||
+                  style.visibility === "collapse" ||
+                  Number.parseFloat(style.opacity) <= 0
+                ) {
+                  return false;
+                }
+                currentElement = currentElement.parentElement;
+              }
+              const box = element.getBoundingClientRect();
+              return box.width >= 4 && box.height >= 4;
+            };
+            const visibleStructuralSignal = Array.from(
+              document.querySelectorAll('iframe[title*="3d secure" i],form[action*="acs" i]'),
+            ).some(rendered);
+            if (visibleStructuralSignal) return true;
+            return Array.from(document.querySelectorAll('input[name="creq" i]')).some((input) => {
+              const form = input.closest("form");
+              return form !== null && rendered(form);
+            });
+          })
+          .catch(() => false),
+      ]);
       const detected =
         urlPattern.test(frame.url()) ||
-        (await frame
-          .evaluate(() => {
-            const text = document.body?.innerText ?? "";
-            if (
-              document.querySelector(
-                'iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
-              ) !== null
-            )
-              return true;
-            return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
-              text,
-            );
-          })
-          .catch(() => false));
+        structural ||
+        /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
+          text,
+        );
       if (!detected) continue;
-      if (frame !== this.page.mainFrame() && !(await this.isChildFrameVisible(frame))) continue;
       return {
         three_ds_required: true,
         order_confirmed: false,
