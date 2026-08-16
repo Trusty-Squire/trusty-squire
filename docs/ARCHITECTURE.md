@@ -219,12 +219,13 @@ agent starts operate_pay in the addressed checkout session
      ordinary navigation can advance the checkout to its review step
   -> split confirm bypasses the initial PayPal-frame gate and strictly resolves the
      final payable total from the main frame and visible trusted payment frames with
-     no caller fallback; origin must match the mandate (the page-title-derived
-     merchant name may change)
+     no caller-supplied amount fallback; currency resolution follows the
+     approval-bound contract in [SECURITY.md](../SECURITY.md#client-encrypted-card-data).
+     Origin must match the mandate (the page-title-derived merchant name may change)
   -> confirm charges under the fill-time approval, without another passkey tap, when
      currency matches and the final total is at or below the approved amount; a
      higher total fails closed with payment_amount_exceeds_approval and is never
-     re-approved. Unresolved or conflicting totals also fail closed without charging
+     re-approved. Missing or conflicting totals also fail closed without charging
   -> the addressed session owns and serializes payment entry and confirmation;
      another session cannot observe, resume, or submit that approval; retry state is
      restored only before submission starts, and unverified field cleanup seals the

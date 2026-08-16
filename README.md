@@ -60,20 +60,22 @@ strict schema.org `Order`/`Invoice.totalPaymentDue` structured data can supply t
 amount and currency. If neither source exposes a total, caller-supplied
 `amount_cents` and `currency` become the authoritative approval amount; an omitted
 merchant name falls back to the checkout URL's hostname. Product and offer prices
-never qualify as machine-read checkout totals. When page currency notation is
-readable, it remains authoritative: Trusty Squire refuses to create an approval when
-it cannot resolve that notation, or when the displayed fractional precision
-conflicts with an agent-supplied fallback currency. Approval, 3-D Secure, Activity, and
-notification amounts use the currency's minor-unit precision (for example, whole
-yen for JPY and two decimals for USD). The anonymous approval page shows the
-merchant, checkout origin, amount and currency, item, and reason directly from the
-short-lived server record before one passkey ceremony authorizes those canonical
-payment values. You also see the requesting MCP client (for example, Hermes) and
-that a saved card will be used before clicking **Approve payment** to relay the
-operator-sealed final authorization. When the pre-submission checkout can be
-machine-read, the payment is refused if its merchant, origin, amount, or currency has
-changed since approval. If that resume read cannot recover a total, Trusty Squire
-reuses the original mandate-bound checkout values. Card entry requires the PAN,
+never qualify as machine-read checkout totals. An unambiguous ISO currency on the
+page remains authoritative. A notation that cannot identify one ISO currency by
+itself, such as a shared currency symbol or an FX-preview selector, falls through to
+the currency already selected or approved for the purchase instead of refusing the
+checkout. Any live amount or currency drift still fails closed; the authoritative
+binding contract lives in the [security model](SECURITY.md#client-encrypted-card-data).
+Approval, 3-D Secure, Activity, and notification amounts use the currency's minor-unit
+precision (for example, whole yen for JPY and two decimals for USD). The anonymous
+approval page shows the merchant, checkout origin, amount and currency, item, and
+reason directly from the short-lived server record before one passkey ceremony
+authorizes those canonical payment values. You also see the requesting MCP client
+(for example, Hermes) and that a saved card will be used before clicking **Approve
+payment** to relay the operator-sealed final authorization. When the pre-submission
+checkout can be machine-read, the payment is refused if its merchant, origin, amount,
+or currency has changed since approval. If that resume read cannot recover a total,
+Trusty Squire reuses the original mandate-bound checkout values. Card entry requires the PAN,
 expiry, and CVV fields; cardholder name and other explicitly labeled billing fields
 are filled best-effort, so a missing name field does not abort the payment. Sealing
 and cleanup touch only those selected payment controls; merchant shipping address and

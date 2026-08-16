@@ -157,12 +157,14 @@ best-effort, and a missing name input does not abort an otherwise fillable payme
 
 The later `confirm` phase is the charge boundary. Its strict reader requires a final
 payable total from the main frame or a visible trusted payment frame, with no
-caller-supplied amount fallback; unresolved or conflicting totals fail closed.
-Checkout origin and currency must match the mandate. A final total at or below the
-approved amount is submitted under the same signed approval, without a second human
-tap. A higher total fails closed with `payment_amount_exceeds_approval`; there is no
-reapproval path. The page-title-derived merchant display name is not compared across
-steps; origin is the recipient trust anchor. While a split card fill is pending,
+caller-supplied amount fallback. Currency notation that cannot identify one ISO
+currency by itself resolves against the already-approved mandate currency; missing or
+conflicting totals still fail closed. Checkout origin and currency must match the
+mandate. A final total at or below the approved amount is submitted under the same
+signed approval, without a second human tap. A higher total fails closed with
+`payment_amount_exceeds_approval`; there is no reapproval path. The page-title-derived
+merchant display name is not compared across steps; origin is the recipient trust
+anchor. While a split card fill is pending,
 ordinary browser actions cannot click charge-labeled controls or press Enter, so only
 `confirm` can cross that boundary. If no submit control is found, the sealed page
 fields and pending metadata remain
