@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -9,6 +10,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -23,6 +25,12 @@ import {
   publishOperatorProfileSeed,
 } from "../operator-profile-pool.js";
 import { profilePathIdentity } from "../profile.js";
+
+function deadPid(): number {
+  const result = spawnSync(process.execPath, ["-e", ""]);
+  if (result.pid === undefined) throw new Error("could not spawn a throwaway process");
+  return result.pid;
+}
 
 const roots: string[] = [];
 const verifiedLoginProof = {
@@ -187,6 +195,96 @@ describe("operator profile pool migration stage", () => {
       await first?.destroy();
       vi.useRealTimers();
     }
+  });
+
+  it("reclaims a seed lock whose recorded holder process has exited", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    writeFileSync(
+      p.seedLock,
+      `${JSON.stringify({
+        host: hostname(),
+        pid: deadPid(),
+        start_time: "dead-birth",
+        token: "orphaned-holder",
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const lease = await acquireOperatorProfile("session-dead-holder", {
+      rootDir: root,
+      sourceProfileDir: source,
+      deadline: Date.now() + 5_000,
+    });
+    try {
+      expect(lease.profileDir).toBeTruthy();
+    } finally {
+      await lease.destroy();
+    }
+  });
+
+  it("does not reclaim a live seed-lock owner based on lock age", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    let releaseLock = (): void => undefined;
+    let markLockHeld = (): void => undefined;
+    const lockGate = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    const lockHeld = new Promise<void>((resolve) => {
+      markLockHeld = resolve;
+    });
+    const holder = operatorProfilePoolTest.withSeedLock(p, async () => {
+      markLockHeld();
+      await lockGate;
+    });
+
+    try {
+      await lockHeld;
+      const originalOwner = readFileSync(p.seedLock, "utf8");
+      const olderThanRejectedTtl = new Date(Date.now() - 10 * 60 * 1_000);
+      utimesSync(p.seedLock, olderThanRejectedTtl, olderThanRejectedTtl);
+
+      await expect(
+        acquireOperatorProfile("session-live-old-holder", {
+          rootDir: root,
+          sourceProfileDir: source,
+          deadline: Date.now() + 250,
+        }),
+      ).rejects.toMatchObject({ reason: "timeout", phase: "seed_lock" });
+      expect(readFileSync(p.seedLock, "utf8")).toBe(originalOwner);
+    } finally {
+      releaseLock();
+      await holder;
+    }
+
+    expect(existsSync(p.seedLock)).toBe(false);
+  });
+
+  it("does not reclaim an unverifiable cross-host seed lock based on lock age", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    const remoteOwner = `${JSON.stringify({
+      host: "operator-on-another-host",
+      pid: deadPid(),
+      start_time: "unverifiable-remotely",
+      token: "remote-holder",
+    })}\n`;
+    writeFileSync(p.seedLock, remoteOwner, { mode: 0o600 });
+    const olderThanRejectedTtl = new Date(Date.now() - 10 * 60 * 1_000);
+    utimesSync(p.seedLock, olderThanRejectedTtl, olderThanRejectedTtl);
+
+    await expect(
+      acquireOperatorProfile("session-remote-old-holder", {
+        rootDir: root,
+        sourceProfileDir: source,
+        deadline: Date.now() + 250,
+      }),
+    ).rejects.toMatchObject({ reason: "timeout", phase: "seed_lock" });
+    expect(readFileSync(p.seedLock, "utf8")).toBe(remoteOwner);
   });
 
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {

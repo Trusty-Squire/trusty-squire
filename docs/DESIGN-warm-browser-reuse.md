@@ -122,6 +122,16 @@ old warm profile before it can be claimed again.
 
 ## 5. Ownership and crash recovery
 
+Seed-lock ownership records bind a host, PID, process start time, and private token. Given a valid
+owner record, a contender reclaims the lock only when the recorded local process has exited or its
+start time no longer matches. This never races a resuming holder, because a confirmed-dead process
+cannot resume. Missing or malformed owner metadata is an ownerless artifact and retains the existing
+30-second startup-grace cleanup; age never overrides a valid matching or cross-host owner. Such an
+owner remains genuine contention indefinitely: wall-clock reclaim of a lock whose owner might still
+be alive was evaluated and rejected as unsafe to make fully race-free, and would not help against an
+already-running old-version orphaned process regardless. The operational mitigation for a
+wedged-but-alive holder is identifying and killing that process by PID.
+
 Raw PID equality is never authority to signal a process. A worker binding records host, PID, Linux
 process start time, and the normalized expected `--user-data-dir`. Cleanup signals Chrome only when
 both the process birth identity and exact worker-profile path still match.

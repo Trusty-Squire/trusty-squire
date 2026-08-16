@@ -81,27 +81,13 @@ describe("BrowserController OAuth popup lifecycle", () => {
   it("keeps the operator product tab alive when the provider redirects then closes its popup", async () => {
     const { controller, product } = await controllerForProduct();
     const context = product.context();
-    let resolveProviderReturned: (() => void) | null = null;
-    let rejectProviderReturned: ((error: unknown) => void) | null = null;
-    const providerReturned = new Promise<void>((resolve, reject) => {
-      resolveProviderReturned = resolve;
-      rejectProviderReturned = reject;
+    const providerReturned = product.waitForEvent("popup").then(async (popup) => {
+      await popup.goto("data:text/html,provider-token-exchange");
+      await product.locator("#state").evaluate((el) => {
+        el.textContent = "Signed in";
+      });
+      await popup.close();
     });
-
-    const onPage = (candidate: Page): void => {
-      void (async () => {
-        // oauth_login first creates an opener-less recovery page. The provider
-        // popup is the page opened by the product, regardless of navigation speed.
-        if ((await candidate.opener()) !== product) return;
-        await candidate.goto("data:text/html,provider-token-exchange");
-        await product.locator("#state").evaluate((el) => {
-          el.textContent = "Signed in";
-        });
-        await candidate.close();
-        resolveProviderReturned?.();
-      })().catch((error: unknown) => rejectProviderReturned?.(error));
-    };
-    context.on("page", onPage);
 
     let sessionId: string | null = null;
     try {
@@ -121,7 +107,6 @@ describe("BrowserController OAuth popup lifecycle", () => {
       expect(result.text).toContain("Signed in");
     } finally {
       if (sessionId !== null) await finishProvisionSession(sessionId).catch(() => undefined);
-      context.off("page", onPage);
       await context.close().catch(() => undefined);
     }
   }, 20_000);
