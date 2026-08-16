@@ -705,6 +705,7 @@ import {
   awaitVerification,
   captchaGate,
   finishProvisionSession,
+  finishProvisionSessionWithPreparation,
   withProvisionSessionCall,
   paymentSession,
   closeAllProvisionSessions,
@@ -722,6 +723,7 @@ import {
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
   getActivePendingApproval,
+  getActivePendingCardFill,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
   restoreActivePendingCardFillAfterConfirmThrow,
@@ -3582,20 +3584,40 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     expect(h.resetCalls).toBe(1);
   });
 
-  it("asks finish to retry while a payment can still submit", async () => {
+  it("closes after a submitted confirmation throws and leaves stale confirming state", async () => {
     const started = await startProvisionSession({ serviceUrl: "https://app.example.com/one" });
-    const claim = claimActivePaymentForOperatePay(undefined);
-    expect(claim.kind).toBe("lease");
-    await expect(finishProvisionSession(started.session_id)).rejects.toThrow(/payment operation/);
-    if (claim.kind === "lease") releaseActivePaymentLease(claim.lease);
-    await finishProvisionSession(started.session_id);
+    const originalSession = paymentSession(started.session_id);
+    const pending = {
+      approval_id: "appr_stale_confirming",
+      approval_url: "https://web.test/vault/pay/appr_stale_confirming",
+      checkout: {
+        merchant: "Shop",
+        checkout_origin: "https://app.example.com",
+        amount_cents: 100,
+        currency: "USD",
+      },
+      card_ref: "card_stale_confirming",
+      last4: "4242",
+    };
+    setActivePendingCardFill(pending, originalSession);
+    expect(claimActivePaymentForOperatePay("confirm", originalSession).kind).toBe("confirm");
+    markActivePendingCardFillSubmitStarted(originalSession);
+    expect(restoreActivePendingCardFillAfterConfirmThrow(pending, originalSession)).toBe(false);
+
+    await expect(
+      finishProvisionSessionWithPreparation(started.session_id, async () => "prepared"),
+    ).resolves.toMatchObject({ finish: { closed: true }, prepared: "prepared" });
+    expect(originalSession.activePayment).toBeNull();
+    expect(originalSession.paymentFieldSealActive).toBe(false);
+    expect(h.leaseDestroyCalls).toBe(1);
   });
 
-  it("refuses finish while an approval or filled card remains resumable", async () => {
+  it("closes unconditionally with an approval or filled card still resumable, clearing payment state", async () => {
     const approvalSession = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    const approvalClaim = claimActivePaymentForOperatePay(undefined);
+    const originalApprovalSession = paymentSession(approvalSession.session_id);
+    const approvalClaim = claimActivePaymentForOperatePay(undefined, originalApprovalSession);
     if (approvalClaim.kind !== "lease") throw new Error("expected payment lease");
     const approval = {
       approval_id: "appr_finish_guard",
@@ -3617,37 +3639,51 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       reason: "Synthetic purchase",
       cardRef: "card_finish_guard",
     };
-    completeActivePaymentLeaseWithPendingApproval(approvalClaim.lease, approval);
-
-    await expect(finishProvisionSession(approvalSession.session_id)).rejects.toThrow(
-      /approval is still awaiting resolution/,
+    completeActivePaymentLeaseWithPendingApproval(
+      approvalClaim.lease,
+      approval,
+      originalApprovalSession,
     );
-    expect(getActivePendingApproval()).toBe(approval);
-    expect(approval.keypair.privateKey).toBe("private");
-    expect(h.resetCalls).toBe(0);
 
-    const resumed = claimActivePaymentForOperatePay(undefined);
-    if (resumed.kind !== "lease") throw new Error("expected resumed payment lease");
-    releaseActivePaymentLease(resumed.lease);
-    await finishProvisionSession(approvalSession.session_id);
+    await expect(finishProvisionSession(approvalSession.session_id)).resolves.toMatchObject({
+      closed: true,
+    });
+    expect(originalApprovalSession.activePayment).toBeNull();
+    expect(originalApprovalSession.paymentFieldSealActive).toBe(false);
+    expect(h.leaseDestroyCalls).toBe(1);
 
     const pendingSession = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
-    setActivePendingCardFill({
-      approval_id: "appr_pending_finish_guard",
-      approval_url: "https://web.test/vault/pay/appr_pending_finish_guard",
-      checkout: approval.checkout,
-      card_ref: "card_finish_guard",
-      last4: "4242",
-    });
-
-    await expect(finishProvisionSession(pendingSession.session_id)).rejects.toThrow(
-      /filled payment is still awaiting confirmation/,
+    const originalPendingSession = paymentSession(pendingSession.session_id);
+    setActivePendingCardFill(
+      {
+        approval_id: "appr_pending_finish_guard",
+        approval_url: "https://web.test/vault/pay/appr_pending_finish_guard",
+        checkout: approval.checkout,
+        card_ref: "card_finish_guard",
+        last4: "4242",
+      },
+      originalPendingSession,
     );
-    expect(h.resetCalls).toBe(1);
-    clearActivePendingCardFill();
-    await finishProvisionSession(pendingSession.session_id);
+
+    await expect(
+      provisionFinishTool.handler({ session_id: pendingSession.session_id }, null),
+    ).resolves.toMatchObject({
+      closed: true,
+    });
+    expect(originalPendingSession.activePayment).toBeNull();
+    expect(originalPendingSession.paymentFieldSealActive).toBe(false);
+    expect(h.leaseDestroyCalls).toBe(2);
+
+    const retried = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    expect(getActivePendingApproval()).toBeNull();
+    expect(getActivePendingCardFill()).toBeNull();
+    await expect(finishProvisionSession(retried.session_id)).resolves.toMatchObject({
+      closed: true,
+    });
   });
 
   it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {

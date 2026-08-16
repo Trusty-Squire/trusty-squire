@@ -242,7 +242,8 @@ agent starts operate_pay in the addressed checkout session
      the unresolved outcome to the user instead of guessing success
   -> the post-wait metadata-only payment status is audited
   -> operate_finish closes that session's admission gate, drains calls that already
-     entered, and refuses teardown while a payment is active or resumable
+     entered, clears any remaining payment state, and closes without a payment-state veto;
+     payment-sensitive profiles are destroyed rather than pooled
 ```
 
 The detailed cryptographic checks and card-data boundary live in

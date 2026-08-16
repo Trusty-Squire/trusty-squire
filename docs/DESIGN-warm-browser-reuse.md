@@ -41,10 +41,10 @@ operate_start
 
 operate_finish
   -> stop admitting calls to this session and drain calls that already entered
-  -> refuse teardown while payment is active, awaiting approval, or awaiting confirmation
-  -> classify the remaining payment fence state
-  -> reset the page and close Chrome with proof
-  -> return a safe profile to the one warm slot, otherwise destroy or quarantine it
+  -> classify the remaining payment fence state for profile disposition
+  -> clear the session's active payment and payment-field seal
+  -> reset the page only for a reusable profile, then close Chrome with proof
+  -> return a safe profile to the one warm slot; destroy or quarantine a payment-sensitive one
 ```
 
 ## 2. Filesystem model
@@ -152,9 +152,10 @@ Failure to prove closure quarantines the lease instead of pooling or deleting it
 
 `operate_finish` first marks the addressed session closing. New calls for that session are rejected,
 calls that already acquired the session drain, and outcome preparation runs behind the same closed
-admission gate. Finish refuses while payment is operating or confirming, while approval is awaiting
-the user, or while a filled card awaits confirmation. Only then may page reset, Chrome closure, or
-profile disposition begin.
+admission gate. Remaining payment state never vetoes teardown. Finish records whether the profile is
+destroy-required, clears the active payment object and payment-field seal, removes the session, and
+then closes Chrome. A payment-sensitive profile is destroyed or quarantined instead of entering the
+warm slot.
 
 The profile is destroy-required when any of these are true at finish:
 

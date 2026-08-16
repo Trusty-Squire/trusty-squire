@@ -126,9 +126,9 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   payment guide. `item` and `reason` remain required on both calls. Never click a
   pay/place-order control or press Enter while the card fill is pending; confirm owns
   the strict amount check and charge. An unrecognized payment iframe is a hard stop.
-- Do not call `operate_finish` while a payment is in progress, awaiting approval,
-  or filled and awaiting confirmation. Finish drains calls already using that
-  session and refuses to close until its payment state is terminal.
+- Always call `operate_finish` when done, including when a payment remains unresolved.
+  The authoritative teardown contract is in the
+  [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools).
 
 **Safety rules the agent must follow:**
 

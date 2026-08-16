@@ -328,10 +328,9 @@ DOM-diagnostics pair is excluded from that surface; set
   `none` only closes; `credentials` requires `store` and preserves credential
   extraction, vault storage, and auto-promotion; `result` requires `summary` or
   `data` and can run `verify_recipe` before closing. Finish first stops new
-  calls and drains calls already using that session. It refuses to close while
-  a payment is in progress, awaiting approval, or filled and awaiting
-  confirmation, so the browser cannot be reset or pooled out from under a
-  resumable charge.
+  calls and drains calls already using that session. Payment state never blocks
+  teardown: finish clears any remaining payment state and destroys, rather than
+  pools, a payment-sensitive browser profile.
 - `operate_recipe_save` saves a postcondition-verified local recipe under a
   closed task verb plus the service's registrable domain. It records stable target
   attributes and exact provenance for Squire-supplied values, not observed refs

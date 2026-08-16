@@ -198,10 +198,11 @@ addressed operate session. `operate_pay` and `operate_payment_status`
 resolve `session_id` once at tool entry and return that ID in
 their results and follow-up hints. Omitting the ID is accepted only when exactly one
 process-local session exists; no path selects a newest or arbitrary session. Closing a
-session first rejects new calls and drains calls that already entered, then refuses
-teardown while a payment is operating, confirming, awaiting approval, or filled and
-awaiting confirmation. A browser therefore cannot be reset, pooled, or substituted
-while that session can still authorize a charge.
+session first rejects new calls and drains calls that already entered. Remaining payment
+state never blocks teardown: close records that the profile is payment-sensitive, clears
+the active payment and payment-field seal, and destroys or quarantines the profile instead
+of returning it to the warm pool. No payment state or card-bearing browser profile can
+therefore carry into a later session.
 
 The phone decrypts the saved card locally, then HPKE-seals it directly to that
 ephemeral X25519 key using HKDF-SHA256 and AES-256-GCM. Each signed payload hash
