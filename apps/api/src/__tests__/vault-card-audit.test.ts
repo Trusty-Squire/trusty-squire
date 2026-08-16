@@ -144,6 +144,42 @@ describe("card / payment / grant events on the vault audit trail", () => {
     expect(String(payment!.reference)).toMatch(/^pay:\/\//);
   });
 
+  it("records a caller-placed charge attempt bound to its approval — attempt semantics, card ref, never a PAN", async () => {
+    const res = await server.inject({
+      method: "POST",
+      url: "/v1/vault/payments/audit",
+      headers: { authorization: `Bearer ${agentToken}` },
+      payload: {
+        merchant: "Synthetic Books",
+        amountCents: 1234,
+        currency: "USD",
+        last4: "4242",
+        status: "payment_place_order_attempted",
+        mandateId: "mandate_abc",
+        cardRef: "card_guard",
+        approvalId: "appr_guard",
+      },
+    });
+    expect(res.statusCode).toBe(201);
+
+    const events = await auditEvents();
+    const payment = events.find((e) => e.type === "vault.payment_executed");
+    expect(payment).toMatchObject({
+      requester: "agent",
+      merchant: "Synthetic Books",
+      amount_cents: 1234,
+      currency: "USD",
+      last4: "4242",
+      payment_status: "payment_place_order_attempted",
+      mandate_id: "mandate_abc",
+      card_ref: "card_guard",
+      approval_id: "appr_guard",
+    });
+    // Never "executed" for a caller-placed attempt Squire cannot verify.
+    expect(payment!.payment_status).not.toBe("payment_executed");
+    expect(JSON.stringify(payment)).not.toMatch(/\b\d{13,19}\b/);
+  });
+
   it("keeps card and payment mutations successful when audit writes fail", async () => {
     deps.vaultAuditStore.record = async () => {
       throw new Error("synthetic audit outage");

@@ -36,6 +36,11 @@ const paymentAuditBody = z.object({
   last4: z.string().regex(/^\d{4}$/),
   status: z.string().min(1).max(64),
   mandateId: z.string().max(128).optional(),
+  // The vault card reference the charge attempt is bound to — never the raw
+  // PAN. Optional: only supplied by the caller-placed-charge-attempt audit
+  // event (operate_act's place-order guard).
+  cardRef: z.string().max(256).optional(),
+  approvalId: z.string().max(256).optional(),
 });
 
 const paymentAuditCursor = z.string().transform((value, ctx) => {
@@ -234,6 +239,11 @@ export const registerVaultE2ERoute: FastifyPluginAsync<{
             currency: parsed.data.currency,
             last4: parsed.data.last4,
             payment_status: parsed.data.status,
+            ...(parsed.data.mandateId !== undefined ? { mandate_id: parsed.data.mandateId } : {}),
+            ...(parsed.data.cardRef !== undefined ? { card_ref: parsed.data.cardRef } : {}),
+            ...(parsed.data.approvalId !== undefined
+              ? { approval_id: parsed.data.approvalId }
+              : {}),
           },
         }) as const;
       let id: string;

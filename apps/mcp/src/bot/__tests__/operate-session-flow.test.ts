@@ -5041,11 +5041,15 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
 // ── Pending card-fill charge guard (split checkout) ─────────────────────────
 //
 // After operate_pay {phase:"fill_card"} the vaulted card sits filled in the
-// page. The operator's job ends at the fill — operate_act charge-verb clicks
-// and Enter are NOT blocked; the caller drives the checkout to place the
-// order itself. The card VALUES stay masked in observations throughout
-// (session.paymentFieldSealActive), which is the actual money-fence pillar —
-// see the masking tests below.
+// page. The operator's job ends at the fill — operate_act is not otherwise
+// blocked from driving the checkout, and Enter/Space presses are never
+// gated (they carry no resolvable label). The card VALUES stay masked in
+// observations throughout (session.paymentFieldSealActive), which is one
+// money-fence pillar — see the masking tests below. A SEPARATE guard
+// (placeOrderApproval/placeOrderAttempted) caps operate_act clicks that
+// target a checkout-submit-labeled control (CHECKOUT_SUBMIT_LABEL_RE — the
+// same label heuristic Squire's own retired single-phase submit used) at
+// one attempt per approval — see the place-order-attempt tests below.
 describe("pending card-fill charge guard", () => {
   const pending = {
     approval_id: "appr_guard",
@@ -5123,7 +5127,7 @@ describe("pending card-fill charge guard", () => {
     expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/cleanup remains unverified/);
   });
 
-  it("allows click/js_click/oauth_click, Enter, and Space while filled — the caller places the order", async () => {
+  it("allows non-charge-verb clicks, unlabeled key presses, and oauth_click freely while filled", async () => {
     h.elements = [
       elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
       elem({ tag: "button", type: null, visibleText: "Continue to review", selector: "#next" }),
@@ -5136,16 +5140,15 @@ describe("pending card-fill charge guard", () => {
     });
     setActivePendingCardFill(pending);
 
-    // None of these throw — clicking a charge-verb control is no longer
-    // reserved for operate_pay {phase:"confirm"}.
-    await act(started.session_id, { kind: "click", target: "Place order" });
+    // A non-charge-verb click is never gated by the place-order guard, no
+    // matter how many times it fires.
+    await act(started.session_id, { kind: "click", target: "Continue to review" });
     expect(h.clickCalls).toBe(1);
-    await act(started.session_id, { kind: "js_click", target: "Place order" });
-    await act(started.session_id, { kind: "oauth_click", target: "Place order" });
-
     await act(started.session_id, { kind: "click", target: "Continue to review" });
     expect(h.clickCalls).toBe(2);
 
+    // Key presses carry no resolvable label, so they can't be matched against
+    // CHECKOUT_SUBMIT_LABEL_RE and are never gated.
     await act(started.session_id, { kind: "press", key: "Enter" });
     await act(started.session_id, { kind: "press", key: "NumpadEnter" });
     h.focusedLabels = ["Pay now"];
@@ -5154,9 +5157,126 @@ describe("pending card-fill charge guard", () => {
     await act(started.session_id, { kind: "press", key: "Space" });
     await act(started.session_id, { kind: "press", key: "Tab" });
 
-    clearActivePendingCardFill();
+    // oauth_click is a distinct action kind (starts an OAuth popup, never a
+    // form submit) — it is routed to a different code path entirely and is
+    // never gated by the place-order guard, regardless of its target's label.
+    await act(started.session_id, { kind: "oauth_click", target: "Place order" });
+  });
+
+  it("allows exactly one charge-verb click per approval, then refuses a repeat — one approval, one place-order attempt", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+      elem({ tag: "button", type: null, visibleText: "Continue to review", selector: "#next" }),
+    ];
+    h.visibleText = "Checkout";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+
+    // The FIRST charge-verb click succeeds — this is the caller placing the
+    // order.
     await act(started.session_id, { kind: "click", target: "Place order" });
-    expect(h.clickCalls).toBe(3);
+    expect(h.clickCalls).toBe(1);
+
+    // A second charge-verb click on the SAME approval — any click-kind — is
+    // refused, whether it's a retry after a perceived failure or a
+    // double-click.
+    await expect(
+      act(started.session_id, { kind: "js_click", target: "Place order" }),
+    ).rejects.toThrow(/place-order attempt already fired/);
+    expect(h.clickCalls).toBe(1);
+    await expect(
+      act(started.session_id, { kind: "click", target: "Place order" }),
+    ).rejects.toThrow(/fresh operate_pay approval is required/);
+    expect(h.clickCalls).toBe(1);
+
+    // Non-charge-verb clicks stay completely unaffected by the guard.
+    await act(started.session_id, { kind: "click", target: "Continue to review" });
+    expect(h.clickCalls).toBe(2);
+  });
+
+  it("keeps the place-order guard bound to its approval across confirm, resets only on a fresh fill", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+    ];
+    h.visibleText = "Checkout";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(1);
+
+    // clearActivePendingCardFill(false, ...) is the real confirm-path call
+    // (operate-pay.ts) — it moves the session to "sealed" WITHOUT resetting
+    // the guard: the same approval's attempt stays consumed either before or
+    // after the caller closes out confirm.
+    clearActivePendingCardFill(false);
+    await expect(
+      act(started.session_id, { kind: "click", target: "Place order" }),
+    ).rejects.toThrow(/place-order attempt already fired/);
+
+    // A verified full clear (paymentFieldsCleared=true) IS a clean slate.
+    // Used here only to simulate a genuinely fresh approval's fill — a real
+    // session can never refill a card once sealed (Pillar 2).
+    clearActivePendingCardFill(true);
+    setActivePendingCardFill({ ...pending, approval_id: "appr_guard_2" });
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(2);
+  });
+
+  it("records exactly one attempt-semantics audit event for the caller's place-order click", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+    ];
+    h.visibleText = "Checkout";
+    const auditPayment = vi.fn().mockResolvedValue({ id: "evt_1" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingCardFill(pending);
+
+    await act(started.session_id, { kind: "click", target: "Place order" });
+
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+    expect(auditPayment).toHaveBeenCalledWith({
+      merchant: "Shop",
+      amount_cents: 100,
+      currency: "USD",
+      last4: "4242",
+      card_ref: "card_guard",
+      approval_id: "appr_guard",
+      // Attempt semantics, never "executed" — Squire cannot verify what the
+      // merchant did after the caller's click.
+      status: "payment_place_order_attempted",
+    });
+
+    // The refused second attempt fires no second audit event.
+    await expect(
+      act(started.session_id, { kind: "click", target: "Place order" }),
+    ).rejects.toThrow(/place-order attempt already fired/);
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not audit or block when no api client was threaded through", async () => {
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+    ];
+    h.visibleText = "Checkout";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+
+    // No session.api — recordPlaceOrderAttemptAudit is a no-op, but the
+    // click itself, and the guard against a second attempt, still work.
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(1);
+    await expect(
+      act(started.session_id, { kind: "click", target: "Place order" }),
+    ).rejects.toThrow(/place-order attempt already fired/);
   });
 
   it("allows a locator-fallback click on a charge control while filled", async () => {
