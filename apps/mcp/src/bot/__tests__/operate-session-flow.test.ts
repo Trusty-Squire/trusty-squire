@@ -722,6 +722,7 @@ import {
   completeActivePaymentLeaseWithPendingApproval,
   completeActivePaymentLeaseWithPendingFill,
   getActivePendingApproval,
+  getActivePendingCardFill,
   releaseActivePaymentLease,
   markActivePendingCardFillSubmitStarted,
   restoreActivePendingCardFillAfterConfirmThrow,
@@ -3591,7 +3592,7 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     await finishProvisionSession(started.session_id);
   });
 
-  it("refuses finish while an approval or filled card remains resumable", async () => {
+  it("closes unconditionally with an approval or filled card still resumable, clearing payment state", async () => {
     const approvalSession = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
@@ -3619,17 +3620,12 @@ describe("operate session — isolated profile-pool lifecycle", () => {
     };
     completeActivePaymentLeaseWithPendingApproval(approvalClaim.lease, approval);
 
-    await expect(finishProvisionSession(approvalSession.session_id)).rejects.toThrow(
-      /approval is still awaiting resolution/,
-    );
-    expect(getActivePendingApproval()).toBe(approval);
-    expect(approval.keypair.privateKey).toBe("private");
+    // A pending payment forces the warm profile to be destroyed rather than
+    // reused (profileRequiresDestroy), so resetCalls (reuse path) stays put.
+    await expect(finishProvisionSession(approvalSession.session_id)).resolves.toMatchObject({
+      closed: true,
+    });
     expect(h.resetCalls).toBe(0);
-
-    const resumed = claimActivePaymentForOperatePay(undefined);
-    if (resumed.kind !== "lease") throw new Error("expected resumed payment lease");
-    releaseActivePaymentLease(resumed.lease);
-    await finishProvisionSession(approvalSession.session_id);
 
     const pendingSession = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
@@ -3642,12 +3638,21 @@ describe("operate session — isolated profile-pool lifecycle", () => {
       last4: "4242",
     });
 
-    await expect(finishProvisionSession(pendingSession.session_id)).rejects.toThrow(
-      /filled payment is still awaiting confirmation/,
-    );
-    expect(h.resetCalls).toBe(1);
-    clearActivePendingCardFill();
-    await finishProvisionSession(pendingSession.session_id);
+    await expect(finishProvisionSession(pendingSession.session_id)).resolves.toMatchObject({
+      closed: true,
+    });
+    expect(h.resetCalls).toBe(0);
+
+    // A fresh session after the stuck one closes proves there's no leftover
+    // exit-blocking state and no need to restart the MCP process.
+    const retried = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    expect(getActivePendingApproval()).toBeNull();
+    expect(getActivePendingCardFill()).toBeNull();
+    await expect(finishProvisionSession(retried.session_id)).resolves.toMatchObject({
+      closed: true,
+    });
   });
 
   it("reuses the warm isolated profile but cold-boots a fresh controller", async () => {
