@@ -24,7 +24,6 @@ import { join } from "node:path";
 import {
   BrowserController,
   CHECKOUT_SUBMIT_LABEL_RE,
-  checkoutSubmitLabel,
   clickDispatchStatusForError,
   parseCheckoutAmount,
   type ClickDispatchStatus,
@@ -4417,18 +4416,23 @@ async function recordPlaceOrderAttemptAudit(
   }
 }
 
-async function runPlaceOrderClick(
+async function runClickWithPlaceOrderGuard(
   session: Session,
-  approval: NonNullable<Session["placeOrderApproval"]>,
-  click: () => Promise<ClickDispatchStatus>,
+  click: (shouldTrack: (labels: readonly string[]) => boolean) => Promise<ClickDispatchStatus>,
 ): Promise<void> {
+  let approval: Session["placeOrderApproval"] = null;
   try {
-    const dispatchStatus = await click();
+    const dispatchStatus = await click((labels) => {
+      approval = enforcePlaceOrderGuard(session, labels);
+      return approval !== null;
+    });
+    if (approval === null) return;
     if (dispatchStatus === "not_dispatched") {
       if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
       return;
     }
   } catch (error) {
+    if (approval === null) throw error;
     if (clickDispatchStatusForError(error) === "not_dispatched") {
       if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
     } else {
@@ -4721,20 +4725,19 @@ export async function act(
           }
           bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
           session.usedLocatorFallback = true;
-          const placeOrderApproval =
-            action.kind === "click" || action.kind === "js_click"
-              ? enforcePlaceOrderGuard(session, [...resolved.labels, resolved.text])
-              : null;
           if (
-            placeOrderApproval !== null &&
+            session.placeOrderApproval !== null &&
             (action.kind === "click" || action.kind === "js_click")
           ) {
-            await runPlaceOrderClick(session, placeOrderApproval, () =>
-              browser.clickWithDispatchTracking({
-                kind: "handle",
-                handle: resolved.handle,
-                method: action.kind,
-              }),
+            await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
+              browser.clickWithDispatchTracking(
+                {
+                  kind: "handle",
+                  handle: resolved.handle,
+                  method: action.kind,
+                },
+                shouldTrack,
+              ),
             );
           } else if (action.kind === "click") await browser.clickHandle(resolved.handle);
           else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
@@ -4773,26 +4776,14 @@ export async function act(
       assertFrameTargetAllowed(session, el, action.kind);
       bindCartIdentity(isCartAffectingAction(action, el));
       if (action.kind === "click" || action.kind === "js_click") {
-        const inputValue = el.tag.toLowerCase() === "input" ? (el.value ?? null) : null;
-        const submitLabel = checkoutSubmitLabel({
-          ariaLabel: el.ariaLabel,
-          inputValue,
-          textContent: el.visibleText,
-        });
-        const placeOrderApproval = enforcePlaceOrderGuard(session, [
-          submitLabel,
-          el.ariaLabel,
-          inputValue,
-          el.visibleText,
-          el.labelText,
-        ]);
         const target = frameTargetFor(el);
-        if (placeOrderApproval !== null) {
-          await runPlaceOrderClick(session, placeOrderApproval, () =>
+        if (session.placeOrderApproval !== null) {
+          await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
             browser.clickWithDispatchTracking(
               target !== null
                 ? { kind: "frame", frame: target, selector: el.selector, method: action.kind }
                 : { kind: "selector", selector: el.selector, method: action.kind },
+              shouldTrack,
             ),
           );
         } else if (action.kind === "click") {

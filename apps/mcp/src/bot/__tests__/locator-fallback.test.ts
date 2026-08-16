@@ -264,6 +264,18 @@ const REPLACED_DURING_TRACKING_FIXTURE = `data:text/html,${encodeURIComponent(`
   </script>
 </body></html>`)}`;
 
+const CAPTURE_STOP_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <button id="buy" style="width:200px;height:40px">Place order</button>
+  <script>
+    window.__chargeClicks = 0;
+    document.addEventListener("click", (event) => {
+      window.__chargeClicks++;
+      event.stopPropagation();
+    }, true);
+  </script>
+</body></html>`)}`;
+
 const OVERLAY_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:0">
   <script>
@@ -717,6 +729,22 @@ describe("resolvePageTarget (real Chromium)", () => {
       .catch((error: unknown) => error);
 
     expect(clickDispatchStatusForError(trackedError)).toBe("not_dispatched");
+  });
+
+  it("classifies a successful click as dispatched when capture stops propagation", async () => {
+    const { ctrl, page } = await pageFor(CAPTURE_STOP_FIXTURE);
+    try {
+      await expect(
+        ctrl.clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" }),
+      ).resolves.toBe("dispatched");
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { __chargeClicks: number }).__chargeClicks,
+        ),
+      ).toBe(1);
+    } finally {
+      await page.close();
+    }
   });
 
   it("click rejects an overlay while explicit js_click dispatches once", async () => {

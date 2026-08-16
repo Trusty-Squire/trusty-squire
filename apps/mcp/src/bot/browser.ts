@@ -4849,10 +4849,50 @@ export class BrowserController {
       }
       throw new BrowserClickDispatchError(await readState(), error);
     }
-    return await readState();
+    await readState();
+    return "dispatched";
   }
 
-  async clickWithDispatchTracking(target: TrackedClickTarget): Promise<ClickDispatchStatus> {
+  private async clickTargetLabels(handle: ElementHandle<Element>): Promise<string[]> {
+    const signals = await handle.evaluate((element) => {
+      const rendered = (node: Element): string => {
+        const innerText = (node as HTMLElement).innerText;
+        return (typeof innerText === "string" ? innerText : (node.textContent ?? ""))
+          .replace(/\s+/g, " ")
+          .trim();
+      };
+      const labelTexts =
+        element instanceof HTMLInputElement ||
+        element instanceof HTMLTextAreaElement ||
+        element instanceof HTMLSelectElement
+          ? Array.from(element.labels ?? [], rendered)
+          : [];
+      return {
+        ariaLabel: element.getAttribute("aria-label"),
+        inputValue: element instanceof HTMLInputElement ? element.value : null,
+        textContent: rendered(element),
+        labelTexts,
+      };
+    });
+    return Array.from(
+      new Set(
+        [
+          checkoutSubmitLabel(signals),
+          signals.ariaLabel,
+          signals.inputValue,
+          signals.textContent,
+          ...signals.labelTexts,
+        ]
+          .map((label) => label?.trim() ?? "")
+          .filter((label) => label.length > 0),
+      ),
+    );
+  }
+
+  async clickWithDispatchTracking(
+    target: TrackedClickTarget,
+    shouldTrack: (labels: readonly string[]) => boolean = () => true,
+  ): Promise<ClickDispatchStatus> {
     if (!this.page) {
       throw new BrowserClickDispatchError("not_dispatched", new Error("Browser not started"));
     }
@@ -4878,9 +4918,19 @@ export class BrowserController {
       );
     }
     try {
-      return await this.runTrackedClick(handle, () =>
-        target.method === "click" ? this.clickHandle(handle) : this.jsClickHandle(handle),
-      );
+      let labels: string[];
+      try {
+        labels = await this.clickTargetLabels(handle);
+      } catch (error) {
+        throw new BrowserClickDispatchError("not_dispatched", error);
+      }
+      const click = () =>
+        target.method === "click" ? this.clickHandle(handle) : this.jsClickHandle(handle);
+      if (!shouldTrack(labels)) {
+        await click();
+        return "dispatched";
+      }
+      return await this.runTrackedClick(handle, click);
     } finally {
       if (dispose) await handle.dispose().catch(() => undefined);
     }

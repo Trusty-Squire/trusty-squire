@@ -149,6 +149,7 @@ const h = vi.hoisted(() => ({
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
+  finalClickLabels: null as string[] | null,
   isPayPalHostedCheckout: false,
   filledCards: [] as unknown[],
   fillAndSubmitError: null as Error | null,
@@ -408,12 +409,32 @@ vi.mock("../browser.js", () => ({
     async clickViaJsInFrame(target: { frameUrl: string }, selector: string): Promise<void> {
       h.frameJsClicks.push(`${target.frameUrl}|${selector}`);
     }
-    async clickWithDispatchTracking(target: {
-      kind: "selector" | "handle" | "frame";
-      selector?: string;
-      frame?: { frameUrl: string };
-      method: "click" | "js_click";
-    }): Promise<"not_dispatched" | "dispatched" | "unknown"> {
+    async clickWithDispatchTracking(
+      target: {
+        kind: "selector" | "handle" | "frame";
+        selector?: string;
+        frame?: { frameUrl: string };
+        method: "click" | "js_click";
+      },
+      shouldTrack: (labels: readonly string[]) => boolean = () => true,
+    ): Promise<"not_dispatched" | "dispatched" | "unknown"> {
+      const element =
+        target.kind === "handle"
+          ? null
+          : (h.elements as Array<Record<string, unknown>>).find(
+              (candidate) => candidate.selector === target.selector,
+            );
+      const labels =
+        h.finalClickLabels ??
+        (target.kind === "handle"
+          ? (h.locatorResolve.labels ?? [h.locatorResolve.text])
+          : [
+              element?.ariaLabel,
+              element?.value,
+              element?.visibleText,
+              element?.labelText,
+            ].filter((label): label is string => typeof label === "string"));
+      const tracked = shouldTrack(labels);
       const failure = h.trackedClickFailure;
       if (failure?.dispatchStatus !== "not_dispatched") {
         if (target.kind === "handle") {
@@ -427,9 +448,8 @@ vi.mock("../browser.js", () => ({
         }
       }
       if (failure !== null) {
-        throw Object.assign(new Error(failure.message), {
-          dispatchStatus: failure.dispatchStatus,
-        });
+        const error = new Error(failure.message);
+        throw tracked ? Object.assign(error, { dispatchStatus: failure.dispatchStatus }) : error;
       }
       return "dispatched";
     }
@@ -937,6 +957,7 @@ beforeEach(() => {
   h.locatorTypeCalls = [];
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
+  h.finalClickLabels = null;
   h.isPayPalHostedCheckout = false;
   h.filledCards = [];
   h.fillAndSubmitError = null;
@@ -5261,6 +5282,28 @@ describe("pending card-fill charge guard", () => {
     await act(started.session_id, { kind: "click", target: "Checkout" });
     expect(h.clickCalls).toBe(1);
     await expect(act(started.session_id, { kind: "click", target: "Checkout" })).rejects.toThrow(
+      /place-order attempt already fired/,
+    );
+    expect(h.clickCalls).toBe(1);
+  });
+
+  it("guards a control relabeled from non-charge to place-order before dispatch", async () => {
+    h.elements = [elem({ tag: "button", visibleText: "Continue", selector: "#checkout" })];
+    h.finalClickLabels = ["Place order"];
+    h.visibleText = "Checkout";
+    const auditPayment = vi.fn().mockResolvedValue({ id: "evt_relabel" });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+      api: { auditPayment } as unknown as ApiClient,
+    });
+    setActivePendingCardFill(pending);
+
+    await act(started.session_id, { kind: "click", target: "Continue" });
+
+    expect(h.clickCalls).toBe(1);
+    expect(auditPayment).toHaveBeenCalledTimes(1);
+    h.elements = [elem({ tag: "button", visibleText: "Place order", selector: "#checkout" })];
+    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
       /place-order attempt already fired/,
     );
     expect(h.clickCalls).toBe(1);
