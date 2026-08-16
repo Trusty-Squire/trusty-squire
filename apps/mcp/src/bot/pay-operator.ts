@@ -45,7 +45,7 @@ export interface OperatePayArgs {
 export interface PaymentBrowser {
   isPayPalHostedCheckout(): Promise<boolean>;
   readCheckoutSummary(fallbackCurrency?: string): Promise<CheckoutSummary>;
-  readCheckoutConfirmSummary(): Promise<CheckoutSummary>;
+  readCheckoutConfirmSummary(approvedCurrency?: string): Promise<CheckoutSummary>;
   fillAndSubmitCheckout(card: CheckoutCard): Promise<CheckoutSubmitResult>;
   fillCheckoutCardFields(card: CheckoutCard): Promise<void>;
   submitFilledCheckout(): Promise<CheckoutSubmitResult>;
@@ -704,25 +704,6 @@ export async function executeOperatePay(
       try {
         checkout = await browser.readCheckoutSummary(args.currency);
       } catch (error) {
-        if (error instanceof Error && error.message === "payment_checkout_currency_unresolved") {
-          return {
-            status: "payment_checkout_currency_unresolved",
-            reason: "checkout_currency_unrecognized",
-          };
-        }
-        if (
-          error instanceof Error &&
-          error.message === "payment_checkout_currency_unresolved_scale_mismatch"
-        ) {
-          // A page amount with fractional precision cannot be relabelled using an
-          // agent hint for a zero- (or lower-) precision currency. Unlike a
-          // missing total, this is an observed contradiction, so never mint an
-          // approval from agent-supplied values.
-          return {
-            status: "payment_checkout_currency_unresolved",
-            reason: "fallback_currency_scale_mismatch",
-          };
-        }
         if (error instanceof Error && error.message === "payment_checkout_total_not_found") {
           if (args.amount_cents !== undefined && args.currency !== undefined) {
             const checkoutUrl = new URL(browser.currentUrl());
@@ -1438,7 +1419,13 @@ export async function executeOperatePayConfirm(
 
   let live: CheckoutSummary;
   try {
-    live = await browser.readCheckoutConfirmSummary();
+    // Thread the already-approved currency through so a page notation that
+    // can't be pinned to one ISO currency on its own (a currency-selector /
+    // FX-preview module, a bare "$" shared by several locales, …) resolves
+    // against what the operator already committed to instead of refusing the
+    // confirm read. The equality check below still refuses closed on any
+    // actual currency/amount drift, so this cannot itself authorize a bad charge.
+    live = await browser.readCheckoutConfirmSummary(checkout.currency);
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (message === "payment_checkout_total_not_found") {
@@ -1450,18 +1437,6 @@ export async function executeOperatePayConfirm(
         reason:
           "The confirm step requires the order total to be visible on the live page. " +
           "Navigate to the order-confirmation step, then retry.",
-      };
-    }
-    if (message === "payment_checkout_currency_unresolved") {
-      return {
-        status: "payment_checkout_currency_unresolved",
-        reason: "checkout_currency_unrecognized",
-      };
-    }
-    if (message === "payment_checkout_currency_unresolved_scale_mismatch") {
-      return {
-        status: "payment_checkout_currency_unresolved",
-        reason: "fallback_currency_scale_mismatch",
       };
     }
     if (message === "payment_checkout_total_conflict") {

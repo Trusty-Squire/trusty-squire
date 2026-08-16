@@ -324,9 +324,11 @@ describe("checkout payment parsing", () => {
     );
   });
 
-  it("fails closed when yen evidence is glued to unparseable trailing text", async () => {
-    // 円税込 is currency evidence the token resolver cannot read; trusting the
-    // USD fallback here would turn ¥1,468 into $1,468.00.
+  it("resolves against the already-approved currency when yen evidence is glued to unparseable trailing text", async () => {
+    // 円税込 is currency evidence the token resolver cannot read on its own —
+    // currency ambiguity no longer blocks the read, it falls through to the
+    // already-approved currency instead (here JPY, the currency actually
+    // approved for this purchase, so the resolved amount stays correct).
     const browser = new BrowserController({ humanize: false });
     const frame = { evaluate: vi.fn().mockResolvedValue("合計 1,468円税込") };
     const page = {
@@ -337,8 +339,9 @@ describe("checkout payment parsing", () => {
     };
     Object.defineProperty(browser, "page", { value: page });
 
-    await expect(browser.readCheckoutSummary("USD")).rejects.toMatchObject({
-      message: "payment_checkout_currency_unresolved",
+    await expect(browser.readCheckoutSummary("JPY")).resolves.toMatchObject({
+      amount_cents: 1_468,
+      currency: "JPY",
     });
   });
 
@@ -354,7 +357,11 @@ describe("checkout payment parsing", () => {
     expect(parseCheckoutAmount(["Order total 98.45"], "JPY")).toBeNull();
   });
 
-  it("surfaces a clear capture error instead of falling back to a mismatched currency", async () => {
+  it("does not mint a scale-mismatched total from a bare number against a zero-decimal fallback", async () => {
+    // A Japan-based approval is not evidence that a bare 98.45 total is JPY —
+    // the mismatched-scale candidate is skipped (never minted as JPY 9,845),
+    // and since nothing else on the page resolves, the read now fails with
+    // total_not_found rather than a currency-specific refusal.
     const browser = new BrowserController({ humanize: false });
     const frame = { evaluate: vi.fn().mockResolvedValue("Order total 98.45") };
     const page = {
@@ -366,7 +373,7 @@ describe("checkout payment parsing", () => {
     Object.defineProperty(browser, "page", { value: page });
 
     await expect(browser.readCheckoutSummary("JPY")).rejects.toThrow(
-      "payment_checkout_currency_unresolved_scale_mismatch",
+      "payment_checkout_total_not_found",
     );
   });
 
@@ -376,7 +383,10 @@ describe("checkout payment parsing", () => {
     "Order total 98.45 kr",
     "Order total 98.45 ₺",
     "Order total JPY$98.45",
-  ])("fails closed when a total uses unresolved currency notation: %s", async (text) => {
+  ])("resolves against the approved currency when a total uses unresolved currency notation: %s", async (text) => {
+    // A notation the resolver can't pin to an ISO currency on its own no
+    // longer blocks the read — it resolves against the already-approved
+    // currency, same as a plain unlabeled number would.
     const browser = new BrowserController({ humanize: false });
     const frame = { evaluate: vi.fn().mockResolvedValue(text) };
     const page = {
@@ -387,8 +397,9 @@ describe("checkout payment parsing", () => {
     };
     Object.defineProperty(browser, "page", { value: page });
 
-    await expect(browser.readCheckoutSummary("USD")).rejects.toMatchObject({
-      message: "payment_checkout_currency_unresolved",
+    await expect(browser.readCheckoutSummary("USD")).resolves.toMatchObject({
+      amount_cents: 9_845,
+      currency: "USD",
     });
   });
 
@@ -1820,14 +1831,29 @@ describe("structured-data checkout totals", () => {
     ).resolves.toMatchObject({ amount_cents: 14_990, currency: "USD" });
   });
 
-  it("requires unambiguous live currency notation only for charge confirmation", async () => {
+  it("resolves an ambiguous live currency notation against the approved currency at charge confirmation", async () => {
     const structured = { jsonLd: [], microdata: [] };
+    // A bare "$"/"¥" symbol is shared by several locales and can't be pinned
+    // to one ISO currency from the page alone (the eBay-style international-
+    // shipping currency-selector shape) — it no longer refuses the confirm
+    // read, it resolves against the currency already approved for this
+    // purchase instead.
+    await expect(
+      structuredCheckoutController("Order total $39.99", structured).readCheckoutConfirmSummary(
+        "USD",
+      ),
+    ).resolves.toMatchObject({ amount_cents: 3_999, currency: "USD" });
+    await expect(
+      structuredCheckoutController("Order total ¥3,999", structured).readCheckoutConfirmSummary(
+        "JPY",
+      ),
+    ).resolves.toMatchObject({ amount_cents: 3_999, currency: "JPY" });
+    // With no approved currency to fall back on, an ambiguous notation still
+    // yields no amount for that occurrence — payment_checkout_total_not_found,
+    // never a currency-specific refusal, is the remaining failure mode.
     await expect(
       structuredCheckoutController("Order total $39.99", structured).readCheckoutConfirmSummary(),
-    ).rejects.toThrow("payment_checkout_currency_unresolved");
-    await expect(
-      structuredCheckoutController("Order total ¥3,999", structured).readCheckoutConfirmSummary(),
-    ).rejects.toThrow("payment_checkout_currency_unresolved");
+    ).rejects.toThrow("payment_checkout_total_not_found");
     await expect(
       structuredCheckoutController("Order total US$39.99", structured).readCheckoutConfirmSummary(),
     ).resolves.toMatchObject({ amount_cents: 3_999, currency: "USD" });
@@ -1841,6 +1867,30 @@ describe("structured-data checkout totals", () => {
       amount_cents: 3_999,
       currency: "USD",
     });
+  });
+
+  it("confirms cleanly against the displayed total on an international currency-selector checkout (eBay shape)", async () => {
+    // eBay International Shipping (and similarly shaped Shopify Markets /
+    // other FX-preview checkouts) shows a currency-choice module near the
+    // order summary — "Select a currency for this purchase … Japanese Yen
+    // (JPY) - ¥ … Exchange rate: ¥…" plus a persistent "Pay in the currency
+    // of your choice — Change currency" control. That must not block confirm:
+    // the buyer selected USD, the page's own labeled "Order total $88.87" is
+    // the displayed value, and it resolves against the approved currency.
+    const text = `Select a currency for this purchase
+United States Dollar (USD) - $
+Japanese Yen (JPY) - ¥
+Exchange rate: ¥141.16 = $1.00
+Pay in the currency of your choice — Change currency
+Order total $88.87`;
+    await expect(
+      structuredCheckoutController(text, { jsonLd: [], microdata: [] }).readCheckoutConfirmSummary(
+        "USD",
+      ),
+    ).resolves.toMatchObject({ amount_cents: 8_887, currency: "USD" });
+    await expect(
+      structuredCheckoutController(text, { jsonLd: [], microdata: [] }).readCheckoutSummary("USD"),
+    ).resolves.toMatchObject({ amount_cents: 8_887, currency: "USD" });
   });
 
   it.each([
@@ -1891,27 +1941,39 @@ describe("structured-data checkout totals", () => {
   });
 
   it.each(["readCheckoutSummary", "readCheckoutReviewSummary"] as const)(
-    "keeps the currency-unresolved guard in %s when a structured total exists",
+    "resolves an unresolved-notation text total against the fallback in %s, never consulting a disagreeing structured total",
     async (reader) => {
+      // "kr" can't be pinned to one ISO currency on its own, so it resolves
+      // against the USD fallback (the currency already approved for this
+      // purchase) — the text total is what the buyer actually sees, so the
+      // disagreeing structured SEK total is never consulted (same
+      // stale-JSON-LD precedence as any other clean visible total).
       const controller = structuredCheckoutController("Order total 98.45 kr", {
         jsonLd: [orderJsonLd({ price: "98.45", priceCurrency: "SEK" })],
         microdata: [],
       });
-      await expect(controller[reader]("USD")).rejects.toMatchObject({
-        message: "payment_checkout_currency_unresolved",
+      await expect(controller[reader]("USD")).resolves.toMatchObject({
+        amount_cents: 9_845,
+        currency: "USD",
       });
     },
   );
 
   it.each(["readCheckoutSummary", "readCheckoutReviewSummary"] as const)(
-    "keeps the fallback-scale-mismatch guard in %s when a structured total exists",
+    "rescues a scale-mismatched text total from structured data in %s instead of refusing",
     async (reader) => {
+      // "98.45" against a zero-decimal JPY fallback is skipped as a
+      // mismatched-scale candidate (never minted as JPY 9,845); since nothing
+      // else on the page resolves, the structured JPY 98 total rescues it —
+      // structured data only ever rescues a would-be total_not_found, so this
+      // cannot override a clean visible total, only fill in for a missing one.
       const controller = structuredCheckoutController("Order total 98.45", {
         jsonLd: [orderJsonLd({ price: "98", priceCurrency: "JPY" })],
         microdata: [],
       });
-      await expect(controller[reader]("JPY")).rejects.toMatchObject({
-        message: "payment_checkout_currency_unresolved_scale_mismatch",
+      await expect(controller[reader]("JPY")).resolves.toMatchObject({
+        amount_cents: 98,
+        currency: "JPY",
       });
     },
   );

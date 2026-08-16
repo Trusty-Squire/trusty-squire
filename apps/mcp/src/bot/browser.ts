@@ -806,7 +806,6 @@ function isCheckoutCountSuffix(token: string | undefined): boolean {
 
 interface CheckoutAmountParseResult {
   amount: { amount_cents: number; currency: string } | null;
-  currencyUnresolved: boolean;
   fallbackCurrencyScaleMismatch: boolean;
 }
 
@@ -907,38 +906,41 @@ function parseCheckoutAmountMatch(
     CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(match[4] ?? "") ||
     CHECKOUT_TAX_EXCLUSIVE_PATTERN.test(trailingLine)
   ) {
-    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+    return { amount: null, fallbackCurrencyScaleMismatch: false };
   }
   if (isCheckoutCountSuffix(match[4])) {
-    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+    return { amount: null, fallbackCurrencyScaleMismatch: false };
   }
   const prefix = classifyCurrencyToken(match[1]);
   const symbol = classifyCurrencyToken(match[2]);
   const suffix = classifyCurrencyToken(match[4]);
-  if (prefix.unresolved || symbol.unresolved || suffix.unresolved) {
-    return { amount: null, currencyUnresolved: true, fallbackCurrencyScaleMismatch: false };
-  }
+  // A page notation that can't be pinned to one ISO currency (a bare "$"/"¥"
+  // shared by several locales, "R$", mismatched code+symbol, …) does not by
+  // itself block the read — it just contributes no currency of its own, so
+  // resolution falls through to the already-approved/selected fallbackCurrency
+  // below, the same as a plain unlabeled number would. The remaining failure
+  // mode is payment_checkout_total_not_found when no total can be pinned down
+  // at all; currency ambiguity alone never refuses a purchase.
   const pageCurrency = prefix.currency ?? suffix.currency ?? symbol.currency;
   const currency = (pageCurrency ?? fallbackCurrency)?.toUpperCase();
   if (currency === undefined || !/^[A-Z]{3}$/.test(currency)) {
-    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+    return { amount: null, fallbackCurrencyScaleMismatch: false };
   }
   const minorDigits = currencyMinorDigits(currency);
   if (pageCurrency === undefined && fallbackCurrencyScaleMismatches(match[3] ?? "", minorDigits)) {
-    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: true };
+    return { amount: null, fallbackCurrencyScaleMismatch: true };
   }
   const amount = parseDisplayedNumber(match[3] ?? "", minorDigits);
   if (amount === null) {
-    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+    return { amount: null, fallbackCurrencyScaleMismatch: false };
   }
   const scale = 10 ** minorDigits;
   const minor = Math.round(amount * scale);
   if (Math.abs(amount * scale - minor) > 1e-6) {
-    return { amount: null, currencyUnresolved: false, fallbackCurrencyScaleMismatch: false };
+    return { amount: null, fallbackCurrencyScaleMismatch: false };
   }
   return {
     amount: { amount_cents: minor, currency },
-    currencyUnresolved: false,
     fallbackCurrencyScaleMismatch: false,
   };
 }
@@ -947,28 +949,35 @@ function parseCheckoutAmountResult(
   texts: readonly string[],
   fallbackCurrency?: string,
 ): CheckoutAmountParseResult {
-  let currencyUnresolved = false;
   let fallbackCurrencyScaleMismatch = false;
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
       if (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) continue;
       const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
-      currencyUnresolved ||= result.currencyUnresolved;
       fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
       if (result.amount === null) continue;
       return {
         amount: result.amount,
-        currencyUnresolved,
         fallbackCurrencyScaleMismatch,
       };
     }
   }
-  return { amount: null, currencyUnresolved, fallbackCurrencyScaleMismatch };
+  return { amount: null, fallbackCurrencyScaleMismatch };
 }
 
-function parseCheckoutConfirmAmountResult(texts: readonly string[]): CheckoutAmountParseResult {
-  let currencyUnresolved = false;
+// The already-approved/selected currency (captured at fill_card time) is
+// passed as fallbackCurrency so a page notation that can't be pinned to one
+// ISO currency on its own (a bare "$" shared by USD/CAD/AUD/…, an FX-preview
+// module's secondary total, …) resolves against it instead of blocking the
+// confirm read. Retains every match instead of returning on the first, so a
+// currency-selector/FX-conversion widget positioned above the real order
+// summary — its own stray "total"-labeled line included — never wins over the
+// final payable total that follows it in reading order.
+function parseCheckoutConfirmAmountResult(
+  texts: readonly string[],
+  fallbackCurrency?: string,
+): CheckoutAmountParseResult {
   let amount: { amount_cents: number; currency: string } | null = null;
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
@@ -977,14 +986,13 @@ function parseCheckoutConfirmAmountResult(texts: readonly string[]): CheckoutAmo
       const result = parseCheckoutAmountMatch(
         text,
         match,
-        undefined,
+        fallbackCurrency,
         classifyCheckoutConfirmCurrencyToken,
       );
-      currencyUnresolved ||= result.currencyUnresolved;
       if (result.amount !== null) amount = result.amount;
     }
   }
-  return { amount, currencyUnresolved, fallbackCurrencyScaleMismatch: false };
+  return { amount, fallbackCurrencyScaleMismatch: false };
 }
 
 export function parseCheckoutAmount(
@@ -1013,7 +1021,6 @@ export function parseCheckoutAmounts(
 interface CheckoutAmountsParseResult {
   amounts: Array<{ amount_cents: number; currency: string }>;
   payableAmounts: Array<{ amount_cents: number; currency: string }>;
-  currencyUnresolved: boolean;
   fallbackCurrencyScaleMismatch: boolean;
 }
 
@@ -1027,14 +1034,12 @@ function parseCheckoutAmountsResult(
 ): CheckoutAmountsParseResult {
   const amounts: Array<{ amount_cents: number; currency: string }> = [];
   const payableAmounts: Array<{ amount_cents: number; currency: string }> = [];
-  let currencyUnresolved = false;
   let fallbackCurrencyScaleMismatch = false;
   for (const text of texts) {
     checkoutTotalPattern.lastIndex = 0;
     for (const match of text.matchAll(checkoutTotalPattern)) {
       if (match[0].startsWith("小計") && !checkoutTextHasFreeShipping(text)) continue;
       const result = parseCheckoutAmountMatch(text, match, fallbackCurrency);
-      currencyUnresolved ||= result.currencyUnresolved;
       fallbackCurrencyScaleMismatch ||= result.fallbackCurrencyScaleMismatch;
       if (result.amount !== null) {
         amounts.push(result.amount);
@@ -1042,7 +1047,7 @@ function parseCheckoutAmountsResult(
       }
     }
   }
-  return { amounts, payableAmounts, currencyUnresolved, fallbackCurrencyScaleMismatch };
+  return { amounts, payableAmounts, fallbackCurrencyScaleMismatch };
 }
 
 // Machine-readable order totals (schema.org). A checkout page that embeds its
@@ -7708,17 +7713,16 @@ export class BrowserController {
         const textAmount = parsedAmounts.payableAmounts.at(-1) ?? parsedAmounts.amounts.at(-1);
         return {
           amount: textAmount ?? parseStructuredCheckoutTotal([structuredExtract]),
-          currencyUnresolved: parsedAmounts.currencyUnresolved,
-          fallbackCurrencyScaleMismatch: parsedAmounts.fallbackCurrencyScaleMismatch,
         };
       }),
     );
-    if (parsedFrames.some((parsed) => parsed.currencyUnresolved)) {
-      throw new Error("payment_checkout_currency_unresolved");
-    }
-    if (parsedFrames.some((parsed) => parsed.fallbackCurrencyScaleMismatch)) {
-      throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
-    }
+    // Currency ambiguity on the page (a shared symbol, an FX-preview module,
+    // …) never blocks this read by itself — an unpinned notation simply
+    // contributes no amount for that occurrence (see parseCheckoutAmountMatch)
+    // and resolution falls through to another candidate or to
+    // payment_checkout_total_not_found below. That is the only refusal mode
+    // left here; the amount/currency actually charged is still verified
+    // against the approved mandate by the caller after this returns.
     // Structured-data order total (schema.org Order/Invoice.totalPaymentDue).
     // Used only when the visible text yields no clean labeled total: a
     // structured total that CONTRADICTS a clean visible one can't be confirmed
@@ -7747,7 +7751,16 @@ export class BrowserController {
     };
   }
 
-  async readCheckoutConfirmSummary(): Promise<CheckoutSummary> {
+  // approvedCurrency is the currency already approved for this purchase
+  // (captured at the fill_card phase's readCheckoutSummary call). It lets a
+  // page notation that can't be pinned to one ISO currency on its own — a
+  // bare "$"/"¥" shared by several locales, a currency-selector/FX-preview
+  // module's own stray total, … — resolve against the currency the operator
+  // already committed to instead of refusing the confirm read outright. The
+  // live amount/currency this returns is still checked against the approved
+  // mandate by the caller (executeOperatePayConfirm) before anything is
+  // charged, so a mis-resolution here cannot itself authorize a bad charge.
+  async readCheckoutConfirmSummary(approvedCurrency?: string): Promise<CheckoutSummary> {
     if (!this.page) throw new Error("Browser not started");
     const page = this.page;
     const identity = await page.evaluate(() => ({
@@ -7760,16 +7773,16 @@ export class BrowserController {
     const frames = await this.visibleTrustedCheckoutFrames();
     const parsedFrames = await Promise.all(
       frames.map(async (frame) =>
-        parseCheckoutConfirmAmountResult([
-          scopedOrderSummaryText(
-            await frame.evaluate(extractCheckoutConfirmSummaryText).catch(() => ""),
-          ),
-        ]),
+        parseCheckoutConfirmAmountResult(
+          [
+            scopedOrderSummaryText(
+              await frame.evaluate(extractCheckoutConfirmSummaryText).catch(() => ""),
+            ),
+          ],
+          approvedCurrency,
+        ),
       ),
     );
-    if (parsedFrames.some((parsed) => parsed.currencyUnresolved)) {
-      throw new Error("payment_checkout_currency_unresolved");
-    }
     const mainAmount = parsedFrames[0]?.amount ?? null;
     const childAmounts = parsedFrames
       .slice(1)
@@ -7886,12 +7899,6 @@ export class BrowserController {
     const textAmount = parsedAmounts.payableAmounts.at(-1) ?? parsedAmounts.amounts.at(-1);
     const structuredAmount =
       textAmount === undefined ? parseStructuredCheckoutTotal(structuredExtracts) : null;
-    if (structuredAmount !== null && parsedAmounts.currencyUnresolved) {
-      throw new Error("payment_checkout_currency_unresolved");
-    }
-    if (structuredAmount !== null && parsedAmounts.fallbackCurrencyScaleMismatch) {
-      throw new Error("payment_checkout_currency_unresolved_scale_mismatch");
-    }
     const amount = textAmount ?? structuredAmount ?? undefined;
     if (amount === undefined) throw new Error("payment_checkout_total_not_found");
     return {

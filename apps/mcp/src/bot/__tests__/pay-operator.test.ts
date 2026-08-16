@@ -321,20 +321,6 @@ async function harness(
 describe("operate_pay", () => {
   it.each([
     [
-      "payment_checkout_currency_unresolved_scale_mismatch",
-      {
-        status: "payment_checkout_currency_unresolved",
-        reason: "fallback_currency_scale_mismatch",
-      },
-    ],
-    [
-      "payment_checkout_currency_unresolved",
-      {
-        status: "payment_checkout_currency_unresolved",
-        reason: "checkout_currency_unrecognized",
-      },
-    ],
-    [
       "payment_checkout_total_not_found",
       {
         status: "needs_cart_total",
@@ -1776,7 +1762,7 @@ describe("operate_pay split checkout — confirm", () => {
     });
     expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
     expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
-    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledWith();
+    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledWith(SPLIT_CHECKOUT.currency);
     expect(browser.readCheckoutSummary).not.toHaveBeenCalled();
     // No second approval is minted — the audit's mandate_id is still the one
     // signed at fill_card.
@@ -1959,16 +1945,16 @@ describe("operate_pay split checkout — confirm", () => {
     expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
   });
 
-  it("passes a currency-unresolved read through as a refusal", async () => {
-    const { result, browser } = await runConfirm({
-      live: new Error("payment_checkout_currency_unresolved"),
-    });
+  it("threads the fill-time approved currency into the confirm read instead of refusing on ambiguity", async () => {
+    // Currency ambiguity on the live confirm page (a currency-selector / FX-
+    // preview module, a bare "$" shared by several locales, …) is no longer a
+    // refusal — the confirm reader resolves against the already-approved
+    // currency instead. Assert the plumbing: readCheckoutConfirmSummary is
+    // called with the approved currency so it CAN do that resolution.
+    const { result, browser } = await runConfirm({});
 
-    expect(result).toMatchObject({
-      status: "payment_checkout_currency_unresolved",
-      reason: "checkout_currency_unrecognized",
-    });
-    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: "payment_submitted" });
+    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledWith(SPLIT_CHECKOUT.currency);
   });
 
   it("runs the 3DS wait against the fill-time approval id — no second approval to mint one", async () => {
