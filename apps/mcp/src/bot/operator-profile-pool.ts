@@ -1,12 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   cpSync,
   existsSync,
+  fstatSync,
+  futimesSync,
   linkSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readlinkSync,
   readdirSync,
@@ -247,15 +251,34 @@ function lockHeldPastTtl(path: string): boolean {
   }
 }
 
+function refreshSeedLockOwnership(path: string, token: string): boolean {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, "r");
+    const owner = JSON.parse(readFileSync(fd, "utf8")) as SeedLockOwner;
+    if (owner.token !== token) return false;
+    const held = fstatSync(fd);
+    const now = new Date();
+    futimesSync(fd, now, now);
+    const published = lstatSync(path);
+    return (
+      held.dev === published.dev &&
+      held.ino === published.ino &&
+      readSeedLockOwner(path)?.token === token
+    );
+  } catch {
+    return false;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
 function seedLockState(path: string): "matching" | "stale" | "unknown" {
   const owner = readSeedLockOwner(path);
   if (owner !== null) {
+    if (lockHeldPastTtl(path)) return "stale";
     if (owner.host !== hostname()) return "unknown";
-    const state = processState(owner);
-    // A live, matching owner is still reclaimed once the lock has been held
-    // past the bounded TTL: the holder process exists but is no longer
-    // making progress (a wedged/orphaned worker), not genuinely contending.
-    return state === "matching" && lockHeldPastTtl(path) ? "stale" : state;
+    return processState(owner);
   }
   try {
     return Date.now() - lstatSync(path).mtimeMs >= STARTUP_GRACE_MS ? "stale" : "unknown";
@@ -480,7 +503,7 @@ async function waitForSeedLockRetry(control: OperatorProfileAcquisitionControl):
 
 async function withSeedLock<T>(
   p: PoolPaths,
-  fn: () => Promise<T> | T,
+  fn: (assertOwned: () => void) => Promise<T> | T,
   control: OperatorProfileAcquisitionControl = {},
 ): Promise<T> {
   const token = randomUUID();
@@ -518,7 +541,13 @@ async function withSeedLock<T>(
   }
   try {
     assertProfileAcquisitionActive(control, "seed_lock");
-    return await fn();
+    const assertOwned = (): void => {
+      if (!refreshSeedLockOwnership(p.seedLock, token)) {
+        throw new Error("shared seed lock ownership was reclaimed");
+      }
+    };
+    assertOwned();
+    return await fn(assertOwned);
   } finally {
     if (readSeedLockOwner(p.seedLock)?.token === token) {
       rmSync(p.seedLock, { recursive: true, force: true });
@@ -541,25 +570,39 @@ function currentGeneration(p: PoolPaths): string | null {
   }
 }
 
-async function publishSeedLocked(p: PoolPaths, sourceProfileDir: string): Promise<string> {
+async function publishSeedLocked(
+  p: PoolPaths,
+  sourceProfileDir: string,
+  assertOwned: () => void,
+  afterStaging?: () => Promise<void>,
+): Promise<string> {
   const generation = randomUUID();
   const staging = join(p.generations, `.${generation}.tmp`);
   const destination = join(p.generations, generation);
+  const nextLink = join(p.seed, `.current-${generation}`);
   try {
+    assertOwned();
     ensurePrivateDir(staging);
+    assertOwned();
     copyIdentitySeed(sourceProfileDir, join(staging, "user-data"));
+    await afterStaging?.();
+    assertOwned();
     renameSync(staging, destination);
-    const nextLink = join(p.seed, `.current-${generation}`);
+    assertOwned();
     symlinkSync(join("generations", generation), nextLink, "dir");
+    assertOwned();
     renameSync(nextLink, p.current);
+    assertOwned();
     for (const entry of readdirSync(p.generations, { withFileTypes: true })) {
-      if (entry.name !== generation) {
+      if (entry.name !== generation && !entry.name.startsWith(".")) {
+        assertOwned();
         rmSync(join(p.generations, entry.name), { recursive: true, force: true });
       }
     }
     return generation;
   } catch (err) {
     rmSync(staging, { recursive: true, force: true });
+    rmSync(nextLink, { force: true });
     throw err;
   }
 }
@@ -604,7 +647,9 @@ export async function publishOperatorProfileSeed(
   const resolvedSource = profilePathIdentity(sourceProfileDir);
   const p = paths(poolRootForSource(resolvedSource, opts.rootDir));
   initializePool(p);
-  return await withSeedLock(p, () => publishSeedLocked(p, resolvedSource));
+  return await withSeedLock(p, (assertOwned) =>
+    publishSeedLocked(p, resolvedSource, assertOwned),
+  );
 }
 
 function profileDir(p: PoolPaths, profileId: string): string {
@@ -945,10 +990,13 @@ export async function acquireOperatorProfile(
 
   const reservation = await withSeedLock(
     p,
-    () => {
+    (assertOwned) => {
+      assertOwned();
       scavengeQuarantinedActive(p);
+      assertOwned();
       scavengeActiveSlots(p, now());
       for (let index = 0; index < ACTIVE_SLOT_COUNT; index += 1) {
+        assertOwned();
         const claimed = reserveActiveSlot(p, index, sessionId);
         if (claimed !== null) return claimed;
       }
@@ -969,12 +1017,14 @@ export async function acquireOperatorProfile(
     assertProfileAcquisitionActive(opts);
     const acquiredDescriptor = await withSeedLock(
       p,
-      () => {
+      (assertOwned) => {
         const generation = currentGeneration(p);
+        assertOwned();
         scavengeWarm(p, generation ?? UNPUBLISHED_SEED_GENERATION, now());
         const warm = join(p.warm, "slot-0");
         let descriptor: ProfileLeaseDescriptor | null = null;
         try {
+          assertOwned();
           renameSync(warm, claimDir);
           descriptor = readLease(claimDir);
         } catch (err) {
@@ -984,26 +1034,33 @@ export async function acquireOperatorProfile(
           const activeDescriptor = { ...descriptor };
           delete activeDescriptor.returned_at;
           delete activeDescriptor.worker;
+          assertOwned();
           writePrivateJson(join(claimDir, "lease.json"), activeDescriptor);
           return activeDescriptor;
         }
 
+        assertOwned();
         rmSync(claimDir, { recursive: true, force: true });
         const profileId = randomUUID();
         allocatedProfileId = profileId;
         const profileRoot = join(p.profiles, profileId);
+        assertOwned();
         ensurePrivateDir(profileRoot);
         const userDataDir = join(profileRoot, "user-data");
         if (generation === null) {
+          assertOwned();
           ensurePrivateDir(userDataDir);
         } else {
+          assertOwned();
           cpSync(join(p.generations, generation, "user-data"), userDataDir, {
             recursive: true,
             force: false,
             errorOnExist: true,
           });
+          assertOwned();
           stripTransientProfileState(userDataDir);
         }
+        assertOwned();
         ensurePrivateDir(claimDir);
         const coldDescriptor: ProfileLeaseDescriptor = {
           version: 1,
@@ -1013,6 +1070,7 @@ export async function acquireOperatorProfile(
           created_at: now(),
           reuse_count: 0,
         };
+        assertOwned();
         writePrivateJson(join(claimDir, "lease.json"), coldDescriptor);
         return coldDescriptor;
       },
@@ -1050,6 +1108,7 @@ export const operatorProfilePoolTest = {
   poolRootForSource,
   currentGeneration,
   withSeedLock,
+  publishSeedLocked,
   reserveActiveSlot,
   scavengeQuarantinedActive,
   scavengeDestroyRequired,

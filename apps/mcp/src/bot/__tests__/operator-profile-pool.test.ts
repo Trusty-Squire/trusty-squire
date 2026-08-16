@@ -274,6 +274,65 @@ describe("operator profile pool migration stage", () => {
     rmSync(p.seedLock, { force: true });
   });
 
+  it("bounds unverifiable seed-lock owners until their lock exceeds the TTL", async () => {
+    const identity = processBirthIdentity(process.pid);
+    if (identity === null) throw new Error("could not read this test process's own identity");
+    const owners = [
+      { host: `${hostname()}-renamed`, ...identity, token: "cross-host-holder" },
+      { host: hostname(), pid: process.pid, start_time: "unknown", token: "unknown-holder" },
+    ];
+
+    for (const [index, owner] of owners.entries()) {
+      const { root, source } = fixture();
+      await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+      const p = operatorProfilePoolTest.paths(root);
+      writeFileSync(p.seedLock, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+
+      await expect(
+        acquireOperatorProfile(`session-unverifiable-${index}`, {
+          rootDir: root,
+          sourceProfileDir: source,
+          deadline: Date.now() + 100,
+        }),
+      ).rejects.toMatchObject({ reason: "timeout", phase: "seed_lock" });
+
+      const longAgo = new Date(Date.now() - 3 * 60_000);
+      utimesSync(p.seedLock, longAgo, longAgo);
+      const lease = await acquireOperatorProfile(`session-reclaimed-${index}`, {
+        rootDir: root,
+        sourceProfileDir: source,
+        deadline: Date.now() + 5_000,
+      });
+      await lease.destroy();
+    }
+  });
+
+  it("fences an in-flight seed publication after its lock is reclaimed", async () => {
+    const { root, source } = fixture();
+    const original = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    let reclaimed = false;
+
+    await expect(
+      operatorProfilePoolTest.withSeedLock(p, async (assertOwned) =>
+        operatorProfilePoolTest.publishSeedLocked(p, source, assertOwned, async () => {
+          const longAgo = new Date(Date.now() - 3 * 60_000);
+          utimesSync(p.seedLock, longAgo, longAgo);
+          await operatorProfilePoolTest.withSeedLock(p, () => {
+            reclaimed = true;
+          });
+        }),
+      ),
+    ).rejects.toThrow("shared seed lock ownership was reclaimed");
+
+    expect(reclaimed).toBe(true);
+    expect(operatorProfilePoolTest.currentGeneration(p)).toBe(original);
+    expect(readdirSync(p.generations)).toEqual([original]);
+  });
+
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
     const { root, source } = fixture();
     const first = await publishOperatorProfileSeed(source, {
@@ -302,12 +361,16 @@ describe("operator profile pool migration stage", () => {
     ).toThrow();
 
     writeCookies(source, [{ host: ".google.com", name: "SID", value: "new-identity-cookie" }]);
+    const inProgressStaging = join(p.generations, ".other-publisher.tmp");
+    mkdirSync(inProgressStaging);
+    writeFileSync(join(inProgressStaging, "marker"), "in progress");
     const second = await publishOperatorProfileSeed(source, {
       rootDir: root,
       proof: verifiedLoginProof,
     });
     expect(second).not.toBe(first);
-    expect(readdirSync(p.generations)).toEqual([second]);
+    expect(readdirSync(p.generations).sort()).toEqual([".other-publisher.tmp", second].sort());
+    expect(readFileSync(join(inProgressStaging, "marker"), "utf8")).toBe("in progress");
     expect(operatorProfilePoolTest.currentGeneration(p)).toBe(second);
   });
 
