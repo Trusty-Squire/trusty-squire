@@ -570,14 +570,39 @@ function currentGeneration(p: PoolPaths): string | null {
   }
 }
 
+function readSeedReaderOwner(path: string): SeedLockOwner | null {
+  const owner = readJson<Partial<SeedLockOwner>>(path);
+  return owner !== null &&
+    typeof owner.host === "string" &&
+    Number.isSafeInteger(owner.pid) &&
+    typeof owner.start_time === "string" &&
+    typeof owner.token === "string"
+    ? (owner as SeedLockOwner)
+    : null;
+}
+
+function seedReaderPinIsActive(path: string): boolean {
+  const owner = readSeedReaderOwner(path);
+  if (owner === null) {
+    try {
+      return Date.now() - lstatSync(path).mtimeMs < STARTUP_GRACE_MS;
+    } catch (err) {
+      return (err as NodeJS.ErrnoException).code !== "ENOENT";
+    }
+  }
+  if (owner.host === hostname()) {
+    const state = processState(owner);
+    if (state === "matching") return true;
+    if (state === "stale") return false;
+  }
+  return !lockHeldPastTtl(path);
+}
+
 function seedGenerationHasReader(path: string): boolean {
   try {
     for (const entry of readdirSync(path, { withFileTypes: true })) {
       if (!entry.isFile() || !entry.name.startsWith(".reader-")) continue;
-      const owner = readJson<SeedLockOwner>(join(path, entry.name));
-      if (owner === null || owner.host !== hostname() || processState(owner) !== "stale") {
-        return true;
-      }
+      if (seedReaderPinIsActive(join(path, entry.name))) return true;
     }
   } catch {
     return true;

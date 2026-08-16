@@ -375,6 +375,74 @@ describe("operator profile pool migration stage", () => {
     expect(readFileSync(join(destination, "Local State"), "utf8")).toBe("identity-key-state");
   });
 
+  it("expires unverifiable reader pins while retaining confirmed live readers", async () => {
+    const { root, source } = fixture();
+    const first = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    const p = operatorProfilePoolTest.paths(root);
+    const identity = processBirthIdentity(process.pid);
+    if (identity === null) throw new Error("could not read this test process's own identity");
+    const expired = new Date(Date.now() - 3 * 60_000);
+    const crossHostPin = join(p.generations, first, ".reader-cross-host");
+    writeFileSync(
+      crossHostPin,
+      `${JSON.stringify({ host: `${hostname()}-renamed`, ...identity, token: "cross-host" })}\n`,
+    );
+    const unknownIdentityPin = join(p.generations, first, ".reader-unknown-identity");
+    writeFileSync(
+      unknownIdentityPin,
+      `${JSON.stringify({
+        host: hostname(),
+        pid: process.pid,
+        start_time: "unknown",
+        token: "unknown-identity",
+      })}\n`,
+    );
+
+    const second = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    expect(existsSync(join(p.generations, first, "user-data"))).toBe(true);
+
+    utimesSync(crossHostPin, expired, expired);
+    utimesSync(unknownIdentityPin, expired, expired);
+    const third = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    expect(existsSync(join(p.generations, first))).toBe(false);
+    expect(existsSync(join(p.generations, second))).toBe(false);
+
+    const livePin = join(p.generations, third, ".reader-live");
+    writeFileSync(livePin, `${JSON.stringify({ host: hostname(), ...identity, token: "live" })}\n`);
+    utimesSync(livePin, expired, expired);
+    const fourth = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    expect(existsSync(join(p.generations, third, "user-data"))).toBe(true);
+
+    rmSync(livePin);
+    const malformedPin = join(p.generations, fourth, ".reader-malformed");
+    writeFileSync(malformedPin, "{}\n");
+    const fifth = await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    expect(existsSync(join(p.generations, fourth, "user-data"))).toBe(true);
+
+    utimesSync(malformedPin, expired, expired);
+    await publishOperatorProfileSeed(source, {
+      rootDir: root,
+      proof: verifiedLoginProof,
+    });
+    expect(existsSync(join(p.generations, fourth))).toBe(false);
+    expect(existsSync(join(p.generations, fifth))).toBe(false);
+  });
+
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {
     const { root, source } = fixture();
     const first = await publishOperatorProfileSeed(source, {
