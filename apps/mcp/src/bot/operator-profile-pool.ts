@@ -233,12 +233,13 @@ function readSeedLockOwner(path: string): SeedLockOwner | null {
 }
 
 function seedLockState(path: string): "matching" | "stale" | "unknown" {
-  // Delivered scope is confirmed-dead-PID reclaim only. A same-host holder with
-  // matching PID/start_time is intentionally unreclaimed: wall-clock reclaim of
-  // a plausibly-live owner cannot be fully race-free without a heavier heartbeat
-  // or fencing protocol, which was evaluated and rejected as out of scope. Such
-  // a protocol also cannot protect against an already-running old-version orphan
-  // like the 2026-08-15 incident; identify and kill that process by PID instead.
+  // Valid owner records are reclaimed only when their same-host PID/start_time is
+  // confirmed stale. A matching or cross-host owner is intentionally unreclaimed:
+  // wall-clock reclaim of a plausibly-live owner cannot be fully race-free without
+  // a heavier heartbeat or fencing protocol, which was rejected as out of scope.
+  // It also cannot protect against an already-running old-version orphan like the
+  // 2026-08-15 incident; identify and kill that process by PID instead. The
+  // startup grace below applies only when no valid owner record can be read.
   const owner = readSeedLockOwner(path);
   if (owner !== null) {
     if (owner.host !== hostname()) return "unknown";
