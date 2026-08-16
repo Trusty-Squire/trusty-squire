@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -9,6 +10,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -22,7 +24,14 @@ import {
   OPERATOR_SEED_GOOGLE_COOKIE_NAMES,
   publishOperatorProfileSeed,
 } from "../operator-profile-pool.js";
-import { profilePathIdentity } from "../profile.js";
+import { processBirthIdentity, profilePathIdentity } from "../profile.js";
+
+// A pid that has certainly exited: spawn a no-op node and let it finish.
+function deadPid(): number {
+  const r = spawnSync(process.execPath, ["-e", ""]);
+  if (r.pid === undefined) throw new Error("could not spawn a throwaway process");
+  return r.pid;
+}
 
 const roots: string[] = [];
 const verifiedLoginProof = {
@@ -187,6 +196,82 @@ describe("operator profile pool migration stage", () => {
       await first?.destroy();
       vi.useRealTimers();
     }
+  });
+
+  it("reclaims a seed lock whose recorded holder process has exited", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    writeFileSync(
+      p.seedLock,
+      `${JSON.stringify({
+        host: hostname(),
+        pid: deadPid(),
+        start_time: "dead-birth",
+        token: "orphaned-holder",
+      })}\n`,
+      { mode: 0o600 },
+    );
+
+    const lease = await acquireOperatorProfile("session-dead-holder", {
+      rootDir: root,
+      sourceProfileDir: source,
+      deadline: Date.now() + 5_000,
+    });
+    try {
+      expect(lease.profileDir).toBeTruthy();
+    } finally {
+      await lease.destroy();
+    }
+  });
+
+  it("reclaims a seed lock held past the bounded TTL even though its holder process is still alive", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    const identity = processBirthIdentity(process.pid);
+    if (identity === null) throw new Error("could not read this test process's own identity");
+    writeFileSync(
+      p.seedLock,
+      `${JSON.stringify({ host: hostname(), ...identity, token: "wedged-holder" })}\n`,
+      { mode: 0o600 },
+    );
+    const longAgo = new Date(Date.now() - 3 * 60_000);
+    utimesSync(p.seedLock, longAgo, longAgo);
+
+    const lease = await acquireOperatorProfile("session-wedged-holder", {
+      rootDir: root,
+      sourceProfileDir: source,
+      deadline: Date.now() + 5_000,
+    });
+    try {
+      expect(lease.profileDir).toBeTruthy();
+    } finally {
+      await lease.destroy();
+    }
+  });
+
+  it("keeps serializing a live seed-lock holder that is still within the bounded TTL", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    const identity = processBirthIdentity(process.pid);
+    if (identity === null) throw new Error("could not read this test process's own identity");
+    writeFileSync(
+      p.seedLock,
+      `${JSON.stringify({ host: hostname(), ...identity, token: "genuinely-live-holder" })}\n`,
+      { mode: 0o600 },
+    );
+
+    await expect(
+      acquireOperatorProfile("session-genuine-contention", {
+        rootDir: root,
+        sourceProfileDir: source,
+        deadline: Date.now() + 200,
+      }),
+    ).rejects.toMatchObject({ reason: "timeout", phase: "seed_lock" });
+
+    rmSync(p.seedLock, { force: true });
   });
 
   it("publishes an identity-only immutable seed and deterministically GCs the old generation", async () => {

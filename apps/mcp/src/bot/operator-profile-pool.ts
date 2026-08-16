@@ -39,6 +39,13 @@ import {
 const ACTIVE_SLOT_COUNT = 2;
 const UNPUBLISHED_SEED_GENERATION = "unpublished";
 const STARTUP_GRACE_MS = 30_000;
+// A legitimate seed-lock hold (seed publication, or the cold-profile copy in
+// acquireOperatorProfile) finishes in well under a minute. This bound exists
+// only to reclaim a lock whose live-but-wedged holder (e.g. an orphaned
+// old-version MCP process left over from a prior reconnect) will otherwise
+// never release it — the genuine-contention path above is unaffected because
+// real holders always release long before this fires.
+const SEED_LOCK_HOLD_TTL_MS = 2 * 60_000;
 const WARM_IDLE_TTL_MS = 6 * 60 * 60 * 1_000;
 const WARM_MAX_REUSES = 50;
 const WARM_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
@@ -232,11 +239,23 @@ function readSeedLockOwner(path: string): SeedLockOwner | null {
   }
 }
 
+function lockHeldPastTtl(path: string): boolean {
+  try {
+    return Date.now() - lstatSync(path).mtimeMs >= SEED_LOCK_HOLD_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
 function seedLockState(path: string): "matching" | "stale" | "unknown" {
   const owner = readSeedLockOwner(path);
   if (owner !== null) {
     if (owner.host !== hostname()) return "unknown";
-    return processState(owner);
+    const state = processState(owner);
+    // A live, matching owner is still reclaimed once the lock has been held
+    // past the bounded TTL: the holder process exists but is no longer
+    // making progress (a wedged/orphaned worker), not genuinely contending.
+    return state === "matching" && lockHeldPastTtl(path) ? "stale" : state;
   }
   try {
     return Date.now() - lstatSync(path).mtimeMs >= STARTUP_GRACE_MS ? "stale" : "unknown";
