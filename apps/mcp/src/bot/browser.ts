@@ -840,9 +840,7 @@ const CONFIRM_DOLLAR_PREFIX_CURRENCIES: Readonly<Record<string, string>> = {
   US: "USD",
 };
 
-function classifyCheckoutConfirmCurrencyToken(
-  token: string | undefined,
-): string | undefined {
+function classifyCheckoutConfirmCurrencyToken(token: string | undefined): string | undefined {
   if (token === undefined) return undefined;
   const upper = token.toUpperCase();
   if (upper.endsWith("$") && upper.length > 1) {
@@ -978,7 +976,7 @@ export function parseCheckoutAmount(
 }
 
 /**
- * Like parseCheckoutAmount but returns every currency-guard-clean match
+ * Like parseCheckoutAmount but returns every parseable currency/amount match
  * instead of the first — checkout review pages can show a pre-shipping
  * subtotal before the final labeled total, so the caller needs the full
  * sequence to pick the settled one. Reuses the same regex and currency
@@ -7688,17 +7686,16 @@ export class BrowserController {
     // Currency ambiguity on the page (a shared symbol, an FX-preview module,
     // …) never blocks this read by itself — an unpinned notation simply
     // contributes no amount for that occurrence (see parseCheckoutAmountMatch)
-    // and resolution falls through to another candidate or to
-    // payment_checkout_total_not_found below. That is the only refusal mode
-    // left here; the amount/currency actually charged is still verified
-    // against the approved mandate by the caller after this returns.
+    // and resolution falls through to another candidate. If no candidate can
+    // be resolved, the existing payment_checkout_total_not_found path below
+    // handles it; currency ambiguity has no separate refusal status.
     // Structured-data order total (schema.org Order/Invoice.totalPaymentDue).
     // Used only when the visible text yields no clean labeled total: a
     // structured total that CONTRADICTS a clean visible one can't be confirmed
     // current (stale server-rendered JSON-LD is a real pattern), so the total
     // the user actually sees wins; when both agree the value is identical
     // either way. Net effect: structured data only ever rescues a
-    // total_not_found, never overrides the text path or its currency guards.
+    // total_not_found, never overrides the text path or its currency resolution.
     const mainAmount = parsedFrames[0] ?? null;
     const childAmounts = parsedFrames
       .slice(1)

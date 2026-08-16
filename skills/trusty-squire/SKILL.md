@@ -121,11 +121,11 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   **Continue to review**, then call `operate_pay` with `phase: "confirm"` once the
   final total is visible. Confirm reads that total and charges under the same
   approval when it is at or below the approved amount. It never asks for another
-  approval: a higher total returns `payment_amount_exceeds_approval`, while an
-  unresolved or conflicting total also fails closed. `item` and `reason` remain
-  required on both calls. Never click a pay/place-order control or press Enter
-  while the card fill is pending; confirm owns the strict amount check and charge.
-  An unrecognized payment iframe is a hard stop.
+  approval: a higher total returns `payment_amount_exceeds_approval`, and a missing
+  or conflicting total fails closed. Currency resolution follows the linked README
+  payment guide. `item` and `reason` remain required on both calls. Never click a
+  pay/place-order control or press Enter while the card fill is pending; confirm owns
+  the strict amount check and charge. An unrecognized payment iframe is a hard stop.
 - Do not call `operate_finish` while a payment is in progress, awaiting approval,
   or filled and awaiting confirmation. Finish drains calls already using that
   session and refuses to close until its payment state is terminal.

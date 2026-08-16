@@ -385,25 +385,28 @@ describe("checkout payment parsing", () => {
     "Order total 98.45 kr",
     "Order total 98.45 ₺",
     "Order total JPY$98.45",
-  ])("resolves against the approved currency when a total uses unresolved currency notation: %s", async (text) => {
-    // A notation the resolver can't pin to an ISO currency on its own no
-    // longer blocks the read — it resolves against the already-approved
-    // currency, same as a plain unlabeled number would.
-    const browser = new BrowserController({ humanize: false });
-    const frame = { evaluate: vi.fn().mockResolvedValue(text) };
-    const page = {
-      evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
-      mainFrame: () => frame,
-      frames: () => [frame],
-      url: () => "https://flowers.example.test/checkout",
-    };
-    Object.defineProperty(browser, "page", { value: page });
+  ])(
+    "resolves against the approved currency when a total uses unresolved currency notation: %s",
+    async (text) => {
+      // A notation the resolver can't pin to an ISO currency on its own no
+      // longer blocks the read — it resolves against the already-approved
+      // currency, same as a plain unlabeled number would.
+      const browser = new BrowserController({ humanize: false });
+      const frame = { evaluate: vi.fn().mockResolvedValue(text) };
+      const page = {
+        evaluate: vi.fn().mockResolvedValue({ title: "Japan Flower Shop", siteName: "" }),
+        mainFrame: () => frame,
+        frames: () => [frame],
+        url: () => "https://flowers.example.test/checkout",
+      };
+      Object.defineProperty(browser, "page", { value: page });
 
-    await expect(browser.readCheckoutSummary("USD")).resolves.toMatchObject({
-      amount_cents: 9_845,
-      currency: "USD",
-    });
-  });
+      await expect(browser.readCheckoutSummary("USD")).resolves.toMatchObject({
+        amount_cents: 9_845,
+        currency: "USD",
+      });
+    },
+  );
 
   it.skipIf(!chromiumAvailable)(
     "ignores struck-through totals in initial and review reads",
