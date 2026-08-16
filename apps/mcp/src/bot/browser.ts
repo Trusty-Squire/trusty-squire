@@ -1410,6 +1410,46 @@ function extractObservationVisibleText(): string {
   return text;
 }
 
+function elementHasEffectiveVisibleRect(element: Element): boolean {
+  if (!element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+  const view = element.ownerDocument.defaultView;
+  if (view === null) return false;
+  const rect = element.getBoundingClientRect();
+  let left = Math.max(rect.left, 0);
+  let top = Math.max(rect.top, 0);
+  let right = Math.min(rect.right, view.innerWidth);
+  let bottom = Math.min(rect.bottom, view.innerHeight);
+  const clips = (overflow: string): boolean =>
+    /^(?:auto|clip|hidden|overlay|scroll)$/.test(overflow);
+  let ancestor = element.parentElement;
+  while (ancestor !== null) {
+    const style = view.getComputedStyle(ancestor);
+    const clipsX = clips(style.overflowX);
+    const clipsY = clips(style.overflowY);
+    if (clipsX || clipsY) {
+      const ancestorRect = ancestor.getBoundingClientRect();
+      const clientLeft = ancestor instanceof HTMLElement ? ancestor.clientLeft : 0;
+      const clientTop = ancestor instanceof HTMLElement ? ancestor.clientTop : 0;
+      const clipLeft = ancestorRect.left + clientLeft;
+      const clipTop = ancestorRect.top + clientTop;
+      const clipRight =
+        clipLeft + (ancestor instanceof HTMLElement ? ancestor.clientWidth : ancestorRect.width);
+      const clipBottom =
+        clipTop + (ancestor instanceof HTMLElement ? ancestor.clientHeight : ancestorRect.height);
+      if (clipsX) {
+        left = Math.max(left, clipLeft);
+        right = Math.min(right, clipRight);
+      }
+      if (clipsY) {
+        top = Math.max(top, clipTop);
+        bottom = Math.min(bottom, clipBottom);
+      }
+    }
+    ancestor = ancestor.parentElement;
+  }
+  return right - left >= 4 && bottom - top >= 4;
+}
+
 const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
 
 function passesPaymentLuhn(digits: string): boolean {
@@ -9395,6 +9435,43 @@ export class BrowserController {
     }
   }
 
+  private async isFrameVisible(frame: Frame): Promise<boolean> {
+    if (!this.page) return false;
+    const mainFrame = this.page.mainFrame();
+    let current: Frame | null = frame;
+    while (current !== mainFrame) {
+      if (current === null) return false;
+      const frameElement = await current.frameElement().catch(() => null);
+      if (frameElement === null) return false;
+      try {
+        if (!(await frameElement.evaluate(elementHasEffectiveVisibleRect).catch(() => false))) {
+          return false;
+        }
+      } finally {
+        await frameElement.dispose().catch(() => undefined);
+      }
+      current = current.parentFrame();
+    }
+    return true;
+  }
+
+  private async hasVisibleThreeDsStructuralSignal(frame: Frame): Promise<boolean> {
+    const elements = await frame
+      .locator('iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i])')
+      .elementHandles()
+      .catch(() => []);
+    try {
+      const visibility = await Promise.all(
+        elements.map((element) =>
+          element.evaluate(elementHasEffectiveVisibleRect).catch(() => false),
+        ),
+      );
+      return visibility.some(Boolean);
+    } finally {
+      await Promise.all(elements.map((element) => element.dispose().catch(() => undefined)));
+    }
+  }
+
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     // Cross-processor 3DS signals only — never key on a single PSP's internal
@@ -9408,29 +9485,25 @@ export class BrowserController {
       // at hcaptcha.html#frame=challenge previously tripped the bare
       // "challenge" match this pattern used to include.
       if (this.frameWithinCaptcha(frame)) continue;
+      if (!(await this.isFrameVisible(frame))) continue;
+      // Text signals intentionally use rendered innerText without effective-rect gating;
+      // overflow-clipped 3DS phrasing is an accepted contrived residual.
+      const [text, structural] = await Promise.all([
+        frame.evaluate(extractObservationVisibleText).catch(() => ""),
+        this.hasVisibleThreeDsStructuralSignal(frame),
+      ]);
       const detected =
         urlPattern.test(frame.url()) ||
-        (await frame
-          .evaluate(() => {
-            const text = document.body?.innerText ?? "";
-            if (
-              document.querySelector(
-                'iframe[title*="3d secure" i],input[name="creq" i],form[action*="acs" i]',
-              ) !== null
-            )
-              return true;
-            return /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
-              text,
-            );
-          })
-          .catch(() => false));
-      if (detected) {
-        return {
-          three_ds_required: true,
-          order_confirmed: false,
-          challenge_url: frame.url() || this.page.url(),
-        };
-      }
+        structural ||
+        /\b(?:3d secure|authenticate (?:this )?payment|verify (?:your )?identity|security code sent to)\b/i.test(
+          text,
+        );
+      if (!detected) continue;
+      return {
+        three_ds_required: true,
+        order_confirmed: false,
+        challenge_url: frame.url() || this.page.url(),
+      };
     }
     return { three_ds_required: false, order_confirmed: false };
   }

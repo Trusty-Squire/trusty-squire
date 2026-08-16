@@ -965,6 +965,52 @@ describe("checkout payment parsing", () => {
     }
   });
 
+  // A hidden EMV 3DS Method pre-auth frame can use the same ACS-shaped URL as a
+  // challenge. It must not interrupt polling for a later frictionless order
+  // confirmation because it presents no user interaction.
+  it.skipIf(!chromiumAvailable)(
+    "does not flag a hidden 3DS-method ping frame and still confirms a frictionless order",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const methodUrl = "https://issuer.example.test/acs/method";
+      try {
+        const page = await browser.newPage();
+        await page.route(methodUrl, async (route) =>
+          route.fulfill({ contentType: "text/html", body: "" }),
+        );
+        await page.route("https://merchant.test/checkout", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay">Pay now</button>
+              <script>
+                document.querySelector("#pay").addEventListener("click", () => {
+                  const frame = document.createElement("iframe");
+                  frame.src = ${JSON.stringify(methodUrl)};
+                  frame.style.cssText = "display:none;width:0;height:0;border:0";
+                  frame.width = "0";
+                  frame.height = "0";
+                  document.body.append(frame);
+                  setTimeout(() => history.pushState({}, "", "/checkouts/abc123/thank_you"), 200);
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/checkout");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: true,
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
   it.skipIf(!chromiumAvailable)(
     "ignores a merchant confirmation signal that predates the Pay now click",
     async () => {
@@ -3605,6 +3651,10 @@ describe("3DS detection vs captcha frames", () => {
           frameUrl: "https://issuer.example.test/authenticate",
           frameAttributes: 'title="3D Secure authentication"',
         },
+        {
+          frameUrl: "https://issuer.example.test/authenticate",
+          frameHtml: '<form><input type="hidden" name="creq"><button>Authorize</button></form>',
+        },
         { merchantHtml: "<p>Please authenticate this payment using 3-D Secure</p>" },
       ];
       try {
@@ -3639,6 +3689,12 @@ describe("3DS detection vs captcha frames", () => {
         frameHtml:
           '<iframe srcdoc="<p>Please verify your identity</p><input name=&quot;creq&quot;>"></iframe>',
       },
+      // EMV 3DS "3DS Method" pre-auth ping — a real ACS-shaped URL, but a
+      // hidden 0x0 iframe with no user interaction, not a challenge.
+      {
+        frameUrl: "https://issuer.example.test/acs/method",
+        frameAttributes: 'style="display:none;width:0;height:0;border:0" width="0" height="0"',
+      },
     ];
     try {
       for (const testCase of cases) {
@@ -3651,4 +3707,45 @@ describe("3DS detection vs captcha frames", () => {
       await browser.close();
     }
   });
+
+  it.skipIf(!chromiumAvailable)(
+    "ignores 3DS signals hidden by their element or an ancestor",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const cases = [
+        {
+          merchantHtml:
+            '<div style="opacity:0"><iframe src="https://issuer.example.test/acs/method" width="100" height="100"></iframe></div>',
+        },
+        {
+          merchantHtml:
+            '<div style="visibility:hidden"><iframe title="3D Secure authentication" src="https://issuer.example.test/authenticate"></iframe></div>',
+        },
+        {
+          merchantHtml:
+            '<div style="display:none"><form action="https://issuer.example.test/acs/challenge"><button>Authorize</button></form></div>',
+        },
+        {
+          merchantHtml:
+            '<div style="opacity:0"><p>Please authenticate this payment using 3-D Secure</p></div>',
+        },
+        { merchantHtml: '<input type="hidden" name="creq">' },
+        {
+          merchantHtml:
+            '<div style="width:0;height:0;overflow:hidden"><iframe title="3D Secure authentication" src="https://issuer.example.test/acs/method" width="100" height="100"></iframe></div>',
+        },
+      ];
+      try {
+        for (const testCase of cases) {
+          await expect(detectInRealPage(browser, testCase)).resolves.toEqual({
+            three_ds_required: false,
+            order_confirmed: false,
+          });
+        }
+      } finally {
+        await browser.close();
+      }
+    },
+    15_000,
+  );
 });
