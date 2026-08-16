@@ -4893,6 +4893,12 @@ export class BrowserController {
     target: TrackedClickTarget,
     shouldTrack: (labels: readonly string[]) => boolean = () => true,
   ): Promise<ClickDispatchStatus> {
+    // Accepted residual: aria-labelledby-only names can escape this final probe;
+    // closing it would broaden shared click instrumentation again.
+    // Accepted residual: same-handle labels can change during the actionability
+    // wait; dispatch-boundary hooks would alter shared click semantics.
+    // Accepted residual: page closure during the pre-click state probe remains
+    // ambiguous; tightening it would deepen the primitive that regressed ordinary clicks.
     if (!this.page) {
       throw new BrowserClickDispatchError("not_dispatched", new Error("Browser not started"));
     }

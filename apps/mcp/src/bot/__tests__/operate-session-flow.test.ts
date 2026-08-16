@@ -149,7 +149,6 @@ const h = vi.hoisted(() => ({
   locatorTypeCalls: [] as Array<{ text: string; sealed: boolean }>,
   locatorResolveIntents: [] as string[],
   locatorDisposeCalls: 0,
-  finalClickLabels: null as string[] | null,
   isPayPalHostedCheckout: false,
   filledCards: [] as unknown[],
   fillAndSubmitError: null as Error | null,
@@ -388,8 +387,22 @@ vi.mock("../browser.js", () => ({
     async hasPhoneCountryControl(): Promise<boolean> {
       return h.phoneCountry !== null;
     }
-    async click(): Promise<void> {
+    async click(selector?: string): Promise<void> {
       h.clickCalls += 1;
+      if (selector !== undefined) {
+        const element = (h.elements as Array<Record<string, unknown>>).find(
+          (candidate) => candidate.selector === selector,
+        );
+        if (
+          element?.tag === "input" &&
+          (element.type === "checkbox" || element.type === "radio")
+        ) {
+          element.checked = true;
+        }
+        if (element?.role === "switch" || element?.role === "checkbox") {
+          element.ariaChecked = element.ariaChecked !== true;
+        }
+      }
       if (h.clickValueMutation !== null) {
         for (const element of h.elements as Array<Record<string, unknown>>) {
           if (element.selector === h.clickValueMutation.selector) {
@@ -425,15 +438,14 @@ vi.mock("../browser.js", () => ({
               (candidate) => candidate.selector === target.selector,
             );
       const labels =
-        h.finalClickLabels ??
-        (target.kind === "handle"
+        target.kind === "handle"
           ? (h.locatorResolve.labels ?? [h.locatorResolve.text])
           : [
               element?.ariaLabel,
               element?.value,
               element?.visibleText,
               element?.labelText,
-            ].filter((label): label is string => typeof label === "string"));
+            ].filter((label): label is string => typeof label === "string");
       const tracked = shouldTrack(labels);
       const failure = h.trackedClickFailure;
       if (failure?.dispatchStatus !== "not_dispatched") {
@@ -957,7 +969,6 @@ beforeEach(() => {
   h.locatorTypeCalls = [];
   h.locatorResolveIntents = [];
   h.locatorDisposeCalls = 0;
-  h.finalClickLabels = null;
   h.isPayPalHostedCheckout = false;
   h.filledCards = [];
   h.fillAndSubmitError = null;
@@ -5228,6 +5239,39 @@ describe("pending card-fill charge guard", () => {
     await act(started.session_id, { kind: "oauth_click", target: "Place order" });
   });
 
+  it("preserves ordinary checkbox and ARIA-toggle semantics while an approval is active", async () => {
+    h.elements = [
+      elem({
+        tag: "input",
+        type: "checkbox",
+        checked: false,
+        visibleText: null,
+        labelText: "Accept terms",
+        selector: "#terms",
+      }),
+      elem({
+        tag: "button",
+        type: null,
+        role: "switch",
+        ariaChecked: false,
+        visibleText: "Enable alerts",
+        selector: "#alerts",
+      }),
+    ];
+    h.visibleText = "Checkout";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+
+    await act(started.session_id, { kind: "click", target: "Accept terms" });
+    await act(started.session_id, { kind: "click", target: "Enable alerts" });
+
+    expect((h.elements[0] as { checked: boolean }).checked).toBe(true);
+    expect((h.elements[1] as { ariaChecked: boolean }).ariaChecked).toBe(true);
+    expect(h.clickCalls).toBe(2);
+  });
+
   it("allows exactly one charge-verb click per approval, then refuses a repeat — one approval, one place-order attempt", async () => {
     h.elements = [
       elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
@@ -5282,28 +5326,6 @@ describe("pending card-fill charge guard", () => {
     await act(started.session_id, { kind: "click", target: "Checkout" });
     expect(h.clickCalls).toBe(1);
     await expect(act(started.session_id, { kind: "click", target: "Checkout" })).rejects.toThrow(
-      /place-order attempt already fired/,
-    );
-    expect(h.clickCalls).toBe(1);
-  });
-
-  it("guards a control relabeled from non-charge to place-order before dispatch", async () => {
-    h.elements = [elem({ tag: "button", visibleText: "Continue", selector: "#checkout" })];
-    h.finalClickLabels = ["Place order"];
-    h.visibleText = "Checkout";
-    const auditPayment = vi.fn().mockResolvedValue({ id: "evt_relabel" });
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-      api: { auditPayment } as unknown as ApiClient,
-    });
-    setActivePendingCardFill(pending);
-
-    await act(started.session_id, { kind: "click", target: "Continue" });
-
-    expect(h.clickCalls).toBe(1);
-    expect(auditPayment).toHaveBeenCalledTimes(1);
-    h.elements = [elem({ tag: "button", visibleText: "Place order", selector: "#checkout" })];
-    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
       /place-order attempt already fired/,
     );
     expect(h.clickCalls).toBe(1);

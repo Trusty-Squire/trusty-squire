@@ -4360,6 +4360,17 @@ function isCheckoutSubmitLabeled(labels: readonly (string | null | undefined)[])
   );
 }
 
+function isPlaceOrderClickCandidate(el: InteractiveElement): boolean {
+  return isCheckoutSubmitLabeled([
+    el.ariaLabel,
+    el.value,
+    el.visibleText,
+    el.labelText,
+    el.iconLabel,
+    el.title,
+  ]);
+}
+
 // D2 — one human passkey approval authorizes at most one place-order attempt.
 // operate_act is otherwise fully generic (no merchant hostname/selector
 // knowledge); this reuses the SAME label heuristic (CHECKOUT_SUBMIT_LABEL_RE)
@@ -4725,8 +4736,13 @@ export async function act(
           }
           bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
           session.usedLocatorFallback = true;
+          const isPlaceOrderCandidate = isCheckoutSubmitLabeled([
+            resolved.text,
+            ...resolved.labels,
+          ]);
           if (
             session.placeOrderApproval !== null &&
+            isPlaceOrderCandidate &&
             (action.kind === "click" || action.kind === "js_click")
           ) {
             await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
@@ -4777,7 +4793,7 @@ export async function act(
       bindCartIdentity(isCartAffectingAction(action, el));
       if (action.kind === "click" || action.kind === "js_click") {
         const target = frameTargetFor(el);
-        if (session.placeOrderApproval !== null) {
+        if (session.placeOrderApproval !== null && isPlaceOrderClickCandidate(el)) {
           await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
             browser.clickWithDispatchTracking(
               target !== null
