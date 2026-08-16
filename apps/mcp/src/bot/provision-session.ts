@@ -23,7 +23,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BrowserController,
+  CHECKOUT_SUBMIT_LABEL_RE,
+  clickDispatchStatusForError,
   parseCheckoutAmount,
+  type ClickDispatchStatus,
   type CheckoutSummary,
   type FrameTarget,
   type InteractiveElement,
@@ -553,6 +556,24 @@ export interface Session {
     | { status: "sealed" }
     | null;
   paymentFieldSealActive: boolean;
+  // Snapshot of the single approval a filled card belongs to, captured at
+  // fill time (setActivePendingCardFill / completeActivePaymentLeaseWithPendingFill)
+  // so the place-order guard below still has what it needs after activePayment
+  // itself has moved on to "confirming" or "sealed" (sealed drops `pending`).
+  // Cleared only at session (re)init or after verified full field cleanup.
+  placeOrderApproval: {
+    approvalId: string;
+    mandateId?: string;
+    merchant: string;
+    amountCents: number;
+    currency: string;
+    cardRef: string;
+    last4: string;
+  } | null;
+  // True once a checkout-submit-labeled operate_act click has fired against
+  // placeOrderApproval. A second one is refused — one human passkey approval
+  // authorizes at most one place-order attempt (see enforcePlaceOrderGuard).
+  placeOrderAttempted: boolean;
   // The most recent real checkout total this session actually observed on a
   // page (e.g. the cart step), scoped to that page's own origin. Split
   // checkouts (Rakuten-style) show no total on the card-entry page itself;
@@ -2527,6 +2548,8 @@ export async function startProvisionSession(opts: StartOptions): Promise<Observa
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    placeOrderApproval: null,
+    placeOrderAttempted: false,
     lastCartCheckout: null,
     cartAdds: new Map(),
     cartAddsByIdempotencyKey: new Map(),
@@ -2629,6 +2652,8 @@ export async function startHarnessProvisionSession(
     replayState: null,
     activePayment: null,
     paymentFieldSealActive: false,
+    placeOrderApproval: null,
+    placeOrderAttempted: false,
     lastCartCheckout: null,
     cartAdds: new Map(),
     cartAddsByIdempotencyKey: new Map(),
@@ -2761,6 +2786,20 @@ export async function activeProvisionBrowserForPayment(
   return session.browser;
 }
 
+function placeOrderApprovalFromPendingFill(
+  pending: PendingCardFill,
+): NonNullable<Session["placeOrderApproval"]> {
+  return {
+    approvalId: pending.approval_id,
+    ...(pending.mandate_id !== undefined ? { mandateId: pending.mandate_id } : {}),
+    merchant: pending.checkout.merchant,
+    amountCents: pending.checkout.amount_cents,
+    currency: pending.checkout.currency,
+    cardRef: pending.card_ref,
+    last4: pending.last4,
+  };
+}
+
 export function setActivePendingCardFill(
   pending: PendingCardFill,
   selectedSession?: Session,
@@ -2768,6 +2807,8 @@ export function setActivePendingCardFill(
   const session = selectedSession ?? activeProvisionSession();
   session.activePayment = { status: "pending", pending };
   session.paymentFieldSealActive = true;
+  session.placeOrderApproval = placeOrderApprovalFromPendingFill(pending);
+  session.placeOrderAttempted = false;
 }
 
 export function retainActivePaymentFieldSeal(selectedSession?: Session): void {
@@ -2856,6 +2897,8 @@ export function completeActivePaymentLeaseWithPendingFill(
   }
   session.activePayment = { status: "pending", pending };
   session.paymentFieldSealActive = true;
+  session.placeOrderApproval = placeOrderApprovalFromPendingFill(pending);
+  session.placeOrderAttempted = false;
 }
 
 // [P0] Mirrors completeActivePaymentLeaseWithPendingFill for the
@@ -2914,6 +2957,15 @@ export function clearActivePendingCardFill(
   const session = selectedSession ?? activeProvisionSession();
   session.activePayment = paymentFieldsCleared ? null : { status: "sealed" };
   session.paymentFieldSealActive = !paymentFieldsCleared;
+  // A verified full clear (paymentFieldsCleared=true) is a clean slate — no
+  // approval is pending a place-order attempt anymore. The real confirm call
+  // site always passes false (moving to "sealed"), which deliberately leaves
+  // placeOrderApproval/placeOrderAttempted untouched: the guard must keep
+  // binding to the SAME approval across the pending -> sealed transition.
+  if (paymentFieldsCleared) {
+    session.placeOrderApproval = null;
+    session.placeOrderAttempted = false;
+  }
 }
 
 export function recordActivePaymentProvenance(cardRef: string, selectedSession?: Session): void {
@@ -4302,6 +4354,106 @@ async function observeSession(
   }
 }
 
+function isCheckoutSubmitLabeled(labels: readonly (string | null | undefined)[]): boolean {
+  return labels.some(
+    (label) => label !== null && label !== undefined && CHECKOUT_SUBMIT_LABEL_RE.test(label.trim()),
+  );
+}
+
+function isPlaceOrderClickCandidate(el: InteractiveElement): boolean {
+  return isCheckoutSubmitLabeled([
+    el.ariaLabel,
+    el.value,
+    el.visibleText,
+    el.labelText,
+    el.iconLabel,
+    el.title,
+  ]);
+}
+
+// D2 — one human passkey approval authorizes at most one place-order attempt.
+// operate_act is otherwise fully generic (no merchant hostname/selector
+// knowledge); this reuses the SAME label heuristic (CHECKOUT_SUBMIT_LABEL_RE)
+// Squire's own retired single-phase submit used to find the pay/place-order
+// control, so a click/js_click only counts as a place-order attempt when it
+// targets a control that reads like one. Returns the approval snapshot when
+// THIS action is the first attempt; throws before the click executes on a
+// repeat. A fresh attempt requires a fresh operate_pay approval — since a
+// filled card can never be refilled in the same session (Pillar 2), that
+// means a new session.
+function enforcePlaceOrderGuard(
+  session: Session,
+  labels: readonly (string | null | undefined)[],
+): Session["placeOrderApproval"] {
+  if (session.placeOrderApproval === null || !isCheckoutSubmitLabeled(labels)) return null;
+  if (session.placeOrderAttempted) {
+    throw new Error(
+      "operate_act refused: a place-order attempt already fired for this approval " +
+        `(approval_id=${session.placeOrderApproval.approvalId}). One human passkey approval ` +
+        "authorizes at most one place-order attempt — a fresh operate_pay approval is required " +
+        "before placing the order again.",
+    );
+  }
+  const approval = session.placeOrderApproval;
+  session.placeOrderAttempted = true;
+  return approval;
+}
+
+// D1 — best-effort server-side record that a caller-placed charge was
+// attempted. Deliberately attempt semantics, not execution: Squire cannot
+// verify what the merchant did after the caller's click (it never re-reads
+// the total or the order-confirmation page here), only that the approval was
+// consumed and the place-order control was pressed. Never blocks the click —
+// mirrors the audit_recorded best-effort handling in pay-operator.ts.
+async function recordPlaceOrderAttemptAudit(
+  session: Session,
+  approval: NonNullable<Session["placeOrderApproval"]>,
+): Promise<void> {
+  if (session.api === undefined) return;
+  try {
+    await session.api.auditPayment({
+      merchant: approval.merchant,
+      amount_cents: approval.amountCents,
+      currency: approval.currency,
+      last4: approval.last4,
+      card_ref: approval.cardRef,
+      approval_id: approval.approvalId,
+      status: "payment_place_order_attempted",
+      ...(approval.mandateId !== undefined ? { mandate_id: approval.mandateId } : {}),
+    });
+  } catch {
+    // Best-effort — an audit write failure must never fail the caller's
+    // place-order action.
+  }
+}
+
+async function runClickWithPlaceOrderGuard(
+  session: Session,
+  click: (shouldTrack: (labels: readonly string[]) => boolean) => Promise<ClickDispatchStatus>,
+): Promise<void> {
+  let approval: Session["placeOrderApproval"] = null;
+  try {
+    const dispatchStatus = await click((labels) => {
+      approval = enforcePlaceOrderGuard(session, labels);
+      return approval !== null;
+    });
+    if (approval === null) return;
+    if (dispatchStatus === "not_dispatched") {
+      if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
+      return;
+    }
+  } catch (error) {
+    if (approval === null) throw error;
+    if (clickDispatchStatusForError(error) === "not_dispatched") {
+      if (session.placeOrderApproval === approval) session.placeOrderAttempted = false;
+    } else {
+      await recordPlaceOrderAttemptAudit(session, approval);
+    }
+    throw error;
+  }
+  await recordPlaceOrderAttemptAudit(session, approval);
+}
+
 export async function act(
   sessionId: string,
   action: ProvisionAction,
@@ -4584,7 +4736,26 @@ export async function act(
           }
           bindCartIdentity(isCartAffectingAction(action, null, resolved.labels));
           session.usedLocatorFallback = true;
-          if (action.kind === "click") await browser.clickHandle(resolved.handle);
+          const isPlaceOrderCandidate = isCheckoutSubmitLabeled([
+            resolved.text,
+            ...resolved.labels,
+          ]);
+          if (
+            session.placeOrderApproval !== null &&
+            isPlaceOrderCandidate &&
+            (action.kind === "click" || action.kind === "js_click")
+          ) {
+            await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
+              browser.clickWithDispatchTracking(
+                {
+                  kind: "handle",
+                  handle: resolved.handle,
+                  method: action.kind,
+                },
+                shouldTrack,
+              ),
+            );
+          } else if (action.kind === "click") await browser.clickHandle(resolved.handle);
           else if (action.kind === "js_click") await browser.jsClickHandle(resolved.handle);
           else await browser.typeHandle(resolved.handle, action.text);
         } finally {
@@ -4620,14 +4791,24 @@ export async function act(
       // A main-frame or same-domain-frame target is unaffected.
       assertFrameTargetAllowed(session, el, action.kind);
       bindCartIdentity(isCartAffectingAction(action, el));
-      if (action.kind === "click") {
+      if (action.kind === "click" || action.kind === "js_click") {
         const target = frameTargetFor(el);
-        if (target !== null) await browser.clickInFrame(target, el.selector);
-        else await browser.click(el.selector);
-      } else if (action.kind === "js_click") {
-        const target = frameTargetFor(el);
-        if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
-        else await browser.clickViaJs(el.selector);
+        if (session.placeOrderApproval !== null && isPlaceOrderClickCandidate(el)) {
+          await runClickWithPlaceOrderGuard(session, (shouldTrack) =>
+            browser.clickWithDispatchTracking(
+              target !== null
+                ? { kind: "frame", frame: target, selector: el.selector, method: action.kind }
+                : { kind: "selector", selector: el.selector, method: action.kind },
+              shouldTrack,
+            ),
+          );
+        } else if (action.kind === "click") {
+          if (target !== null) await browser.clickInFrame(target, el.selector);
+          else await browser.click(el.selector);
+        } else {
+          if (target !== null) await browser.clickViaJsInFrame(target, el.selector);
+          else await browser.clickViaJs(el.selector);
+        }
       } else if (action.kind === "type" && frameTargetFor(el) !== null) {
         // Frame targets skip the autocomplete-popup-commit machinery below —
         // it operates on the main page's DOM only (markPreexistingType

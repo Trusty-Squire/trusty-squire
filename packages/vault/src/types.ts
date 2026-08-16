@@ -115,7 +115,8 @@ export interface VaultAuditPayload {
   // its duplicates were merged into. Set together by the one-time
   // dedup-credentials migration so the collapse is auditable + reversible.
   collapsed_into?: string;
-  // Payment-card + payment forensics (card_* / payment_executed events).
+  // Payment-card + payment forensics (card_* / payment_executed events,
+  // including caller-placed order attempts).
   // Display metadata only — `last4` is exactly the four digits the E2E
   // card row stores for display; a full PAN or CVV never reaches an
   // audit payload (the server can't read them out of the sealed blob).
@@ -124,6 +125,9 @@ export interface VaultAuditPayload {
   merchant?: string;
   amount_cents?: number;
   currency?: string;
+  mandate_id?: string;
+  card_ref?: string;
+  approval_id?: string;
   // Free-form processor status ("approved" / "declined" / …) — distinct
   // from `outcome`, whose union is the vault's own retrieval outcomes.
   payment_status?: string;
@@ -158,8 +162,8 @@ export const VAULT_AUDIT_TYPES = {
   // the server, so nothing sensitive can land here by construction.
   cardStored: "vault.card_stored",
   cardDeleted: "vault.card_deleted",
-  // A payment executed with a stored card (operate_pay's audit report).
-  // Merchant + amount + last4 only — never a PAN.
+  // A stored-card payment event: either operate_pay's outcome report or a
+  // caller-placed order attempt. Metadata only — never a PAN.
   paymentExecuted: "vault.payment_executed",
   // Egress-grant lifecycle — a standing token that lets a deployed app
   // spend the referenced credential through the injecting proxy.

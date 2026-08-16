@@ -7,7 +7,7 @@
 //
 // Deliberately NOTIFIED (rare, user-significant):
 //   credential stored / rotated / deleted / restored,
-//   card stored / deleted, payment executed, grant minted / revoked.
+//   card stored / deleted, payment executed or attempted, grant minted / revoked.
 // Deliberately EXCLUDED (per-event pushes would be spam):
 //   ACCESS events — vault.credential_retrieved, vault.proxy_executed,
 //   vault.proxy_rejected. A future access DIGEST (batched summary behind a
@@ -71,9 +71,13 @@ export function formatVaultEventMessage(event: VaultAuditEventInput, at: Date): 
           ? ` — ${formatCurrencyAmount(p.amount_cents, p.currency)}`
           : ""
       }${p.last4 !== undefined ? ` ··${p.last4}` : ""} · ${ts}`;
-      return p.payment_status === "payment_3ds_authenticated_pending_order"
-        ? `⚠️ Payment pending — manual order check required: ${paymentDetail}`
-        : `💸 Payment ${p.payment_status ?? "executed"}: ${paymentDetail}`;
+      if (p.payment_status === "payment_3ds_authenticated_pending_order") {
+        return `⚠️ Payment pending — manual order check required: ${paymentDetail}`;
+      }
+      if (p.payment_status === "payment_place_order_attempted") {
+        return `Place-order attempted: ${paymentDetail}`;
+      }
+      return `💸 Payment ${p.payment_status ?? "executed"}: ${paymentDetail}`;
     }
     case VAULT_AUDIT_TYPES.grantMinted:
       return `🔗 Egress grant minted: ${subject} · ${ts}`;

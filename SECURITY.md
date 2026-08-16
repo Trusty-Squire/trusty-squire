@@ -160,15 +160,34 @@ operator's. The operator never re-reads a live total for a split checkout, never
 clicks a charge control, and never submits anything after the fill: the fill-time
 approval already authorizes a charge up to the approved amount, and the caller is
 responsible for checking the live final total against that approved amount before
-placing the order itself through the ordinary `operate_act` surface (click, js_click,
-oauth_click, and Enter/Space are not reserved for the operator while a split fill is
-pending — clicking a charge-labeled control is an ordinary action). The card VALUES
-remain masked in every observation for the life of the pending fill regardless: that
-masking is driven by the session's payment-field seal, independent of which caller
-clicks the submit control, so the money-fence guarantee that the coding-agent model
-never sees a raw PAN/CVV holds whether the operator or the caller ends up submitting.
+placing the order itself through `operate_act`. At fill time, the session snapshots
+the approval ID, optional mandate ID,
+merchant, approved amount and currency, opaque card reference, and last four digits.
+A `click` or `js_click` whose resolved control label matches the shared
+checkout-submit heuristic consumes that snapshot before dispatch. The first
+recognized click may fire; a second recognized click for the same approval is refused
+before dispatch and requires a fresh `operate_pay` approval, which also requires a
+fresh session because same-session refill is forbidden. If dispatch is positively
+known not to have occurred, the attempt marker is rolled back. Non-charge-labeled
+clicks, key presses, and `oauth_click` remain outside this heuristic and are not gated
+by it. No merchant hostname or CSS selector participates in the decision.
+
+After a recognized place-order click dispatches, the MCP server best-effort writes a
+`vault.payment_executed` audit event through the existing payment-audit endpoint with
+`payment_status: "payment_place_order_attempted"`. The event binds the approved
+merchant, amount, currency, card reference, approval ID, optional mandate ID, and
+last four digits. It deliberately records an attempt rather than an executed charge:
+Trusty Squire cannot verify what the merchant did after the caller's click. The audit
+write never blocks or changes the click result, and no PAN or CVV can enter the
+payload.
+
+The card VALUES remain masked in every observation for the life of the pending fill
+regardless. That masking is driven by the session's payment-field seal, independent
+of which caller clicks the submit control, so the money-fence guarantee that the
+coding-agent model never sees a raw PAN/CVV holds whether the operator or the caller
+ends up submitting.
 The `confirm` phase is a pure close-out: it makes no browser or provider call, reads
-no total, verifies no amount, and audits nothing (it never charges), so it also
+no total, verifies no amount, and emits no audit event itself (it never charges), so it also
 cannot mislabel or falsely claim a payment was executed. It reports the approved
 merchant, amount, and currency back to the caller and releases the pending-fill
 lease into a sealed state — the observation seal (and so the masking) stays active,
@@ -232,10 +251,10 @@ may wait for the user to resolve the challenge, but it never completes the
 challenge itself.
 
 Payment audit events are deliberately metadata-only: merchant, amount,
-currency, card last four digits, status, and an optional mandate ID. The API
-validates `last4` as exactly four digits; the audit schema has no PAN or CVV
-fields, and stored events never include them. Payment audit events use the vault
-audit retention window, which defaults to 365 days.
+currency, card last four digits, status, and optional mandate, opaque card, and
+approval references. The API validates `last4` as exactly four digits; the audit
+schema has no PAN or CVV fields, and stored events never include them. Payment audit
+events use the vault audit retention window, which defaults to 365 days.
 
 ### Trust boundaries
 

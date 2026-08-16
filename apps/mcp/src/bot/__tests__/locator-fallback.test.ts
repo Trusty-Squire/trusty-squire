@@ -14,14 +14,13 @@
 // matches on rendered text (innerText, so hidden descendants don't leak), gates
 // on a real click affordance, checks visibility through the ancestor chain,
 // collapses a button and its inner <span> to one, refuses an ambiguous match,
-// and pierces open shadow roots. clickHandle uses one actionability-checked click
-// (noWaitAfter, so it can't throw post-dispatch and double-click); jsClickHandle
-// is the explicit DOM-dispatch path through a transparent overlay. This test
-// drives real Chromium. Synthetic fixtures only — no credentials.
+// and pierces open shadow roots. clickHandle uses one actionability-checked click;
+// jsClickHandle is the explicit DOM-dispatch path through a transparent overlay.
+// This test drives real Chromium. Synthetic fixtures only — no credentials.
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { chromium, type Browser, type Page } from "playwright";
-import { BrowserController } from "../browser.js";
+import { BrowserController, clickDispatchStatusForError } from "../browser.js";
 import { parseLocatorTarget, shouldBlockUnsafeProvisionSignals } from "../provision-session.js";
 
 // Mirrors the Casetify shape: 20 decorative cursor:pointer card-eligible divs
@@ -237,6 +236,44 @@ const ARIA_DISABLED_FIXTURE = `data:text/html,${encodeURIComponent(`
 const DETACHED_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:0">
   <button id="buy" style="width:200px;height:40px">Add To Cart</button>
+</body></html>`)}`;
+
+const REPLACED_DURING_TRACKING_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <script>
+    window.__chargeClicks = 0;
+    const original = document.createElement("button");
+    original.id = "buy";
+    original.textContent = "Place order";
+    original.style.cssText = "width:200px;height:40px";
+    document.body.append(original);
+    let trackingState;
+    let replaced = false;
+    Object.defineProperty(window, "__trustySquireClickDispatch", {
+      configurable: true,
+      get() { return trackingState; },
+      set(value) {
+        trackingState = value;
+        if (replaced) return;
+        replaced = true;
+        const replacement = original.cloneNode(true);
+        replacement.addEventListener("click", () => { window.__chargeClicks++; });
+        original.replaceWith(replacement);
+      },
+    });
+  </script>
+</body></html>`)}`;
+
+const CAPTURE_STOP_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <button id="buy" style="width:200px;height:40px">Place order</button>
+  <script>
+    window.__chargeClicks = 0;
+    document.addEventListener("click", (event) => {
+      window.__chargeClicks++;
+      event.stopPropagation();
+    }, true);
+  </script>
 </body></html>`)}`;
 
 const OVERLAY_FIXTURE = `data:text/html,${encodeURIComponent(`
@@ -459,6 +496,13 @@ describe("resolvePageTarget (real Chromium)", () => {
       if (!resolved.ok) throw new Error("unreachable");
       expect(resolved.text).toBe("");
       expect(resolved.labels).toEqual(["Place order"]);
+      await expect(
+        ctrl.clickWithDispatchTracking({
+          kind: "handle",
+          handle: resolved.handle,
+          method: "click",
+        }),
+      ).resolves.toBe("dispatched");
       await resolved.handle.dispose();
     } finally {
       await page.close();
@@ -634,9 +678,64 @@ describe("resolvePageTarget (real Chromium)", () => {
       expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw new Error("unreachable");
       await page.evaluate(() => document.querySelector("#buy")?.remove());
+      const trackedError = await ctrl
+        .clickWithDispatchTracking({
+          kind: "handle",
+          handle: resolved.handle,
+          method: "click",
+        })
+        .catch((error: unknown) => error);
+      expect(clickDispatchStatusForError(trackedError)).toBe("not_dispatched");
       await expect(ctrl.clickHandle(resolved.handle)).rejects.toThrow(/detached/);
       await expect(ctrl.jsClickHandle(resolved.handle)).rejects.toThrow(/detached/);
       await resolved.handle.dispose();
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("does not dispatch to a replacement installed after tracking begins", async () => {
+    const { ctrl, page } = await pageFor(REPLACED_DURING_TRACKING_FIXTURE);
+    try {
+      const firstError = await ctrl
+        .clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" })
+        .catch((error: unknown) => error);
+      expect(clickDispatchStatusForError(firstError)).toBe("not_dispatched");
+      expect(
+        await page.evaluate(() => (window as unknown as { __chargeClicks: number }).__chargeClicks),
+      ).toBe(0);
+
+      await expect(
+        ctrl.clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" }),
+      ).resolves.toBe("dispatched");
+      expect(
+        await page.evaluate(() => (window as unknown as { __chargeClicks: number }).__chargeClicks),
+      ).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("classifies a page closed before target resolution as not dispatched", async () => {
+    const { ctrl, page } = await pageFor(DETACHED_FIXTURE);
+    await page.close();
+
+    const trackedError = await ctrl
+      .clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" })
+      .catch((error: unknown) => error);
+
+    expect(clickDispatchStatusForError(trackedError)).toBe("not_dispatched");
+  });
+
+  it("classifies a successful click as dispatched when capture stops propagation", async () => {
+    const { ctrl, page } = await pageFor(CAPTURE_STOP_FIXTURE);
+    try {
+      await expect(
+        ctrl.clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" }),
+      ).resolves.toBe("dispatched");
+      expect(
+        await page.evaluate(() => (window as unknown as { __chargeClicks: number }).__chargeClicks),
+      ).toBe(1);
     } finally {
       await page.close();
     }

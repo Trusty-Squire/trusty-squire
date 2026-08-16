@@ -213,6 +213,11 @@ export class ApiClient {
     last4: string;
     status: string;
     mandate_id?: string;
+    // The vault card reference the charge attempt was bound to — never the
+    // raw PAN. Optional: only the caller-placed-charge-attempt audit event
+    // (operate_act's place-order guard) currently supplies it.
+    card_ref?: string;
+    approval_id?: string;
   }): Promise<{ id: string }> {
     return this.post("/v1/vault/payments/audit", {
       merchant: input.merchant,
@@ -221,6 +226,8 @@ export class ApiClient {
       last4: input.last4,
       status: input.status,
       ...(input.mandate_id !== undefined ? { mandateId: input.mandate_id } : {}),
+      ...(input.card_ref !== undefined ? { cardRef: input.card_ref } : {}),
+      ...(input.approval_id !== undefined ? { approvalId: input.approval_id } : {}),
     });
   }
 

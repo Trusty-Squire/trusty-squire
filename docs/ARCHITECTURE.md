@@ -215,12 +215,18 @@ agent starts operate_pay in the addressed checkout session
      are filled best-effort, so a missing name field does not abort the payment
   -> the raw card is zeroed; sealed, observation-masked page fields remain, while
      session state retains only approval/mandate and card-reference metadata
-  -> operate_act is NOT gated on that pending state: the caller verifies the live
-     final total against the approved amount itself and places the order through
-     ordinary navigation, click, js_click, oauth_click, or Enter/Space — none of
-     that is reserved for the operator. Card VALUES stay masked in observations
-     throughout regardless of who submits (the money-fence guarantee lives in the
-     session's payment-field seal, not in who clicks)
+  -> the caller verifies the live final total against the approved amount itself
+     and places the order through operate_act. For click/js_click, the session's
+     fill-time approval snapshot permits at most one dispatch to a control matching
+     the shared pay/place-order label heuristic; a repeat is refused and requires a
+     fresh approval in a fresh session. Non-charge-labeled clicks, key presses, and
+     oauth_click remain ungated. Card VALUES stay masked in observations throughout
+     regardless of who submits (the money-fence guarantee lives in the session's
+     payment-field seal, not in who clicks)
+  -> a dispatched recognized place-order click best-effort records one metadata-only
+     `vault.payment_executed` event with `payment_place_order_attempted` status,
+     bound to the approval, optional mandate, approved amount/currency, merchant,
+     and opaque card reference. It records an attempt, never a verified charge outcome
   -> split confirm makes no browser or provider call: it reads no total, verifies
      no amount, and submits nothing (it never charges), so it reports the approved
      merchant/amount/currency back and releases the pending-fill lease into a
