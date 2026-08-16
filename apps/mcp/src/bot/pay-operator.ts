@@ -1288,7 +1288,7 @@ export async function executeOperatePay(
           "Nothing was charged. Drive the checkout to the order-confirmation step, verify the " +
           "live final total there matches the approved amount_cents/currency above, then place " +
           "the order yourself via operate_act and handle any 3-D Secure challenge directly — " +
-          'Trusty Squire never re-reads the total or clicks the pay/place-order control. Call ' +
+          "Trusty Squire never re-reads the total or clicks the pay/place-order control. Call " +
           'operate_pay {phase:"confirm"} any time after this fill to close out the approval; it ' +
           "does not need to happen before you place the order.",
       };

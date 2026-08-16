@@ -1388,8 +1388,8 @@ describe("operate_pay split checkout phases", () => {
     const executeOperatePay = vi
       .spyOn(PayOperator, "executeOperatePay")
       .mockImplementation(async (_args, _api, _browser, deps) => {
-        deps.onCardResolved(PENDING.card_ref);
-        deps.onCardFilled(PENDING);
+        deps!.onCardResolved!(PENDING.card_ref);
+        deps!.onCardFilled!(PENDING);
         return {
           status: "payment_card_filled",
           approval_url: PENDING.approval_url,
@@ -1444,6 +1444,8 @@ describe("operate_pay split checkout phases", () => {
     expect(auditPayment).not.toHaveBeenCalled();
     expect(mockRecordActivePaymentProvenance).not.toHaveBeenCalled();
     expect(mockPending).toBeNull();
+    expect(mockPaymentSealed).toBe(true);
+    expect(mockPaymentSealActive).toBe(true);
   });
 
   it("atomically reserves a pending fill across overlapping confirms", async () => {
@@ -1515,10 +1517,7 @@ describe("operate_pay split checkout phases", () => {
     // a later iteration observes it.
     const first = operatePayTool.handler(confirmArgs, api);
     const others = [undefined, "fill_card" as const, "confirm" as const].map((phase) =>
-      operatePayTool.handler(
-        operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase }),
-        api,
-      ),
+      operatePayTool.handler(operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase }), api),
     );
     for (const other of others) {
       await expect(other).rejects.toThrow(/another payment confirmation is already in progress/);

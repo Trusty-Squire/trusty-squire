@@ -146,12 +146,12 @@ PCI card-field frame. When a checkout mounts multiple card forms, the operator f
 one complete visible and enabled group containing PAN, name, expiry, and CVV. When
 multiple groups are complete, it uses the PAN's rendered center-point hit-test and
 selects only the unique topmost, non-occluded group; otherwise it fails with
-`payment_card_form_ambiguous`. Card filling stays inside that selected group. Charge
-controls inside a card group are eligible only for the selected group in both
-same-step and later confirmation,
-and both card fields and charge controls follow their HTML `form` relationship when
-mounted elsewhere in the DOM; a merchant checkout control outside every card group
-remains eligible. Once the payment context is selected, PAN, expiry, and CVV are the
+`payment_card_form_ambiguous`. Card filling stays inside that selected group. In the
+single-page flow, a charge control inside a card group is eligible only for the
+selected group, and both card fields and that charge control follow their HTML `form`
+relationship when mounted elsewhere in the DOM; a merchant checkout control outside
+every card group remains eligible. The split-checkout fill does not select or click a
+charge control. Once the payment context is selected, PAN, expiry, and CVV are the
 required card fields. Cardholder name and the remaining billing fields are filled
 best-effort, and a missing name input does not abort an otherwise fillable payment.
 
@@ -256,9 +256,9 @@ audit retention window, which defaults to 365 days.
   plus the constrained `brand` and `last4` display metadata.
 - During payment, the phone releases card data only to the ephemeral local
   operator key under the exact purchase binding. The API and coding-agent model
-  never see plaintext PAN or CVV. Split-checkout card fields may remain sealed in
-  the live page between fill and confirmation, but observations mask their values
-  and arbitrary cross-origin frames cannot receive them.
+  never see plaintext PAN or CVV. Split-checkout card fields remain sealed in the
+  live page after fill, including after close-out confirmation; observations mask
+  their values, and arbitrary cross-origin frames cannot receive them.
 
 ### Using a credential without exposing the key: egress grants
 

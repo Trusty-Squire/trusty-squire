@@ -1640,9 +1640,10 @@ function splitPending(checkout: CheckoutSummary = SPLIT_CHECKOUT): PendingCardFi
 // the caller can verify the live total and place the order itself.
 describe("operate_pay split checkout — confirm", () => {
   it("reports the fill-time approved terms with no browser or API interaction", async () => {
-    const result = (await executeOperatePayConfirm(
-      splitPending(SPLIT_CHECKOUT),
-    )) as Record<string, unknown>;
+    const result = (await executeOperatePayConfirm(splitPending(SPLIT_CHECKOUT))) as Record<
+      string,
+      unknown
+    >;
 
     expect(result).toMatchObject({
       status: "payment_ready_to_place",
@@ -1675,9 +1676,10 @@ describe("operate_pay split checkout — confirm", () => {
     });
     expect(approvalBodies[0]).toMatchObject({ amount_cents: 2_803, currency: "JPY" });
 
-    const confirmResult = (await executeOperatePayConfirm(
-      splitPending(rakutenCart),
-    )) as Record<string, unknown>;
+    const confirmResult = (await executeOperatePayConfirm(splitPending(rakutenCart))) as Record<
+      string,
+      unknown
+    >;
     expect(confirmResult).toMatchObject({
       status: "payment_ready_to_place",
       amount_cents: 2_803,

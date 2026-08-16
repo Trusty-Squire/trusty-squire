@@ -5123,7 +5123,7 @@ describe("pending card-fill charge guard", () => {
     expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/cleanup remains unverified/);
   });
 
-  it("allows charge-verb clicks, Enter, and Space while filled — the caller places the order", async () => {
+  it("allows click/js_click/oauth_click, Enter, and Space while filled — the caller places the order", async () => {
     h.elements = [
       elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
       elem({ tag: "button", type: null, visibleText: "Continue to review", selector: "#next" }),
@@ -5141,6 +5141,7 @@ describe("pending card-fill charge guard", () => {
     await act(started.session_id, { kind: "click", target: "Place order" });
     expect(h.clickCalls).toBe(1);
     await act(started.session_id, { kind: "js_click", target: "Place order" });
+    await act(started.session_id, { kind: "oauth_click", target: "Place order" });
 
     await act(started.session_id, { kind: "click", target: "Continue to review" });
     expect(h.clickCalls).toBe(2);
@@ -5172,6 +5173,52 @@ describe("pending card-fill charge guard", () => {
 
     await act(started.session_id, { kind: "click", target: "text=Pay now" });
     expect(h.locatorClickCalls).toBe(1);
+  });
+
+  it("confirm seals the real session, keeps observations masked, permits the caller's click, and allows finish", async () => {
+    h.elements = [
+      elem({
+        id: "card-number",
+        autocomplete: "cc-number",
+        selector: "#card-number",
+        value: "4242424242424242",
+      }),
+      elem({ tag: "button", type: null, visibleText: "Confirm and pay", selector: "#pay" }),
+    ];
+    h.visibleText = "Card 4242 4242 4242 4242 · Confirm and pay";
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    setActivePendingCardFill(pending);
+
+    const result = (await operatePayTool.handler(
+      operatePayTool.inputSchema.parse({
+        session_id: started.session_id,
+        phase: "confirm",
+        item: "Widget",
+        reason: "Synthetic purchase",
+      }),
+      {} as ApiClient,
+    )) as Record<string, unknown>;
+
+    expect(result).toMatchObject({
+      status: "payment_ready_to_place",
+      merchant: "Shop",
+      amount_cents: 100,
+      currency: "USD",
+      approval_url: "https://web.test/vault/pay/appr_guard",
+    });
+    expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(
+      /payment field cleanup remains unverified/,
+    );
+
+    const full = await observe(started.session_id, "full");
+    expect(JSON.stringify(full)).not.toContain("4242424242424242");
+    expect(full.text).toContain("[sealed payment]");
+
+    await act(started.session_id, { kind: "click", target: "Confirm and pay" });
+    expect(h.clickCalls).toBe(1);
+    await finishProvisionSession(started.session_id);
   });
 
   it("masks re-rendered payment fields while a fill remains pending", async () => {

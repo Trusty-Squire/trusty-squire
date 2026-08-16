@@ -305,9 +305,10 @@ DOM-diagnostics pair is excluded from that surface; set
     variant. Cart and checkout observations expose an informational,
     best-effort `checkout_state` with stage, product and variant identity,
     quantity, separately observed subtotal and shipping, payable total when
-    known, canonical cart URL, and one `next_action`. `operate_pay` always reads
-    the authoritative charge total from the live checkout instead of accepting
-    this state as payment input.
+    known, canonical cart URL, and one `next_action`. The `single` and
+    `fill_card` payment phases derive their authoritative approval amount
+    independently of this state, preferring live checkout data according to the
+    payment guide above.
   - `extract` captures a generated credential into a sealed slot or the vault.
   - `solve_captcha` drives the in-session captcha gate and returns the
     fail-fast `needs_user` handoff when it cannot be cleared.
@@ -349,9 +350,10 @@ DOM-diagnostics pair is excluded from that surface; set
   `operate_pay` accepts an explicit `session_id` and `phase` of `"single"`
   (the default, also implied by omitting phase), `"fill_card"`, or `"confirm"`.
   It can use a selected card, the only card on file, or a just-in-time
-  add-card approval, then fills the checkout and applies the post-submit outcome
-  wait described above before handing back unresolved outcomes. It also supports the
-  two-phase `fill_card` then `confirm` flow for split checkouts described above.
+  add-card approval. The single-page flow fills the checkout and applies the
+  post-submit outcome wait described above before handing back unresolved
+  outcomes. Split checkouts use the `fill_card` then `confirm` flow described
+  above.
   `operate_payment_status` follows the [payment guide](#one-prompt) polling
   contract. It returns the session ID and includes it in every follow-up tool
   hint, so an approval is always resumed in its originating browser. Malformed calls return the same

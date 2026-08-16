@@ -137,7 +137,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
     "payment-provider fields without charging. Then drive the checkout to the order-confirmation " +
     "step, VERIFY the live final total there matches the returned approved amount_cents and " +
     "currency, and place the order yourself via operate_act, handling any 3-D Secure challenge " +
-    'directly — Trusty Squire never re-reads the total or clicks the pay/place-order control. Call ' +
+    "directly — Trusty Squire never re-reads the total or clicks the pay/place-order control. Call " +
     'phase="confirm" any time after the fill to close out the approval; it is not a prerequisite ' +
     "to placing the order. Exactly one human approval per purchase. If the payment gets stuck or " +
     "the card is declined, recover with operate_finish and start a fresh session — operate_pay " +
@@ -168,7 +168,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
           '"single" (the default; also implied by omitting phase) is an ordinary one-step ' +
           'checkout. Split checkouts only: "fill_card" approves an amount (falling back to the most ' +
           "recent real total this session observed when the card-entry page itself has none) " +
-          'and releases the vaulted card without charging — the caller then verifies the final ' +
+          "and releases the vaulted card without charging — the caller then verifies the final " +
           'total against that amount and places the order itself via operate_act. "confirm" just ' +
           "closes out that approval afterward (no total check, no click, no charge).",
       },
