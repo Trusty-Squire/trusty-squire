@@ -101,7 +101,7 @@ A failed login or uncertain close leaves the current generation unchanged.
 
 Under the seed lock, acquisition:
 
-1. scavenges only ownership states it can prove stale;
+1. reclaims abandoned or expired seed-lock ownership through the lock's atomic protocol;
 2. reserves the first free active slot with a private owner token;
 3. claims the closed warm profile when it belongs to `seed/current` and is within its bounds; or
 4. copies the current immutable seed into a new worker profile.
@@ -121,6 +121,13 @@ operation; there is no background timer or daemon. Publishing a new seed therefo
 old warm profile before it can be claimed again.
 
 ## 5. Ownership and crash recovery
+
+Seed-lock ownership records bind a host, PID, process start time, and private token. A contender
+reclaims the lock immediately when the recorded local process has exited or its start time no
+longer matches. A live matching owner remains genuine contention for two minutes; once the lock's
+modification time reaches that hold limit, it is reclaimable so a wedged process cannot block new
+starts indefinitely. Reclaim atomically renames the lock into `tombstones/` before contenders retry
+the existing hard-link claim, so concurrent reclaimers cannot both acquire it.
 
 Raw PID equality is never authority to signal a process. A worker binding records host, PID, Linux
 process start time, and the normalized expected `--user-data-dir`. Cleanup signals Chrome only when
