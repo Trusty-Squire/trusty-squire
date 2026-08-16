@@ -9395,6 +9395,31 @@ export class BrowserController {
     }
   }
 
+  // EMV 3DS runs a hidden "3DS Method" pre-auth iframe (browser fingerprint
+  // ping, zero user interaction) at a URL often indistinguishable from the
+  // real ACS challenge endpoint — frictionless/out-of-band approvals (seen
+  // live on a Shopify + DBS checkout) load this invisible iframe and nothing
+  // else, so a signal match alone isn't enough. Only a frame the buyer can
+  // actually see and act on counts as a challenge; main-frame text matches
+  // (no iframe involved) are unaffected.
+  private async isChildFrameVisible(frame: Frame): Promise<boolean> {
+    const frameElement = await frame.frameElement().catch(() => null);
+    if (frameElement === null) return false;
+    try {
+      const box = await frameElement.boundingBox().catch(() => null);
+      if (box === null || box.width < 4 || box.height < 4) return false;
+      const hidden = await frameElement
+        .evaluate((el: Element) => {
+          const style = getComputedStyle(el);
+          return style.display === "none" || style.visibility === "hidden" || style.opacity === "0";
+        })
+        .catch(() => true);
+      return !hidden;
+    } finally {
+      await frameElement.dispose().catch(() => undefined);
+    }
+  }
+
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
     if (!this.page) throw new Error("Browser not started");
     // Cross-processor 3DS signals only — never key on a single PSP's internal
@@ -9424,13 +9449,13 @@ export class BrowserController {
             );
           })
           .catch(() => false));
-      if (detected) {
-        return {
-          three_ds_required: true,
-          order_confirmed: false,
-          challenge_url: frame.url() || this.page.url(),
-        };
-      }
+      if (!detected) continue;
+      if (frame !== this.page.mainFrame() && !(await this.isChildFrameVisible(frame))) continue;
+      return {
+        three_ds_required: true,
+        order_confirmed: false,
+        challenge_url: frame.url() || this.page.url(),
+      };
     }
     return { three_ds_required: false, order_confirmed: false };
   }

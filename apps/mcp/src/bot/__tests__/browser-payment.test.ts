@@ -965,6 +965,54 @@ describe("checkout payment parsing", () => {
     }
   });
 
+  // REGRESSION (live Shopify + DBS frictionless checkout, 2026-08-16): EMV 3DS
+  // runs a hidden "3DS Method" pre-auth iframe at an ACS-shaped URL with zero
+  // user interaction — it must never be read as a challenge, and a real
+  // frictionless order confirmation reached moments later must still resolve
+  // as success rather than a spurious 3DS wall.
+  it.skipIf(!chromiumAvailable)(
+    "does not flag a hidden 3DS-method ping frame and still confirms a frictionless order",
+    async () => {
+      const browser = await chromium.launch({ headless: true });
+      const methodUrl = "https://issuer.example.test/acs/method";
+      try {
+        const page = await browser.newPage();
+        await page.route(methodUrl, async (route) =>
+          route.fulfill({ contentType: "text/html", body: "" }),
+        );
+        await page.route("https://merchant.test/checkout", async (route) =>
+          route.fulfill({
+            contentType: "text/html",
+            body: `
+              <button id="pay">Pay now</button>
+              <script>
+                document.querySelector("#pay").addEventListener("click", () => {
+                  const frame = document.createElement("iframe");
+                  frame.src = ${JSON.stringify(methodUrl)};
+                  frame.style.cssText = "display:none;width:0;height:0;border:0";
+                  frame.width = "0";
+                  frame.height = "0";
+                  document.body.append(frame);
+                  setTimeout(() => history.pushState({}, "", "/checkouts/abc123/thank_you"), 200);
+                });
+              </script>`,
+          }),
+        );
+        await page.goto("https://merchant.test/checkout");
+        const controller = new BrowserController({ humanize: false });
+        (controller as unknown as { page: Page }).page = page;
+
+        await expect(controller.submitFilledCheckout()).resolves.toEqual({
+          three_ds_required: false,
+          order_confirmed: true,
+        });
+      } finally {
+        await browser.close();
+      }
+    },
+    20_000,
+  );
+
   it.skipIf(!chromiumAvailable)(
     "ignores a merchant confirmation signal that predates the Pay now click",
     async () => {
@@ -3638,6 +3686,12 @@ describe("3DS detection vs captcha frames", () => {
           "https://newassets.hcaptcha.com/captcha/v1/abc123/static/hcaptcha.html#frame=nested&id=xyz",
         frameHtml:
           '<iframe srcdoc="<p>Please verify your identity</p><input name=&quot;creq&quot;>"></iframe>',
+      },
+      // EMV 3DS "3DS Method" pre-auth ping — a real ACS-shaped URL, but a
+      // hidden 0x0 iframe with no user interaction, not a challenge.
+      {
+        frameUrl: "https://issuer.example.test/acs/method",
+        frameAttributes: 'style="display:none;width:0;height:0;border:0" width="0" height="0"',
       },
     ];
     try {
