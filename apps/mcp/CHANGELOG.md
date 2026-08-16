@@ -1,5 +1,13 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.28 (2026-08-16)
+
+- fix(mcp): operate_finish closes unconditionally, even mid-payment (#538)
+- fix(mcp): hand split-checkout order placement to the caller; operator no longer presses the pay button (#539)
+- fix(mcp): require a visible 3-D Secure challenge before flagging it, so a hidden 3DS-method iframe no longer fakes a challenge (#540)
+- fix(mcp): reclaim only provably-dead seed-lock holders (#541)
+- feat(mcp): audit caller-placed charges + one-approval/one-place-order guard (#542)
+
 ## 1.1.9-rc.27 (2026-08-16)
 
 - fix(mcp): handle captcha and out-of-band 3DS correctly (#534)
