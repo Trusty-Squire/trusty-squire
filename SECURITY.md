@@ -155,43 +155,34 @@ remains eligible. Once the payment context is selected, PAN, expiry, and CVV are
 required card fields. Cardholder name and the remaining billing fields are filled
 best-effort, and a missing name input does not abort an otherwise fillable payment.
 
-The later `confirm` phase is the charge boundary. Its strict reader requires a final
-payable total from the main frame or a visible trusted payment frame, with no
-caller-supplied amount fallback. Currency notation that cannot identify one ISO
-currency by itself resolves against the already-approved mandate currency; missing or
-conflicting totals still fail closed. Checkout origin and currency must match the
-mandate. A final total at or below the approved amount is submitted under the same
-signed approval, without a second human tap. A higher total fails closed with
-`payment_amount_exceeds_approval`; there is no reapproval path. The page-title-derived
-merchant display name is not compared across steps; origin is the recipient trust
-anchor. While a split card fill is pending,
-ordinary browser actions cannot click charge-labeled controls or press Enter, so only
-`confirm` can cross that boundary. If no submit control is found, the sealed page
-fields and pending metadata remain
-available for a safe retry. Once submission starts and serializes their values, the
-eligible sealed fields are cleared when cleanup can be confirmed, even while 3-D Secure
-or outcome verification continues. Dispatching the charge control is not itself a
-successful outcome: the operator requires a new merchant terminal route with a
-substantive order or receipt identity that was absent before dispatch. The browser
-completes 3-D Secure natively, including out-of-band bank-app challenges. The operator
-never manipulates or intercepts the challenge frame; it detects challenges only with
-read-only URL, selector, and text checks, and reads text passively to identify declines.
-Captcha-hosted frames are excluded before challenge detection or passive decline
-checks. Any unconfirmed submission enters the long wait when it is enabled, even if no
-on-page challenge was detected; the linked Telegram notification distinguishes a
-detected challenge from merely possible out-of-band authentication. The operator keeps
-polling for that same merchant order or receipt identity. After the wait, a bare click
-with neither confirmation nor a detected challenge remains
-`payment_outcome_unknown`. A detected
-challenge that remains unresolved on timeout stays `payment_3ds_required` and is handed
-back to the user. Neither status can be mistaken for `payment_submitted`, permits a
-success claim, or allows blind resubmission; the merchant's order state must be checked
-manually before any retry. Every payment entry is claimed before
-asynchronous work begins, and a pending confirmation is claimed atomically, so
-overlapping `operate_pay` calls cannot race toward the same submission. A failed
-confirmation becomes retryable only if submission has not started. If field cleanup
-cannot be confirmed, pending metadata is discarded, the observation seal remains
-active, and the session refuses further payment operations.
+Placing the order and verifying the final total are the CALLER's job, not the
+operator's. The operator never re-reads a live total for a split checkout, never
+clicks a charge control, and never submits anything after the fill: the fill-time
+approval already authorizes a charge up to the approved amount, and the caller is
+responsible for checking the live final total against that approved amount before
+placing the order itself through the ordinary `operate_act` surface (click, js_click,
+oauth_click, and Enter/Space are not reserved for the operator while a split fill is
+pending — clicking a charge-labeled control is an ordinary action). The card VALUES
+remain masked in every observation for the life of the pending fill regardless: that
+masking is driven by the session's payment-field seal, independent of which caller
+clicks the submit control, so the money-fence guarantee that the coding-agent model
+never sees a raw PAN/CVV holds whether the operator or the caller ends up submitting.
+The `confirm` phase is a pure close-out: it makes no browser or provider call, reads
+no total, verifies no amount, and audits nothing (it never charges), so it also
+cannot mislabel or falsely claim a payment was executed. It reports the approved
+merchant, amount, and currency back to the caller and releases the pending-fill
+lease into a sealed state — the observation seal (and so the masking) stays active,
+since the operator never actually cleared the live fields, and the session then
+refuses further payment operations for its lifetime. There is deliberately no
+same-session path to fill a different card after a fill or a confirm: recovery from
+a stuck, declined, or abandoned payment is closing the session with `operate_finish`
+and starting a fresh one, not an in-place refill. Every payment entry is still
+claimed before asynchronous work begins, and a pending confirmation is claimed
+atomically, so overlapping `operate_pay` calls cannot race toward the same
+close-out. The single-page (`phase="single"`) checkout is unaffected by any of
+this: it still reads the live total, fills, and submits in one call exactly as
+before, including its own 3-D Secure wait and `payment_outcome_unknown` /
+`payment_3ds_required` handling.
 
 Payment state, the approval keypair, and the verified mandate remain attached to the
 addressed operate session. `operate_pay` and `operate_payment_status`

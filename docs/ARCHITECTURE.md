@@ -215,25 +215,25 @@ agent starts operate_pay in the addressed checkout session
      are filled best-effort, so a missing name field does not abort the payment
   -> the raw card is zeroed; sealed, observation-masked page fields remain, while
      session state retains only approval/mandate and card-reference metadata
-  -> operate_act blocks charge-labeled clicks and Enter while that state is pending;
-     ordinary navigation can advance the checkout to its review step
-  -> split confirm bypasses the initial PayPal-frame gate and strictly resolves the
-     final payable total from the main frame and visible trusted payment frames with
-     no caller-supplied amount fallback; currency resolution follows the
-     approval-bound contract in [SECURITY.md](../SECURITY.md#client-encrypted-card-data).
-     Origin must match the mandate (the page-title-derived merchant name may change)
-  -> confirm charges under the fill-time approval, without another passkey tap, when
-     currency matches and the final total is at or below the approved amount; a
-     higher total fails closed with payment_amount_exceeds_approval and is never
-     re-approved. Missing or conflicting totals also fail closed without charging
+  -> operate_act is NOT gated on that pending state: the caller verifies the live
+     final total against the approved amount itself and places the order through
+     ordinary navigation, click, js_click, oauth_click, or Enter/Space — none of
+     that is reserved for the operator. Card VALUES stay masked in observations
+     throughout regardless of who submits (the money-fence guarantee lives in the
+     session's payment-field seal, not in who clicks)
+  -> split confirm makes no browser or provider call: it reads no total, verifies
+     no amount, and submits nothing (it never charges), so it reports the approved
+     merchant/amount/currency back and releases the pending-fill lease into a
+     sealed state — masking stays active since the fields were never actually
+     cleared, and the session then refuses further payment operations for its
+     lifetime; there is no same-session refill, only operate_finish + a fresh
+     session recovers a stuck or declined payment
   -> the addressed session owns and serializes payment entry and confirmation;
-     another session cannot observe, resume, or submit that approval; retry state is
-     restored only before submission starts, and unverified field cleanup seals the
-     session against later payment operations (the contract lives in SECURITY.md)
-  -> a missing submit control retains the pending fill for retry; terminal payment
-     outcomes clear it
-  -> every unconfirmed submit enters the bounded authentication/outcome wait; the
-     API sends a challenge-specific Telegram nudge for detected 3-D Secure or
+     another session cannot observe or resume that approval (the contract lives
+     in SECURITY.md)
+  -> only the single-page (phase="single") flow still submits and enters the
+     bounded authentication/outcome wait below; the API sends a challenge-specific
+     Telegram nudge for detected 3-D Secure or
      cautious bank-app guidance when authentication may be out of band
   -> the browser completes authentication natively while the operator polls only for
      a new merchant terminal route with a substantive order or receipt identity;

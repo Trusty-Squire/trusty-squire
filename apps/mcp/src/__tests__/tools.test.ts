@@ -10,7 +10,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import canonicalize from "canonicalize";
 import { ApiCallError, type ApiClient } from "../api-client.js";
-import type { CheckoutSummary } from "../bot/browser.js";
 import type {
   CartCheckoutObservation,
   PaymentBrowser,
@@ -1384,66 +1383,37 @@ describe("operate_pay split checkout phases", () => {
     );
   });
 
-  it("confirm verifies the live total, charges, clears pending, and skips the PayPal gate", async () => {
+  it("confirm reports ready-to-place, clears pending, and never touches the browser or API", async () => {
     mockPending = { ...PENDING };
-    // An incidental PayPal button iframe on the review page must not block the
-    // confirm of an already-filled card.
-    vi.mocked(mockBrowser.isPayPalHostedCheckout).mockResolvedValue(true);
     const auditPayment = vi.fn().mockResolvedValue({ id: "audit_1" });
     const api = makeMockApi({ auditPayment } as unknown as ApiClient);
     const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
 
     const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
-    expect(result).toMatchObject({ status: "payment_submitted", amount_cents: 100 });
-    expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
-    expect(mockBrowser.isPayPalHostedCheckout).not.toHaveBeenCalled();
-    expect(auditPayment).toHaveBeenCalledWith(
-      expect.objectContaining({ last4: "4242", status: "payment_submitted" }),
-    );
-    expect(mockPending).toBeNull();
-  });
-
-  it("confirm keeps the pending fill on an amount mismatch (no charge)", async () => {
-    mockPending = { ...PENDING };
-    vi.mocked(mockBrowser.readCheckoutConfirmSummary).mockResolvedValue({
-      merchant: "M",
-      checkout_origin: "https://m.test",
-      amount_cents: 999,
-      currency: "EUR",
-    });
-    const api = makeMockApi();
-    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
-
-    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
-    expect(result).toMatchObject({
-      status: "payment_amount_mismatch",
-      mandate_amount_cents: 100,
-      live_amount_cents: 999,
-    });
+    expect(result).toMatchObject({ status: "payment_ready_to_place", amount_cents: 100 });
+    // confirm no longer re-reads the live total, clicks anything, or audits a
+    // charge — it isn't charging. The caller places the order and verifies
+    // the total itself.
     expect(mockBrowser.submitFilledCheckout).not.toHaveBeenCalled();
-    expect(mockPending).not.toBeNull();
+    expect(mockBrowser.readCheckoutConfirmSummary).not.toHaveBeenCalled();
+    expect(mockBrowser.isPayPalHostedCheckout).not.toHaveBeenCalled();
+    expect(auditPayment).not.toHaveBeenCalled();
+    expect(mockPending).toBeNull();
   });
 
   it("atomically reserves a pending fill across overlapping confirms", async () => {
     mockPending = { ...PENDING };
-    let releaseSubmit!: (value: { three_ds_required: false; order_confirmed: true }) => void;
-    vi.mocked(mockBrowser.submitFilledCheckout).mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          releaseSubmit = resolve;
-        }),
-    );
-    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
+    const api = makeMockApi();
     const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
 
+    // confirm is now purely synchronous (no browser/API call), so the second
+    // call below races the first before it has a chance to resolve — this
+    // still exercises the claim's synchronous "confirming" reservation.
     const first = operatePayTool.handler(args, api);
-    await vi.waitFor(() => expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1));
     await expect(operatePayTool.handler(args, api)).rejects.toThrow(
       /another payment confirmation is already in progress/,
     );
-    releaseSubmit({ three_ds_required: false, order_confirmed: true });
-    await expect(first).resolves.toMatchObject({ status: "payment_submitted" });
-    expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
+    await expect(first).resolves.toMatchObject({ status: "payment_ready_to_place" });
   });
 
   it("rejects every non-confirm payment while a card fill is pending", async () => {
@@ -1491,106 +1461,25 @@ describe("operate_pay split checkout phases", () => {
 
   it("rejects every other payment while confirm is in flight", async () => {
     mockPending = { ...PENDING };
-    let releaseRead!: (value: CheckoutSummary) => void;
-    vi.mocked(mockBrowser.readCheckoutConfirmSummary).mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          releaseRead = resolve;
-        }),
-    );
-    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
-    const confirmArgs = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
-    const first = operatePayTool.handler(confirmArgs, api);
-    await vi.waitFor(() => expect(mockBrowser.readCheckoutConfirmSummary).toHaveBeenCalledOnce());
-
-    for (const phase of [undefined, "fill_card" as const, "confirm" as const]) {
-      const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase });
-      await expect(operatePayTool.handler(args, api)).rejects.toThrow(
-        /another payment confirmation is already in progress/,
-      );
-    }
-    releaseRead({
-      merchant: "M",
-      checkout_origin: "https://m.test",
-      amount_cents: 100,
-      currency: "USD",
-    });
-    await expect(first).resolves.toMatchObject({ status: "payment_submitted" });
-    expect(mockBrowser.submitFilledCheckout).toHaveBeenCalledTimes(1);
-  });
-
-  it("restores the pending fill when confirm throws before submission", async () => {
-    mockPending = { ...PENDING };
-    vi.mocked(mockBrowser.readCheckoutConfirmSummary).mockRejectedValue(
-      new Error("Execution context was destroyed"),
-    );
     const api = makeMockApi();
-    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
+    const confirmArgs = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
 
-    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
-      /Execution context was destroyed/,
+    // confirm is now near-instant (no browser/API call), so every call below
+    // must fire back-to-back, synchronously, before it has a chance to
+    // resolve — otherwise the "confirming" reservation window closes before
+    // a later iteration observes it.
+    const first = operatePayTool.handler(confirmArgs, api);
+    const others = [undefined, "fill_card" as const, "confirm" as const].map((phase) =>
+      operatePayTool.handler(
+        operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase }),
+        api,
+      ),
     );
-    expect(mockPending).toEqual(PENDING);
-    expect(mockPendingConfirming).toBe(false);
+    for (const other of others) {
+      await expect(other).rejects.toThrow(/another payment confirmation is already in progress/);
+    }
+    await expect(first).resolves.toMatchObject({ status: "payment_ready_to_place" });
     expect(mockBrowser.submitFilledCheckout).not.toHaveBeenCalled();
-  });
-
-  it("does not restore the pending fill when confirm throws after submission starts", async () => {
-    mockPending = { ...PENDING };
-    vi.mocked(mockBrowser.submitFilledCheckout).mockResolvedValue({
-      three_ds_required: true,
-      order_confirmed: false,
-    });
-    vi.mocked(mockBrowser.waitForThreeDsResolution).mockRejectedValue(
-      new Error("Execution context was destroyed"),
-    );
-    const api = makeMockApi({ notifyThreeDs: vi.fn().mockResolvedValue({ sent: true }) });
-    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
-
-    await expect(operatePayTool.handler(args, api)).rejects.toThrow(
-      /Execution context was destroyed/,
-    );
-    expect(mockPending).toBeNull();
-    expect(mockPendingConfirming).toBe(true);
-    await expect(
-      operatePayTool.handler(operatePayTool.inputSchema.parse(PAYMENT_DETAILS), api),
-    ).rejects.toThrow(/another payment confirmation is already in progress/);
-  });
-
-  it("confirm clears pending after an ambiguous submit outcome", async () => {
-    mockPending = { ...PENDING };
-    vi.mocked(mockBrowser.submitFilledCheckout).mockRejectedValue(
-      new Error("click failed after dispatch"),
-    );
-    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
-    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
-
-    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
-    expect(result).toMatchObject({ status: "payment_outcome_unknown" });
-    expect(mockBrowser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
-    expect(mockPending).toBeNull();
-    expect(mockPaymentSealActive).toBe(false);
-  });
-
-  it("confirm retains the seal lock when terminal cleanup cannot clear the fields", async () => {
-    mockPending = { ...PENDING };
-    mockPaymentSealActive = true;
-    vi.mocked(mockBrowser.submitFilledCheckout).mockRejectedValue(
-      new Error("click failed after dispatch"),
-    );
-    vi.mocked(mockBrowser.clearSealedPaymentFields).mockRejectedValue(
-      new Error("controlled field restored"),
-    );
-    const api = makeMockApi({ auditPayment: vi.fn().mockResolvedValue({ id: "audit_1" }) });
-    const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
-
-    const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
-    expect(result).toMatchObject({
-      status: "payment_outcome_unknown",
-      payment_fields_cleared: false,
-    });
-    expect(mockPending).toBeNull();
-    expect(mockPaymentSealActive).toBe(true);
   });
 });
 

@@ -21,7 +21,6 @@ import {
   type CheckoutCard,
   type CheckoutSubmitResult,
   type CheckoutSummary,
-  type ThreeDsResolution,
 } from "../browser.js";
 
 const CHECKOUT = {
@@ -1636,175 +1635,26 @@ function splitPending(checkout: CheckoutSummary = SPLIT_CHECKOUT): PendingCardFi
   };
 }
 
-async function runConfirm(cfg: {
-  approvedCheckout?: CheckoutSummary;
-  live?: CheckoutSummary | Error;
-  submit?: CheckoutSubmitResult | Error;
-  threeDsResolution?: ThreeDsResolution;
-  waitSeconds?: number;
-  clear?: Error;
-}): Promise<{
-  result: Record<string, unknown>;
-  auditBodies: unknown[];
-  notifyCalls: string[];
-  notifyBodies: Array<Record<string, unknown>>;
-  browser: PaymentBrowser;
-}> {
-  const auditBodies: unknown[] = [];
-  const notifyCalls: string[] = [];
-  const notifyBodies: Array<Record<string, unknown>> = [];
-  const approvedCheckout = cfg.approvedCheckout ?? SPLIT_CHECKOUT;
-  const live = cfg.live ?? { ...approvedCheckout };
-  const submit = cfg.submit ?? { three_ds_required: false, order_confirmed: true };
-
-  const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (url.endsWith("/v1/vault/payments/audit") && init?.method === "POST") {
-      auditBodies.push(JSON.parse(String(init.body)) as unknown);
-      return Response.json({ id: "audit_split" }, { status: 201 });
-    }
-    if (url.endsWith("/notify-3ds") && init?.method === "POST") {
-      notifyCalls.push(url);
-      notifyBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
-      return Response.json({ sent: true });
-    }
-    return Response.json({ error: "not_found" }, { status: 404 });
-  }) as typeof fetch;
-
-  const browser: PaymentBrowser = {
-    isPayPalHostedCheckout: vi.fn().mockResolvedValue(false),
-    // Exactly one approval per purchase: confirm charges within the approval
-    // already minted at fill_card and must never read a live summary to mint
-    // another one — a call here would be a regression back toward #482.
-    readCheckoutSummary: vi
-      .fn()
-      .mockRejectedValue(new Error("confirm must not call readCheckoutSummary")),
-    readCheckoutConfirmSummary:
-      live instanceof Error ? vi.fn().mockRejectedValue(live) : vi.fn().mockResolvedValue(live),
-    currentUrl: vi.fn().mockReturnValue(`${approvedCheckout.checkout_origin}/checkout/confirm`),
-    fillAndSubmitCheckout: vi.fn(),
-    fillCheckoutCardFields: vi
-      .fn()
-      .mockRejectedValue(new Error("confirm must not call fillCheckoutCardFields")),
-    submitFilledCheckout:
-      submit instanceof Error
-        ? vi.fn().mockRejectedValue(submit)
-        : vi.fn().mockResolvedValue(submit),
-    clearSealedPaymentFields:
-      cfg.clear === undefined
-        ? vi.fn().mockResolvedValue(undefined)
-        : vi.fn().mockRejectedValue(cfg.clear),
-    waitForThreeDsResolution: vi.fn().mockResolvedValue(cfg.threeDsResolution ?? "timeout"),
-  };
-  const api = new ApiClient({
-    apiBaseUrl: "https://api.test",
-    registryBaseUrl: "https://registry.test",
-    agentSessionToken: "synthetic-session-token",
-    fetch: fetchMock,
-  });
-
-  const result = (await executeOperatePayConfirm(
-    splitPending(approvedCheckout),
-    cfg.waitSeconds !== undefined ? { three_ds_wait_seconds: cfg.waitSeconds } : {},
-    api,
-    browser,
-  )) as Record<string, unknown>;
-
-  return { result, auditBodies, notifyCalls, notifyBodies, browser };
-}
-
+// confirm no longer touches the browser or the API at all: no total re-read,
+// no button click, no audit event. It only reports the approved terms back so
+// the caller can verify the live total and place the order itself.
 describe("operate_pay split checkout — confirm", () => {
-  it("does not report payment_submitted when post-submit confirmation is absent", async () => {
-    const { result, auditBodies, notifyCalls, notifyBodies, browser } = await runConfirm({
-      submit: { three_ds_required: false, order_confirmed: false },
-    });
+  it("reports the fill-time approved terms with no browser or API interaction", async () => {
+    const result = (await executeOperatePayConfirm(
+      splitPending(SPLIT_CHECKOUT),
+    )) as Record<string, unknown>;
 
     expect(result).toMatchObject({
-      status: "payment_outcome_unknown",
-      needs_user: {
-        wall: "3ds",
-        resume: "checkout",
-        message: expect.stringMatching(/No order confirmation.*bank app/),
-      },
-    });
-    expect(notifyCalls).toHaveLength(1);
-    expect(notifyBodies).toEqual([{ mode: "possible_out_of_band" }]);
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
-    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
-  });
-
-  it("notifies Telegram and hands back an app-push message when confirm hits a 3DS timeout", async () => {
-    const { result, notifyCalls, notifyBodies } = await runConfirm({
-      submit: { three_ds_required: true, order_confirmed: false },
-      threeDsResolution: "timeout",
-    });
-
-    expect(result).toMatchObject({
-      status: "payment_3ds_required",
-      needs_user: {
-        wall: "3ds",
-        resume: "checkout",
-        message: expect.stringContaining("bank app"),
-      },
-    });
-    expect(notifyCalls).toHaveLength(1);
-    expect(notifyBodies).toEqual([{ mode: "detected_challenge" }]);
-  });
-
-  it("charges within the approved amount when the final total matches it exactly", async () => {
-    const { result, auditBodies, browser } = await runConfirm({});
-
-    expect(result).toMatchObject({
-      status: "payment_submitted",
+      status: "payment_ready_to_place",
+      approval_url: "https://web.test/vault/pay/appr_split",
       merchant: SPLIT_CHECKOUT.merchant,
       amount_cents: SPLIT_CHECKOUT.amount_cents,
       currency: SPLIT_CHECKOUT.currency,
+      next: expect.stringContaining("place the order"),
     });
-    expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
-    expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
-    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledWith(SPLIT_CHECKOUT.currency);
-    expect(browser.readCheckoutSummary).not.toHaveBeenCalled();
-    // No second approval is minted — the audit's mandate_id is still the one
-    // signed at fill_card.
-    expect(auditBodies).toEqual([
-      expect.objectContaining({
-        amountCents: SPLIT_CHECKOUT.amount_cents,
-        last4: "4242",
-        status: "payment_submitted",
-        mandateId: "mandate_split",
-      }),
-    ]);
   });
 
-  it("charges within the approved amount when the final total is lower — no second approval", async () => {
-    const lowered = SPLIT_CHECKOUT.amount_cents - 500;
-    const { result, browser } = await runConfirm({
-      live: { ...SPLIT_CHECKOUT, amount_cents: lowered },
-    });
-
-    expect(result).toMatchObject({ status: "payment_submitted", amount_cents: lowered });
-    expect(browser.submitFilledCheckout).toHaveBeenCalledTimes(1);
-  });
-
-  it("refuses closed — never a second approval — when the final total exceeds the approved amount", async () => {
-    const higher = SPLIT_CHECKOUT.amount_cents + 500;
-    const { result, browser } = await runConfirm({
-      live: { ...SPLIT_CHECKOUT, amount_cents: higher },
-    });
-
-    expect(result).toMatchObject({
-      status: "payment_amount_exceeds_approval",
-      merchant: SPLIT_CHECKOUT.merchant,
-      approved_amount_cents: SPLIT_CHECKOUT.amount_cents,
-      approved_currency: SPLIT_CHECKOUT.currency,
-      live_amount_cents: higher,
-      live_currency: SPLIT_CHECKOUT.currency,
-    });
-    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
-    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
-  });
-
-  it("Rakuten-style: fill_card approves the cart 小計, then a higher 注文確認 total refuses closed", async () => {
+  it("Rakuten-style: fill_card approves the cart 小計, and confirm reports that same amount back", async () => {
     // fill_card sources the cart's subtotal (小計 2,803円 — the session's
     // carried cart total) as the approved amount.
     const rakutenCart: CheckoutSummary = {
@@ -1823,154 +1673,14 @@ describe("operate_pay split checkout — confirm", () => {
     });
     expect(approvalBodies[0]).toMatchObject({ amount_cents: 2_803, currency: "JPY" });
 
-    // confirm sees a strictly higher FINAL total on the order-confirmation page
-    // and refuses — the SAME approval is never exceeded, no second tap.
-    const { result: confirmResult, browser } = await runConfirm({
-      approvedCheckout: rakutenCart,
-      live: { ...rakutenCart, amount_cents: 3_000 },
-    });
+    const confirmResult = (await executeOperatePayConfirm(
+      splitPending(rakutenCart),
+    )) as Record<string, unknown>;
     expect(confirmResult).toMatchObject({
-      status: "payment_amount_exceeds_approval",
-      approved_amount_cents: 2_803,
-      live_amount_cents: 3_000,
+      status: "payment_ready_to_place",
+      amount_cents: 2_803,
+      currency: "JPY",
     });
-    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
-    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
-  });
-
-  it("refuses to charge while the total is still not visible", async () => {
-    const { result, auditBodies, browser } = await runConfirm({
-      live: new Error("payment_checkout_total_not_found"),
-    });
-
-    expect(result).toMatchObject({ status: "payment_checkout_total_not_found" });
-    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
-    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
-    expect(auditBodies).toEqual([]);
-  });
-
-  it("refuses to charge when trusted checkout contexts show conflicting totals", async () => {
-    const { result, auditBodies, browser } = await runConfirm({
-      live: new Error("payment_checkout_total_conflict"),
-    });
-
-    expect(result).toMatchObject({
-      status: "payment_amount_mismatch",
-      reason: "conflicting_checkout_totals",
-    });
-    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
-    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
-    expect(auditBodies).toEqual([]);
-  });
-
-  it("refuses to charge when the origin drifted (same total)", async () => {
-    const { result, browser } = await runConfirm({
-      live: { ...SPLIT_CHECKOUT, checkout_origin: "https://evil.synthetic.test" },
-    });
-
-    expect(result).toMatchObject({
-      status: "payment_amount_mismatch",
-      live_checkout_origin: "https://evil.synthetic.test",
-    });
-    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
-  });
-
-  it("refuses to charge when the currency drifted (same amount)", async () => {
-    const { result, browser } = await runConfirm({
-      live: { ...SPLIT_CHECKOUT, currency: "EUR" },
-    });
-
-    expect(result).toMatchObject({ status: "payment_amount_mismatch", live_currency: "EUR" });
-    expect(browser.submitFilledCheckout).not.toHaveBeenCalled();
-  });
-
-  it("tolerates a merchant display-name change between checkout steps", async () => {
-    // The merchant string derives from the page title, which legitimately
-    // changes between the payment and review steps; origin+amount+currency are
-    // the mandate-bound gate.
-    const { result, auditBodies } = await runConfirm({
-      live: { ...SPLIT_CHECKOUT, merchant: "Order Review — Split Merchant" },
-    });
-
-    expect(result).toMatchObject({
-      status: "payment_submitted",
-      merchant: SPLIT_CHECKOUT.merchant,
-    });
-    expect(auditBodies).toEqual([expect.objectContaining({ merchant: SPLIT_CHECKOUT.merchant })]);
-  });
-
-  it("keeps the filled fields for a retry when no charge control is found", async () => {
-    const { result, auditBodies, browser } = await runConfirm({
-      submit: new Error("payment_submit_not_found"),
-    });
-
-    expect(result).toMatchObject({
-      status: "payment_checkout_failed",
-      reason: "payment_submit_not_found",
-    });
-    // Nothing was charged and the card stays in the page for a settled retry.
-    expect(browser.clearSealedPaymentFields).not.toHaveBeenCalled();
-    expect(auditBodies).toEqual([
-      expect.objectContaining({
-        merchant: SPLIT_CHECKOUT.merchant,
-        status: "payment_checkout_failed",
-      }),
-    ]);
-  });
-
-  it("clears the fill and returns terminal unknown after an ambiguous submit failure", async () => {
-    const { result, auditBodies, browser } = await runConfirm({
-      submit: new Error("click failed after dispatch"),
-    });
-
-    expect(result).toMatchObject({
-      status: "payment_outcome_unknown",
-      reason: "payment_submit_outcome_unknown",
-      payment_fields_cleared: true,
-    });
-    expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
-    expect(auditBodies).toEqual([expect.objectContaining({ status: "payment_outcome_unknown" })]);
-  });
-
-  it("reports uncleared fields after an ambiguous submit failure", async () => {
-    const { result, browser } = await runConfirm({
-      submit: new Error("click failed after dispatch"),
-      clear: new Error("controlled field restored"),
-    });
-
-    expect(result).toMatchObject({
-      status: "payment_outcome_unknown",
-      payment_fields_cleared: false,
-    });
-    expect(browser.clearSealedPaymentFields).toHaveBeenCalledTimes(1);
-  });
-
-  it("threads the fill-time approved currency into the confirm read instead of refusing on ambiguity", async () => {
-    // Currency ambiguity on the live confirm page (a currency-selector / FX-
-    // preview module, a bare "$" shared by several locales, …) is no longer a
-    // refusal — the confirm reader resolves against the already-approved
-    // currency instead. Assert the plumbing: readCheckoutConfirmSummary is
-    // called with the approved currency so it CAN do that resolution.
-    const { result, browser } = await runConfirm({});
-
-    expect(result).toMatchObject({ status: "payment_submitted" });
-    expect(browser.readCheckoutConfirmSummary).toHaveBeenCalledWith(SPLIT_CHECKOUT.currency);
-  });
-
-  it("runs the 3DS wait against the fill-time approval id — no second approval to mint one", async () => {
-    const { result, notifyCalls, browser } = await runConfirm({
-      submit: {
-        three_ds_required: true,
-        order_confirmed: false,
-        challenge_url: "https://issuer.synthetic.test/c",
-      },
-      threeDsResolution: "succeeded",
-    });
-
-    expect(result).toMatchObject({ status: "payment_submitted" });
-    expect(notifyCalls).toHaveLength(1);
-    expect(notifyCalls[0]).toContain("appr_split");
-    expect(browser.waitForThreeDsResolution).toHaveBeenCalledWith(180_000);
   });
 });
 

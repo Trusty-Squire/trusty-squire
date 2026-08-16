@@ -105,20 +105,22 @@ page exposes no total, caller-supplied `amount_cents` and `currency` take preced
 as the approval amount. If they are omitted, Trusty Squire may use the most recent real
 total observed earlier in the same browser session, such as the cart subtotal, only
 when the checkout origin still matches. One phone approval
-binds that amount, releases the card, and authorizes the eventual charge up to the
-approved amount; Trusty Squire then fills the card without submitting. It fills only
-the merchant's own HTTPS frames or recognized payment-provider frames. The card stays
-in the page as sealed, observation-masked fields while the agent advances to the
-review step; charge-like `operate_act` clicks and Enter are blocked during that
-interval.
+binds that amount and releases the card; Trusty Squire fills the card without
+submitting and its role in the purchase ends there. It fills only the merchant's own
+HTTPS frames or recognized payment-provider frames. The card stays in the page as
+sealed, observation-masked fields while the agent advances to the review step and
+places the order — charge-like `operate_act` clicks and Enter are ordinary actions
+during that interval, not reserved for the operator. Verify the live final total
+against the approved `amount_cents`/currency yourself before placing the order; Trusty
+Squire no longer re-reads the total or submits anything.
 
-`operate_pay { phase: "confirm" }` is where the charge happens. It strictly reads the
-final payable total and submits within the same approval, without a second phone tap,
-when the origin and currency still match and the final total is at or below the
-approved amount. A higher final total returns `payment_amount_exceeds_approval` and is
-not re-approved. A changed page title does not invalidate the merchant because the
-checkout origin is the trust anchor. A missing or conflicting final total is never
-replaced with caller-supplied payment values.
+`operate_pay { phase: "confirm" }` just releases the session's pending-fill lock and
+reports the approved terms back — it makes no browser or provider call, records no
+audit event, and never charges. It can be called any time after the fill — it does not
+need to happen before you place the order, and it never reads a total or verifies an
+amount. If a payment gets stuck or a card is declined, recover with `operate_finish`
+and start a fresh session; `operate_pay` does not support refilling a different card
+mid-session.
 
 Before an initial single-page or `fill_card` call, Trusty Squire follows the actual
 visible card-number field and hands the checkout back when that field is hosted by
@@ -220,10 +222,9 @@ The result contains a host-scoped egress `base_url` and a `token`, not the Clerk
 - Saved cards are encrypted in your browser with a passkey-derived key. For a
   single-page payment, your phone releases the card only after approving the
   exact purchase details shown on the approval page. On a split checkout, one
-  amount-bound approval both releases the card and authorizes a charge up to that
-  amount; confirmation refuses a higher final total instead of requesting another
-  approval. The API temporarily relays only operator-sealed card ciphertext and
-  its signed mandate; successful operator confirmation clears those relay bytes.
+  amount-bound approval releases the card; Trusty Squire's role ends at the fill
+  and the caller places the order and verifies the final total itself. The API
+  temporarily relays only operator-sealed card ciphertext and its signed mandate.
   Trusty Squire's API and the coding-agent model never receive plaintext PAN or
   CVV. See the
   [security model](https://github.com/trusty-squire/trusty-squire/blob/main/SECURITY.md#client-encrypted-card-data)

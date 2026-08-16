@@ -116,16 +116,19 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   call `operate_pay` with `phase: "fill_card"` and follow the
   [README payment guide](https://github.com/Trusty-Squire/trusty-squire#one-prompt)
   for amount precedence. That one approval releases and fills the card,
-  charging nothing yet, and authorizes the eventual charge up to the approved
-  amount. Advance only through non-charge navigation such as **Next** or
-  **Continue to review**, then call `operate_pay` with `phase: "confirm"` once the
-  final total is visible. Confirm reads that total and charges under the same
-  approval when it is at or below the approved amount. It never asks for another
-  approval: a higher total returns `payment_amount_exceeds_approval`, and a missing
-  or conflicting total fails closed. Currency resolution follows the linked README
-  payment guide. `item` and `reason` remain required on both calls. Never click a
-  pay/place-order control or press Enter while the card fill is pending; confirm owns
-  the strict amount check and charge. An unrecognized payment iframe is a hard stop.
+  charging nothing yet. Trusty Squire's part is then done: drive the checkout
+  to the order-confirmation step, VERIFY the live final total there matches
+  the approved `amount_cents`/currency yourself, and place the order via
+  `operate_act` (clicking the pay/place-order control or pressing Enter is
+  fine — it is no longer reserved), handling any 3-D Secure challenge
+  directly. Call `operate_pay` with `phase: "confirm"` any time after the fill
+  to close out the approval (audit trail + release the session's payment
+  lock) — it does not need to happen before you place the order, and it never
+  reads a total, verifies an amount, or submits anything itself. `item` and
+  `reason` remain required on both calls. If the payment gets stuck or the
+  card is declined, recover with `operate_finish` and start a fresh session —
+  `operate_pay` does not support refilling a different card mid-session. An
+  unrecognized payment iframe is a hard stop.
 - Always call `operate_finish` when done, including when a payment remains unresolved.
   The authoritative teardown contract is in the
   [README tool guide](https://github.com/Trusty-Squire/trusty-squire#mcp-tools).

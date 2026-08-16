@@ -5041,9 +5041,11 @@ describe("frame targets — domain-lock (operator-frame-support)", () => {
 // ── Pending card-fill charge guard (split checkout) ─────────────────────────
 //
 // After operate_pay {phase:"fill_card"} the vaulted card sits filled in the
-// page, so the ONLY sanctioned path to the charge is operate_pay
-// {phase:"confirm"} (which verifies the live total first). A weak model must
-// not be able to fire the charge itself through operate_act.
+// page. The operator's job ends at the fill — operate_act charge-verb clicks
+// and Enter are NOT blocked; the caller drives the checkout to place the
+// order itself. The card VALUES stay masked in observations throughout
+// (session.paymentFieldSealActive), which is the actual money-fence pillar —
+// see the masking tests below.
 describe("pending card-fill charge guard", () => {
   const pending = {
     approval_id: "appr_guard",
@@ -5073,7 +5075,7 @@ describe("pending card-fill charge guard", () => {
     expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
   });
 
-  it("locks charge actions for the full fill-card lease", async () => {
+  it("serializes concurrent payment leases without blocking ordinary clicks", async () => {
     h.elements = [
       elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
     ];
@@ -5084,14 +5086,13 @@ describe("pending card-fill charge guard", () => {
 
     expect(claim.kind).toBe("lease");
     expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/already in progress/);
-    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
-      /operate_pay/,
-    );
+    // operate_act is never gated on an in-flight payment lease — only a
+    // second operate_pay call is serialized behind it.
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(1);
 
     if (claim.kind !== "lease") throw new Error("expected fill-card payment lease");
     expect(releaseActivePaymentLease(claim.lease, true)).toBe(true);
-    await act(started.session_id, { kind: "click", target: "Place order" });
-    expect(h.clickCalls).toBe(1);
   });
 
   it("serializes fill-card behind every other payment lease", async () => {
@@ -5122,55 +5123,42 @@ describe("pending card-fill charge guard", () => {
     expect(() => claimActivePaymentForOperatePay(undefined)).toThrow(/cleanup remains unverified/);
   });
 
-  it("refuses charge-verb clicks and Enter while filled, frees them after confirm clears", async () => {
+  it("allows charge-verb clicks, Enter, and Space while filled — the caller places the order", async () => {
     h.elements = [
       elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
       elem({ tag: "button", type: null, visibleText: "Continue to review", selector: "#next" }),
     ];
+    // Non-empty so settleAfterStateChange's post-click text poll resolves on
+    // its first check instead of retrying for 1.2s per click.
+    h.visibleText = "Checkout";
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
     setActivePendingCardFill(pending);
 
-    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
-      /operate_pay \{phase:"confirm"\}/,
-    );
-    await expect(
-      act(started.session_id, { kind: "js_click", target: "Place order" }),
-    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
-    // oauth_click clicks too — it must not be a side door to the charge.
-    await expect(
-      act(started.session_id, { kind: "oauth_click", target: "Place order" }),
-    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
-    expect(h.clickCalls).toBe(0);
-
-    // Between-step navigation stays free — that's how the host reaches the
-    // confirmation page at all.
-    await act(started.session_id, { kind: "click", target: "Continue to review" });
+    // None of these throw — clicking a charge-verb control is no longer
+    // reserved for operate_pay {phase:"confirm"}.
+    await act(started.session_id, { kind: "click", target: "Place order" });
     expect(h.clickCalls).toBe(1);
+    await act(started.session_id, { kind: "js_click", target: "Place order" });
 
-    // Enter fires the form's default submit → refused; other keys pass.
-    await expect(act(started.session_id, { kind: "press", key: "Enter" })).rejects.toThrow(
-      /operate_pay/,
-    );
-    await expect(act(started.session_id, { kind: "press", key: "NumpadEnter" })).rejects.toThrow(
-      /operate_pay/,
-    );
+    await act(started.session_id, { kind: "click", target: "Continue to review" });
+    expect(h.clickCalls).toBe(2);
+
+    await act(started.session_id, { kind: "press", key: "Enter" });
+    await act(started.session_id, { kind: "press", key: "NumpadEnter" });
     h.focusedLabels = ["Pay now"];
-    await expect(act(started.session_id, { kind: "press", key: "Space" })).rejects.toThrow(
-      /operate_pay/,
-    );
+    await act(started.session_id, { kind: "press", key: "Space" });
     h.focusedLabels = ["Continue to review"];
     await act(started.session_id, { kind: "press", key: "Space" });
     await act(started.session_id, { kind: "press", key: "Tab" });
 
-    // Once confirm consumes the fill, the ordinary rules return.
     clearActivePendingCardFill();
     await act(started.session_id, { kind: "click", target: "Place order" });
-    expect(h.clickCalls).toBe(2);
+    expect(h.clickCalls).toBe(3);
   });
 
-  it("refuses a locator-fallback click on a charge control while filled", async () => {
+  it("allows a locator-fallback click on a charge control while filled", async () => {
     h.locatorResolve = {
       ok: true,
       text: "",
@@ -5182,10 +5170,8 @@ describe("pending card-fill charge guard", () => {
     });
     setActivePendingCardFill(pending);
 
-    await expect(
-      act(started.session_id, { kind: "click", target: "text=Pay now" }),
-    ).rejects.toThrow(/operate_pay \{phase:"confirm"\}/);
-    expect(h.locatorClickCalls).toBe(0);
+    await act(started.session_id, { kind: "click", target: "text=Pay now" });
+    expect(h.locatorClickCalls).toBe(1);
   });
 
   it("masks re-rendered payment fields while a fill remains pending", async () => {
@@ -5277,7 +5263,7 @@ describe("pending card-fill charge guard", () => {
     expect(JSON.stringify(full)).not.toMatch(/4242|CVV 123/);
   });
 
-  it("keeps masking and charge locking after retry state is cleared without DOM cleanup", async () => {
+  it("keeps masking after retry state is cleared without DOM cleanup", async () => {
     h.elements = [
       elem({
         id: "card-number",
@@ -5295,13 +5281,12 @@ describe("pending card-fill charge guard", () => {
 
     const full = await observe(started.session_id, "full");
     expect(JSON.stringify(full)).not.toContain("4242424242424242");
-    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
-      /operate_pay/,
-    );
+    await act(started.session_id, { kind: "click", target: "Place order" });
+    expect(h.clickCalls).toBe(1);
 
     clearActivePendingCardFill(true);
     await act(started.session_id, { kind: "click", target: "Place order" });
-    expect(h.clickCalls).toBe(1);
+    expect(h.clickCalls).toBe(2);
   });
 });
 
