@@ -642,8 +642,8 @@ kill the server).
   `session_id` exactly once at tool entry, requires it when more than one session
   exists, and carries the selected `Session` through every await. Payment results
   and tool hints repeat the same ID. `operate_finish*` closes admission, drains
-  entered calls, and refuses teardown while payment state remains active or
-  resumable.
+  entered calls, and follows the payment-state cleanup and profile-disposition
+  contract in `SECURITY.md`.
 - **Unreadable checkout totals.** Follow the README payment guide for the public
   precedence contract; `executeOperatePay` in `pay-operator.ts` is the
   authoritative implementation.
