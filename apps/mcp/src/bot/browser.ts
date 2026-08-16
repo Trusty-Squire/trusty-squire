@@ -4858,14 +4858,18 @@ export class BrowserController {
     }
     let handle: ElementHandle<Element> | null;
     let dispose = false;
-    if (target.kind === "handle") {
-      handle = target.handle;
-    } else if (target.kind === "frame") {
-      handle = await this.resolveFrameElement(target.frame, target.selector);
-      dispose = true;
-    } else {
-      handle = await this.page.$(target.selector);
-      dispose = true;
+    try {
+      if (target.kind === "handle") {
+        handle = target.handle;
+      } else if (target.kind === "frame") {
+        handle = await this.resolveFrameElement(target.frame, target.selector);
+        dispose = true;
+      } else {
+        handle = await this.page.$(target.selector);
+        dispose = true;
+      }
+    } catch (error) {
+      throw new BrowserClickDispatchError("not_dispatched", error);
     }
     if (handle === null) {
       throw new BrowserClickDispatchError(
@@ -4874,19 +4878,9 @@ export class BrowserController {
       );
     }
     try {
-      return await this.runTrackedClick(handle, async () => {
-        if (target.kind === "handle") {
-          if (target.method === "click") await this.clickHandle(handle);
-          else await this.jsClickHandle(handle);
-        } else if (target.kind === "frame") {
-          if (target.method === "click") await handle.click({ timeout: 8000 });
-          else await handle.evaluate((element) => (element as HTMLElement).click());
-        } else if (target.method === "click") {
-          await this.click(target.selector);
-        } else {
-          await this.clickViaJs(target.selector);
-        }
-      });
+      return await this.runTrackedClick(handle, () =>
+        target.method === "click" ? this.clickHandle(handle) : this.jsClickHandle(handle),
+      );
     } finally {
       if (dispose) await handle.dispose().catch(() => undefined);
     }

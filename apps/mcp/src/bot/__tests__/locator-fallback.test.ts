@@ -238,6 +238,32 @@ const DETACHED_FIXTURE = `data:text/html,${encodeURIComponent(`
   <button id="buy" style="width:200px;height:40px">Add To Cart</button>
 </body></html>`)}`;
 
+const REPLACED_DURING_TRACKING_FIXTURE = `data:text/html,${encodeURIComponent(`
+<!doctype html><html><body style="margin:0;padding:0">
+  <script>
+    window.__chargeClicks = 0;
+    const original = document.createElement("button");
+    original.id = "buy";
+    original.textContent = "Place order";
+    original.style.cssText = "width:200px;height:40px";
+    document.body.append(original);
+    let trackingState;
+    let replaced = false;
+    Object.defineProperty(window, "__trustySquireClickDispatch", {
+      configurable: true,
+      get() { return trackingState; },
+      set(value) {
+        trackingState = value;
+        if (replaced) return;
+        replaced = true;
+        const replacement = original.cloneNode(true);
+        replacement.addEventListener("click", () => { window.__chargeClicks++; });
+        original.replaceWith(replacement);
+      },
+    });
+  </script>
+</body></html>`)}`;
+
 const OVERLAY_FIXTURE = `data:text/html,${encodeURIComponent(`
 <!doctype html><html><body style="margin:0;padding:0">
   <script>
@@ -654,6 +680,43 @@ describe("resolvePageTarget (real Chromium)", () => {
     } finally {
       await page.close();
     }
+  });
+
+  it("does not dispatch to a replacement installed after tracking begins", async () => {
+    const { ctrl, page } = await pageFor(REPLACED_DURING_TRACKING_FIXTURE);
+    try {
+      const firstError = await ctrl
+        .clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" })
+        .catch((error: unknown) => error);
+      expect(clickDispatchStatusForError(firstError)).toBe("not_dispatched");
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { __chargeClicks: number }).__chargeClicks,
+        ),
+      ).toBe(0);
+
+      await expect(
+        ctrl.clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" }),
+      ).resolves.toBe("dispatched");
+      expect(
+        await page.evaluate(
+          () => (window as unknown as { __chargeClicks: number }).__chargeClicks,
+        ),
+      ).toBe(1);
+    } finally {
+      await page.close();
+    }
+  });
+
+  it("classifies a page closed before target resolution as not dispatched", async () => {
+    const { ctrl, page } = await pageFor(DETACHED_FIXTURE);
+    await page.close();
+
+    const trackedError = await ctrl
+      .clickWithDispatchTracking({ kind: "selector", selector: "#buy", method: "click" })
+      .catch((error: unknown) => error);
+
+    expect(clickDispatchStatusForError(trackedError)).toBe("not_dispatched");
   });
 
   it("click rejects an overlay while explicit js_click dispatches once", async () => {
