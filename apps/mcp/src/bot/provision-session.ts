@@ -4773,12 +4773,19 @@ export async function act(
       assertFrameTargetAllowed(session, el, action.kind);
       bindCartIdentity(isCartAffectingAction(action, el));
       if (action.kind === "click" || action.kind === "js_click") {
+        const inputValue = el.tag.toLowerCase() === "input" ? (el.value ?? null) : null;
         const submitLabel = checkoutSubmitLabel({
           ariaLabel: el.ariaLabel,
-          inputValue: el.tag.toLowerCase() === "input" ? (el.value ?? null) : null,
+          inputValue,
           textContent: el.visibleText,
         });
-        const placeOrderApproval = enforcePlaceOrderGuard(session, [submitLabel, el.labelText]);
+        const placeOrderApproval = enforcePlaceOrderGuard(session, [
+          submitLabel,
+          el.ariaLabel,
+          inputValue,
+          el.visibleText,
+          el.labelText,
+        ]);
         const target = frameTargetFor(el);
         if (placeOrderApproval !== null) {
           await runPlaceOrderClick(session, placeOrderApproval, () =>

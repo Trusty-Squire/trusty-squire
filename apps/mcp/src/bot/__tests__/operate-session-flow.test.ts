@@ -5240,7 +5240,7 @@ describe("pending card-fill charge guard", () => {
     expect(h.clickCalls).toBe(2);
   });
 
-  it("recognizes input submit values as place-order labels", async () => {
+  it("checks input submit values independently from non-charge aria labels", async () => {
     h.elements = [
       elem({
         tag: "input",
@@ -5248,7 +5248,7 @@ describe("pending card-fill charge guard", () => {
         value: "Place order",
         visibleText: null,
         labelText: null,
-        ariaLabel: null,
+        ariaLabel: "Checkout",
         selector: "#place-order-input",
       }),
     ];
@@ -5258,12 +5258,50 @@ describe("pending card-fill charge guard", () => {
     });
     setActivePendingCardFill(pending);
 
-    await act(started.session_id, { kind: "click", target: "Place order" });
+    await act(started.session_id, { kind: "click", target: "Checkout" });
     expect(h.clickCalls).toBe(1);
-    await expect(act(started.session_id, { kind: "click", target: "Place order" })).rejects.toThrow(
+    await expect(act(started.session_id, { kind: "click", target: "Checkout" })).rejects.toThrow(
       /place-order attempt already fired/,
     );
     expect(h.clickCalls).toBe(1);
+  });
+
+  it("audits a caller place-order attempt from a recipe-run-created session", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "recipe-audit-client-"));
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    h.elements = [
+      elem({ tag: "button", type: null, visibleText: "Place order", selector: "#place-order" }),
+    ];
+    h.visibleText = "Checkout";
+    const auditPayment = vi.fn().mockResolvedValue({ id: "evt_recipe" });
+    const api = { auditPayment } as unknown as ApiClient;
+
+    try {
+      const started = (await operateRecipeRunTool.handler(
+        {
+          verb: "purchase",
+          service_url: "https://shop.example.com/checkout",
+          params: {},
+        },
+        api,
+      )) as { session_id: string; replay: { status: string } };
+      expect(started.replay.status).toBe("cache_miss");
+
+      setActivePendingCardFill(pending);
+      await act(started.session_id, { kind: "click", target: "Place order" });
+
+      expect(auditPayment).toHaveBeenCalledTimes(1);
+      expect(auditPayment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          approval_id: "appr_guard",
+          card_ref: "card_guard",
+          status: "payment_place_order_attempted",
+        }),
+      );
+    } finally {
+      delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("keeps the place-order guard bound to its approval across confirm, resets only on a fresh fill", async () => {

@@ -203,6 +203,29 @@ describe("NotifyingVaultAuditStore", () => {
     expect(message).not.toContain("💸");
   });
 
+  it("formats place-order attempts without implying an executed payment", () => {
+    const message = formatVaultEventMessage(
+      {
+        account_id: "a",
+        type: VAULT_AUDIT_TYPES.paymentExecuted,
+        payload: {
+          reference: "pay://p4",
+          requester: "agent",
+          merchant: "Synthetic Books",
+          amount_cents: 1234,
+          currency: "USD",
+          payment_status: "payment_place_order_attempted",
+        },
+      },
+      NOW,
+    );
+
+    expect(message).toContain("Place-order attempted");
+    expect(message).toContain("Synthetic Books — USD 12.34");
+    expect(message).not.toContain("💸");
+    expect(message).not.toContain("Payment payment_place_order_attempted");
+  });
+
   it("logs audit failures without rejecting a completed mutation", async () => {
     const logger = { error: vi.fn() };
     await expect(

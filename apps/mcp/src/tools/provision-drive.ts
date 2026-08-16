@@ -1888,7 +1888,7 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
       leg: { type: "string", enum: ["checkout"] },
     },
   },
-  async handler(args) {
+  async handler(args, api) {
     if (args.leg === "checkout") {
       return await useCheckoutLegRecipe(args.session_id!, args.verb!, args.params ?? {});
     }
@@ -1911,6 +1911,7 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
         serviceUrl: args.service_url,
         consentInboxRead: await readInboxConsent(),
         ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
+        ...(api !== null ? { api } : {}),
       });
       if (cold.needs_user !== undefined) return cold;
       return {
@@ -1958,6 +1959,7 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
         serviceUrl: args.service_url,
         consentInboxRead: await readInboxConsent(),
         ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
+        ...(api !== null ? { api } : {}),
       });
       if (cold.needs_user !== undefined) return cold;
       return {
@@ -1981,6 +1983,7 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
         ...(recipe.allowed_hosts.length > 0 ? { extraAllowedHosts: recipe.allowed_hosts } : {}),
         hint: renderOperatorRecipeHint(recipe),
         ...(args.require_live_identity === true ? { requireLiveIdentity: true } : {}),
+        ...(api !== null ? { api } : {}),
       });
       if (started.needs_user !== undefined) return started;
       if (legacyHintOnly) {
