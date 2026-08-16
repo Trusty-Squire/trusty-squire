@@ -233,9 +233,12 @@ function readSeedLockOwner(path: string): SeedLockOwner | null {
 }
 
 function seedLockState(path: string): "matching" | "stale" | "unknown" {
-  // Reclaim only confirmed-dead owners. Reclaiming a plausibly-live owner needs
-  // heavier fencing or heartbeats to avoid racing a resumed holder, and cannot
-  // protect against old-version processes; live wedges still require killing the PID.
+  // Delivered scope is confirmed-dead-PID reclaim only. A same-host holder with
+  // matching PID/start_time is intentionally unreclaimed: wall-clock reclaim of
+  // a plausibly-live owner cannot be fully race-free without a heavier heartbeat
+  // or fencing protocol, which was evaluated and rejected as out of scope. Such
+  // a protocol also cannot protect against an already-running old-version orphan
+  // like the 2026-08-15 incident; identify and kill that process by PID instead.
   const owner = readSeedLockOwner(path);
   if (owner !== null) {
     if (owner.host !== hostname()) return "unknown";
