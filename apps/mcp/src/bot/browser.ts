@@ -1410,6 +1410,48 @@ function extractObservationVisibleText(): string {
   return text;
 }
 
+function elementHasEffectiveVisibleRect(element: Element): boolean {
+  if (!element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })) return false;
+  const view = element.ownerDocument.defaultView;
+  if (view === null) return false;
+  const rect = element.getBoundingClientRect();
+  let left = Math.max(rect.left, 0);
+  let top = Math.max(rect.top, 0);
+  let right = Math.min(rect.right, view.innerWidth);
+  let bottom = Math.min(rect.bottom, view.innerHeight);
+  const clips = (overflow: string): boolean =>
+    /^(?:auto|clip|hidden|overlay|scroll)$/.test(overflow);
+  let ancestor = element.parentElement;
+  while (ancestor !== null) {
+    const style = view.getComputedStyle(ancestor);
+    const clipsX = clips(style.overflowX);
+    const clipsY = clips(style.overflowY);
+    if (clipsX || clipsY) {
+      const ancestorRect = ancestor.getBoundingClientRect();
+      const clientLeft = ancestor instanceof HTMLElement ? ancestor.clientLeft : 0;
+      const clientTop = ancestor instanceof HTMLElement ? ancestor.clientTop : 0;
+      const clipLeft = ancestorRect.left + clientLeft;
+      const clipTop = ancestorRect.top + clientTop;
+      const clipRight =
+        clipLeft +
+        (ancestor instanceof HTMLElement ? ancestor.clientWidth : ancestorRect.width);
+      const clipBottom =
+        clipTop +
+        (ancestor instanceof HTMLElement ? ancestor.clientHeight : ancestorRect.height);
+      if (clipsX) {
+        left = Math.max(left, clipLeft);
+        right = Math.min(right, clipRight);
+      }
+      if (clipsY) {
+        top = Math.max(top, clipTop);
+        bottom = Math.min(bottom, clipBottom);
+      }
+    }
+    ancestor = ancestor.parentElement;
+  }
+  return right - left >= 4 && bottom - top >= 4;
+}
+
 const PAYMENT_PAN_MAX_SPAN_CHARS = 96;
 
 function passesPaymentLuhn(digits: string): boolean {
@@ -9404,34 +9446,34 @@ export class BrowserController {
       const frameElement = await current.frameElement().catch(() => null);
       if (frameElement === null) return false;
       try {
-        const [box, rendered] = await Promise.all([
-          frameElement.boundingBox().catch(() => null),
-          frameElement
-            .evaluate((element: Element) => {
-              let currentElement: Element | null = element;
-              while (currentElement !== null) {
-                const style = getComputedStyle(currentElement);
-                if (
-                  style.display === "none" ||
-                  style.visibility === "hidden" ||
-                  style.visibility === "collapse" ||
-                  Number.parseFloat(style.opacity) <= 0
-                ) {
-                  return false;
-                }
-                currentElement = currentElement.parentElement;
-              }
-              return true;
-            })
-            .catch(() => false),
-        ]);
-        if (box === null || box.width < 4 || box.height < 4 || !rendered) return false;
+        if (!(await frameElement.evaluate(elementHasEffectiveVisibleRect).catch(() => false))) {
+          return false;
+        }
       } finally {
         await frameElement.dispose().catch(() => undefined);
       }
       current = current.parentFrame();
     }
     return true;
+  }
+
+  private async hasVisibleThreeDsStructuralSignal(frame: Frame): Promise<boolean> {
+    const elements = await frame
+      .locator(
+        'iframe[title*="3d secure" i],form[action*="acs" i],form:has(input[name="creq" i])',
+      )
+      .elementHandles()
+      .catch(() => []);
+    try {
+      const visibility = await Promise.all(
+        elements.map((element) =>
+          element.evaluate(elementHasEffectiveVisibleRect).catch(() => false),
+        ),
+      );
+      return visibility.some(Boolean);
+    } finally {
+      await Promise.all(elements.map((element) => element.dispose().catch(() => undefined)));
+    }
   }
 
   private async detectThreeDsChallenge(): Promise<CheckoutSubmitResult> {
@@ -9450,35 +9492,7 @@ export class BrowserController {
       if (!(await this.isFrameVisible(frame))) continue;
       const [text, structural] = await Promise.all([
         frame.evaluate(extractObservationVisibleText).catch(() => ""),
-        frame
-          .evaluate(() => {
-            const rendered = (element: Element): boolean => {
-              let currentElement: Element | null = element;
-              while (currentElement !== null) {
-                const style = getComputedStyle(currentElement);
-                if (
-                  style.display === "none" ||
-                  style.visibility === "hidden" ||
-                  style.visibility === "collapse" ||
-                  Number.parseFloat(style.opacity) <= 0
-                ) {
-                  return false;
-                }
-                currentElement = currentElement.parentElement;
-              }
-              const box = element.getBoundingClientRect();
-              return box.width >= 4 && box.height >= 4;
-            };
-            const visibleStructuralSignal = Array.from(
-              document.querySelectorAll('iframe[title*="3d secure" i],form[action*="acs" i]'),
-            ).some(rendered);
-            if (visibleStructuralSignal) return true;
-            return Array.from(document.querySelectorAll('input[name="creq" i]')).some((input) => {
-              const form = input.closest("form");
-              return form !== null && rendered(form);
-            });
-          })
-          .catch(() => false),
+        this.hasVisibleThreeDsStructuralSignal(frame),
       ]);
       const detected =
         urlPattern.test(frame.url()) ||

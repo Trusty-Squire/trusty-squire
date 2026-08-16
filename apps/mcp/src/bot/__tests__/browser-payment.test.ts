@@ -3732,6 +3732,10 @@ describe("3DS detection vs captcha frames", () => {
             '<div style="opacity:0"><p>Please authenticate this payment using 3-D Secure</p></div>',
         },
         { merchantHtml: '<input type="hidden" name="creq">' },
+        {
+          merchantHtml:
+            '<div style="width:0;height:0;overflow:hidden"><iframe title="3D Secure authentication" src="https://issuer.example.test/acs/method" width="100" height="100"></iframe></div>',
+        },
       ];
       try {
         for (const testCase of cases) {
