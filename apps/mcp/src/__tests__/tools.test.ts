@@ -16,6 +16,7 @@ import type {
   PendingApprovalWait,
   PendingCardFill,
 } from "../bot/pay-operator.js";
+import * as PayOperator from "../bot/pay-operator.js";
 import type * as ProvisionSession from "../bot/provision-session.js";
 
 // operate_pay's handler reaches into the single active browser session via
@@ -1383,14 +1384,57 @@ describe("operate_pay split checkout phases", () => {
     );
   });
 
-  it("confirm reports ready-to-place, clears pending, and never touches the browser or API", async () => {
+  it("records card provenance exactly once when fill_card succeeds", async () => {
+    const executeOperatePay = vi
+      .spyOn(PayOperator, "executeOperatePay")
+      .mockImplementation(async (_args, _api, _browser, deps) => {
+        deps.onCardResolved(PENDING.card_ref);
+        deps.onCardFilled(PENDING);
+        return {
+          status: "payment_card_filled",
+          approval_url: PENDING.approval_url,
+          merchant: PENDING.checkout.merchant,
+          amount_cents: PENDING.checkout.amount_cents,
+          currency: PENDING.checkout.currency,
+          last4: PENDING.last4,
+        };
+      });
+    const api = makeMockApi({
+      listPaymentCards: vi.fn().mockResolvedValue([{ id: PENDING.card_ref, label: "Personal" }]),
+    } as unknown as ApiClient);
+
+    try {
+      await expect(
+        operatePayTool.handler(
+          operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "fill_card" }),
+          api,
+        ),
+      ).resolves.toMatchObject({ status: "payment_card_filled" });
+      expect(mockRecordActivePaymentProvenance).toHaveBeenCalledOnce();
+      expect(mockRecordActivePaymentProvenance).toHaveBeenCalledWith(
+        PENDING.card_ref,
+        expect.objectContaining({ id: PAYMENT_SESSION_A_ID }),
+      );
+      expect(mockPending).toEqual(PENDING);
+    } finally {
+      executeOperatePay.mockRestore();
+    }
+  });
+
+  it("confirm closes out neutrally, clears pending, and never touches the browser or API", async () => {
     mockPending = { ...PENDING };
     const auditPayment = vi.fn().mockResolvedValue({ id: "audit_1" });
     const api = makeMockApi({ auditPayment } as unknown as ApiClient);
     const args = operatePayTool.inputSchema.parse({ ...PAYMENT_DETAILS, phase: "confirm" });
 
     const result = (await operatePayTool.handler(args, api)) as Record<string, unknown>;
-    expect(result).toMatchObject({ status: "payment_ready_to_place", amount_cents: 100 });
+    expect(result).toMatchObject({
+      status: "payment_ready_to_place",
+      amount_cents: 100,
+      next:
+        "Trusty Squire closed out the fill-time approval and released the pending-fill lease. " +
+        "It did not inspect, submit, or otherwise change the checkout.",
+    });
     // confirm no longer re-reads the live total, clicks anything, or audits a
     // charge — it isn't charging. The caller places the order and verifies
     // the total itself.
@@ -1398,6 +1442,7 @@ describe("operate_pay split checkout phases", () => {
     expect(mockBrowser.readCheckoutConfirmSummary).not.toHaveBeenCalled();
     expect(mockBrowser.isPayPalHostedCheckout).not.toHaveBeenCalled();
     expect(auditPayment).not.toHaveBeenCalled();
+    expect(mockRecordActivePaymentProvenance).not.toHaveBeenCalled();
     expect(mockPending).toBeNull();
   });
 

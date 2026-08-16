@@ -333,6 +333,7 @@ export const operatePayTool: Tool<z.infer<typeof inputSchema>> = {
             },
             onCardFilled: (pending) => {
               filledPending = pending;
+              recordActivePaymentProvenance(pending.card_ref, session);
             },
             onCardFillCleanupFailed: () => {
               paymentFieldsCleared = false;

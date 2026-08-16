@@ -122,8 +122,8 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
   `operate_act` (clicking the pay/place-order control or pressing Enter is
   fine — it is no longer reserved), handling any 3-D Secure challenge
   directly. Call `operate_pay` with `phase: "confirm"` any time after the fill
-  to close out the approval (audit trail + release the session's payment
-  lock) — it does not need to happen before you place the order, and it never
+  to close out the approval and release the session's pending-fill lock — it
+  does not need to happen before you place the order, and it never
   reads a total, verifies an amount, or submits anything itself. `item` and
   `reason` remain required on both calls. If the payment gets stuck or the
   card is declined, recover with `operate_finish` and start a fresh session —
@@ -142,8 +142,9 @@ Once connected and restarted, the `squire` MCP tools appear. The core loop:
 - **Stop for the user** at phone verification, a hard image CAPTCHA, an
   unsupported payment, 3-D Secure, or any decision that belongs to a person.
   `operate_pay` may proceed only after its explicit phone approval succeeds. Do
-  not bypass a pending split payment with `operate_act`, do not guess, and do not
-  claim a signup finished when it did not.
+  use `operate_act` for split-checkout navigation and order placement after a
+  successful card fill as described above; do not guess or claim a signup
+  finished when it did not.
 - Card controls marked `interaction: "vaulted_card_only"` must be handled with
   their recommended `operate_pay { phase: "fill_card" }` action. Never type a
   PAN or Luhn-valid card number through `operate_act`; a refusal points back to

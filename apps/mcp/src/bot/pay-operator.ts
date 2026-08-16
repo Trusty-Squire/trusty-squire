@@ -1419,8 +1419,7 @@ export async function executeOperatePayConfirm(
     amount_cents: checkout.amount_cents,
     currency: checkout.currency,
     next:
-      "Nothing was charged by Trusty Squire. Verify the live final total on the page matches the " +
-      "approved amount_cents/currency above, then place the order yourself via operate_act and " +
-      "handle any 3-D Secure challenge directly.",
+      "Trusty Squire closed out the fill-time approval and released the pending-fill lease. " +
+      "It did not inspect, submit, or otherwise change the checkout.",
   };
 }

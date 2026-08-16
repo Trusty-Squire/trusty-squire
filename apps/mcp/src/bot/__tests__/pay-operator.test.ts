@@ -1650,7 +1650,9 @@ describe("operate_pay split checkout — confirm", () => {
       merchant: SPLIT_CHECKOUT.merchant,
       amount_cents: SPLIT_CHECKOUT.amount_cents,
       currency: SPLIT_CHECKOUT.currency,
-      next: expect.stringContaining("place the order"),
+      next:
+        "Trusty Squire closed out the fill-time approval and released the pending-fill lease. " +
+        "It did not inspect, submit, or otherwise change the checkout.",
     });
   });
 
