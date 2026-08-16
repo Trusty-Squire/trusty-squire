@@ -10,6 +10,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { hostname, tmpdir } from "node:os";
@@ -220,6 +221,43 @@ describe("operator profile pool migration stage", () => {
       expect(lease.profileDir).toBeTruthy();
     } finally {
       await lease.destroy();
+    }
+  });
+
+  it("reclaims a live matching seed-lock owner after the bounded hold TTL", async () => {
+    const { root, source } = fixture();
+    await publishOperatorProfileSeed(source, { rootDir: root, proof: verifiedLoginProof });
+    const p = operatorProfilePoolTest.paths(root);
+    let releaseLock = (): void => undefined;
+    let lease: Awaited<ReturnType<typeof acquireOperatorProfile>> | undefined;
+    const lockGate = new Promise<void>((resolve) => {
+      releaseLock = resolve;
+    });
+    let markLockHeld = (): void => undefined;
+    const lockHeld = new Promise<void>((resolve) => {
+      markLockHeld = resolve;
+    });
+    const holder = operatorProfilePoolTest.withSeedLock(p, async () => {
+      markLockHeld();
+      await lockGate;
+    });
+
+    try {
+      await lockHeld;
+      const expiredAt = new Date(Date.now() - 2 * 60 * 1_000 - 1_000);
+      utimesSync(p.seedLock, expiredAt, expiredAt);
+
+      lease = await acquireOperatorProfile("session-live-expired-holder", {
+        rootDir: root,
+        sourceProfileDir: source,
+        deadline: Date.now() + 1_000,
+      });
+
+      expect(lease.profileDir).toBeTruthy();
+    } finally {
+      await lease?.destroy();
+      releaseLock();
+      await holder;
     }
   });
 
