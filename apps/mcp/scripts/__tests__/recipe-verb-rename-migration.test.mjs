@@ -353,6 +353,71 @@ describe("recipe verb-rename migration", () => {
     });
   });
 
+  it("keeps the source intact when staging rewritten bytes fails", async () => {
+    const sourceFile = "reserve--acme.com.json";
+    const sourcePath = path.join(dir, sourceFile);
+    await writeRecipe(
+      dir,
+      sourceFile,
+      recipe({ name: "legacy", verb: "reserve", domain: "acme.com" }),
+    );
+
+    const originalWriteFile = fs.writeFile.bind(fs);
+    const failure = Object.assign(new Error("injected write failure"), { code: "EIO" });
+    vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
+      await originalWriteFile(file, "", options);
+      throw failure;
+    });
+
+    await expect(
+      migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} }),
+    ).rejects.toMatchObject({ code: "EIO" });
+    expect(await readJson(sourcePath)).toMatchObject({
+      name: "legacy",
+      verb: "reserve",
+    });
+  });
+
+  it("does not overwrite an update made after canonical publication", async () => {
+    const sourceFile = "reserve--acme.com.json";
+    const targetFile = "book--acme.com.json";
+    const targetPath = path.join(dir, targetFile);
+    await writeRecipe(
+      dir,
+      sourceFile,
+      recipe({ name: "legacy", verb: "reserve", domain: "acme.com" }),
+    );
+
+    const originalLink = fs.link.bind(fs);
+    const originalWriteFile = fs.writeFile.bind(fs);
+    let injected = false;
+    vi.spyOn(fs, "link").mockImplementation(async (source, destination) => {
+      const result = await originalLink(source, destination);
+      if (!injected && destination === targetPath) {
+        injected = true;
+        await originalWriteFile(
+          targetPath,
+          `${JSON.stringify(
+            recipe({ name: "concurrent", verb: "book", domain: "acme.com" }),
+            null,
+            2,
+          )}\n`,
+          "utf8",
+        );
+      }
+      return result;
+    });
+
+    await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
+
+    expect(injected).toBe(true);
+    expect(await readJson(targetPath)).toMatchObject({
+      name: "concurrent",
+      verb: "book",
+    });
+    expect(await exists(path.join(dir, sourceFile))).toBe(false);
+  });
+
   it("is idempotent — a second run is a no-op", async () => {
     await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }));
 

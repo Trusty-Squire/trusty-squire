@@ -114,6 +114,7 @@ export async function migrateRecipeVerbs({
       domain: recipe?.domain ?? null,
       actionPath: recipe?.action_path ?? null,
       mtimeMs: stat.mtimeMs,
+      mode: stat.mode,
     };
   };
 
@@ -196,6 +197,32 @@ export async function migrateRecipeVerbs({
     );
   };
 
+  const stageRewritten = async (snapshot, canonical) => {
+    const stageDir = await fs.mkdtemp(path.join(dir, ".recipe-verb-migration-"));
+    const stagePath = path.join(stageDir, "recipe");
+    const rewritten = snapshot.raw.replace(
+      /"verb"\s*:\s*"[^"]*"/,
+      `"verb": "${canonical}"`,
+    );
+    try {
+      await fs.writeFile(stagePath, rewritten, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: snapshot.mode,
+      });
+      const handle = await fs.open(stagePath, "r");
+      try {
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      return { path: stagePath, dir: stageDir };
+    } catch (err) {
+      await fs.rm(stageDir, { recursive: true, force: true });
+      throw err;
+    }
+  };
+
   for (const group of [...groups.values()].sort((a, b) =>
     a.targetFile.localeCompare(b.targetFile),
   )) {
@@ -210,92 +237,103 @@ export async function migrateRecipeVerbs({
     const winner = contenders[0];
     const losers = contenders.slice(1);
     const domain = group.sources[0].domain;
+    const stages = [];
+    let stagedWinner = null;
 
-    for (const loser of losers) {
-      const loserPath = await preserveAsSuperseded(loser.path, targetPath);
-      recordCollision({
-        loser,
-        winner,
-        loserPath,
-        domain,
-        targetFile: group.targetFile,
-      });
+    if (!dryRun && CANONICAL_VERB[winner.verb] === group.canonical) {
+      stagedWinner = await stageRewritten(winner, group.canonical);
+      stages.push(stagedWinner);
     }
 
-    let finalWinner = winner;
-    let dynamicCollision = false;
+    try {
+      for (const loser of losers) {
+        const loserPath = await preserveAsSuperseded(loser.path, targetPath);
+        recordCollision({
+          loser,
+          winner,
+          loserPath,
+          domain,
+          targetFile: group.targetFile,
+        });
+      }
 
-    if (winner.path !== targetPath && !dryRun) {
-      for (;;) {
-        try {
-          await fs.link(winner.path, targetPath);
-          await fs.unlink(winner.path);
-          break;
-        } catch (err) {
-          if (err.code !== "EEXIST") throw err;
+      let finalWinner = winner;
+      let dynamicCollision = false;
 
-          const currentTarget = await readSnapshot(group.targetFile);
-          if (!currentTarget) continue;
-          dynamicCollision = true;
+      if (winner.path !== targetPath && !dryRun) {
+        for (;;) {
+          try {
+            await fs.link(stagedWinner.path, targetPath);
+            await fs.unlink(winner.path);
+            break;
+          } catch (err) {
+            if (err.code !== "EEXIST") throw err;
 
-          if (compareContenders(winner, currentTarget) <= 0) {
-            let loserPath;
-            try {
-              loserPath = await preserveAsSuperseded(currentTarget.path, targetPath);
-            } catch (preserveError) {
-              if (preserveError.code === "ENOENT") continue;
-              throw preserveError;
+            const currentTarget = await readSnapshot(group.targetFile);
+            if (!currentTarget) continue;
+            dynamicCollision = true;
+
+            if (compareContenders(winner, currentTarget) <= 0) {
+              let loserPath;
+              try {
+                loserPath = await preserveAsSuperseded(currentTarget.path, targetPath);
+              } catch (preserveError) {
+                if (preserveError.code === "ENOENT") continue;
+                throw preserveError;
+              }
+              recordCollision({
+                loser: currentTarget,
+                winner,
+                loserPath,
+                domain,
+                targetFile: group.targetFile,
+              });
+              continue;
             }
+
+            const loserPath = await preserveAsSuperseded(winner.path, targetPath);
             recordCollision({
-              loser: currentTarget,
-              winner,
+              loser: winner,
+              winner: currentTarget,
               loserPath,
               domain,
               targetFile: group.targetFile,
             });
-            continue;
+            finalWinner = currentTarget;
+            break;
           }
+        }
+      } else if (winner.path === targetPath && stagedWinner) {
+        await fs.rename(stagedWinner.path, targetPath);
+      }
 
-          const loserPath = await preserveAsSuperseded(winner.path, targetPath);
-          recordCollision({
-            loser: winner,
-            winner: currentTarget,
-            loserPath,
+      const finalCanonical = CANONICAL_VERB[finalWinner.verb];
+      if (!dryRun && finalWinner !== winner && finalCanonical === group.canonical) {
+        const finalStage = await stageRewritten(finalWinner, group.canonical);
+        stages.push(finalStage);
+        await fs.rename(finalStage.path, targetPath);
+      }
+
+      if (finalCanonical === group.canonical) {
+        if (
+          finalWinner.path === targetPath ||
+          (!existingTarget && !dynamicCollision)
+        ) {
+          summary.renamed.push({
+            from: finalWinner.file,
+            to: group.targetFile,
+            verb: finalWinner.verb,
+            canonical: group.canonical,
             domain,
-            targetFile: group.targetFile,
           });
-          finalWinner = currentTarget;
-          break;
+          emit(
+            `→ ${finalWinner.file} → ${group.targetFile} ` +
+              `(verb ${finalWinner.verb} → ${group.canonical})`,
+          );
         }
       }
-    }
-
-    const finalCanonical = CANONICAL_VERB[finalWinner.verb];
-    if (finalCanonical === group.canonical) {
-      if (!dryRun) {
-        const rewritten = finalWinner.raw.replace(
-          /"verb"\s*:\s*"[^"]*"/,
-          `"verb": "${group.canonical}"`,
-        );
-        if (rewritten !== finalWinner.raw) await fs.writeFile(targetPath, rewritten, "utf8");
-      }
-
-      if (
-        finalWinner.path === targetPath ||
-        (!existingTarget && !dynamicCollision)
-      ) {
-        summary.renamed.push({
-          from: finalWinner.file,
-          to: group.targetFile,
-          verb: finalWinner.verb,
-          canonical: group.canonical,
-          domain,
-        });
-        emit(
-          `→ ${finalWinner.file} → ${group.targetFile} ` +
-            `(verb ${finalWinner.verb} → ${group.canonical})`,
-        );
-      }
+    } finally {
+      await Promise.all(stages.map((stage) => fs.rm(stage.dir, { recursive: true, force: true })));
     }
   }
 
