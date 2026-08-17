@@ -1,5 +1,9 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9-rc.29 (2026-08-16)
+
+- feat(mcp): key recipes by action path and simplify payment replay (#545)
+
 ## 1.1.9-rc.28 (2026-08-16)
 
 - fix(mcp): operate_finish closes unconditionally, even mid-payment (#538)
