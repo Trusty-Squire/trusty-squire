@@ -1,5 +1,14 @@
 # Changelog — @trusty-squire/mcp
 
+## 1.1.9 (2026-08-17)
+
+- fix(mcp): migrate legacy recipe verbs safely (#547)
+- release(api): deploy payment completion fix to prod (#509)
+- fix(pay): accept the operator's card_ref key on approval confirm (#476)
+- ci: retrigger checks
+- release(mcp): 1.1.8
+- release(mcp): 1.1.7 (#435)
+
 ## 1.1.9-rc.29 (2026-08-16)
 
 - feat(mcp): key recipes by action path and simplify payment replay (#545)
