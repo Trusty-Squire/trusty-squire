@@ -87,7 +87,6 @@ export function operatorRecipeDir() {
  * @param {object} opts
  * @param {string} [opts.dir]             directory to scan; defaults to operatorRecipeDir()
  * @param {boolean} [opts.dryRun]         report what would happen without writing
- * @param {boolean} [opts.quiescent]       confirms recipe writers are stopped for live migration
  * @param {string} [opts.timestampBase]   injectable timestamp for `.superseded-<ts>`
  *                                        names (test seam; defaults to Date.now())
  * @param {(line: string) => void} [opts.log]  log sink; defaults to console.log
@@ -96,7 +95,6 @@ export function operatorRecipeDir() {
 export async function migrateRecipeVerbs({
   dir = operatorRecipeDir(),
   dryRun = false,
-  quiescent = false,
   timestampBase,
   log = (line) => console.log(line),
 } = {}) {
@@ -260,10 +258,6 @@ export async function migrateRecipeVerbs({
     });
   }
 
-  if (!dryRun && plans.length > 0 && !quiescent) {
-    throw new Error("Live migration requires stopped recipe writers; confirm with quiescent: true");
-  }
-
   const pending = plans
     .filter((plan) => canonicalVerb(plan.winner.verb) === plan.canonical)
     .map((plan) => ({ ...plan, currentPath: plan.winner.path }));
@@ -323,10 +317,9 @@ function isMain() {
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run") || args.includes("--dry");
-  const quiescent = args.includes("--quiescent");
   const dir = operatorRecipeDir();
   console.log(dryRun ? `[dry-run] scanning ${dir}` : `scanning ${dir}`);
-  const summary = await migrateRecipeVerbs({ dir, dryRun, quiescent });
+  const summary = await migrateRecipeVerbs({ dir, dryRun });
   const total = summary.renamed.length + summary.superseded.length;
   console.log(
     `${dryRun ? "[dry-run] would migrate" : "migrated"} ${total} file(s) ` +

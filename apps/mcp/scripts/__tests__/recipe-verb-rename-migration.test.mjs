@@ -3,13 +3,7 @@ import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import {
-  migrateRecipeVerbs as migrateRecipeVerbsUnconfirmed,
-  CANONICAL_VERB,
-} from "../recipe-verb-rename-migration.mjs";
-
-const migrateRecipeVerbs = (options) =>
-  migrateRecipeVerbsUnconfirmed({ quiescent: true, ...options });
+import { migrateRecipeVerbs, CANONICAL_VERB } from "../recipe-verb-rename-migration.mjs";
 
 // Small fixture renderer matching the runtime's recipe shape (name + verb +
 // domain are all that matter for the migration; nothing else is touched).
@@ -174,19 +168,18 @@ describe("recipe verb-rename migration", () => {
     expect(second.superseded).toHaveLength(0);
   });
 
-  it("requires explicit confirmation that recipe writers are stopped", async () => {
+  it("runs live migration without an extra confirmation flag", async () => {
     const sourcePath = await writeRecipe(
       dir,
       "reserve--acme.com.json",
       recipe({ verb: "reserve", domain: "acme.com" }),
     );
 
-    await expect(
-      migrateRecipeVerbsUnconfirmed({ dir, timestampBase: "t" }),
-    ).rejects.toThrow("requires stopped recipe writers");
+    const summary = await migrateRecipeVerbs({ dir, timestampBase: "t" });
 
-    expect((await readJson(sourcePath)).verb).toBe("reserve");
-    expect(await exists(path.join(dir, "book--acme.com.json"))).toBe(false);
+    expect(summary.renamed).toHaveLength(1);
+    expect(await exists(sourcePath)).toBe(false);
+    expect((await readJson(path.join(dir, "book--acme.com.json"))).verb).toBe("book");
   });
 
   it("keeps the source intact when a staged rewrite partially fails", async () => {
