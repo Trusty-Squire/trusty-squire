@@ -98,8 +98,8 @@ different registrable domains, look-alikes, and templates in a hostname are
 rejected. The client checks before publishing, the registry checks before
 storing, and replay checks the resolved entry and allowed hosts before opening
 a session and each explicit navigation step before executing it. A replay-time
-violation is terminal for that recipe, fails the payment gate, and falls back
-to cold driving when the call shape permits a cold start.
+violation is terminal for that recipe and falls back to cold driving when the
+call shape permits a cold start.
 
 Checkout-shape recipes have no site domain. They therefore cannot declare an
 entry URL, widen `allowed_hosts`, or contain `goto`/`allow_host` actions; they
@@ -108,8 +108,8 @@ may only interact with the already-open checkout page.
 The share-eligibility gate remains a separate privacy boundary: personal data
 is represented only as typed holes and is filled from the replaying user's own
 inputs. Earned credential values never enter a shared recipe; only sealed slot
-references may appear. The field-role checks and all money-path guards described
-below apply unchanged.
+references may appear. The general per-step field-role checks and the charging
+rule described below still apply.
 
 ## Recording contract
 
@@ -210,7 +210,7 @@ unconditionally returns `fallback_required` the moment it reaches a
 `recorded.kind === "operate_pay"` step, for every recipe, regardless of verb.
 `isMoneyPath` (the same function) is a pure trace-content check —
 `recipe.trace.some((e) => e.action.kind === "operate_pay")` — used only to
-decide whether a guard failure elsewhere in the trace narrows to
+decide whether a field failure elsewhere in the trace narrows to
 `leg_fallback_required` (resume the checkout leg cold from
 `from_step_index`) instead of the terminal `human_required`; it does not
 gate whether `operate_pay` itself may run.

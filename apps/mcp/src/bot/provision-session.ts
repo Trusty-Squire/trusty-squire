@@ -443,7 +443,7 @@ interface ReplayState {
   failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
   // replay-per-leg-signature — index of this recipe's OWN first money field,
   // or null when none exists. > 0 means there's a genuine non-money prefix
-  // (a catalog/storefront leg) ahead of it, which is what lets a guard
+  // (a catalog/storefront leg) ahead of it, which is what lets a field
   // failure degrade to leg_fallback_required instead of the terminal
   // human_required — see humanRequired in replayOperatorRecipe.
   legStartIndex: number | null;
@@ -5790,7 +5790,7 @@ export async function rememberRecipe(
   // crude-but-reliable degenerate (verb, domain) catch-all alive, so a later
   // replay on an unrecognized path doesn't go cold where today it hits.
   if (actionPath.length > 0) {
-    await refreshDegenerateCatchAll(recipe).catch(() => undefined);
+    await refreshDegenerateCatchAll(recipe);
   }
   audit(sessionId, "remember_recipe", {
     name: opts.name,
@@ -5822,7 +5822,8 @@ async function refreshDegenerateCatchAll(recipe: OperatorRecipe): Promise<void> 
   try {
     const existing = await readRecipe(operatorRecipeKeyForDomain(recipe.verb, recipe.domain));
     shouldRefresh = existing.action_path === undefined || existing.action_path.length === 0;
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     shouldRefresh = true;
   }
   if (!shouldRefresh) return;
@@ -5990,19 +5991,15 @@ export type OperatorReplayResult =
       field: string;
     }
   | {
-      // replay-per-leg-signature — a money-path guard failure that occurred
+      // replay-per-leg-signature — a replay field failure that occurred
       // AFTER a genuine catalog/storefront prefix (legStartIndex > 0): the
       // catalog/storefront leg already replayed fine, only the checkout leg
       // needs cold driving. Distinct from human_required, which stays the
       // terminal "stop, nothing narrower to fall back to" response for a
-      // single-leg (or leg-less) recipe. Not resumable via resume_from,
-      // and the same fail-closed payment gate as human_required stays shut
-      // for this session's remainder: operate_pay is refused, and
-      // operate_recipe_save / operate_recipe_run{leg:"checkout"} both throw on this
-      // session (recipeRejectionReason is set, replayState is retained by
-      // design). The host may drive the checkout leg's NON-payment steps
-      // cold from from_step_index; completing payment requires a fresh
-      // operate_start.
+      // single-leg (or leg-less) recipe. It is not resumable via resume_from,
+      // and recipe recording remains refused because recipeRejectionReason is
+      // set. The host may drive the checkout leg cold from from_step_index;
+      // any charge still goes through a fresh, human-approved operate_pay.
       status: "leg_fallback_required";
       observation: Observation;
       leg: "checkout";
@@ -6013,10 +6010,9 @@ export type OperatorReplayResult =
       // replay-serve-live-domainlock — a goto/allow_host step's resolved
       // target does not resolve to the recipe's own eTLD+1. Distinct from
       // fallback_required: this is
-      // NEVER resumable — the fail-closed payment gate shuts exactly like
-      // human_required, and the host must abandon this recipe's replay and
-      // drive the remainder cold. Prevents a tampered/malicious shared
-      // recipe from steering the browser to an attacker origin.
+      // NEVER resumable — the host must abandon this recipe's replay and
+      // drive the remainder cold. Prevents a tampered/malicious shared recipe
+      // from steering the browser to an attacker origin.
       status: "domain_lock_violation";
       observation: Observation;
       step_index: number;

@@ -757,7 +757,14 @@ vi.mock("../operator-profile-pool.js", () => {
   };
 });
 
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  writeFileSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, generateKeyPairSync } from "node:crypto";
@@ -1463,6 +1470,55 @@ describe("prepared-statement replay", () => {
     });
   });
 
+  // Money rule simplification (2026-08-16): the deleted repair-time target
+  // check no longer rejects an ambiguous sibling repair in act(). The general
+  // resume-time verification still checks the originally recorded target.
+  it("an ambiguous sibling repair succeeds at act() time but fails replay resume", async () => {
+    h.elements = [];
+    const recipe = replayRecipe({
+      trace: [
+        {
+          action: {
+            kind: "type",
+            target: {
+              dom_hint: { testid: "shipping-city" },
+              accessible_name: "City",
+              field_role: "ac:address-level2",
+            },
+            value: { hole: "address.city" },
+          },
+        },
+      ],
+    });
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    await replayOperatorRecipe(started.session_id, recipe, { "address.city": "Queens" });
+    h.elements = [
+      elem({ testId: "new-shipping-city", labelText: "City", selector: "#shipping", value: "" }),
+      elem({ testId: "billing-city", labelText: "City", selector: "#billing", value: "" }),
+    ];
+    await expect(
+      act(started.session_id, {
+        kind: "type",
+        target: "billing-city",
+        text: "Queens",
+        replayRepair: { stepIndex: 0, hole: "address.city" },
+      }),
+    ).resolves.toBeDefined();
+    const resumed = await replayOperatorRecipe(
+      started.session_id,
+      recipe,
+      { "address.city": "Queens" },
+      1,
+    );
+    expect(resumed).toMatchObject({
+      status: "human_required",
+      reason: "field_missing",
+      field: "address.city",
+    });
+  });
+
   // Money rule simplification (2026-08-16): activeProvisionBrowserForPayment
   // no longer re-verifies field mounts/values before handing the browser to
   // operate_pay — that software re-check was deleted along with the rest of
@@ -1932,6 +1988,40 @@ describe("verified recipe recording", () => {
     expect(readdirSync(dir)).toEqual([]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("fails the save when the required degenerate catch-all cannot be refreshed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verified-recipe-degenerate-fail-"));
+    const degenerateFile = join(dir, "purchase--example.com.json");
+    process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR = dir;
+    writeFileSync(degenerateFile, `${JSON.stringify(replayRecipe(), null, 2)}\n`, "utf8");
+    chmodSync(degenerateFile, 0o400);
+    h.visibleText = "Review order";
+    const started = await startProvisionSession({ serviceUrl: "https://shop.example.com/cart" });
+    try {
+      await expect(
+        provisionRememberTool.handler(
+          {
+            session_id: started.session_id,
+            name: "buy-coffee",
+            goal: "Buy coffee",
+            verb: "purchase",
+            inputs: {},
+            postcondition: {
+              kind: "execute_capability",
+              describe: "Ready to approve",
+              success_signal: { text_present: "Review order" },
+            },
+          },
+          null as unknown as ApiClient,
+        ),
+      ).rejects.toMatchObject({ code: "EACCES" });
+      expect(readdirSync(dir)).toContain("purchase--example.com--cart.json");
+    } finally {
+      chmodSync(degenerateFile, 0o600);
+      delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("never writes a cold trace after a checkout transition loses attestation", async () => {

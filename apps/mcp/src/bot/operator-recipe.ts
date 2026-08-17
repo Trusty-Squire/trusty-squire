@@ -125,16 +125,26 @@ export async function writeRecipe(recipe: OperatorRecipe): Promise<string> {
   // Validate (and, crucially, re-assert the no-stored-value invariant) before
   // anything reaches disk.
   const parsed = OperatorRecipeSchema.parse(recipe);
+  const canonical =
+    parsed.verb !== undefined && parsed.domain !== undefined
+      ? {
+          ...parsed,
+          verb: canonicalVerb(parsed.verb),
+          domain: parsed.domain.toLowerCase(),
+        }
+      : parsed;
   const dir = operatorRecipeDir();
   await fs.mkdir(dir, { recursive: true });
   const fileStem =
-    parsed.verb !== undefined && parsed.domain !== undefined
-      ? parsed.action_path !== undefined && parsed.action_path.length > 0
-        ? `${parsed.verb}--${parsed.domain}--${parsed.action_path}`
-        : `${parsed.verb}--${parsed.domain}`
-      : parsed.name;
+    canonical.verb !== undefined && canonical.domain !== undefined
+      ? operatorRecipeKeyForDomainAndActionPath(
+          canonical.verb,
+          canonical.domain,
+          canonical.action_path ?? "",
+        )
+      : canonical.name;
   const file = path.join(dir, `${safeFileName(fileStem)}.json`);
-  await fs.writeFile(file, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+  await fs.writeFile(file, `${JSON.stringify(canonical, null, 2)}\n`, "utf8");
   return file;
 }
 
