@@ -3,6 +3,11 @@ import {
   isRecipeShareEligible,
   operatorRecipeDomain,
   operatorRecipeKey,
+  operatorRecipeKeyForDomain,
+  canonicalVerb,
+  extractActionPath,
+  operatorRecipeKeyWithActionPath,
+  operatorRecipeKeyForDomainAndActionPath,
   parseOperatorRecipe,
   checkoutFieldSetSignature,
   isCheckoutShapeKey,
@@ -59,6 +64,106 @@ describe("operatorRecipeDomain / operatorRecipeKey", () => {
   it("derives the eTLD+1 and the (verb, domain) key", () => {
     expect(operatorRecipeDomain("https://sub.example.com/a/b?x=1")).toBe("example.com");
     expect(operatorRecipeKey("signup", "https://sub.example.com/a")).toBe("signup--example.com");
+  });
+});
+
+describe("canonicalVerb", () => {
+  it("merges the two captain-named groups", () => {
+    expect(canonicalVerb("reserve")).toBe("book");
+    expect(canonicalVerb("renew")).toBe("subscribe");
+    expect(canonicalVerb("upgrade")).toBe("subscribe");
+    expect(canonicalVerb("downgrade")).toBe("subscribe");
+  });
+
+  it("does not merge purchase/checkout/add_to_cart", () => {
+    expect(canonicalVerb("purchase")).toBe("purchase");
+    expect(canonicalVerb("checkout")).toBe("checkout");
+    expect(canonicalVerb("add_to_cart")).toBe("add_to_cart");
+  });
+
+  it("leaves an already-canonical verb unchanged", () => {
+    expect(canonicalVerb("book")).toBe("book");
+    expect(canonicalVerb("subscribe")).toBe("subscribe");
+  });
+
+  it("key builders apply canonicalization before building the key", () => {
+    expect(operatorRecipeKey("reserve", "https://acme.com/x")).toBe("book--acme.com");
+    expect(operatorRecipeKeyForDomain("renew", "acme.com")).toBe("subscribe--acme.com");
+  });
+});
+
+describe("extractActionPath", () => {
+  it("matches an allow-listed final segment", () => {
+    expect(extractActionPath("https://acme.com/signup")).toBe("signup");
+    expect(extractActionPath("https://acme.com/pricing")).toBe("pricing");
+  });
+
+  it("returns empty for a URL with nothing in the allow-list — the mandatory default-empty fail path", () => {
+    expect(extractActionPath("https://acme.com/")).toBe("");
+    expect(extractActionPath("https://acme.com/products/widget")).toBe("");
+    expect(extractActionPath("not a url")).toBe("");
+  });
+
+  it("strips a leading locale segment before matching", () => {
+    expect(extractActionPath("https://acme.com/en-us/signup")).toBe("signup");
+    expect(extractActionPath("https://acme.com/fr/login")).toBe("login");
+  });
+
+  it("strips a leading version segment before matching", () => {
+    expect(extractActionPath("https://acme.com/v2/checkout")).toBe("checkout");
+  });
+
+  it("strips both a leading locale and version segment", () => {
+    expect(extractActionPath("https://acme.com/en/v1/billing")).toBe("billing");
+  });
+
+  it("query string never contributes", () => {
+    expect(extractActionPath("https://acme.com/products?ref=signup")).toBe("");
+  });
+
+  it("caps at two segments when the immediate parent is also an allow-list hit", () => {
+    expect(extractActionPath("https://acme.com/account/billing/cancel")).toBe("billing/cancel");
+  });
+
+  it("does not extend past two segments", () => {
+    // "billing" is the parent hit; "settings" one level further up is not included.
+    expect(extractActionPath("https://acme.com/settings/billing/cancel")).toBe("billing/cancel");
+  });
+
+  it("applies synonym canonicalization", () => {
+    expect(extractActionPath("https://acme.com/sign-up")).toBe("signup");
+    expect(extractActionPath("https://acme.com/log-in")).toBe("login");
+    expect(extractActionPath("https://acme.com/contactsales")).toBe("contact-sales");
+  });
+
+  it("walks last to first, preferring the deepest allow-list hit", () => {
+    expect(extractActionPath("https://acme.com/plans/enterprise")).toBe("plans/enterprise");
+  });
+});
+
+describe("operatorRecipeKeyWithActionPath / operatorRecipeKeyForDomainAndActionPath", () => {
+  it("builds the specific (verb, domain, action_path) key when action_path is non-empty", () => {
+    expect(operatorRecipeKeyWithActionPath("signup", "https://acme.com/signup", "signup")).toBe(
+      "signup--acme.com--signup",
+    );
+    expect(operatorRecipeKeyForDomainAndActionPath("signup", "acme.com", "signup")).toBe(
+      "signup--acme.com--signup",
+    );
+  });
+
+  it("degrades to today's (verb, domain) key when action_path is empty", () => {
+    expect(operatorRecipeKeyWithActionPath("signup", "https://acme.com/", "")).toBe(
+      "signup--acme.com",
+    );
+    expect(operatorRecipeKeyForDomainAndActionPath("signup", "acme.com", "")).toBe(
+      "signup--acme.com",
+    );
+  });
+
+  it("canonicalizes the verb before building the key", () => {
+    expect(operatorRecipeKeyWithActionPath("reserve", "https://acme.com/book", "book")).toBe(
+      "book--acme.com--book",
+    );
   });
 });
 

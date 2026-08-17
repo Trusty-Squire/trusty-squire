@@ -30,6 +30,10 @@ import {
   operatorRecipeDomain,
   operatorRecipeKey,
   operatorRecipeKeyForDomain,
+  canonicalVerb,
+  extractActionPath,
+  operatorRecipeKeyWithActionPath,
+  operatorRecipeKeyForDomainAndActionPath,
   checkoutFieldSetSignature,
   isCheckoutShapeKey,
   checkoutShapeKey,
@@ -66,6 +70,10 @@ export {
   operatorRecipeDomain,
   operatorRecipeKey,
   operatorRecipeKeyForDomain,
+  canonicalVerb,
+  extractActionPath,
+  operatorRecipeKeyWithActionPath,
+  operatorRecipeKeyForDomainAndActionPath,
   checkoutFieldSetSignature,
   isCheckoutShapeKey,
   checkoutShapeKey,
@@ -121,7 +129,9 @@ export async function writeRecipe(recipe: OperatorRecipe): Promise<string> {
   await fs.mkdir(dir, { recursive: true });
   const fileStem =
     parsed.verb !== undefined && parsed.domain !== undefined
-      ? `${parsed.verb}--${parsed.domain}`
+      ? parsed.action_path !== undefined && parsed.action_path.length > 0
+        ? `${parsed.verb}--${parsed.domain}--${parsed.action_path}`
+        : `${parsed.verb}--${parsed.domain}`
       : parsed.name;
   const file = path.join(dir, `${safeFileName(fileStem)}.json`);
   await fs.writeFile(file, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
@@ -139,10 +149,24 @@ export async function readRecipeFromFile(file: string): Promise<OperatorRecipe> 
   return OperatorRecipeSchema.parse(JSON.parse(raw));
 }
 
+// Layer-1 lookup: try the specific (verb, domain, action_path) file first,
+// then fall through to today's degenerate (verb, domain) file on a miss (or
+// when action_path is empty to begin with). The fallback is mandatory, not
+// optional — an old recipe recorded before action_path existed sits only at
+// the degenerate slot, and a replaying URL that now happens to extract a
+// non-empty action_path must still find it.
 export async function readRecipeForTask(
   verb: OperatorVerb,
   serviceUrl: string,
 ): Promise<OperatorRecipe> {
+  const actionPath = extractActionPath(serviceUrl);
+  if (actionPath.length > 0) {
+    try {
+      return await readRecipe(operatorRecipeKeyWithActionPath(verb, serviceUrl, actionPath));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
   return await readRecipe(operatorRecipeKey(verb, serviceUrl));
 }
 

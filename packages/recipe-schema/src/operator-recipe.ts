@@ -45,6 +45,23 @@ export const OperatorVerbSchema = z.enum([
 ]);
 export type OperatorVerb = z.infer<typeof OperatorVerbSchema>;
 
+// Verb consolidation — the two captain-named merges only (not the wider
+// purchase/checkout/add_to_cart merge the research report floated; the
+// decided direction explicitly resists merging further). OperatorVerbSchema
+// keeps parsing all 15 legacy values so old input/files still parse; nothing
+// is ever WRITTEN under a legacy name after this — every key/file builder
+// below runs the verb through this first.
+const VERB_CONSOLIDATION: Partial<Record<OperatorVerb, OperatorVerb>> = {
+  reserve: "book",
+  renew: "subscribe",
+  upgrade: "subscribe",
+  downgrade: "subscribe",
+};
+
+export function canonicalVerb(verb: OperatorVerb): OperatorVerb {
+  return VERB_CONSOLIDATION[verb] ?? verb;
+}
+
 export const RecipeHoleSchema = z
   .object({
     hole: z
@@ -227,6 +244,17 @@ export const OperatorRecipeSchema = z
     // split — see checkoutFieldSetSignature below.
     verb: OperatorVerbSchema.optional(),
     domain: z.string().min(1).max(253).optional(),
+    // NEW optional layer-1 keying dimension — a short token parsed from the
+    // recorded entry_url's path (see extractActionPath below). Deliberately
+    // its OWN field, not folded into `domain` the way checkoutShapeKey is:
+    // domain-lock (isSameRecipeDomain / recipeDomainLockViolations) parses
+    // `domain` as a real hostname, and an action_path recipe is a normal,
+    // fully domain-locked, navigable recipe — just with a more specific key.
+    action_path: z
+      .string()
+      .max(60)
+      .regex(/^[a-z0-9-]+(?:\/[a-z0-9-]+)?$/)
+      .optional(),
     // The canonical replay entry — the session's START url (the service_url
     // passed to operate_start). Optional for back-compat with recipes saved
     // before this field; recipeEntryUrl falls back to the first STABLE trace
@@ -303,12 +331,114 @@ export function operatorRecipeDomain(url: string): string {
 }
 
 export function operatorRecipeKey(verb: OperatorVerb, url: string): string {
-  return `${verb}--${operatorRecipeDomain(url)}`;
+  return `${canonicalVerb(verb)}--${operatorRecipeDomain(url)}`;
 }
 
 /** Key straight from an already-resolved (verb, domain) pair — the shape the registry stores by. */
 export function operatorRecipeKeyForDomain(verb: OperatorVerb, domain: string): string {
-  return `${verb}--${domain.toLowerCase()}`;
+  return `${canonicalVerb(verb)}--${domain.toLowerCase()}`;
+}
+
+// ── action_path — layer-1 keying dimension (recipe-key-redesign) ────────
+//
+// A short token parsed from the recorded entry_url's path, hand-maintained
+// same operational shape as TENANT_HOST_SUFFIXES above. No state, no
+// learning, no per-platform config. Every URL that doesn't hit the
+// allow-list degrades to exactly today's (verb, domain) key — the
+// mandatory default-empty fail path.
+const ACTION_PATH_ALLOWLIST = new Set([
+  "signup",
+  "login",
+  "checkout",
+  "cart",
+  "book",
+  "reserve",
+  "cancel",
+  "pricing",
+  "plans",
+  "enterprise",
+  "contact-sales",
+  "keys",
+  "api-keys",
+  "settings",
+  "billing",
+  "download",
+  "demo",
+  "trial",
+  "upgrade",
+  "downgrade",
+  "renew",
+  "subscribe",
+]);
+
+const ACTION_PATH_SYNONYMS: Record<string, string> = {
+  "sign-up": "signup",
+  "log-in": "login",
+  contactsales: "contact-sales",
+};
+
+const LOCALE_SEGMENT = /^[a-z]{2}(-[a-z]{2})?$/;
+const VERSION_SEGMENT = /^v\d+$/;
+
+function canonicalizeActionSegment(segment: string): string {
+  const stripped = segment.replace(/[_]/g, "-");
+  return ACTION_PATH_SYNONYMS[stripped] ?? stripped;
+}
+
+/**
+ * Pure extraction of the action_path token from a recipe's entry_url. Query
+ * string never contributes. Returns "" when nothing in the path hits the
+ * allow-list — the mandatory default-empty fail path that keeps every
+ * non-matching URL degrading to exactly today's key.
+ */
+export function extractActionPath(url: string): string {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname;
+  } catch {
+    return "";
+  }
+  let segments = pathname
+    .toLowerCase()
+    .split("/")
+    .filter((segment) => segment.length > 0);
+  if (segments.length > 0 && LOCALE_SEGMENT.test(segments[0]!)) segments = segments.slice(1);
+  if (segments.length > 0 && VERSION_SEGMENT.test(segments[0]!)) segments = segments.slice(1);
+
+  for (let i = segments.length - 1; i >= 0; i -= 1) {
+    const canonical = canonicalizeActionSegment(segments[i]!);
+    if (!ACTION_PATH_ALLOWLIST.has(canonical)) continue;
+    if (i > 0) {
+      const parentCanonical = canonicalizeActionSegment(segments[i - 1]!);
+      if (ACTION_PATH_ALLOWLIST.has(parentCanonical)) {
+        return `${parentCanonical}/${canonical}`;
+      }
+    }
+    return canonical;
+  }
+  return "";
+}
+
+/** Layer-1 key: (verb, domain, action_path) when action_path is non-empty, else today's (verb, domain) key. */
+export function operatorRecipeKeyWithActionPath(
+  verb: OperatorVerb,
+  url: string,
+  actionPath: string,
+): string {
+  return actionPath.length > 0
+    ? `${canonicalVerb(verb)}--${operatorRecipeDomain(url)}--${actionPath}`
+    : operatorRecipeKey(verb, url);
+}
+
+/** Layer-1 key straight from an already-resolved (verb, domain, action_path) triple. */
+export function operatorRecipeKeyForDomainAndActionPath(
+  verb: OperatorVerb,
+  domain: string,
+  actionPath: string,
+): string {
+  return actionPath.length > 0
+    ? `${canonicalVerb(verb)}--${domain.toLowerCase()}--${actionPath}`
+    : operatorRecipeKeyForDomain(verb, domain);
 }
 
 // ── Checkout-leg shape signature (replay-per-leg-signature) ────────────

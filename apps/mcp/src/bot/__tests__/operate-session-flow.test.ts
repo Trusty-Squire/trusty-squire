@@ -1107,8 +1107,13 @@ describe("prepared-statement replay", () => {
       /invalid replay continuation/i,
     );
     await finishProvisionSession(started.session_id);
-    expect(h.leaseReturnCalls).toBe(0);
-    expect(h.leaseDestroyCalls).toBe(1);
+    // Money rule simplification (2026-08-16): profile-destroy hygiene was
+    // previously tied to the deleted software field-verification guard
+    // (moneyPath && paymentGuard !== "verified"). The manual-card-entry
+    // refusal itself stays terminal; the profile is no longer force-destroyed
+    // as a side effect of it.
+    expect(h.leaseReturnCalls).toBe(1);
+    expect(h.leaseDestroyCalls).toBe(0);
   });
 
   it("rejects fresh, wrong-index, and changed-binding replay continuations", async () => {
@@ -1144,7 +1149,12 @@ describe("prepared-statement replay", () => {
     );
   });
 
-  it("requires a human when a transition mutates and unmounts a field", async () => {
+  // Money rule simplification (2026-08-16): the post-transition field
+  // re-verification this test used to exercise was deleted — the fence is
+  // the live human biometric approval per charge, not a software re-check
+  // of address/contact fields after a page transition. A field mutated or
+  // unmounted by a later transition no longer forces human intervention.
+  it("does not require a human when a later transition mutates or unmounts an already-verified field", async () => {
     h.elements = [
       elem({
         testId: "shipping-city",
@@ -1190,18 +1200,10 @@ describe("prepared-statement replay", () => {
       }),
       { "address.city": "Queens" },
     );
-    expect(result).toMatchObject({
-      status: "human_required",
-      reason: "field_missing",
-      field: "address.city",
-    });
+    expect(result).toMatchObject({ status: "complete" });
     expect(h.elements).toEqual([]);
-    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
-      /verification is not satisfied/i,
-    );
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
     await finishProvisionSession(started.session_id);
-    expect(h.leaseReturnCalls).toBe(0);
-    expect(h.leaseDestroyCalls).toBe(1);
   });
 
   it("rejects unclassified legacy recipes from deterministic replay", async () => {
@@ -1253,7 +1255,11 @@ describe("prepared-statement replay", () => {
     expect(h.typed).toEqual([]);
   });
 
-  it("revalidates phone country across transitions and at payment", async () => {
+  // Money rule simplification (2026-08-16): cross-transition field
+  // re-verification was deleted along with the software payment-validation
+  // guards. A field mutated by a later, unrelated transition is no longer
+  // re-checked before payment — the fence is the human biometric approval.
+  it("does not re-verify phone country after a later transition mutates it", async () => {
     h.elements = [
       elem({
         tag: "button",
@@ -1287,17 +1293,14 @@ describe("prepared-statement replay", () => {
       }),
       { "contact.country": "United States" },
     );
-    expect(result).toMatchObject({
-      status: "human_required",
-      reason: "field_value_mismatch",
-      field: "contact.country",
-    });
-    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
-      /verification is not satisfied/i,
-    );
+    expect(result).toMatchObject({ status: "complete" });
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
   });
 
-  it("replay-per-leg-signature: degrades to leg_fallback_required (not human_required) when a genuine catalog prefix precedes the failing checkout field", async () => {
+  // Money rule simplification (2026-08-16): the mismatch this scenario used
+  // to detect (a later click transition silently mutating an already-typed
+  // field) was only caught by the deleted post-transition re-verification.
+  it("replay-per-leg-signature: a later transition mutating an already-set field is not re-verified (deleted software guard)", async () => {
     h.elements = [
       elem({
         tag: "button",
@@ -1346,20 +1349,8 @@ describe("prepared-statement replay", () => {
     const result = await replayOperatorRecipe(started.session_id, recipe, {
       "contact.country": "United States",
     });
-    expect(result).toMatchObject({
-      status: "leg_fallback_required",
-      leg: "checkout",
-      from_step_index: 1,
-    });
-    expect((result as { reason: string }).reason).toContain("field_value_mismatch");
-    // Not resumable — the run degrades to cold driving for the leg, it
-    // doesn't hand back a continuation the way fallback_required does.
-    await expect(
-      replayOperatorRecipe(started.session_id, recipe, { "contact.country": "United States" }, 1),
-    ).rejects.toThrow(/invalid replay continuation/i);
-    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
-      /verification is not satisfied/i,
-    );
+    expect(result).toMatchObject({ status: "complete" });
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
   }, 10_000);
 
   it("blocks payment until the exact missed field is repaired and replay resumes", async () => {
@@ -1387,11 +1378,15 @@ describe("prepared-statement replay", () => {
       "address.city": "Queens",
     });
     expect(fallback).toMatchObject({ status: "fallback_required", next_index: 1 });
-    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
 
+    // Money rule simplification (2026-08-16): the deleted repair-retargeting
+    // guard used to let a host repair land on a DIFFERENT element than the
+    // one recorded and still resume cleanly (money-path recipes only). That
+    // capability is gone; the general (non-money-specific) resume check still
+    // requires the repair to land on the originally recorded target.
     h.elements = [
       elem({
-        testId: "live-city",
+        testId: "shipping-city",
         labelText: "City",
         selector: "#live-city",
         value: "",
@@ -1399,7 +1394,7 @@ describe("prepared-statement replay", () => {
     ];
     await act(started.session_id, {
       kind: "type",
-      target: "live-city",
+      target: "shipping-city",
       text: "Queens",
       replayRepair: { stepIndex: 0, hole: "address.city" },
     });
@@ -1410,10 +1405,15 @@ describe("prepared-statement replay", () => {
       1,
     );
     expect(complete.status).toBe("complete");
-    expect(() => activeProvisionBrowser()).not.toThrow();
   });
 
-  it("rejects a wrong field repair and keeps payment blocked", async () => {
+  // Money rule simplification (2026-08-16): act()'s own replayRepair
+  // validation (value-mismatch / target-mismatch thrown at repair time) was
+  // deleted along with the software payment-validation guards. A repair now
+  // always succeeds at act() time; a wrong value is instead caught by the
+  // general (non-money-specific) resume-time field re-verification, which
+  // only ever checks the ORIGINALLY recorded target.
+  it("a wrong field repair is not rejected at act() time, but is caught on replay resume", async () => {
     h.elements = [];
     const recipe = replayRecipe({
       trace: [
@@ -1449,47 +1449,25 @@ describe("prepared-statement replay", () => {
         text: "Brooklyn",
         replayRepair: { stepIndex: 0, hole: "address.city" },
       }),
-    ).rejects.toThrow(/replay repair value mismatch/i);
-    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
+    ).resolves.toBeDefined();
+    const resumed = await replayOperatorRecipe(
+      started.session_id,
+      recipe,
+      { "address.city": "Queens" },
+      1,
+    );
+    expect(resumed).toMatchObject({
+      status: "human_required",
+      reason: "field_value_mismatch",
+      field: "address.city",
+    });
   });
 
-  it("rejects an ambiguous sibling repair with the expected value", async () => {
-    h.elements = [];
-    const recipe = replayRecipe({
-      trace: [
-        {
-          action: {
-            kind: "type",
-            target: {
-              dom_hint: { testid: "shipping-city" },
-              accessible_name: "City",
-              field_role: "ac:address-level2",
-            },
-            value: { hole: "address.city" },
-          },
-        },
-      ],
-    });
-    const started = await startProvisionSession({
-      serviceUrl: "https://shop.example.com/checkout",
-    });
-    await replayOperatorRecipe(started.session_id, recipe, { "address.city": "Queens" });
-    h.elements = [
-      elem({ testId: "new-shipping-city", labelText: "City", selector: "#shipping", value: "" }),
-      elem({ testId: "billing-city", labelText: "City", selector: "#billing", value: "" }),
-    ];
-    await expect(
-      act(started.session_id, {
-        kind: "type",
-        target: "billing-city",
-        text: "Queens",
-        replayRepair: { stepIndex: 0, hole: "address.city" },
-      }),
-    ).rejects.toThrow(/repair target mismatch/i);
-    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
-  });
-
-  it("rechecks mounted verified fields at the payment boundary", async () => {
+  // Money rule simplification (2026-08-16): activeProvisionBrowserForPayment
+  // no longer re-verifies field mounts/values before handing the browser to
+  // operate_pay — that software re-check was deleted along with the rest of
+  // the payment-validation guards.
+  it("does not re-check mounted verified fields at the payment boundary", async () => {
     h.elements = [
       elem({
         testId: "shipping-city",
@@ -1522,12 +1500,12 @@ describe("prepared-statement replay", () => {
     );
     expect(result.status).toBe("complete");
     (h.elements[0] as Record<string, unknown>).value = "Brooklyn";
-    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
-      /verification is not satisfied/i,
-    );
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
   });
 
-  it("blocks payment when a verified target drifts without a replay transition", async () => {
+  // Money rule simplification (2026-08-16): a verified target drifting after
+  // replay is no longer detected before payment — see comment above.
+  it("does not block payment when a verified target drifts without a replay transition", async () => {
     h.elements = [
       elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
     ];
@@ -1554,9 +1532,7 @@ describe("prepared-statement replay", () => {
       { "address.city": "Queens" },
     );
     h.elements = [elem({ testId: "new-city", selector: "#new-city", value: "Brooklyn" })];
-    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
-      /verification is not satisfied/i,
-    );
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
   });
 
   it("uses a committed custom-combobox value only for immediate attestation", async () => {
@@ -1596,12 +1572,12 @@ describe("prepared-statement replay", () => {
       { "address.country": "United States" },
     );
     expect(result).toMatchObject({ status: "complete", field_values_verified: true });
-    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
-      /verification is not satisfied/i,
-    );
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
   });
 
-  it("detects field drift caused by a replay transition before retirement", async () => {
+  // Money rule simplification (2026-08-16): the pre/post-transition field
+  // re-verification this test used to exercise was deleted.
+  it("does not detect field drift caused by a replay transition (deleted software guard)", async () => {
     h.elements = [
       elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
       elem({
@@ -1641,15 +1617,14 @@ describe("prepared-statement replay", () => {
       }),
       { "address.city": "Queens" },
     );
-    expect(result).toMatchObject({
-      status: "human_required",
-      reason: "field_value_mismatch",
-      field: "address.city",
-    });
-    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
+    expect(result).toMatchObject({ status: "complete" });
+    await expect(activeProvisionBrowserForPayment()).resolves.toBeDefined();
   });
 
-  it("invalidates a verified field when a later value action changes it", async () => {
+  // Money rule simplification (2026-08-16): a later, out-of-band act() call
+  // that overwrites an already-verified field is no longer detected — the
+  // deleted refreshReplayVerificationAfterAction guard used to catch this.
+  it("does not invalidate a verified field when a later value action changes it", async () => {
     h.elements = [
       elem({ testId: "shipping-city", labelText: "City", selector: "#city", value: "" }),
     ];
@@ -1677,8 +1652,7 @@ describe("prepared-statement replay", () => {
     );
     await expect(
       act(started.session_id, { kind: "type", target: "shipping-city", text: "Brooklyn" }),
-    ).rejects.toThrow(/field value mismatch/i);
-    expect(() => activeProvisionBrowser()).toThrow(/verification is not satisfied/i);
+    ).resolves.toBeDefined();
   });
 
   it("does not let a caller skip straight past a mis-filled money field", async () => {
@@ -1722,7 +1696,7 @@ describe("prepared-statement replay", () => {
 describe("replay-serve-live-domainlock — hard domain-lock at replay time", () => {
   const shapeDomain = `shape:${"a".repeat(64)}`;
 
-  it("SAFETY: refuses a goto step targeting a different eTLD+1, hard-stops (not resumable), and shuts the payment gate", async () => {
+  it("SAFETY: refuses a goto step targeting a different eTLD+1, hard-stops (not resumable)", async () => {
     const started = await startProvisionSession({
       serviceUrl: "https://shop.example.com/checkout",
     });
@@ -1740,9 +1714,6 @@ describe("replay-serve-live-domainlock — hard domain-lock at replay time", () 
       recipe_domain: "example.com",
     });
     expect(h.gotos).not.toContain("https://attacker.net/phish");
-    await expect(activeProvisionBrowserForPayment()).rejects.toThrow(
-      /verification is not satisfied/i,
-    );
   });
 
   it("SAFETY: refuses an allow_host step declaring a different eTLD+1", async () => {
@@ -2101,14 +2072,21 @@ describe("verified recipe recording", () => {
       null as unknown as ApiClient,
     );
     expect(saved).toMatchObject({ verified: { confirmed: true } });
-    expect(readdirSync(dir)).toEqual(["purchase--example.com.json"]);
-    const raw = JSON.parse(readFileSync(join(dir, "purchase--example.com.json"), "utf8")) as Record<
-      string,
-      unknown
-    >;
+    // recipe-key-redesign: the service URL's path ("/cart") hits the
+    // action_path allow-list, so the specific (verb, domain, action_path)
+    // file is written, AND the degenerate (verb, domain) catch-all is
+    // refreshed alongside it (the no-regression guarantee).
+    expect(readdirSync(dir).sort()).toEqual([
+      "purchase--example.com--cart.json",
+      "purchase--example.com.json",
+    ]);
+    const raw = JSON.parse(
+      readFileSync(join(dir, "purchase--example.com--cart.json"), "utf8"),
+    ) as Record<string, unknown>;
     expect(raw).toMatchObject({
       verb: "purchase",
       domain: "example.com",
+      action_path: "cart",
       trace: [
         {
           action: {
@@ -2185,9 +2163,14 @@ describe("verified recipe recording", () => {
     );
     expect((saved as { checkout_leg_file?: string }).checkout_leg_file).toBeDefined();
     const files = readdirSync(dir).sort();
+    // recipe-key-redesign: the service URL's path ("/cart") hits the
+    // action_path allow-list, so the whole-task recipe writes BOTH its
+    // specific and degenerate catch-all file, alongside the checkout leg.
     expect(files).toContain("purchase--example.com.json");
-    expect(files.length).toBe(2);
-    const checkoutLegFile = files.find((f) => f !== "purchase--example.com.json")!;
+    expect(files).toContain("purchase--example.com--cart.json");
+    expect(files.length).toBe(3);
+    const wholeTaskFiles = new Set(["purchase--example.com.json", "purchase--example.com--cart.json"]);
+    const checkoutLegFile = files.find((f) => !wholeTaskFiles.has(f))!;
     const raw = JSON.parse(readFileSync(join(dir, checkoutLegFile), "utf8")) as Record<
       string,
       unknown
@@ -2250,7 +2233,13 @@ describe("verified recipe recording", () => {
       null as unknown as ApiClient,
     );
     expect((saved as { checkout_leg_file?: string }).checkout_leg_file).toBeUndefined();
-    expect(readdirSync(dir)).toEqual(["purchase--example.com.json"]);
+    // recipe-key-redesign: the service URL's path ("/cart") hits the
+    // action_path allow-list, so both the specific and degenerate
+    // catch-all files are written — still no checkout leg, though.
+    expect(readdirSync(dir).sort()).toEqual([
+      "purchase--example.com--cart.json",
+      "purchase--example.com.json",
+    ]);
     delete process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
     rmSync(dir, { recursive: true, force: true });
   });

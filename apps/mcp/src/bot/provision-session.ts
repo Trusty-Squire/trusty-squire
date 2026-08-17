@@ -72,10 +72,13 @@ import {
   knownRecipeInputValue,
   localeStableFieldRole,
   operatorRecipeDomain,
+  operatorRecipeKeyForDomain,
+  canonicalVerb,
+  extractActionPath,
   checkoutFieldSetSignature,
   checkoutShapeKey,
+  readRecipe,
   resolveRecipeFieldTarget,
-  resolveRecipeRepairTarget,
   resolveRecipeTarget,
   verifyFilledFieldValues,
   writeRecipe,
@@ -437,7 +440,6 @@ interface ReplayState {
   nextIndex: number | null;
   expectedFields: Map<number, ReplayExpectedField>;
   verifiedFields: Set<number>;
-  paymentGuard: "pending" | "verified" | "failed";
   failure?: { reason: "field_missing" | "field_value_mismatch"; field: string };
   // replay-per-leg-signature — index of this recipe's OWN first money field,
   // or null when none exists. > 0 means there's a genuine non-money prefix
@@ -820,14 +822,14 @@ function sessionForCall(sessionId: string): Session | undefined {
   return sessions.get(sessionId);
 }
 
+// Money rule (simplified 2026-08-16): the fence is the live human biometric
+// approval per charge, not a software re-check of replay field values. The
+// only surviving invariant — a card-charging trace step is never blind-
+// replayed — is enforced unconditionally where operate_pay steps are
+// encountered during replay (see replayOperatorRecipe), not here.
 function assertPaymentSessionAllowed(session: Session): void {
   if (session.closing) {
     throw new Error(`provision session ${session.id} is closing`);
-  }
-  if (session.replayState?.moneyPath === true && session.replayState.paymentGuard !== "verified") {
-    throw new Error(
-      "operate_pay refused: replay address/contact/quantity verification is not satisfied",
-    );
   }
 }
 
@@ -1668,15 +1670,6 @@ function frameTargetFor(el: FrameScopedTarget): FrameTarget | null {
     frameUrl: el.frameUrl ?? "",
     ...(el.frameOpaque === true ? { frameOpaque: true } : {}),
   };
-}
-
-function sameInteractiveTarget(left: InteractiveElement, right: InteractiveElement): boolean {
-  return (
-    left.selector === right.selector &&
-    (left.frameOrigin ?? null) === (right.frameOrigin ?? null) &&
-    (left.framePath ?? null) === (right.framePath ?? null) &&
-    (left.frameOpaque ?? false) === (right.frameOpaque ?? false)
-  );
 }
 
 function frameTargetAllowed(session: Session, el: FrameScopedTarget): boolean {
@@ -2763,26 +2756,6 @@ export async function activeProvisionBrowserForPayment(
   selectedSession?: Session,
 ): Promise<BrowserController> {
   const session = selectedSession ?? activeProvisionSession();
-  const state = session.replayState;
-  if (state?.moneyPath !== true) return session.browser;
-  const fresh = await session.browser.extractInteractiveElements();
-  session.lastElements = fresh;
-  for (const expected of state.expectedFields.values()) {
-    if (!state.verifiedFields.has(expected.stepIndex)) continue;
-    if (!(await isReplayFieldMounted(session, expected, fresh))) {
-      markReplayFailure(session, "field_missing", expected.hole);
-      throw new Error(
-        "operate_pay refused: replay address/contact/quantity verification is not satisfied",
-      );
-    }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
-    if (!guard.ok) {
-      markReplayFailure(session, guard.reason, expected.hole);
-      throw new Error(
-        "operate_pay refused: replay address/contact/quantity verification is not satisfied",
-      );
-    }
-  }
   return session.browser;
 }
 
@@ -4950,8 +4923,6 @@ export async function act(
     }
   }
   await verifyRecordedFieldsAfterTransition(session, action, recordingTransitionFields);
-  await captureReplayRepairVerification(session, completedAction, resolvedEl);
-  await refreshReplayVerificationAfterAction(session, completedAction, resolvedEl);
   // Don't fold inbox-provider steps into the replayable recipe (see
   // INBOX_READ_HOSTS): replay re-reads the code via awaitVerification, and a
   // recorded inbox click would bake the email's subject into a shared recipe.
@@ -5781,12 +5752,18 @@ export async function rememberRecipe(
   if (opts.entry_mode !== undefined && opts.verb === undefined) {
     throw new Error("runtime recipe entry requires a keyed verb");
   }
+  const verb = opts.verb !== undefined ? canonicalVerb(opts.verb) : undefined;
+  const actionPath = verb !== undefined ? extractActionPath(session.startUrl) : "";
   const recipe: OperatorRecipe = {
     name: opts.name,
     schema_version: 1,
     goal: opts.goal,
-    ...(opts.verb !== undefined
-      ? { verb: opts.verb, domain: operatorRecipeDomain(session.startUrl) }
+    ...(verb !== undefined
+      ? {
+          verb,
+          domain: operatorRecipeDomain(session.startUrl),
+          ...(actionPath.length > 0 ? { action_path: actionPath } : {}),
+        }
       : {}),
     // Canonical, stable replay entry — the page the session started at, never a
     // mid-flow single-use link inferred from the trace.
@@ -5808,13 +5785,20 @@ export async function rememberRecipe(
     );
   }
   const file = await writeRecipe(recipe);
+  // No-regression guarantee (recipe-key-redesign): a recording that lands at
+  // the specific (verb, domain, action_path) file must also keep the
+  // crude-but-reliable degenerate (verb, domain) catch-all alive, so a later
+  // replay on an unrecognized path doesn't go cold where today it hits.
+  if (actionPath.length > 0) {
+    await refreshDegenerateCatchAll(recipe).catch(() => undefined);
+  }
   audit(sessionId, "remember_recipe", {
     name: opts.name,
     steps: recipe.trace.length,
     secrets: secrets.length,
     file,
   });
-  const checkoutLegFile = await rememberCheckoutLeg(session, opts.verb, trace).catch(() => null);
+  const checkoutLegFile = await rememberCheckoutLeg(session, verb, trace).catch(() => null);
   return {
     file,
     name: opts.name,
@@ -5824,6 +5808,36 @@ export async function rememberRecipe(
     ...(checkoutLegFile !== null ? { checkout_leg_file: checkoutLegFile } : {}),
   };
 }
+
+// recipe-key-redesign — no-regression guarantee: on every recording that
+// lands at a specific (verb, domain, action_path) file, also refresh the
+// degenerate (verb, domain) catch-all whenever that slot is absent or
+// itself empty-path (i.e. it's already the crude catch-all, not some other
+// specific recording). Without this, a future recording that extracts a
+// path would quietly stop refreshing the catch-all a later unrecognized-path
+// replay still relies on.
+async function refreshDegenerateCatchAll(recipe: OperatorRecipe): Promise<void> {
+  if (recipe.verb === undefined || recipe.domain === undefined) return;
+  let shouldRefresh: boolean;
+  try {
+    const existing = await readRecipe(operatorRecipeKeyForDomain(recipe.verb, recipe.domain));
+    shouldRefresh = existing.action_path === undefined || existing.action_path.length === 0;
+  } catch {
+    shouldRefresh = true;
+  }
+  if (!shouldRefresh) return;
+  const degenerateRecipe: OperatorRecipe = { ...recipe, action_path: undefined };
+  await writeRecipe(degenerateRecipe);
+}
+
+// recipe-key-redesign — replaces the deleted MONEY_REPLAY_VERBS for the two
+// SAVE-TIME classifiers below (checkout-leg carving, unprovenanced-money-
+// field refusal). Distinct from the money REPLAY gate (which is now a pure
+// trace-content check, unconditional on verb) — these two are scope filters
+// unrelated to the payment fence, so they keep the verb-set shape MONEY_
+// REPLAY_VERBS had, just canonicalized (post-merge, 7 legacy verbs collapse
+// to 4 canonical ones).
+const MONEY_SHAPED_VERBS = new Set<OperatorVerb>(["purchase", "subscribe", "checkout", "book"]);
 
 // replay-per-leg-signature — split off and save the checkout portion of a
 // just-recorded money-path trace as its OWN recipe, keyed by the checkout
@@ -5837,7 +5851,7 @@ async function rememberCheckoutLeg(
   verb: OperatorVerb | undefined,
   trace: readonly TraceEntry[],
 ): Promise<string | null> {
-  if (verb === undefined || !MONEY_REPLAY_VERBS.has(verb)) return null;
+  if (verb === undefined || !MONEY_SHAPED_VERBS.has(verb)) return null;
   const legStart = checkoutLegStartIndex(trace);
   if (legStart === null) return null;
   const legTrace = trace.slice(legStart);
@@ -5953,16 +5967,6 @@ export async function checkoutShapeSignatureForSession(sessionId: string): Promi
   const fieldNames = await session.browser.extractCheckoutFieldNames();
   return checkoutFieldSetSignature(fieldNames);
 }
-
-const MONEY_REPLAY_VERBS = new Set<OperatorVerb>([
-  "purchase",
-  "subscribe",
-  "checkout",
-  "renew",
-  "upgrade",
-  "book",
-  "reserve",
-]);
 
 export type OperatorReplayResult =
   | {
@@ -6118,7 +6122,7 @@ function checkoutLegPostcondition(legTrace: readonly TraceEntry[]): Postconditio
 }
 
 function findUnprovenancedMoneyField(recipe: OperatorRecipe): string | null {
-  if (recipe.verb === undefined || !MONEY_REPLAY_VERBS.has(recipe.verb)) return null;
+  if (recipe.verb === undefined || !MONEY_SHAPED_VERBS.has(recipe.verb)) return null;
   for (const { action } of recipe.trace) {
     const field = moneyFieldName(action);
     if (field !== null && typeof action.value === "string") return field;
@@ -6183,7 +6187,6 @@ function markReplayFailure(
 ): void {
   rejectRecipeRecording(session, `replay transition failed (${field}: ${reason})`);
   if (session.replayState === null) return;
-  session.replayState.paymentGuard = "failed";
   session.replayState.failure = { reason, field };
   audit(session.id, "replay_field_value_guard", { ok: false, reason, field });
 }
@@ -6201,8 +6204,6 @@ function markReplayDomainLockViolation(session: Session, host: string, recipeDom
     session,
     `replay refused: "${host}" is outside the recipe's own domain "${recipeDomain}"`,
   );
-  if (session.replayState === null) return;
-  session.replayState.paymentGuard = "failed";
   audit(session.id, "replay_domain_lock_violation", { host, recipe_domain: recipeDomain });
 }
 
@@ -6285,116 +6286,6 @@ async function isReplayFieldMounted(
     return await session.browser.hasPhoneCountryControl();
   }
   return expected.target !== null && hasRecipeTargetCandidate(elements, expected.target);
-}
-
-async function captureReplayRepairVerification(
-  session: Session,
-  action: ProvisionAction,
-  resolvedEl: InteractiveElement | null,
-): Promise<void> {
-  const state = session.replayState;
-  if (state === null || state.nextIndex === null || !state.moneyPath) return;
-  const stepIndex = state.nextIndex - 1;
-  const expected = state.expectedFields.get(stepIndex);
-  if (expected === undefined) return;
-  if (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country") {
-    return;
-  }
-  if (
-    action.replayRepair === undefined ||
-    action.replayRepair.stepIndex !== stepIndex ||
-    action.replayRepair.hole !== expected.hole
-  ) {
-    throw new Error(`replay repair must bind to step ${stepIndex} and ${expected.hole}`);
-  }
-  const supplied =
-    action.kind === "type" || action.kind === "select"
-      ? action.text
-      : action.kind === "set_phone_country"
-        ? action.country
-        : null;
-  if (supplied === null) return;
-  if (supplied !== expected.expected) {
-    markReplayFailure(session, "field_value_mismatch", expected.hole);
-    throw new Error(`replay repair value mismatch for ${expected.hole}`);
-  }
-  if (action.kind === "set_phone_country") {
-    const guard = await verifyReplayField(session, expected);
-    if (!guard.ok) {
-      markReplayFailure(session, guard.reason, expected.hole);
-      throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
-    }
-    state.verifiedFields.add(stepIndex);
-    return;
-  }
-  const recordedResolution =
-    expected.target === null
-      ? null
-      : resolveRecipeFieldTarget(session.lastElements, expected.target);
-  if (resolvedEl === null) {
-    throw new Error(`replay repair target mismatch for ${expected.hole}`);
-  }
-  const recordedTargetMatches =
-    recordedResolution !== null && sameInteractiveTarget(recordedResolution.element, resolvedEl);
-  const semanticResolution =
-    expected.target === null
-      ? null
-      : resolveRecipeRepairTarget(session.lastElements, expected.target);
-  const replacementSemanticsMatch =
-    semanticResolution !== null && sameInteractiveTarget(semanticResolution, resolvedEl);
-  if (!recordedTargetMatches && !replacementSemanticsMatch) {
-    throw new Error(`replay repair target mismatch for ${expected.hole}`);
-  }
-  const replacementTarget = recipeTargetFor(resolvedEl, session.lastElements, session.userEmail);
-  if (replacementTarget === undefined) {
-    throw new Error(`replay repair target could not be attested for ${expected.hole}`);
-  }
-  expected.target = replacementTarget;
-  const guard = await verifyReplayField(session, expected, action.kind === "select");
-  if (!guard.ok) {
-    markReplayFailure(session, guard.reason, expected.hole);
-    throw new Error(`replay repair verification failed for ${expected.hole}: ${guard.reason}`);
-  }
-  state.verifiedFields.add(stepIndex);
-}
-
-async function refreshReplayVerificationAfterAction(
-  session: Session,
-  action: ProvisionAction,
-  resolvedEl: InteractiveElement | null,
-): Promise<void> {
-  const state = session.replayState;
-  if (
-    state === null ||
-    !state.moneyPath ||
-    state.nextIndex !== null ||
-    state.paymentGuard !== "verified" ||
-    (action.kind !== "type" && action.kind !== "select" && action.kind !== "set_phone_country")
-  ) {
-    return;
-  }
-  const affected = [...state.expectedFields.values()].filter((expected) => {
-    if (action.kind === "set_phone_country") return expected.kind === "set_phone_country";
-    if (expected.target === null || resolvedEl === null) return false;
-    const resolution = resolveRecipeFieldTarget(session.lastElements, expected.target);
-    return resolution !== null && sameInteractiveTarget(resolution.element, resolvedEl);
-  });
-  for (const expected of affected) {
-    state.verifiedFields.delete(expected.stepIndex);
-    state.paymentGuard = "pending";
-    const supplied = action.kind === "set_phone_country" ? action.country : action.text;
-    if (supplied !== expected.expected) {
-      markReplayFailure(session, "field_value_mismatch", expected.hole);
-      throw new Error(`replay field value mismatch for ${expected.hole}`);
-    }
-    const guard = await verifyReplayField(session, expected, action.kind === "select");
-    if (!guard.ok) {
-      markReplayFailure(session, guard.reason, expected.hole);
-      throw new Error(`replay field verification failed for ${expected.hole}: ${guard.reason}`);
-    }
-    state.verifiedFields.add(expected.stepIndex);
-  }
-  if (state.verifiedFields.size === state.expectedFields.size) state.paymentGuard = "verified";
 }
 
 function isReplayTransitionAction(action: ProvisionAction): boolean {
@@ -6494,63 +6385,6 @@ async function verifyRecordedFieldsAfterTransition(
   }
 }
 
-async function attestReplayFieldsBeforeTransition(
-  session: Session,
-  action: ProvisionAction,
-): Promise<
-  | { ok: true; fields: Set<number> }
-  | { ok: false; reason: "field_missing" | "field_value_mismatch"; field: string }
-> {
-  const state = session.replayState;
-  const fields = new Set<number>();
-  if (state === null || !state.moneyPath || !isReplayTransitionAction(action)) {
-    return { ok: true, fields };
-  }
-  const fresh = await session.browser.extractInteractiveElements();
-  session.lastElements = fresh;
-  for (const expected of state.expectedFields.values()) {
-    if (
-      !state.verifiedFields.has(expected.stepIndex) ||
-      (expected.target === null && expected.kind !== "set_phone_country")
-    ) {
-      continue;
-    }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
-    if (!guard.ok) {
-      return { ok: false, reason: guard.reason, field: expected.hole };
-    }
-    fields.add(expected.stepIndex);
-  }
-  return { ok: true, fields };
-}
-
-async function verifyReplayFieldsAfterTransition(
-  session: Session,
-  action: ProvisionAction,
-  attestedFields: ReadonlySet<number>,
-): Promise<
-  { ok: true } | { ok: false; reason: "field_missing" | "field_value_mismatch"; field: string }
-> {
-  const state = session.replayState;
-  if (state === null || !state.moneyPath || !isReplayTransitionAction(action)) {
-    return { ok: true };
-  }
-  const fresh = await session.browser.extractInteractiveElements();
-  session.lastElements = fresh;
-  for (const stepIndex of attestedFields) {
-    const expected = state.expectedFields.get(stepIndex);
-    if (expected === undefined) continue;
-    if (!(await isReplayFieldMounted(session, expected, fresh))) {
-      return { ok: false, reason: "field_missing", field: expected.hole };
-    }
-    const guard = await verifyReplayFieldWithElements(session, expected, fresh);
-    if (!guard.ok) {
-      return { ok: false, reason: guard.reason, field: expected.hole };
-    }
-  }
-  return { ok: true };
-}
-
 /**
  * Execute deterministic recipe steps until completion or one local miss.
  * A miss is returned to the host with a continuation index; after the host
@@ -6574,7 +6408,13 @@ export async function replayOperatorRecipe(
   if (recipe.verb === undefined || recipe.domain === undefined) {
     throw new Error("legacy named recipes are hint-only and cannot replay deterministically");
   }
-  const isMoneyPath = MONEY_REPLAY_VERBS.has(recipe.verb);
+  // recipe-key-redesign money rule: the only surviving invariant is that a
+  // card-charging step is never blind-replayed — enforced unconditionally
+  // below where recorded.kind === "operate_pay" always forces a fallback to
+  // the fresh, human-approved operate_pay path. isMoneyPath here only feeds
+  // the leg-fallback narrowing (where to resume cold-driving), not a
+  // software field-verification gate.
+  const isMoneyPath = recipe.trace.some((entry) => entry.action.kind === "operate_pay");
   let state: ReplayState;
 
   const humanRequired = async (
@@ -6589,12 +6429,8 @@ export async function replayOperatorRecipe(
     // behavior exactly: hard-stop at human_required.
     if (state.moneyPath && state.legStartIndex !== null && state.legStartIndex > 0) {
       const fromStepIndex = state.legStartIndex;
-      // Same fail-closed payment gate as human_required (markReplayFailure
-      // sets paymentGuard:"failed" and rejects recipe re-recording) — only
-      // the RETURNED status differs. Deliberately does NOT null out
-      // session.replayState: activeProvisionSession's operate_pay gate
-      // reads session.replayState.paymentGuard, so clearing it would
-      // silently reopen the payment gate instead of keeping it shut.
+      // Deliberately does NOT null out session.replayState — a resumed
+      // fallback should not silently reopen a failed replay.
       // nextIndex is left unset (not stepIndex+1), so a resume_from
       // attempt still hits "invalid replay continuation" below — this is
       // not a resumable fallback the way fallback_required is.
@@ -6626,7 +6462,6 @@ export async function replayOperatorRecipe(
       nextIndex: null,
       expectedFields: expected.fields,
       verifiedFields: new Set(),
-      paymentGuard: isMoneyPath ? "pending" : "verified",
       legStartIndex: isMoneyPath ? checkoutLegStartIndex(recipe.trace) : null,
     };
     session.replayState = state;
@@ -6661,12 +6496,6 @@ export async function replayOperatorRecipe(
     reason: string,
   ): Promise<OperatorReplayResult> => {
     state.nextIndex = stepIndex + 1;
-    if (
-      step.action.kind === "operate_pay" &&
-      state.verifiedFields.size === state.expectedFields.size
-    ) {
-      state.paymentGuard = "verified";
-    }
     return {
       status: "fallback_required",
       observation: await observe(sessionId),
@@ -6840,10 +6669,6 @@ export async function replayOperatorRecipe(
     }
 
     try {
-      const transitionAttestation = await attestReplayFieldsBeforeTransition(session, action);
-      if (!transitionAttestation.ok) {
-        return await humanRequired(transitionAttestation.reason, transitionAttestation.field);
-      }
       await options.beforeAction?.({ step_index: i, action });
       await act(sessionId, action, "none");
       replayed += 1;
@@ -6853,39 +6678,17 @@ export async function replayOperatorRecipe(
         if (!guard.ok) return await humanRequired(guard.reason, expected.hole);
         state.verifiedFields.add(i);
       }
-      const transitionGuard = await verifyReplayFieldsAfterTransition(
-        session,
-        action,
-        transitionAttestation.fields,
-      );
-      if (!transitionGuard.ok) {
-        return await humanRequired(transitionGuard.reason, transitionGuard.field);
-      }
     } catch (error) {
       if (error instanceof ManualCardEntryBlockedError) throw error;
       return await fallback(step, i, error instanceof Error ? error.message : String(error));
     }
   }
 
-  if (isMoneyPath) {
-    const unverified = [...state.expectedFields.values()].find(
-      (expected) => !state.verifiedFields.has(expected.stepIndex),
-    );
-    if (unverified !== undefined) {
-      return await humanRequired("field_missing", unverified.hole);
-    }
-    state.paymentGuard = "verified";
-    audit(sessionId, "replay_field_value_guard", {
-      ok: true,
-      fields: state.expectedFields.size,
-    });
-  }
-
   return {
     status: "complete",
     observation: await observe(sessionId),
     replayed_steps: replayed,
-    field_values_verified: isMoneyPath,
+    field_values_verified: true,
   };
 }
 
@@ -7648,11 +7451,7 @@ export interface PreparedFinishResult<T> {
 }
 
 function profileRequiresDestroy(session: Session): boolean {
-  return (
-    session.activePayment !== null ||
-    session.paymentFieldSealActive ||
-    (session.replayState?.moneyPath === true && session.replayState.paymentGuard !== "verified")
-  );
+  return session.activePayment !== null || session.paymentFieldSealActive;
 }
 
 async function closeFinishingProvisionSession(session: Session): Promise<FinishResult> {

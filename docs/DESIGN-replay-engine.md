@@ -17,20 +17,60 @@ Recipes are saved with `operate_recipe_save` and replayed with
 
 ## Recipe identity
 
-The local key is `(verb, eTLD+1)`:
+The local key is a `(verb, eTLD+1, action_path)` tuple (recipe-key-redesign,
+2026-08-16), resolved through a tiered lookup that degrades to exactly
+yesterday's `(verb, eTLD+1)` key on any miss:
 
 - `verb` is parsed by the closed `OperatorVerbSchema` enum in
   `packages/recipe-schema` (re-exported by `apps/mcp/src/bot/operator-recipe.ts`).
-  It is host-classified, not free-form.
-- The domain is derived with the Public Suffix List. Paths and queries do not
+  It is host-classified, not free-form. `OperatorVerbSchema` still parses all
+  15 legacy values (no enum narrowing), but every key/file builder runs the
+  verb through `canonicalVerb()` first, which merges `reserve→book` and
+  `renew|upgrade|downgrade→subscribe`. No new recording is ever written under
+  a legacy verb name; the merge exists only so old input and old files keep
+  parsing. `purchase`/`checkout`/`add_to_cart` are deliberately NOT merged.
+- The domain is derived with the Public Suffix List. Queries never
   participate, so ordinary `www`, `shop`, and `checkout` subdomains collapse to
   their registrable domain.
+- `action_path` is a NEW optional field (`extractActionPath` in
+  `packages/recipe-schema`) — a short token parsed from the recipe's own
+  `entry_url` path: lowercase, drop empty segments, drop a leading locale
+  (`^[a-z]{2}(-[a-z]{2})?$`) or version (`^v\d+$`) segment, then walk the
+  remaining segments last→first for the first hit in a hand-maintained
+  allow-list (`signup, login, checkout, cart, book, reserve, cancel, pricing,
+  plans, enterprise, contact-sales, keys, api-keys, settings, billing,
+  download, demo, trial, upgrade, downgrade, renew, subscribe`, with synonym
+  canonicalization such as `sign-up→signup`). If the hit's immediate parent
+  segment is also an allow-list hit, both are kept (capped at two segments,
+  e.g. `billing/cancel`). No hit anywhere in the path → `action_path` is
+  absent/empty — the mandatory default-empty fail path that keeps every
+  non-matching URL keying exactly as before. `action_path` is deliberately
+  its own schema field, not folded into `domain` the way `checkoutShapeKey`
+  is: domain-lock (`isSameRecipeDomain`, `recipeDomainLockViolations`) parses
+  `domain` as a real hostname, and an action_path recipe is a normal, fully
+  domain-locked, navigable recipe — just with a more specific key. Domain-lock
+  code is entirely untouched by this field.
+- **Local file naming and lookup (`apps/mcp/src/bot/operator-recipe.ts`):**
+  `writeRecipe`'s file stem is `${verb}--${domain}--${action_path}` when
+  `action_path` is set and non-empty, else today's `${verb}--${domain}`.
+  `readRecipeForTask` tries the specific file first when the replaying URL's
+  `action_path` is non-empty, catches `ENOENT`, and retries the degenerate
+  `${verb}--${domain}` file — the fallback is mandatory, not optional: an old
+  recipe recorded before this field existed sits only at the degenerate slot,
+  and a replaying URL that now happens to extract a non-empty `action_path`
+  must still find it.
+- **No-regression write guarantee (`provision-session.ts`):** every
+  recording that lands at a specific `(verb, domain, action_path)` file also
+  refreshes the degenerate `(verb, domain)` catch-all whenever that slot is
+  absent or itself empty-path, so a later replay on an unrecognized path
+  doesn't go cold where today it hits.
 - Tenant subdomains under `myshopify.com` and `notion.site` retain the full host.
 - Recipes are local files under `~/.trusty-squire/operator-recipes/`, or the
   directory selected by `TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR`. Share-eligible
   recipes are additionally written live to the shared registry and are served
   immediately to other installs on a local miss. See [Shared registry and
-  domain lock](#shared-registry-and-domain-lock).
+  domain lock](#shared-registry-and-domain-lock). The registry route's own
+  `action_path` slot is deferred — not yet part of the shared-registry lookup.
 - A money-path recording additionally saves its checkout leg as a second,
   narrower recipe in the same store, keyed by the live checkout page's
   field-name-set signature (`checkoutShapeKey` → `shape:<sha256>` in the
@@ -155,26 +195,55 @@ The saved postcondition is bound from the active replay's parameters before
 
 ## Money-path guards
 
-The replay money path covers purchase, subscribe, checkout, renew, upgrade,
-book, and reserve recipes. Its additional invariants are:
+Simplified 2026-08-16 (recipe-key-redesign, per captain decision). The money
+fence is the live human biometric (passkey) approval on every charge, plus
+the card never reaching the model — not a software re-check of replay field
+values layered on top of that hardware gate. Re-validating address/contact/
+quantity fields in software before allowing a charge was redundant with a
+human about to approve the same charge, so that whole layer was deleted, not
+re-gated.
 
-1. Every deterministic target action passes a fresh structural resolution.
-2. A recipe value is committed to a field only when the live field's
-   locale-stable role matches the recorded `field_role` (see Stable targets);
-   role mismatch or absence downgrades the step to a miss for host repair.
-3. Every injected address, contact, and quantity value is checked against the
-   live field immediately after the action and across state-changing
-   transitions while the field remains mounted.
-4. A host-repaired money field must identify the issued step and hole, supply
-   the same value, match the recorded or uniquely equivalent target, and pass a
-   fresh live-value check.
-5. A missing or mismatched field on a recipe with a genuine catalog/storefront
-   prefix ahead of its checkout leg returns `leg_fallback_required` — the host
-   cold-drives the checkout leg from `from_step_index` — while a recipe with
-   no such prefix returns `human_required` exactly as before. Both fail the
-   payment guard identically; `operate_pay` refuses to run until all replay
-   field guards are satisfied and rechecks mounted fields immediately before
-   payment.
+**The single surviving invariant:** a trace step that charges the card is
+never blind-replayed — it always routes to a fresh, human-approved
+`operate_pay`. Concretely, `replayOperatorRecipe` (`provision-session.ts`)
+unconditionally returns `fallback_required` the moment it reaches a
+`recorded.kind === "operate_pay"` step, for every recipe, regardless of verb.
+`isMoneyPath` (the same function) is a pure trace-content check —
+`recipe.trace.some((e) => e.action.kind === "operate_pay")` — used only to
+decide whether a guard failure elsewhere in the trace narrows to
+`leg_fallback_required` (resume the checkout leg cold from
+`from_step_index`) instead of the terminal `human_required`; it does not
+gate whether `operate_pay` itself may run.
+
+Deleted entirely (not re-gated behind a different condition):
+
+- `MONEY_REPLAY_VERBS` — the verb-set classifier the old `isMoneyPath` used.
+- The `paymentGuard` state machine (`"pending" | "verified" | "failed"`) and
+  everything that existed only to compute it: pre/post-transition field
+  re-verification (`attestReplayFieldsBeforeTransition`,
+  `verifyReplayFieldsAfterTransition`), repair-time re-verification
+  (`captureReplayRepairVerification`, `refreshReplayVerificationAfterAction`),
+  and `activeProvisionBrowserForPayment`'s live-field re-check immediately
+  before handing the browser to `operate_pay`.
+- `assertPaymentSessionAllowed`'s field-verification refusal — it now only
+  checks that the session isn't closing.
+
+What did NOT change: the general (non-money-specific) replay field
+verification — a `type`/`select`/`set_phone_country` step's value is still
+checked against the live field immediately after that step executes, and a
+`resume_from` continuation still re-verifies a host-repaired field before
+continuing. That machinery serves every recipe, not just money-shaped ones,
+and was never part of the deleted payment-validation layer. Two save-time
+classifiers (checkout-leg carving in `rememberCheckoutLeg`, and the
+unprovenanced-money-field refusal in `findUnprovenancedMoneyField`) also
+survive unchanged in scope — they use a small local `MONEY_SHAPED_VERBS` set
+(`purchase, subscribe, checkout, book` — the old `MONEY_REPLAY_VERBS`,
+canonicalized) since they are save-time scope filters unrelated to the
+payment fence, not part of the money rule being simplified.
+
+Shipping recipient/address correctness is a separate concern
+(`RECIPIENT-BINDING-DESIGN.md`), not a money-path guard, and is untouched by
+this change.
 
 The existing `operate_pay` phone approval, passkey mandate, card injection,
 3-D Secure handling, and expected-total behavior are unchanged.
