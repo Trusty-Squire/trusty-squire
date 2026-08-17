@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -143,25 +143,53 @@ describe("recipe verb-rename migration", () => {
     expect(second.superseded).toHaveLength(0);
   });
 
-  it("structurally rewrites escaped top-level verb keys and stays idempotent", async () => {
+  it("rewrites the semantic top-level verb without changing unrelated bytes", async () => {
     const sourceFile = "reserve--acme.com.json";
     const canonicalFile = "book--acme.com.json";
+    const sourceRaw =
+      `{"verb":"purchase","v\\u0065rb":"reserve","domain":"acme.com",` +
+      `"large":9007199254740993,"duplicate":"first","duplicate":"second"}\n`;
+    const expectedRaw =
+      `{"verb":"purchase","v\\u0065rb":"book","domain":"acme.com",` +
+      `"large":9007199254740993,"duplicate":"first","duplicate":"second"}\n`;
     await fs.writeFile(
       path.join(dir, sourceFile),
-      `{"v\\u0065rb":"reserve","domain":"acme.com","name":"escaped"}\n`,
+      sourceRaw,
       "utf8",
     );
 
     const first = await migrateRecipeVerbs({ dir, timestampBase: "t" });
     const second = await migrateRecipeVerbs({ dir, timestampBase: "t" });
 
-    expect(await readJson(path.join(dir, canonicalFile))).toMatchObject({
-      name: "escaped",
-      verb: "book",
-    });
+    expect(await fs.readFile(path.join(dir, canonicalFile), "utf8")).toBe(expectedRaw);
+    expect((await readJson(path.join(dir, canonicalFile))).verb).toBe("book");
     expect(first.renamed).toHaveLength(1);
     expect(second.renamed).toHaveLength(0);
     expect(second.superseded).toHaveLength(0);
+  });
+
+  it("keeps the original recipe intact when staging the rewrite fails", async () => {
+    const sourceFile = "reserve--acme.com.json";
+    const sourcePath = path.join(dir, sourceFile);
+    await writeRecipe(
+      dir,
+      sourceFile,
+      recipe({ name: "intact", verb: "reserve", domain: "acme.com" }),
+    );
+    const before = await fs.readFile(sourcePath, "utf8");
+    const error = Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    const writeFile = vi.spyOn(fs, "writeFile").mockRejectedValueOnce(error);
+
+    try {
+      await expect(migrateRecipeVerbs({ dir, timestampBase: "t" })).rejects.toMatchObject({
+        code: "ENOSPC",
+      });
+    } finally {
+      writeFile.mockRestore();
+    }
+
+    expect(await fs.readFile(sourcePath, "utf8")).toBe(before);
+    expect(await exists(path.join(dir, "book--acme.com.json"))).toBe(false);
   });
 
   it("leaves non-merged verbs untouched", async () => {
@@ -367,6 +395,44 @@ describe("recipe verb-rename migration", () => {
     expect((await fs.readdir(dir)).some((file) => file.includes(".migration-"))).toBe(false);
     expect(live.renamed).toHaveLength(2);
     expect(live.superseded).toHaveLength(0);
+  });
+
+  it("recovers a cyclic rename after staging fails", async () => {
+    await writeRecipe(
+      dir,
+      "book--a.com.json",
+      recipe({ name: "upgrade-source", verb: "upgrade", domain: "a.com" }),
+      NOW,
+    );
+    await writeRecipe(
+      dir,
+      "subscribe--a.com.json",
+      recipe({ name: "reserve-source", verb: "reserve", domain: "a.com" }),
+      NOW - 10_000,
+    );
+    const error = Object.assign(new Error("disk full"), { code: "ENOSPC" });
+    const writeFile = vi.spyOn(fs, "writeFile").mockRejectedValueOnce(error);
+
+    try {
+      await expect(migrateRecipeVerbs({ dir, timestampBase: "t" })).rejects.toMatchObject({
+        code: "ENOSPC",
+      });
+    } finally {
+      writeFile.mockRestore();
+    }
+
+    const rerun = await migrateRecipeVerbs({ dir, timestampBase: "rerun", log: () => {} });
+
+    expect(await readJson(path.join(dir, "book--a.com.json"))).toMatchObject({
+      name: "reserve-source",
+      verb: "book",
+    });
+    expect(await readJson(path.join(dir, "subscribe--a.com.json"))).toMatchObject({
+      name: "upgrade-source",
+      verb: "subscribe",
+    });
+    expect((await fs.readdir(dir)).some((file) => file.includes(".migration-"))).toBe(false);
+    expect(rerun.renamed).toHaveLength(2);
   });
 
   it("never overwrites an existing superseded archive", async () => {

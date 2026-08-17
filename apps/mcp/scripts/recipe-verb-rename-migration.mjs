@@ -61,6 +61,82 @@ function safeFileName(name) {
   return `${slug.slice(0, 63)}-${digest}`;
 }
 
+function skipJsonWhitespace(raw, index) {
+  while (index < raw.length && /[ \t\r\n]/.test(raw[index])) index += 1;
+  return index;
+}
+
+function scanJsonString(raw, start) {
+  let index = start + 1;
+  while (index < raw.length) {
+    if (raw[index] === "\\") {
+      index += 2;
+      continue;
+    }
+    if (raw[index] === '"') return index + 1;
+    index += 1;
+  }
+  throw new SyntaxError("Unterminated JSON string");
+}
+
+function scanJsonValue(raw, start) {
+  if (raw[start] === '"') return scanJsonString(raw, start);
+  if (raw[start] !== "{" && raw[start] !== "[") {
+    let index = start;
+    while (index < raw.length && !/[,\]} \t\r\n]/.test(raw[index])) index += 1;
+    return index;
+  }
+
+  const closers = [];
+  let index = start;
+  while (index < raw.length) {
+    const token = raw[index];
+    if (token === '"') {
+      index = scanJsonString(raw, index);
+      continue;
+    }
+    if (token === "{") closers.push("}");
+    else if (token === "[") closers.push("]");
+    else if (token === "}" || token === "]") {
+      if (closers.pop() !== token) throw new SyntaxError("Mismatched JSON delimiter");
+      if (closers.length === 0) return index + 1;
+    }
+    index += 1;
+  }
+  throw new SyntaxError("Unterminated JSON value");
+}
+
+function rewriteTopLevelVerb(raw, canonical) {
+  let index = skipJsonWhitespace(raw, 0);
+  if (raw[index] !== "{") throw new SyntaxError("Recipe JSON must be an object");
+  index += 1;
+  let verbValue = null;
+
+  for (;;) {
+    index = skipJsonWhitespace(raw, index);
+    if (raw[index] === "}") break;
+    const keyStart = index;
+    const keyEnd = scanJsonString(raw, keyStart);
+    const key = JSON.parse(raw.slice(keyStart, keyEnd));
+    index = skipJsonWhitespace(raw, keyEnd);
+    if (raw[index] !== ":") throw new SyntaxError("Invalid JSON object property");
+    index = skipJsonWhitespace(raw, index + 1);
+    const valueStart = index;
+    const valueEnd = scanJsonValue(raw, valueStart);
+    if (key === "verb") verbValue = { start: valueStart, end: valueEnd };
+    index = skipJsonWhitespace(raw, valueEnd);
+    if (raw[index] === ",") {
+      index += 1;
+      continue;
+    }
+    if (raw[index] === "}") break;
+    throw new SyntaxError("Invalid JSON object separator");
+  }
+
+  if (!verbValue) throw new SyntaxError("Recipe JSON has no top-level verb");
+  return `${raw.slice(0, verbValue.start)}${JSON.stringify(canonical)}${raw.slice(verbValue.end)}`;
+}
+
 /** Where the runtime keeps recipes — mirrors operatorRecipeDir(). */
 export function operatorRecipeDir() {
   const fromEnv = process.env.TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR;
@@ -153,6 +229,8 @@ export async function migrateRecipeVerbs({
 
   const reservedNames = new Set(files);
   let collisionSeq = 0;
+  let holdingSeq = 0;
+  let stagingSeq = 0;
   const timestamp = timestampBase ?? Date.now().toString();
   const nextSupersededPath = (targetPath) => {
     let candidate;
@@ -162,6 +240,53 @@ export async function migrateRecipeVerbs({
     } while (reservedNames.has(path.basename(candidate)));
     reservedNames.add(path.basename(candidate));
     return candidate;
+  };
+
+  const nextHoldingPath = (sourcePath) => {
+    const sourceStem = sourcePath.endsWith(".json") ? sourcePath.slice(0, -5) : sourcePath;
+    let candidate;
+    do {
+      candidate = `${sourceStem}.migration-${timestamp}-${++holdingSeq}.json`;
+    } while (reservedNames.has(path.basename(candidate)));
+    reservedNames.add(path.basename(candidate));
+    return candidate;
+  };
+
+  const stageRewrite = async (targetPath, rewritten) => {
+    for (;;) {
+      const stagingPath = `${targetPath}.migration-write-${timestamp}-${++stagingSeq}`;
+      if (reservedNames.has(path.basename(stagingPath))) continue;
+      reservedNames.add(path.basename(stagingPath));
+      try {
+        await fs.writeFile(stagingPath, rewritten, { encoding: "utf8", flag: "wx" });
+        return stagingPath;
+      } catch (err) {
+        if (err.code === "EEXIST") continue;
+        await fs.unlink(stagingPath).catch(() => {});
+        throw err;
+      }
+    }
+  };
+
+  const publishRewrite = async (plan) => {
+    let sourcePath = plan.currentPath;
+    if (sourcePath === plan.targetPath) {
+      const holdingPath = nextHoldingPath(sourcePath);
+      await fs.link(sourcePath, holdingPath);
+      await fs.unlink(sourcePath);
+      sourcePath = holdingPath;
+    }
+
+    const rewritten = rewriteTopLevelVerb(plan.winner.raw, plan.canonical);
+    const stagingPath = await stageRewrite(plan.targetPath, rewritten);
+    try {
+      await fs.link(stagingPath, plan.targetPath);
+    } catch (err) {
+      await fs.unlink(stagingPath).catch(() => {});
+      throw err;
+    }
+    await fs.unlink(stagingPath);
+    await fs.unlink(sourcePath);
   };
 
   const preserveAsSuperseded = async (sourcePath, targetPath) => {
@@ -226,7 +351,6 @@ export async function migrateRecipeVerbs({
     .filter((plan) => canonicalVerb(plan.winner.verb) === plan.canonical)
     .map((plan) => ({ ...plan, currentPath: plan.winner.path }));
   const cycleHolds = [];
-  let holdingSeq = 0;
   const migrationOrder = [];
   while (pending.length > 0) {
     const index = pending.findIndex(
@@ -237,11 +361,7 @@ export async function migrateRecipeVerbs({
     );
     if (index === -1) {
       const plan = pending[0];
-      let holdingPath;
-      do {
-        holdingPath = `${plan.winner.path}.migration-${timestamp}-${++holdingSeq}`;
-      } while (reservedNames.has(path.basename(holdingPath)));
-      reservedNames.add(path.basename(holdingPath));
+      const holdingPath = nextHoldingPath(plan.winner.path);
       cycleHolds.push({ sourcePath: plan.currentPath, holdingPath });
       plan.currentPath = holdingPath;
       continue;
@@ -271,15 +391,7 @@ export async function migrateRecipeVerbs({
 
   for (const plan of migrationOrder) {
     if (!dryRun) {
-      const rewritten = `${JSON.stringify(
-        { ...plan.winner.recipe, verb: plan.canonical },
-        null,
-        2,
-      )}\n`;
-      if (plan.currentPath !== plan.targetPath) {
-        await fs.rename(plan.currentPath, plan.targetPath);
-      }
-      await fs.writeFile(plan.targetPath, rewritten, "utf8");
+      await publishRewrite(plan);
     }
 
     summary.renamed.push({
