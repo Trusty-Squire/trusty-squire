@@ -77,7 +77,7 @@ export async function migrateRecipeVerbs({
 
   let files;
   try {
-    files = (await fs.readdir(dir)).filter((f) => f.endsWith(".json"));
+    files = await fs.readdir(dir);
   } catch (err) {
     if (err.code === "ENOENT") {
       emit(`⚠ recipe dir not found (${dir}); nothing to migrate.`);
@@ -86,113 +86,134 @@ export async function migrateRecipeVerbs({
     throw err;
   }
 
-  // Monotonic per-run counter keeps `.superseded-<ts>` names unique when two
-  // different legacy verbs collide onto the same canonical target in one run.
-  let collisionSeq = 0;
-  const stamp = () => {
-    const base = timestampBase ?? Date.now().toString();
-    return collisionSeq++ === 0 ? base : `${base}-${collisionSeq}`;
-  };
-
-  for (const file of files.sort()) {
-    const sourcePath = path.join(dir, file);
-
-    let raw;
-    let recipe;
+  const snapshots = new Map();
+  for (const file of files.filter((entry) => entry.endsWith(".json")).sort()) {
+    const filePath = path.join(dir, file);
+    let stat;
     try {
-      raw = await fs.readFile(sourcePath, "utf8");
+      stat = await fs.stat(filePath);
+    } catch {
+      continue;
+    }
+
+    let raw = null;
+    let recipe = null;
+    try {
+      raw = await fs.readFile(filePath, "utf8");
       recipe = JSON.parse(raw);
     } catch {
-      // Unparseable / non-recipe JSON: leave untouched.
-      continue;
+      // Keep the snapshot so an unreadable canonical target still collides,
+      // but do not consider it a legacy migration source.
     }
 
-    const verb = recipe && recipe.verb;
-    const canonical = CANONICAL_VERB[verb];
-    if (!canonical) continue; // not a legacy verb — untouched
-
-    // Build the canonical filename from the existing `--`-joined stem: swap the
-    // leading verb segment for the canonical one, preserving domain and any
-    // action_path segments verbatim (already lowercased/sanitized by the runtime).
-    const sourceStem = file.slice(0, -".json".length);
-    const stem = sourceStem.startsWith(`${verb}--`)
-      ? `${canonical}${sourceStem.slice(verb.length)}`
-      : `${canonical}--${sourceStem.replace(/^-+|-+$/g, "")}`;
-    const targetPath = path.join(dir, `${stem}.json`);
-
-    const domain = recipe.domain ?? null;
-    const targetExists = await fs.access(targetPath).then(
-      () => true,
-      () => false,
-    );
-
-    // No collision — rewrite the verb in place and rename to the canonical path.
-    if (!targetExists) {
-      if (!dryRun) {
-        const rewritten = raw.replace(/"verb"\s*:\s*"[^"]*"/, `"verb": "${canonical}"`);
-        await fs.rename(sourcePath, targetPath);
-        // Rename first so a failure never leaves the verb field canonical but
-        // the file unreachable; rewrite after the move is in place.
-        if (rewritten !== raw) await fs.writeFile(targetPath, rewritten, "utf8");
-      }
-      summary.renamed.push({ from: file, to: `${stem}.json`, verb, canonical, domain });
-      emit(`→ ${file} → ${stem}.json (verb ${verb} → ${canonical})`);
-      continue;
-    }
-
-    // Collision: keep the more-recently-modified file at the canonical path,
-    // move the loser to `<canonical>.superseded-<ts>` — never delete.
-    const [srcStat, tgtStat] = await Promise.all([
-      fs.stat(sourcePath),
-      fs.stat(targetPath),
-    ]);
-    const sourceNewer = srcStat.mtimeMs >= tgtStat.mtimeMs;
-    const targetVerb = await recipeVerbAt(targetPath);
-    const winnerVerb = sourceNewer ? verb : targetVerb;
-    const loserPath = `${targetPath}.superseded-${stamp()}`;
-
-    if (!dryRun) {
-      if (sourceNewer) {
-        // Source (legacy) wins: rewrite verb, move onto canonical path (overwriting
-        // the older canonical file), demote the older file to superseded.
-        const rewritten = raw.replace(
-          /"verb"\s*:\s*"[^"]*"/,
-          `"verb": "${canonical}"`,
-        );
-        await fs.rename(targetPath, loserPath);
-        await fs.rename(sourcePath, targetPath);
-        if (rewritten !== raw) await fs.writeFile(targetPath, rewritten, "utf8");
-      } else {
-        // Existing canonical file wins: keep it in place, preserve the loser as-is.
-        await fs.rename(sourcePath, loserPath);
-      }
-    }
-
-    summary.superseded.push({
-      from: file,
-      canonicalFile: `${stem}.json`,
-      superseded: path.basename(loserPath),
-      domain,
-      winnerVerb,
+    snapshots.set(file, {
+      file,
+      path: filePath,
+      raw,
+      verb: recipe?.verb ?? "?",
+      domain: recipe?.domain ?? null,
+      mtimeMs: stat.mtimeMs,
     });
-    emit(
-      `collision ${domain ?? "unknown"}: ${verb} vs ${targetVerb} on ${stem}.json — keeping ` +
-        `${winnerVerb} (newer), preserved ${sourceNewer ? path.basename(targetPath) : file} as ` +
-        `${path.basename(loserPath)}`,
-    );
+  }
+
+  const groups = new Map();
+  for (const snapshot of snapshots.values()) {
+    const canonical = CANONICAL_VERB[snapshot.verb];
+    if (!canonical) continue;
+
+    const sourceStem = snapshot.file.slice(0, -".json".length);
+    const stem = sourceStem.startsWith(`${snapshot.verb}--`)
+      ? `${canonical}${sourceStem.slice(snapshot.verb.length)}`
+      : `${canonical}--${sourceStem.replace(/^-+|-+$/g, "")}`;
+    const targetFile = `${stem}.json`;
+    const group = groups.get(targetFile) ?? { targetFile, canonical, sources: [] };
+    group.sources.push(snapshot);
+    groups.set(targetFile, group);
+  }
+
+  const reservedNames = new Set(files);
+  let collisionSeq = 0;
+  const timestamp = timestampBase ?? Date.now().toString();
+  const nextSupersededPath = (targetPath) => {
+    let candidate;
+    do {
+      const suffix = collisionSeq++ === 0 ? timestamp : `${timestamp}-${collisionSeq}`;
+      candidate = `${targetPath}.superseded-${suffix}`;
+    } while (reservedNames.has(path.basename(candidate)));
+    reservedNames.add(path.basename(candidate));
+    return candidate;
+  };
+
+  const preserveAsSuperseded = async (sourcePath, targetPath) => {
+    for (;;) {
+      const loserPath = nextSupersededPath(targetPath);
+      if (dryRun) return loserPath;
+      try {
+        await fs.link(sourcePath, loserPath);
+        await fs.unlink(sourcePath);
+        return loserPath;
+      } catch (err) {
+        if (err.code !== "EEXIST") throw err;
+      }
+    }
+  };
+
+  for (const group of [...groups.values()].sort((a, b) =>
+    a.targetFile.localeCompare(b.targetFile),
+  )) {
+    const targetPath = path.join(dir, group.targetFile);
+    const existingTarget = snapshots.get(group.targetFile);
+    const contenders = [...group.sources];
+    if (existingTarget && !contenders.some((entry) => entry.path === existingTarget.path)) {
+      contenders.push(existingTarget);
+    }
+    contenders.sort((a, b) => b.mtimeMs - a.mtimeMs || a.file.localeCompare(b.file));
+
+    const winner = contenders[0];
+    const losers = contenders.slice(1);
+    const domain = group.sources[0].domain;
+
+    for (const loser of losers) {
+      const loserPath = await preserveAsSuperseded(loser.path, targetPath);
+      summary.superseded.push({
+        from: loser.file,
+        canonicalFile: group.targetFile,
+        superseded: path.basename(loserPath),
+        domain,
+        winnerVerb: winner.verb,
+      });
+      emit(
+        `collision ${domain ?? "unknown"}: ${loser.verb} vs ${winner.verb} on ${group.targetFile} — ` +
+          `keeping ${winner.verb} (newer), preserved ${loser.file} as ${path.basename(loserPath)}`,
+      );
+    }
+
+    if (winner.path !== targetPath) {
+      if (!dryRun) {
+        const rewritten = winner.raw.replace(
+          /"verb"\s*:\s*"[^"]*"/,
+          `"verb": "${group.canonical}"`,
+        );
+        await fs.rename(winner.path, targetPath);
+        if (rewritten !== winner.raw) await fs.writeFile(targetPath, rewritten, "utf8");
+      }
+
+      if (!existingTarget) {
+        summary.renamed.push({
+          from: winner.file,
+          to: group.targetFile,
+          verb: winner.verb,
+          canonical: group.canonical,
+          domain,
+        });
+        emit(
+          `→ ${winner.file} → ${group.targetFile} (verb ${winner.verb} → ${group.canonical})`,
+        );
+      }
+    }
   }
 
   return summary;
-}
-
-// Read the canonical target's verb for a collision "who won" log, without
-// letting a read failure abort the whole migration.
-async function recipeVerbAt(targetPath) {
-  try {
-    return JSON.parse(await fs.readFile(targetPath, "utf8")).verb ?? "?";
-  } catch {
-    return "?";
-  }
 }
 
 // ── CLI ────────────────────────────────────────────────────────────────
