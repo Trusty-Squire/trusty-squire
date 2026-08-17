@@ -87,8 +87,7 @@ export async function migrateRecipeVerbs({
     log(line);
   };
 
-  const readSnapshot = async (file) => {
-    const filePath = path.join(dir, file);
+  const readSnapshot = async (file, filePath = path.join(dir, file)) => {
     let stat;
     try {
       stat = await fs.stat(filePath);
@@ -118,9 +117,9 @@ export async function migrateRecipeVerbs({
     };
   };
 
-  let files;
+  let entries;
   try {
-    files = await fs.readdir(dir);
+    entries = await fs.readdir(dir, { withFileTypes: true });
   } catch (err) {
     if (err.code === "ENOENT") {
       emit(`⚠ recipe dir not found (${dir}); nothing to migrate.`);
@@ -129,17 +128,70 @@ export async function migrateRecipeVerbs({
     throw err;
   }
 
-  const snapshots = new Map();
+  const files = entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+  const topLevelSnapshots = new Map();
   for (const file of files.filter((entry) => entry.endsWith(".json")).sort()) {
     const snapshot = await readSnapshot(file);
-    if (snapshot) snapshots.set(file, snapshot);
+    if (snapshot) topLevelSnapshots.set(file, snapshot);
   }
 
-  const groups = new Map();
-  for (const snapshot of snapshots.values()) {
-    const canonical = CANONICAL_VERB[snapshot.verb];
-    if (!canonical) continue;
+  const claimDirs = entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith(".recipe-verb-claims-"))
+    .map((entry) => path.join(dir, entry.name));
+  const recoveredSnapshots = [];
+  for (const claimDir of claimDirs) {
+    const claimedFiles = await fs.readdir(claimDir);
+    for (const claimedFile of claimedFiles.filter((entry) => entry.endsWith(".json")).sort()) {
+      const file = claimedFile.replace(/^\d+-/, "");
+      const snapshot = await readSnapshot(file, path.join(claimDir, claimedFile));
+      if (snapshot) recoveredSnapshots.push(snapshot);
+    }
+  }
 
+  let activeClaimDir = null;
+  let claimSeq = 0;
+  const ensureClaimDir = async () => {
+    if (!activeClaimDir) {
+      activeClaimDir = await fs.mkdtemp(path.join(dir, ".recipe-verb-claims-"));
+      claimDirs.push(activeClaimDir);
+    }
+    return activeClaimDir;
+  };
+  const claimCurrentPath = async (file) => {
+    const claimDir = await ensureClaimDir();
+    const claimedPath = path.join(claimDir, `${claimSeq++}-${file}`);
+    try {
+      await fs.rename(path.join(dir, file), claimedPath);
+    } catch (err) {
+      if (err.code === "ENOENT") return null;
+      throw err;
+    }
+    return readSnapshot(file, claimedPath);
+  };
+
+  let sourceSnapshots;
+  let nonSourceClaims;
+  if (dryRun) {
+    sourceSnapshots = [...topLevelSnapshots.values(), ...recoveredSnapshots].filter(
+      (snapshot) => CANONICAL_VERB[snapshot.verb],
+    );
+    nonSourceClaims = recoveredSnapshots.filter((snapshot) => !CANONICAL_VERB[snapshot.verb]);
+  } else {
+    sourceSnapshots = recoveredSnapshots.filter((snapshot) => CANONICAL_VERB[snapshot.verb]);
+    nonSourceClaims = recoveredSnapshots.filter((snapshot) => !CANONICAL_VERB[snapshot.verb]);
+    for (const snapshot of topLevelSnapshots.values()) {
+      if (!CANONICAL_VERB[snapshot.verb]) continue;
+      const claimed = await claimCurrentPath(snapshot.file);
+      if (claimed && CANONICAL_VERB[claimed.verb]) sourceSnapshots.push(claimed);
+      else if (claimed) nonSourceClaims.push(claimed);
+    }
+  }
+
+  const sourcePaths = new Set(sourceSnapshots.map((snapshot) => snapshot.path));
+
+  const groups = new Map();
+  for (const snapshot of sourceSnapshots) {
+    const canonical = CANONICAL_VERB[snapshot.verb];
     const sourceStem = snapshot.file.slice(0, -".json".length);
     const fallbackStem = sourceStem.startsWith(`${snapshot.verb}--`)
       ? `${canonical}${sourceStem.slice(snapshot.verb.length)}`
@@ -151,6 +203,18 @@ export async function migrateRecipeVerbs({
     const group = groups.get(targetFile) ?? { targetFile, canonical, sources: [] };
     group.sources.push(snapshot);
     groups.set(targetFile, group);
+  }
+
+  const recoveredTargetsByFile = new Map();
+  const orphanClaims = [];
+  for (const snapshot of nonSourceClaims) {
+    if (!groups.has(snapshot.file)) {
+      orphanClaims.push(snapshot);
+      continue;
+    }
+    const targets = recoveredTargetsByFile.get(snapshot.file) ?? [];
+    targets.push(snapshot);
+    recoveredTargetsByFile.set(snapshot.file, targets);
   }
 
   const reservedNames = new Set(files);
@@ -179,6 +243,19 @@ export async function migrateRecipeVerbs({
       }
     }
   };
+
+  if (!dryRun) {
+    for (const snapshot of orphanClaims) {
+      const originalPath = path.join(dir, snapshot.file);
+      try {
+        await fs.link(snapshot.path, originalPath);
+        await fs.unlink(snapshot.path);
+      } catch (err) {
+        if (err.code !== "EEXIST") throw err;
+        await preserveAsSuperseded(snapshot.path, originalPath);
+      }
+    }
+  }
 
   const compareContenders = (a, b) =>
     b.mtimeMs - a.mtimeMs || a.file.localeCompare(b.file);
@@ -227,10 +304,21 @@ export async function migrateRecipeVerbs({
     a.targetFile.localeCompare(b.targetFile),
   )) {
     const targetPath = path.join(dir, group.targetFile);
-    const existingTarget = snapshots.get(group.targetFile);
     const contenders = [...group.sources];
-    if (existingTarget && !contenders.some((entry) => entry.path === existingTarget.path)) {
-      contenders.push(existingTarget);
+    const existingTargets = [...(recoveredTargetsByFile.get(group.targetFile) ?? [])];
+    if (dryRun) {
+      const existingTarget = topLevelSnapshots.get(group.targetFile);
+      if (existingTarget && !sourcePaths.has(existingTarget.path)) {
+        existingTargets.push(existingTarget);
+      }
+    } else {
+      const existingTarget = await claimCurrentPath(group.targetFile);
+      if (existingTarget) existingTargets.push(existingTarget);
+    }
+    for (const existingTarget of existingTargets) {
+      if (!contenders.some((entry) => entry.path === existingTarget.path)) {
+        contenders.push(existingTarget);
+      }
     }
     contenders.sort(compareContenders);
 
@@ -238,14 +326,23 @@ export async function migrateRecipeVerbs({
     const losers = contenders.slice(1);
     const domain = group.sources[0].domain;
     const stages = [];
-    let stagedWinner = null;
-
-    if (!dryRun && CANONICAL_VERB[winner.verb] === group.canonical) {
-      stagedWinner = await stageRewritten(winner, group.canonical);
-      stages.push(stagedWinner);
-    }
+    const stagedByPath = new Map();
+    const publishPathFor = async (snapshot) => {
+      if (CANONICAL_VERB[snapshot.verb] !== group.canonical) return snapshot.path;
+      let stage = stagedByPath.get(snapshot.path);
+      if (!stage) {
+        stage = await stageRewritten(snapshot, group.canonical);
+        stagedByPath.set(snapshot.path, stage);
+        stages.push(stage);
+      }
+      return stage.path;
+    };
 
     try {
+      let finalWinner = winner;
+      let publishPath = null;
+      if (!dryRun) publishPath = await publishPathFor(finalWinner);
+
       for (const loser of losers) {
         const loserPath = await preserveAsSuperseded(loser.path, targetPath);
         recordCollision({
@@ -257,33 +354,23 @@ export async function migrateRecipeVerbs({
         });
       }
 
-      let finalWinner = winner;
-      let dynamicCollision = false;
-
-      if (winner.path !== targetPath && !dryRun) {
+      if (!dryRun) {
         for (;;) {
           try {
-            await fs.link(stagedWinner.path, targetPath);
-            await fs.unlink(winner.path);
+            await fs.link(publishPath, targetPath);
+            await fs.unlink(finalWinner.path);
             break;
           } catch (err) {
             if (err.code !== "EEXIST") throw err;
 
-            const currentTarget = await readSnapshot(group.targetFile);
+            const currentTarget = await claimCurrentPath(group.targetFile);
             if (!currentTarget) continue;
-            dynamicCollision = true;
 
-            if (compareContenders(winner, currentTarget) <= 0) {
-              let loserPath;
-              try {
-                loserPath = await preserveAsSuperseded(currentTarget.path, targetPath);
-              } catch (preserveError) {
-                if (preserveError.code === "ENOENT") continue;
-                throw preserveError;
-              }
+            if (compareContenders(finalWinner, currentTarget) <= 0) {
+              const loserPath = await preserveAsSuperseded(currentTarget.path, targetPath);
               recordCollision({
                 loser: currentTarget,
-                winner,
+                winner: finalWinner,
                 loserPath,
                 domain,
                 targetFile: group.targetFile,
@@ -291,50 +378,50 @@ export async function migrateRecipeVerbs({
               continue;
             }
 
-            const loserPath = await preserveAsSuperseded(winner.path, targetPath);
+            const nextPublishPath = await publishPathFor(currentTarget);
+            const loserPath = await preserveAsSuperseded(finalWinner.path, targetPath);
             recordCollision({
-              loser: winner,
+              loser: finalWinner,
               winner: currentTarget,
               loserPath,
               domain,
               targetFile: group.targetFile,
             });
             finalWinner = currentTarget;
-            break;
+            publishPath = nextPublishPath;
           }
         }
-      } else if (winner.path === targetPath && stagedWinner) {
-        await fs.rename(stagedWinner.path, targetPath);
       }
 
       const finalCanonical = CANONICAL_VERB[finalWinner.verb];
-      if (!dryRun && finalWinner !== winner && finalCanonical === group.canonical) {
-        const finalStage = await stageRewritten(finalWinner, group.canonical);
-        stages.push(finalStage);
-        await fs.rename(finalStage.path, targetPath);
-      }
-
       if (finalCanonical === group.canonical) {
-        if (
-          finalWinner.path === targetPath ||
-          (!existingTarget && !dynamicCollision)
-        ) {
-          summary.renamed.push({
-            from: finalWinner.file,
-            to: group.targetFile,
-            verb: finalWinner.verb,
-            canonical: group.canonical,
-            domain,
-          });
-          emit(
-            `→ ${finalWinner.file} → ${group.targetFile} ` +
-              `(verb ${finalWinner.verb} → ${group.canonical})`,
-          );
-        }
+        summary.renamed.push({
+          from: finalWinner.file,
+          to: group.targetFile,
+          verb: finalWinner.verb,
+          canonical: group.canonical,
+          domain,
+        });
+        emit(
+          `→ ${finalWinner.file} → ${group.targetFile} ` +
+            `(verb ${finalWinner.verb} → ${group.canonical})`,
+        );
       }
     } finally {
       await Promise.all(stages.map((stage) => fs.rm(stage.dir, { recursive: true, force: true })));
     }
+  }
+
+  if (!dryRun) {
+    await Promise.all(
+      claimDirs.map(async (claimDir) => {
+        try {
+          await fs.rmdir(claimDir);
+        } catch (err) {
+          if (err.code !== "ENOENT" && err.code !== "ENOTEMPTY") throw err;
+        }
+      }),
+    );
   }
 
   return summary;
