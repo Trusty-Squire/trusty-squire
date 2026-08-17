@@ -401,7 +401,7 @@ trusty-squire/
     └── recipe-schema/ Shared wire schema for operator replay recipes
 ```
 
-Product and public-web changes should follow [PRODUCT.md](https://github.com/trusty-squire/trusty-squire/blob/main/PRODUCT.md) and [DESIGN.md](https://github.com/trusty-squire/trusty-squire/blob/main/DESIGN.md).
+Product and public-web changes should follow [PRODUCT.md](https://github.com/trusty-squire/trusty-squire/blob/main/docs/PRODUCT.md) and [DESIGN.md](https://github.com/trusty-squire/trusty-squire/blob/main/docs/DESIGN.md).
 
 ## License
 
