@@ -114,6 +114,8 @@ export async function migrateRecipeVerbs({
       actionPath: recipe?.action_path ?? null,
       mtimeMs: stat.mtimeMs,
       mode: stat.mode,
+      dev: stat.dev,
+      ino: stat.ino,
     };
   };
 
@@ -244,19 +246,6 @@ export async function migrateRecipeVerbs({
     }
   };
 
-  if (!dryRun) {
-    for (const snapshot of orphanClaims) {
-      const originalPath = path.join(dir, snapshot.file);
-      try {
-        await fs.link(snapshot.path, originalPath);
-        await fs.unlink(snapshot.path);
-      } catch (err) {
-        if (err.code !== "EEXIST") throw err;
-        await preserveAsSuperseded(snapshot.path, originalPath);
-      }
-    }
-  }
-
   const compareContenders = (a, b) =>
     b.mtimeMs - a.mtimeMs || a.file.localeCompare(b.file);
 
@@ -273,6 +262,46 @@ export async function migrateRecipeVerbs({
         `keeping ${winner.verb} (newer), preserved ${loser.file} as ${path.basename(loserPath)}`,
     );
   };
+
+  for (const snapshot of orphanClaims) {
+    const originalPath = path.join(dir, snapshot.file);
+    const existing = dryRun
+      ? topLevelSnapshots.get(snapshot.file)
+      : await claimCurrentPath(snapshot.file);
+
+    if (!existing) {
+      emit(`recovery ${snapshot.file}: restoring claimed recipe to its original path`);
+      if (!dryRun) {
+        await fs.link(snapshot.path, originalPath);
+        await fs.unlink(snapshot.path);
+      }
+      continue;
+    }
+
+    if (snapshot.dev === existing.dev && snapshot.ino === existing.ino) {
+      emit(`recovery ${snapshot.file}: removing duplicate claimed link`);
+      if (!dryRun) {
+        await fs.link(snapshot.path, originalPath);
+        await fs.unlink(snapshot.path);
+        await fs.unlink(existing.path);
+      }
+      continue;
+    }
+
+    const [winner, loser] = [snapshot, existing].sort(compareContenders);
+    const loserPath = await preserveAsSuperseded(loser.path, originalPath);
+    recordCollision({
+      loser,
+      winner,
+      loserPath,
+      domain: winner.domain ?? loser.domain,
+      targetFile: snapshot.file,
+    });
+    if (!dryRun) {
+      await fs.link(winner.path, originalPath);
+      await fs.unlink(winner.path);
+    }
+  }
 
   const stageRewritten = async (snapshot, canonical) => {
     const stageDir = await fs.mkdtemp(path.join(dir, ".recipe-verb-migration-"));

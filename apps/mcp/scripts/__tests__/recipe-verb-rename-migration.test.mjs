@@ -426,6 +426,39 @@ describe("recipe verb-rename migration", () => {
     expect(await exists(sourcePath)).toBe(false);
   });
 
+  it("reports and cleans an interrupted same-inode publication without archiving it", async () => {
+    const canonicalFile = "book--acme.com.json";
+    const canonicalPath = await writeRecipe(
+      dir,
+      canonicalFile,
+      recipe({ name: "published", verb: "book", domain: "acme.com" }),
+      NOW,
+    );
+    const claimDir = await fs.mkdtemp(path.join(dir, ".recipe-verb-claims-"));
+    const claimPath = path.join(claimDir, `0-${canonicalFile}`);
+    await fs.link(canonicalPath, claimPath);
+
+    const dryRun = await migrateRecipeVerbs({
+      dir,
+      dryRun: true,
+      timestampBase: "t",
+      log: () => {},
+    });
+
+    expect(dryRun.log).toEqual([
+      `recovery ${canonicalFile}: removing duplicate claimed link`,
+    ]);
+    expect(await exists(claimPath)).toBe(true);
+    expect((await fs.readdir(dir)).some((file) => file.includes(".superseded-"))).toBe(false);
+
+    const live = await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
+
+    expect(live).toEqual(dryRun);
+    expect(await readJson(canonicalPath)).toMatchObject({ name: "published", verb: "book" });
+    expect(await exists(claimDir)).toBe(false);
+    expect((await fs.readdir(dir)).some((file) => file.includes(".superseded-"))).toBe(false);
+  });
+
   it("publishes a source update made immediately before its claim", async () => {
     const sourceFile = "reserve--acme.com.json";
     const sourcePath = path.join(dir, sourceFile);
