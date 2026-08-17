@@ -34,6 +34,7 @@
 //   TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR=/some/dir node <script>            # target a dir
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
+import { applyEdits, modify } from "jsonc-parser";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -61,80 +62,8 @@ function safeFileName(name) {
   return `${slug.slice(0, 63)}-${digest}`;
 }
 
-function skipJsonWhitespace(raw, index) {
-  while (index < raw.length && /[ \t\r\n]/.test(raw[index])) index += 1;
-  return index;
-}
-
-function scanJsonString(raw, start) {
-  let index = start + 1;
-  while (index < raw.length) {
-    if (raw[index] === "\\") {
-      index += 2;
-      continue;
-    }
-    if (raw[index] === '"') return index + 1;
-    index += 1;
-  }
-  throw new SyntaxError("Unterminated JSON string");
-}
-
-function scanJsonValue(raw, start) {
-  if (raw[start] === '"') return scanJsonString(raw, start);
-  if (raw[start] !== "{" && raw[start] !== "[") {
-    let index = start;
-    while (index < raw.length && !/[,\]} \t\r\n]/.test(raw[index])) index += 1;
-    return index;
-  }
-
-  const closers = [];
-  let index = start;
-  while (index < raw.length) {
-    const token = raw[index];
-    if (token === '"') {
-      index = scanJsonString(raw, index);
-      continue;
-    }
-    if (token === "{") closers.push("}");
-    else if (token === "[") closers.push("]");
-    else if (token === "}" || token === "]") {
-      if (closers.pop() !== token) throw new SyntaxError("Mismatched JSON delimiter");
-      if (closers.length === 0) return index + 1;
-    }
-    index += 1;
-  }
-  throw new SyntaxError("Unterminated JSON value");
-}
-
 function rewriteTopLevelVerb(raw, canonical) {
-  let index = skipJsonWhitespace(raw, 0);
-  if (raw[index] !== "{") throw new SyntaxError("Recipe JSON must be an object");
-  index += 1;
-  let verbValue = null;
-
-  for (;;) {
-    index = skipJsonWhitespace(raw, index);
-    if (raw[index] === "}") break;
-    const keyStart = index;
-    const keyEnd = scanJsonString(raw, keyStart);
-    const key = JSON.parse(raw.slice(keyStart, keyEnd));
-    index = skipJsonWhitespace(raw, keyEnd);
-    if (raw[index] !== ":") throw new SyntaxError("Invalid JSON object property");
-    index = skipJsonWhitespace(raw, index + 1);
-    const valueStart = index;
-    const valueEnd = scanJsonValue(raw, valueStart);
-    if (key === "verb") verbValue = { start: valueStart, end: valueEnd };
-    index = skipJsonWhitespace(raw, valueEnd);
-    if (raw[index] === ",") {
-      index += 1;
-      continue;
-    }
-    if (raw[index] === "}") break;
-    throw new SyntaxError("Invalid JSON object separator");
-  }
-
-  if (!verbValue) throw new SyntaxError("Recipe JSON has no top-level verb");
-  return `${raw.slice(0, verbValue.start)}${JSON.stringify(canonical)}${raw.slice(verbValue.end)}`;
+  return applyEdits(raw, modify(raw, ["verb"], canonical, {}));
 }
 
 /** Where the runtime keeps recipes — mirrors operatorRecipeDir(). */
@@ -201,8 +130,6 @@ export async function migrateRecipeVerbs({
     snapshots.set(file, {
       file,
       path: filePath,
-      raw,
-      recipe,
       verb: recipe?.verb ?? "?",
       domain: recipe?.domain ?? null,
       actionPath: recipe?.action_path ?? null,
@@ -229,8 +156,6 @@ export async function migrateRecipeVerbs({
 
   const reservedNames = new Set(files);
   let collisionSeq = 0;
-  let holdingSeq = 0;
-  let stagingSeq = 0;
   const timestamp = timestampBase ?? Date.now().toString();
   const nextSupersededPath = (targetPath) => {
     let candidate;
@@ -242,51 +167,16 @@ export async function migrateRecipeVerbs({
     return candidate;
   };
 
-  const nextHoldingPath = (sourcePath) => {
-    const sourceStem = sourcePath.endsWith(".json") ? sourcePath.slice(0, -5) : sourcePath;
-    let candidate;
-    do {
-      candidate = `${sourceStem}.migration-${timestamp}-${++holdingSeq}.json`;
-    } while (reservedNames.has(path.basename(candidate)));
-    reservedNames.add(path.basename(candidate));
-    return candidate;
-  };
-
-  const stageRewrite = async (targetPath, rewritten) => {
-    for (;;) {
-      const stagingPath = `${targetPath}.migration-write-${timestamp}-${++stagingSeq}`;
-      if (reservedNames.has(path.basename(stagingPath))) continue;
-      reservedNames.add(path.basename(stagingPath));
-      try {
-        await fs.writeFile(stagingPath, rewritten, { encoding: "utf8", flag: "wx" });
-        return stagingPath;
-      } catch (err) {
-        if (err.code === "EEXIST") continue;
-        await fs.unlink(stagingPath).catch(() => {});
-        throw err;
-      }
-    }
-  };
-
   const publishRewrite = async (plan) => {
-    let sourcePath = plan.currentPath;
-    if (sourcePath === plan.targetPath) {
-      const holdingPath = nextHoldingPath(sourcePath);
-      await fs.link(sourcePath, holdingPath);
-      await fs.unlink(sourcePath);
-      sourcePath = holdingPath;
+    if (plan.currentPath !== plan.targetPath) {
+      await fs.rename(plan.currentPath, plan.targetPath);
     }
-
-    const rewritten = rewriteTopLevelVerb(plan.winner.raw, plan.canonical);
-    const stagingPath = await stageRewrite(plan.targetPath, rewritten);
-    try {
-      await fs.link(stagingPath, plan.targetPath);
-    } catch (err) {
-      await fs.unlink(stagingPath).catch(() => {});
-      throw err;
-    }
-    await fs.unlink(stagingPath);
-    await fs.unlink(sourcePath);
+    const currentRaw = await fs.readFile(plan.targetPath, "utf8");
+    await fs.writeFile(
+      plan.targetPath,
+      rewriteTopLevelVerb(currentRaw, plan.canonical),
+      "utf8",
+    );
   };
 
   const preserveAsSuperseded = async (sourcePath, targetPath) => {
@@ -350,7 +240,6 @@ export async function migrateRecipeVerbs({
   const pending = plans
     .filter((plan) => canonicalVerb(plan.winner.verb) === plan.canonical)
     .map((plan) => ({ ...plan, currentPath: plan.winner.path }));
-  const cycleHolds = [];
   const migrationOrder = [];
   while (pending.length > 0) {
     const index = pending.findIndex(
@@ -360,20 +249,9 @@ export async function migrateRecipeVerbs({
         ),
     );
     if (index === -1) {
-      const plan = pending[0];
-      const holdingPath = nextHoldingPath(plan.winner.path);
-      cycleHolds.push({ sourcePath: plan.currentPath, holdingPath });
-      plan.currentPath = holdingPath;
-      continue;
+      throw new Error("Cyclic recipe rename paths cannot be migrated safely");
     }
     migrationOrder.push(pending.splice(index, 1)[0]);
-  }
-
-  if (!dryRun) {
-    for (const hold of cycleHolds) {
-      await fs.link(hold.sourcePath, hold.holdingPath);
-      await fs.unlink(hold.sourcePath);
-    }
   }
 
   for (const plan of plans) {
