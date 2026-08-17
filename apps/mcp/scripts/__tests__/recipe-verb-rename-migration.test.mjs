@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -53,7 +53,6 @@ describe("recipe verb-rename migration", () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), "recipe-migrate-"));
   });
   afterEach(async () => {
-    vi.restoreAllMocks();
     await fs.rm(dir, { recursive: true, force: true });
   });
 
@@ -274,7 +273,7 @@ describe("recipe verb-rename migration", () => {
     ]);
   });
 
-  it("claims cross-group legacy sources before publishing canonical targets", async () => {
+  it("orders cross-group legacy renames before publishing canonical targets", async () => {
     await writeRecipe(
       dir,
       "reserve--a.com.json",
@@ -338,204 +337,6 @@ describe("recipe verb-rename migration", () => {
       verb: "reserve",
     });
     expect(summary.superseded[0].superseded).toBe("book--acme.com.json.superseded-t-2");
-  });
-
-  it("preserves a canonical target created after the initial snapshot", async () => {
-    const sourceFile = "reserve--acme.com.json";
-    const targetFile = "book--acme.com.json";
-    const targetPath = path.join(dir, targetFile);
-    await writeRecipe(
-      dir,
-      sourceFile,
-      recipe({ name: "legacy", verb: "reserve", domain: "acme.com" }),
-      NOW - 10_000,
-    );
-
-    const originalLink = fs.link.bind(fs);
-    const originalRename = fs.rename.bind(fs);
-    let injected = false;
-    const injectTarget = async (destination) => {
-      if (!injected && destination === targetPath) {
-        injected = true;
-        await writeRecipe(
-          dir,
-          targetFile,
-          recipe({ name: "concurrent", verb: "book", domain: "acme.com" }),
-          NOW,
-        );
-      }
-    };
-    vi.spyOn(fs, "link").mockImplementation(async (source, destination) => {
-      await injectTarget(destination);
-      return await originalLink(source, destination);
-    });
-    vi.spyOn(fs, "rename").mockImplementation(async (source, destination) => {
-      await injectTarget(destination);
-      return await originalRename(source, destination);
-    });
-
-    const summary = await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
-
-    expect(injected).toBe(true);
-    expect(await readJson(targetPath)).toMatchObject({ name: "concurrent", verb: "book" });
-    expect(
-      await readJson(path.join(dir, "book--acme.com.json.superseded-t")),
-    ).toMatchObject({ name: "legacy", verb: "reserve" });
-    expect(summary.superseded[0]).toMatchObject({
-      from: sourceFile,
-      canonicalFile: targetFile,
-      winnerVerb: "book",
-    });
-  });
-
-  it("recovers a claimed source after staging rewritten bytes fails", async () => {
-    const sourceFile = "reserve--acme.com.json";
-    const sourcePath = path.join(dir, sourceFile);
-    await writeRecipe(
-      dir,
-      sourceFile,
-      recipe({ name: "legacy", verb: "reserve", domain: "acme.com" }),
-    );
-
-    const originalWriteFile = fs.writeFile.bind(fs);
-    const failure = Object.assign(new Error("injected write failure"), { code: "EIO" });
-    vi.spyOn(fs, "writeFile").mockImplementation(async (file, data, options) => {
-      await originalWriteFile(file, "", options);
-      throw failure;
-    });
-
-    await expect(
-      migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} }),
-    ).rejects.toMatchObject({ code: "EIO" });
-
-    const claimDir = (await fs.readdir(dir)).find((file) =>
-      file.startsWith(".recipe-verb-claims-"),
-    );
-    const claimedFile = (await fs.readdir(path.join(dir, claimDir)))[0];
-    expect(await readJson(path.join(dir, claimDir, claimedFile))).toMatchObject({
-      name: "legacy",
-      verb: "reserve",
-    });
-
-    vi.restoreAllMocks();
-    await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
-    expect(await readJson(path.join(dir, "book--acme.com.json"))).toMatchObject({
-      name: "legacy",
-      verb: "book",
-    });
-    expect(await exists(sourcePath)).toBe(false);
-  });
-
-  it("reports and cleans an interrupted same-inode publication without archiving it", async () => {
-    const canonicalFile = "book--acme.com.json";
-    const canonicalPath = await writeRecipe(
-      dir,
-      canonicalFile,
-      recipe({ name: "published", verb: "book", domain: "acme.com" }),
-      NOW,
-    );
-    const claimDir = await fs.mkdtemp(path.join(dir, ".recipe-verb-claims-"));
-    const claimPath = path.join(claimDir, `0-${canonicalFile}`);
-    await fs.link(canonicalPath, claimPath);
-
-    const dryRun = await migrateRecipeVerbs({
-      dir,
-      dryRun: true,
-      timestampBase: "t",
-      log: () => {},
-    });
-
-    expect(dryRun.log).toEqual([
-      `recovery ${canonicalFile}: removing duplicate claimed link`,
-    ]);
-    expect(await exists(claimPath)).toBe(true);
-    expect((await fs.readdir(dir)).some((file) => file.includes(".superseded-"))).toBe(false);
-
-    const live = await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
-
-    expect(live).toEqual(dryRun);
-    expect(await readJson(canonicalPath)).toMatchObject({ name: "published", verb: "book" });
-    expect(await exists(claimDir)).toBe(false);
-    expect((await fs.readdir(dir)).some((file) => file.includes(".superseded-"))).toBe(false);
-  });
-
-  it("publishes a source update made immediately before its claim", async () => {
-    const sourceFile = "reserve--acme.com.json";
-    const sourcePath = path.join(dir, sourceFile);
-    await writeRecipe(
-      dir,
-      sourceFile,
-      recipe({ name: "initial", verb: "reserve", domain: "acme.com" }),
-      NOW - 10_000,
-    );
-
-    const originalRename = fs.rename.bind(fs);
-    let injected = false;
-    vi.spyOn(fs, "rename").mockImplementation(async (source, destination) => {
-      if (
-        !injected &&
-        source === sourcePath &&
-        path.basename(path.dirname(destination)).startsWith(".recipe-verb-claims-")
-      ) {
-        injected = true;
-        await writeRecipe(
-          dir,
-          sourceFile,
-          recipe({ name: "concurrent", verb: "reserve", domain: "acme.com" }),
-          NOW,
-        );
-      }
-      return originalRename(source, destination);
-    });
-
-    await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
-
-    expect(injected).toBe(true);
-    expect(await readJson(path.join(dir, "book--acme.com.json"))).toMatchObject({
-      name: "concurrent",
-      verb: "book",
-    });
-    expect(await exists(sourcePath)).toBe(false);
-  });
-
-  it("does not overwrite an update made after canonical publication", async () => {
-    const sourceFile = "reserve--acme.com.json";
-    const targetFile = "book--acme.com.json";
-    const targetPath = path.join(dir, targetFile);
-    await writeRecipe(
-      dir,
-      sourceFile,
-      recipe({ name: "legacy", verb: "reserve", domain: "acme.com" }),
-    );
-
-    const originalLink = fs.link.bind(fs);
-    const originalWriteFile = fs.writeFile.bind(fs);
-    let injected = false;
-    vi.spyOn(fs, "link").mockImplementation(async (source, destination) => {
-      const result = await originalLink(source, destination);
-      if (!injected && destination === targetPath) {
-        injected = true;
-        await originalWriteFile(
-          targetPath,
-          `${JSON.stringify(
-            recipe({ name: "concurrent", verb: "book", domain: "acme.com" }),
-            null,
-            2,
-          )}\n`,
-          "utf8",
-        );
-      }
-      return result;
-    });
-
-    await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
-
-    expect(injected).toBe(true);
-    expect(await readJson(targetPath)).toMatchObject({
-      name: "concurrent",
-      verb: "book",
-    });
-    expect(await exists(path.join(dir, sourceFile))).toBe(false);
   });
 
   it("is idempotent — a second run is a no-op", async () => {
