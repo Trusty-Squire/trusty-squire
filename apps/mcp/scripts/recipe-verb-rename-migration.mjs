@@ -126,6 +126,7 @@ export async function migrateRecipeVerbs({
       file,
       path: filePath,
       raw,
+      recipe,
       verb: recipe?.verb ?? "?",
       domain: recipe?.domain ?? null,
       actionPath: recipe?.action_path ?? null,
@@ -270,16 +271,15 @@ export async function migrateRecipeVerbs({
 
   for (const plan of migrationOrder) {
     if (!dryRun) {
-      const rewritten = plan.winner.raw.replace(
-        /"verb"\s*:\s*"[^"]*"/,
-        `"verb": "${plan.canonical}"`,
-      );
+      const rewritten = `${JSON.stringify(
+        { ...plan.winner.recipe, verb: plan.canonical },
+        null,
+        2,
+      )}\n`;
       if (plan.currentPath !== plan.targetPath) {
         await fs.rename(plan.currentPath, plan.targetPath);
       }
-      if (rewritten !== plan.winner.raw) {
-        await fs.writeFile(plan.targetPath, rewritten, "utf8");
-      }
+      await fs.writeFile(plan.targetPath, rewritten, "utf8");
     }
 
     summary.renamed.push({

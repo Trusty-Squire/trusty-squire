@@ -143,6 +143,27 @@ describe("recipe verb-rename migration", () => {
     expect(second.superseded).toHaveLength(0);
   });
 
+  it("structurally rewrites escaped top-level verb keys and stays idempotent", async () => {
+    const sourceFile = "reserve--acme.com.json";
+    const canonicalFile = "book--acme.com.json";
+    await fs.writeFile(
+      path.join(dir, sourceFile),
+      `{"v\\u0065rb":"reserve","domain":"acme.com","name":"escaped"}\n`,
+      "utf8",
+    );
+
+    const first = await migrateRecipeVerbs({ dir, timestampBase: "t" });
+    const second = await migrateRecipeVerbs({ dir, timestampBase: "t" });
+
+    expect(await readJson(path.join(dir, canonicalFile))).toMatchObject({
+      name: "escaped",
+      verb: "book",
+    });
+    expect(first.renamed).toHaveLength(1);
+    expect(second.renamed).toHaveLength(0);
+    expect(second.superseded).toHaveLength(0);
+  });
+
   it("leaves non-merged verbs untouched", async () => {
     for (const [file, verb] of [
       ["purchase--acme.json", "purchase"],
