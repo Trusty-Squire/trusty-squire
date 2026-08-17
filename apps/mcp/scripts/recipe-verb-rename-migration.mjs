@@ -34,7 +34,7 @@
 //   TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR=/some/dir node <script>            # target a dir
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
-import { applyEdits, modify } from "jsonc-parser";
+import { applyEdits, parseTree } from "jsonc-parser";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -63,7 +63,15 @@ function safeFileName(name) {
 }
 
 function rewriteTopLevelVerb(raw, canonical) {
-  return applyEdits(raw, modify(raw, ["verb"], canonical, {}));
+  const root = parseTree(raw);
+  const property = root?.children
+    ?.toReversed()
+    .find((node) => node.children?.[0]?.value === "verb");
+  const value = property?.children?.[1];
+  if (!value) throw new SyntaxError("Recipe JSON has no top-level verb");
+  return applyEdits(raw, [
+    { offset: value.offset, length: value.length, content: JSON.stringify(canonical) },
+  ]);
 }
 
 /** Where the runtime keeps recipes — mirrors operatorRecipeDir(). */
@@ -79,6 +87,7 @@ export function operatorRecipeDir() {
  * @param {object} opts
  * @param {string} [opts.dir]             directory to scan; defaults to operatorRecipeDir()
  * @param {boolean} [opts.dryRun]         report what would happen without writing
+ * @param {boolean} [opts.quiescent]       confirms recipe writers are stopped for live migration
  * @param {string} [opts.timestampBase]   injectable timestamp for `.superseded-<ts>`
  *                                        names (test seam; defaults to Date.now())
  * @param {(line: string) => void} [opts.log]  log sink; defaults to console.log
@@ -87,6 +96,7 @@ export function operatorRecipeDir() {
 export async function migrateRecipeVerbs({
   dir = operatorRecipeDir(),
   dryRun = false,
+  quiescent = false,
   timestampBase,
   log = (line) => console.log(line),
 } = {}) {
@@ -156,6 +166,7 @@ export async function migrateRecipeVerbs({
 
   const reservedNames = new Set(files);
   let collisionSeq = 0;
+  let rewriteSeq = 0;
   const timestamp = timestampBase ?? Date.now().toString();
   const nextSupersededPath = (targetPath) => {
     let candidate;
@@ -168,15 +179,27 @@ export async function migrateRecipeVerbs({
   };
 
   const publishRewrite = async (plan) => {
-    if (plan.currentPath !== plan.targetPath) {
-      await fs.rename(plan.currentPath, plan.targetPath);
+    const currentRaw = await fs.readFile(plan.currentPath, "utf8");
+    const rewritten = rewriteTopLevelVerb(currentRaw, plan.canonical);
+    let stagingPath;
+    for (;;) {
+      stagingPath = `${plan.targetPath}.rewrite-${timestamp}-${++rewriteSeq}`;
+      try {
+        await fs.writeFile(stagingPath, rewritten, { encoding: "utf8", flag: "wx" });
+        break;
+      } catch (err) {
+        if (err.code === "EEXIST") continue;
+        await fs.unlink(stagingPath).catch(() => {});
+        throw err;
+      }
     }
-    const currentRaw = await fs.readFile(plan.targetPath, "utf8");
-    await fs.writeFile(
-      plan.targetPath,
-      rewriteTopLevelVerb(currentRaw, plan.canonical),
-      "utf8",
-    );
+    try {
+      await fs.rename(stagingPath, plan.targetPath);
+    } catch (err) {
+      await fs.unlink(stagingPath).catch(() => {});
+      throw err;
+    }
+    if (plan.currentPath !== plan.targetPath) await fs.unlink(plan.currentPath);
   };
 
   const preserveAsSuperseded = async (sourcePath, targetPath) => {
@@ -235,6 +258,10 @@ export async function migrateRecipeVerbs({
       losers: contenders.slice(1),
       domain: group.sources[0].domain,
     });
+  }
+
+  if (!dryRun && plans.length > 0 && !quiescent) {
+    throw new Error("Live migration requires stopped recipe writers; confirm with quiescent: true");
   }
 
   const pending = plans
@@ -296,9 +323,10 @@ function isMain() {
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run") || args.includes("--dry");
+  const quiescent = args.includes("--quiescent");
   const dir = operatorRecipeDir();
   console.log(dryRun ? `[dry-run] scanning ${dir}` : `scanning ${dir}`);
-  const summary = await migrateRecipeVerbs({ dir, dryRun });
+  const summary = await migrateRecipeVerbs({ dir, dryRun, quiescent });
   const total = summary.renamed.length + summary.superseded.length;
   console.log(
     `${dryRun ? "[dry-run] would migrate" : "migrated"} ${total} file(s) ` +

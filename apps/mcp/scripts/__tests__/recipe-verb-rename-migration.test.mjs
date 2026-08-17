@@ -3,7 +3,13 @@ import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
-import { migrateRecipeVerbs, CANONICAL_VERB } from "../recipe-verb-rename-migration.mjs";
+import {
+  migrateRecipeVerbs as migrateRecipeVerbsUnconfirmed,
+  CANONICAL_VERB,
+} from "../recipe-verb-rename-migration.mjs";
+
+const migrateRecipeVerbs = (options) =>
+  migrateRecipeVerbsUnconfirmed({ quiescent: true, ...options });
 
 // Small fixture renderer matching the runtime's recipe shape (name + verb +
 // domain are all that matter for the migration; nothing else is touched).
@@ -147,10 +153,10 @@ describe("recipe verb-rename migration", () => {
     const sourceFile = "reserve--acme.com.json";
     const canonicalFile = "book--acme.com.json";
     const sourceRaw =
-      `{"v\\u0065rb":"reserve","domain":"acme.com",` +
+      `{"verb":"purchase","v\\u0065rb":"reserve","domain":"acme.com",` +
       `"large":9007199254740993,"duplicate":"first","duplicate":"second"}\n`;
     const expectedRaw =
-      `{"v\\u0065rb":"book","domain":"acme.com",` +
+      `{"verb":"purchase","v\\u0065rb":"book","domain":"acme.com",` +
       `"large":9007199254740993,"duplicate":"first","duplicate":"second"}\n`;
     await fs.writeFile(
       path.join(dir, sourceFile),
@@ -168,36 +174,22 @@ describe("recipe verb-rename migration", () => {
     expect(second.superseded).toHaveLength(0);
   });
 
-  it("rewrites the latest source contents when the recipe changes during migration", async () => {
+  it("requires explicit confirmation that recipe writers are stopped", async () => {
     const sourcePath = await writeRecipe(
       dir,
       "reserve--acme.com.json",
-      recipe({ name: "snapshot", verb: "reserve", domain: "acme.com" }),
+      recipe({ verb: "reserve", domain: "acme.com" }),
     );
-    const realRename = fs.rename.bind(fs);
-    const rename = vi.spyOn(fs, "rename").mockImplementationOnce(async (from, to) => {
-      await fs.writeFile(
-        sourcePath,
-        `${JSON.stringify(recipe({ name: "latest", verb: "reserve", domain: "acme.com" }))}\n`,
-        "utf8",
-      );
-      await realRename(from, to);
-    });
 
-    try {
-      await migrateRecipeVerbs({ dir, timestampBase: "t" });
-    } finally {
-      rename.mockRestore();
-    }
+    await expect(
+      migrateRecipeVerbsUnconfirmed({ dir, timestampBase: "t" }),
+    ).rejects.toThrow("requires stopped recipe writers");
 
-    expect(await readJson(path.join(dir, "book--acme.com.json"))).toMatchObject({
-      name: "latest",
-      verb: "book",
-    });
-    expect(await exists(sourcePath)).toBe(false);
+    expect((await readJson(sourcePath)).verb).toBe("reserve");
+    expect(await exists(path.join(dir, "book--acme.com.json"))).toBe(false);
   });
 
-  it("leaves the source at its canonical path when rewriting fails", async () => {
+  it("keeps the source intact when a staged rewrite partially fails", async () => {
     const sourceFile = "book--acme.com.json";
     const sourcePath = path.join(dir, sourceFile);
     await writeRecipe(
@@ -207,7 +199,11 @@ describe("recipe verb-rename migration", () => {
     );
     const before = await fs.readFile(sourcePath, "utf8");
     const error = Object.assign(new Error("disk full"), { code: "ENOSPC" });
-    const writeFile = vi.spyOn(fs, "writeFile").mockRejectedValueOnce(error);
+    const realWriteFile = fs.writeFile.bind(fs);
+    const writeFile = vi.spyOn(fs, "writeFile").mockImplementationOnce(async (file) => {
+      await realWriteFile(file, "{", "utf8");
+      throw error;
+    });
 
     try {
       await expect(migrateRecipeVerbs({ dir, timestampBase: "t" })).rejects.toMatchObject({
@@ -219,6 +215,7 @@ describe("recipe verb-rename migration", () => {
 
     expect(await fs.readFile(sourcePath, "utf8")).toBe(before);
     expect(await exists(sourcePath)).toBe(true);
+    expect((await fs.readdir(dir)).filter((file) => file.includes(".rewrite-"))).toEqual([]);
   });
 
   it("leaves non-merged verbs untouched", async () => {
