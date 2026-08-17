@@ -797,7 +797,7 @@ Key routing rules:
 
 ## Design System
 
-Read `DESIGN.md` (repo root) before any visual or UI change to `apps/web`.
+Read `docs/DESIGN.md` before any visual or UI change to `apps/web`.
 Fonts (Geist + JetBrains Mono), the color ramp, spacing/type/radius scales,
 component patterns, and motion are defined there. Don't deviate without
 explicit approval; flag any code that diverges. The vault is mono-forward
