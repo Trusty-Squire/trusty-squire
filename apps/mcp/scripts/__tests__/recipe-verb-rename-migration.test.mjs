@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { migrateRecipeVerbs, CANONICAL_VERB } from "../recipe-verb-rename-migration.mjs";
@@ -32,6 +33,16 @@ async function exists(p) {
     () => true,
     () => false,
   );
+}
+
+function runtimeFileName(stem) {
+  const slug = stem
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (slug.length <= 80) return `${slug}.json`;
+  const digest = createHash("sha256").update(slug).digest("hex").slice(0, 16);
+  return `${slug.slice(0, 63)}-${digest}.json`;
 }
 
 describe("recipe verb-rename migration", () => {
@@ -80,15 +91,36 @@ describe("recipe verb-rename migration", () => {
   it("preserves an existing action_path segment when renaming", async () => {
     await writeRecipe(
       dir,
-      "reserve--acme--signup.json",
+      "reserve--acme.com--signup.json",
       recipe({ verb: "reserve", domain: "acme.com", action_path: "signup" }),
     );
     await migrateRecipeVerbs({ dir, timestampBase: "t" });
 
-    const migrated = await readJson(path.join(dir, "book--acme--signup.json"));
+    const migrated = await readJson(path.join(dir, "book--acme.com--signup.json"));
     expect(migrated.verb).toBe("book");
     expect(migrated.action_path).toBe("signup");
-    expect(await exists(path.join(dir, "reserve--acme--signup.json"))).toBe(false);
+    expect(await exists(path.join(dir, "reserve--acme.com--signup.json"))).toBe(false);
+  });
+
+  it("recomputes canonical filenames for long-domain recipe keys", async () => {
+    const domain = `${"a".repeat(76)}.com`;
+    const legacyFile = runtimeFileName(`reserve--${domain}`);
+    const canonicalFile = runtimeFileName(`book--${domain}`);
+    await writeRecipe(
+      dir,
+      legacyFile,
+      recipe({ name: "long-domain", verb: "reserve", domain }),
+    );
+
+    const summary = await migrateRecipeVerbs({ dir, timestampBase: "t" });
+
+    expect(canonicalFile).not.toBe(legacyFile.replace(/^reserve/, "book"));
+    expect(summary.renamed[0]).toMatchObject({ from: legacyFile, to: canonicalFile });
+    expect(await readJson(path.join(dir, canonicalFile))).toMatchObject({
+      name: "long-domain",
+      verb: "book",
+    });
+    expect(await exists(path.join(dir, legacyFile))).toBe(false);
   });
 
   it("leaves non-merged verbs untouched", async () => {
@@ -120,8 +152,8 @@ describe("recipe verb-rename migration", () => {
 
   it("collision: keeps the newer file at the canonical path and preserves the loser as superseded", async () => {
     // reserve is newer than the existing book file.
-    await writeRecipe(dir, "book--acme.json", recipe({ verb: "book", domain: "acme.com" }), NOW - 10_000);
-    await writeRecipe(dir, "reserve--acme.json", recipe({ verb: "reserve", domain: "acme.com" }), NOW);
+    await writeRecipe(dir, "book--acme.com.json", recipe({ verb: "book", domain: "acme.com" }), NOW - 10_000);
+    await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }), NOW);
 
     const logs = [];
     const summary = await migrateRecipeVerbs({
@@ -131,7 +163,7 @@ describe("recipe verb-rename migration", () => {
     });
 
     // reserve (newer) was rewritten to book and landed on the canonical path.
-    const canonical = await readJson(path.join(dir, "book--acme.json"));
+    const canonical = await readJson(path.join(dir, "book--acme.com.json"));
     expect(canonical.verb).toBe("book");
 
     // The older book file is preserved, not deleted.
@@ -142,7 +174,7 @@ describe("recipe verb-rename migration", () => {
     expect(summary.superseded).toHaveLength(1);
     expect(summary.superseded[0]).toMatchObject({
       domain: "acme.com",
-      canonicalFile: "book--acme.json",
+      canonicalFile: "book--acme.com.json",
       winnerVerb: "reserve",
     });
 
@@ -156,13 +188,13 @@ describe("recipe verb-rename migration", () => {
   });
 
   it("collision: keeps pre-existing canonical file when it is newer", async () => {
-    await writeRecipe(dir, "book--acme.json", recipe({ verb: "book", domain: "acme.com" }), NOW);
-    await writeRecipe(dir, "reserve--acme.json", recipe({ verb: "reserve", domain: "acme.com" }), NOW - 10_000);
+    await writeRecipe(dir, "book--acme.com.json", recipe({ verb: "book", domain: "acme.com" }), NOW);
+    await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }), NOW - 10_000);
 
     const summary = await migrateRecipeVerbs({ dir, timestampBase: "t" });
 
     // Existing book file stayed put and still wins.
-    const canonical = await readJson(path.join(dir, "book--acme.json"));
+    const canonical = await readJson(path.join(dir, "book--acme.com.json"));
     expect(canonical.verb).toBe("book");
 
     // The older reserve file is preserved as superseded with its original verb.
@@ -174,9 +206,9 @@ describe("recipe verb-rename migration", () => {
   });
 
   it("collision: two legacy verbs onto the same canonical get unique superseded names", async () => {
-    await writeRecipe(dir, "subscribe--acme.json", recipe({ verb: "subscribe", domain: "acme.com" }), NOW);
-    await writeRecipe(dir, "renew--acme.json", recipe({ verb: "renew", domain: "acme.com" }), NOW - 20_000);
-    await writeRecipe(dir, "upgrade--acme.json", recipe({ verb: "upgrade", domain: "acme.com" }), NOW - 10_000);
+    await writeRecipe(dir, "subscribe--acme.com.json", recipe({ verb: "subscribe", domain: "acme.com" }), NOW);
+    await writeRecipe(dir, "renew--acme.com.json", recipe({ verb: "renew", domain: "acme.com" }), NOW - 20_000);
+    await writeRecipe(dir, "upgrade--acme.com.json", recipe({ verb: "upgrade", domain: "acme.com" }), NOW - 10_000);
 
     const summary = await migrateRecipeVerbs({ dir, timestampBase: "t" });
 
@@ -189,13 +221,13 @@ describe("recipe verb-rename migration", () => {
   it("plans same-target legacy collisions before writing and keeps the newest", async () => {
     await writeRecipe(
       dir,
-      "renew--acme.json",
+      "renew--acme.com.json",
       recipe({ name: "older-renew", verb: "renew", domain: "acme.com" }),
       NOW - 10_000,
     );
     await writeRecipe(
       dir,
-      "upgrade--acme.json",
+      "upgrade--acme.com.json",
       recipe({ name: "newer-upgrade", verb: "upgrade", domain: "acme.com" }),
       NOW,
     );
@@ -209,12 +241,12 @@ describe("recipe verb-rename migration", () => {
     const live = await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
 
     expect(dryRun).toEqual(live);
-    expect((await readJson(path.join(dir, "subscribe--acme.json")))).toMatchObject({
+    expect((await readJson(path.join(dir, "subscribe--acme.com.json")))).toMatchObject({
       name: "newer-upgrade",
       verb: "subscribe",
     });
     expect(
-      await readJson(path.join(dir, "subscribe--acme.json.superseded-t")),
+      await readJson(path.join(dir, "subscribe--acme.com.json.superseded-t")),
     ).toMatchObject({ name: "older-renew", verb: "renew" });
     expect(live.log.filter((line) => line.startsWith("collision "))).toEqual([
       expect.stringMatching(/renew vs upgrade.*keeping upgrade/),
@@ -224,36 +256,36 @@ describe("recipe verb-rename migration", () => {
   it("never overwrites an existing superseded archive", async () => {
     await writeRecipe(
       dir,
-      "book--acme.json",
+      "book--acme.com.json",
       recipe({ name: "canonical", verb: "book", domain: "acme.com" }),
       NOW,
     );
     await writeRecipe(
       dir,
-      "reserve--acme.json",
+      "reserve--acme.com.json",
       recipe({ name: "legacy", verb: "reserve", domain: "acme.com" }),
       NOW - 10_000,
     );
     await writeRecipe(
       dir,
-      "book--acme.json.superseded-t",
+      "book--acme.com.json.superseded-t",
       recipe({ name: "prior-archive", verb: "reserve", domain: "acme.com" }),
     );
 
     const summary = await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
 
-    expect(await readJson(path.join(dir, "book--acme.json.superseded-t"))).toMatchObject({
+    expect(await readJson(path.join(dir, "book--acme.com.json.superseded-t"))).toMatchObject({
       name: "prior-archive",
     });
-    expect(await readJson(path.join(dir, "book--acme.json.superseded-t-2"))).toMatchObject({
+    expect(await readJson(path.join(dir, "book--acme.com.json.superseded-t-2"))).toMatchObject({
       name: "legacy",
       verb: "reserve",
     });
-    expect(summary.superseded[0].superseded).toBe("book--acme.json.superseded-t-2");
+    expect(summary.superseded[0].superseded).toBe("book--acme.com.json.superseded-t-2");
   });
 
   it("is idempotent — a second run is a no-op", async () => {
-    await writeRecipe(dir, "reserve--acme.json", recipe({ verb: "reserve", domain: "acme.com" }));
+    await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }));
 
     const first = await migrateRecipeVerbs({ dir, timestampBase: "t" });
     expect(first.renamed).toHaveLength(1);
@@ -265,12 +297,12 @@ describe("recipe verb-rename migration", () => {
     expect(second.renamed).toHaveLength(0);
     expect(second.superseded).toHaveLength(0);
     expect(before).toEqual(after);
-    expect((await readJson(path.join(dir, "book--acme.json"))).verb).toBe("book");
+    expect((await readJson(path.join(dir, "book--acme.com.json"))).verb).toBe("book");
   });
 
   it("dry-run write nothing", async () => {
-    await writeRecipe(dir, "reserve--acme.json", recipe({ verb: "reserve", domain: "acme.com" }), NOW - 10_000);
-    await writeRecipe(dir, "book--acme.json", recipe({ verb: "book", domain: "acme.com" }), NOW);
+    await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }), NOW - 10_000);
+    await writeRecipe(dir, "book--acme.com.json", recipe({ verb: "book", domain: "acme.com" }), NOW);
 
     const logs = [];
     const summary = await migrateRecipeVerbs({
@@ -285,9 +317,9 @@ describe("recipe verb-rename migration", () => {
     expect(logs.some((l) => l.startsWith("collision "))).toBe(true);
 
     const files = (await fs.readdir(dir)).sort();
-    expect(files).toEqual(["book--acme.json", "reserve--acme.json"].sort());
-    expect((await readJson(path.join(dir, "reserve--acme.json"))).verb).toBe("reserve");
-    expect((await readJson(path.join(dir, "book--acme.json"))).verb).toBe("book");
+    expect(files).toEqual(["book--acme.com.json", "reserve--acme.com.json"].sort());
+    expect((await readJson(path.join(dir, "reserve--acme.com.json"))).verb).toBe("reserve");
+    expect((await readJson(path.join(dir, "book--acme.com.json"))).verb).toBe("book");
     expect(files.some((f) => f.includes(".superseded-"))).toBe(false);
   });
 

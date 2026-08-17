@@ -33,6 +33,7 @@
 //   node apps/mcp/scripts/recipe-verb-rename-migration.mjs --dry-run     # report only
 //   TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR=/some/dir node <script>            # target a dir
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -44,6 +45,17 @@ export const CANONICAL_VERB = Object.freeze({
   upgrade: "subscribe",
   downgrade: "subscribe",
 });
+
+function safeFileName(name) {
+  const slug = name
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (slug.length === 0) return "recipe";
+  if (slug.length <= 80) return slug;
+  const digest = createHash("sha256").update(slug).digest("hex").slice(0, 16);
+  return `${slug.slice(0, 63)}-${digest}`;
+}
 
 /** Where the runtime keeps recipes — mirrors operatorRecipeDir(). */
 export function operatorRecipeDir() {
@@ -112,6 +124,7 @@ export async function migrateRecipeVerbs({
       raw,
       verb: recipe?.verb ?? "?",
       domain: recipe?.domain ?? null,
+      actionPath: recipe?.action_path ?? null,
       mtimeMs: stat.mtimeMs,
     });
   }
@@ -122,10 +135,13 @@ export async function migrateRecipeVerbs({
     if (!canonical) continue;
 
     const sourceStem = snapshot.file.slice(0, -".json".length);
-    const stem = sourceStem.startsWith(`${snapshot.verb}--`)
+    const fallbackStem = sourceStem.startsWith(`${snapshot.verb}--`)
       ? `${canonical}${sourceStem.slice(snapshot.verb.length)}`
       : `${canonical}--${sourceStem.replace(/^-+|-+$/g, "")}`;
-    const targetFile = `${stem}.json`;
+    const targetStem = snapshot.domain
+      ? [canonical, snapshot.domain, snapshot.actionPath].filter(Boolean).join("--")
+      : fallbackStem;
+    const targetFile = `${safeFileName(targetStem)}.json`;
     const group = groups.get(targetFile) ?? { targetFile, canonical, sources: [] };
     group.sources.push(snapshot);
     groups.set(targetFile, group);
