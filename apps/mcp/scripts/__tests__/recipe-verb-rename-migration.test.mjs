@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
@@ -53,6 +53,7 @@ describe("recipe verb-rename migration", () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), "recipe-migrate-"));
   });
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(dir, { recursive: true, force: true });
   });
 
@@ -121,6 +122,26 @@ describe("recipe verb-rename migration", () => {
       verb: "book",
     });
     expect(await exists(path.join(dir, legacyFile))).toBe(false);
+  });
+
+  it("rewrites a legacy verb already stored at its canonical path", async () => {
+    const canonicalFile = "book--acme.com.json";
+    await writeRecipe(
+      dir,
+      canonicalFile,
+      recipe({ name: "interrupted", verb: "reserve", domain: "acme.com" }),
+    );
+
+    const first = await migrateRecipeVerbs({ dir, timestampBase: "t" });
+    const second = await migrateRecipeVerbs({ dir, timestampBase: "t" });
+
+    expect(await readJson(path.join(dir, canonicalFile))).toMatchObject({
+      name: "interrupted",
+      verb: "book",
+    });
+    expect(first.renamed[0]).toMatchObject({ from: canonicalFile, to: canonicalFile });
+    expect(second.renamed).toHaveLength(0);
+    expect(second.superseded).toHaveLength(0);
   });
 
   it("leaves non-merged verbs untouched", async () => {
@@ -282,6 +303,54 @@ describe("recipe verb-rename migration", () => {
       verb: "reserve",
     });
     expect(summary.superseded[0].superseded).toBe("book--acme.com.json.superseded-t-2");
+  });
+
+  it("preserves a canonical target created after the initial snapshot", async () => {
+    const sourceFile = "reserve--acme.com.json";
+    const targetFile = "book--acme.com.json";
+    const targetPath = path.join(dir, targetFile);
+    await writeRecipe(
+      dir,
+      sourceFile,
+      recipe({ name: "legacy", verb: "reserve", domain: "acme.com" }),
+      NOW - 10_000,
+    );
+
+    const originalLink = fs.link.bind(fs);
+    const originalRename = fs.rename.bind(fs);
+    let injected = false;
+    const injectTarget = async (destination) => {
+      if (!injected && destination === targetPath) {
+        injected = true;
+        await writeRecipe(
+          dir,
+          targetFile,
+          recipe({ name: "concurrent", verb: "book", domain: "acme.com" }),
+          NOW,
+        );
+      }
+    };
+    vi.spyOn(fs, "link").mockImplementation(async (source, destination) => {
+      await injectTarget(destination);
+      return await originalLink(source, destination);
+    });
+    vi.spyOn(fs, "rename").mockImplementation(async (source, destination) => {
+      await injectTarget(destination);
+      return await originalRename(source, destination);
+    });
+
+    const summary = await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
+
+    expect(injected).toBe(true);
+    expect(await readJson(targetPath)).toMatchObject({ name: "concurrent", verb: "book" });
+    expect(
+      await readJson(path.join(dir, "book--acme.com.json.superseded-t")),
+    ).toMatchObject({ name: "legacy", verb: "reserve" });
+    expect(summary.superseded[0]).toMatchObject({
+      from: sourceFile,
+      canonicalFile: targetFile,
+      winnerVerb: "book",
+    });
   });
 
   it("is idempotent — a second run is a no-op", async () => {
