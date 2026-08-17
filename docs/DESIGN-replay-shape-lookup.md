@@ -7,20 +7,19 @@ predicate in [`DESIGN-replay-eval-harness.md`](DESIGN-replay-eval-harness.md).
 This document identifies the keying limitation the shipped change closed and
 records the independent test evidence for it. The as-built keying differs
 from §2's sketch: exact full-set hash equality (`shape:<sha256>` in the
-ordinary domain slot), not a ≥90% threshold or `platform:*` naming — CLAUDE.md
-§"Per-leg recipe resolution + checkout shape signature
-(replay-per-leg-signature)" owns the as-built description.
+ordinary domain slot), not a ≥90% threshold or `platform:*` naming.
+[`DESIGN-replay-engine.md`](DESIGN-replay-engine.md) owns the current as-built
+description.
 
 ## 1. The problem
 
-`readRecipeForTask(verb, serviceUrl)`
-(`apps/mcp/src/bot/operator-recipe.ts:126-131`) resolves exactly one recipe,
-once, at session entry, via `operatorRecipeKey(verb, url)` →
-`` `${verb}--${operatorRecipeDomain(url)}` ``
-(`packages/recipe-schema/src/operator-recipe.ts:288-290`) —
-a `(verb, eTLD+1)` key, per `DESIGN-replay-engine.md` §"Recipe identity".
+Before per-leg signatures and action-path keying landed,
+`readRecipeForTask(verb, serviceUrl)` resolved exactly one recipe at session
+entry via a `(verb, eTLD+1)` key. The current tiered local lookup is documented
+in `DESIGN-replay-engine.md` §"Recipe identity"; this section preserves the
+limitation that motivated the shape-key design.
 
-Two consequences follow from keying at the domain level, at entry:
+Two consequences followed from keying at the domain level, at entry:
 
 - **Near-zero cross-user reuse.** A recipe recorded on `whitejade.xyz` only
   ever replays for `whitejade.xyz`. Every store a different user provisions
@@ -35,7 +34,7 @@ Two consequences follow from keying at the domain level, at entry:
   before the checkout page has loaded is a prediction, not an observation —
   and a wrong guess on the money path is not an acceptable failure mode.
 
-So the engine's current single entry-time key cannot simultaneously be
+So the engine's pre-change single entry-time key could not simultaneously be
 correct (safe against wrong-platform mis-fires) and reusable (shared across
 unrelated domains that happen to run the same platform).
 

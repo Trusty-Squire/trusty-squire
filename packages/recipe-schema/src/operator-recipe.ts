@@ -1,7 +1,7 @@
 // operator-recipe.ts — the wire contract for an Operator Recipe: a
-// (verb, eTLD+1)-keyed replay plan captured from a successful `operate_*`
-// run. Shared by the mcp client (records + publishes) and the registry
-// server (validates + stores), the same relationship
+// action-path-aware replay plan captured from a successful `operate_*` run.
+// Shared by the mcp client (records + publishes) and the registry server
+// (validates + stores), the same relationship
 // @trusty-squire/skill-schema has to the Tier-2 Learned Skill flow.
 //
 // A recipe is a MAP, not a recording: every user-specific input must be a
@@ -48,9 +48,9 @@ export type OperatorVerb = z.infer<typeof OperatorVerbSchema>;
 // Verb consolidation — the two captain-named merges only (not the wider
 // purchase/checkout/add_to_cart merge the research report floated; the
 // decided direction explicitly resists merging further). OperatorVerbSchema
-// keeps parsing all 15 legacy values so old input/files still parse; nothing
-// is ever WRITTEN under a legacy name after this — every key/file builder
-// below runs the verb through this first.
+// keeps parsing all 15 legacy values so stale input and directly loaded old
+// recipe contents still parse; nothing is ever WRITTEN under a legacy name
+// after this — every key/file builder below runs the verb through this first.
 const VERB_CONSOLIDATION: Partial<Record<OperatorVerb, OperatorVerb>> = {
   reserve: "book",
   renew: "subscribe",

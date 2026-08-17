@@ -757,14 +757,7 @@ vi.mock("../operator-profile-pool.js", () => {
   };
 });
 
-import {
-  chmodSync,
-  mkdtempSync,
-  writeFileSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-} from "node:fs";
+import { chmodSync, mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash, generateKeyPairSync } from "node:crypto";
@@ -791,7 +784,6 @@ import {
   getSessionUserEmail,
   parseElementsTable,
   replayOperatorRecipe,
-  activeProvisionBrowser,
   activeProvisionBrowserForPayment,
   activeCartCheckoutForOrigin,
   cartAdd,
@@ -1063,6 +1055,34 @@ describe("prepared-statement replay", () => {
     expect(result.status).toBe("fallback_required");
     expect(result.status === "fallback_required" && result.step_index).toBe(0);
     expect(result.status === "fallback_required" && result.next_index).toBe(1);
+  });
+
+  it("never replays operate_pay and hands the charge to the fresh approval flow", async () => {
+    const started = await startProvisionSession({
+      serviceUrl: "https://shop.example.com/checkout",
+    });
+    let replayDispatchedPayment = false;
+    const result = await replayOperatorRecipe(
+      started.session_id,
+      replayRecipe({
+        trace: [{ action: { kind: "operate_pay", value: { hole: "card" } } }],
+      }),
+      {},
+      0,
+      {
+        beforeAction: () => {
+          replayDispatchedPayment = true;
+        },
+      },
+    );
+
+    expect(result).toMatchObject({
+      status: "fallback_required",
+      step_index: 0,
+      next_index: 1,
+      reason: "payment requires the existing operate_pay approval flow",
+    });
+    expect(replayDispatchedPayment).toBe(false);
   });
 
   it("makes manual card-entry refusal terminal without exposing replay data", async () => {
@@ -2259,7 +2279,10 @@ describe("verified recipe recording", () => {
     expect(files).toContain("purchase--example.com.json");
     expect(files).toContain("purchase--example.com--cart.json");
     expect(files.length).toBe(3);
-    const wholeTaskFiles = new Set(["purchase--example.com.json", "purchase--example.com--cart.json"]);
+    const wholeTaskFiles = new Set([
+      "purchase--example.com.json",
+      "purchase--example.com--cart.json",
+    ]);
     const checkoutLegFile = files.find((f) => !wholeTaskFiles.has(f))!;
     const raw = JSON.parse(readFileSync(join(dir, checkoutLegFile), "utf8")) as Record<
       string,

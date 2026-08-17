@@ -520,83 +520,23 @@ package would defeat the whole 0.7.0 thesis).
 
 ### Operator Recipe registry (replay-serve-live-domainlock)
 
-Operator Recipes are the shared `(verb, eTLD+1)` replay flow, separate from
-registry Skills. [`docs/DESIGN-replay-engine.md`](docs/DESIGN-replay-engine.md)
-owns the live-on-write registry contract, hard domain lock, cross-user privacy
-rules, replay behavior, and implementation map. Keep this section as a pointer;
+Operator Recipes use an action-path-aware local lookup plus a shared
+`(canonical verb, eTLD+1)` registry fallback, separate from registry Skills.
+[`docs/DESIGN-replay-engine.md`](docs/DESIGN-replay-engine.md) owns recipe
+identity, live-on-write registry behavior, domain lock, cross-user privacy,
+replay behavior, and the implementation map. Keep this section as a pointer;
 do not duplicate that conditional security contract in always-loaded guidance.
 
 ### Per-leg recipe resolution + checkout shape signature (replay-per-leg-signature)
 
-Builds on replay-serve-live-domainlock above: resolves a recipe once **per leg**
-(catalog/storefront vs. checkout) instead of once at task entry, and keys
-the checkout leg by the checkout page's own field-name-set signature
-instead of domain — so a checkout recipe recorded on one store replays on
-an unrelated store of the same checkout implementation (cross-domain
-reuse), while a store whose checkout fields differ at all just misses (no
-thin-common-subset fuzzy matching — see safety note below). Proven by
-`/home/lunchbox/firstmate/data/replay-proof-tests/report.md` (Shopify:
-100%/100% discriminator, 9/9 cross-store field-target-resolution) and
-`/home/lunchbox/firstmate/data/shape-class-generality-test/report.md`
-(WooCommerce does NOT form a shared class — each of 5 real stores gets its
-own signature; Shopify↔WooCommerce mutual discrimination holds, 0 overlap).
-
-- **The checkout-leg key reuses the EXACT `(verb, domain)` slot** — no
-  registry/route/store/schema change. `checkoutFieldSetSignature`
-  (`packages/recipe-schema`) hashes a checkout page's own full
-  input/select/textarea `name` (falling back to `id`) set — sha256 of the
-  sorted/deduped/lowercased list, hidden fields INCLUDED (a platform's own
-  hidden session/GraphQL fields are exactly its most stable signal).
-  `checkoutShapeKey(signature)` formats it as `shape:<64-hex>`, stored in
-  the recipe's ordinary `domain` field (`operatorRecipeKeyForCheckoutShape`
-  mirrors `operatorRecipeKeyForDomain`). The registry's
-  `isPlausibleRecipeDomain` (`apps/registry/src/routes/recipes.ts`)
-  explicitly accepts this form via `isCheckoutShapeKey` — not disguised as
-  a fake hostname, checked as an honest second key shape. No platform name
-  ever appears in resolution code; which stores share a signature falls
-  purely out of what their checkout DOM happens to produce.
-- **Leg boundary = the existing money-field classifier, not a new
-  heuristic.** `checkoutLegStartIndex` (`provision-session.ts`) finds the
-  first trace step `moneyFieldName` already treats as a money field (the
-  same classifier the fill guard has always used) — no URL/path
-  pattern-matching. `rememberRecipe` writes the ordinary whole-task recipe
-  UNCHANGED, then (verb in `MONEY_REPLAY_VERBS` and a money field exists)
-  ALSO writes a second, narrower recipe covering just `trace.slice(legStart)`,
-  keyed by the LIVE checkout page's signature at `operate_recipe_save` time
-  (`BrowserController.extractCheckoutFieldNames`, deliberately reading
-  `type=hidden` fields that `extractInteractiveElements` deliberately
-  skips). Both publish to the registry independently, live on write
-  (`operate_recipe_save`'s `checkout_leg_registry_publish`).
-- **Independent replay entry point:** `operate_recipe_run{verb, session_id,
-  leg:"checkout"}` (no `service_url`) resolves+replays just the checkout
-  leg against an ALREADY-OPEN session's current page — local store first,
-  then the registry, by signature. Degrades to `replay.status:"cache_miss"`
-  (never throws) on a miss, so the host just keeps driving that leg cold —
-  this is what makes a cold-catalog + shared-checkout-plan run (proof
-  report Test 3(a)) work: no domain recipe needs to exist at all.
-- **`human_required` → `leg_fallback_required` generalization, narrowly
-  scoped.** A money-path guard failure (`humanRequired` in
-  `replayOperatorRecipe`) now degrades to the new `leg_fallback_required`
-  status (host cold-drives the checkout leg from `from_step_index`, run
-  continues) ONLY when the recipe being replayed has a genuine
-  catalog/storefront prefix (`ReplayState.legStartIndex > 0`). A recipe
-  whose first step IS already a money field (no distinguishable leg to
-  fall back to) keeps the exact original `human_required` hard-stop —
-  this is why 3 pre-existing tests with money-field-at-index-0 fixtures
-  needed zero changes. **Load-bearing safety detail:** the leg-fallback
-  path calls `markReplayFailure` exactly like `human_required` (payment
-  guard → `"failed"`, `resume_from` rejected) and deliberately does NOT
-  null `session.replayState` — an earlier draft did, which silently
-  reopened `operate_pay`'s fail-closed gate (`activeProvisionSession`
-  checks `session.replayState?.moneyPath`); caught by a test asserting
-  `activeProvisionBrowserForPayment()` still rejects after a leg fallback.
-- **Fixtures for tests come from the proof/generality reports' real
-  captures**, not invented ones — `corpus/shopping/*.har` are product-page
-  captures only (noted as a corpus gap in the proof report), so
-  `packages/recipe-schema/src/__tests__/operator-recipe.test.ts` and
-  `apps/mcp/src/__tests__/recipe-registry-share.test.ts` transcribe the
-  reports' actual field-name lists (Shopify's 45-name intersection across
-  6 merchants; 5 real WooCommerce stores' captured sets) verbatim.
+Checkout legs use an exact field-name-set signature, so a recipe can transfer
+across stores only when their checkout shapes match. Whole-task recipes use the
+action-path-aware local key and maintain the degenerate catch-all; checkout-leg
+recipes keep their separate `shape:<sha256>` key. The current lookup, fallback,
+recording, and payment contracts live only in
+[`docs/DESIGN-replay-engine.md`](docs/DESIGN-replay-engine.md). The evidence
+record remains in
+[`docs/DESIGN-replay-shape-lookup.md`](docs/DESIGN-replay-shape-lookup.md).
 
 ### Non-blocking payment approval (operate_payment_status)
 

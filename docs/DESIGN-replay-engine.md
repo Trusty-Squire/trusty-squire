@@ -26,9 +26,11 @@ yesterday's `(verb, eTLD+1)` key on any miss:
   It is host-classified, not free-form. `OperatorVerbSchema` still parses all
   15 legacy values (no enum narrowing), but every key/file builder runs the
   verb through `canonicalVerb()` first, which merges `reserve→book` and
-  `renew|upgrade|downgrade→subscribe`. No new recording is ever written under
-  a legacy verb name; the merge exists only so old input and old files keep
-  parsing. `purchase`/`checkout`/`add_to_cart` are deliberately NOT merged.
+  `renew|upgrade|downgrade→subscribe`. No new recording is written under a
+  legacy verb name. Stale classifier output and directly loaded old recipe
+  contents still parse; renaming legacy-keyed files is owned by the separate
+  verb-migration work. `purchase`/`checkout`/`add_to_cart` are deliberately
+  NOT merged.
 - The domain is derived with the Public Suffix List. Queries never
   participate, so ordinary `www`, `shop`, and `checkout` subdomains collapse to
   their registrable domain.

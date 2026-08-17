@@ -141,6 +141,19 @@ describe("extractActionPath", () => {
   });
 });
 
+describe("OperatorRecipeSchema action_path", () => {
+  it("accepts one or two lowercase slug segments and rejects invalid or overlong values", () => {
+    expect(
+      parseOperatorRecipe({ ...baseRecipe(), action_path: "billing/cancel" }).action_path,
+    ).toBe("billing/cancel");
+    expect(() => parseOperatorRecipe({ ...baseRecipe(), action_path: "Billing" })).toThrow();
+    expect(() =>
+      parseOperatorRecipe({ ...baseRecipe(), action_path: "plans/book/demo" }),
+    ).toThrow();
+    expect(() => parseOperatorRecipe({ ...baseRecipe(), action_path: "a".repeat(61) })).toThrow();
+  });
+});
+
 describe("operatorRecipeKeyWithActionPath / operatorRecipeKeyForDomainAndActionPath", () => {
   it("builds the specific (verb, domain, action_path) key when action_path is non-empty", () => {
     expect(operatorRecipeKeyWithActionPath("signup", "https://acme.com/signup", "signup")).toBe(
