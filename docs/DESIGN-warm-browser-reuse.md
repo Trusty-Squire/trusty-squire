@@ -170,8 +170,7 @@ warm slot.
 The profile is destroy-required when any of these are true at finish:
 
 - an active payment object remains;
-- payment fields remain sealed; or
-- a money-path replay has not reached a verified payment guard.
+- payment fields remain sealed.
 
 Destroy-required profiles never enter the warm slot. If Chrome closed with proof, the quarantined
 profile is deleted. If closure is unknown, the profile remains quarantined and later scavenging uses

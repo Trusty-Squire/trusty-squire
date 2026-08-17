@@ -12,8 +12,8 @@ Related: prepared-statement recipe design (gbrain `trusty-squire-shape-cache-des
 
 ## 1. Purpose + the go/no-go predicate
 
-We are about to build a `(verb, domain)`-keyed replay cache on the predicate that replays are
-**fast** and **accurate**. This harness is the instrument that decides whether that predicate holds.
+We are evaluating an action-path-aware replay cache on the predicate that replays are **fast** and
+**accurate**. This harness is the instrument that decides whether that predicate holds.
 It must emit a single go/no-go:
 
 > **SHIP** iff: net speedup clears the bar on realistic repeat traffic **AND** clean-replay
@@ -48,9 +48,12 @@ escaped wrong-outcomes; fallbacks are a **cost** that shows up in net speedup.
 
 ## 3. System under test (self-contained recap)
 
-- **Key** = `(verb, eTLD+1)`. `verb` ∈ a closed ~15-item set (purchase, get_api_key, signup, …),
-  tagged by the host LLM from the task. `eTLD+1` via Public Suffix List; path/query dropped; small
-  allowlist for `*.myshopify.com`-class subdomain-is-tenant hosts.
+- **Local key** = `(canonical verb, eTLD+1, action_path)`, with a mandatory fallback to the
+  `(canonical verb, eTLD+1)` catch-all. `verb` ∈ a closed 15-item set tagged by the host LLM;
+  the key builders consolidate `reserve→book` and `renew|upgrade|downgrade→subscribe`.
+  `eTLD+1` comes from the Public Suffix List, with a small allowlist for tenant-host suffixes.
+  `action_path` comes only from allow-listed path segments; queries never contribute. The shared
+  registry remains keyed by `(canonical verb, eTLD+1)`.
 - **Recipe** = ordered `[{ action, target, value }]` where `target` is a stable-attr bundle and
   `value` is a literal or a `{hole-ref}`. `DESIGN-replay-engine.md` § Stable targets owns the
   authoritative bundle shape (including the locale-stable `field_role` money-fill guard).

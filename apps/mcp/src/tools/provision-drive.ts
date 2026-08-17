@@ -1854,7 +1854,9 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
   name: "operate_use",
   description:
     "Replay a local prepared-statement recipe selected by the host-classified closed-enum " +
-    "verb plus service_url (eTLD+1 keyed; path/query ignored). A legacy name opens the " +
+    "verb plus service_url. Lookup uses eTLD+1 plus an allow-listed action path derived from " +
+    "the URL path, then falls back to the eTLD+1 catch-all; query parameters are ignored. " +
+    "A legacy name opens the " +
     "saved workflow as a planning hint without deterministic replay. Binds " +
     "hole values and executes each step through ordered target fallback. A single miss " +
     "returns replay.status='fallback_required' with that step and next_index; repair only " +
@@ -1862,18 +1864,17 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
     "resume_from=next_index. A recipe whose entry or declared hosts would leave its own " +
     "site (a tampered or malicious shared recipe) is refused outright: " +
     "replay.status='domain_lock_violation', and driving continues cold. " +
-    "Money-path completion deterministically verifies every injected address/contact/qty field. " +
+    "A recorded operate_pay step is never replayed and instead returns fallback_required so " +
+    "the charge runs through a fresh, human-approved operate_pay. " +
     "Pass verb + session_id + leg:'checkout' (no service_url) to resolve+replay just the " +
     "CHECKOUT leg against an already-open session's current page — keyed by the checkout page's " +
     "own field-name-set signature, so a checkout plan recorded on one store can replay on a " +
     "different, unrelated store of the same checkout platform (cross-domain reuse). " +
     "replay.status='cache_miss' means no recipe matches this page's shape; drive the checkout " +
-    "leg cold. A money-path guard failure on a recipe with a real catalog/storefront prefix " +
-    "returns replay.status='leg_fallback_required' (not human_required) — the session's " +
-    "fail-closed payment gate stays shut for its remainder (operate_pay, operate_remember, and " +
-    "further operate_use calls on that session are refused); non-payment checkout steps can " +
-    "still be driven cold from from_step_index, but completing payment requires a fresh " +
-    "operate_start.",
+    "leg cold. A replay field failure on a recipe with a real catalog/storefront prefix " +
+    "returns replay.status='leg_fallback_required' (not human_required): do not resume that " +
+    "recipe; drive the checkout leg cold from from_step_index, and route any charge through " +
+    "a fresh, human-approved operate_pay on the live session.",
   inputSchema: useSchema,
   jsonInputSchema: {
     type: "object",
@@ -1918,7 +1919,8 @@ export const provisionUseTool: Tool<z.infer<typeof useSchema>> = {
         ...cold,
         replay: {
           status: "cache_miss" as const,
-          reason: "no local recipe for this (verb, eTLD+1); continue cold",
+          reason:
+            "no local recipe for this action path or its (verb, eTLD+1) catch-all; continue cold",
         },
       };
     }

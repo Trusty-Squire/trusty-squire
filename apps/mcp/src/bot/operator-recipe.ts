@@ -30,6 +30,10 @@ import {
   operatorRecipeDomain,
   operatorRecipeKey,
   operatorRecipeKeyForDomain,
+  canonicalVerb,
+  extractActionPath,
+  operatorRecipeKeyWithActionPath,
+  operatorRecipeKeyForDomainAndActionPath,
   checkoutFieldSetSignature,
   isCheckoutShapeKey,
   checkoutShapeKey,
@@ -66,6 +70,10 @@ export {
   operatorRecipeDomain,
   operatorRecipeKey,
   operatorRecipeKeyForDomain,
+  canonicalVerb,
+  extractActionPath,
+  operatorRecipeKeyWithActionPath,
+  operatorRecipeKeyForDomainAndActionPath,
   checkoutFieldSetSignature,
   isCheckoutShapeKey,
   checkoutShapeKey,
@@ -117,14 +125,26 @@ export async function writeRecipe(recipe: OperatorRecipe): Promise<string> {
   // Validate (and, crucially, re-assert the no-stored-value invariant) before
   // anything reaches disk.
   const parsed = OperatorRecipeSchema.parse(recipe);
+  const canonical =
+    parsed.verb !== undefined && parsed.domain !== undefined
+      ? {
+          ...parsed,
+          verb: canonicalVerb(parsed.verb),
+          domain: parsed.domain.toLowerCase(),
+        }
+      : parsed;
   const dir = operatorRecipeDir();
   await fs.mkdir(dir, { recursive: true });
   const fileStem =
-    parsed.verb !== undefined && parsed.domain !== undefined
-      ? `${parsed.verb}--${parsed.domain}`
-      : parsed.name;
+    canonical.verb !== undefined && canonical.domain !== undefined
+      ? operatorRecipeKeyForDomainAndActionPath(
+          canonical.verb,
+          canonical.domain,
+          canonical.action_path ?? "",
+        )
+      : canonical.name;
   const file = path.join(dir, `${safeFileName(fileStem)}.json`);
-  await fs.writeFile(file, `${JSON.stringify(parsed, null, 2)}\n`, "utf8");
+  await fs.writeFile(file, `${JSON.stringify(canonical, null, 2)}\n`, "utf8");
   return file;
 }
 
@@ -139,10 +159,24 @@ export async function readRecipeFromFile(file: string): Promise<OperatorRecipe> 
   return OperatorRecipeSchema.parse(JSON.parse(raw));
 }
 
+// Layer-1 lookup: try the specific (verb, domain, action_path) file first,
+// then fall through to today's degenerate (verb, domain) file on a miss (or
+// when action_path is empty to begin with). The fallback is mandatory, not
+// optional — an old recipe recorded before action_path existed sits only at
+// the degenerate slot, and a replaying URL that now happens to extract a
+// non-empty action_path must still find it.
 export async function readRecipeForTask(
   verb: OperatorVerb,
   serviceUrl: string,
 ): Promise<OperatorRecipe> {
+  const actionPath = extractActionPath(serviceUrl);
+  if (actionPath.length > 0) {
+    try {
+      return await readRecipe(operatorRecipeKeyWithActionPath(verb, serviceUrl, actionPath));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
   return await readRecipe(operatorRecipeKey(verb, serviceUrl));
 }
 

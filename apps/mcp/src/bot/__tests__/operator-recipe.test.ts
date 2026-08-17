@@ -95,6 +95,42 @@ describe("operator-recipe IO round-trip", () => {
       await readRecipeForTask("purchase", "https://www.example.co.uk/another/path?q=1"),
     ).toEqual(keyed);
   });
+
+  it("canonicalizes and reads a specific (verb, domain, action_path) recipe", async () => {
+    const keyed: OperatorRecipe = {
+      ...RECIPE,
+      name: "reserve-table",
+      verb: "reserve",
+      domain: "Example.COM",
+      action_path: "book",
+      entry_url: "https://www.example.com/book",
+    };
+    const file = await writeRecipe(keyed);
+    const canonical = { ...keyed, verb: "book" as const, domain: "example.com" };
+    expect(path.basename(file)).toBe("book--example.com--book.json");
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toMatchObject({
+      verb: "book",
+      domain: "example.com",
+      action_path: "book",
+    });
+    expect(await readRecipeForTask("reserve", "https://example.com/book?path=checkout")).toEqual(
+      canonical,
+    );
+  });
+
+  it("falls back from an action_path miss to the degenerate recipe", async () => {
+    const degenerate: OperatorRecipe = {
+      ...RECIPE,
+      name: "legacy-checkout",
+      verb: "purchase",
+      domain: "legacy-recipes.com",
+      entry_url: "https://legacy-recipes.com/start",
+    };
+    await writeRecipe(degenerate);
+    expect(
+      await readRecipeForTask("purchase", "https://legacy-recipes.com/checkout?ignored=1"),
+    ).toEqual(degenerate);
+  });
 });
 
 describe("prepared-statement recipe key", () => {
