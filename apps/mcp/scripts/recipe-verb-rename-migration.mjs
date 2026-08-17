@@ -6,12 +6,12 @@
 // ~/.trusty-squire/operator-recipes/*.json filed under a legacy verb need a
 // one-time rename so they resolve under the canonical verb going forward.
 //
-// For each file whose verb ∈ {reserve, renew, upgrade, downgrade} this script:
-//   • rewrites the `verb` field to its canonical form
-//     (reserve→book; renew|upgrade|downgrade→subscribe);
-//   • renames the file to `${canonical}--${domain}[--${action_path}].json`
-//     (same `--`-joined, lowercased stem the runtime uses; any existing
-//     action_path segment is preserved).
+// For each file whose verb ∈ {reserve, renew, upgrade, downgrade}, this script
+// targets `${canonical}--${domain}[--${action_path}].json` (the same
+// `--`-joined, lowercased stem the runtime uses). The winning file's `verb` is
+// rewritten to its canonical form (reserve→book;
+// renew|upgrade|downgrade→subscribe), and any existing action_path segment is
+// preserved. A collision loser is archived unchanged as described below.
 //
 // Collision safety (the point — see the recipe-key redesign plan, Q#2):
 //   • If the canonical target file already exists, the more-recently-modified
@@ -20,13 +20,14 @@
 //   • One log line is emitted per collision: domain, both source verbs, and
 //     which one won.
 //
-// The 2-entry canonical map is inlined here on purpose: this PR stays
+// The two canonical merges are inlined here on purpose: this PR stays
 // decoupled from the sibling recipe-key-redesign-impl PR, so the two can land
 // in either order. It is a one-time throwaway script; do not import the map
 // from the recipe-schema package.
 //
-// Idempotent and safe to re-run: after the first pass no file carries a legacy
-// verb, and `.superseded-*` files are not `*.json` so they are never rescanned.
+// Idempotent and safe to re-run: after the first pass no scan-eligible `*.json`
+// file carries a legacy verb. Archived `.superseded-*` files may retain one,
+// but they are never rescanned.
 //
 // Usage (default dir honors TRUSTY_SQUIRE_OPERATOR_RECIPE_DIR like the runtime):
 //   node apps/mcp/scripts/recipe-verb-rename-migration.mjs               # live
@@ -39,7 +40,7 @@ import path from "node:path";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 
-// ── Inlined 2-entry canonical map (see file header for why it is inline) ──
+// ── Inlined canonical merges (see file header for why they are inline) ──
 export const CANONICAL_VERB = Object.freeze({
   reserve: "book",
   renew: "subscribe",
@@ -214,8 +215,7 @@ export async function migrateRecipeVerbs({
     }
   };
 
-  const compareContenders = (a, b) =>
-    b.mtimeMs - a.mtimeMs || a.file.localeCompare(b.file);
+  const compareContenders = (a, b) => b.mtimeMs - a.mtimeMs || a.file.localeCompare(b.file);
 
   const recordCollision = ({ loser, winner, loserPath, domain, targetFile }) => {
     summary.superseded.push({
@@ -264,10 +264,7 @@ export async function migrateRecipeVerbs({
   const migrationOrder = [];
   while (pending.length > 0) {
     const index = pending.findIndex(
-      (plan) =>
-        !pending.some(
-          (other) => other !== plan && other.currentPath === plan.targetPath,
-        ),
+      (plan) => !pending.some((other) => other !== plan && other.currentPath === plan.targetPath),
     );
     if (index === -1) {
       throw new Error("Cyclic recipe rename paths cannot be migrated safely");

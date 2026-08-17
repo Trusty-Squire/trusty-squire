@@ -66,10 +66,18 @@ describe("recipe verb-rename migration", () => {
   });
 
   it("renames each legacy-verb file to its canonical path and rewrites the verb", async () => {
-    await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }));
+    await writeRecipe(
+      dir,
+      "reserve--acme.com.json",
+      recipe({ verb: "reserve", domain: "acme.com" }),
+    );
     await writeRecipe(dir, "renew--acme.com.json", recipe({ verb: "renew", domain: "acme.com" }));
     await writeRecipe(dir, "upgrade--foo.io.json", recipe({ verb: "upgrade", domain: "foo.io" }));
-    await writeRecipe(dir, "downgrade--bar.net.json", recipe({ verb: "downgrade", domain: "bar.net" }));
+    await writeRecipe(
+      dir,
+      "downgrade--bar.net.json",
+      recipe({ verb: "downgrade", domain: "bar.net" }),
+    );
 
     const summary = await migrateRecipeVerbs({ dir, timestampBase: "t" });
 
@@ -106,11 +114,7 @@ describe("recipe verb-rename migration", () => {
     const domain = `${"a".repeat(76)}.com`;
     const legacyFile = runtimeFileName(`reserve--${domain}`);
     const canonicalFile = runtimeFileName(`book--${domain}`);
-    await writeRecipe(
-      dir,
-      legacyFile,
-      recipe({ name: "long-domain", verb: "reserve", domain }),
-    );
+    await writeRecipe(dir, legacyFile, recipe({ name: "long-domain", verb: "reserve", domain }));
 
     const summary = await migrateRecipeVerbs({ dir, timestampBase: "t" });
 
@@ -152,11 +156,7 @@ describe("recipe verb-rename migration", () => {
     const expectedRaw =
       `{"verb":"purchase","v\\u0065rb":"book","domain":"acme.com",` +
       `"large":9007199254740993,"duplicate":"first","duplicate":"second"}\n`;
-    await fs.writeFile(
-      path.join(dir, sourceFile),
-      sourceRaw,
-      "utf8",
-    );
+    await fs.writeFile(path.join(dir, sourceFile), sourceRaw, "utf8");
 
     const first = await migrateRecipeVerbs({ dir, timestampBase: "t" });
     const second = await migrateRecipeVerbs({ dir, timestampBase: "t" });
@@ -244,8 +244,18 @@ describe("recipe verb-rename migration", () => {
 
   it("collision: keeps the newer file at the canonical path and preserves the loser as superseded", async () => {
     // reserve is newer than the existing book file.
-    await writeRecipe(dir, "book--acme.com.json", recipe({ verb: "book", domain: "acme.com" }), NOW - 10_000);
-    await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }), NOW);
+    await writeRecipe(
+      dir,
+      "book--acme.com.json",
+      recipe({ verb: "book", domain: "acme.com" }),
+      NOW - 10_000,
+    );
+    await writeRecipe(
+      dir,
+      "reserve--acme.com.json",
+      recipe({ verb: "reserve", domain: "acme.com" }),
+      NOW,
+    );
 
     const logs = [];
     const summary = await migrateRecipeVerbs({
@@ -280,8 +290,18 @@ describe("recipe verb-rename migration", () => {
   });
 
   it("collision: keeps pre-existing canonical file when it is newer", async () => {
-    await writeRecipe(dir, "book--acme.com.json", recipe({ verb: "book", domain: "acme.com" }), NOW);
-    await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }), NOW - 10_000);
+    await writeRecipe(
+      dir,
+      "book--acme.com.json",
+      recipe({ verb: "book", domain: "acme.com" }),
+      NOW,
+    );
+    await writeRecipe(
+      dir,
+      "reserve--acme.com.json",
+      recipe({ verb: "reserve", domain: "acme.com" }),
+      NOW - 10_000,
+    );
 
     const summary = await migrateRecipeVerbs({ dir, timestampBase: "t" });
 
@@ -298,9 +318,24 @@ describe("recipe verb-rename migration", () => {
   });
 
   it("collision: two legacy verbs onto the same canonical get unique superseded names", async () => {
-    await writeRecipe(dir, "subscribe--acme.com.json", recipe({ verb: "subscribe", domain: "acme.com" }), NOW);
-    await writeRecipe(dir, "renew--acme.com.json", recipe({ verb: "renew", domain: "acme.com" }), NOW - 20_000);
-    await writeRecipe(dir, "upgrade--acme.com.json", recipe({ verb: "upgrade", domain: "acme.com" }), NOW - 10_000);
+    await writeRecipe(
+      dir,
+      "subscribe--acme.com.json",
+      recipe({ verb: "subscribe", domain: "acme.com" }),
+      NOW,
+    );
+    await writeRecipe(
+      dir,
+      "renew--acme.com.json",
+      recipe({ verb: "renew", domain: "acme.com" }),
+      NOW - 20_000,
+    );
+    await writeRecipe(
+      dir,
+      "upgrade--acme.com.json",
+      recipe({ verb: "upgrade", domain: "acme.com" }),
+      NOW - 10_000,
+    );
 
     const summary = await migrateRecipeVerbs({ dir, timestampBase: "t" });
 
@@ -333,13 +368,14 @@ describe("recipe verb-rename migration", () => {
     const live = await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
 
     expect(dryRun).toEqual(live);
-    expect((await readJson(path.join(dir, "subscribe--acme.com.json")))).toMatchObject({
+    expect(await readJson(path.join(dir, "subscribe--acme.com.json"))).toMatchObject({
       name: "newer-upgrade",
       verb: "subscribe",
     });
-    expect(
-      await readJson(path.join(dir, "subscribe--acme.com.json.superseded-t")),
-    ).toMatchObject({ name: "older-renew", verb: "renew" });
+    expect(await readJson(path.join(dir, "subscribe--acme.com.json.superseded-t"))).toMatchObject({
+      name: "older-renew",
+      verb: "renew",
+    });
     expect(live.log.filter((line) => line.startsWith("collision "))).toEqual([
       expect.stringMatching(/renew vs upgrade.*keeping upgrade/),
     ]);
@@ -412,7 +448,11 @@ describe("recipe verb-rename migration", () => {
   });
 
   it("is idempotent — a second run is a no-op", async () => {
-    await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }));
+    await writeRecipe(
+      dir,
+      "reserve--acme.com.json",
+      recipe({ verb: "reserve", domain: "acme.com" }),
+    );
 
     const first = await migrateRecipeVerbs({ dir, timestampBase: "t" });
     expect(first.renamed).toHaveLength(1);
@@ -428,8 +468,18 @@ describe("recipe verb-rename migration", () => {
   });
 
   it("dry-run write nothing", async () => {
-    await writeRecipe(dir, "reserve--acme.com.json", recipe({ verb: "reserve", domain: "acme.com" }), NOW - 10_000);
-    await writeRecipe(dir, "book--acme.com.json", recipe({ verb: "book", domain: "acme.com" }), NOW);
+    await writeRecipe(
+      dir,
+      "reserve--acme.com.json",
+      recipe({ verb: "reserve", domain: "acme.com" }),
+      NOW - 10_000,
+    );
+    await writeRecipe(
+      dir,
+      "book--acme.com.json",
+      recipe({ verb: "book", domain: "acme.com" }),
+      NOW,
+    );
 
     const logs = [];
     const summary = await migrateRecipeVerbs({
