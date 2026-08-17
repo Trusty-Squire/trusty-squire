@@ -46,6 +46,10 @@ export const CANONICAL_VERB = Object.freeze({
   downgrade: "subscribe",
 });
 
+function canonicalVerb(verb) {
+  return Object.hasOwn(CANONICAL_VERB, verb) ? CANONICAL_VERB[verb] : null;
+}
+
 function safeFileName(name) {
   const slug = name
     .toLowerCase()
@@ -131,7 +135,7 @@ export async function migrateRecipeVerbs({
 
   const groups = new Map();
   for (const snapshot of snapshots.values()) {
-    const canonical = CANONICAL_VERB[snapshot.verb];
+    const canonical = canonicalVerb(snapshot.verb);
     if (!canonical) continue;
     const sourceStem = snapshot.file.slice(0, -".json".length);
     const fallbackStem = sourceStem.startsWith(`${snapshot.verb}--`)
@@ -217,17 +221,38 @@ export async function migrateRecipeVerbs({
     });
   }
 
-  const pending = plans.filter((plan) => CANONICAL_VERB[plan.winner.verb] === plan.canonical);
+  const pending = plans
+    .filter((plan) => canonicalVerb(plan.winner.verb) === plan.canonical)
+    .map((plan) => ({ ...plan, currentPath: plan.winner.path }));
+  const cycleHolds = [];
+  let holdingSeq = 0;
   const migrationOrder = [];
   while (pending.length > 0) {
     const index = pending.findIndex(
       (plan) =>
         !pending.some(
-          (other) => other !== plan && other.winner.path === plan.targetPath,
+          (other) => other !== plan && other.currentPath === plan.targetPath,
         ),
     );
-    if (index === -1) throw new Error("cyclic recipe rename dependency");
+    if (index === -1) {
+      const plan = pending[0];
+      let holdingPath;
+      do {
+        holdingPath = `${plan.winner.path}.migration-${timestamp}-${++holdingSeq}`;
+      } while (reservedNames.has(path.basename(holdingPath)));
+      reservedNames.add(path.basename(holdingPath));
+      cycleHolds.push({ sourcePath: plan.currentPath, holdingPath });
+      plan.currentPath = holdingPath;
+      continue;
+    }
     migrationOrder.push(pending.splice(index, 1)[0]);
+  }
+
+  if (!dryRun) {
+    for (const hold of cycleHolds) {
+      await fs.link(hold.sourcePath, hold.holdingPath);
+      await fs.unlink(hold.sourcePath);
+    }
   }
 
   for (const plan of plans) {
@@ -249,8 +274,8 @@ export async function migrateRecipeVerbs({
         /"verb"\s*:\s*"[^"]*"/,
         `"verb": "${plan.canonical}"`,
       );
-      if (plan.winner.path !== plan.targetPath) {
-        await fs.rename(plan.winner.path, plan.targetPath);
+      if (plan.currentPath !== plan.targetPath) {
+        await fs.rename(plan.currentPath, plan.targetPath);
       }
       if (rewritten !== plan.winner.raw) {
         await fs.writeFile(plan.targetPath, rewritten, "utf8");

@@ -150,6 +150,8 @@ describe("recipe verb-rename migration", () => {
       ["book--acme.json", "book"],
       ["subscribe--acme.json", "subscribe"],
       ["get_api_key--acme.json", "get_api_key"],
+      ["constructor--acme.json", "constructor"],
+      ["tostring--acme.json", "toString"],
     ]) {
       await writeRecipe(dir, file, recipe({ verb, domain: "acme.com" }));
     }
@@ -163,6 +165,8 @@ describe("recipe verb-rename migration", () => {
       "book--acme.json",
       "subscribe--acme.json",
       "get_api_key--acme.json",
+      "constructor--acme.json",
+      "tostring--acme.json",
     ];
     for (const f of stillThere) {
       expect(await exists(path.join(dir, f))).toBe(true);
@@ -306,6 +310,42 @@ describe("recipe verb-rename migration", () => {
     expect(dryRun).toEqual(summary);
     expect(summary.renamed).toHaveLength(2);
     expect(summary.superseded).toHaveLength(0);
+  });
+
+  it("uses an in-directory holding file to complete cyclic legacy renames", async () => {
+    await writeRecipe(
+      dir,
+      "book--a.com.json",
+      recipe({ name: "upgrade-source", verb: "upgrade", domain: "a.com" }),
+      NOW,
+    );
+    await writeRecipe(
+      dir,
+      "subscribe--a.com.json",
+      recipe({ name: "reserve-source", verb: "reserve", domain: "a.com" }),
+      NOW - 10_000,
+    );
+
+    const dryRun = await migrateRecipeVerbs({
+      dir,
+      dryRun: true,
+      timestampBase: "t",
+      log: () => {},
+    });
+    const live = await migrateRecipeVerbs({ dir, timestampBase: "t", log: () => {} });
+
+    expect(live).toEqual(dryRun);
+    expect(await readJson(path.join(dir, "book--a.com.json"))).toMatchObject({
+      name: "reserve-source",
+      verb: "book",
+    });
+    expect(await readJson(path.join(dir, "subscribe--a.com.json"))).toMatchObject({
+      name: "upgrade-source",
+      verb: "subscribe",
+    });
+    expect((await fs.readdir(dir)).some((file) => file.includes(".migration-"))).toBe(false);
+    expect(live.renamed).toHaveLength(2);
+    expect(live.superseded).toHaveLength(0);
   });
 
   it("never overwrites an existing superseded archive", async () => {
