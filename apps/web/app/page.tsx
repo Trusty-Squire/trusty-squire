@@ -14,30 +14,60 @@ export const metadata: Metadata = {
   alternates: { canonical: "https://trustysquire.ai/" },
 };
 
-const EXAMPLES = [
+const PILLARS = [
   {
-    href: "/services/braintrust",
-    prompt: "Sign up for Braintrust and save its API key outside agent context.",
+    name: "Provision & Ship",
+    sub: "for builders; keys never exposed",
+    cards: [
+      {
+        prompt: "Add Google OAuth in one prompt",
+        outcome: "Working OAuth login, no dashboard tour.",
+        kills: "Kills the client-secret copy/paste into .env.",
+        status: "Proven",
+      },
+      {
+        prompt: "Add Stripe payments in one prompt",
+        outcome: "Live Checkout and webhook wiring.",
+        kills: "Kills hand-typing API keys into code.",
+        status: "Proven",
+      },
+      {
+        prompt: "Go live: deploy, custom domain, and SSL",
+        outcome: "A real URL, HTTPS, DNS done.",
+        kills: "Kills the deploy-dashboard round trip.",
+        status: "Proven",
+      },
+      {
+        prompt: "Publish to iOS + Android",
+        outcome: "App-store listings live.",
+        kills: "Kills the Apple/Google console slog — 2FA, notarization, review.",
+        status: "Vision",
+      },
+    ],
   },
   {
-    href: "/services/cerebras",
-    prompt: "Set up Cerebras inference without putting its API key in this project.",
-  },
-  {
-    href: "/services/clerk",
-    prompt: "Sign up for Clerk, create an app, and save the secret key.",
-  },
-  {
-    href: "/services/deepinfra",
-    prompt: "Create a DeepInfra account and wire the vaulted token into my backend.",
-  },
-  {
-    href: "/services/zilliz",
-    prompt: "Sign up for Zilliz Cloud and keep its API key out of .env.",
-  },
-  {
-    href: "/use-cases/api-keys-without-env",
-    prompt: "That app token leaked. Revoke its access now.",
+    name: "Transact & Coordinate Privately",
+    sub: "for everyone; card + contacts never exposed",
+    cards: [
+      {
+        prompt: "Send gifts privately (Hermes)",
+        outcome: "A gift sent, no address shared.",
+        kills: "Kills texting your address or card to a friend.",
+        status: "Proven",
+      },
+      {
+        prompt: "Book it for me — dinner, flights, tickets",
+        outcome: "A confirmed reservation.",
+        kills: "Kills the phone tree / booking-site form.",
+        status: "Proven",
+      },
+      {
+        prompt: "Never share your card or address again",
+        outcome: "Any checkout completed.",
+        kills: "Kills pasting card numbers into forms.",
+        status: "Proven",
+      },
+    ],
   },
 ] as const;
 
@@ -58,7 +88,7 @@ const HOME_JSON_LD = {
       url: "https://trustysquire.ai/",
       name: "Trusty Squire",
       description:
-        "Trusty Squire signs up and signs in to websites for developers using coding agents.",
+        "MCP tools that let coding agents provision, ship, and pay on your behalf — keys and card never leave the vault.",
       publisher: { "@id": "https://trustysquire.ai/#organization" },
     },
   ],
@@ -78,18 +108,18 @@ function ProductStill() {
       <div className="panel-body">
         <div className="ln">
           <span className="g">$</span>
-          <span className="usr">sign me up for Clerk and wire it into this app</span>
+          <span className="usr">add Google OAuth in one prompt</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
           <span className="sq">squire</span>
-          <span> opening Clerk · email signup, secret key…</span>
+          <span> opening Google Cloud Console · OAuth client, secret…</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
           <span className="ok">✓</span>
-          <span> key sealed → vault&nbsp;</span>
-          <span className="key">cred_clerk_••••••</span>
+          <span> secret sealed → vault&nbsp;</span>
+          <span className="key">cred_oauth_••••••</span>
         </div>
         <div className="ln">
           <span className="g"> </span>
@@ -141,23 +171,12 @@ export default function Page() {
               <Shield size={54} glyph />
             </span>
             <span className="eyebrow">
-              <b>MCP</b> · built for agentic coding
+              <b>MCP</b> · agency for your agents
             </span>
-            <h1>Trusty Squire signs up / in to websites for you so you don’t have to.</h1>
+            <h1>Give your agents agency.</h1>
             <p className="sub">
-              Browser operators often stop at signup walls and bot detection. Trusty Squire opens
-              the real website, completes signup or sign-in, finishes setup, and saves generated
-              credentials without putting them in chat, code, or <code>.env</code>.
+              MCP tools to automate auth and pay — your keys and card never leave the vault.
             </p>
-            <ol className="hero-asks">
-              {EXAMPLES.map((example, index) => (
-                <li key={example.prompt}>
-                  <Link href={example.href}>
-                    <span>{String(index + 1).padStart(2, "0")}</span>“{example.prompt}”
-                  </Link>
-                </li>
-              ))}
-            </ol>
             <div className="cta">
               <CopyChip />
               <a className="docs" href={DOCS_URL}>
@@ -189,64 +208,64 @@ export default function Page() {
           <h2 id="what-is-trusty-squire">What is Trusty Squire?</h2>
           <p>
             Trusty Squire is an MCP server for coding agents. Claude Code, Codex, Cursor, OpenCode,
-            or Goose plans the job; Trusty Squire operates the website and keeps the generated
-            secret on the safe side of the boundary.
+            or Goose plans the job; Trusty Squire operates the website, wires up the integration, or
+            completes the purchase — keeping the generated secret or card on the safe side of the
+            boundary.
           </p>
           <h3>How does it work?</h3>
           <ol>
-            <li>Your agent names the website and the finished outcome.</li>
-            <li>Trusty Squire drives the real signup, sign-in, or setup flow.</li>
+            <li>Your agent names the outcome — an account, an integration, or a purchase.</li>
+            <li>Trusty Squire drives the real signup, setup, or checkout flow.</li>
             <li>
-              The credential is encrypted in a write-only vault and injected server-side when used.
+              The credential or card is encrypted in a write-only vault and injected server-side
+              when used.
             </li>
           </ol>
           <p className="home-limit">
-            If a site requires a phone, hard CAPTCHA, payment, or a decision only you should make,
-            the run stops and tells you instead of guessing.
+            If a site requires a phone, hard CAPTCHA, or a decision only you should make, the run
+            stops and tells you instead of guessing.
           </p>
         </div>
       </section>
 
-      {/* ---------------- CAPABILITIES ---------------- */}
-      <section className="wrap caps">
-        <Reveal className="cap">
-          <div className="cap-num">01 / provision</div>
-          <div className="cap-body">
-            <h3>Your agent handles signups</h3>
-            <p>
-              Ask for a service. Your squire creates the account, works through available
-              verification, and stores the generated API key. No fifteen-tab signup detour, right
-              inside Claude Code, Codex, OpenCode, Goose, and Cursor.
-            </p>
+      {/* ---------------- PILLAR EXAMPLE GRID ---------------- */}
+      <section className="wrap pillars" aria-labelledby="pillars-prelude">
+        <p id="pillars-prelude" className="pillars-prelude">
+          Magic happens when your agents can sign up, provision, and purchase on your behalf — hard
+          tasks in one prompt.
+        </p>
+        {PILLARS.map((pillar) => (
+          <div className="pillar" key={pillar.name}>
+            <div className="pillar-head">
+              <h3>{pillar.name}</h3>
+              <span className="pillar-sub">{pillar.sub}</span>
+            </div>
+            <div className="caps">
+              {pillar.cards.map((card, index) => (
+                <Reveal className="cap" key={card.prompt}>
+                  <div className="cap-num">
+                    {String(index + 1).padStart(2, "0")}
+                    <span className={card.status === "Proven" ? "row-tag" : "row-tag vision"}>
+                      {card.status}
+                    </span>
+                  </div>
+                  <div className="cap-body">
+                    <h3>“{card.prompt}”</h3>
+                    <p>
+                      {card.outcome} {card.kills}
+                    </p>
+                  </div>
+                </Reveal>
+              ))}
+            </div>
           </div>
-        </Reveal>
-        <Reveal className="cap">
-          <div className="cap-num">02 / vault</div>
-          <div className="cap-body">
-            <h3>Use keys without exposing them</h3>
-            <p>
-              Stop scattering keys across <span className="m">.env</span> files. Keys go into the
-              vault; a proxy injects each value into the provider request server-side without
-              returning it to the agent or consuming app.
-            </p>
-          </div>
-        </Reveal>
-        <Reveal className="cap">
-          <div className="cap-num">03 / operate</div>
-          <div className="cap-body">
-            <h3>Finish setup behind a login</h3>
-            <p>
-              Wire up OAuth across consoles, configure webhooks, and stand up projects. Your squire
-              does the authenticated click-work while the secret stays out of chat.
-            </p>
-          </div>
-        </Reveal>
+        ))}
       </section>
 
       {/* ---------------- CTA ---------------- */}
       <section className="endcta">
         <Reveal className="wrap">
-          <h2>Install the squire. Get back to building.</h2>
+          <h2>Install the squire. Let it handle the rest.</h2>
           <p>One command. Plugs into your agent of choice. Free to start.</p>
           <div className="cta">
             <CopyChip />

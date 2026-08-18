@@ -24,18 +24,16 @@ export default function ClaudeCodeIntegrationPage() {
       installCommand="npx @trusty-squire/mcp connect --target=claude-code"
       examples={[
         {
-          prompt: "Sign me up for Zilliz Cloud and save the API key.",
-          result:
-            "Claude plans the task while Trusty Squire drives the website and stores the generated credential.",
+          prompt: "Add Google OAuth in one prompt.",
+          result: "Working OAuth login, no dashboard tour, no client-secret copy/paste into .env.",
         },
         {
-          prompt: "Add Google OAuth without showing me the client secret.",
-          result:
-            "Move through the provider and application consoles without copying the secret into the conversation.",
+          prompt: "Add Stripe payments in one prompt.",
+          result: "Live Checkout and webhook wiring instead of hand-typing API keys into code.",
         },
         {
-          prompt: "That app token leaked. Revoke its access now.",
-          result: "Let Claude select the scoped grant while Trusty Squire performs the revocation.",
+          prompt: "Go live: deploy, custom domain, and SSL.",
+          result: "A real URL with HTTPS and DNS done, skipping the deploy-dashboard round trip.",
         },
       ]}
       steps={[

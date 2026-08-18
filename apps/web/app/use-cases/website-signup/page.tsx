@@ -23,17 +23,16 @@ export default function WebsiteSignupPage() {
       deck="Trusty Squire opens the real signup page, works through the flow one step at a time, and saves generated credentials directly to your vault."
       examples={[
         {
-          prompt: "Sign me up for Zilliz Cloud and save the API key.",
-          result:
-            "Create the account, complete the available verification steps, and store the generated key.",
+          prompt: "Add Google OAuth in one prompt.",
+          result: "Working OAuth login, no dashboard tour, no client-secret copy/paste into .env.",
         },
         {
-          prompt: "Create a Clerk account for this new app.",
-          result: "Move from the public signup page into the authenticated project setup.",
+          prompt: "Add Stripe payments in one prompt.",
+          result: "Live Checkout and webhook wiring instead of hand-typing API keys into code.",
         },
         {
-          prompt: "Set up Clerk, Cerebras, DeepInfra, and Zilliz Cloud for this app.",
-          result: "Work through several service signups as one project outcome.",
+          prompt: "Go live: deploy, custom domain, and SSL.",
+          result: "A real URL with HTTPS and DNS done, skipping the deploy-dashboard round trip.",
         },
       ]}
       steps={[

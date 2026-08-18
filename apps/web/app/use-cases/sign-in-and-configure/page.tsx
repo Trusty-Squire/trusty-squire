@@ -24,19 +24,16 @@ export default function SignInAndConfigurePage() {
       deck="Use a browser session you choose, then let Trusty Squire handle the settings, console, and integration work that lives behind the login."
       examples={[
         {
-          prompt: "Sign in to Sentry and configure the webhook.",
-          result:
-            "Open the existing account, find the project settings, and finish the webhook setup.",
+          prompt: "Add Google OAuth in one prompt.",
+          result: "Working OAuth login, no dashboard tour, no client-secret copy/paste into .env.",
         },
         {
-          prompt: "Add Google OAuth to my app without showing me the client secret.",
-          result:
-            "Move between the provider and application consoles while keeping the secret out of chat.",
+          prompt: "Go live: deploy, custom domain, and SSL.",
+          result: "A real URL with HTTPS and DNS done, skipping the deploy-dashboard round trip.",
         },
         {
-          prompt: "Connect the services this app already uses.",
-          result:
-            "Complete related authenticated setup steps as one outcome instead of a dashboard scavenger hunt.",
+          prompt: "Send gifts privately (Hermes).",
+          result: "A gift sent, no address shared — no texting your address or card to a friend.",
         },
       ]}
       steps={[
@@ -58,7 +55,7 @@ export default function SignInAndConfigurePage() {
         {
           title: "Human decisions stay human",
           description:
-            "If the site asks for payment, consent, a risky choice, or a gate that should not be guessed, the run stops and tells you what is needed.",
+            "If the site asks for consent, a risky choice, or a gate that should not be guessed, the run stops and tells you what is needed. Every charge requires exactly one human approval before payment, then the run can continue.",
         },
       ]}
       related={[
