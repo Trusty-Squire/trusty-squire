@@ -33,9 +33,7 @@ const DEFAULT_REGISTRY_BASE =
 const SERVER_INSTRUCTIONS = `This is Trusty Squire — it drives a real browser through signup, provisioning,
 and checkout flows on the user's behalf (\`operate_start\`/\`operate_observe\`/
 \`operate_act\`/\`operate_pay\`/\`operate_finish\`, plus recipe replay), and backs it
-with a write-only credential vault. Auth setup (OAuth clients, API keys),
-payments, and other website tasks are all compositions of the same operate_*
-primitives — there are no separate per-use-case tools.
+with a write-only credential vault.
 The user's secrets (API keys, tokens, passwords) live in the vault encrypted;
 they are NOT in the conversation context and CANNOT be read back to you.
 Routing rules for THIS server's vault tools:
