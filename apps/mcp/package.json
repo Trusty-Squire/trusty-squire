@@ -64,7 +64,7 @@
     "@hpke/core": "^1.9.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "@trusty-squire/recipe-schema": "workspace:*",
-    "@trusty-squire/skill-schema": "workspace:0.1.6-rc.1",
+    "@trusty-squire/skill-schema": "workspace:0.1.6",
     "better-sqlite3": "12.8.0",
     "boxen": "^8.0.1",
     "canonicalize": "^2.0.0",

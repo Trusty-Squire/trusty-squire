@@ -86,7 +86,7 @@ writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 //     the workflow skips with a notice instead of republishing.)
 const promotedWorkspacePkgs = [];
 if (!isPrerelease) {
-  for (const wsPath of ["packages/skill-schema/package.json"]) {
+  for (const wsPath of ["packages/skill-schema/package.json", "packages/recipe-schema/package.json"]) {
     const wsPkg = JSON.parse(readFileSync(wsPath, "utf8"));
     if (wsPkg.version.includes("-")) {
       wsPkg.version = wsPkg.version.replace(/-.*$/, "");
