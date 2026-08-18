@@ -6,19 +6,22 @@ Brand
 
 ## Users
 
-Trusty Squire is for developers who work primarily through coding agents such as Claude Code, Codex, Cursor, and Goose. They want their agent to finish authenticated setup and website transactions instead of stopping at a login or checkout screen, but they do not want credentials or payment cards copied into chat, source code, or `.env` files.
+Trusty Squire is for people who delegate work to agents. Builders use it to provision services and ship software without dashboard detours or exposed credentials. Anyone can use it to purchase and coordinate on their behalf without sharing a card or address with the agent.
 
 ## Product Purpose
 
-**Give your agents agency.**
+Give your agents agency.
 
-MCP tools to automate auth and pay — your keys and card never leave the vault.
+Trusty Squire provides MCP tools that let agents provision, ship, transact, and coordinate on a user's behalf while keys and cards remain in the vault. Its two product pillars are:
 
-Trusty Squire gives coding agents a safe way to sign up, provision, and purchase on the user's behalf. Its general browser operator, recipe replay, payment flow, and vault primitives compose into jobs such as OAuth setup, app publishing, payments, gifting, and booking; these are composed workflows, not separate one-shot tools. Success means a developer understands that job in one sentence, sees a concrete use case that matches their work, and can install Trusty Squire without learning internal architecture first.
+1. **Provision & Ship:** create accounts, configure OAuth and payments, deploy software, and publish apps without exposing credentials.
+2. **Transact & Coordinate Privately:** complete approved purchases, reservations, and private coordination without exposing a card or address.
+
+Success means a user understands those jobs in one sentence, sees a concrete outcome that matches their work, and can install Trusty Squire without learning internal architecture first.
 
 ## Brand Personality
 
-Calm, exact, capable, and serious. Trusty Squire should feel like dependable infrastructure for people who live in a terminal, with plain language and visible proof instead of hype.
+Calm, exact, capable, and serious. Trusty Squire should feel like dependable agency for people delegating hard web tasks, with plain language and visible proof instead of hype.
 
 ## Anti-references
 
@@ -32,11 +35,11 @@ Calm, exact, capable, and serious. Trusty Squire should feel like dependable inf
 ## Design Principles
 
 1. Lead with the literal job. Say what Trusty Squire does before explaining how it works.
-2. Show real requests early. Concrete asks such as "set up Google OAuth for this app," "work through publishing this app," "pay this checkout," "send this gift," and "book this reservation" are more useful than capability labels. Describe publishing, gifting, and booking as compositions of the general operator and payment primitives, not dedicated tools.
+2. Show real requests early. Concrete asks such as "Add Google OAuth in one prompt" and "Book it for me" are more useful than capability labels.
 3. Keep the interface calm and technical. Strong typography, ruled structure, and terminal evidence should carry the brand.
-4. Explain safety in plain language. Credentials go to the vault, not into chat or source code.
+4. Explain safety in plain language. Keys and cards remain in the vault instead of entering chat, source code, or forms handled by the agent.
 5. Make every discovery surface consistent. The website, GitHub, npm, directories, and search metadata should describe the same product.
 
 ## Accessibility and Inclusion
 
-Use semantic structure, complete keyboard access, visible focus states, sufficient color contrast, and reduced-motion support. Never rely on color alone to communicate state. Keep copy direct and readable for developers who are new to agents as well as experienced users.
+Use semantic structure, complete keyboard access, visible focus states, sufficient color contrast, and reduced-motion support. Never rely on color alone to communicate state. Keep copy direct and readable for people who are new to agents as well as experienced users.

@@ -231,8 +231,8 @@ export default function Page() {
       {/* ---------------- PILLAR EXAMPLE GRID ---------------- */}
       <section className="wrap pillars" aria-labelledby="pillars-prelude">
         <p id="pillars-prelude" className="pillars-prelude">
-          Magic happens when your agents can sign up, provision, and purchase on your behalf —
-          hard tasks in one prompt.
+          Magic happens when your agents can sign up, provision, and purchase on your behalf — hard
+          tasks in one prompt.
         </p>
         {PILLARS.map((pillar) => (
           <div className="pillar" key={pillar.name}>

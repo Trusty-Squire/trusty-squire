@@ -5,18 +5,17 @@
 > Don't deviate without explicit approval. Flag any code that diverges.
 
 ## Product Context
-- **What this is:** Give your agents agency. Trusty Squire provides MCP tools to automate auth and pay — your keys and card never leave the vault. Coding agents can sign up, provision, and purchase on the user's behalf. Generated credentials land in an encrypted vault instead of chat, source code, or `.env` files.
-- **Who it's for:** Developers who live in the terminal (Claude Code, Cursor, Codex, Goose).
-- **Space:** Agent infrastructure / browser operations / auth, payments, and secrets management.
+- **Positioning and audiences:** [`PRODUCT.md`](PRODUCT.md) is the authority. The interface must make its two pillars — Provision & Ship and Transact & Coordinate Privately — distinct and concrete.
+- **Space:** Agent infrastructure / private credential and payment coordination.
 - **Surfaces:** marketing landing (`/`), public getting-started (`/start`), auth (`/login`), the app (`/vault`, `/vault/new`, `/agents`). `/install` is the token-gated OAuth-binding wizard the CLI opens (centered auth-card), distinct from `/start`.
 
 ## Memorable Thing
-**"Serious infrastructure for people who live in the terminal — calm, fast, exact."**
-What someone remembers is the quiet precision: keys handled like a pro tool, not a consumer app. Every decision serves this.
+**"Give your agents agency — calm, fast, exact."**
+What someone remembers is the quiet precision: hard website work gets finished while keys and cards stay private. Every decision serves this.
 
 ## Aesthetic Direction
 - **Lane:** Linear-leaning polished dark, industrial-utilitarian. Brutal simplicity + efficiency.
-- **Decoration:** minimal. One indigo accent. A single soft radial glow behind the login mark, the vault header, and the marketing-landing hero *only* — everywhere else flat. The landing glow is **static** (no drift/loop animation); the rest of the landing (product surface, capabilities, CTA) is flat.
+- **Decoration:** minimal. One indigo accent. A single soft radial glow behind the login mark, the vault header, and the marketing-landing hero *only* — everywhere else flat. The landing glow is **static** (no drift/loop animation); the rest of the landing (product surface, pillar grid, CTA) is flat.
 - **Mono-forward:** anything machine (API keys, hostnames, references, counts, timestamps) renders in mono. Sans is for chrome and labels only. This is the identity.
 - **Anti-slop (never):** purple gradients, centered card in a void, rounded consumer bubbles, Inter as the UI font, 3-column icon grids, decorative blobs, generic repeated glyphs.
 
@@ -57,7 +56,7 @@ Layered near-blacks, hairline borders, one indigo accent used sparingly (focus r
 ## Layout
 - **App:** left-anchored within `max-width: 760px`. Header on a hairline baseline; content in strict-rhythm lists, not cards.
 - **Login:** two-column. Left = anchored auth column with a `border-right` hairline; right = a stage carrying a quiet statement + faint masked grid + glow. Never a centered card in a void.
-- **Marketing landing:** editorial, not a SaaS template. Logo hero (the brand mark front-and-centre) → pulled-back headline → a single *static* product surface (one mono terminal still, no animated demo widgets) → a dense **hairline-ruled, numbered capabilities list** (`01 / automate` …, no illustration cards) → flat CTA → footer. Wide-but-disciplined (`max-width: 1080px`), one static hero glow, motion limited to a one-shot rise/reveal.
+- **Marketing landing:** editorial, not a SaaS template. Logo hero (the brand mark front-and-centre) → pulled-back headline → a single *static* OAuth product surface (one mono terminal still, no animated demo widgets) → concise explainer → two labeled groups of **hairline-ruled, numbered outcome rows** for the product pillars → flat CTA → footer. Wide-but-disciplined (`max-width: 1080px`), one static hero glow, motion limited to a one-shot rise/reveal. Keep the safety promise in the hero subline; do not add a standalone trust section.
 - **Getting-started (`/start`):** the public install page (landing nav + a narrow `max-width: 640px` column): logo, the `connect` command in a copy chip, a ruled supported-agents list, numbered next-steps. Flat. The landing "Install" CTA points here, not at npm.
 - **Border radius:** `--r-sm 6` `--r-md 8` `--r-lg 10`, `999` for pills/avatars. Tighter than consumer.
 
@@ -84,3 +83,4 @@ Layered near-blacks, hairline borders, one indigo accent used sparingly (focus r
 |------|----------|-----------|
 | 2026-05-30 | Initial system created | /design-consultation. Linear-leaning polished dark; Geist + JetBrains Mono; mono-forward vault; favicon service icons; left-anchored ruled login. Approved against rendered mockups. |
 | 2026-05-31 | Landing + marketing overhaul | Editorial rebuild of `/` (retired the zig-zag feature cards + animated demo widgets → numbered hairline-ruled capabilities list + one static product surface + logo hero); one static hero glow (decoration exception); new public `/start` install page (landing "Install" repointed off npm); added `--warn` token + `--s-16/20/24` section rhythm; unified all off-token greens→`--ok`/ambers→`--warn`; shared `Shield` component (currentColor) replaces per-file inline SVGs. |
+| 2026-08-18 | Two-pillar landing | Replaced the single builder-oriented capabilities list with grouped Provision & Ship and Transact & Coordinate Privately outcomes. Safety remains in the hero subline rather than a standalone trust section. |

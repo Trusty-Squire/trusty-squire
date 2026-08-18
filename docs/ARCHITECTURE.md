@@ -1,14 +1,13 @@
 # Trusty Squire Architecture
 
-Give your agents agency. Trusty Squire provides MCP tools to automate auth and
-pay — your keys and card never leave the vault. Coding agents can sign up,
-provision, and purchase on the user's behalf. A user asks their agent to create
-an account, finish setup behind a login, publish an app, or complete a purchase.
-Trusty Squire drives the browser and provider APIs, stores generated credentials
-in a write-only vault, and lets code use them through scoped grants without
-exposing raw secret values to the agent.
+Trusty Squire lets people working through AI agents provision accounts and
+services or complete user-approved purchases. It drives the browser and provider
+APIs, stores generated credentials and client-encrypted cards behind the vault
+boundary, and lets code use credentials through scoped grants without exposing
+raw secret values to the agent.
 
 This document is the canonical project overview and data-flow map.
+[`PRODUCT.md`](PRODUCT.md) owns product positioning and audiences.
 [`SECURITY.md`](../SECURITY.md) owns security and cryptographic contracts.
 
 ## Product Model
@@ -26,9 +25,10 @@ Trusty Squire combines four capabilities:
    type sealed values inside a live browser session without returning them to
    chat, including user-approved card payments.
 
-The main user is a developer working through an AI coding agent. The developer
-wants authenticated setup and website transactions completed without copying
-keys or card data through prompts, `.env` files, screenshots, or browser tabs.
+The system supports builders who want infrastructure credentials and SaaS setup
+completed without copying keys through prompts, `.env` files, screenshots, or
+browser tabs, as well as users authorizing a purchase without exposing their
+saved card to the agent or API.
 
 ## Core Concepts
 
