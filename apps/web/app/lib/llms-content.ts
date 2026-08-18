@@ -95,7 +95,7 @@ The agent calls \`grant_app_access\` for a supported service. Trusty Squire retu
 
 ### Does Trusty Squire bypass every signup gate?
 
-No. It can continue through real website flows that defeat general browser operators, but it stops when a site requires a phone, hard CAPTCHA, payment, or a decision that belongs to a person.
+No. It can continue through real website flows that defeat general browser operators, but it stops when a site requires a phone, hard CAPTCHA, or a decision that belongs to a person. Every charge requires exactly one human approval before payment, then the run can continue.
 
 ## MCP tool groups
 

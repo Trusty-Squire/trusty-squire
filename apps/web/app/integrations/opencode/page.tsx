@@ -25,7 +25,7 @@ const FAQS: readonly FaqItem[] = [
   {
     question: "Can OpenCode automate every website signup?",
     answer:
-      "No. Trusty Squire stops when a site requires a phone, hard CAPTCHA, payment, or a decision that belongs to a person instead of guessing or claiming success.",
+      "No. Trusty Squire stops when a site requires a phone, hard CAPTCHA, or a decision that belongs to a person instead of guessing or claiming success. Every charge requires exactly one human approval before payment, then the run can continue.",
   },
 ];
 

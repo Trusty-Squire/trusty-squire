@@ -55,7 +55,7 @@ export default function SignInAndConfigurePage() {
         {
           title: "Human decisions stay human",
           description:
-            "If the site asks for payment, consent, a risky choice, or a gate that should not be guessed, the run stops and tells you what is needed.",
+            "If the site asks for consent, a risky choice, or a gate that should not be guessed, the run stops and tells you what is needed. Every charge requires exactly one human approval before payment, then the run can continue.",
         },
       ]}
       related={[
