@@ -10,9 +10,11 @@ Trusty Squire is for developers who work primarily through coding agents such as
 
 ## Product Purpose
 
-Trusty Squire signs up / in to websites for you so you don't have to.
+**Give your agents agency.**
 
-It gives coding agents a safe way to create accounts, sign in, configure services, and save the resulting API keys or credentials directly to a vault. Success means a developer understands that job in one sentence, sees a concrete use case that matches their work, and can install Trusty Squire without learning internal architecture first.
+MCP tools to automate auth and pay — your keys and card never leave the vault.
+
+Trusty Squire gives coding agents a safe way to sign up, provision, and purchase on the user's behalf. Its general browser operator, recipe replay, payment flow, and vault primitives compose into jobs such as OAuth setup, app publishing, payments, gifting, and booking; these are composed workflows, not separate one-shot tools. Success means a developer understands that job in one sentence, sees a concrete use case that matches their work, and can install Trusty Squire without learning internal architecture first.
 
 ## Brand Personality
 
@@ -30,7 +32,7 @@ Calm, exact, capable, and serious. Trusty Squire should feel like dependable inf
 ## Design Principles
 
 1. Lead with the literal job. Say what Trusty Squire does before explaining how it works.
-2. Show real requests early. Concrete asks such as "sign me up for Resend" are more useful than capability labels.
+2. Show real requests early. Concrete asks such as "set up Google OAuth for this app," "work through publishing this app," "pay this checkout," "send this gift," and "book this reservation" are more useful than capability labels. Describe publishing, gifting, and booking as compositions of the general operator and payment primitives, not dedicated tools.
 3. Keep the interface calm and technical. Strong typography, ruled structure, and terminal evidence should carry the brand.
 4. Explain safety in plain language. Credentials go to the vault, not into chat or source code.
 5. Make every discovery surface consistent. The website, GitHub, npm, directories, and search metadata should describe the same product.

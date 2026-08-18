@@ -108,7 +108,7 @@ Live GitHub metadata is intentionally unchanged until the content PR is reviewed
 
 Proposed repository description:
 
-> MCP server that lets coding agents sign up for websites and stores API keys in a write-only vault — Claude Code, Codex, Cursor.
+> Give your agents agency. MCP tools to automate auth and pay — sign up, provision, and purchase while your keys and card stay in the vault.
 
 Proposed topics:
 

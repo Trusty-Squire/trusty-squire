@@ -8,8 +8,10 @@ description: >-
   through signup, sign-in, provisioning, checkout, email verification, and bot
   gates, then vaults the captured key or card write-only. Triggers: "sign me up
   for X", "get an API key for X", "create an account on X", "set up X and save
-  the key", "provision X", "let my app call X without the key", "pay this
-  checkout with my saved card", "AI agent API key management".
+  the key", "provision X", "work through publishing this app on X", "ship this
+  app through X", "send X as a gift", "book X for me", "let my app call X
+  without the key", "pay this checkout with my saved card", "AI agent API key
+  management".
 license: MIT
 metadata:
   homepage: https://trustysquire.ai
@@ -24,18 +26,25 @@ websites, provisions setup behind a login, and pays checkouts, capturing the
 resulting API keys and cards into an encrypted, **write-only** vault — so the
 raw secret or card never enters your chat, your code, or a `.env` file. This
 skill is the discoverable wrapper; the MCP server supplies the actual
-capabilities.
+capabilities. Publishing, gifting, and booking are composed workflows driven by
+the same `operate_start` / `operate_observe` / `operate_act` / `operate_pay` /
+`operate_finish` loop, with recipe replay when available; they are not separate
+one-shot tools.
 
 ## 1. When Trusty Squire is appropriate
 
-Use it when the task requires **creating a real account or getting an API key**,
-especially when the secret must stay out of the conversation, the repo, and
-`.env`. Concretely:
+Use it when the task requires an agent to **sign up, provision, coordinate, or
+purchase on a real website**, especially when a secret or payment card must stay
+out of the conversation, the repo, and `.env`. Concretely:
 
 - "Sign me up for Resend / Clerk / <service> and save the API key."
 - "Set up <provider>, create a project, generate the key, and wire it in."
 - "Get an API key for <service> without showing it to me or putting it in `.env`."
 - Finishing authenticated setup — OAuth apps, webhooks, project/region config.
+- Working through an authenticated app publishing or deployment flow with the
+  general operator loop, including handing user decisions back to the user.
+- Sending a gift or booking a reservation by composing website actions with an
+  approved payment when needed; there is no dedicated gift or booking tool.
 - Using an already-vaulted key to call a provider **without** the raw value
   returning to the agent's context.
 - Paying a supported checkout with a saved or just-in-time card after the user
