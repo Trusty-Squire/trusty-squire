@@ -304,8 +304,9 @@ export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
     "user's machine at service_url and returns the initial compact observation " +
     "{session_id, url, text, el_table, delta, snapshot_file}. " +
     OBSERVE_DELTA_CONTRACT +
-    "YOU are the planner — read the observation, then drive the signup with " +
-    'operate_act, re-read with operate_observe, and call operate_act { kind: "extract" } ' +
+    "YOU are the planner — read the observation, then drive the signup, setup, or " +
+    'checkout with operate_act (and operate_pay for a purchase), re-read with ' +
+    'operate_observe, and call operate_act { kind: "extract" } ' +
     "when you reach the credentials. Always operate_finish when done. The " +
     "browser is domain-scoped to the target + its identity providers. If the " +
     "registry knows this service, the first observation includes a `hint` — the " +

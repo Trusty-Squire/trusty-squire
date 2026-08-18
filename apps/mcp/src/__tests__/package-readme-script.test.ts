@@ -9,7 +9,7 @@ const packageRoot = fileURLToPath(new URL("../../", import.meta.url));
 const repoRoot = path.resolve(packageRoot, "../..");
 const script = path.join(packageRoot, "scripts", "package-readme.mjs");
 const canonicalReadme = path.join(repoRoot, "README.md");
-const tagline = "Trusty Squire signs up / in to websites for you so you don’t have to.";
+const tagline = "Give your agents agency.";
 
 let tmpDir: string;
 let source: string;
@@ -103,7 +103,7 @@ describe("package README lifecycle", () => {
 });
 
 describe("canonical README discovery order", () => {
-  it("puts the value prop, disambiguation, trust line, and verified Clerk prompt after the tagline", async () => {
+  it("puts the sub-tagline, elevator pitch, trust line, and headline prompt after the tagline", async () => {
     const readme = await fs.readFile(canonicalReadme, "utf8");
     const lines = readme
       .split("\n")
@@ -112,14 +112,14 @@ describe("canonical README discovery order", () => {
     const taglineAt = lines.findIndex((line) => line.includes(tagline));
 
     expect(taglineAt).toBeGreaterThanOrEqual(0);
-    expect(lines[taglineAt + 1]).toContain("retrieve the API keys automatically");
-    expect(lines[taglineAt + 1]).toContain("encrypted, write-only vault");
-    expect(lines[taglineAt + 2]).toContain("not a secrets manager for keys you already have");
-    expect(lines[taglineAt + 3]).toContain("Built to be handed the keys");
+    expect(lines[taglineAt + 1]).toContain("MCP tools to automate auth and pay");
+    expect(lines[taglineAt + 1]).toContain("keys and card never leave the vault");
+    expect(lines[taglineAt + 2]).toContain("sign up, provision, and purchase on your behalf");
+    expect(lines[taglineAt + 3]).toContain("Provider secrets and payment cards are write-only");
     expect(lines.slice(taglineAt + 4, taglineAt + 8)).toEqual([
       "## One prompt",
       "```text",
-      "Use Trusty Squire to create a Clerk account for this app, save the generated secret key, allow api.clerk.com for server-side requests, and wire it in without putting the raw key in chat, code, or .env.",
+      "Add Google OAuth to this app in one prompt: create the OAuth client, save the client secret, and wire it in without putting the raw key in chat, code, or .env.",
       "```",
     ]);
     expect(readme).not.toContain("Sign in to Sentry");

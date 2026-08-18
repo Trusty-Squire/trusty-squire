@@ -1,14 +1,15 @@
 ---
 name: trusty-squire
 description: >-
-  Use when a coding agent needs to sign up for a website or SaaS, finish setup
-  behind a login, or obtain an API key — and the secret must NOT land in chat,
-  source code, or a .env file. Trusty Squire is an MCP server that drives a real
-  browser through signup, sign-in, email verification, and bot gates, then vaults
-  the captured key write-only. Triggers: "sign me up for X", "get an API key for
-  X", "create an account on X", "set up X and save the key", "provision X",
-  "let my app call X without the key", "pay this checkout with my saved card",
-  "AI agent API key management".
+  Use when a coding agent needs to sign up for a website or SaaS, provision an
+  OAuth client or API key, pay a checkout, or otherwise act on a real website on
+  the user's behalf — and the secret or card must NOT land in chat, source code,
+  or a .env file. Trusty Squire is an MCP server that drives a real browser
+  through signup, sign-in, provisioning, checkout, email verification, and bot
+  gates, then vaults the captured key or card write-only. Triggers: "sign me up
+  for X", "get an API key for X", "create an account on X", "set up X and save
+  the key", "provision X", "let my app call X without the key", "pay this
+  checkout with my saved card", "AI agent API key management".
 license: MIT
 metadata:
   homepage: https://trustysquire.ai
@@ -19,10 +20,11 @@ metadata:
 # Trusty Squire
 
 Trusty Squire is an MCP server your coding agent drives. It signs up for
-websites, completes provider setup behind a login, and captures the resulting
-API key into an encrypted, **write-only** vault — so the raw secret never enters
-your chat, your code, or a `.env` file. This skill is the discoverable wrapper;
-the MCP server supplies the actual capabilities.
+websites, provisions setup behind a login, and pays checkouts, capturing the
+resulting API keys and cards into an encrypted, **write-only** vault — so the
+raw secret or card never enters your chat, your code, or a `.env` file. This
+skill is the discoverable wrapper; the MCP server supplies the actual
+capabilities.
 
 ## 1. When Trusty Squire is appropriate
 

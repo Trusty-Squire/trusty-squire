@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
-  "description": "Trusty Squire signs up / in to websites for you so you don’t have to.",
+  "description": "Trusty Squire gives coding agents the ability to provision, ship, and pay — without your keys or card ever leaving the vault.",
   "type": "module",
   "scripts": {
     "build": "pnpm -r build",

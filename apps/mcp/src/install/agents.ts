@@ -290,7 +290,8 @@ const goose: AgentDefinition = {
       // extension by `name` — both are required for it to appear.
       enabled: true,
       bundled: false,
-      description: "Trusty Squire signs up / in to websites for you so you don’t have to.",
+      description:
+        "Trusty Squire gives coding agents the ability to provision, ship, and pay — without your keys or card ever leaving the vault.",
       timeout: 300,
     };
     data.extensions = extensions;
