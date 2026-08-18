@@ -128,6 +128,16 @@ h1 .dim{color:var(--muted)}
   max-width:56ch}
 .cap p .m{font-family:var(--mono);font-size:.9em;color:var(--fg)}
 
+/* pillar example grid — two labeled groups, reuses the .cap row pattern */
+.pillars{padding:var(--s-16) 0 var(--s-20)}
+.pillars-prelude{font-family:var(--mono);font-size:14px;color:var(--muted);
+  max-width:56ch;margin-bottom:var(--s-12)}
+.pillar+.pillar{margin-top:var(--s-12)}
+.pillar-head{display:flex;align-items:baseline;gap:10px;margin-bottom:var(--s-4)}
+.pillar-head h3{font-size:19px;font-weight:600;letter-spacing:-.02em}
+.pillar-sub{font-family:var(--mono);font-size:12px;color:var(--faint)}
+.row-tag.vision{color:var(--muted);border-color:var(--line2)}
+
 /* pricing — flat hairline-ruled tiers, mono prices, one accent-marked focal
    column (see docs/DESIGN.md: no glossy cards, no gradients). */
 .price-hero{padding:var(--s-20) 0 var(--s-4);text-align:center}

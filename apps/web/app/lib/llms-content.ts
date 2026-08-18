@@ -17,13 +17,13 @@ export function buildLlmsTxt(): string {
 
   return `# Trusty Squire
 
-> Trusty Squire signs up / in to websites for you so you don't have to.
+> Give your agents agency.
 
-Trusty Squire is an MCP server that lets Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents create accounts on real websites and retrieve the API keys automatically. It works through signup or sign-in, finishes setup behind the login, and stores each generated key in an encrypted, write-only vault — never in chat, code, or your .env.
+Trusty Squire is an MCP server that gives Claude Code, Codex, Cursor, OpenCode, Goose, and other coding agents the ability to provision, ship, and pay on your behalf. It signs up for and configures real websites, wires up OAuth, Stripe, and deploys, and can complete purchases and coordinate on your behalf — your keys and card never leave the vault.
 
 ## Why it exists
 
-Trusty Squire is not a secrets manager for keys you already have, and not a browser-automation framework you script per site. Operator-style browser tools often stall at signup walls and bot detection; Trusty Squire works through those, provisions the real account, and captures the resulting API key without returning the raw provider secret to the agent, chat, source code, or the project's .env file.
+Trusty Squire is not a secrets manager for keys you already have, and not a browser-automation framework you script per site. Operator-style browser tools often stall at signup walls and bot detection; Trusty Squire works through those, provisions the real account or completes the real purchase, and captures the resulting credential or payment without returning the raw secret or card to the agent, chat, source code, or the project's .env file.
 
 ## Install
 
@@ -36,7 +36,7 @@ Free to start.
 - Provider credentials are captured into an encrypted, write-only vault.
 - Credential tools use references and server-side injection instead of returning stored plaintext.
 - Deployed backends can receive host-scoped, auditable, revocable egress grants. The grant token is returned once through MCP and can enter agent context; it is not the provider key. Use \`use_credential\` when zero grant-token exposure is required.
-- A run stops for a phone requirement, hard CAPTCHA, payment, or human decision instead of guessing.
+- A run stops for a phone requirement, hard CAPTCHA, or human decision instead of guessing.
 
 ## Key URLs
 

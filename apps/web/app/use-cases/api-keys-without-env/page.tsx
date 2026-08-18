@@ -24,18 +24,16 @@ export default function ApiKeysWithoutEnvPage() {
       deck="Trusty Squire stores generated credentials, injects them into provider requests server-side, and can give deployed apps scoped access you can revoke."
       examples={[
         {
-          prompt: "Sign me up for Zilliz Cloud and save the API key.",
-          result:
-            "Capture the generated key into the vault instead of copying it through the conversation.",
+          prompt: "Add Stripe payments in one prompt.",
+          result: "Live Checkout and webhook wiring instead of hand-typing API keys into code.",
         },
         {
-          prompt: "Let my deployed app call OpenRouter without giving it the OpenRouter key.",
-          result:
-            "Issue scoped app access while the provider credential stays out of the consuming app.",
+          prompt: "Add Google OAuth in one prompt.",
+          result: "Working OAuth login, no dashboard tour, no client-secret copy/paste into .env.",
         },
         {
-          prompt: "That app token leaked. Revoke its access now.",
-          result: "Revoke the app grant without rotating the underlying provider key.",
+          prompt: "Never share your card or address again.",
+          result: "Any checkout completed without pasting card numbers into a form.",
         },
       ]}
       steps={[

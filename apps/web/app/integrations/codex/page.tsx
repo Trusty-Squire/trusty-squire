@@ -24,17 +24,16 @@ export default function CodexIntegrationPage() {
       installCommand="npx @trusty-squire/mcp connect --target=codex"
       examples={[
         {
-          prompt: "Sign in to Sentry and configure the webhook.",
-          result:
-            "Codex keeps the integration goal in view while Trusty Squire works behind the login.",
+          prompt: "Add Google OAuth in one prompt.",
+          result: "Working OAuth login, no dashboard tour, no client-secret copy/paste into .env.",
         },
         {
-          prompt: "Set up Clerk, Cerebras, DeepInfra, and Zilliz Cloud for this app.",
-          result: "Coordinate several provider setups from the same coding session.",
+          prompt: "Go live: deploy, custom domain, and SSL.",
+          result: "A real URL with HTTPS and DNS done, skipping the deploy-dashboard round trip.",
         },
         {
-          prompt: "Let my app call OpenRouter without giving it the OpenRouter key.",
-          result: "Create scoped app access instead of placing the provider key in the project.",
+          prompt: "Book it for me — dinner, flights, tickets.",
+          result: "A confirmed reservation instead of the phone tree or booking-site form.",
         },
       ]}
       steps={[
