@@ -300,12 +300,12 @@ const OBSERVE_DELTA_CONTRACT =
 export const provisionStartTool: Tool<z.infer<typeof startSchema>> = {
   name: "operate_start",
   description:
-    "Begin an interactive provisioning session: opens a scoped browser on the " +
+    "Begin an interactive website task: opens a scoped browser on the " +
     "user's machine at service_url and returns the initial compact observation " +
     "{session_id, url, text, el_table, delta, snapshot_file}. " +
     OBSERVE_DELTA_CONTRACT +
     "YOU are the planner — read the observation, then drive the signup, setup, or " +
-    'checkout with operate_act (and operate_pay for a purchase), re-read with ' +
+    "checkout with operate_act (and operate_pay for a purchase), re-read with " +
     'operate_observe, and call operate_act { kind: "extract" } ' +
     "when you reach the credentials. Always operate_finish when done. The " +
     "browser is domain-scoped to the target + its identity providers. If the " +
@@ -350,7 +350,7 @@ const observeSchema = z.object({
 export const provisionObserveTool: Tool<z.infer<typeof observeSchema>> = {
   name: "operate_observe",
   description:
-    "Re-read the current page of a provisioning session. DEFAULT is a COMPACT " +
+    "Re-read the current page of an operate session. DEFAULT is a COMPACT " +
     "payload whose elements ride in `el_table` (a tab-delimited table; each row's " +
     "stable `ref` is the operate_act.target) with compact label/role/href/value_len " +
     "columns and `frame_origin` on child-frame controls; ordinary same- and " +
@@ -1005,7 +1005,7 @@ async function handleAwaitVerification(args: AwaitVerificationArgs) {
 export const provisionActTool: Tool<z.infer<typeof actSchema>> = {
   name: "operate_act",
   description:
-    "Take one action in a provisioning session, then return the resulting " +
+    "Take one action in an operate session, then return the resulting " +
     "observation. kinds: click (target=element ref, preferably an el_table row's ref), " +
     "type (target + text; model-supplied card-number-shaped text is refused — card payment " +
     "must use operate_pay, which fills a vaulted card without exposing it to the model), " +

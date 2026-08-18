@@ -2,30 +2,33 @@
 
 Give your agents agency. Trusty Squire provides MCP tools to automate auth and
 pay — your keys and card never leave the vault. Coding agents can sign up,
-provision, and purchase on the user's behalf. A user asks their agent to create an account, finish setup
-behind a login, or connect a service to an app. Trusty Squire drives the browser
-and provider APIs, stores generated credentials in a write-only vault, and lets
-code use them through scoped grants without exposing raw secret values to the
-agent.
+provision, and purchase on the user's behalf. A user asks their agent to create
+an account, finish setup behind a login, publish an app, or complete a purchase.
+Trusty Squire drives the browser and provider APIs, stores generated credentials
+in a write-only vault, and lets code use them through scoped grants without
+exposing raw secret values to the agent.
 
 This document is the canonical project overview and data-flow map.
 [`SECURITY.md`](../SECURITY.md) owns security and cryptographic contracts.
 
 ## Product Model
 
-Trusty Squire has three jobs:
+Trusty Squire combines four capabilities:
 
-1. Acquire credentials: sign up for services, complete onboarding, extract API
-   keys, and learn repeatable service-specific flows.
-2. Store credentials: encrypt secrets in a vault that agents can write to but
-   cannot read from, including opaque card blobs encrypted by a trusted client.
-3. Use credentials safely: inject secrets server-side for allowed calls or type
-   sealed values inside a live browser session without returning them to chat,
-   including user-approved card payments.
+1. Operate websites: drive signup, sign-in, provisioning, publishing, booking,
+   gifting, and checkout flows while handing human-only decisions back to the
+   user.
+2. Learn and replay: capture repeatable website flows as signed recipes so later
+   runs can avoid rediscovering every step.
+3. Store sensitive assets: encrypt credentials and client-encrypted card blobs
+   in a vault that agents can write to but cannot read from.
+4. Use sensitive assets safely: inject secrets server-side for allowed calls or
+   type sealed values inside a live browser session without returning them to
+   chat, including user-approved card payments.
 
 The main user is a developer working through an AI coding agent. The developer
-wants infrastructure credentials and SaaS setup completed without copying keys
-through prompts, `.env` files, screenshots, or browser tabs.
+wants authenticated setup and website transactions completed without copying
+keys or card data through prompts, `.env` files, screenshots, or browser tabs.
 
 ## Core Concepts
 

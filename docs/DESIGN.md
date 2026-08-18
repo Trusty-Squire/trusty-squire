@@ -7,7 +7,7 @@
 ## Product Context
 - **What this is:** Give your agents agency. Trusty Squire provides MCP tools to automate auth and pay — your keys and card never leave the vault. Coding agents can sign up, provision, and purchase on the user's behalf. Generated credentials land in an encrypted vault instead of chat, source code, or `.env` files.
 - **Who it's for:** Developers who live in the terminal (Claude Code, Cursor, Codex, Goose).
-- **Space:** Developer infrastructure / secrets management.
+- **Space:** Agent infrastructure / browser operations / auth, payments, and secrets management.
 - **Surfaces:** marketing landing (`/`), public getting-started (`/start`), auth (`/login`), the app (`/vault`, `/vault/new`, `/agents`). `/install` is the token-gated OAuth-binding wizard the CLI opens (centered auth-card), distinct from `/start`.
 
 ## Memorable Thing

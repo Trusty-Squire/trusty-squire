@@ -173,15 +173,18 @@ remote CDP, macOS, and Windows operator sessions are not supported in this migra
 
 ## What happens
 
-1. Your coding agent names the website and the account, setup, or credential it needs.
+1. Your coding agent names the website and the outcome it needs: an account,
+   authenticated setup, app publishing, a purchase, a gift, or a booking.
 2. Trusty Squire opens an isolated browser profile and works through the service flow one step at a time. It can use the Google identity you explicitly connected without opening the canonical login profile during the task.
-3. When the site reveals an API key or client secret, Trusty Squire captures it into the vault without returning the raw value through its credential tools.
-4. The agent can make an authenticated request through Trusty Squire or create a host-scoped, rate-limited app grant.
+3. If the flow produces an API key or client secret, Trusty Squire captures it
+   into the vault without returning the raw value through its credential tools.
+4. The agent can make an authenticated request, create a host-scoped app grant,
+   or use a saved card for a supported checkout after you approve the purchase.
 5. Eligible successful flows can become signed registry skills, so later runs can replay verified steps instead of rediscovering every click.
 
-If a site requires phone verification, a hard CAPTCHA, an unsupported payment,
-3-D Secure, or another human decision, the run stops and tells you. It does not
-guess or pretend the signup completed.
+If a site requires phone verification, a hard CAPTCHA, an unresolved 3-D Secure
+challenge, an unsupported payment method, or another human decision, the run
+hands control back and tells you. It does not guess or pretend the task completed.
 
 ## Supported services
 

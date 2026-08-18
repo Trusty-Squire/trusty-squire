@@ -6,7 +6,7 @@ Brand
 
 ## Users
 
-Trusty Squire is for developers who work primarily through coding agents such as Claude Code, Codex, Cursor, and Goose. They want their agent to finish setup work instead of stopping at a login screen, but they do not want credentials copied into chat, source code, or `.env` files.
+Trusty Squire is for developers who work primarily through coding agents such as Claude Code, Codex, Cursor, and Goose. They want their agent to finish authenticated setup and website transactions instead of stopping at a login or checkout screen, but they do not want credentials or payment cards copied into chat, source code, or `.env` files.
 
 ## Product Purpose
 

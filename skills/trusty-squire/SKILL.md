@@ -6,12 +6,12 @@ description: >-
   the user's behalf — and the secret or card must NOT land in chat, source code,
   or a .env file. Trusty Squire is an MCP server that drives a real browser
   through signup, sign-in, provisioning, checkout, email verification, and bot
-  gates, then vaults the captured key or card write-only. Triggers: "sign me up
-  for X", "get an API key for X", "create an account on X", "set up X and save
-  the key", "provision X", "work through publishing this app on X", "ship this
-  app through X", "send X as a gift", "book X for me", "let my app call X
-  without the key", "pay this checkout with my saved card", "AI agent API key
-  management".
+  gates, then vaults captured keys write-only and uses payment cards only through
+  a user-approved vault flow. Triggers: "sign me up for X", "get an API key for
+  X", "create an account on X", "set up X and save the key", "provision X",
+  "work through publishing this app on X", "ship this app through X", "send X as
+  a gift", "book X for me", "let my app call X without the key", "pay this
+  checkout with my saved card", "AI agent API key management".
 license: MIT
 metadata:
   homepage: https://trustysquire.ai
@@ -22,12 +22,13 @@ metadata:
 # Trusty Squire
 
 Trusty Squire is an MCP server your coding agent drives. It signs up for
-websites, provisions setup behind a login, and pays checkouts, capturing the
-resulting API keys and cards into an encrypted, **write-only** vault — so the
-raw secret or card never enters your chat, your code, or a `.env` file. This
-skill is the discoverable wrapper; the MCP server supplies the actual
-capabilities. Publishing, gifting, and booking are composed workflows driven by
-the same `operate_start` / `operate_observe` / `operate_act` / `operate_pay` /
+websites, provisions setup behind a login, and pays checkouts. Resulting API
+keys go into an encrypted, **write-only** vault, while payment cards are added
+by the user and released only through an approved purchase flow — so neither a
+raw secret nor card enters your chat, your code, or a `.env` file. This skill is
+the discoverable wrapper; the MCP server supplies the actual capabilities.
+Publishing, gifting, and booking are composed workflows driven by the same
+`operate_start` / `operate_observe` / `operate_act` / `operate_pay` /
 `operate_finish` loop, with recipe replay when available; they are not separate
 one-shot tools.
 
