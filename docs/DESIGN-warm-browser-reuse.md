@@ -123,7 +123,6 @@ waiters and each start rechecks the shutdown generation after acquisition before
 Before the first seed exists, acquisition creates an empty worker profile; a caller that requires a
 live identity then fails closed at the existing Google-session gate. Identity and email checks run
 against the claimed worker profile, never the canonical profile or seed.
-
 A warm profile is eligible for at most six hours idle, 50 reuses, or 24 hours of age. Bounds and
 current-generation invalidation are enforced deterministically on the next serialized pool
 operation; there is no background timer or daemon. Publishing a new seed therefore invalidates the
